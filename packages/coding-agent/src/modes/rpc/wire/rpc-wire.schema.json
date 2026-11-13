@@ -824,6 +824,138 @@
 				"timeoutMs": null,
 				"completion": null,
 				"clientOmit": []
+			},
+			{
+				"name": "get_sandbox",
+				"doc": "Sandbox state of the session's workspace: status, settings, locks and the resolved policy.",
+				"params": null,
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_sandbox_setting",
+				"doc": "Write one sandbox setting to the global config (lists and scope replace the whole operator list); returns the new state.",
+				"params": "SetSandboxSettingParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "reset_sandbox_setting",
+				"doc": "Remove a sandbox setting from the global config, so another layer or the default applies; returns the new state.",
+				"params": "ResetSandboxSettingParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "edit_sandbox_list",
+				"doc": "Add, remove or replace (needs `replacement`) one entry of a sandbox list in the global config; returns the new state.",
+				"params": "EditSandboxListParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "grant_sandbox_host",
+				"doc": "Allow a host for this session, or always (appended to the global allowlist); returns the new state.",
+				"params": "GrantSandboxHostParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "revoke_sandbox_host",
+				"doc": "Drop a host's session grant (persisted entries are removed with `edit_sandbox_list`); returns the new state.",
+				"params": "RevokeSandboxHostParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_sandbox_host_prompts",
+				"doc": "Opt in to `sandbox_host_request` frames for hosts off the allowlist (off: such hosts are refused); returns the applied setting.",
+				"params": "SetSandboxHostPromptsParams",
+				"result": "SetSandboxHostPromptsResult",
+				"nullable": false,
+				"unwrap": "enabled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "respond_sandbox_host",
+				"doc": "Answer a pending `sandbox_host_request`; bypasses the command queue.",
+				"params": "RespondSandboxHostParams",
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "grant_sandbox_path",
+				"doc": "Allow exactly this path for this session (write implies read; persistent entries use `edit_sandbox_list`); returns the new state.",
+				"params": "GrantSandboxPathParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "revoke_sandbox_path",
+				"doc": "Drop a path's session grant; returns the new state.",
+				"params": "RevokeSandboxPathParams",
+				"result": "SandboxState",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_sandbox_access_prompts",
+				"doc": "Opt in to `sandbox_access_request` frames for the agent's path and host requests (off: they are refused); returns the applied setting.",
+				"params": "SetSandboxAccessPromptsParams",
+				"result": "SetSandboxAccessPromptsResult",
+				"nullable": false,
+				"unwrap": "enabled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "respond_sandbox_access",
+				"doc": "Answer a pending `sandbox_access_request` (`instruct` needs `instructions`); bypasses the command queue.",
+				"params": "RespondSandboxAccessParams",
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
 			}
 		]
 	},
@@ -2765,6 +2897,10 @@
 					],
 					"description": "Current goal mode; null when the session has no goal.",
 					"default": null
+				},
+				"sandbox": {
+					"$ref": "#/$defs/SandboxSummary",
+					"description": "Sandbox status of the session's workspace; absent on servers without the sandbox commands."
 				}
 			},
 			"required": [
@@ -2855,6 +2991,10 @@
 					"properties": {},
 					"additionalProperties": {},
 					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
+				},
+				"sandbox": {
+					"$ref": "#/$defs/SandboxResultMeta",
+					"description": "Present when the command ran inside the OS sandbox."
 				}
 			},
 			"required": [
@@ -2865,6 +3005,40 @@
 				"totalBytes",
 				"outputLines",
 				"outputBytes"
+			]
+		},
+		"SandboxResultMeta": {
+			"type": "object",
+			"properties": {
+				"backend": {
+					"type": "string"
+				},
+				"mode": {
+					"$ref": "#/$defs/SandboxMode"
+				},
+				"network": {
+					"$ref": "#/$defs/SandboxNetworkMode"
+				},
+				"blockedHosts": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Hosts the egress proxy refused during this command."
+				},
+				"denied": {
+					"type": "boolean",
+					"description": "The output looks like a filesystem denial by the sandbox."
+				},
+				"startFailed": {
+					"type": "boolean",
+					"description": "Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start."
+				}
+			},
+			"required": [
+				"backend",
+				"mode",
+				"network"
 			]
 		},
 		"LineRange": {
@@ -3651,6 +3825,467 @@
 				}
 			},
 			"description": "`agentInvoked: false` means the prompt completed locally and no `prompt_result` follows."
+		},
+		"SandboxSettingId": {
+			"enum": [
+				"enabled",
+				"mode",
+				"scope",
+				"fallback",
+				"readScope",
+				"networkMode",
+				"allowWrite",
+				"allowRead",
+				"denyRead",
+				"allowedHosts"
+			],
+			"type": "string",
+			"description": "A `sandbox.*` setting the sandbox commands address."
+		},
+		"SandboxListId": {
+			"enum": [
+				"allowWrite",
+				"allowRead",
+				"denyRead",
+				"allowedHosts"
+			],
+			"type": "string",
+			"description": "A path or host list setting."
+		},
+		"SandboxMode": {
+			"enum": [
+				"workspace-write",
+				"read-only"
+			],
+			"type": "string"
+		},
+		"SandboxScope": {
+			"enum": [
+				"bash",
+				"eval",
+				"exec"
+			],
+			"type": "string"
+		},
+		"SandboxFallback": {
+			"enum": [
+				"warn",
+				"block"
+			],
+			"type": "string"
+		},
+		"SandboxReadScope": {
+			"enum": [
+				"all",
+				"workspace"
+			],
+			"type": "string"
+		},
+		"SandboxNetworkMode": {
+			"enum": [
+				"allowlist",
+				"deny",
+				"allow"
+			],
+			"type": "string"
+		},
+		"SandboxListOp": {
+			"enum": [
+				"add",
+				"remove",
+				"replace"
+			],
+			"type": "string"
+		},
+		"SandboxGrantScope": {
+			"enum": [
+				"session",
+				"always"
+			],
+			"type": "string"
+		},
+		"SandboxHostDecision": {
+			"enum": [
+				"once",
+				"session",
+				"always",
+				"deny"
+			],
+			"type": "string",
+			"description": "Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse."
+		},
+		"SandboxPathKind": {
+			"enum": [
+				"write",
+				"read"
+			],
+			"type": "string"
+		},
+		"SandboxAccessKind": {
+			"enum": [
+				"write",
+				"read",
+				"host"
+			],
+			"type": "string"
+		},
+		"SandboxAccessDecision": {
+			"enum": [
+				"session",
+				"always",
+				"deny",
+				"instruct"
+			],
+			"type": "string",
+			"description": "Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing."
+		},
+		"SandboxStatusOff": {
+			"type": "object",
+			"properties": {
+				"state": {
+					"const": "off"
+				}
+			},
+			"required": [
+				"state"
+			]
+		},
+		"SandboxStatusActive": {
+			"type": "object",
+			"properties": {
+				"state": {
+					"const": "active"
+				},
+				"backend": {
+					"type": "string"
+				},
+				"network": {
+					"$ref": "#/$defs/SandboxNetworkMode",
+					"description": "Network mode as enforced here (a mode this host cannot enforce runs as deny)."
+				},
+				"warnings": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"state",
+				"backend",
+				"network",
+				"warnings"
+			]
+		},
+		"SandboxStatusUnavailable": {
+			"type": "object",
+			"properties": {
+				"state": {
+					"const": "unavailable"
+				},
+				"reason": {
+					"type": "string"
+				},
+				"fallback": {
+					"$ref": "#/$defs/SandboxFallback",
+					"description": "`warn`: commands run unsandboxed; `block`: they fail."
+				}
+			},
+			"required": [
+				"state",
+				"reason",
+				"fallback"
+			]
+		},
+		"SandboxStatus": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/SandboxStatusOff"
+				},
+				{
+					"$ref": "#/$defs/SandboxStatusActive"
+				},
+				{
+					"$ref": "#/$defs/SandboxStatusUnavailable"
+				}
+			],
+			"description": "Runtime status of the sandbox, discriminated by `state`."
+		},
+		"SandboxSummary": {
+			"type": "object",
+			"properties": {
+				"state": {
+					"enum": [
+						"off",
+						"active",
+						"unavailable"
+					],
+					"type": "string"
+				},
+				"backend": {
+					"type": "string",
+					"description": "Containment backend while active."
+				}
+			},
+			"required": [
+				"state"
+			],
+			"description": "Sandbox status without the detail `get_sandbox` returns."
+		},
+		"SandboxSettingValues": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				},
+				"mode": {
+					"$ref": "#/$defs/SandboxMode"
+				},
+				"scope": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SandboxScope"
+					}
+				},
+				"fallback": {
+					"$ref": "#/$defs/SandboxFallback"
+				},
+				"readScope": {
+					"$ref": "#/$defs/SandboxReadScope"
+				},
+				"networkMode": {
+					"$ref": "#/$defs/SandboxNetworkMode"
+				},
+				"allowWrite": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"allowRead": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"denyRead": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"allowedHosts": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"enabled",
+				"mode",
+				"scope",
+				"fallback",
+				"readScope",
+				"networkMode",
+				"allowWrite",
+				"allowRead",
+				"denyRead",
+				"allowedHosts"
+			],
+			"description": "Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces)."
+		},
+		"SandboxLocked": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "string"
+				},
+				"mode": {
+					"type": "string"
+				},
+				"scope": {
+					"type": "string"
+				},
+				"fallback": {
+					"type": "string"
+				},
+				"readScope": {
+					"type": "string"
+				},
+				"networkMode": {
+					"type": "string"
+				},
+				"allowWrite": {
+					"type": "string"
+				},
+				"allowRead": {
+					"type": "string"
+				},
+				"denyRead": {
+					"type": "string"
+				},
+				"allowedHosts": {
+					"type": "string"
+				}
+			},
+			"description": "Settings another layer decides, with the reason; writing one fails with `sandbox_locked`."
+		},
+		"SandboxListNotes": {
+			"type": "object",
+			"properties": {
+				"allowWrite": {
+					"type": "string"
+				},
+				"allowRead": {
+					"type": "string"
+				},
+				"denyRead": {
+					"type": "string"
+				},
+				"allowedHosts": {
+					"type": "string"
+				}
+			},
+			"description": "Per-list note when project config narrows the list in this workspace."
+		},
+		"SandboxIgnoredValue": {
+			"type": "object",
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"id",
+				"reason"
+			],
+			"description": "A project-layer value dropped because it would loosen the sandbox."
+		},
+		"SandboxEffectivePolicy": {
+			"type": "object",
+			"properties": {
+				"readwritePaths": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"readonlyPaths": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"deniedPaths": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"readwritePaths",
+				"readonlyPaths",
+				"deniedPaths"
+			],
+			"description": "Resolved filesystem policy for the workspace."
+		},
+		"SandboxSessionPaths": {
+			"type": "object",
+			"properties": {
+				"write": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"read": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"write",
+				"read"
+			],
+			"description": "Paths allowed for this session only: writable (and readable), and readable."
+		},
+		"SandboxState": {
+			"type": "object",
+			"properties": {
+				"workspace": {
+					"type": "string",
+					"description": "Directory the policy is resolved for (the session cwd)."
+				},
+				"status": {
+					"$ref": "#/$defs/SandboxStatus"
+				},
+				"settings": {
+					"$ref": "#/$defs/SandboxSettingValues"
+				},
+				"locked": {
+					"$ref": "#/$defs/SandboxLocked"
+				},
+				"listNotes": {
+					"$ref": "#/$defs/SandboxListNotes"
+				},
+				"ignored": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SandboxIgnoredValue"
+					}
+				},
+				"effective": {
+					"$ref": "#/$defs/SandboxEffectivePolicy"
+				},
+				"blockedHosts": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Hosts refused this session that are still not allowed, most recent first."
+				},
+				"sessionHosts": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Hosts allowed for this session only."
+				},
+				"sessionPaths": {
+					"$ref": "#/$defs/SandboxSessionPaths",
+					"description": "Paths allowed for this session only."
+				},
+				"hostPrompts": {
+					"type": "boolean",
+					"description": "Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`)."
+				},
+				"accessPrompts": {
+					"type": "boolean",
+					"description": "The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`)."
+				}
+			},
+			"required": [
+				"workspace",
+				"status",
+				"settings",
+				"locked",
+				"listNotes",
+				"ignored",
+				"effective",
+				"blockedHosts",
+				"sessionHosts",
+				"sessionPaths",
+				"hostPrompts",
+				"accessPrompts"
+			],
+			"description": "Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it."
 		},
 		"AutoCompactionReason": {
 			"enum": [
@@ -5087,6 +5722,147 @@
 			],
 			"description": "A builtin slash command changed the model configuration."
 		},
+		"SandboxUpdateEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "sandbox_update"
+				},
+				"state": {
+					"$ref": "#/$defs/SandboxState"
+				}
+			},
+			"required": [
+				"type",
+				"state"
+			],
+			"description": "Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled."
+		},
+		"SandboxHostRequestEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "sandbox_host_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"host": {
+					"type": "string"
+				},
+				"port": {
+					"type": "integer"
+				},
+				"timeoutMs": {
+					"type": "integer",
+					"description": "Unanswered for this long, the request is denied and cancelled."
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"host",
+				"port",
+				"timeoutMs"
+			],
+			"description": "A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`."
+		},
+		"SandboxHostRequestCancelledEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "sandbox_host_request_cancelled"
+				},
+				"id": {
+					"type": "string"
+				},
+				"reason": {
+					"enum": [
+						"timeout",
+						"aborted"
+					],
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"reason"
+			],
+			"description": "A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended."
+		},
+		"SandboxAccessRequestEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "sandbox_access_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"kind": {
+					"$ref": "#/$defs/SandboxAccessKind"
+				},
+				"target": {
+					"type": "string",
+					"description": "Resolved absolute path, or canonical host name."
+				},
+				"intent": {
+					"type": "string",
+					"description": "What the agent is doing and why it needs `target`, as the agent wrote it."
+				},
+				"effect": {
+					"type": "string",
+					"description": "What a grant lets contained commands do, written by omp."
+				},
+				"workspace": {
+					"type": "string"
+				},
+				"canAlways": {
+					"type": "boolean",
+					"description": "False when the backing list is locked: offer no `always`."
+				},
+				"command": {
+					"type": "string",
+					"description": "The command that needs the access, verbatim."
+				},
+				"alternative": {
+					"type": "string",
+					"description": "What the agent does instead when denied."
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"kind",
+				"target",
+				"intent",
+				"effect",
+				"workspace",
+				"canAlways"
+			],
+			"description": "The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`."
+		},
+		"SandboxAccessRequestCancelledEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "sandbox_access_request_cancelled"
+				},
+				"id": {
+					"type": "string"
+				},
+				"reason": {
+					"const": "aborted"
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"reason"
+			],
+			"description": "A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended."
+		},
 		"RpcFrameErrorEvent": {
 			"type": "object",
 			"properties": {
@@ -6114,6 +6890,21 @@
 				},
 				{
 					"$ref": "#/$defs/ConfigUpdateEvent"
+				},
+				{
+					"$ref": "#/$defs/SandboxUpdateEvent"
+				},
+				{
+					"$ref": "#/$defs/SandboxHostRequestEvent"
+				},
+				{
+					"$ref": "#/$defs/SandboxHostRequestCancelledEvent"
+				},
+				{
+					"$ref": "#/$defs/SandboxAccessRequestEvent"
+				},
+				{
+					"$ref": "#/$defs/SandboxAccessRequestCancelledEvent"
 				},
 				{
 					"$ref": "#/$defs/RpcFrameErrorEvent"
@@ -7242,6 +8033,200 @@
 			},
 			"required": [
 				"records"
+			]
+		},
+		"SetSandboxSettingParams": {
+			"type": "object",
+			"properties": {
+				"setting": {
+					"$ref": "#/$defs/SandboxSettingId"
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "boolean"
+						},
+						{
+							"type": "string"
+						},
+						{
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						}
+					]
+				}
+			},
+			"required": [
+				"setting",
+				"value"
+			]
+		},
+		"ResetSandboxSettingParams": {
+			"type": "object",
+			"properties": {
+				"setting": {
+					"$ref": "#/$defs/SandboxSettingId"
+				}
+			},
+			"required": [
+				"setting"
+			]
+		},
+		"EditSandboxListParams": {
+			"type": "object",
+			"properties": {
+				"list": {
+					"$ref": "#/$defs/SandboxListId"
+				},
+				"op": {
+					"$ref": "#/$defs/SandboxListOp"
+				},
+				"entry": {
+					"type": "string"
+				},
+				"replacement": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"list",
+				"op",
+				"entry"
+			]
+		},
+		"GrantSandboxHostParams": {
+			"type": "object",
+			"properties": {
+				"host": {
+					"type": "string"
+				},
+				"scope": {
+					"$ref": "#/$defs/SandboxGrantScope"
+				}
+			},
+			"required": [
+				"host",
+				"scope"
+			]
+		},
+		"RevokeSandboxHostParams": {
+			"type": "object",
+			"properties": {
+				"host": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"host"
+			]
+		},
+		"SetSandboxHostPromptsParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"SetSandboxHostPromptsResult": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"RespondSandboxHostParams": {
+			"type": "object",
+			"properties": {
+				"requestId": {
+					"type": "string"
+				},
+				"decision": {
+					"$ref": "#/$defs/SandboxHostDecision"
+				}
+			},
+			"required": [
+				"requestId",
+				"decision"
+			]
+		},
+		"GrantSandboxPathParams": {
+			"type": "object",
+			"properties": {
+				"kind": {
+					"$ref": "#/$defs/SandboxPathKind"
+				},
+				"path": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"kind",
+				"path"
+			]
+		},
+		"RevokeSandboxPathParams": {
+			"type": "object",
+			"properties": {
+				"kind": {
+					"$ref": "#/$defs/SandboxPathKind"
+				},
+				"path": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"kind",
+				"path"
+			]
+		},
+		"SetSandboxAccessPromptsParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"SetSandboxAccessPromptsResult": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"RespondSandboxAccessParams": {
+			"type": "object",
+			"properties": {
+				"requestId": {
+					"type": "string"
+				},
+				"decision": {
+					"$ref": "#/$defs/SandboxAccessDecision"
+				},
+				"instructions": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"requestId",
+				"decision"
 			]
 		}
 	}

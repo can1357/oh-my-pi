@@ -21,6 +21,7 @@ import {
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
+import type { Settings } from "./config/settings";
 import type { SkillsSettings } from "./extensibility/settings";
 import type { Personality } from "./session/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
@@ -37,6 +38,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import sandboxPromptTemplate from "./prompts/system/sandbox.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
 import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
@@ -51,6 +53,17 @@ import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
 import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
 import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
 import { cfgTuiAutoGraph, cfgTuiReactions, cfgTuiRenderMermaid, cfgTuiRenderSvg } from "./modes/settings";
+import { readSandboxConfig } from "./sandbox/policy";
+import { SandboxRuntime } from "./sandbox/runtime";
+import {
+	cfgSandboxAllowWrite,
+	cfgSandboxDenyRead,
+	cfgSandboxEnabled,
+	cfgSandboxMode,
+	cfgSandboxNetworkMode,
+	cfgSandboxReadScope,
+	cfgSandboxScope,
+} from "./sandbox/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import {
@@ -108,7 +121,48 @@ export const cfgSystemPromptInputs = combine({
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
 	ttsrDisabledRules: cfgTtsrDisabledRules,
 	secretsEnabled: cfgSecretsEnabled,
+	// The sandbox block (`buildSandboxPrompt`) states what is contained.
+	sandboxEnabled: cfgSandboxEnabled,
+	sandboxMode: cfgSandboxMode,
+	sandboxScope: cfgSandboxScope,
+	sandboxReadScope: cfgSandboxReadScope,
+	sandboxAllowWrite: cfgSandboxAllowWrite,
+	sandboxDenyRead: cfgSandboxDenyRead,
+	sandboxNetworkMode: cfgSandboxNetworkMode,
 });
+
+/**
+ * The system-prompt block describing the OS sandbox while it is active for `workspace`, else
+ * `undefined`. Rebuilt with the prompt on every `sandbox.*` change ({@link cfgSystemPromptInputs}).
+ */
+export async function buildSandboxPrompt(
+	settings: Settings,
+	workspace: string,
+	options: { requestTool?: boolean } = {},
+): Promise<string | undefined> {
+	// The config read is pure; a disabled sandbox never creates the runtime (or runs its native probes).
+	const config = readSandboxConfig(settings);
+	if (!config.enabled) return undefined;
+	const runtime = await SandboxRuntime.for(workspace);
+	const status = runtime.status();
+	if (status.state !== "active") return undefined;
+	const policy = runtime.effectivePolicy();
+	return prompt
+		.render(sandboxPromptTemplate, {
+			bash: config.scope.includes("bash"),
+			eval: config.scope.includes("eval"),
+			exec: config.scope.includes("exec"),
+			backend: status.backend,
+			writable: policy.readwritePaths,
+			readOnly: config.mode === "read-only",
+			denied: policy.deniedPaths,
+			networkAllow: status.network === "allow",
+			networkDeny: status.network === "deny",
+			// `sandbox_request` is registered: point denials at it instead of prose.
+			requestTool: options.requestTool === true,
+		})
+		.trim();
+}
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
 const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {

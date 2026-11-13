@@ -1,9 +1,11 @@
 import * as fs from "node:fs";
+import { sessionSandboxWritableRoots } from "../../internal-urls/context";
 import * as path from "node:path";
 
 import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
+import { SandboxRuntime } from "../../sandbox/runtime";
 import {
 	abortReasonError,
 	buildManagedKernelEnv,
@@ -33,6 +35,7 @@ import {
 import type { PythonShadowPlan, PythonShadowSnapshot } from "./kernel";
 import {
 	checkPythonKernelAvailability,
+	evalSandboxFingerprint,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
 	type KernelShutdownResult,
@@ -134,6 +137,8 @@ export interface PythonExecutorOptions {
 }
 
 export interface PythonKernelExecutor {
+	/** Sandbox policy fingerprint a contained kernel runs under; `undefined` when uncontained. */
+	readonly sandbox?: string;
 	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
 	syncPreludes?: (
 		preludes: readonly PythonPreludeSource[],
@@ -260,12 +265,25 @@ const formatKernelTimeoutAnnotation = formatSessionKernelTimeoutAnnotation;
 
 async function startKernel(cwd: string, options: PythonExecutorOptions): Promise<PythonKernel> {
 	requireRemainingTimeoutMs(options.deadlineMs);
-	return await PythonKernel.start({
+	const startOptions = {
 		cwd,
 		env: buildManagedKernelEnv(options),
 		signal: options.signal,
 		deadlineMs: options.deadlineMs,
 		interpreter: options.interpreter,
+	};
+	// Containment ruled out by configuration: start exactly as without the sandbox, no extra await.
+	const pendingFingerprint = evalSandboxFingerprint(cwd);
+	if (pendingFingerprint === undefined || (await pendingFingerprint) === undefined) {
+		return await PythonKernel.start(startOptions);
+	}
+	// A contained kernel's `write()` helpers target the session's `local://` root: keep it writable,
+	// and give it the bridge it can reach (tool calls outside a run read the start env).
+	const bridge = await containedKernelBridge(options.bridge, cwd);
+	return await PythonKernel.start({
+		...startOptions,
+		env: buildManagedKernelEnv({ ...options, bridge }),
+		sandboxExtraWrite: sessionSandboxWritableRoots(options.toolSession),
 	});
 }
 
@@ -356,8 +374,13 @@ async function acquireLiveSessionKernel(
 	context: KernelSessionRegistryContext<PythonKernel, PythonExecutorOptions, PythonSession>,
 ): Promise<PythonKernel> {
 	while (context.sessions.get(session.sessionKey) === session) {
+		// A kernel started under another sandbox policy (or uncontained) is replaced like a dead one.
+		// The policy is resolved before the liveness check so that check is not stale across an
+		// await; when configuration rules containment out there is no await at all.
+		const pendingFingerprint = evalSandboxFingerprint(cwd);
+		const fingerprint = pendingFingerprint === undefined ? undefined : await pendingFingerprint;
 		const kernel = session.kernel;
-		if (kernel.isAlive()) {
+		if (kernel.isAlive() && kernel.sandbox === fingerprint) {
 			reportKernelAlive(session, kernel, options.toolSession);
 			return kernel;
 		}
@@ -384,6 +407,12 @@ async function executeWithKernel(
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
+	// A contained kernel reaches the Unix-socket bridge; an uncontained one keeps its bridge, unawaited.
+	if (kernel.sandbox !== undefined) {
+		const cwd = normalizeKernelSessionCwd(options?.cwd ?? getProjectDir());
+		const bridge = await containedKernelBridge(options?.bridge, cwd);
+		if (bridge !== options?.bridge) options = { ...options, bridge };
+	}
 	const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
 	await kernel.syncPreludes?.(
 		pythonPreludeSources(options?.toolSession),
@@ -423,6 +452,21 @@ async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {
 			error: err instanceof Error ? err.message : String(err),
 		});
 	}
+}
+
+/**
+ * The bridge a sandbox-contained kernel can reach. On POSIX it cannot reach host loopback, so it
+ * gets a Unix-socket bridge inside the private temp dir of the sandbox runtime for `cwd` (the
+ * kernel's writable root) instead of the TCP one `ensureToolBridge` set up. Callers consult it
+ * only for contained kernels, so an uncontained run takes no extra await.
+ */
+async function containedKernelBridge(
+	bridge: PythonExecutorOptions["bridge"],
+	cwd: string,
+): Promise<PythonExecutorOptions["bridge"]> {
+	if (!bridge || process.platform === "win32") return bridge;
+	const runtime = await SandboxRuntime.for(cwd);
+	return await ensurePyToolBridge("unix", runtime.tempDir());
 }
 
 async function executePerCall(code: string, cwd: string, options: PythonExecutorOptions): Promise<PythonResult> {
@@ -506,6 +550,9 @@ async function invokePythonToolRequest(
 		kernelOwnerId: options.kernelOwnerId,
 	});
 	if (!kernel) throw new EvalKernelNotRunningError("Python");
+	const pendingFingerprint = evalSandboxFingerprint(cwd);
+	const fingerprint = pendingFingerprint === undefined ? undefined : await pendingFingerprint;
+	if (kernel.sandbox !== fingerprint) throw new EvalKernelNotRunningError("Python");
 
 	const bridgeOptions: PythonExecutorOptions = {
 		cwd,
@@ -516,6 +563,7 @@ async function invokePythonToolRequest(
 		signal: options.signal,
 	};
 	await ensureToolBridge(bridgeOptions);
+	if (kernel.sandbox !== undefined) bridgeOptions.bridge = await containedKernelBridge(bridgeOptions.bridge, cwd);
 
 	const runId = Snowflake.next();
 	const unregister = registerPyToolBridge(options.sessionId, runId, {

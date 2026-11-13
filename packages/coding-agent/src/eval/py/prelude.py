@@ -459,6 +459,23 @@ if "__omp_prelude_loaded__" not in globals():
         finally:
             _OMP_CALL_IDENTITY.reset(token)
 
+    def _bridge_post_unix(socket_path: str, payload: bytes, headers: dict) -> bytes:
+        """POST `payload` to `/v1/tool` over the host's Unix-socket bridge and return the body."""
+        import http.client, socket
+
+        class _UnixHTTPConnection(http.client.HTTPConnection):
+            def connect(self):
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.connect(socket_path)
+                self.sock = sock
+
+        conn = _UnixHTTPConnection("localhost")
+        try:
+            conn.request("POST", "/v1/tool", body=payload, headers=headers)
+            return conn.getresponse().read()
+        finally:
+            conn.close()
+
     def _bridge_call(name: str, args: dict):
         """POST one request to the host tool bridge and return its `value`."""
         base, token, session = _tool_proxy_from_env()
@@ -478,20 +495,25 @@ if "__omp_prelude_loaded__" not in globals():
         if identity is not None:
             payload["identity"] = identity
         payload = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base}/v1/tool",
-            data=payload,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-            },
-        )
-        try:
-            with _BRIDGE_OPENER.open(req) as resp:
-                body = resp.read()
-        except urllib.error.HTTPError as exc:
-            body = exc.read()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        if base.startswith("unix:"):
+            # Sandbox-contained kernel: host loopback is denied, the bridge listens on a Unix socket.
+            body = _bridge_post_unix(base[len("unix:"):], payload, headers)
+        else:
+            req = urllib.request.Request(
+                f"{base}/v1/tool",
+                data=payload,
+                method="POST",
+                headers=headers,
+            )
+            try:
+                with _BRIDGE_OPENER.open(req) as resp:
+                    body = resp.read()
+            except urllib.error.HTTPError as exc:
+                body = exc.read()
         try:
             data = json.loads(body)
         except json.JSONDecodeError:

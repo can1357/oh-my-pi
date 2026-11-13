@@ -23,6 +23,7 @@ import { type CfgWriteDetails, type CfgWriteOutcome } from "@oh-my-pi/pi-tui/too
 import { CFG_SAVE_SEGMENT, CFG_URL_PREFIX, parseCfgUrl } from "@oh-my-pi/pi-tui/tools/cfg-url";
 import { type AnySetting, all } from "../config/registry";
 import type { SettingProvenance, Settings } from "../config/settings";
+import { sandboxEnabled } from "../sandbox/policy";
 import cfgPromptDoc from "../prompts/internal-urls/cfg.md" with { type: "text" };
 import cfgEnvShadowedTemplate from "../prompts/tools/cfg-env-shadowed.md" with { type: "text" };
 import cfgApprovalTimeoutTemplate from "../prompts/tools/cfg-approval-timeout.md" with { type: "text" };
@@ -131,17 +132,22 @@ export function setCfgApprovalHost(host: CfgApprovalHost | null): void {
 	sessionGrant = undefined;
 }
 
-/** Answers from the session grant when it covers this write; otherwise asks the host and records a new grant. */
+/**
+ * Answers from the session grant when it covers this write; otherwise asks the host and records a
+ * new grant. A `guarded` write (the sandbox's own settings while it is enabled) always asks and never
+ * records a grant: the agent must not loosen the sandbox under an earlier "for this session".
+ */
 async function decide(
 	host: CfgApprovalHost,
 	request: CfgChangeRequest,
 	sessionId: string | undefined,
+	guarded: boolean,
 	signal?: AbortSignal,
 ): Promise<CfgApproval> {
 	const grant = sessionId !== undefined && sessionGrant?.sessionId === sessionId ? sessionGrant : undefined;
-	if (grant && (grant.save || !request.save)) return "once";
+	if (!guarded && grant && (grant.save || !request.save)) return "once";
 	const answer = await host.approve(request, { signal });
-	if (answer === "session" && sessionId !== undefined) {
+	if (answer === "session" && sessionId !== undefined && !guarded) {
 		sessionGrant = { sessionId, save: request.save || (grant?.save ?? false) };
 	}
 	return answer;
@@ -430,7 +436,9 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			}
 		}
 		const sessionId = callerSession(context).getSessionId?.() ?? undefined;
-		const decision = approvalQueue.then(() => decide(host, request, sessionId, context?.signal));
+		// The sandbox's own settings, while it is enabled, are never answered from a session grant.
+		const guarded = leaf.id.startsWith("sandbox.") && sandboxEnabled(settings);
+		const decision = approvalQueue.then(() => decide(host, request, sessionId, guarded, context?.signal));
 		approvalQueue = decision.catch(() => undefined);
 		const answer = await decision;
 		if (answer === "timeout") {

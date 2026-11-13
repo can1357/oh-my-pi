@@ -260,6 +260,31 @@ export function getDotenvEnvValues(
 }
 
 /**
+ * Copy of `env` without its `undefined` slots and without every variable whose value equals the
+ * value OMP's own dotenv files (agent dir, config root, `~/.env`) define for that name. Those files
+ * hold OMP's credentials; a process that must not see them (a sandboxed one) starts from this.
+ *
+ * Compares by name and value against the parsed files, so it is stateless and gives the same
+ * answer in a worker thread, where the loader found the values already in the process env.
+ */
+export function stripOmpDotenvEnv(env: Record<string, string | undefined>): Record<string, string> {
+	const result: Record<string, string> = {};
+	for (const key in env) {
+		const value = env[key];
+		if (value === undefined) continue;
+		if (
+			(Object.hasOwn(agentEnv, key) && agentEnv[key] === value) ||
+			(Object.hasOwn(piEnv, key) && piEnv[key] === value) ||
+			(Object.hasOwn(homeEnv, key) && homeEnv[key] === value)
+		) {
+			continue;
+		}
+		result[key] = value;
+	}
+	return result;
+}
+
+/**
  * Parses a complete .env file with the runtime's dotenv grammar, then retains
  * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
@@ -380,9 +405,28 @@ export function withOmpOtelEnv<T>(fn: () => T): T {
 	}
 }
 
+/**
+ * Names that make OMP load config files with operator authority (`--config` overlays). A project's
+ * dotenv files are repository content, so a value from them must never reach these names.
+ */
+const OPERATOR_ONLY_ENV_NAMES: Readonly<Record<string, true>> = { PI_CONFIG_FILES: true, OMP_CONFIG_FILES: true };
+
+// Bun may already have autoloaded the project's dotenv files: an operator-only name keeps only the
+// value the launch environment gave it (same provenance rules as child shells), so OMP's own files
+// below supply it otherwise.
+if (Object.keys(OPERATOR_ONLY_ENV_NAMES).some(name => Bun.env[name] !== undefined)) {
+	const launchOwnedEnv = filterChildShellEnvInternal(Bun.env, getProjectDir());
+	for (const name in OPERATOR_ONLY_ENV_NAMES) {
+		const kept = launchOwnedEnv[name];
+		if (kept === undefined) delete Bun.env[name];
+		else if (Bun.env[name] !== kept) Bun.env[name] = kept;
+	}
+}
+
 for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 	for (const key in file) {
 		if (isMacosMallocStackLoggingEnvName(key)) continue;
+		if (file === projectEnv && Object.hasOwn(OPERATOR_ONLY_ENV_NAMES, key)) continue;
 		if (file !== projectEnv && claimOmpOtelEnvFileEntry(key, file[key])) continue;
 		if (!Bun.env[key]) {
 			Bun.env[key] = file[key];

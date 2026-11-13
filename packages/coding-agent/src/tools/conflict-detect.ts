@@ -22,6 +22,7 @@ import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-t
 import type { ToolSession } from "./index";
 import { getToolConversationState } from "./tool-state";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
+import { containedFileAccess, openReadableFile, withReadableFile } from "../sandbox/file-access";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const OURS_PREFIX = "<<<<<<<";
@@ -145,10 +146,7 @@ export async function scanFileForConflicts(
 	options: { maxBytes?: number } = {},
 ): Promise<ConflictFileScan> {
 	const maxBytes = options.maxBytes ?? SCAN_FILE_DEFAULT_MAX_BYTES;
-	const file = Bun.file(absolutePath);
-	const size = file.size;
-	const truncated = size > maxBytes;
-	const bytes = truncated ? new Uint8Array(await file.slice(0, maxBytes).arrayBuffer()) : await file.bytes();
+	const { bytes, truncated } = await readScanBytes(absolutePath, maxBytes);
 	const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 	// `split("\n")` over a truncated read may leave a partial last line; the
 	// scanner already tolerates an unclosed opener, so no extra trimming.
@@ -272,6 +270,40 @@ export class ConflictHistory {
 	}
 }
 
+/** The first `maxBytes` of `absolutePath`, and whether the file is longer. */
+async function readScanBytes(
+	absolutePath: string,
+	maxBytes: number,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+	if (!containedFileAccess()) {
+		const file = Bun.file(absolutePath);
+		const truncated = file.size > maxBytes;
+		const bytes = truncated ? new Uint8Array(await file.slice(0, maxBytes).arrayBuffer()) : await file.bytes();
+		return { bytes, truncated };
+	}
+	return withReadableFile(absolutePath, async handle => {
+		const { size } = await handle.stat();
+		if (size <= maxBytes) return { bytes: await handle.readFile(), truncated: false };
+		const buffer = Buffer.allocUnsafe(maxBytes);
+		const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+		return { bytes: buffer.subarray(0, bytesRead), truncated: true };
+	});
+}
+
+/** `absolutePath`'s bytes in chunks; contained, through the verified handle. */
+async function* streamFileChunks(absolutePath: string): AsyncGenerator<Uint8Array> {
+	if (!containedFileAccess()) {
+		yield* Bun.file(absolutePath).stream();
+		return;
+	}
+	const handle = await openReadableFile(absolutePath);
+	try {
+		yield* handle.createReadStream({ autoClose: false });
+	} finally {
+		await handle.close();
+	}
+}
+
 /**
  * Stream `absolutePath` for marker blocks equal to a registered entry. Unlike
  * discovery this has no byte cap, so memory is bounded instead: only one
@@ -333,7 +365,7 @@ async function findRegisteredBlocks(absolutePath: string, entries: readonly Conf
 		lineBytes = 0;
 		return line;
 	};
-	for await (const chunk of Bun.file(absolutePath).stream()) {
+	for await (const chunk of streamFileChunks(absolutePath)) {
 		let start = 0;
 		for (let end = chunk.indexOf(10); ; end = chunk.indexOf(10, start)) {
 			const segment = chunk.subarray(start, end === -1 ? chunk.length : end);

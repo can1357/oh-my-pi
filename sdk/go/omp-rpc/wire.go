@@ -2567,6 +2567,8 @@ type SessionState struct {
 	ContextUsage *ContextUsage    `json:"contextUsage,omitempty"`
 	// Current goal mode; null when the session has no goal.
 	Goal *GoalModeState `json:"goal"`
+	// Sandbox status of the session's workspace; absent on servers without the sandbox commands.
+	Sandbox *SandboxSummary `json:"sandbox,omitempty"`
 }
 
 func (v *SessionState) UnmarshalJSON(data []byte) error {
@@ -2605,6 +2607,7 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.defaulted("dumpTools", &out.DumpTools, `[]`)
 	d.optional("contextUsage", &out.ContextUsage)
 	d.defaulted("goal", &out.Goal, `null`)
+	d.optional("sandbox", &out.Sandbox)
 	if d.err != nil {
 		return d.err
 	}
@@ -2642,6 +2645,8 @@ type BashResult struct {
 	Images        []ImageContent             `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	Trace map[string]json.RawMessage `json:"trace,omitempty"`
+	// Present when the command ran inside the OS sandbox.
+	Sandbox *SandboxResultMeta `json:"sandbox,omitempty"`
 }
 
 func (v *BashResult) UnmarshalJSON(data []byte) error {
@@ -2673,6 +2678,39 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("workingDir", &out.WorkingDir)
 	d.optional("images", &out.Images)
 	d.optional("trace", &out.Trace)
+	d.optional("sandbox", &out.Sandbox)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SandboxResultMeta struct {
+	Backend string             `json:"backend"`
+	Mode    SandboxMode        `json:"mode"`
+	Network SandboxNetworkMode `json:"network"`
+	// Hosts the egress proxy refused during this command.
+	BlockedHosts []string `json:"blockedHosts,omitempty"`
+	// The output looks like a filesystem denial by the sandbox.
+	Denied *bool `json:"denied,omitempty"`
+	// Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start.
+	StartFailed *bool `json:"startFailed,omitempty"`
+}
+
+func (v *SandboxResultMeta) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxResultMeta", v.decodeFrom)
+}
+
+func (v *SandboxResultMeta) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxResultMeta
+	d := fieldDecoder{raw: raw, owner: "SandboxResultMeta"}
+	d.required("backend", &out.Backend)
+	d.required("mode", &out.Mode)
+	d.required("network", &out.Network)
+	d.optional("blockedHosts", &out.BlockedHosts)
+	d.optional("denied", &out.Denied)
+	d.optional("startFailed", &out.StartFailed)
 	if d.err != nil {
 		return d.err
 	}
@@ -3515,6 +3553,676 @@ func (v *PromptAck) decodeFrom(raw map[string]json.RawMessage) error {
 	var out PromptAck
 	d := fieldDecoder{raw: raw, owner: "PromptAck"}
 	d.optional("agentInvoked", &out.AgentInvoked)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A `sandbox.*` setting the sandbox commands address.
+type SandboxSettingId string
+
+const (
+	SandboxSettingIdEnabled      SandboxSettingId = "enabled"
+	SandboxSettingIdMode         SandboxSettingId = "mode"
+	SandboxSettingIdScope        SandboxSettingId = "scope"
+	SandboxSettingIdFallback     SandboxSettingId = "fallback"
+	SandboxSettingIdReadScope    SandboxSettingId = "readScope"
+	SandboxSettingIdNetworkMode  SandboxSettingId = "networkMode"
+	SandboxSettingIdAllowWrite   SandboxSettingId = "allowWrite"
+	SandboxSettingIdAllowRead    SandboxSettingId = "allowRead"
+	SandboxSettingIdDenyRead     SandboxSettingId = "denyRead"
+	SandboxSettingIdAllowedHosts SandboxSettingId = "allowedHosts"
+)
+
+func (v *SandboxSettingId) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxSettingId")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxSettingId(s); value {
+	case SandboxSettingIdEnabled, SandboxSettingIdMode, SandboxSettingIdScope, SandboxSettingIdFallback, SandboxSettingIdReadScope, SandboxSettingIdNetworkMode, SandboxSettingIdAllowWrite, SandboxSettingIdAllowRead, SandboxSettingIdDenyRead, SandboxSettingIdAllowedHosts:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxSettingId", s)
+}
+
+// A path or host list setting.
+type SandboxListId string
+
+const (
+	SandboxListIdAllowWrite   SandboxListId = "allowWrite"
+	SandboxListIdAllowRead    SandboxListId = "allowRead"
+	SandboxListIdDenyRead     SandboxListId = "denyRead"
+	SandboxListIdAllowedHosts SandboxListId = "allowedHosts"
+)
+
+func (v *SandboxListId) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxListId")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxListId(s); value {
+	case SandboxListIdAllowWrite, SandboxListIdAllowRead, SandboxListIdDenyRead, SandboxListIdAllowedHosts:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxListId", s)
+}
+
+type SandboxMode string
+
+const (
+	SandboxModeWorkspaceWrite SandboxMode = "workspace-write"
+	SandboxModeReadOnly       SandboxMode = "read-only"
+)
+
+func (v *SandboxMode) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxMode")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxMode(s); value {
+	case SandboxModeWorkspaceWrite, SandboxModeReadOnly:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxMode", s)
+}
+
+type SandboxScope string
+
+const (
+	SandboxScopeBash SandboxScope = "bash"
+	SandboxScopeEval SandboxScope = "eval"
+	SandboxScopeExec SandboxScope = "exec"
+)
+
+func (v *SandboxScope) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxScope")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxScope(s); value {
+	case SandboxScopeBash, SandboxScopeEval, SandboxScopeExec:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxScope", s)
+}
+
+type SandboxFallback string
+
+const (
+	SandboxFallbackWarn  SandboxFallback = "warn"
+	SandboxFallbackBlock SandboxFallback = "block"
+)
+
+func (v *SandboxFallback) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxFallback")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxFallback(s); value {
+	case SandboxFallbackWarn, SandboxFallbackBlock:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxFallback", s)
+}
+
+type SandboxReadScope string
+
+const (
+	SandboxReadScopeAll       SandboxReadScope = "all"
+	SandboxReadScopeWorkspace SandboxReadScope = "workspace"
+)
+
+func (v *SandboxReadScope) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxReadScope")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxReadScope(s); value {
+	case SandboxReadScopeAll, SandboxReadScopeWorkspace:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxReadScope", s)
+}
+
+type SandboxNetworkMode string
+
+const (
+	SandboxNetworkModeAllowlist SandboxNetworkMode = "allowlist"
+	SandboxNetworkModeDeny      SandboxNetworkMode = "deny"
+	SandboxNetworkModeAllow     SandboxNetworkMode = "allow"
+)
+
+func (v *SandboxNetworkMode) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxNetworkMode")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxNetworkMode(s); value {
+	case SandboxNetworkModeAllowlist, SandboxNetworkModeDeny, SandboxNetworkModeAllow:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxNetworkMode", s)
+}
+
+type SandboxListOp string
+
+const (
+	SandboxListOpAdd     SandboxListOp = "add"
+	SandboxListOpRemove  SandboxListOp = "remove"
+	SandboxListOpReplace SandboxListOp = "replace"
+)
+
+func (v *SandboxListOp) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxListOp")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxListOp(s); value {
+	case SandboxListOpAdd, SandboxListOpRemove, SandboxListOpReplace:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxListOp", s)
+}
+
+type SandboxGrantScope string
+
+const (
+	SandboxGrantScopeSession SandboxGrantScope = "session"
+	SandboxGrantScopeAlways  SandboxGrantScope = "always"
+)
+
+func (v *SandboxGrantScope) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxGrantScope")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxGrantScope(s); value {
+	case SandboxGrantScopeSession, SandboxGrantScopeAlways:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxGrantScope", s)
+}
+
+// Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse.
+type SandboxHostDecision string
+
+const (
+	SandboxHostDecisionOnce    SandboxHostDecision = "once"
+	SandboxHostDecisionSession SandboxHostDecision = "session"
+	SandboxHostDecisionAlways  SandboxHostDecision = "always"
+	SandboxHostDecisionDeny    SandboxHostDecision = "deny"
+)
+
+func (v *SandboxHostDecision) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxHostDecision")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxHostDecision(s); value {
+	case SandboxHostDecisionOnce, SandboxHostDecisionSession, SandboxHostDecisionAlways, SandboxHostDecisionDeny:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxHostDecision", s)
+}
+
+type SandboxPathKind string
+
+const (
+	SandboxPathKindWrite SandboxPathKind = "write"
+	SandboxPathKindRead  SandboxPathKind = "read"
+)
+
+func (v *SandboxPathKind) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxPathKind")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxPathKind(s); value {
+	case SandboxPathKindWrite, SandboxPathKindRead:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxPathKind", s)
+}
+
+type SandboxAccessKind string
+
+const (
+	SandboxAccessKindWrite SandboxAccessKind = "write"
+	SandboxAccessKindRead  SandboxAccessKind = "read"
+	SandboxAccessKindHost  SandboxAccessKind = "host"
+)
+
+func (v *SandboxAccessKind) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxAccessKind")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxAccessKind(s); value {
+	case SandboxAccessKindWrite, SandboxAccessKindRead, SandboxAccessKindHost:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxAccessKind", s)
+}
+
+// Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing.
+type SandboxAccessDecision string
+
+const (
+	SandboxAccessDecisionSession  SandboxAccessDecision = "session"
+	SandboxAccessDecisionAlways   SandboxAccessDecision = "always"
+	SandboxAccessDecisionDeny     SandboxAccessDecision = "deny"
+	SandboxAccessDecisionInstruct SandboxAccessDecision = "instruct"
+)
+
+func (v *SandboxAccessDecision) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxAccessDecision")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxAccessDecision(s); value {
+	case SandboxAccessDecisionSession, SandboxAccessDecisionAlways, SandboxAccessDecisionDeny, SandboxAccessDecisionInstruct:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxAccessDecision", s)
+}
+
+type SandboxStatusOff struct{}
+
+func (v *SandboxStatusOff) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxStatusOff", v.decodeFrom)
+}
+
+func (v *SandboxStatusOff) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxStatusOff
+	d := fieldDecoder{raw: raw, owner: "SandboxStatusOff"}
+	d.constant("state", "off")
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxStatusOff) MarshalJSON() ([]byte, error) {
+	type plain SandboxStatusOff
+	return encodeObject(plain(v), `"state":"off"`, nil)
+}
+
+type SandboxStatusActive struct {
+	Backend string `json:"backend"`
+	// Network mode as enforced here (a mode this host cannot enforce runs as deny).
+	Network  SandboxNetworkMode `json:"network"`
+	Warnings []string           `json:"warnings"`
+}
+
+func (v *SandboxStatusActive) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxStatusActive", v.decodeFrom)
+}
+
+func (v *SandboxStatusActive) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxStatusActive
+	d := fieldDecoder{raw: raw, owner: "SandboxStatusActive"}
+	d.constant("state", "active")
+	d.required("backend", &out.Backend)
+	d.required("network", &out.Network)
+	d.required("warnings", &out.Warnings)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxStatusActive) MarshalJSON() ([]byte, error) {
+	type plain SandboxStatusActive
+	return encodeObject(plain(v), `"state":"active"`, nil)
+}
+
+type SandboxStatusUnavailable struct {
+	Reason string `json:"reason"`
+	// `warn`: commands run unsandboxed; `block`: they fail.
+	Fallback SandboxFallback `json:"fallback"`
+}
+
+func (v *SandboxStatusUnavailable) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxStatusUnavailable", v.decodeFrom)
+}
+
+func (v *SandboxStatusUnavailable) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxStatusUnavailable
+	d := fieldDecoder{raw: raw, owner: "SandboxStatusUnavailable"}
+	d.constant("state", "unavailable")
+	d.required("reason", &out.Reason)
+	d.required("fallback", &out.Fallback)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxStatusUnavailable) MarshalJSON() ([]byte, error) {
+	type plain SandboxStatusUnavailable
+	return encodeObject(plain(v), `"state":"unavailable"`, nil)
+}
+
+// Runtime status of the sandbox, discriminated by `state`.
+type SandboxStatus struct {
+	// Value holds one variant, chosen by "state" on decode.
+	Value SandboxStatusVariant
+}
+
+// SandboxStatusVariant is implemented by the types SandboxStatus can hold.
+type SandboxStatusVariant interface {
+	isSandboxStatus()
+}
+
+func (SandboxStatusOff) isSandboxStatus()         {}
+func (SandboxStatusActive) isSandboxStatus()      {}
+func (SandboxStatusUnavailable) isSandboxStatus() {}
+
+func (v SandboxStatus) MarshalJSON() ([]byte, error) {
+	return encodeVariant("SandboxStatus", v.Value)
+}
+
+func (v *SandboxStatus) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxStatus", v.decodeFrom)
+}
+
+func (v *SandboxStatus) decodeFrom(raw map[string]json.RawMessage) error {
+	tag, err := unionTag(raw, "SandboxStatus", "state")
+	if err != nil {
+		return err
+	}
+	var value SandboxStatusVariant
+	switch tag {
+	case "off":
+		value, err = decodeVariant[SandboxStatusOff](raw)
+	case "active":
+		value, err = decodeVariant[SandboxStatusActive](raw)
+	case "unavailable":
+		value, err = decodeVariant[SandboxStatusUnavailable](raw)
+	default:
+		return unknownValue("SandboxStatus.state", tag)
+	}
+	if err != nil {
+		return err
+	}
+	v.Value = value
+	return nil
+}
+
+// Sandbox status without the detail `get_sandbox` returns.
+type SandboxSummary struct {
+	State SandboxSummaryState `json:"state"`
+	// Containment backend while active.
+	Backend *string `json:"backend,omitempty"`
+}
+
+func (v *SandboxSummary) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxSummary", v.decodeFrom)
+}
+
+func (v *SandboxSummary) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxSummary
+	d := fieldDecoder{raw: raw, owner: "SandboxSummary"}
+	d.required("state", &out.State)
+	d.optional("backend", &out.Backend)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SandboxSummaryState string
+
+const (
+	SandboxSummaryStateOff         SandboxSummaryState = "off"
+	SandboxSummaryStateActive      SandboxSummaryState = "active"
+	SandboxSummaryStateUnavailable SandboxSummaryState = "unavailable"
+)
+
+func (v *SandboxSummaryState) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxSummaryState")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxSummaryState(s); value {
+	case SandboxSummaryStateOff, SandboxSummaryStateActive, SandboxSummaryStateUnavailable:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxSummaryState", s)
+}
+
+// Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces).
+type SandboxSettingValues struct {
+	Enabled      bool               `json:"enabled"`
+	Mode         SandboxMode        `json:"mode"`
+	Scope        []SandboxScope     `json:"scope"`
+	Fallback     SandboxFallback    `json:"fallback"`
+	ReadScope    SandboxReadScope   `json:"readScope"`
+	NetworkMode  SandboxNetworkMode `json:"networkMode"`
+	AllowWrite   []string           `json:"allowWrite"`
+	AllowRead    []string           `json:"allowRead"`
+	DenyRead     []string           `json:"denyRead"`
+	AllowedHosts []string           `json:"allowedHosts"`
+}
+
+func (v *SandboxSettingValues) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxSettingValues", v.decodeFrom)
+}
+
+func (v *SandboxSettingValues) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxSettingValues
+	d := fieldDecoder{raw: raw, owner: "SandboxSettingValues"}
+	d.required("enabled", &out.Enabled)
+	d.required("mode", &out.Mode)
+	d.required("scope", &out.Scope)
+	d.required("fallback", &out.Fallback)
+	d.required("readScope", &out.ReadScope)
+	d.required("networkMode", &out.NetworkMode)
+	d.required("allowWrite", &out.AllowWrite)
+	d.required("allowRead", &out.AllowRead)
+	d.required("denyRead", &out.DenyRead)
+	d.required("allowedHosts", &out.AllowedHosts)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Settings another layer decides, with the reason; writing one fails with `sandbox_locked`.
+type SandboxLocked struct {
+	Enabled      *string `json:"enabled,omitempty"`
+	Mode         *string `json:"mode,omitempty"`
+	Scope        *string `json:"scope,omitempty"`
+	Fallback     *string `json:"fallback,omitempty"`
+	ReadScope    *string `json:"readScope,omitempty"`
+	NetworkMode  *string `json:"networkMode,omitempty"`
+	AllowWrite   *string `json:"allowWrite,omitempty"`
+	AllowRead    *string `json:"allowRead,omitempty"`
+	DenyRead     *string `json:"denyRead,omitempty"`
+	AllowedHosts *string `json:"allowedHosts,omitempty"`
+}
+
+func (v *SandboxLocked) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxLocked", v.decodeFrom)
+}
+
+func (v *SandboxLocked) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxLocked
+	d := fieldDecoder{raw: raw, owner: "SandboxLocked"}
+	d.optional("enabled", &out.Enabled)
+	d.optional("mode", &out.Mode)
+	d.optional("scope", &out.Scope)
+	d.optional("fallback", &out.Fallback)
+	d.optional("readScope", &out.ReadScope)
+	d.optional("networkMode", &out.NetworkMode)
+	d.optional("allowWrite", &out.AllowWrite)
+	d.optional("allowRead", &out.AllowRead)
+	d.optional("denyRead", &out.DenyRead)
+	d.optional("allowedHosts", &out.AllowedHosts)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Per-list note when project config narrows the list in this workspace.
+type SandboxListNotes struct {
+	AllowWrite   *string `json:"allowWrite,omitempty"`
+	AllowRead    *string `json:"allowRead,omitempty"`
+	DenyRead     *string `json:"denyRead,omitempty"`
+	AllowedHosts *string `json:"allowedHosts,omitempty"`
+}
+
+func (v *SandboxListNotes) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxListNotes", v.decodeFrom)
+}
+
+func (v *SandboxListNotes) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxListNotes
+	d := fieldDecoder{raw: raw, owner: "SandboxListNotes"}
+	d.optional("allowWrite", &out.AllowWrite)
+	d.optional("allowRead", &out.AllowRead)
+	d.optional("denyRead", &out.DenyRead)
+	d.optional("allowedHosts", &out.AllowedHosts)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A project-layer value dropped because it would loosen the sandbox.
+type SandboxIgnoredValue struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+func (v *SandboxIgnoredValue) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxIgnoredValue", v.decodeFrom)
+}
+
+func (v *SandboxIgnoredValue) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxIgnoredValue
+	d := fieldDecoder{raw: raw, owner: "SandboxIgnoredValue"}
+	d.required("id", &out.ID)
+	d.required("reason", &out.Reason)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Resolved filesystem policy for the workspace.
+type SandboxEffectivePolicy struct {
+	ReadwritePaths []string `json:"readwritePaths"`
+	ReadonlyPaths  []string `json:"readonlyPaths"`
+	DeniedPaths    []string `json:"deniedPaths"`
+}
+
+func (v *SandboxEffectivePolicy) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxEffectivePolicy", v.decodeFrom)
+}
+
+func (v *SandboxEffectivePolicy) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxEffectivePolicy
+	d := fieldDecoder{raw: raw, owner: "SandboxEffectivePolicy"}
+	d.required("readwritePaths", &out.ReadwritePaths)
+	d.required("readonlyPaths", &out.ReadonlyPaths)
+	d.required("deniedPaths", &out.DeniedPaths)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Paths allowed for this session only: writable (and readable), and readable.
+type SandboxSessionPaths struct {
+	Write []string `json:"write"`
+	Read  []string `json:"read"`
+}
+
+func (v *SandboxSessionPaths) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxSessionPaths", v.decodeFrom)
+}
+
+func (v *SandboxSessionPaths) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxSessionPaths
+	d := fieldDecoder{raw: raw, owner: "SandboxSessionPaths"}
+	d.required("write", &out.Write)
+	d.required("read", &out.Read)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it.
+type SandboxState struct {
+	// Directory the policy is resolved for (the session cwd).
+	Workspace string                 `json:"workspace"`
+	Status    SandboxStatus          `json:"status"`
+	Settings  SandboxSettingValues   `json:"settings"`
+	Locked    SandboxLocked          `json:"locked"`
+	ListNotes SandboxListNotes       `json:"listNotes"`
+	Ignored   []SandboxIgnoredValue  `json:"ignored"`
+	Effective SandboxEffectivePolicy `json:"effective"`
+	// Hosts refused this session that are still not allowed, most recent first.
+	BlockedHosts []string `json:"blockedHosts"`
+	// Hosts allowed for this session only.
+	SessionHosts []string `json:"sessionHosts"`
+	// Paths allowed for this session only.
+	SessionPaths SandboxSessionPaths `json:"sessionPaths"`
+	// Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`).
+	HostPrompts bool `json:"hostPrompts"`
+	// The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`).
+	AccessPrompts bool `json:"accessPrompts"`
+}
+
+func (v *SandboxState) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxState", v.decodeFrom)
+}
+
+func (v *SandboxState) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxState
+	d := fieldDecoder{raw: raw, owner: "SandboxState"}
+	d.required("workspace", &out.Workspace)
+	d.required("status", &out.Status)
+	d.required("settings", &out.Settings)
+	d.required("locked", &out.Locked)
+	d.required("listNotes", &out.ListNotes)
+	d.required("ignored", &out.Ignored)
+	d.required("effective", &out.Effective)
+	d.required("blockedHosts", &out.BlockedHosts)
+	d.required("sessionHosts", &out.SessionHosts)
+	d.required("sessionPaths", &out.SessionPaths)
+	d.required("hostPrompts", &out.HostPrompts)
+	d.required("accessPrompts", &out.AccessPrompts)
 	if d.err != nil {
 		return d.err
 	}
@@ -5534,6 +6242,188 @@ func (v ConfigUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"config_update"`, nil)
 }
 
+// Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled.
+type SandboxUpdateEvent struct {
+	State SandboxState `json:"state"`
+}
+
+func (v *SandboxUpdateEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxUpdateEvent", v.decodeFrom)
+}
+
+func (v *SandboxUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxUpdateEvent
+	d := fieldDecoder{raw: raw, owner: "SandboxUpdateEvent"}
+	d.constant("type", "sandbox_update")
+	d.required("state", &out.State)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxUpdateEvent) MarshalJSON() ([]byte, error) {
+	type plain SandboxUpdateEvent
+	return encodeObject(plain(v), `"type":"sandbox_update"`, nil)
+}
+
+// A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`.
+type SandboxHostRequestEvent struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port int64  `json:"port"`
+	// Unanswered for this long, the request is denied and cancelled.
+	TimeoutMs int64 `json:"timeoutMs"`
+}
+
+func (v *SandboxHostRequestEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxHostRequestEvent", v.decodeFrom)
+}
+
+func (v *SandboxHostRequestEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxHostRequestEvent
+	d := fieldDecoder{raw: raw, owner: "SandboxHostRequestEvent"}
+	d.constant("type", "sandbox_host_request")
+	d.required("id", &out.ID)
+	d.required("host", &out.Host)
+	d.required("port", &out.Port)
+	d.required("timeoutMs", &out.TimeoutMs)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxHostRequestEvent) MarshalJSON() ([]byte, error) {
+	type plain SandboxHostRequestEvent
+	return encodeObject(plain(v), `"type":"sandbox_host_request"`, nil)
+}
+
+// A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended.
+type SandboxHostRequestCancelledEvent struct {
+	ID     string                                 `json:"id"`
+	Reason SandboxHostRequestCancelledEventReason `json:"reason"`
+}
+
+func (v *SandboxHostRequestCancelledEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxHostRequestCancelledEvent", v.decodeFrom)
+}
+
+func (v *SandboxHostRequestCancelledEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxHostRequestCancelledEvent
+	d := fieldDecoder{raw: raw, owner: "SandboxHostRequestCancelledEvent"}
+	d.constant("type", "sandbox_host_request_cancelled")
+	d.required("id", &out.ID)
+	d.required("reason", &out.Reason)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxHostRequestCancelledEvent) MarshalJSON() ([]byte, error) {
+	type plain SandboxHostRequestCancelledEvent
+	return encodeObject(plain(v), `"type":"sandbox_host_request_cancelled"`, nil)
+}
+
+type SandboxHostRequestCancelledEventReason string
+
+const (
+	SandboxHostRequestCancelledEventReasonTimeout SandboxHostRequestCancelledEventReason = "timeout"
+	SandboxHostRequestCancelledEventReasonAborted SandboxHostRequestCancelledEventReason = "aborted"
+)
+
+func (v *SandboxHostRequestCancelledEventReason) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SandboxHostRequestCancelledEventReason")
+	if err != nil {
+		return err
+	}
+	switch value := SandboxHostRequestCancelledEventReason(s); value {
+	case SandboxHostRequestCancelledEventReasonTimeout, SandboxHostRequestCancelledEventReasonAborted:
+		*v = value
+		return nil
+	}
+	return unknownValue("SandboxHostRequestCancelledEventReason", s)
+}
+
+// The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`.
+type SandboxAccessRequestEvent struct {
+	ID   string            `json:"id"`
+	Kind SandboxAccessKind `json:"kind"`
+	// Resolved absolute path, or canonical host name.
+	Target string `json:"target"`
+	// What the agent is doing and why it needs `target`, as the agent wrote it.
+	Intent string `json:"intent"`
+	// What a grant lets contained commands do, written by omp.
+	Effect    string `json:"effect"`
+	Workspace string `json:"workspace"`
+	// False when the backing list is locked: offer no `always`.
+	CanAlways bool `json:"canAlways"`
+	// The command that needs the access, verbatim.
+	Command *string `json:"command,omitempty"`
+	// What the agent does instead when denied.
+	Alternative *string `json:"alternative,omitempty"`
+}
+
+func (v *SandboxAccessRequestEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxAccessRequestEvent", v.decodeFrom)
+}
+
+func (v *SandboxAccessRequestEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxAccessRequestEvent
+	d := fieldDecoder{raw: raw, owner: "SandboxAccessRequestEvent"}
+	d.constant("type", "sandbox_access_request")
+	d.required("id", &out.ID)
+	d.required("kind", &out.Kind)
+	d.required("target", &out.Target)
+	d.required("intent", &out.Intent)
+	d.required("effect", &out.Effect)
+	d.required("workspace", &out.Workspace)
+	d.required("canAlways", &out.CanAlways)
+	d.optional("command", &out.Command)
+	d.optional("alternative", &out.Alternative)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxAccessRequestEvent) MarshalJSON() ([]byte, error) {
+	type plain SandboxAccessRequestEvent
+	return encodeObject(plain(v), `"type":"sandbox_access_request"`, nil)
+}
+
+// A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended.
+type SandboxAccessRequestCancelledEvent struct {
+	ID string `json:"id"`
+}
+
+func (v *SandboxAccessRequestCancelledEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SandboxAccessRequestCancelledEvent", v.decodeFrom)
+}
+
+func (v *SandboxAccessRequestCancelledEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SandboxAccessRequestCancelledEvent
+	d := fieldDecoder{raw: raw, owner: "SandboxAccessRequestCancelledEvent"}
+	d.constant("type", "sandbox_access_request_cancelled")
+	d.required("id", &out.ID)
+	d.constant("reason", "aborted")
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v SandboxAccessRequestCancelledEvent) MarshalJSON() ([]byte, error) {
+	type plain SandboxAccessRequestCancelledEvent
+	return encodeObject(plain(v), `"type":"sandbox_access_request_cancelled","reason":"aborted"`, nil)
+}
+
 // An event could not fit within the transport limits and was dropped.
 type RpcFrameErrorEvent struct {
 	Error        string  `json:"error"`
@@ -6782,62 +7672,67 @@ type RpcNotificationVariant interface {
 	isRpcNotification()
 }
 
-func (ReadyEvent) isRpcNotification()                   {}
-func (PromptResultEvent) isRpcNotification()            {}
-func (SessionSettledEvent) isRpcNotification()          {}
-func (ExtensionError) isRpcNotification()               {}
-func (ExtensionUiRequest) isRpcNotification()           {}
-func (AvailableCommandsUpdateEvent) isRpcNotification() {}
-func (SubagentLifecycleEvent) isRpcNotification()       {}
-func (SubagentProgressEvent) isRpcNotification()        {}
-func (SubagentEvent) isRpcNotification()                {}
-func (LivePhaseEvent) isRpcNotification()               {}
-func (LiveLevelsEvent) isRpcNotification()              {}
-func (LiveTranscriptEvent) isRpcNotification()          {}
-func (LiveEndEvent) isRpcNotification()                 {}
-func (DictationStateEvent) isRpcNotification()          {}
-func (DictationTranscriptEvent) isRpcNotification()     {}
-func (DictationEndEvent) isRpcNotification()            {}
-func (BtwDeltaEvent) isRpcNotification()                {}
-func (BtwRecordEvent) isRpcNotification()               {}
-func (CommandOutputEvent) isRpcNotification()           {}
-func (SessionInfoUpdateEvent) isRpcNotification()       {}
-func (ConfigUpdateEvent) isRpcNotification()            {}
-func (RpcFrameErrorEvent) isRpcNotification()           {}
-func (AgentStartEvent) isRpcNotification()              {}
-func (AgentEndEvent) isRpcNotification()                {}
-func (TurnStartEvent) isRpcNotification()               {}
-func (TurnEndEvent) isRpcNotification()                 {}
-func (MessageStartEvent) isRpcNotification()            {}
-func (MessageUpdateEvent) isRpcNotification()           {}
-func (MessageEndEvent) isRpcNotification()              {}
-func (ToolExecutionStartEvent) isRpcNotification()      {}
-func (ToolExecutionUpdateEvent) isRpcNotification()     {}
-func (ToolStreamUpdateEvent) isRpcNotification()        {}
-func (ToolExecutionEndEvent) isRpcNotification()        {}
-func (AutoCompactionStartEvent) isRpcNotification()     {}
-func (AutoCompactionEndEvent) isRpcNotification()       {}
-func (ManualCompactionStartEvent) isRpcNotification()   {}
-func (ManualCompactionEndEvent) isRpcNotification()     {}
-func (AutoRetryStartEvent) isRpcNotification()          {}
-func (AutoRetryEndEvent) isRpcNotification()            {}
-func (CacheWarmingStartEvent) isRpcNotification()       {}
-func (CacheWarmingEndEvent) isRpcNotification()         {}
-func (RetryFallbackAppliedEvent) isRpcNotification()    {}
-func (RetryFallbackSucceededEvent) isRpcNotification()  {}
-func (ModelChangedEvent) isRpcNotification()            {}
-func (ConfigWarningsChangedEvent) isRpcNotification()   {}
-func (AdvisorCostChangedEvent) isRpcNotification()      {}
-func (AdvisorYieldedEvent) isRpcNotification()          {}
-func (TtsrTriggeredEvent) isRpcNotification()           {}
-func (TodoReminderEvent) isRpcNotification()            {}
-func (TodoAutoClearEvent) isRpcNotification()           {}
-func (IrcMessageEvent) isRpcNotification()              {}
-func (NoticeEvent) isRpcNotification()                  {}
-func (ThinkingLevelChangedEvent) isRpcNotification()    {}
-func (GoalUpdatedEvent) isRpcNotification()             {}
-func (QueueUpdateEvent) isRpcNotification()             {}
-func (UnknownNotification) isRpcNotification()          {}
+func (ReadyEvent) isRpcNotification()                         {}
+func (PromptResultEvent) isRpcNotification()                  {}
+func (SessionSettledEvent) isRpcNotification()                {}
+func (ExtensionError) isRpcNotification()                     {}
+func (ExtensionUiRequest) isRpcNotification()                 {}
+func (AvailableCommandsUpdateEvent) isRpcNotification()       {}
+func (SubagentLifecycleEvent) isRpcNotification()             {}
+func (SubagentProgressEvent) isRpcNotification()              {}
+func (SubagentEvent) isRpcNotification()                      {}
+func (LivePhaseEvent) isRpcNotification()                     {}
+func (LiveLevelsEvent) isRpcNotification()                    {}
+func (LiveTranscriptEvent) isRpcNotification()                {}
+func (LiveEndEvent) isRpcNotification()                       {}
+func (DictationStateEvent) isRpcNotification()                {}
+func (DictationTranscriptEvent) isRpcNotification()           {}
+func (DictationEndEvent) isRpcNotification()                  {}
+func (BtwDeltaEvent) isRpcNotification()                      {}
+func (BtwRecordEvent) isRpcNotification()                     {}
+func (CommandOutputEvent) isRpcNotification()                 {}
+func (SessionInfoUpdateEvent) isRpcNotification()             {}
+func (ConfigUpdateEvent) isRpcNotification()                  {}
+func (SandboxUpdateEvent) isRpcNotification()                 {}
+func (SandboxHostRequestEvent) isRpcNotification()            {}
+func (SandboxHostRequestCancelledEvent) isRpcNotification()   {}
+func (SandboxAccessRequestEvent) isRpcNotification()          {}
+func (SandboxAccessRequestCancelledEvent) isRpcNotification() {}
+func (RpcFrameErrorEvent) isRpcNotification()                 {}
+func (AgentStartEvent) isRpcNotification()                    {}
+func (AgentEndEvent) isRpcNotification()                      {}
+func (TurnStartEvent) isRpcNotification()                     {}
+func (TurnEndEvent) isRpcNotification()                       {}
+func (MessageStartEvent) isRpcNotification()                  {}
+func (MessageUpdateEvent) isRpcNotification()                 {}
+func (MessageEndEvent) isRpcNotification()                    {}
+func (ToolExecutionStartEvent) isRpcNotification()            {}
+func (ToolExecutionUpdateEvent) isRpcNotification()           {}
+func (ToolStreamUpdateEvent) isRpcNotification()              {}
+func (ToolExecutionEndEvent) isRpcNotification()              {}
+func (AutoCompactionStartEvent) isRpcNotification()           {}
+func (AutoCompactionEndEvent) isRpcNotification()             {}
+func (ManualCompactionStartEvent) isRpcNotification()         {}
+func (ManualCompactionEndEvent) isRpcNotification()           {}
+func (AutoRetryStartEvent) isRpcNotification()                {}
+func (AutoRetryEndEvent) isRpcNotification()                  {}
+func (CacheWarmingStartEvent) isRpcNotification()             {}
+func (CacheWarmingEndEvent) isRpcNotification()               {}
+func (RetryFallbackAppliedEvent) isRpcNotification()          {}
+func (RetryFallbackSucceededEvent) isRpcNotification()        {}
+func (ModelChangedEvent) isRpcNotification()                  {}
+func (ConfigWarningsChangedEvent) isRpcNotification()         {}
+func (AdvisorCostChangedEvent) isRpcNotification()            {}
+func (AdvisorYieldedEvent) isRpcNotification()                {}
+func (TtsrTriggeredEvent) isRpcNotification()                 {}
+func (TodoReminderEvent) isRpcNotification()                  {}
+func (TodoAutoClearEvent) isRpcNotification()                 {}
+func (IrcMessageEvent) isRpcNotification()                    {}
+func (NoticeEvent) isRpcNotification()                        {}
+func (ThinkingLevelChangedEvent) isRpcNotification()          {}
+func (GoalUpdatedEvent) isRpcNotification()                   {}
+func (QueueUpdateEvent) isRpcNotification()                   {}
+func (UnknownNotification) isRpcNotification()                {}
 
 func (v RpcNotification) MarshalJSON() ([]byte, error) {
 	return encodeVariant("RpcNotification", v.Value)
@@ -6893,6 +7788,16 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[SessionInfoUpdateEvent](raw)
 	case "config_update":
 		value, err = decodeVariant[ConfigUpdateEvent](raw)
+	case "sandbox_update":
+		value, err = decodeVariant[SandboxUpdateEvent](raw)
+	case "sandbox_host_request":
+		value, err = decodeVariant[SandboxHostRequestEvent](raw)
+	case "sandbox_host_request_cancelled":
+		value, err = decodeVariant[SandboxHostRequestCancelledEvent](raw)
+	case "sandbox_access_request":
+		value, err = decodeVariant[SandboxAccessRequestEvent](raw)
+	case "sandbox_access_request_cancelled":
+		value, err = decodeVariant[SandboxAccessRequestCancelledEvent](raw)
 	case "rpc_frame_error":
 		value, err = decodeVariant[RpcFrameErrorEvent](raw)
 	case "agent_start":
@@ -6982,67 +7887,72 @@ type RpcServerFrameVariant interface {
 	isRpcServerFrame()
 }
 
-func (RpcResponse) isRpcServerFrame()                  {}
-func (HostToolCallRequest) isRpcServerFrame()          {}
-func (HostToolCancelRequest) isRpcServerFrame()        {}
-func (HostUriRequest) isRpcServerFrame()               {}
-func (HostUriCancelRequest) isRpcServerFrame()         {}
-func (ReadyEvent) isRpcServerFrame()                   {}
-func (PromptResultEvent) isRpcServerFrame()            {}
-func (SessionSettledEvent) isRpcServerFrame()          {}
-func (ExtensionError) isRpcServerFrame()               {}
-func (ExtensionUiRequest) isRpcServerFrame()           {}
-func (AvailableCommandsUpdateEvent) isRpcServerFrame() {}
-func (SubagentLifecycleEvent) isRpcServerFrame()       {}
-func (SubagentProgressEvent) isRpcServerFrame()        {}
-func (SubagentEvent) isRpcServerFrame()                {}
-func (LivePhaseEvent) isRpcServerFrame()               {}
-func (LiveLevelsEvent) isRpcServerFrame()              {}
-func (LiveTranscriptEvent) isRpcServerFrame()          {}
-func (LiveEndEvent) isRpcServerFrame()                 {}
-func (DictationStateEvent) isRpcServerFrame()          {}
-func (DictationTranscriptEvent) isRpcServerFrame()     {}
-func (DictationEndEvent) isRpcServerFrame()            {}
-func (BtwDeltaEvent) isRpcServerFrame()                {}
-func (BtwRecordEvent) isRpcServerFrame()               {}
-func (CommandOutputEvent) isRpcServerFrame()           {}
-func (SessionInfoUpdateEvent) isRpcServerFrame()       {}
-func (ConfigUpdateEvent) isRpcServerFrame()            {}
-func (RpcFrameErrorEvent) isRpcServerFrame()           {}
-func (AgentStartEvent) isRpcServerFrame()              {}
-func (AgentEndEvent) isRpcServerFrame()                {}
-func (TurnStartEvent) isRpcServerFrame()               {}
-func (TurnEndEvent) isRpcServerFrame()                 {}
-func (MessageStartEvent) isRpcServerFrame()            {}
-func (MessageUpdateEvent) isRpcServerFrame()           {}
-func (MessageEndEvent) isRpcServerFrame()              {}
-func (ToolExecutionStartEvent) isRpcServerFrame()      {}
-func (ToolExecutionUpdateEvent) isRpcServerFrame()     {}
-func (ToolStreamUpdateEvent) isRpcServerFrame()        {}
-func (ToolExecutionEndEvent) isRpcServerFrame()        {}
-func (AutoCompactionStartEvent) isRpcServerFrame()     {}
-func (AutoCompactionEndEvent) isRpcServerFrame()       {}
-func (ManualCompactionStartEvent) isRpcServerFrame()   {}
-func (ManualCompactionEndEvent) isRpcServerFrame()     {}
-func (AutoRetryStartEvent) isRpcServerFrame()          {}
-func (AutoRetryEndEvent) isRpcServerFrame()            {}
-func (CacheWarmingStartEvent) isRpcServerFrame()       {}
-func (CacheWarmingEndEvent) isRpcServerFrame()         {}
-func (RetryFallbackAppliedEvent) isRpcServerFrame()    {}
-func (RetryFallbackSucceededEvent) isRpcServerFrame()  {}
-func (ModelChangedEvent) isRpcServerFrame()            {}
-func (ConfigWarningsChangedEvent) isRpcServerFrame()   {}
-func (AdvisorCostChangedEvent) isRpcServerFrame()      {}
-func (AdvisorYieldedEvent) isRpcServerFrame()          {}
-func (TtsrTriggeredEvent) isRpcServerFrame()           {}
-func (TodoReminderEvent) isRpcServerFrame()            {}
-func (TodoAutoClearEvent) isRpcServerFrame()           {}
-func (IrcMessageEvent) isRpcServerFrame()              {}
-func (NoticeEvent) isRpcServerFrame()                  {}
-func (ThinkingLevelChangedEvent) isRpcServerFrame()    {}
-func (GoalUpdatedEvent) isRpcServerFrame()             {}
-func (QueueUpdateEvent) isRpcServerFrame()             {}
-func (UnknownNotification) isRpcServerFrame()          {}
+func (RpcResponse) isRpcServerFrame()                        {}
+func (HostToolCallRequest) isRpcServerFrame()                {}
+func (HostToolCancelRequest) isRpcServerFrame()              {}
+func (HostUriRequest) isRpcServerFrame()                     {}
+func (HostUriCancelRequest) isRpcServerFrame()               {}
+func (ReadyEvent) isRpcServerFrame()                         {}
+func (PromptResultEvent) isRpcServerFrame()                  {}
+func (SessionSettledEvent) isRpcServerFrame()                {}
+func (ExtensionError) isRpcServerFrame()                     {}
+func (ExtensionUiRequest) isRpcServerFrame()                 {}
+func (AvailableCommandsUpdateEvent) isRpcServerFrame()       {}
+func (SubagentLifecycleEvent) isRpcServerFrame()             {}
+func (SubagentProgressEvent) isRpcServerFrame()              {}
+func (SubagentEvent) isRpcServerFrame()                      {}
+func (LivePhaseEvent) isRpcServerFrame()                     {}
+func (LiveLevelsEvent) isRpcServerFrame()                    {}
+func (LiveTranscriptEvent) isRpcServerFrame()                {}
+func (LiveEndEvent) isRpcServerFrame()                       {}
+func (DictationStateEvent) isRpcServerFrame()                {}
+func (DictationTranscriptEvent) isRpcServerFrame()           {}
+func (DictationEndEvent) isRpcServerFrame()                  {}
+func (BtwDeltaEvent) isRpcServerFrame()                      {}
+func (BtwRecordEvent) isRpcServerFrame()                     {}
+func (CommandOutputEvent) isRpcServerFrame()                 {}
+func (SessionInfoUpdateEvent) isRpcServerFrame()             {}
+func (ConfigUpdateEvent) isRpcServerFrame()                  {}
+func (SandboxUpdateEvent) isRpcServerFrame()                 {}
+func (SandboxHostRequestEvent) isRpcServerFrame()            {}
+func (SandboxHostRequestCancelledEvent) isRpcServerFrame()   {}
+func (SandboxAccessRequestEvent) isRpcServerFrame()          {}
+func (SandboxAccessRequestCancelledEvent) isRpcServerFrame() {}
+func (RpcFrameErrorEvent) isRpcServerFrame()                 {}
+func (AgentStartEvent) isRpcServerFrame()                    {}
+func (AgentEndEvent) isRpcServerFrame()                      {}
+func (TurnStartEvent) isRpcServerFrame()                     {}
+func (TurnEndEvent) isRpcServerFrame()                       {}
+func (MessageStartEvent) isRpcServerFrame()                  {}
+func (MessageUpdateEvent) isRpcServerFrame()                 {}
+func (MessageEndEvent) isRpcServerFrame()                    {}
+func (ToolExecutionStartEvent) isRpcServerFrame()            {}
+func (ToolExecutionUpdateEvent) isRpcServerFrame()           {}
+func (ToolStreamUpdateEvent) isRpcServerFrame()              {}
+func (ToolExecutionEndEvent) isRpcServerFrame()              {}
+func (AutoCompactionStartEvent) isRpcServerFrame()           {}
+func (AutoCompactionEndEvent) isRpcServerFrame()             {}
+func (ManualCompactionStartEvent) isRpcServerFrame()         {}
+func (ManualCompactionEndEvent) isRpcServerFrame()           {}
+func (AutoRetryStartEvent) isRpcServerFrame()                {}
+func (AutoRetryEndEvent) isRpcServerFrame()                  {}
+func (CacheWarmingStartEvent) isRpcServerFrame()             {}
+func (CacheWarmingEndEvent) isRpcServerFrame()               {}
+func (RetryFallbackAppliedEvent) isRpcServerFrame()          {}
+func (RetryFallbackSucceededEvent) isRpcServerFrame()        {}
+func (ModelChangedEvent) isRpcServerFrame()                  {}
+func (ConfigWarningsChangedEvent) isRpcServerFrame()         {}
+func (AdvisorCostChangedEvent) isRpcServerFrame()            {}
+func (AdvisorYieldedEvent) isRpcServerFrame()                {}
+func (TtsrTriggeredEvent) isRpcServerFrame()                 {}
+func (TodoReminderEvent) isRpcServerFrame()                  {}
+func (TodoAutoClearEvent) isRpcServerFrame()                 {}
+func (IrcMessageEvent) isRpcServerFrame()                    {}
+func (NoticeEvent) isRpcServerFrame()                        {}
+func (ThinkingLevelChangedEvent) isRpcServerFrame()          {}
+func (GoalUpdatedEvent) isRpcServerFrame()                   {}
+func (QueueUpdateEvent) isRpcServerFrame()                   {}
+func (UnknownNotification) isRpcServerFrame()                {}
 
 func (v RpcServerFrame) MarshalJSON() ([]byte, error) {
 	return encodeVariant("RpcServerFrame", v.Value)
@@ -7108,6 +8018,16 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[SessionInfoUpdateEvent](raw)
 	case "config_update":
 		value, err = decodeVariant[ConfigUpdateEvent](raw)
+	case "sandbox_update":
+		value, err = decodeVariant[SandboxUpdateEvent](raw)
+	case "sandbox_host_request":
+		value, err = decodeVariant[SandboxHostRequestEvent](raw)
+	case "sandbox_host_request_cancelled":
+		value, err = decodeVariant[SandboxHostRequestCancelledEvent](raw)
+	case "sandbox_access_request":
+		value, err = decodeVariant[SandboxAccessRequestEvent](raw)
+	case "sandbox_access_request_cancelled":
+		value, err = decodeVariant[SandboxAccessRequestCancelledEvent](raw)
 	case "rpc_frame_error":
 		value, err = decodeVariant[RpcFrameErrorEvent](raw)
 	case "agent_start":
@@ -7774,6 +8694,44 @@ func (v *GetBtwHistoryResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out GetBtwHistoryResult
 	d := fieldDecoder{raw: raw, owner: "GetBtwHistoryResult"}
 	d.required("records", &out.Records)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SetSandboxHostPromptsResult struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (v *SetSandboxHostPromptsResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SetSandboxHostPromptsResult", v.decodeFrom)
+}
+
+func (v *SetSandboxHostPromptsResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SetSandboxHostPromptsResult
+	d := fieldDecoder{raw: raw, owner: "SetSandboxHostPromptsResult"}
+	d.required("enabled", &out.Enabled)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SetSandboxAccessPromptsResult struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (v *SetSandboxAccessPromptsResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SetSandboxAccessPromptsResult", v.decodeFrom)
+}
+
+func (v *SetSandboxAccessPromptsResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SetSandboxAccessPromptsResult
+	d := fieldDecoder{raw: raw, owner: "SetSandboxAccessPromptsResult"}
+	d.required("enabled", &out.Enabled)
 	if d.err != nil {
 		return d.err
 	}
@@ -8562,4 +9520,188 @@ func (c Commands) GetBtwHistory(ctx context.Context) ([]BtwHistoryRecord, error)
 	var out GetBtwHistoryResult
 	err := c.call(ctx, "get_btw_history", nil, 0, &out)
 	return out.Records, err
+}
+
+// GetSandbox sends "get_sandbox": Sandbox state of the session's workspace: status, settings, locks and the resolved policy.
+func (c Commands) GetSandbox(ctx context.Context) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "get_sandbox", nil, 0, &out)
+	return out, err
+}
+
+// SetSandboxSettingCommand holds the parameters of "set_sandbox_setting".
+type SetSandboxSettingCommand struct {
+	Setting SandboxSettingId             `json:"setting"`
+	Value   BooleanOrStringOrStringArray `json:"value"`
+}
+
+// SetSandboxSetting sends "set_sandbox_setting": Write one sandbox setting to the global config (lists and scope replace the whole operator list); returns the new state.
+func (c Commands) SetSandboxSetting(ctx context.Context, p SetSandboxSettingCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "set_sandbox_setting", p, 0, &out)
+	return out, err
+}
+
+// BooleanOrStringOrStringArray holds exactly one of its fields, chosen by the JSON kind of the value.
+type BooleanOrStringOrStringArray struct {
+	Boolean *bool
+	String  *string
+	Array   []string
+}
+
+func (v BooleanOrStringOrStringArray) MarshalJSON() ([]byte, error) {
+	switch {
+	case v.Boolean != nil:
+		return json.Marshal(*v.Boolean)
+	case v.String != nil:
+		return json.Marshal(*v.String)
+	case v.Array != nil:
+		return json.Marshal(v.Array)
+	}
+	return nil, emptyUnion("BooleanOrStringOrStringArray")
+}
+
+func (v *BooleanOrStringOrStringArray) UnmarshalJSON(data []byte) error {
+	var out BooleanOrStringOrStringArray
+	var err error
+	switch jsonKind(data) {
+	case 't':
+		err = json.Unmarshal(data, &out.Boolean)
+	case '"':
+		err = json.Unmarshal(data, &out.String)
+	case '[':
+		err = json.Unmarshal(data, &out.Array)
+	default:
+		return unexpectedKind("BooleanOrStringOrStringArray", data)
+	}
+	if err != nil {
+		return err
+	}
+	*v = out
+	return nil
+}
+
+// ResetSandboxSettingCommand holds the parameters of "reset_sandbox_setting".
+type ResetSandboxSettingCommand struct {
+	Setting SandboxSettingId `json:"setting"`
+}
+
+// ResetSandboxSetting sends "reset_sandbox_setting": Remove a sandbox setting from the global config, so another layer or the default applies; returns the new state.
+func (c Commands) ResetSandboxSetting(ctx context.Context, p ResetSandboxSettingCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "reset_sandbox_setting", p, 0, &out)
+	return out, err
+}
+
+// EditSandboxListCommand holds the parameters of "edit_sandbox_list".
+type EditSandboxListCommand struct {
+	List        SandboxListId `json:"list"`
+	Op          SandboxListOp `json:"op"`
+	Entry       string        `json:"entry"`
+	Replacement *string       `json:"replacement,omitempty"`
+}
+
+// EditSandboxList sends "edit_sandbox_list": Add, remove or replace (needs `replacement`) one entry of a sandbox list in the global config; returns the new state.
+func (c Commands) EditSandboxList(ctx context.Context, p EditSandboxListCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "edit_sandbox_list", p, 0, &out)
+	return out, err
+}
+
+// GrantSandboxHostCommand holds the parameters of "grant_sandbox_host".
+type GrantSandboxHostCommand struct {
+	Host  string            `json:"host"`
+	Scope SandboxGrantScope `json:"scope"`
+}
+
+// GrantSandboxHost sends "grant_sandbox_host": Allow a host for this session, or always (appended to the global allowlist); returns the new state.
+func (c Commands) GrantSandboxHost(ctx context.Context, p GrantSandboxHostCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "grant_sandbox_host", p, 0, &out)
+	return out, err
+}
+
+// RevokeSandboxHostCommand holds the parameters of "revoke_sandbox_host".
+type RevokeSandboxHostCommand struct {
+	Host string `json:"host"`
+}
+
+// RevokeSandboxHost sends "revoke_sandbox_host": Drop a host's session grant (persisted entries are removed with `edit_sandbox_list`); returns the new state.
+func (c Commands) RevokeSandboxHost(ctx context.Context, p RevokeSandboxHostCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "revoke_sandbox_host", p, 0, &out)
+	return out, err
+}
+
+// SetSandboxHostPromptsCommand holds the parameters of "set_sandbox_host_prompts".
+type SetSandboxHostPromptsCommand struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetSandboxHostPrompts sends "set_sandbox_host_prompts": Opt in to `sandbox_host_request` frames for hosts off the allowlist (off: such hosts are refused); returns the applied setting.
+func (c Commands) SetSandboxHostPrompts(ctx context.Context, p SetSandboxHostPromptsCommand) (bool, error) {
+	var out SetSandboxHostPromptsResult
+	err := c.call(ctx, "set_sandbox_host_prompts", p, 0, &out)
+	return out.Enabled, err
+}
+
+// RespondSandboxHostCommand holds the parameters of "respond_sandbox_host".
+type RespondSandboxHostCommand struct {
+	RequestID string              `json:"requestId"`
+	Decision  SandboxHostDecision `json:"decision"`
+}
+
+// RespondSandboxHost sends "respond_sandbox_host": Answer a pending `sandbox_host_request`; bypasses the command queue.
+func (c Commands) RespondSandboxHost(ctx context.Context, p RespondSandboxHostCommand) error {
+	return c.call(ctx, "respond_sandbox_host", p, 0, nil)
+}
+
+// GrantSandboxPathCommand holds the parameters of "grant_sandbox_path".
+type GrantSandboxPathCommand struct {
+	Kind SandboxPathKind `json:"kind"`
+	Path string          `json:"path"`
+}
+
+// GrantSandboxPath sends "grant_sandbox_path": Allow exactly this path for this session (write implies read; persistent entries use `edit_sandbox_list`); returns the new state.
+func (c Commands) GrantSandboxPath(ctx context.Context, p GrantSandboxPathCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "grant_sandbox_path", p, 0, &out)
+	return out, err
+}
+
+// RevokeSandboxPathCommand holds the parameters of "revoke_sandbox_path".
+type RevokeSandboxPathCommand struct {
+	Kind SandboxPathKind `json:"kind"`
+	Path string          `json:"path"`
+}
+
+// RevokeSandboxPath sends "revoke_sandbox_path": Drop a path's session grant; returns the new state.
+func (c Commands) RevokeSandboxPath(ctx context.Context, p RevokeSandboxPathCommand) (SandboxState, error) {
+	var out SandboxState
+	err := c.call(ctx, "revoke_sandbox_path", p, 0, &out)
+	return out, err
+}
+
+// SetSandboxAccessPromptsCommand holds the parameters of "set_sandbox_access_prompts".
+type SetSandboxAccessPromptsCommand struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetSandboxAccessPrompts sends "set_sandbox_access_prompts": Opt in to `sandbox_access_request` frames for the agent's path and host requests (off: they are refused); returns the applied setting.
+func (c Commands) SetSandboxAccessPrompts(ctx context.Context, p SetSandboxAccessPromptsCommand) (bool, error) {
+	var out SetSandboxAccessPromptsResult
+	err := c.call(ctx, "set_sandbox_access_prompts", p, 0, &out)
+	return out.Enabled, err
+}
+
+// RespondSandboxAccessCommand holds the parameters of "respond_sandbox_access".
+type RespondSandboxAccessCommand struct {
+	RequestID    string                `json:"requestId"`
+	Decision     SandboxAccessDecision `json:"decision"`
+	Instructions *string               `json:"instructions,omitempty"`
+}
+
+// RespondSandboxAccess sends "respond_sandbox_access": Answer a pending `sandbox_access_request` (`instruct` needs `instructions`); bypasses the command queue.
+func (c Commands) RespondSandboxAccess(ctx context.Context, p RespondSandboxAccessCommand) error {
+	return c.call(ctx, "respond_sandbox_access", p, 0, nil)
 }

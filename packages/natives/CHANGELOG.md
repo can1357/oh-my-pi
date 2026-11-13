@@ -7,6 +7,7 @@
 - `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
 - `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
 - `grep()` and `glob()` below an ovnfs checkout are answered by the ovnfs daemon serving it, which searches the checkout's overlay in-process instead of paying an NFS round trip per file: the walker finds ovnfs mounts in the host mount table, and falls back to its own walk whenever the daemon cannot answer (no daemon, another protocol version, a daemon serving another mount, an error reply). Named file roots, `onMatches` streaming, `type` filters and link-following globs always walk natively
+- Added OS-level process containment through MXC (seatbelt, bubblewrap, processcontainer): `sandboxSupport()`, `sandboxDiscoverPaths(env)` and `SandboxProcess.spawn()` run an argv under read-write/read-only/denied path lists with an `allow`, `deny` or loopback-`proxy` network posture, plus the Windows-only `listVolumeRoots` (enumerable drive roots) and `loopback` (host loopback in `deny`/`proxy`) opt-ins ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 

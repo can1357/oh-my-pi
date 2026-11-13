@@ -7,9 +7,11 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import { FileType } from "@oh-my-pi/pi-natives";
 import { isEnoent, isFsError, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
+import { containedFileAccess, containedGlob, withContainedFileAccess } from "../sandbox/file-access";
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
@@ -142,22 +144,38 @@ async function enumerateRenamePairs(
 			exceeded: false,
 		};
 	}
-	const entries = await fs.promises.readdir(source, { recursive: true, withFileTypes: true });
-	const pairs: FileRenamePair[] = [];
-	for (const entry of entries) {
-		if (!entry.isFile()) continue;
-		if (pairs.length >= MAX_RENAME_PAIRS) {
-			return { pairs, directory: true, exceeded: true };
-		}
-		const parent = entry.parentPath ?? source;
-		const absOld = path.join(parent, entry.name);
-		const rel = path.relative(source, absOld);
-		pairs.push({
-			oldUri: fileToUri(absOld),
-			newUri: fileToUri(path.join(dest, rel)),
+	const relativeFiles: string[] = [];
+	let exceeded = false;
+	if (containedFileAccess()) {
+		// The container walks the tree: only the regular files it can list come back.
+		const { matches } = await containedGlob({
+			pattern: "**/*",
+			path: source,
+			fileType: FileType.File,
+			hidden: true,
+			gitignore: false,
+			includeNodeModules: true,
+			maxResults: MAX_RENAME_PAIRS + 1,
 		});
+		for (const match of matches) relativeFiles.push(match.path);
+		exceeded = relativeFiles.length > MAX_RENAME_PAIRS;
+		relativeFiles.length = Math.min(relativeFiles.length, MAX_RENAME_PAIRS);
+	} else {
+		const entries = await fs.promises.readdir(source, { recursive: true, withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile()) continue;
+			if (relativeFiles.length >= MAX_RENAME_PAIRS) {
+				exceeded = true;
+				break;
+			}
+			relativeFiles.push(path.relative(source, path.join(entry.parentPath ?? source, entry.name)));
+		}
 	}
-	return { pairs, directory: true, exceeded: false };
+	const pairs: FileRenamePair[] = relativeFiles.map(rel => ({
+		oldUri: fileToUri(path.join(source, rel)),
+		newUri: fileToUri(path.join(dest, rel)),
+	}));
+	return { pairs, directory: true, exceeded };
 }
 
 function formatRenameStatPath(filePath: string, cwd: string): string {
@@ -193,6 +211,25 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 		return lines;
 	};
+	/**
+	 * The paths a call names, for restricted folders and the sandbox's file policy: `file` (not the
+	 * workspace scope `*`) and a `rename_file` destination. Workspace edits a server computes are
+	 * checked again where they are applied ({@link applyWorkspaceEditWithLsp}).
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const params = args as Partial<LspParams> | null | undefined;
+		const named = [params?.file, params?.action === "rename_file" ? params.new_name : undefined];
+		const paths: string[] = [];
+		for (const entry of named) {
+			if (typeof entry !== "string" || entry.length === 0 || entry === "*") continue;
+			try {
+				paths.push(resolveToCwd(entry, this.session.cwd));
+			} catch {
+				// Not a local path.
+			}
+		}
+		return paths;
+	};
 	readonly label = "LSP";
 	readonly loadMode = "discoverable";
 	readonly summary = "Query LSP (language server) for diagnostics, hover info, and references";
@@ -216,6 +253,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	}
 
 	async execute(
+		toolCallId: string,
+		params: LspParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<LspToolDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<LspToolDetails>> {
+		// Under the OS sandbox, every file the call writes, creates, moves or deletes runs in the contained host.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: LspParams,
 		signal?: AbortSignal,

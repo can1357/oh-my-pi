@@ -5,11 +5,16 @@
  * lists, stops, and tails it, and every omp process in the project shares it. This module starts
  * hosts on demand (evicting the least recently used idle one beyond `ida.maxOpen`), attaches to
  * hosts other processes started, and forwards requests over each host's socket.
+ *
+ * While the OS sandbox is active for the session's workspace, databases are hosted inside this omp
+ * process instead (`LocalScope`): the worker must be spawned contained, which only the process that
+ * holds the session's sandbox runtime can do. Those hosts are private to the process and
+ * workspace, never visible to the broker or its other clients, and never mix with the daemons.
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
@@ -17,31 +22,30 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type DaemonBrokerClient, daemonClientForProject } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { daemonRuntimeDir } from "../launch/paths";
+import { withContainedFileAccess } from "../sandbox/file-access";
+import type { SandboxRuntime } from "../sandbox/runtime";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
 import type { ToolSession } from "../tools";
+import { containingSandbox } from "../sandbox/file-access";
+import { containedIdaWorkerSpawner } from "./contained";
+import { connectSocket, HostConnection, IdaDatabase, IdaHostGoneError } from "./database";
+import { IdaHost } from "./host";
+import { createIdaLink } from "./link";
 import {
 	errorMessage,
 	IDA_DAEMON_PREFIX,
 	IDA_HOST_CONFIG_ENV,
 	IDA_HOST_READY_PATTERN,
 	IDA_HOST_WORKER_ARG,
-	type IdaCallMethod,
 	type IdaHostConfig,
-	type IdaHostRequest,
-	type IdaHostResponse,
-	type IdaHostStatus,
 	idaDaemonName,
 	idaHostEndpoint,
-	parseIdaHostResponse,
-	parseIdaHostStatus,
 } from "./protocol";
 import { resolveIdaRuntime } from "./runtime";
 import { cfgIdaIdleCloseSec, cfgIdaMaxOpen } from "./settings";
-import { type FatSelection, type IdbLocation, idbRef, type LocateIdbOptions, locateIdb } from "./store";
-import type { IdaDatabaseInfo, IdaRequestOptions } from "./supervisor";
+import { type IdbLocation, idbRef, type LocateIdbOptions, locateIdb, prepareStoreDir } from "./store";
 
 const HOST_LABEL = "IDA host";
-const CONNECT_TIMEOUT_MS = 3_000;
 /** Budget for a host to print its listening banner; the database opens after that. */
 const READY_TIMEOUT_MS = 15_000;
 /** attach→describe→start rounds; bounds cross-process start races and wedged-host replacement. */
@@ -50,208 +54,58 @@ const ENSURE_ATTEMPTS = 3;
 const EXIT_WAIT_MS = 10_000;
 /** How long release waits for a host's save; the host finishes it regardless. */
 const FLUSH_WAIT_MS = 8_000;
+/** How long release waits for an in-process host to save and close before killing its worker. */
+const LOCAL_CLOSE_WAIT_MS = 30_000;
 /**
  * How long one caller waits for a database to open. IDA's initial auto-analysis of a large binary
  * can run for hours; it keeps going in the host past this, and a later call picks up the result.
  */
 const OPEN_WAIT_MS = 120_000;
 
-/** The host connection dropped (host exited or is exiting). */
-class IdaHostGoneError extends ToolError {}
-
-/** Connect to `endpoint`; undefined when nothing listens there. */
-function connectSocket(endpoint: string): Promise<IpcConnection | undefined> {
-	return IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: CONNECT_TIMEOUT_MS }).catch(() => undefined);
-}
-
-/** One connection to a host: numbered requests, responses matched by id. */
-class HostConnection {
-	readonly #name: string;
-	readonly #conn: IpcConnection;
-	readonly #pending = new Map<number, PromiseWithResolvers<unknown>>();
-	#nextId = 1;
-	#open = true;
-
-	constructor(name: string, conn: IpcConnection, onClose: () => void) {
-		this.#name = name;
-		this.#conn = conn;
-		conn.start(
-			line => this.#onLine(line),
-			reason => {
-				if (reason) logger.debug("IDA host connection error", { name, error: reason });
-				this.#open = false;
-				const error = new IdaHostGoneError(`IDA host ${name} exited; see \`omp ps logs ${name}\``);
-				for (const entry of this.#pending.values()) entry.reject(error);
-				this.#pending.clear();
-				onClose();
-			},
-		);
-	}
-
-	get open(): boolean {
-		return this.#open;
-	}
-
-	nextId(): number {
-		return this.#nextId++;
-	}
-
-	/** Send `request` and wait for its answer; host-side failures reject with a {@link ToolError}. */
-	call(request: IdaHostRequest): Promise<unknown> {
-		if (!this.#open) {
-			return Promise.reject(
-				new IdaHostGoneError(`IDA host ${this.#name} exited; see \`omp ps logs ${this.#name}\``),
-			);
-		}
-		const entry = Promise.withResolvers<unknown>();
-		this.#pending.set(request.id, entry);
-		this.#conn.send(JSON.stringify(request));
-		return entry.promise;
-	}
-
-	/** Send a request that has no answer (`cancel`). */
-	notify(request: IdaHostRequest): void {
-		this.#conn.send(JSON.stringify(request));
-	}
-
-	close(): void {
-		this.#conn.destroy();
-	}
-
-	#onLine(line: string): void {
-		let response: IdaHostResponse;
-		try {
-			response = parseIdaHostResponse(line);
-		} catch (error) {
-			logger.warn("IDA host sent a malformed response", { name: this.#name, error: errorMessage(error) });
-			return;
-		}
-		const entry = this.#pending.get(response.id);
-		if (!entry) return;
-		this.#pending.delete(response.id);
-		if (response.ok) entry.resolve(response.result);
-		else entry.reject(new ToolError(response.error));
-	}
-}
-
-/**
- * An open IDA database as seen from this omp process: a connection to its host daemon plus the
- * last reported {@link IdaHostStatus}. Shared by every agent in the process.
- */
-export class IdaDatabase {
-	/** Broker daemon name (`omp ps` row, `omp ps logs <name>`). */
-	readonly name: string;
-	readonly #conn: HostConnection;
-	#status: IdaHostStatus;
-
-	private constructor(name: string, conn: HostConnection, status: IdaHostStatus) {
-		this.name = name;
-		this.#conn = conn;
-		this.#status = status;
-	}
-
-	/**
-	 * Connect to the host for `name` and fetch its status (`open` waits for the database to open).
-	 * Undefined when no host listens; throws the host's open failure.
-	 */
-	static async attach(name: string, endpoint: string, op: "open" | "status"): Promise<IdaDatabase | undefined> {
-		const socket = await connectSocket(endpoint);
-		if (!socket) return undefined;
-		let db: IdaDatabase | undefined;
-		const conn = new HostConnection(name, socket, () => {
-			if (db && handles.get(name) === db) handles.delete(name);
-		});
-		try {
-			const status = parseIdaHostStatus(await conn.call({ id: conn.nextId(), op }));
-			db = new IdaDatabase(name, conn, status);
-			return db;
-		} catch (error) {
-			conn.close();
-			throw error;
-		}
-	}
-
-	/** Registry key from `locateIdb`. */
-	get id(): string {
-		return this.#status.id;
-	}
-
-	/** Reference `read` and `ida db=` resolve back to this database (see `idbRef`). */
-	get ref(): string {
-		return this.#status.ref;
-	}
-
-	/** For universal binaries: the analyzed slice and its siblings. */
-	get fat(): FatSelection | undefined {
-		return this.#status.fat;
-	}
-
-	/** Path of the IDB file as reported by IDA. */
-	get idbPath(): string {
-		return this.#status.idbPath;
-	}
-
-	/** Loader facts reported when the database opened. */
-	get info(): IdaDatabaseInfo {
-		return this.#status.info;
-	}
-
-	/** Last status fetched from the host. */
-	get status(): IdaHostStatus {
-		return this.#status;
-	}
-
-	/** Whether the host connection is still up. */
-	get connected(): boolean {
-		return this.#conn.open;
-	}
-
-	/** Refetch the host's status; `open` first waits for the database to finish opening. */
-	async refresh(op: "open" | "status" = "status"): Promise<IdaHostStatus> {
-		this.#status = parseIdaHostStatus(await this.#conn.call({ id: this.#conn.nextId(), op }));
-		return this.#status;
-	}
-
-	/**
-	 * Run one worker request on the host, queued behind requests from every omp process.
-	 * `timeoutMs` covers the queue wait; an abort cancels this request only (see `IdaWorker.request`).
-	 */
-	async request<T>(method: IdaCallMethod, params: object, options: IdaRequestOptions = {}): Promise<T> {
-		const { signal, timeoutMs } = options;
-		signal?.throwIfAborted();
-		const id = this.#conn.nextId();
-		const answer = this.#conn.call({ id, op: "call", method, params, timeoutMs });
-		const onAbort = () => this.#conn.notify({ id: this.#conn.nextId(), op: "cancel", target: id });
-		signal?.addEventListener("abort", onAbort, { once: true });
-		try {
-			// The worker answers with the JSON shape documented for `method`.
-			return (await untilAborted(signal, answer)) as T;
-		} finally {
-			signal?.removeEventListener("abort", onAbort);
-		}
-	}
-
-	/** Save when the database has unsaved changes. */
-	async flush(): Promise<void> {
-		await this.#conn.call({ id: this.#conn.nextId(), op: "flush" });
-	}
-
-	/** Close the database (saving first when `save`); its host exits afterwards. */
-	async close(options: { save: boolean }): Promise<void> {
-		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save });
-	}
-
-	/** Drop this process's connection; the host keeps running. */
-	disconnect(): void {
-		this.#conn.close();
-	}
-}
-
-/** Attached hosts by daemon name. */
+/** Attached broker hosts by daemon name. */
 const handles = new Map<string, IdaDatabase>();
-/** In-flight opens by `locateIdb` id, shared by concurrent callers in this process. */
+/** In-flight opens by `locateIdb` id (plus workspace, when contained), shared by concurrent callers in this process. */
 const pending = new Map<string, Promise<IdaDatabase>>();
 let cleanupRegistered = false;
+
+function registerCleanup(): void {
+	if (cleanupRegistered) return;
+	cleanupRegistered = true;
+	postmortem.register("ida-release", releaseIdaDatabases);
+}
+
+/** An in-process host and the promise that settles once it is gone. */
+interface LocalHost {
+	host: IdaHost;
+	finished: Promise<void>;
+}
+
+/** The databases one workspace hosts inside this omp process while the OS sandbox is active. */
+class LocalScope {
+	readonly hosts = new Map<string, LocalHost>();
+	readonly handles = new Map<string, IdaDatabase>();
+}
+
+const localScopes = new Map<string, LocalScope>();
+
+function localScope(cwd: string): LocalScope {
+	let scope = localScopes.get(cwd);
+	if (!scope) {
+		scope = new LocalScope();
+		localScopes.set(cwd, scope);
+	}
+	return scope;
+}
+
+/** Where a call's databases live: the project's broker daemons, or this process's {@link LocalScope}. */
+interface HostSource {
+	/** Names of the hosts that have not exited. */
+	liveNames(): Promise<string[]>;
+	/** Attach to the host `name`, reusing this process's live connection; undefined when none runs. */
+	attach(name: string, op: "open" | "status"): Promise<IdaDatabase | undefined>;
+	/** Wait for the host `name` to exit (best effort). */
+	waitExit(name: string): Promise<void>;
+}
 
 function hostEndpoint(broker: DaemonBrokerClient, name: string): string {
 	return idaHostEndpoint(daemonRuntimeDir(broker.projectDir), name);
@@ -268,7 +122,9 @@ async function attachHost(
 		await cached.refresh(op);
 		return cached;
 	}
-	const db = await IdaDatabase.attach(name, hostEndpoint(broker, name), op);
+	const db = await IdaDatabase.attach(name, hostEndpoint(broker, name), op, closed => {
+		if (closed && handles.get(name) === closed) handles.delete(name);
+	});
 	if (!db) return undefined;
 	// A concurrent attach won; keep one connection per host.
 	const winner = handles.get(name);
@@ -277,17 +133,8 @@ async function attachHost(
 		return winner;
 	}
 	handles.set(name, db);
-	if (!cleanupRegistered) {
-		cleanupRegistered = true;
-		postmortem.register("ida-release", releaseIdaDatabases);
-	}
+	registerCleanup();
 	return db;
-}
-
-/** Attach to every host in `names` that answers; unreachable ones are skipped. */
-async function attachAll(broker: DaemonBrokerClient, names: string[]): Promise<IdaDatabase[]> {
-	const dbs = await Promise.all(names.map(name => attachHost(broker, name, "status").catch(() => undefined)));
-	return dbs.filter(db => db !== undefined);
 }
 
 /** Names of the scope's IDA daemons that have not exited. */
@@ -299,13 +146,83 @@ async function liveHostNames(broker: DaemonBrokerClient): Promise<string[]> {
 		.map(daemon => daemon.name);
 }
 
+function brokerSource(broker: DaemonBrokerClient): HostSource {
+	return {
+		liveNames: () => liveHostNames(broker),
+		attach: (name, op) => attachHost(broker, name, op),
+		waitExit: async name => {
+			await broker.request({ op: "wait", name, for: "exit", timeoutMs: EXIT_WAIT_MS }).catch(error => {
+				logger.debug("IDA host exit wait failed", { name, error: errorMessage(error) });
+			});
+		},
+	};
+}
+
+/**
+ * Attach to the in-process host `name`, reusing this process's live connection; undefined when none
+ * runs. `fresh` is a host just started by the caller: it is attached even if it already failed, so
+ * the caller receives the open failure instead of finding no host.
+ */
+async function attachLocal(
+	scope: LocalScope,
+	name: string,
+	op: "open" | "status",
+	fresh?: LocalHost,
+): Promise<IdaDatabase | undefined> {
+	const cached = scope.handles.get(name);
+	if (cached?.connected) {
+		await cached.refresh(op);
+		return cached;
+	}
+	const local = fresh ?? scope.hosts.get(name);
+	if (!local || (!fresh && local.host.stopped)) return undefined;
+	const db = await connectLocal(scope, local, name, op);
+	// A concurrent attach won; keep one connection per host.
+	const winner = scope.handles.get(name);
+	if (winner?.connected) {
+		db.disconnect();
+		return winner;
+	}
+	scope.handles.set(name, db);
+	registerCleanup();
+	return db;
+}
+
+/** A fresh in-process connection to `local`, not registered in `scope.handles`. */
+function connectLocal(scope: LocalScope, local: LocalHost, name: string, op: "open" | "status"): Promise<IdaDatabase> {
+	const [near, far] = createIdaLink();
+	local.host.serve(far);
+	return IdaDatabase.connect(name, near, op, {
+		local: true,
+		onClose: closed => {
+			if (closed && scope.handles.get(name) === closed) scope.handles.delete(name);
+		},
+	});
+}
+
+function localSource(scope: LocalScope): HostSource {
+	return {
+		liveNames: async () => [...scope.hosts].filter(([, local]) => !local.host.stopped).map(([name]) => name),
+		attach: (name, op) => attachLocal(scope, name, op),
+		waitExit: async name => {
+			await scope.hosts.get(name)?.finished;
+		},
+	};
+}
+
+/** Attach to every host in `names` that answers; unreachable ones are skipped. */
+async function attachAll(source: HostSource, names: string[]): Promise<IdaDatabase[]> {
+	const dbs = await Promise.all(names.map(name => source.attach(name, "status").catch(() => undefined)));
+	return dbs.filter(db => db !== undefined);
+}
+
 /** Save and close least recently used idle hosts until starting one more stays within `ida.maxOpen`. */
-async function makeRoom(session: ToolSession, broker: DaemonBrokerClient, name: string): Promise<void> {
+async function makeRoom(session: ToolSession, source: HostSource, name: string): Promise<void> {
 	const maxOpen = Math.max(1, cfgIdaMaxOpen.get(session.settings));
 	for (;;) {
-		const others = (await liveHostNames(broker)).filter(other => other !== name);
+		const others = (await source.liveNames()).filter(other => other !== name);
 		if (others.length < maxOpen) return;
-		const victim = (await attachAll(broker, others))
+		const victim = (await attachAll(source, others))
 			.filter(db => db.status.state === "open" && !db.status.busy)
 			.sort((a, b) => a.status.lastUsed - b.status.lastUsed)[0];
 		if (!victim) {
@@ -314,9 +231,7 @@ async function makeRoom(session: ToolSession, broker: DaemonBrokerClient, name: 
 			);
 		}
 		await victim.close({ save: true });
-		await broker.request({ op: "wait", name: victim.name, for: "exit", timeoutMs: EXIT_WAIT_MS }).catch(error => {
-			logger.debug("IDA host exit wait failed", { name: victim.name, error: errorMessage(error) });
-		});
+		await source.waitExit(victim.name);
 	}
 }
 
@@ -388,8 +303,75 @@ async function openIdaDatabase(session: ToolSession, loc: IdbLocation): Promise<
 			else await stopQuietly(broker, name, HOST_LABEL);
 			continue;
 		}
-		await makeRoom(session, broker, name);
+		await makeRoom(session, brokerSource(broker), name);
 		await startHost(session, broker, loc, name);
+	}
+}
+
+/**
+ * Start the in-process host for `loc`, its worker spawned inside `sandbox`'s container. The host
+ * outlives the tool call that started it, so its one omp-side read of the source (the staging copy)
+ * runs under a contained file access of its own.
+ */
+async function startLocalHost(
+	session: ToolSession,
+	sandbox: SandboxRuntime,
+	scope: LocalScope,
+	loc: IdbLocation,
+	name: string,
+): Promise<LocalHost | undefined> {
+	// A host that is stopping still holds the database's lock; replace it only once it is gone.
+	await scope.hosts.get(name)?.finished;
+	if (scope.hosts.has(name)) return undefined;
+	const runtime = await resolveIdaRuntime(session);
+	if (scope.hosts.has(name)) return undefined;
+	const host = new IdaHost(
+		{ loc, runtime, idleCloseMs: cfgIdaIdleCloseSec.get(session.settings) * 1000 },
+		{
+			prepare: target => withContainedFileAccess(session, () => prepareStoreDir(target)),
+			spawn: containedIdaWorkerSpawner(sandbox),
+			onStderr: text => logger.debug("IDA worker output", { id: loc.id, text: text.trimEnd() }),
+			// An open that failed (typically a refused access) is retried at once: the user may have granted it.
+			openFailedLingerMs: 0,
+		},
+	);
+	const local: LocalHost = {
+		host,
+		finished: host
+			.run()
+			.then(
+				code => logger.debug("IDA host exited", { id: loc.id, code }),
+				error => logger.warn("IDA host failed", { id: loc.id, error: errorMessage(error) }),
+			)
+			.then(() => {
+				if (scope.hosts.get(name) === local) scope.hosts.delete(name);
+				scope.handles.get(name)?.disconnect();
+			}),
+	};
+	scope.hosts.set(name, local);
+	registerCleanup();
+	return local;
+}
+
+/** Attach to the in-process host for `loc`, starting it (and waiting for the open) when none runs. */
+async function openLocalIdaDatabase(
+	session: ToolSession,
+	sandbox: SandboxRuntime,
+	scope: LocalScope,
+	loc: IdbLocation,
+): Promise<IdaDatabase> {
+	const name = idaDaemonName(loc.id);
+	let started: LocalHost | undefined;
+	for (let attempt = 0; ; attempt++) {
+		const db = await attachLocal(scope, name, "open", started).catch(error => {
+			// A host exiting (idle close, eviction) is replaced below; open failures surface.
+			if (error instanceof IdaHostGoneError) return undefined;
+			throw error;
+		});
+		if (db) return db;
+		if (attempt === ENSURE_ATTEMPTS) throw new ToolError(`IDA host ${name} did not come up`);
+		await makeRoom(session, localSource(scope), name);
+		started = await startLocalHost(session, sandbox, scope, loc, name);
 	}
 }
 
@@ -404,6 +386,10 @@ export interface AcquireIdaDatabaseOptions extends LocateIdbOptions {
  * aborting `signal` or exceeding {@link OPEN_WAIT_MS} stops only this caller's wait, the open itself
  * always runs to completion.
  *
+ * While the OS sandbox is active the database opens in an in-process host whose worker runs
+ * contained; call this inside the tool call's `withContainedFileAccess` so the binary's bytes are
+ * read through the sandbox host too.
+ *
  * Throws a ToolError when the database is still opening after {@link OPEN_WAIT_MS}.
  */
 export async function acquireIdaDatabase(
@@ -412,36 +398,52 @@ export async function acquireIdaDatabase(
 	options: AcquireIdaDatabaseOptions = {},
 ): Promise<IdaDatabase> {
 	const { signal, arch } = options;
+	const sandbox = await containingSandbox(session.cwd);
+	const scope = sandbox ? localScope(session.cwd) : undefined;
 	const loc = await locateIdb(sourcePath, { arch });
-	const cached = handles.get(idaDaemonName(loc.id));
+	const name = idaDaemonName(loc.id);
+	const cached = (scope ? scope.handles : handles).get(name);
 	if (cached?.connected && cached.status.state === "open") return cached;
-	let opening = pending.get(loc.id);
+	const pendingKey = scope ? `${session.cwd}\0${loc.id}` : loc.id;
+	let opening = pending.get(pendingKey);
 	if (!opening) {
-		opening = openIdaDatabase(session, loc).finally(() => pending.delete(loc.id));
+		const open =
+			sandbox && scope ? openLocalIdaDatabase(session, sandbox, scope, loc) : openIdaDatabase(session, loc);
+		opening = open.finally(() => pending.delete(pendingKey));
 		// Every caller may have stopped waiting; remaining ones still receive the failure.
 		opening.catch(error => logger.debug("IDA database open failed", { id: loc.id, error: errorMessage(error) }));
-		pending.set(loc.id, opening);
+		pending.set(pendingKey, opening);
 	}
 	const deadline = AbortSignal.timeout(OPEN_WAIT_MS);
 	try {
 		return await untilAborted(signal ? AbortSignal.any([signal, deadline]) : deadline, opening);
 	} catch (error) {
 		if (signal?.aborted || !deadline.aborted) throw error;
-		const name = idaDaemonName(loc.id);
-		const since = await openingSince(session, name);
+		const since = await openingSince(session, name, scope);
 		const age = since === undefined ? "" : ` for ${Math.round((Date.now() - since) / 60_000)}m`;
-		throw new ToolError(
-			`IDA is still analyzing ${idbRef(loc)} (opening${age}); the analysis continues in \`${name}\`. Retry later, or stop it with \`omp ps stop ${name}\``,
-		);
+		const where = scope
+			? "the analysis continues in this omp process. Retry later"
+			: `the analysis continues in \`${name}\`. Retry later, or stop it with \`omp ps stop ${name}\``;
+		throw new ToolError(`IDA is still analyzing ${idbRef(loc)} (opening${age}); ${where}`);
 	}
 }
 
 /** When the host `name` started opening its database; undefined when it is unreachable or already open. */
-async function openingSince(session: ToolSession, name: string): Promise<number | undefined> {
+async function openingSince(
+	session: ToolSession,
+	name: string,
+	scope: LocalScope | undefined,
+): Promise<number | undefined> {
 	try {
-		const broker = await daemonClientForProject(session.cwd);
 		// A separate connection: caching an `opening` status in `handles` would hand stale status to the pending open.
-		const db = await IdaDatabase.attach(name, hostEndpoint(broker, name), "status");
+		let db: IdaDatabase | undefined;
+		if (scope) {
+			const local = scope.hosts.get(name);
+			db = local && !local.host.stopped ? await connectLocal(scope, local, name, "status") : undefined;
+		} else {
+			const broker = await daemonClientForProject(session.cwd);
+			db = await IdaDatabase.attach(name, hostEndpoint(broker, name), "status", () => {});
+		}
 		if (!db) return undefined;
 		db.disconnect();
 		return db.status.state === "opening" ? db.status.lastUsed : undefined;
@@ -450,29 +452,61 @@ async function openingSince(session: ToolSession, name: string): Promise<number 
 	}
 }
 
-/** The open database with `locateIdb` id (or daemon name) `ref` in this project, if any. */
-export async function findOpenIdaDatabase(session: ToolSession, ref: string): Promise<IdaDatabase | undefined> {
-	const broker = await daemonClientForProject(session.cwd);
-	const name = ref.startsWith(IDA_DAEMON_PREFIX) ? ref : idaDaemonName(ref);
-	const db = await attachHost(broker, name, "status").catch(() => undefined);
-	return db?.status.state === "open" ? db : undefined;
-}
-
-/** Every database hosted in this project, including ones other omp processes opened. */
-export async function listIdaDatabases(session: ToolSession): Promise<IdaDatabase[]> {
-	const broker = await daemonClientForProject(session.cwd);
-	return attachAll(broker, await liveHostNames(broker));
+/** The host source of `session`'s databases: in-process while its sandbox is active, else the project broker. */
+async function sourceFor(session: ToolSession): Promise<HostSource> {
+	if (await containingSandbox(session.cwd)) return localSource(localScope(session.cwd));
+	return brokerSource(await daemonClientForProject(session.cwd));
 }
 
 /**
- * Save every attached database with unsaved changes and drop this process's connections; the hosts
- * keep running for other omp processes and exit with the project's broker. Failures are logged.
+ * The open database with `locateIdb` id (or daemon name) `ref` in this project, if any. While the
+ * sandbox is active only this process's contained databases are visible, never a broker daemon's.
+ */
+export async function findOpenIdaDatabase(session: ToolSession, ref: string): Promise<IdaDatabase | undefined> {
+	const source = await sourceFor(session);
+	const name = ref.startsWith(IDA_DAEMON_PREFIX) ? ref : idaDaemonName(ref);
+	const db = await source.attach(name, "status").catch(() => undefined);
+	return db?.status.state === "open" ? db : undefined;
+}
+
+/**
+ * Every database hosted in this project, including ones other omp processes opened; while the
+ * sandbox is active, only this process's contained databases.
+ */
+export async function listIdaDatabases(session: ToolSession): Promise<IdaDatabase[]> {
+	const source = await sourceFor(session);
+	return attachAll(source, await source.liveNames());
+}
+
+/** Save and close an in-process host, killing its worker when that takes longer than {@link LOCAL_CLOSE_WAIT_MS}. */
+async function closeLocalHost(name: string, local: LocalHost): Promise<void> {
+	const expired = Promise.withResolvers<boolean>();
+	const timer = setTimeout(() => expired.resolve(true), LOCAL_CLOSE_WAIT_MS);
+	try {
+		const timedOut = await Promise.race([local.host.shutdown().then(() => false), expired.promise]);
+		if (timedOut) {
+			logger.warn("IDA close on release timed out; killing the worker", { name });
+			await local.host.terminate();
+		}
+		await local.finished;
+	} catch (error) {
+		logger.warn("IDA close on release failed", { name, error: errorMessage(error) });
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Save every attached database with unsaved changes and drop this process's connections; broker
+ * hosts keep running for other omp processes and exit with the project's broker. In-process
+ * (contained) hosts end with this call: each saves if needed and its worker exits. Failures are logged.
  */
 export async function releaseIdaDatabases(): Promise<void> {
 	const dbs = [...handles.values()];
 	handles.clear();
-	await Promise.all(
-		dbs.map(async db => {
+	const locals = [...localScopes.values()].flatMap(scope => [...scope.hosts]);
+	await Promise.all([
+		...dbs.map(async db => {
 			const wait = Promise.withResolvers<void>();
 			const timer = setTimeout(wait.resolve, FLUSH_WAIT_MS);
 			try {
@@ -484,7 +518,8 @@ export async function releaseIdaDatabases(): Promise<void> {
 				db.disconnect();
 			}
 		}),
-	);
+		...locals.map(([name, local]) => closeLocalHost(name, local)),
+	]);
 }
 
 /** Exercise worker-host IDA host startup and the ping handshake for distribution smoke tests. */

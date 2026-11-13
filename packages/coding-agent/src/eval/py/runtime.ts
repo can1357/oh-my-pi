@@ -281,3 +281,19 @@ export function resolvePythonRuntime(cwd: string, baseEnv: Record<string, string
 	}
 	return runtime;
 }
+
+/**
+ * Directories a contained Python process must read beyond the configured read roots: the staged runner
+ * script (when there is one), the virtual environment, and the real interpreter installation
+ * behind its symlinks (never the symlink's own parent, which can be `~/.local` or `/opt/homebrew`).
+ */
+export async function pythonReadRoots(runtime: PythonRuntime, scriptPath?: string): Promise<string[]> {
+	const roots = scriptPath ? [path.dirname(scriptPath)] : [];
+	if (runtime.venvPath) roots.push(runtime.venvPath);
+	try {
+		roots.push(path.dirname(path.dirname(await fs.promises.realpath(runtime.pythonPath))));
+	} catch {
+		// Unresolvable interpreter: the spawn reports it.
+	}
+	return roots;
+}

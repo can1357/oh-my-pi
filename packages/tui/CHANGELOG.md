@@ -6,6 +6,9 @@
 
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Added the `/sandbox` panel for the OS sandbox: Overview, Filesystem (with the paths allowed this session, each removable), Network (with the hosts blocked this session, each allowable) and Effective policy pages; in Tern it renders as a native preferences sheet beside the transcript, in a plain terminal as a fullscreen panel ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Bash and eval tool cards show a `sandboxed` badge when the run was contained by the OS sandbox, with a warning note for hosts the sandbox blocked or a likely sandbox denial ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added the sandbox access dialog for the agent's `sandbox_request` (intent, command, effect, what it does if denied; Allow for this session, Always allow, Deny, Reply with instructions), in the composer and natively in Tern, plus a `sandbox_request` tool card showing the request and your decision ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.20.0] - 2026-11-12
 

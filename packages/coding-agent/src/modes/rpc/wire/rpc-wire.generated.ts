@@ -525,6 +525,8 @@ export interface SessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal mode; null when the session has no goal. */
 	goal?: GoalModeState | null;
+	/** Sandbox status of the session's workspace; absent on servers without the sandbox commands. */
+	sandbox?: SandboxSummary;
 }
 
 export interface BashResult {
@@ -557,6 +559,20 @@ export interface BashResult {
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;
+	/** Present when the command ran inside the OS sandbox. */
+	sandbox?: SandboxResultMeta;
+}
+
+export interface SandboxResultMeta {
+	backend: string;
+	mode: SandboxMode;
+	network: SandboxNetworkMode;
+	/** Hosts the egress proxy refused during this command. */
+	blockedHosts?: string[];
+	/** The output looks like a filesystem denial by the sandbox. */
+	denied?: boolean;
+	/** Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start. */
+	startFailed?: boolean;
 }
 
 export interface LineRange {
@@ -800,6 +816,142 @@ export interface HandoffResult {
 /** `agentInvoked: false` means the prompt completed locally and no `prompt_result` follows. */
 export interface PromptAck {
 	agentInvoked?: boolean;
+}
+
+/** A `sandbox.*` setting the sandbox commands address. */
+export type SandboxSettingId = "enabled" | "mode" | "scope" | "fallback" | "readScope" | "networkMode" | "allowWrite" | "allowRead" | "denyRead" | "allowedHosts";
+
+/** A path or host list setting. */
+export type SandboxListId = "allowWrite" | "allowRead" | "denyRead" | "allowedHosts";
+
+export type SandboxMode = "workspace-write" | "read-only";
+
+export type SandboxScope = "bash" | "eval" | "exec";
+
+export type SandboxFallback = "warn" | "block";
+
+export type SandboxReadScope = "all" | "workspace";
+
+export type SandboxNetworkMode = "allowlist" | "deny" | "allow";
+
+export type SandboxListOp = "add" | "remove" | "replace";
+
+export type SandboxGrantScope = "session" | "always";
+
+/** Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse. */
+export type SandboxHostDecision = "once" | "session" | "always" | "deny";
+
+export type SandboxPathKind = "write" | "read";
+
+export type SandboxAccessKind = "write" | "read" | "host";
+
+/** Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing. */
+export type SandboxAccessDecision = "session" | "always" | "deny" | "instruct";
+
+export interface SandboxStatusOff {
+	state: "off";
+}
+
+export interface SandboxStatusActive {
+	state: "active";
+	backend: string;
+	/** Network mode as enforced here (a mode this host cannot enforce runs as deny). */
+	network: SandboxNetworkMode;
+	warnings: string[];
+}
+
+export interface SandboxStatusUnavailable {
+	state: "unavailable";
+	reason: string;
+	/** `warn`: commands run unsandboxed; `block`: they fail. */
+	fallback: SandboxFallback;
+}
+
+/** Runtime status of the sandbox, discriminated by `state`. */
+export type SandboxStatus = SandboxStatusOff | SandboxStatusActive | SandboxStatusUnavailable;
+
+/** Sandbox status without the detail `get_sandbox` returns. */
+export interface SandboxSummary {
+	state: "off" | "active" | "unavailable";
+	/** Containment backend while active. */
+	backend?: string;
+}
+
+/** Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces). */
+export interface SandboxSettingValues {
+	enabled: boolean;
+	mode: SandboxMode;
+	scope: SandboxScope[];
+	fallback: SandboxFallback;
+	readScope: SandboxReadScope;
+	networkMode: SandboxNetworkMode;
+	allowWrite: string[];
+	allowRead: string[];
+	denyRead: string[];
+	allowedHosts: string[];
+}
+
+/** Settings another layer decides, with the reason; writing one fails with `sandbox_locked`. */
+export interface SandboxLocked {
+	enabled?: string;
+	mode?: string;
+	scope?: string;
+	fallback?: string;
+	readScope?: string;
+	networkMode?: string;
+	allowWrite?: string;
+	allowRead?: string;
+	denyRead?: string;
+	allowedHosts?: string;
+}
+
+/** Per-list note when project config narrows the list in this workspace. */
+export interface SandboxListNotes {
+	allowWrite?: string;
+	allowRead?: string;
+	denyRead?: string;
+	allowedHosts?: string;
+}
+
+/** A project-layer value dropped because it would loosen the sandbox. */
+export interface SandboxIgnoredValue {
+	id: string;
+	reason: string;
+}
+
+/** Resolved filesystem policy for the workspace. */
+export interface SandboxEffectivePolicy {
+	readwritePaths: string[];
+	readonlyPaths: string[];
+	deniedPaths: string[];
+}
+
+/** Paths allowed for this session only: writable (and readable), and readable. */
+export interface SandboxSessionPaths {
+	write: string[];
+	read: string[];
+}
+
+/** Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it. */
+export interface SandboxState {
+	/** Directory the policy is resolved for (the session cwd). */
+	workspace: string;
+	status: SandboxStatus;
+	settings: SandboxSettingValues;
+	locked: SandboxLocked;
+	listNotes: SandboxListNotes;
+	ignored: SandboxIgnoredValue[];
+	effective: SandboxEffectivePolicy;
+	/** Hosts refused this session that are still not allowed, most recent first. */
+	blockedHosts: string[];
+	/** Hosts allowed for this session only. */
+	sessionHosts: string[];
+	/** Paths allowed for this session only. */
+	sessionPaths: SandboxSessionPaths;
+	/** Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`). */
+	hostPrompts: boolean;
+	/** The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`). */
+	accessPrompts: boolean;
 }
 
 export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete";
@@ -1251,6 +1403,56 @@ export interface ConfigUpdateEvent {
 	thinkingLevel?: ThinkingLevel;
 }
 
+/** Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled. */
+export interface SandboxUpdateEvent {
+	type: "sandbox_update";
+	state: SandboxState;
+}
+
+/** A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`. */
+export interface SandboxHostRequestEvent {
+	type: "sandbox_host_request";
+	id: string;
+	host: string;
+	port: number;
+	/** Unanswered for this long, the request is denied and cancelled. */
+	timeoutMs: number;
+}
+
+/** A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended. */
+export interface SandboxHostRequestCancelledEvent {
+	type: "sandbox_host_request_cancelled";
+	id: string;
+	reason: "timeout" | "aborted";
+}
+
+/** The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`. */
+export interface SandboxAccessRequestEvent {
+	type: "sandbox_access_request";
+	id: string;
+	kind: SandboxAccessKind;
+	/** Resolved absolute path, or canonical host name. */
+	target: string;
+	/** What the agent is doing and why it needs `target`, as the agent wrote it. */
+	intent: string;
+	/** What a grant lets contained commands do, written by omp. */
+	effect: string;
+	workspace: string;
+	/** False when the backing list is locked: offer no `always`. */
+	canAlways: boolean;
+	/** The command that needs the access, verbatim. */
+	command?: string;
+	/** What the agent does instead when denied. */
+	alternative?: string;
+}
+
+/** A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended. */
+export interface SandboxAccessRequestCancelledEvent {
+	type: "sandbox_access_request_cancelled";
+	id: string;
+	reason: "aborted";
+}
+
 /** An event could not fit within the transport limits and was dropped. */
 export interface RpcFrameErrorEvent {
 	type: "rpc_frame_error";
@@ -1545,7 +1747,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | SandboxUpdateEvent | SandboxHostRequestEvent | SandboxHostRequestCancelledEvent | SandboxAccessRequestEvent | SandboxAccessRequestCancelledEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1926,6 +2128,68 @@ export interface GetBtwHistoryResult {
 	records: BtwHistoryRecord[];
 }
 
+export interface SetSandboxSettingParams {
+	setting: SandboxSettingId;
+	value: boolean | string | string[];
+}
+
+export interface ResetSandboxSettingParams {
+	setting: SandboxSettingId;
+}
+
+export interface EditSandboxListParams {
+	list: SandboxListId;
+	op: SandboxListOp;
+	entry: string;
+	replacement?: string;
+}
+
+export interface GrantSandboxHostParams {
+	host: string;
+	scope: SandboxGrantScope;
+}
+
+export interface RevokeSandboxHostParams {
+	host: string;
+}
+
+export interface SetSandboxHostPromptsParams {
+	enabled: boolean;
+}
+
+export interface SetSandboxHostPromptsResult {
+	enabled: boolean;
+}
+
+export interface RespondSandboxHostParams {
+	requestId: string;
+	decision: SandboxHostDecision;
+}
+
+export interface GrantSandboxPathParams {
+	kind: SandboxPathKind;
+	path: string;
+}
+
+export interface RevokeSandboxPathParams {
+	kind: SandboxPathKind;
+	path: string;
+}
+
+export interface SetSandboxAccessPromptsParams {
+	enabled: boolean;
+}
+
+export interface SetSandboxAccessPromptsResult {
+	enabled: boolean;
+}
+
+export interface RespondSandboxAccessParams {
+	requestId: string;
+	decision: SandboxAccessDecision;
+	instructions?: string;
+}
+
 /** Every RPC command's parameters and successful response `data`. */
 export interface RpcWireCommands {
 	negotiate_protocol: { params: NegotiateProtocolParams; result: NegotiateProtocolResult };
@@ -2002,4 +2266,16 @@ export interface RpcWireCommands {
 	btw: { params: BtwParams; result: BtwResult };
 	btw_cancel: { params: BtwCancelParams; result: BtwCancelResult };
 	get_btw_history: { params: undefined; result: GetBtwHistoryResult };
+	get_sandbox: { params: undefined; result: SandboxState };
+	set_sandbox_setting: { params: SetSandboxSettingParams; result: SandboxState };
+	reset_sandbox_setting: { params: ResetSandboxSettingParams; result: SandboxState };
+	edit_sandbox_list: { params: EditSandboxListParams; result: SandboxState };
+	grant_sandbox_host: { params: GrantSandboxHostParams; result: SandboxState };
+	revoke_sandbox_host: { params: RevokeSandboxHostParams; result: SandboxState };
+	set_sandbox_host_prompts: { params: SetSandboxHostPromptsParams; result: SetSandboxHostPromptsResult };
+	respond_sandbox_host: { params: RespondSandboxHostParams; result: undefined };
+	grant_sandbox_path: { params: GrantSandboxPathParams; result: SandboxState };
+	revoke_sandbox_path: { params: RevokeSandboxPathParams; result: SandboxState };
+	set_sandbox_access_prompts: { params: SetSandboxAccessPromptsParams; result: SetSandboxAccessPromptsResult };
+	respond_sandbox_access: { params: RespondSandboxAccessParams; result: undefined };
 }

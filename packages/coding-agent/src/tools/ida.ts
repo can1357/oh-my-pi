@@ -17,11 +17,13 @@ import {
 	cfgIdaAvailable,
 	findOpenIdaDatabase,
 	type IdaDatabase,
+	isIdaDatabasePath,
 	listIdaDatabases,
 	locateIdb,
 	splitSliceRef,
 } from "../ida";
 import idaDescription from "../prompts/tools/ida.md" with { type: "text" };
+import { withContainedFileAccess } from "../sandbox/file-access";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { saveArtifactText } from "./gh-common";
@@ -94,6 +96,22 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		if (code) lines.push(`Code: ${truncateForPrompt(code)}`);
 		return lines;
 	};
+	/**
+	 * A `.i64`/`.idb` named by path is opened and saved in place, so restricted folders and the
+	 * sandbox's file policy see it. A binary's database lives in omp's own store; the binary is
+	 * only read.
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const ref = stringArg(args, "db");
+		if (!ref) return undefined;
+		const { path: sourcePath } = splitSliceRef(ref);
+		if (!isIdaDatabasePath(sourcePath)) return undefined;
+		try {
+			return [resolveToCwd(sourcePath, this.session.cwd)];
+		} catch {
+			return undefined;
+		}
+	};
 	readonly label = "IDA";
 	readonly summary = "Open, edit, and script IDA Pro databases shared across agents";
 	readonly description: string;
@@ -111,6 +129,18 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 	}
 
 	async execute(
+		toolCallId: string,
+		params: IdaParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<IdaToolDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<IdaToolDetails>> {
+		// Under the OS sandbox, the binary this call reads goes through the contained host, and the
+		// database opens in a worker that runs contained.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: IdaParams,
 		signal?: AbortSignal,

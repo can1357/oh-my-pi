@@ -499,11 +499,32 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 	return writtenPaths;
 }
 
+/**
+ * Processes spawned inside the OS sandbox (`OMP_SANDBOX=1`, set by the
+ * coding-agent sandbox runtime) see the natives cache read-only. They must load
+ * what the unsandboxed host already provisioned for this version and never
+ * create, touch, copy into, or prune cache directories.
+ */
+function isSandboxedProcess() {
+	return process.env.OMP_SANDBOX === "1";
+}
+
 function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
 	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
 	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
 	if (!file) return null;
 	const targetPath = path.join(ctx.versionedDir, file.filename);
+
+	if (isSandboxedProcess()) {
+		try {
+			if (isEmbeddedAddonFileCurrent(targetPath, file)) return targetPath;
+			errors.push(`embedded addon (${file.filename}): not extracted by the host; sandboxed processes cannot extract it`);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			errors.push(`embedded addon (${file.filename}): ${message}`);
+		}
+		return null;
+	}
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
@@ -543,7 +564,8 @@ function maybeStageNodeModulesAddon(ctx, errors) {
 			stagedPath = stagedPath || targetPath;
 			continue;
 		}
-		if (!fs.existsSync(sourcePath)) continue;
+		// Sandboxed: load the host-staged copy or fall back to the node_modules candidate.
+		if (isSandboxedProcess() || !fs.existsSync(sourcePath)) continue;
 
 		try {
 			prepareNativeVersionDir(ctx.versionedDir);
@@ -996,6 +1018,20 @@ export function initLoaderContext(overrides = {}) {
 	};
 }
 
+/**
+ * Bun's `require()` resolver fails with "Cannot find module" on sandboxed
+ * Windows children when an ancestor of the addon path (e.g. the user profile
+ * above `~/.omp`) is not readable, even though the file itself is. Sandboxed
+ * processes dlopen the already-absolute candidate directly; `require` would do
+ * nothing more for a `.node` path.
+ */
+function requireAddon(require_, candidate) {
+	if (!isSandboxedProcess()) return require_(candidate);
+	const module = { exports: {} };
+	process.dlopen(module, candidate);
+	return module.exports;
+}
+
 export function loadNative() {
 	startupMarker("native:loadNative:start");
 	const ctx = initLoaderContext();
@@ -1018,13 +1054,15 @@ export function loadNative() {
 		}
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
-			const bindings = require_(candidate);
+			const bindings = requireAddon(require_, candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 			reportStaleWorkspaceAddon(ctx, loadedAddon);
-	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			if (!isSandboxedProcess()) {
+				cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			}
 			startupMarker("native:loadNative:done");
 			return bindings;
 		} catch (err) {

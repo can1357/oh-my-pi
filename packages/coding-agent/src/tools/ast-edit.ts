@@ -8,13 +8,14 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+import type { AstReplaceChange, AstReplaceFileChange, ShellFilesystem } from "@oh-my-pi/pi-natives";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import { containedAstEdit, readFileText, withContainedFileAccess } from "../sandbox/file-access";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
@@ -27,7 +28,14 @@ import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 
-import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
+import {
+	normalizePathLikeInput,
+	parseSearchPath,
+	relativeSearchResultPath,
+	resolveSearchResultPath,
+	resolveToCwd,
+	resolveToolSearchScope,
+} from "./path-utils";
 import {
 	capParseErrors,
 	formatCodeFrameLine,
@@ -87,7 +95,7 @@ async function runAstEditTargets(
 	let limitReached = false;
 	let applied = !options.dryRun;
 	for (const target of targets) {
-		const targetResult = await astEdit({
+		const targetResult = await containedAstEdit({
 			rewrites: options.rewrites,
 			path: target.basePath,
 			glob: target.glob,
@@ -139,7 +147,7 @@ function runAstEditOnce(
 	if (targets) {
 		return runAstEditTargets(targets, resolvedSearchPath, options);
 	}
-	return astEdit({
+	return containedAstEdit({
 		rewrites: options.rewrites,
 		path: resolvedSearchPath,
 		glob: globFilter,
@@ -167,6 +175,28 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			decisions.push(router.writeTier(target, undefined, undefined));
 		}
 		return strictestApproval(decisions);
+	};
+	/**
+	 * The folder (or file) each local path entry rewrites below — a glob's non-glob base — so
+	 * restricted folders and the sandbox's file policy see where the rewrite writes. Internal URLs
+	 * name no local folder.
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const paths = isRecord(args) ? args.paths : undefined;
+		if (!Array.isArray(paths)) return undefined;
+		const router = InternalUrlRouter.instance();
+		const bases: string[] = [];
+		for (const entry of paths) {
+			if (typeof entry !== "string") continue;
+			const normalized = normalizePathLikeInput(entry);
+			if (normalized.length === 0 || router.canHandle(router.normalize(normalized))) continue;
+			try {
+				bases.push(resolveToCwd(parseSearchPath(normalized).basePath, this.session.cwd));
+			} catch {
+				// Not a local path: nothing on disk to match.
+			}
+		}
+		return bases;
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
@@ -242,6 +272,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	}
 
 	async execute(
+		toolCallId: string,
+		params: AstEditSchemaInfer,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<AstEditToolDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<AstEditToolDetails>> {
+		// Under the OS sandbox, the preview's tree walk and parses run in the contained host.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: AstEditSchemaInfer,
 		signal?: AbortSignal,
@@ -352,7 +393,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
 					if (snapshotPath === undefined) continue;
 					try {
-						const fullText = normalizeToLF(await Bun.file(snapshotPath).text());
+						const fullText = normalizeToLF(await readFileText(snapshotPath));
 						const tag = snapshotStore.recordSnapshot(snapshotPath, fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
@@ -443,13 +484,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						// The apply outlives the preview call: its filesystem carries no signal.
 						const applyContext = sessionResolveContext(this.session);
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
-							rewrites: normalizedRewrites,
-							dryRun: false,
-							maxFiles,
-							failOnParseError: false,
-							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
-						});
+						// Under the OS sandbox the rewrite runs in the contained host, which writes the files.
+						const applyResult = await withContainedFileAccess(this.session, () =>
+							runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+								rewrites: normalizedRewrites,
+								dryRun: false,
+								maxFiles,
+								failOnParseError: false,
+								filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+							}),
+						);
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
 							applyResult.parseErrors,
 						);
@@ -472,17 +516,20 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						const freshTagLines: string[] = [];
 						if (useHashLines) {
 							const snapshotStore = getEditStore(this.session);
-							for (const relativePath of appliedFileList) {
-								const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
-								if (appliedPath === undefined) continue;
-								try {
-									const fullText = normalizeToLF(await Bun.file(appliedPath).text());
-									const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
-									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
-								} catch {
-									// File disappeared between apply and re-read; skip its tag.
+							// The re-read of the rewritten files goes through the container's verified handle too.
+							await withContainedFileAccess(this.session, async () => {
+								for (const relativePath of appliedFileList) {
+									const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+									if (appliedPath === undefined) continue;
+									try {
+										const fullText = normalizeToLF(await readFileText(appliedPath));
+										const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
+										freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
+									} catch {
+										// File disappeared between apply and re-read; skip its tag.
+									}
 								}
-							}
+							});
 						}
 						const appliedFileReplacements = appliedFileList.map(filePath => ({
 							path: filePath,

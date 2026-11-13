@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ConversionResult, Markit, StreamInfo } from "../markit";
+import { containedFileAccess, readFileBytes } from "../sandbox/file-access";
 import { ToolAbortError } from "../tools/tool-errors";
 import {
 	type MarkitConversionCacheStatus,
@@ -140,10 +141,16 @@ export async function convertFileWithMarkit(
 		// markdown-only cache hit would leave the directory missing members, so
 		// this path stays uncached.
 		try {
-			const result = await runMarkitConversion(
-				markit => markit.convertFile(filePath, { imageDir: options.imageDir }),
-				signal,
-			);
+			const imageDir = options.imageDir;
+			const result = await runMarkitConversion(async markit => {
+				if (!containedFileAccess()) return markit.convertFile(filePath, { imageDir });
+				return markit.convert(Buffer.from(await readFileBytes(filePath)), {
+					localPath: filePath,
+					extension: path.extname(filePath).toLowerCase(),
+					filename: path.basename(filePath),
+					imageDir,
+				});
+			}, signal);
 			return { ...finalizeConversion(result.markdown), cache: "skipped" };
 		} catch (error) {
 			if (error instanceof ToolAbortError) {
@@ -156,7 +163,7 @@ export async function convertFileWithMarkit(
 	throwIfAborted(signal);
 	let bytes: Uint8Array;
 	try {
-		bytes = await untilAborted(signal, () => Bun.file(filePath).bytes());
+		bytes = await untilAborted(signal, () => readFileBytes(filePath));
 	} catch (error) {
 		if (error instanceof ToolAbortError) throw error;
 		if (error instanceof Error && error.name === "AbortError") throw new ToolAbortError();

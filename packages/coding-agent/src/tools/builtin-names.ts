@@ -31,6 +31,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"reflect",
 	"learn",
 	"manage_skill",
+	"sandbox_request",
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
@@ -86,6 +87,7 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	learn: { summary: "Capture reusable lessons in long-term memory", defaultState: "off" },
 	manage_skill: { summary: "Create, update, or delete managed skills", defaultState: "off" },
 	security_scan: { summary: "Run security scans", defaultState: "off" },
+	sandbox_request: { summary: "Ask the user for sandbox access to a path or host", defaultState: "off" },
 };
 
 export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;

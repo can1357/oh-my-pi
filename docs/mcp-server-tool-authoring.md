@@ -19,7 +19,7 @@ Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
 
 `src/mcp/types.ts` defines the authoring shape used by MCP config writers and runtime:
 
-- `stdio` (writer default when `type` missing): requires `command`, optional `args`, `env`, `cwd`
+- `stdio` (writer default when `type` missing): requires `command`, optional `args`, `env`, `cwd`, `sandbox` (`boolean`, run contained while the OS sandbox is enabled; decided at connect), `sandboxNetwork` (`"allowlist"`, `"deny"` or `"allow"`, default `"allow"`)
 - `http`: requires `url`, optional `headers`
 - `sse`: requires `url`, optional `headers` (legacy HTTP+SSE transport)
 - shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `instructions` (`boolean`, default `true`), `auth`, `oauth`
@@ -36,6 +36,7 @@ tool-format providers generally do not.
 - requires `command` for stdio
 - requires `url` for http/sse
 - rejects unknown `type`
+- rejects a non-boolean `sandbox` and a `sandboxNetwork` outside `allowlist`/`deny`/`allow`
 
 `config-writer.ts` applies this validation for add/update operations and also validates server names:
 
@@ -70,8 +71,9 @@ The capability layer (`src/capability/index.ts`) then:
 Duplicate names are not merged. Differently named definitions can also be
 shadowed when `isSameMCPConnection()` finds matching transport inputs: auth,
 OAuth, effective request-ID format, and either stdio command/args/env/literal
-keys/cwd or remote URL/headers. Name, timeout, and instruction settings do not
-distinguish equivalent connections.
+keys/cwd/`sandbox` (plus `sandboxNetwork` when `sandbox` is true) or remote
+URL/headers. Name, timeout, and instruction settings do not distinguish
+equivalent connections.
 
 Suppressed servers still claim their name, so a disabled higher-priority
 definition cannot fall back to a same-named lower-priority server. They do not

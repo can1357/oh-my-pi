@@ -34,6 +34,7 @@ import {
 	isForeignUserConfigRoot,
 	isUserConfigRoot,
 	loadFilesFromDir,
+	parseMCPSandboxOptions,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -193,6 +194,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 
+			const sandboxOptions = parseMCPSandboxOptions(serverConfig, (field, value) =>
+				logger.warn(`MCP server "${serverName}": invalid ${field} ${JSON.stringify(value)}, ignoring`),
+			);
+
 			result.push({
 				name: serverName,
 				enabled,
@@ -203,6 +208,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
 				cwd: serverConfig.cwd as string | undefined,
+				...sandboxOptions,
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,
 				auth: serverConfig.auth as

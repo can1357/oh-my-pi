@@ -56,15 +56,18 @@ export function isFullyQualifiedPath(filePath: string, platform: NodeJS.Platform
 	return true;
 }
 
-/** Expands a leading `~` (`~`, `~/…`, `~\…`, `~name`) to `home`, the user's home directory by default. */
-export function expandTilde(filePath: string, home?: string): string {
+/**
+ * Expands a leading `~` (`~`, `~/…`, `~\…`, `~name`) to `home`, the user's home directory by default.
+ * `api` joins `~name`; pass `path.posix`/`path.win32` to expand for a platform other than this host's.
+ */
+export function expandTilde(filePath: string, home?: string, api: typeof path.posix = path): string {
 	const h = home ?? os.homedir();
 	if (filePath === "~") return h;
 	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
 		return h + filePath.slice(1);
 	}
 	if (filePath.startsWith("~")) {
-		return path.join(h, filePath.slice(1));
+		return api.join(h, filePath.slice(1));
 	}
 	return filePath;
 }

@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { readFileText } from "../sandbox/file-access";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import type {
 	CodeAction,
@@ -24,7 +25,7 @@ export { detectLanguageId } from "@oh-my-pi/pi-tui/lang-from-path";
 export async function readTextFromDisk(filePath: string): Promise<string> {
 	const kind = specialFileKind(await fs.stat(filePath));
 	if (kind) throw new Error(`Cannot open '${filePath}': it is a ${kind}, not a regular file or directory.`);
-	return Bun.file(filePath).text();
+	return readFileText(filePath);
 }
 
 // =============================================================================
@@ -727,7 +728,7 @@ export async function readLocationContext(filePath: string, line: number, contex
 	try {
 		// Context is decoration: a special-file location keeps its header, like a missing file.
 		if (specialFileKind(await fs.stat(filePath))) return [];
-		const fileText = await Bun.file(filePath).text();
+		const fileText = await readFileText(filePath);
 		const lines = fileText.split(/\r?\n/);
 		if (lines.length === 0) return [];
 

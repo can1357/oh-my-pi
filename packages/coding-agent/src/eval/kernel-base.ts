@@ -1,8 +1,20 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
 import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
-import type { Subprocess } from "bun";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
 import { type EvalDisplayOutput, evalImageMetadata } from "./types";
+
+/**
+ * The surface of a runner process the kernel drives: Bun's piped `Subprocess`, or a sandboxed
+ * child adapted to the same shape.
+ */
+export interface KernelProcess {
+	readonly pid: number;
+	readonly stdin: { write(data: string): unknown; flush(): unknown; end(): unknown };
+	readonly stdout: ReadableStream<Uint8Array>;
+	readonly stderr: ReadableStream<Uint8Array>;
+	readonly exited: Promise<number>;
+	kill(signal?: NodeJS.Signals): void;
+}
 
 const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
 
@@ -73,6 +85,8 @@ export interface KernelStartOptions {
 	interpreter?: string;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	/** Host directories a sandbox-contained runner may also write (the session's `local://` root). */
+	sandboxExtraWrite?: readonly string[];
 }
 
 /** Per-language configuration handed to {@link BaseKernel} by each subclass. */
@@ -233,8 +247,8 @@ export function isTimeoutReason(reason: unknown): boolean {
  */
 export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = KernelExecuteOptions> {
 	readonly id: string;
-	#proc: Subprocess | null = null;
-	#stdin: Bun.FileSink | null = null;
+	#proc: KernelProcess | null = null;
+	#stdin: KernelProcess["stdin"] | null = null;
 	#alive = true;
 	readonly #died = Promise.withResolvers<void>();
 	#disposed = false;
@@ -257,7 +271,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#options = options;
 	}
 
-	setProcess(proc: Subprocess<"pipe", "pipe", "pipe">) {
+	setProcess(proc: KernelProcess) {
 		this.#proc = proc;
 		this.#stdin = proc.stdin;
 		this.#exitedPromise = proc.exited;
@@ -271,8 +285,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			})
 			.catch(() => {});
 
-		this.#startReader(proc.stdout as ReadableStream<Uint8Array>);
-		this.#startStderrDrain(proc.stderr as ReadableStream<Uint8Array>);
+		this.#startReader(proc.stdout);
+		this.#startStderrDrain(proc.stderr);
 	}
 
 	isAlive(): boolean {

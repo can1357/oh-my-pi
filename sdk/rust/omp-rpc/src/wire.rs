@@ -3156,6 +3156,9 @@ pub struct SessionState {
 	/// Current goal mode; null when the session has no goal.
 	#[serde(default = "default_session_state_goal")]
 	pub goal: Option<GoalModeState>,
+	/// Sandbox status of the session's workspace; absent on servers without the sandbox commands.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub sandbox: Option<SandboxSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3208,6 +3211,25 @@ pub struct BashResult {
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub trace: Option<Map<String, Value>>,
+	/// Present when the command ran inside the OS sandbox.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub sandbox: Option<SandboxResultMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxResultMeta {
+	pub backend: String,
+	pub mode: SandboxMode,
+	pub network: SandboxNetworkMode,
+	/// Hosts the egress proxy refused during this command.
+	#[serde(rename = "blockedHosts", default, skip_serializing_if = "Option::is_none")]
+	pub blocked_hosts: Option<Vec<String>>,
+	/// The output looks like a filesystem denial by the sandbox.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub denied: Option<bool>,
+	/// Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start.
+	#[serde(rename = "startFailed", default, skip_serializing_if = "Option::is_none")]
+	pub start_failed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3578,6 +3600,477 @@ pub struct HandoffResult {
 pub struct PromptAck {
 	#[serde(rename = "agentInvoked", default, skip_serializing_if = "Option::is_none")]
 	pub agent_invoked: Option<bool>,
+}
+
+/// A `sandbox.*` setting the sandbox commands address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxSettingId {
+	#[serde(rename = "enabled")]
+	Enabled,
+	#[serde(rename = "mode")]
+	Mode,
+	#[serde(rename = "scope")]
+	Scope,
+	#[serde(rename = "fallback")]
+	Fallback,
+	#[serde(rename = "readScope")]
+	ReadScope,
+	#[serde(rename = "networkMode")]
+	NetworkMode,
+	#[serde(rename = "allowWrite")]
+	AllowWrite,
+	#[serde(rename = "allowRead")]
+	AllowRead,
+	#[serde(rename = "denyRead")]
+	DenyRead,
+	#[serde(rename = "allowedHosts")]
+	AllowedHosts,
+}
+
+impl SandboxSettingId {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Enabled => "enabled",
+			Self::Mode => "mode",
+			Self::Scope => "scope",
+			Self::Fallback => "fallback",
+			Self::ReadScope => "readScope",
+			Self::NetworkMode => "networkMode",
+			Self::AllowWrite => "allowWrite",
+			Self::AllowRead => "allowRead",
+			Self::DenyRead => "denyRead",
+			Self::AllowedHosts => "allowedHosts",
+		}
+	}
+}
+
+/// A path or host list setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxListId {
+	#[serde(rename = "allowWrite")]
+	AllowWrite,
+	#[serde(rename = "allowRead")]
+	AllowRead,
+	#[serde(rename = "denyRead")]
+	DenyRead,
+	#[serde(rename = "allowedHosts")]
+	AllowedHosts,
+}
+
+impl SandboxListId {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::AllowWrite => "allowWrite",
+			Self::AllowRead => "allowRead",
+			Self::DenyRead => "denyRead",
+			Self::AllowedHosts => "allowedHosts",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxMode {
+	#[serde(rename = "workspace-write")]
+	WorkspaceWrite,
+	#[serde(rename = "read-only")]
+	ReadOnly,
+}
+
+impl SandboxMode {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::WorkspaceWrite => "workspace-write",
+			Self::ReadOnly => "read-only",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxScope {
+	#[serde(rename = "bash")]
+	Bash,
+	#[serde(rename = "eval")]
+	Eval,
+	#[serde(rename = "exec")]
+	Exec,
+}
+
+impl SandboxScope {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Bash => "bash",
+			Self::Eval => "eval",
+			Self::Exec => "exec",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxFallback {
+	#[serde(rename = "warn")]
+	Warn,
+	#[serde(rename = "block")]
+	Block,
+}
+
+impl SandboxFallback {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Warn => "warn",
+			Self::Block => "block",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxReadScope {
+	#[serde(rename = "all")]
+	All,
+	#[serde(rename = "workspace")]
+	Workspace,
+}
+
+impl SandboxReadScope {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::All => "all",
+			Self::Workspace => "workspace",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxNetworkMode {
+	#[serde(rename = "allowlist")]
+	Allowlist,
+	#[serde(rename = "deny")]
+	Deny,
+	#[serde(rename = "allow")]
+	Allow,
+}
+
+impl SandboxNetworkMode {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Allowlist => "allowlist",
+			Self::Deny => "deny",
+			Self::Allow => "allow",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxListOp {
+	#[serde(rename = "add")]
+	Add,
+	#[serde(rename = "remove")]
+	Remove,
+	#[serde(rename = "replace")]
+	Replace,
+}
+
+impl SandboxListOp {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Add => "add",
+			Self::Remove => "remove",
+			Self::Replace => "replace",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxGrantScope {
+	#[serde(rename = "session")]
+	Session,
+	#[serde(rename = "always")]
+	Always,
+}
+
+impl SandboxGrantScope {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Session => "session",
+			Self::Always => "always",
+		}
+	}
+}
+
+/// Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxHostDecision {
+	#[serde(rename = "once")]
+	Once,
+	#[serde(rename = "session")]
+	Session,
+	#[serde(rename = "always")]
+	Always,
+	#[serde(rename = "deny")]
+	Deny,
+}
+
+impl SandboxHostDecision {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Once => "once",
+			Self::Session => "session",
+			Self::Always => "always",
+			Self::Deny => "deny",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxPathKind {
+	#[serde(rename = "write")]
+	Write,
+	#[serde(rename = "read")]
+	Read,
+}
+
+impl SandboxPathKind {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Write => "write",
+			Self::Read => "read",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxAccessKind {
+	#[serde(rename = "write")]
+	Write,
+	#[serde(rename = "read")]
+	Read,
+	#[serde(rename = "host")]
+	Host,
+}
+
+impl SandboxAccessKind {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Write => "write",
+			Self::Read => "read",
+			Self::Host => "host",
+		}
+	}
+}
+
+/// Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxAccessDecision {
+	#[serde(rename = "session")]
+	Session,
+	#[serde(rename = "always")]
+	Always,
+	#[serde(rename = "deny")]
+	Deny,
+	#[serde(rename = "instruct")]
+	Instruct,
+}
+
+impl SandboxAccessDecision {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Session => "session",
+			Self::Always => "always",
+			Self::Deny => "deny",
+			Self::Instruct => "instruct",
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxStatusOff {}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxStatusActive {
+	pub backend: String,
+	/// Network mode as enforced here (a mode this host cannot enforce runs as deny).
+	pub network: SandboxNetworkMode,
+	pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxStatusUnavailable {
+	pub reason: String,
+	/// `warn`: commands run unsandboxed; `block`: they fail.
+	pub fallback: SandboxFallback,
+}
+
+/// Runtime status of the sandbox, discriminated by `state`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SandboxStatus {
+	Off(SandboxStatusOff),
+	Active(SandboxStatusActive),
+	Unavailable(SandboxStatusUnavailable),
+}
+
+impl SandboxStatus {
+	/// Decodes from JSON, dispatching on `state`.
+	pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("state").and_then(Value::as_str) {
+			Some("off") => |value| serde_json::from_value(value).map(Self::Off),
+			Some("active") => |value| serde_json::from_value(value).map(Self::Active),
+			Some("unavailable") => |value| serde_json::from_value(value).map(Self::Unavailable),
+			other => {
+				return Err(serde_json::Error::custom(format!("unknown SandboxStatus state {other:?}")));
+			}
+		};
+		decode(value)
+	}
+}
+
+impl Serialize for SandboxStatus {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			Self::Off(member) => serialize_tagged(member, &[("state", "off")], serializer),
+			Self::Active(member) => serialize_tagged(member, &[("state", "active")], serializer),
+			Self::Unavailable(member) => serialize_tagged(member, &[("state", "unavailable")], serializer),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for SandboxStatus {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		Self::from_value(Value::deserialize(deserializer)?).map_err(D::Error::custom)
+	}
+}
+
+/// Sandbox status without the detail `get_sandbox` returns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxSummary {
+	pub state: SandboxSummaryState,
+	/// Containment backend while active.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub backend: Option<String>,
+}
+
+/// Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxSettingValues {
+	pub enabled: bool,
+	pub mode: SandboxMode,
+	pub scope: Vec<SandboxScope>,
+	pub fallback: SandboxFallback,
+	#[serde(rename = "readScope")]
+	pub read_scope: SandboxReadScope,
+	#[serde(rename = "networkMode")]
+	pub network_mode: SandboxNetworkMode,
+	#[serde(rename = "allowWrite")]
+	pub allow_write: Vec<String>,
+	#[serde(rename = "allowRead")]
+	pub allow_read: Vec<String>,
+	#[serde(rename = "denyRead")]
+	pub deny_read: Vec<String>,
+	#[serde(rename = "allowedHosts")]
+	pub allowed_hosts: Vec<String>,
+}
+
+/// Settings another layer decides, with the reason; writing one fails with `sandbox_locked`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxLocked {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub enabled: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub mode: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub scope: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fallback: Option<String>,
+	#[serde(rename = "readScope", default, skip_serializing_if = "Option::is_none")]
+	pub read_scope: Option<String>,
+	#[serde(rename = "networkMode", default, skip_serializing_if = "Option::is_none")]
+	pub network_mode: Option<String>,
+	#[serde(rename = "allowWrite", default, skip_serializing_if = "Option::is_none")]
+	pub allow_write: Option<String>,
+	#[serde(rename = "allowRead", default, skip_serializing_if = "Option::is_none")]
+	pub allow_read: Option<String>,
+	#[serde(rename = "denyRead", default, skip_serializing_if = "Option::is_none")]
+	pub deny_read: Option<String>,
+	#[serde(rename = "allowedHosts", default, skip_serializing_if = "Option::is_none")]
+	pub allowed_hosts: Option<String>,
+}
+
+/// Per-list note when project config narrows the list in this workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxListNotes {
+	#[serde(rename = "allowWrite", default, skip_serializing_if = "Option::is_none")]
+	pub allow_write: Option<String>,
+	#[serde(rename = "allowRead", default, skip_serializing_if = "Option::is_none")]
+	pub allow_read: Option<String>,
+	#[serde(rename = "denyRead", default, skip_serializing_if = "Option::is_none")]
+	pub deny_read: Option<String>,
+	#[serde(rename = "allowedHosts", default, skip_serializing_if = "Option::is_none")]
+	pub allowed_hosts: Option<String>,
+}
+
+/// A project-layer value dropped because it would loosen the sandbox.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxIgnoredValue {
+	pub id: String,
+	pub reason: String,
+}
+
+/// Resolved filesystem policy for the workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxEffectivePolicy {
+	#[serde(rename = "readwritePaths")]
+	pub readwrite_paths: Vec<String>,
+	#[serde(rename = "readonlyPaths")]
+	pub readonly_paths: Vec<String>,
+	#[serde(rename = "deniedPaths")]
+	pub denied_paths: Vec<String>,
+}
+
+/// Paths allowed for this session only: writable (and readable), and readable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxSessionPaths {
+	pub write: Vec<String>,
+	pub read: Vec<String>,
+}
+
+/// Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxState {
+	/// Directory the policy is resolved for (the session cwd).
+	pub workspace: String,
+	pub status: SandboxStatus,
+	pub settings: SandboxSettingValues,
+	pub locked: SandboxLocked,
+	#[serde(rename = "listNotes")]
+	pub list_notes: SandboxListNotes,
+	pub ignored: Vec<SandboxIgnoredValue>,
+	pub effective: SandboxEffectivePolicy,
+	/// Hosts refused this session that are still not allowed, most recent first.
+	#[serde(rename = "blockedHosts")]
+	pub blocked_hosts: Vec<String>,
+	/// Hosts allowed for this session only.
+	#[serde(rename = "sessionHosts")]
+	pub session_hosts: Vec<String>,
+	/// Paths allowed for this session only.
+	#[serde(rename = "sessionPaths")]
+	pub session_paths: SandboxSessionPaths,
+	/// Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`).
+	#[serde(rename = "hostPrompts")]
+	pub host_prompts: bool,
+	/// The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`).
+	#[serde(rename = "accessPrompts")]
+	pub access_prompts: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -4436,6 +4929,60 @@ pub struct ConfigUpdateEvent {
 	pub thinking_level: Option<ThinkingLevel>,
 }
 
+/// Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxUpdateEvent {
+	pub state: SandboxState,
+}
+
+/// A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxHostRequestEvent {
+	pub id: String,
+	pub host: String,
+	pub port: i64,
+	/// Unanswered for this long, the request is denied and cancelled.
+	#[serde(rename = "timeoutMs")]
+	pub timeout_ms: i64,
+}
+
+/// A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxHostRequestCancelledEvent {
+	pub id: String,
+	pub reason: SandboxHostRequestCancelledEventReason,
+}
+
+/// The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxAccessRequestEvent {
+	pub id: String,
+	pub kind: SandboxAccessKind,
+	/// Resolved absolute path, or canonical host name.
+	pub target: String,
+	/// What the agent is doing and why it needs `target`, as the agent wrote it.
+	pub intent: String,
+	/// What a grant lets contained commands do, written by omp.
+	pub effect: String,
+	pub workspace: String,
+	/// False when the backing list is locked: offer no `always`.
+	#[serde(rename = "canAlways")]
+	pub can_always: bool,
+	/// The command that needs the access, verbatim.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub command: Option<String>,
+	/// What the agent does instead when denied.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub alternative: Option<String>,
+}
+
+/// A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxAccessRequestCancelledEvent {
+	pub id: String,
+	pub reason: LitAborted,
+}
+
 /// An event could not fit within the transport limits and was dropped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpcFrameErrorEvent {
@@ -5099,6 +5646,16 @@ pub enum RpcNotification {
 	SessionInfoUpdate(SessionInfoUpdateEvent),
 	/// A builtin slash command changed the model configuration.
 	ConfigUpdate(ConfigUpdateEvent),
+	/// Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled.
+	SandboxUpdate(SandboxUpdateEvent),
+	/// A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`.
+	SandboxHostRequest(SandboxHostRequestEvent),
+	/// A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended.
+	SandboxHostRequestCancelled(SandboxHostRequestCancelledEvent),
+	/// The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`.
+	SandboxAccessRequest(SandboxAccessRequestEvent),
+	/// A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended.
+	SandboxAccessRequestCancelled(SandboxAccessRequestCancelledEvent),
 	/// An event could not fit within the transport limits and was dropped.
 	RpcFrameError(RpcFrameErrorEvent),
 	/// A session event, discriminated by `type`; `set_event_filter` selects which are sent.
@@ -5132,6 +5689,11 @@ impl RpcNotification {
 			Some("command_output") => |value| serde_json::from_value(value).map(Self::CommandOutput),
 			Some("session_info_update") => |value| serde_json::from_value(value).map(Self::SessionInfoUpdate),
 			Some("config_update") => |value| serde_json::from_value(value).map(Self::ConfigUpdate),
+			Some("sandbox_update") => |value| serde_json::from_value(value).map(Self::SandboxUpdate),
+			Some("sandbox_host_request") => |value| serde_json::from_value(value).map(Self::SandboxHostRequest),
+			Some("sandbox_host_request_cancelled") => |value| serde_json::from_value(value).map(Self::SandboxHostRequestCancelled),
+			Some("sandbox_access_request") => |value| serde_json::from_value(value).map(Self::SandboxAccessRequest),
+			Some("sandbox_access_request_cancelled") => |value| serde_json::from_value(value).map(Self::SandboxAccessRequestCancelled),
 			Some("rpc_frame_error") => |value| serde_json::from_value(value).map(Self::RpcFrameError),
 			Some("agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcAgentEvent),
 			_ => |value| Ok(Self::Unknown(value)),
@@ -5164,6 +5726,11 @@ impl Serialize for RpcNotification {
 			Self::CommandOutput(member) => serialize_tagged(member, &[("type", "command_output")], serializer),
 			Self::SessionInfoUpdate(member) => serialize_tagged(member, &[("type", "session_info_update")], serializer),
 			Self::ConfigUpdate(member) => serialize_tagged(member, &[("type", "config_update")], serializer),
+			Self::SandboxUpdate(member) => serialize_tagged(member, &[("type", "sandbox_update")], serializer),
+			Self::SandboxHostRequest(member) => serialize_tagged(member, &[("type", "sandbox_host_request")], serializer),
+			Self::SandboxHostRequestCancelled(member) => serialize_tagged(member, &[("type", "sandbox_host_request_cancelled")], serializer),
+			Self::SandboxAccessRequest(member) => serialize_tagged(member, &[("type", "sandbox_access_request")], serializer),
+			Self::SandboxAccessRequestCancelled(member) => serialize_tagged(member, &[("type", "sandbox_access_request_cancelled")], serializer),
 			Self::RpcFrameError(member) => serialize_tagged(member, &[("type", "rpc_frame_error")], serializer),
 			Self::RpcAgentEvent(member) => member.serialize(serializer),
 			Self::Unknown(value) => value.serialize(serializer),
@@ -5196,7 +5763,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "sandbox_update" | "sandbox_host_request" | "sandbox_host_request_cancelled" | "sandbox_access_request" | "sandbox_access_request_cancelled" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -5741,6 +6308,85 @@ pub struct GetBtwHistoryResult {
 	pub records: Vec<BtwHistoryRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxSettingParams {
+	pub setting: SandboxSettingId,
+	pub value: BoolOrStringOrStringList,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetSandboxSettingParams {
+	pub setting: SandboxSettingId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditSandboxListParams {
+	pub list: SandboxListId,
+	pub op: SandboxListOp,
+	pub entry: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub replacement: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantSandboxHostParams {
+	pub host: String,
+	pub scope: SandboxGrantScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevokeSandboxHostParams {
+	pub host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxHostPromptsParams {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxHostPromptsResult {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RespondSandboxHostParams {
+	#[serde(rename = "requestId")]
+	pub request_id: String,
+	pub decision: SandboxHostDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantSandboxPathParams {
+	pub kind: SandboxPathKind,
+	pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevokeSandboxPathParams {
+	pub kind: SandboxPathKind,
+	pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxAccessPromptsParams {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxAccessPromptsResult {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RespondSandboxAccessParams {
+	#[serde(rename = "requestId")]
+	pub request_id: String,
+	pub decision: SandboxAccessDecision,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub instructions: Option<String>,
+}
+
 /// The constant `"image"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LitImage;
@@ -5984,6 +6630,27 @@ impl LogoutAccountType {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxSummaryState {
+	#[serde(rename = "off")]
+	Off,
+	#[serde(rename = "active")]
+	Active,
+	#[serde(rename = "unavailable")]
+	Unavailable,
+}
+
+impl SandboxSummaryState {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Off => "off",
+			Self::Active => "active",
+			Self::Unavailable => "unavailable",
+		}
+	}
+}
+
 /// The constant `"cost_cap"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LitCostCap;
@@ -6022,6 +6689,45 @@ impl DictationStateEventState {
 			Self::Starting => "starting",
 			Self::Recording => "recording",
 			Self::Transcribing => "transcribing",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxHostRequestCancelledEventReason {
+	#[serde(rename = "timeout")]
+	Timeout,
+	#[serde(rename = "aborted")]
+	Aborted,
+}
+
+impl SandboxHostRequestCancelledEventReason {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Timeout => "timeout",
+			Self::Aborted => "aborted",
+		}
+	}
+}
+
+/// The constant `"aborted"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LitAborted;
+
+impl Serialize for LitAborted {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str("aborted")
+	}
+}
+
+impl<'de> Deserialize<'de> for LitAborted {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = Value::deserialize(deserializer)?;
+		if value.as_str() == Some("aborted") {
+			Ok(Self)
+		} else {
+			Err(D::Error::custom(format!("expected \"aborted\", got {value}")))
 		}
 	}
 }
@@ -6084,6 +6790,15 @@ impl HostUriResultContentType {
 			Self::TextPlain => "text/plain",
 		}
 	}
+}
+
+/// Untagged union: the first variant that decodes wins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BoolOrStringOrStringList {
+	Bool(bool),
+	String(String),
+	StringList(Vec<String>),
 }
 
 fn default_queued_messages_state_live_steered() -> i64 {
@@ -7445,5 +8160,211 @@ impl Command for GetBtwHistoryCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<GetBtwHistoryResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.records)
+	}
+}
+
+/// Sandbox state of the session's workspace: status, settings, locks and the resolved policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GetSandboxCommand {}
+
+impl Command for GetSandboxCommand {
+	const NAME: &'static str = "get_sandbox";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Write one sandbox setting to the global config (lists and scope replace the whole operator list); returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxSettingCommand {
+	pub setting: SandboxSettingId,
+	pub value: BoolOrStringOrStringList,
+}
+
+impl Command for SetSandboxSettingCommand {
+	const NAME: &'static str = "set_sandbox_setting";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Remove a sandbox setting from the global config, so another layer or the default applies; returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetSandboxSettingCommand {
+	pub setting: SandboxSettingId,
+}
+
+impl Command for ResetSandboxSettingCommand {
+	const NAME: &'static str = "reset_sandbox_setting";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Add, remove or replace (needs `replacement`) one entry of a sandbox list in the global config; returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditSandboxListCommand {
+	pub list: SandboxListId,
+	pub op: SandboxListOp,
+	pub entry: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub replacement: Option<String>,
+}
+
+impl Command for EditSandboxListCommand {
+	const NAME: &'static str = "edit_sandbox_list";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Allow a host for this session, or always (appended to the global allowlist); returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantSandboxHostCommand {
+	pub host: String,
+	pub scope: SandboxGrantScope,
+}
+
+impl Command for GrantSandboxHostCommand {
+	const NAME: &'static str = "grant_sandbox_host";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Drop a host's session grant (persisted entries are removed with `edit_sandbox_list`); returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevokeSandboxHostCommand {
+	pub host: String,
+}
+
+impl Command for RevokeSandboxHostCommand {
+	const NAME: &'static str = "revoke_sandbox_host";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Opt in to `sandbox_host_request` frames for hosts off the allowlist (off: such hosts are refused); returns the applied setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxHostPromptsCommand {
+	pub enabled: bool,
+}
+
+impl Command for SetSandboxHostPromptsCommand {
+	const NAME: &'static str = "set_sandbox_host_prompts";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = bool;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SetSandboxHostPromptsResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.enabled)
+	}
+}
+
+/// Answer a pending `sandbox_host_request`; bypasses the command queue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RespondSandboxHostCommand {
+	#[serde(rename = "requestId")]
+	pub request_id: String,
+	pub decision: SandboxHostDecision,
+}
+
+impl Command for RespondSandboxHostCommand {
+	const NAME: &'static str = "respond_sandbox_host";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ();
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		let _ = data;
+		Ok(())
+	}
+}
+
+/// Allow exactly this path for this session (write implies read; persistent entries use `edit_sandbox_list`); returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantSandboxPathCommand {
+	pub kind: SandboxPathKind,
+	pub path: String,
+}
+
+impl Command for GrantSandboxPathCommand {
+	const NAME: &'static str = "grant_sandbox_path";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Drop a path's session grant; returns the new state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevokeSandboxPathCommand {
+	pub kind: SandboxPathKind,
+	pub path: String,
+}
+
+impl Command for RevokeSandboxPathCommand {
+	const NAME: &'static str = "revoke_sandbox_path";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SandboxState;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SandboxState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Opt in to `sandbox_access_request` frames for the agent's path and host requests (off: they are refused); returns the applied setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSandboxAccessPromptsCommand {
+	pub enabled: bool,
+}
+
+impl Command for SetSandboxAccessPromptsCommand {
+	const NAME: &'static str = "set_sandbox_access_prompts";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = bool;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SetSandboxAccessPromptsResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.enabled)
+	}
+}
+
+/// Answer a pending `sandbox_access_request` (`instruct` needs `instructions`); bypasses the command queue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RespondSandboxAccessCommand {
+	#[serde(rename = "requestId")]
+	pub request_id: String,
+	pub decision: SandboxAccessDecision,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub instructions: Option<String>,
+}
+
+impl Command for RespondSandboxAccessCommand {
+	const NAME: &'static str = "respond_sandbox_access";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ();
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		let _ = data;
+		Ok(())
 	}
 }

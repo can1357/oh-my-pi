@@ -251,6 +251,15 @@ crate.annotation(
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
     crate = "pcre2-sys",
 )
+
+# Mirrors .cargo/config.toml: build mxc-sdk without Microsoft telemetry
+# routing (an empty component path forces an unrouted build in MXC releases
+# that read it; 1.0.1 is unrouted unless MXC_TELEMETRY_PROVIDER_GROUP_GUID is
+# set).
+crate.annotation(
+    build_script_env = {"MXC_TELEMETRY_COMPONENT_PATH": ""},
+    crate = "mxc-sdk",
+)
 use_repo(crate, "crates")
 
 # --- msvc cross toolchain (owned by bazel/toolchains/msvc) ---------------------

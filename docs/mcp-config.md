@@ -137,6 +137,10 @@ Optional:
 - `args?: string[]`
 - `env?: Record<string, string>`
 - `cwd?: string`
+- `sandbox?: boolean` — run the server inside the OS sandbox (see `docs/sandbox.md`) while `sandbox.enabled` is on; default `false`. With the sandbox off the server spawns normally. Writes are limited to the workspace and temp dirs like every contained process. OMP-specific: read from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages.
+- `sandboxNetwork?: "allowlist" | "deny" | "allow"` — network for a contained server; default `"allow"`. `"allowlist"` routes through the egress proxy with `sandbox.network.allowedHosts`.
+
+Containment is decided when the server connects. After toggling the sandbox or changing its policy, an already-running opted-in server keeps running as it was until `/mcp reconnect <name>`. When the sandbox is enabled but no backend is available, `sandbox.fallback: warn` starts the server uncontained after the one sandbox warning, and `block` fails the connection with the reason. On Windows a command that launches through `cmd.exe` (a `.cmd`/`.bat` shim, or a command not found on PATH) cannot be contained: point `command` at `node` or `bun` plus the server script instead. `sandbox` and `sandboxNetwork` (the latter only with `sandbox: true`) are part of a server's connection identity, so a contained and an uncontained entry for the same command stay separate servers.
 
 Example:
 
@@ -474,6 +478,7 @@ From `validateServerConfig()` in `packages/coding-agent/src/mcp/config.ts`:
 - `http` and `sse` require `url`
 - a server cannot set both `command` and `url`
 - unknown `type` values are rejected
+- `sandbox`, when set, must be a boolean, and `sandboxNetwork` one of `allowlist`, `deny`, `allow`
 
 These rules apply to direct configs passed to the validator/writer. Discovery first converts canonical entries: it infers `http` for a URL-only entry and `stdio` for a command entry, and keeps the fields for the selected transport. Do not rely on discovery to reject conflicting raw fields or an unknown type; write explicit, schema-valid transport definitions.
 

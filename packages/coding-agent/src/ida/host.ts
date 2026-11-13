@@ -1,17 +1,22 @@
 /**
- * IDA host daemon: the broker-supervised process behind one open database.
+ * IDA host: the owner of one open database.
  *
- * `acquireIdaDatabase` (`client.ts`) starts it under the project's daemon broker, so `omp ps`
- * lists it as `omp.ida.<id>`. The host listens on its endpoint first, then takes the IDB lock and
- * opens the database in an {@link IdaWorker}; every omp process in the project shares that worker
- * over NDJSON ({@link IdaHostRequest}). The host exits once the worker does (`close`, idle close,
- * crash). SIGTERM (broker shutdown after the last omp process leaves, `omp ps stop`) closes the
- * worker first, saving when it has unsaved changes.
+ * Normally the broker-supervised daemon behind it: `acquireIdaDatabase` (`client.ts`) starts it
+ * under the project's daemon broker, so `omp ps` lists it as `omp.ida.<id>`. The host listens on its
+ * endpoint first, then takes the IDB lock and opens the database in an {@link IdaWorker}; every
+ * omp process in the project shares that worker over NDJSON ({@link IdaHostRequest}). The host exits
+ * once the worker does (`close`, idle close, crash). SIGTERM (broker shutdown after the last omp
+ * process leaves, `omp ps stop`) closes the worker first, saving when it has unsaved changes.
+ *
+ * While the OS sandbox is active the same host runs inside the omp process instead, serving
+ * in-process links ({@link IdaHost.serve}) with the worker spawned contained: the broker daemon has
+ * no access to the session's sandbox runtime.
  */
 import * as fs from "node:fs";
-import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
+import { IpcServer } from "@oh-my-pi/pi-natives";
 import { acquireFileLock, logger, postmortem, setProcessName } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { IdaLink } from "./link";
 import {
 	errorMessage,
 	IDA_HOST_CONFIG_ENV,
@@ -22,36 +27,62 @@ import {
 	parseIdaHostConfig,
 	parseIdaHostRequest,
 } from "./protocol";
-import { idbRef, prepareStoreDir } from "./store";
-import { IdaWorker } from "./supervisor";
+import { type IdbLocation, idbRef, prepareStoreDir } from "./store";
+import { IdaWorker, type IdaWorkerProcess, type IdaWorkerSpawner, spawnIdaWorker } from "./supervisor";
 
 /** How long a host whose open failed keeps answering with the failure before exiting. */
 const OPEN_FAILED_LINGER_MS = 10_000;
 /** Budget for a `flush` save. */
 const FLUSH_TIMEOUT_MS = 120_000;
 
-class IdaHost {
-	readonly #config: IdaHostConfig;
+/** What a host needs to open its database (everything but where it listens). */
+export type IdaHostSetup = Omit<IdaHostConfig, "endpoint">;
+
+/** Seams of the in-process host; the daemon uses the defaults. */
+export interface IdaHostOptions {
+	/** Settle `loc` before the worker opens it; defaults to `prepareStoreDir`. */
+	prepare?: (loc: IdbLocation) => Promise<void>;
+	/** Start the worker process; defaults to an ordinary child process. */
+	spawn?: IdaWorkerSpawner;
+	/** Receives the host's and its worker's diagnostics; defaults to this process's stderr. */
+	onStderr?: (text: string) => void;
+	/** How long a failed open keeps being reported before the host exits. */
+	openFailedLingerMs?: number;
+}
+
+export class IdaHost {
+	readonly #config: IdaHostSetup;
+	readonly #options: IdaHostOptions;
 	readonly #startedAt = Date.now();
 	readonly #opening: Promise<IdaWorker>;
-	readonly #connections = new Set<IpcConnection>();
+	readonly #connections = new Set<IdaLink>();
 	/** Request handlers still running; shutdown lets them answer before closing sockets. */
 	readonly #inflight = new Set<Promise<void>>();
+	/** Resolved when shutdown begins; ends the failed-open linger early. */
+	readonly #stopRequested = Promise.withResolvers<void>();
 	#server: IpcServer | undefined;
 	/** The open worker; cleared once it exits. */
 	#worker: IdaWorker | undefined;
 	#stopping: Promise<void> | undefined;
+	/** The worker process once spawned, so a shutdown can kill it even while the database opens. */
+	#process: IdaWorkerProcess | undefined;
 
-	constructor(config: IdaHostConfig) {
+	constructor(config: IdaHostSetup, options: IdaHostOptions = {}) {
 		this.#config = config;
+		this.#options = options;
 		this.#opening = this.#open();
 		// Failures are answered per request and reported by `run`.
 		this.#opening.catch(() => undefined);
 	}
 
-	/** Listen on the endpoint; rejects with code EADDRINUSE when a live host already owns it. */
-	async listen(): Promise<void> {
-		this.#server = await IpcServer.listen(this.#config.endpoint, { framing: "lines" }, conn => this.#accept(conn));
+	/** True once shutdown began: the host no longer accepts work. */
+	get stopped(): boolean {
+		return this.#stopping !== undefined;
+	}
+
+	/** Listen on `endpoint`; rejects with code EADDRINUSE when a live host already owns it. */
+	async listen(endpoint: string): Promise<void> {
+		this.#server = await IpcServer.listen(endpoint, { framing: "lines" }, conn => this.serve(conn));
 	}
 
 	/** Wait for the database to open and later close; resolves with the host's exit code. */
@@ -60,8 +91,8 @@ class IdaHost {
 		try {
 			worker = await this.#opening;
 		} catch (error) {
-			process.stderr.write(`IDA open failed: ${errorMessage(error)}\n`);
-			await Bun.sleep(OPEN_FAILED_LINGER_MS);
+			this.#stderr(`IDA open failed: ${errorMessage(error)}\n`);
+			await this.#linger();
 			await this.shutdown();
 			return 1;
 		}
@@ -83,7 +114,32 @@ class IdaHost {
 		return this.#stopping;
 	}
 
+	/** Kill the worker process without saving, for a shutdown that must not wait for its save. */
+	async terminate(): Promise<void> {
+		const proc = this.#process;
+		if (!proc) return;
+		try {
+			proc.kill("SIGKILL");
+		} catch {
+			// Already gone.
+		}
+		await proc.exited;
+	}
+
+	async #linger(): Promise<void> {
+		const ms = this.#options.openFailedLingerMs ?? OPEN_FAILED_LINGER_MS;
+		if (ms <= 0) return;
+		const timer = setTimeout(this.#stopRequested.resolve, ms);
+		await this.#stopRequested.promise;
+		clearTimeout(timer);
+	}
+
+	#stderr(text: string): void {
+		(this.#options.onStderr ?? writeProcessStderr)(text);
+	}
+
 	async #stop(): Promise<void> {
+		this.#stopRequested.resolve();
 		const worker = this.#worker;
 		this.#worker = undefined;
 		if (worker) {
@@ -107,8 +163,16 @@ class IdaHost {
 			throw new ToolError(`IDB ${loc.id} is in use by another omp process outside this project`);
 		});
 		try {
-			await prepareStoreDir(loc);
-			const worker = await IdaWorker.start(loc, runtime, lock, idleCloseMs);
+			await (this.#options.prepare ?? prepareStoreDir)(loc);
+			const spawn = this.#options.spawn ?? spawnIdaWorker;
+			const worker = await IdaWorker.start(loc, runtime, lock, idleCloseMs, {
+				spawn: async (...args) => {
+					const launch = await spawn(...args);
+					this.#process = launch.proc;
+					return launch;
+				},
+				onStderr: this.#options.onStderr,
+			});
 			this.#worker = worker;
 			return worker;
 		} catch (error) {
@@ -148,7 +212,8 @@ class IdaHost {
 		};
 	}
 
-	#accept(conn: IpcConnection): void {
+	/** Serve the protocol on `conn`: an accepted socket, or one end of an in-process link. */
+	serve(conn: IdaLink): void {
 		this.#connections.add(conn);
 		// This connection's pending `call`s, aborted by `cancel` or when the connection drops.
 		const calls = new Map<number, AbortController>();
@@ -229,6 +294,10 @@ class IdaHost {
 	}
 }
 
+function writeProcessStderr(text: string): void {
+	process.stderr.write(text);
+}
+
 /** Run the IDA host selected by the CLI worker dispatcher; exits with the host's status. */
 export async function startIdaHostFromEnvironment(): Promise<void> {
 	const raw = process.env[IDA_HOST_CONFIG_ENV];
@@ -241,7 +310,7 @@ export async function startIdaHostFromEnvironment(): Promise<void> {
 	let code: number;
 	try {
 		try {
-			await host.listen();
+			await host.listen(config.endpoint);
 		} catch (error) {
 			// EADDRINUSE: a live host already serves this database; ours must not touch its endpoint.
 			process.stderr.write(`IDA host listen failed: ${errorMessage(error)}\n`);

@@ -45,6 +45,7 @@ notify = "=8.2.0"
 log = "0.4"
 # Already in the graph via pi-builtins; SIMD newline search for IPC line framing.
 memchr = "2.7.4"
+mxc-sdk.workspace = true
 pi-vcs.workspace = true
 parking_lot.workspace = true
 pdf-inspector.workspace = true

@@ -60,6 +60,8 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		if (server.envPolicy) config.envPolicy = server.envPolicy;
 		if (server.envLiteralKeys) config.envLiteralKeys = server.envLiteralKeys;
 		if (server.cwd) config.cwd = server.cwd;
+		if (server.sandbox !== undefined) config.sandbox = server.sandbox;
+		if (server.sandboxNetwork) config.sandboxNetwork = server.sandboxNetwork;
 		return config;
 	}
 
@@ -351,9 +353,16 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 	}
 
 	if (serverType === "stdio") {
-		const stdioConfig = config as { command?: string };
+		const stdioConfig = config as { command?: string; sandbox?: unknown; sandboxNetwork?: unknown };
 		if (!stdioConfig.command) {
 			errors.push(`Server "${name}": stdio server requires "command" field`);
+		}
+		if (stdioConfig.sandbox !== undefined && typeof stdioConfig.sandbox !== "boolean") {
+			errors.push(`Server "${name}": "sandbox" must be a boolean`);
+		}
+		const network = stdioConfig.sandboxNetwork;
+		if (network !== undefined && network !== "allowlist" && network !== "deny" && network !== "allow") {
+			errors.push(`Server "${name}": "sandboxNetwork" must be "allowlist", "deny" or "allow"`);
 		}
 	} else if (serverType === "http" || serverType === "sse") {
 		const httpConfig = config as { url?: string };

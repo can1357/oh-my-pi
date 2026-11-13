@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseMCPSandboxOptions, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -32,6 +32,8 @@ interface MCPConfigFile {
 			args?: string[];
 			env?: Record<string, string>;
 			cwd?: string;
+			sandbox?: boolean;
+			sandboxNetwork?: "allowlist" | "deny" | "allow";
 			url?: string;
 			headers?: Record<string, string>;
 			auth?: {
@@ -101,6 +103,10 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
+			const sandboxOptions = parseMCPSandboxOptions(serverConfig, (field, value) =>
+				logger.warn(`MCP server has invalid '${field}' value, ignoring`, { name, value }),
+			);
+
 			const server: MCPServer = {
 				name,
 				enabled,
@@ -111,6 +117,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				args: serverConfig.args,
 				env: serverConfig.env,
 				cwd: serverConfig.cwd,
+				...sandboxOptions,
 				url: serverConfig.url,
 				headers: serverConfig.headers,
 				auth: serverConfig.auth,

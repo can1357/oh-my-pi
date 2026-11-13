@@ -141,6 +141,75 @@ _BTW_STATUS_VALUES: Final[frozenset[str]] = frozenset({"running", "complete", "c
 _decode_btw_status = cast("Decoder[BtwStatus]", literal(_BTW_STATUS_VALUES))
 
 
+SandboxSettingId: TypeAlias = Literal["enabled", "mode", "scope", "fallback", "readScope", "networkMode", "allowWrite", "allowRead", "denyRead", "allowedHosts"]
+"""A `sandbox.*` setting the sandbox commands address."""
+_SANDBOX_SETTING_ID_VALUES: Final[frozenset[str]] = frozenset({"enabled", "mode", "scope", "fallback", "readScope", "networkMode", "allowWrite", "allowRead", "denyRead", "allowedHosts"})
+_decode_sandbox_setting_id = cast("Decoder[SandboxSettingId]", literal(_SANDBOX_SETTING_ID_VALUES))
+
+
+SandboxListId: TypeAlias = Literal["allowWrite", "allowRead", "denyRead", "allowedHosts"]
+"""A path or host list setting."""
+_SANDBOX_LIST_ID_VALUES: Final[frozenset[str]] = frozenset({"allowWrite", "allowRead", "denyRead", "allowedHosts"})
+_decode_sandbox_list_id = cast("Decoder[SandboxListId]", literal(_SANDBOX_LIST_ID_VALUES))
+
+
+SandboxMode: TypeAlias = Literal["workspace-write", "read-only"]
+_SANDBOX_MODE_VALUES: Final[frozenset[str]] = frozenset({"workspace-write", "read-only"})
+_decode_sandbox_mode = cast("Decoder[SandboxMode]", literal(_SANDBOX_MODE_VALUES))
+
+
+SandboxScope: TypeAlias = Literal["bash", "eval", "exec"]
+_SANDBOX_SCOPE_VALUES: Final[frozenset[str]] = frozenset({"bash", "eval", "exec"})
+_decode_sandbox_scope = cast("Decoder[SandboxScope]", literal(_SANDBOX_SCOPE_VALUES))
+
+
+SandboxFallback: TypeAlias = Literal["warn", "block"]
+_SANDBOX_FALLBACK_VALUES: Final[frozenset[str]] = frozenset({"warn", "block"})
+_decode_sandbox_fallback = cast("Decoder[SandboxFallback]", literal(_SANDBOX_FALLBACK_VALUES))
+
+
+SandboxReadScope: TypeAlias = Literal["all", "workspace"]
+_SANDBOX_READ_SCOPE_VALUES: Final[frozenset[str]] = frozenset({"all", "workspace"})
+_decode_sandbox_read_scope = cast("Decoder[SandboxReadScope]", literal(_SANDBOX_READ_SCOPE_VALUES))
+
+
+SandboxNetworkMode: TypeAlias = Literal["allowlist", "deny", "allow"]
+_SANDBOX_NETWORK_MODE_VALUES: Final[frozenset[str]] = frozenset({"allowlist", "deny", "allow"})
+_decode_sandbox_network_mode = cast("Decoder[SandboxNetworkMode]", literal(_SANDBOX_NETWORK_MODE_VALUES))
+
+
+SandboxListOp: TypeAlias = Literal["add", "remove", "replace"]
+_SANDBOX_LIST_OP_VALUES: Final[frozenset[str]] = frozenset({"add", "remove", "replace"})
+_decode_sandbox_list_op = cast("Decoder[SandboxListOp]", literal(_SANDBOX_LIST_OP_VALUES))
+
+
+SandboxGrantScope: TypeAlias = Literal["session", "always"]
+_SANDBOX_GRANT_SCOPE_VALUES: Final[frozenset[str]] = frozenset({"session", "always"})
+_decode_sandbox_grant_scope = cast("Decoder[SandboxGrantScope]", literal(_SANDBOX_GRANT_SCOPE_VALUES))
+
+
+SandboxHostDecision: TypeAlias = Literal["once", "session", "always", "deny"]
+"""Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse."""
+_SANDBOX_HOST_DECISION_VALUES: Final[frozenset[str]] = frozenset({"once", "session", "always", "deny"})
+_decode_sandbox_host_decision = cast("Decoder[SandboxHostDecision]", literal(_SANDBOX_HOST_DECISION_VALUES))
+
+
+SandboxPathKind: TypeAlias = Literal["write", "read"]
+_SANDBOX_PATH_KIND_VALUES: Final[frozenset[str]] = frozenset({"write", "read"})
+_decode_sandbox_path_kind = cast("Decoder[SandboxPathKind]", literal(_SANDBOX_PATH_KIND_VALUES))
+
+
+SandboxAccessKind: TypeAlias = Literal["write", "read", "host"]
+_SANDBOX_ACCESS_KIND_VALUES: Final[frozenset[str]] = frozenset({"write", "read", "host"})
+_decode_sandbox_access_kind = cast("Decoder[SandboxAccessKind]", literal(_SANDBOX_ACCESS_KIND_VALUES))
+
+
+SandboxAccessDecision: TypeAlias = Literal["session", "always", "deny", "instruct"]
+"""Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing."""
+_SANDBOX_ACCESS_DECISION_VALUES: Final[frozenset[str]] = frozenset({"session", "always", "deny", "instruct"})
+_decode_sandbox_access_decision = cast("Decoder[SandboxAccessDecision]", literal(_SANDBOX_ACCESS_DECISION_VALUES))
+
+
 AutoCompactionReason: TypeAlias = Literal["threshold", "overflow", "idle", "incomplete"]
 _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"threshold", "overflow", "idle", "incomplete"})
 _decode_auto_compaction_reason = cast("Decoder[AutoCompactionReason]", literal(_AUTO_COMPACTION_REASON_VALUES))
@@ -678,6 +747,8 @@ class SessionState:
     context_usage: ContextUsage | None = None
     goal: GoalModeState | None = None
     """Current goal mode; null when the session has no goal."""
+    sandbox: SandboxSummary | None = None
+    """Sandbox status of the session's workspace; absent on servers without the sandbox commands."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -711,6 +782,21 @@ class BashResult:
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+    sandbox: SandboxResultMeta | None = None
+    """Present when the command ran inside the OS sandbox."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxResultMeta:
+    backend: str
+    mode: SandboxMode
+    network: SandboxNetworkMode
+    blocked_hosts: tuple[str, ...] | None = None
+    """Hosts the egress proxy refused during this command."""
+    denied: bool | None = None
+    """The output looks like a filesystem denial by the sandbox."""
+    start_failed: bool | None = None
+    """Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -982,6 +1068,120 @@ class HandoffResult:
 class PromptAck:
     """`agentInvoked: false` means the prompt completed locally and no `prompt_result` follows."""
     agent_invoked: bool | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxStatusOff:
+    state: Literal["off"] = "off"
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxStatusActive:
+    state: Literal["active"] = "active"
+    backend: str
+    network: SandboxNetworkMode
+    """Network mode as enforced here (a mode this host cannot enforce runs as deny)."""
+    warnings: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxStatusUnavailable:
+    state: Literal["unavailable"] = "unavailable"
+    reason: str
+    fallback: SandboxFallback
+    """`warn`: commands run unsandboxed; `block`: they fail."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxSummary:
+    """Sandbox status without the detail `get_sandbox` returns."""
+    state: Literal["off", "active", "unavailable"]
+    backend: str | None = None
+    """Containment backend while active."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxSettingValues:
+    """Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces)."""
+    enabled: bool
+    mode: SandboxMode
+    scope: tuple[SandboxScope, ...]
+    fallback: SandboxFallback
+    read_scope: SandboxReadScope
+    network_mode: SandboxNetworkMode
+    allow_write: tuple[str, ...]
+    allow_read: tuple[str, ...]
+    deny_read: tuple[str, ...]
+    allowed_hosts: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxLocked:
+    """Settings another layer decides, with the reason; writing one fails with `sandbox_locked`."""
+    enabled: str | None = None
+    mode: str | None = None
+    scope: str | None = None
+    fallback: str | None = None
+    read_scope: str | None = None
+    network_mode: str | None = None
+    allow_write: str | None = None
+    allow_read: str | None = None
+    deny_read: str | None = None
+    allowed_hosts: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxListNotes:
+    """Per-list note when project config narrows the list in this workspace."""
+    allow_write: str | None = None
+    allow_read: str | None = None
+    deny_read: str | None = None
+    allowed_hosts: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxIgnoredValue:
+    """A project-layer value dropped because it would loosen the sandbox."""
+    id: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxEffectivePolicy:
+    """Resolved filesystem policy for the workspace."""
+    readwrite_paths: tuple[str, ...]
+    readonly_paths: tuple[str, ...]
+    denied_paths: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxSessionPaths:
+    """Paths allowed for this session only: writable (and readable), and readable."""
+    write: tuple[str, ...]
+    read: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxState:
+    """Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it."""
+    workspace: str
+    """Directory the policy is resolved for (the session cwd)."""
+    status: SandboxStatus
+    settings: SandboxSettingValues
+    locked: SandboxLocked
+    list_notes: SandboxListNotes
+    ignored: tuple[SandboxIgnoredValue, ...]
+    effective: SandboxEffectivePolicy
+    blocked_hosts: tuple[str, ...]
+    """Hosts refused this session that are still not allowed, most recent first."""
+    session_hosts: tuple[str, ...]
+    """Hosts allowed for this session only."""
+    session_paths: SandboxSessionPaths
+    """Paths allowed for this session only."""
+    host_prompts: bool
+    """Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`)."""
+    access_prompts: bool
+    """The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`)."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1470,6 +1670,61 @@ class ConfigUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxUpdateEvent:
+    """Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled."""
+    type: Literal["sandbox_update"] = "sandbox_update"
+    state: SandboxState
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxHostRequestEvent:
+    """A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`."""
+    type: Literal["sandbox_host_request"] = "sandbox_host_request"
+    id: str
+    host: str
+    port: int
+    timeout_ms: int
+    """Unanswered for this long, the request is denied and cancelled."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxHostRequestCancelledEvent:
+    """A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended."""
+    type: Literal["sandbox_host_request_cancelled"] = "sandbox_host_request_cancelled"
+    id: str
+    reason: Literal["timeout", "aborted"]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxAccessRequestEvent:
+    """The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`."""
+    type: Literal["sandbox_access_request"] = "sandbox_access_request"
+    id: str
+    kind: SandboxAccessKind
+    target: str
+    """Resolved absolute path, or canonical host name."""
+    intent: str
+    """What the agent is doing and why it needs `target`, as the agent wrote it."""
+    effect: str
+    """What a grant lets contained commands do, written by omp."""
+    workspace: str
+    can_always: bool
+    """False when the backing list is locked: offer no `always`."""
+    command: str | None = None
+    """The command that needs the access, verbatim."""
+    alternative: str | None = None
+    """What the agent does instead when denied."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SandboxAccessRequestCancelledEvent:
+    """A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended."""
+    type: Literal["sandbox_access_request_cancelled"] = "sandbox_access_request_cancelled"
+    id: str
+    reason: Literal["aborted"] = "aborted"
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class RpcFrameErrorEvent:
     """An event could not fit within the transport limits and was dropped."""
     type: Literal["rpc_frame_error"] = "rpc_frame_error"
@@ -1725,11 +1980,15 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
+SandboxStatus: TypeAlias = SandboxStatusOff | SandboxStatusActive | SandboxStatusUnavailable
+"""Runtime status of the sandbox, discriminated by `state`."""
+
+
 RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | SandboxUpdateEvent | SandboxHostRequestEvent | SandboxHostRequestCancelledEvent | SandboxAccessRequestEvent | SandboxAccessRequestCancelledEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -2073,6 +2332,7 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         dump_tools=defaulted(payload, "dumpTools", array(parse_tool_descriptor), path, ()),
         context_usage=optional(payload, "contextUsage", parse_context_usage, path),
         goal=defaulted(payload, "goal", nullable(parse_goal_mode_state), path, None),
+        sandbox=optional(payload, "sandbox", parse_sandbox_summary, path),
     )
 
 
@@ -2101,6 +2361,19 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
+        sandbox=optional(payload, "sandbox", parse_sandbox_result_meta, path),
+    )
+
+
+def parse_sandbox_result_meta(value: object, path: str = "SandboxResultMeta") -> SandboxResultMeta:
+    payload = expect_object(value, path)
+    return SandboxResultMeta(
+        backend=required(payload, "backend", decode_str, path),
+        mode=required(payload, "mode", _decode_sandbox_mode, path),
+        network=required(payload, "network", _decode_sandbox_network_mode, path),
+        blocked_hosts=optional(payload, "blockedHosts", array(decode_str), path),
+        denied=optional(payload, "denied", decode_bool, path),
+        start_failed=optional(payload, "startFailed", decode_bool, path),
     )
 
 
@@ -2411,6 +2684,125 @@ def parse_prompt_ack(value: object, path: str = "PromptAck") -> PromptAck:
     payload = expect_object(value, path)
     return PromptAck(
         agent_invoked=optional(payload, "agentInvoked", decode_bool, path),
+    )
+
+
+def parse_sandbox_status_off(value: object, path: str = "SandboxStatusOff") -> SandboxStatusOff:
+    payload = expect_object(value, path)
+    required(payload, "state", cast('Decoder[Literal["off"]]', literal(frozenset({"off"}))), path)
+    return SandboxStatusOff(
+    )
+
+
+def parse_sandbox_status_active(value: object, path: str = "SandboxStatusActive") -> SandboxStatusActive:
+    payload = expect_object(value, path)
+    required(payload, "state", cast('Decoder[Literal["active"]]', literal(frozenset({"active"}))), path)
+    return SandboxStatusActive(
+        backend=required(payload, "backend", decode_str, path),
+        network=required(payload, "network", _decode_sandbox_network_mode, path),
+        warnings=required(payload, "warnings", array(decode_str), path),
+    )
+
+
+def parse_sandbox_status_unavailable(value: object, path: str = "SandboxStatusUnavailable") -> SandboxStatusUnavailable:
+    payload = expect_object(value, path)
+    required(payload, "state", cast('Decoder[Literal["unavailable"]]', literal(frozenset({"unavailable"}))), path)
+    return SandboxStatusUnavailable(
+        reason=required(payload, "reason", decode_str, path),
+        fallback=required(payload, "fallback", _decode_sandbox_fallback, path),
+    )
+
+
+def parse_sandbox_summary(value: object, path: str = "SandboxSummary") -> SandboxSummary:
+    payload = expect_object(value, path)
+    return SandboxSummary(
+        state=required(payload, "state", cast('Decoder[Literal["off", "active", "unavailable"]]', literal(frozenset({"off", "active", "unavailable"}))), path),
+        backend=optional(payload, "backend", decode_str, path),
+    )
+
+
+def parse_sandbox_setting_values(value: object, path: str = "SandboxSettingValues") -> SandboxSettingValues:
+    payload = expect_object(value, path)
+    return SandboxSettingValues(
+        enabled=required(payload, "enabled", decode_bool, path),
+        mode=required(payload, "mode", _decode_sandbox_mode, path),
+        scope=required(payload, "scope", array(_decode_sandbox_scope), path),
+        fallback=required(payload, "fallback", _decode_sandbox_fallback, path),
+        read_scope=required(payload, "readScope", _decode_sandbox_read_scope, path),
+        network_mode=required(payload, "networkMode", _decode_sandbox_network_mode, path),
+        allow_write=required(payload, "allowWrite", array(decode_str), path),
+        allow_read=required(payload, "allowRead", array(decode_str), path),
+        deny_read=required(payload, "denyRead", array(decode_str), path),
+        allowed_hosts=required(payload, "allowedHosts", array(decode_str), path),
+    )
+
+
+def parse_sandbox_locked(value: object, path: str = "SandboxLocked") -> SandboxLocked:
+    payload = expect_object(value, path)
+    return SandboxLocked(
+        enabled=optional(payload, "enabled", decode_str, path),
+        mode=optional(payload, "mode", decode_str, path),
+        scope=optional(payload, "scope", decode_str, path),
+        fallback=optional(payload, "fallback", decode_str, path),
+        read_scope=optional(payload, "readScope", decode_str, path),
+        network_mode=optional(payload, "networkMode", decode_str, path),
+        allow_write=optional(payload, "allowWrite", decode_str, path),
+        allow_read=optional(payload, "allowRead", decode_str, path),
+        deny_read=optional(payload, "denyRead", decode_str, path),
+        allowed_hosts=optional(payload, "allowedHosts", decode_str, path),
+    )
+
+
+def parse_sandbox_list_notes(value: object, path: str = "SandboxListNotes") -> SandboxListNotes:
+    payload = expect_object(value, path)
+    return SandboxListNotes(
+        allow_write=optional(payload, "allowWrite", decode_str, path),
+        allow_read=optional(payload, "allowRead", decode_str, path),
+        deny_read=optional(payload, "denyRead", decode_str, path),
+        allowed_hosts=optional(payload, "allowedHosts", decode_str, path),
+    )
+
+
+def parse_sandbox_ignored_value(value: object, path: str = "SandboxIgnoredValue") -> SandboxIgnoredValue:
+    payload = expect_object(value, path)
+    return SandboxIgnoredValue(
+        id=required(payload, "id", decode_str, path),
+        reason=required(payload, "reason", decode_str, path),
+    )
+
+
+def parse_sandbox_effective_policy(value: object, path: str = "SandboxEffectivePolicy") -> SandboxEffectivePolicy:
+    payload = expect_object(value, path)
+    return SandboxEffectivePolicy(
+        readwrite_paths=required(payload, "readwritePaths", array(decode_str), path),
+        readonly_paths=required(payload, "readonlyPaths", array(decode_str), path),
+        denied_paths=required(payload, "deniedPaths", array(decode_str), path),
+    )
+
+
+def parse_sandbox_session_paths(value: object, path: str = "SandboxSessionPaths") -> SandboxSessionPaths:
+    payload = expect_object(value, path)
+    return SandboxSessionPaths(
+        write=required(payload, "write", array(decode_str), path),
+        read=required(payload, "read", array(decode_str), path),
+    )
+
+
+def parse_sandbox_state(value: object, path: str = "SandboxState") -> SandboxState:
+    payload = expect_object(value, path)
+    return SandboxState(
+        workspace=required(payload, "workspace", decode_str, path),
+        status=required(payload, "status", parse_sandbox_status, path),
+        settings=required(payload, "settings", parse_sandbox_setting_values, path),
+        locked=required(payload, "locked", parse_sandbox_locked, path),
+        list_notes=required(payload, "listNotes", parse_sandbox_list_notes, path),
+        ignored=required(payload, "ignored", array(parse_sandbox_ignored_value), path),
+        effective=required(payload, "effective", parse_sandbox_effective_policy, path),
+        blocked_hosts=required(payload, "blockedHosts", array(decode_str), path),
+        session_hosts=required(payload, "sessionHosts", array(decode_str), path),
+        session_paths=required(payload, "sessionPaths", parse_sandbox_session_paths, path),
+        host_prompts=required(payload, "hostPrompts", decode_bool, path),
+        access_prompts=required(payload, "accessPrompts", decode_bool, path),
     )
 
 
@@ -2960,6 +3352,59 @@ def parse_config_update_event(value: object, path: str = "ConfigUpdateEvent") ->
     )
 
 
+def parse_sandbox_update_event(value: object, path: str = "SandboxUpdateEvent") -> SandboxUpdateEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["sandbox_update"]]', literal(frozenset({"sandbox_update"}))), path)
+    return SandboxUpdateEvent(
+        state=required(payload, "state", parse_sandbox_state, path),
+    )
+
+
+def parse_sandbox_host_request_event(value: object, path: str = "SandboxHostRequestEvent") -> SandboxHostRequestEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["sandbox_host_request"]]', literal(frozenset({"sandbox_host_request"}))), path)
+    return SandboxHostRequestEvent(
+        id=required(payload, "id", decode_str, path),
+        host=required(payload, "host", decode_str, path),
+        port=required(payload, "port", decode_int, path),
+        timeout_ms=required(payload, "timeoutMs", decode_int, path),
+    )
+
+
+def parse_sandbox_host_request_cancelled_event(value: object, path: str = "SandboxHostRequestCancelledEvent") -> SandboxHostRequestCancelledEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["sandbox_host_request_cancelled"]]', literal(frozenset({"sandbox_host_request_cancelled"}))), path)
+    return SandboxHostRequestCancelledEvent(
+        id=required(payload, "id", decode_str, path),
+        reason=required(payload, "reason", cast('Decoder[Literal["timeout", "aborted"]]', literal(frozenset({"timeout", "aborted"}))), path),
+    )
+
+
+def parse_sandbox_access_request_event(value: object, path: str = "SandboxAccessRequestEvent") -> SandboxAccessRequestEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["sandbox_access_request"]]', literal(frozenset({"sandbox_access_request"}))), path)
+    return SandboxAccessRequestEvent(
+        id=required(payload, "id", decode_str, path),
+        kind=required(payload, "kind", _decode_sandbox_access_kind, path),
+        target=required(payload, "target", decode_str, path),
+        intent=required(payload, "intent", decode_str, path),
+        effect=required(payload, "effect", decode_str, path),
+        workspace=required(payload, "workspace", decode_str, path),
+        can_always=required(payload, "canAlways", decode_bool, path),
+        command=optional(payload, "command", decode_str, path),
+        alternative=optional(payload, "alternative", decode_str, path),
+    )
+
+
+def parse_sandbox_access_request_cancelled_event(value: object, path: str = "SandboxAccessRequestCancelledEvent") -> SandboxAccessRequestCancelledEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["sandbox_access_request_cancelled"]]', literal(frozenset({"sandbox_access_request_cancelled"}))), path)
+    required(payload, "reason", cast('Decoder[Literal["aborted"]]', literal(frozenset({"aborted"}))), path)
+    return SandboxAccessRequestCancelledEvent(
+        id=required(payload, "id", decode_str, path),
+    )
+
+
 def parse_rpc_frame_error_event(value: object, path: str = "RpcFrameErrorEvent") -> RpcFrameErrorEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["rpc_frame_error"]]', literal(frozenset({"rpc_frame_error"}))), path)
@@ -3231,6 +3676,10 @@ def parse_usage_limit_state(value: object, path: str = "UsageLimitState") -> Usa
     return dispatch("stage", _USAGE_LIMIT_STATE_CASES)(value, path)
 
 
+def parse_sandbox_status(value: object, path: str = "SandboxStatus") -> SandboxStatus:
+    return dispatch("state", _SANDBOX_STATUS_CASES)(value, path)
+
+
 def parse_rpc_agent_event(value: object, path: str = "RpcAgentEvent") -> RpcAgentEvent:
     return dispatch("type", _RPC_AGENT_EVENT_CASES)(value, path)
 
@@ -3247,6 +3696,13 @@ def parse_notification(value: object, path: str = "notification") -> RpcNotifica
 _USAGE_LIMIT_STATE_CASES: Final[dict[str, Decoder[UsageLimitState]]] = {
         "low_priority": parse_usage_limit_low_priority,
         "wrap_up": parse_usage_limit_wrap_up,
+}
+
+
+_SANDBOX_STATUS_CASES: Final[dict[str, Decoder[SandboxStatus]]] = {
+        "off": parse_sandbox_status_off,
+        "active": parse_sandbox_status_active,
+        "unavailable": parse_sandbox_status_unavailable,
 }
 
 
@@ -3309,6 +3765,11 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "command_output": parse_command_output_event,
         "session_info_update": parse_session_info_update_event,
         "config_update": parse_config_update_event,
+        "sandbox_update": parse_sandbox_update_event,
+        "sandbox_host_request": parse_sandbox_host_request_event,
+        "sandbox_host_request_cancelled": parse_sandbox_host_request_cancelled_event,
+        "sandbox_access_request": parse_sandbox_access_request_event,
+        "sandbox_access_request_cancelled": parse_sandbox_access_request_cancelled_event,
         "rpc_frame_error": parse_rpc_frame_error_event,
         "agent_start": parse_rpc_agent_event,
         "agent_end": parse_rpc_agent_event,
@@ -3799,6 +4260,89 @@ class WireClient:
         params: dict[str, object] = {}
         return required(expect_object(self._command("get_btw_history", params), "get_btw_history"), "records", array(parse_btw_history_record), "get_btw_history")
 
+    def get_sandbox(self) -> SandboxState:
+        """Sandbox state of the session's workspace: status, settings, locks and the resolved policy."""
+        params: dict[str, object] = {}
+        return parse_sandbox_state(self._command("get_sandbox", params), "get_sandbox")
+
+    def set_sandbox_setting(self, setting: SandboxSettingId, value: bool | str | tuple[str, ...]) -> SandboxState:
+        """Write one sandbox setting to the global config (lists and scope replace the whole operator list); returns the new state."""
+        params: dict[str, object] = {}
+        params["setting"] = setting
+        params["value"] = value
+        return parse_sandbox_state(self._command("set_sandbox_setting", params), "set_sandbox_setting")
+
+    def reset_sandbox_setting(self, setting: SandboxSettingId) -> SandboxState:
+        """Remove a sandbox setting from the global config, so another layer or the default applies; returns the new state."""
+        params: dict[str, object] = {}
+        params["setting"] = setting
+        return parse_sandbox_state(self._command("reset_sandbox_setting", params), "reset_sandbox_setting")
+
+    def edit_sandbox_list(self, list: SandboxListId, op: SandboxListOp, entry: str, *, replacement: str | None = None) -> SandboxState:
+        """Add, remove or replace (needs `replacement`) one entry of a sandbox list in the global config; returns the new state."""
+        params: dict[str, object] = {}
+        params["list"] = list
+        params["op"] = op
+        params["entry"] = entry
+        if replacement is not None:
+            params["replacement"] = replacement
+        return parse_sandbox_state(self._command("edit_sandbox_list", params), "edit_sandbox_list")
+
+    def grant_sandbox_host(self, host: str, scope: SandboxGrantScope) -> SandboxState:
+        """Allow a host for this session, or always (appended to the global allowlist); returns the new state."""
+        params: dict[str, object] = {}
+        params["host"] = host
+        params["scope"] = scope
+        return parse_sandbox_state(self._command("grant_sandbox_host", params), "grant_sandbox_host")
+
+    def revoke_sandbox_host(self, host: str) -> SandboxState:
+        """Drop a host's session grant (persisted entries are removed with `edit_sandbox_list`); returns the new state."""
+        params: dict[str, object] = {}
+        params["host"] = host
+        return parse_sandbox_state(self._command("revoke_sandbox_host", params), "revoke_sandbox_host")
+
+    def set_sandbox_host_prompts(self, enabled: bool) -> bool:
+        """Opt in to `sandbox_host_request` frames for hosts off the allowlist (off: such hosts are refused); returns the applied setting."""
+        params: dict[str, object] = {}
+        params["enabled"] = enabled
+        return required(expect_object(self._command("set_sandbox_host_prompts", params), "set_sandbox_host_prompts"), "enabled", decode_bool, "set_sandbox_host_prompts")
+
+    def respond_sandbox_host(self, request_id: str, decision: SandboxHostDecision) -> None:
+        """Answer a pending `sandbox_host_request`; bypasses the command queue."""
+        params: dict[str, object] = {}
+        params["requestId"] = request_id
+        params["decision"] = decision
+        self._command("respond_sandbox_host", params)
+
+    def grant_sandbox_path(self, kind: SandboxPathKind, path: str) -> SandboxState:
+        """Allow exactly this path for this session (write implies read; persistent entries use `edit_sandbox_list`); returns the new state."""
+        params: dict[str, object] = {}
+        params["kind"] = kind
+        params["path"] = path
+        return parse_sandbox_state(self._command("grant_sandbox_path", params), "grant_sandbox_path")
+
+    def revoke_sandbox_path(self, kind: SandboxPathKind, path: str) -> SandboxState:
+        """Drop a path's session grant; returns the new state."""
+        params: dict[str, object] = {}
+        params["kind"] = kind
+        params["path"] = path
+        return parse_sandbox_state(self._command("revoke_sandbox_path", params), "revoke_sandbox_path")
+
+    def set_sandbox_access_prompts(self, enabled: bool) -> bool:
+        """Opt in to `sandbox_access_request` frames for the agent's path and host requests (off: they are refused); returns the applied setting."""
+        params: dict[str, object] = {}
+        params["enabled"] = enabled
+        return required(expect_object(self._command("set_sandbox_access_prompts", params), "set_sandbox_access_prompts"), "enabled", decode_bool, "set_sandbox_access_prompts")
+
+    def respond_sandbox_access(self, request_id: str, decision: SandboxAccessDecision, *, instructions: str | None = None) -> None:
+        """Answer a pending `sandbox_access_request` (`instruct` needs `instructions`); bypasses the command queue."""
+        params: dict[str, object] = {}
+        params["requestId"] = request_id
+        params["decision"] = decision
+        if instructions is not None:
+            params["instructions"] = instructions
+        self._command("respond_sandbox_access", params)
+
     def on_ready(self, listener: Callable[[ReadyEvent], None]) -> Callable[[], None]:
         """Subscribe to `ready`: First frame after startup; transport fields are absent on servers without protocol v2."""
         return self._listen("ready", listener)
@@ -3882,6 +4426,26 @@ class WireClient:
     def on_config_update(self, listener: Callable[[ConfigUpdateEvent], None]) -> Callable[[], None]:
         """Subscribe to `config_update`: A builtin slash command changed the model configuration."""
         return self._listen("config_update", listener)
+
+    def on_sandbox_update(self, listener: Callable[[SandboxUpdateEvent], None]) -> Callable[[], None]:
+        """Subscribe to `sandbox_update`: Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled."""
+        return self._listen("sandbox_update", listener)
+
+    def on_sandbox_host_request(self, listener: Callable[[SandboxHostRequestEvent], None]) -> Callable[[], None]:
+        """Subscribe to `sandbox_host_request`: A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`."""
+        return self._listen("sandbox_host_request", listener)
+
+    def on_sandbox_host_request_cancelled(self, listener: Callable[[SandboxHostRequestCancelledEvent], None]) -> Callable[[], None]:
+        """Subscribe to `sandbox_host_request_cancelled`: A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended."""
+        return self._listen("sandbox_host_request_cancelled", listener)
+
+    def on_sandbox_access_request(self, listener: Callable[[SandboxAccessRequestEvent], None]) -> Callable[[], None]:
+        """Subscribe to `sandbox_access_request`: The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`."""
+        return self._listen("sandbox_access_request", listener)
+
+    def on_sandbox_access_request_cancelled(self, listener: Callable[[SandboxAccessRequestCancelledEvent], None]) -> Callable[[], None]:
+        """Subscribe to `sandbox_access_request_cancelled`: A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended."""
+        return self._listen("sandbox_access_request_cancelled", listener)
 
     def on_rpc_frame_error(self, listener: Callable[[RpcFrameErrorEvent], None]) -> Callable[[], None]:
         """Subscribe to `rpc_frame_error`: An event could not fit within the transport limits and was dropped."""
@@ -4162,6 +4726,37 @@ __all__ = [
     "RpcAgentEvent",
     "RpcFrameErrorEvent",
     "RpcNotification",
+    "SandboxAccessDecision",
+    "SandboxAccessKind",
+    "SandboxAccessRequestCancelledEvent",
+    "SandboxAccessRequestEvent",
+    "SandboxEffectivePolicy",
+    "SandboxFallback",
+    "SandboxGrantScope",
+    "SandboxHostDecision",
+    "SandboxHostRequestCancelledEvent",
+    "SandboxHostRequestEvent",
+    "SandboxIgnoredValue",
+    "SandboxListId",
+    "SandboxListNotes",
+    "SandboxListOp",
+    "SandboxLocked",
+    "SandboxMode",
+    "SandboxNetworkMode",
+    "SandboxPathKind",
+    "SandboxReadScope",
+    "SandboxResultMeta",
+    "SandboxScope",
+    "SandboxSessionPaths",
+    "SandboxSettingId",
+    "SandboxSettingValues",
+    "SandboxState",
+    "SandboxStatus",
+    "SandboxStatusActive",
+    "SandboxStatusOff",
+    "SandboxStatusUnavailable",
+    "SandboxSummary",
+    "SandboxUpdateEvent",
     "SelectOptionDetail",
     "SelectUiRequest",
     "SessionCredits",
@@ -4342,6 +4937,24 @@ __all__ = [
     "parse_retry_fallback_succeeded_event",
     "parse_rpc_agent_event",
     "parse_rpc_frame_error_event",
+    "parse_sandbox_access_request_cancelled_event",
+    "parse_sandbox_access_request_event",
+    "parse_sandbox_effective_policy",
+    "parse_sandbox_host_request_cancelled_event",
+    "parse_sandbox_host_request_event",
+    "parse_sandbox_ignored_value",
+    "parse_sandbox_list_notes",
+    "parse_sandbox_locked",
+    "parse_sandbox_result_meta",
+    "parse_sandbox_session_paths",
+    "parse_sandbox_setting_values",
+    "parse_sandbox_state",
+    "parse_sandbox_status",
+    "parse_sandbox_status_active",
+    "parse_sandbox_status_off",
+    "parse_sandbox_status_unavailable",
+    "parse_sandbox_summary",
+    "parse_sandbox_update_event",
     "parse_select_option_detail",
     "parse_select_ui_request",
     "parse_session_credits",

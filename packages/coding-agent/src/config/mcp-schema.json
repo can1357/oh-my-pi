@@ -179,6 +179,17 @@
             "cwd": {
               "type": "string",
               "description": "Working directory used when spawning the stdio process."
+            },
+            "sandbox": {
+              "type": "boolean",
+              "default": false,
+              "description": "Run this server inside the OS sandbox while `sandbox.enabled` is on (writes limited to the workspace and temp dirs). With the sandbox off the server spawns normally. OMP-specific."
+            },
+            "sandboxNetwork": {
+              "type": "string",
+              "enum": ["allowlist", "deny", "allow"],
+              "default": "allow",
+              "description": "Network for the contained server: `allow` (default), `deny`, or `allowlist` (egress proxy with `sandbox.network.allowedHosts`). Only used with `sandbox: true`."
             }
           },
           "not": {

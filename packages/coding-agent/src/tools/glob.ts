@@ -6,6 +6,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
+import { containedGlob, withContainedFileAccess } from "../sandbox/file-access";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
@@ -99,7 +100,7 @@ export interface GlobToolOptions {
 	operations?: GlobOperations;
 	/** Remap slash-only paths to the session cwd before root-search validation. */
 	rootPathAlias?: boolean;
-	/** Glob backend (`natives.glob`). Override only in tests. */
+	/** Glob backend (`containedGlob`: `natives.glob`, in the contained host when contained). Override only in tests. */
 	nativeGlob?: typeof natives.glob;
 	/** Filesystem stat used before native scans. Override only in tests. */
 	stat?: typeof fs.promises.stat;
@@ -178,7 +179,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	) {
 		this.#customOps = options?.operations;
 		this.#rootPathAlias = options?.rootPathAlias === true;
-		this.#nativeGlob = options?.nativeGlob ?? natives.glob;
+		this.#nativeGlob = options?.nativeGlob ?? containedGlob;
 		this.#stat = options?.stat ?? fs.promises.stat;
 		this.#timeoutMs = options?.timeoutMs ?? DEFAULT_GLOB_TIMEOUT_MS;
 		if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) {
@@ -187,6 +188,17 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	}
 
 	async execute(
+		toolCallId: string,
+		params: typeof findSchema.infer,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<GlobToolDetails>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<GlobToolDetails>> {
+		// Under the OS sandbox, the directory walk of this call runs in the contained host.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: typeof findSchema.infer,
 		signal?: AbortSignal,

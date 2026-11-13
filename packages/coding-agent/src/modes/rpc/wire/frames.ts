@@ -140,6 +140,43 @@ export const frameDefs = {
 		{ type: "'config_update'", "model?": "ModelInfo", "thinkingLevel?": "ThinkingLevel" },
 		"A builtin slash command changed the model configuration.",
 	),
+	SandboxUpdateEvent: doc(
+		{ type: "'sandbox_update'", state: "SandboxState" },
+		"Sandbox state of the session's workspace, pushed on every change and once after startup when the sandbox is enabled.",
+	),
+	SandboxHostRequestEvent: doc(
+		{
+			type: "'sandbox_host_request'",
+			id: "string",
+			host: "string",
+			port: "number.integer",
+			timeoutMs: doc("number.integer", "Unanswered for this long, the request is denied and cancelled."),
+		},
+		"A contained command wants a host off the allowlist; answer with `respond_sandbox_host`. Sent only after `set_sandbox_host_prompts`.",
+	),
+	SandboxHostRequestCancelledEvent: doc(
+		{ type: "'sandbox_host_request_cancelled'", id: "string", reason: "'timeout' | 'aborted'" },
+		"A `sandbox_host_request` was denied without an answer: it timed out, or prompts were turned off or the session ended.",
+	),
+	SandboxAccessRequestEvent: doc(
+		{
+			type: "'sandbox_access_request'",
+			id: "string",
+			kind: "SandboxAccessKind",
+			target: doc("string", "Resolved absolute path, or canonical host name."),
+			intent: doc("string", "What the agent is doing and why it needs `target`, as the agent wrote it."),
+			"command?": doc("string", "The command that needs the access, verbatim."),
+			"alternative?": doc("string", "What the agent does instead when denied."),
+			effect: doc("string", "What a grant lets contained commands do, written by omp."),
+			workspace: "string",
+			canAlways: doc("boolean", "False when the backing list is locked: offer no `always`."),
+		},
+		"The agent asks for a path or host; answer with `respond_sandbox_access` (no timeout). Sent only after `set_sandbox_access_prompts`.",
+	),
+	SandboxAccessRequestCancelledEvent: doc(
+		{ type: "'sandbox_access_request_cancelled'", id: "string", reason: "'aborted'" },
+		"A `sandbox_access_request` was denied without an answer: its tool call was aborted, or prompts were turned off or the session ended.",
+	),
 	RpcFrameErrorEvent: doc(
 		{ type: "'rpc_frame_error'", "originalType?": "string", error: "string" },
 		"An event could not fit within the transport limits and was dropped.",

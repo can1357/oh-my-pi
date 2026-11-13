@@ -29,6 +29,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
+import { sandboxFileToolDenial } from "../../sandbox/file-tools";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
@@ -371,6 +372,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		if (resolved.policy === "deny") {
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
+		}
+		// The sandbox's filesystem policy binds in-process file tools as it binds contained commands:
+		// a path outside it is refused (whatever the approval mode) until `sandbox_request` grants it.
+		const pendingSandboxDenial = sandboxFileToolDenial({
+			settings: approvalSettings,
+			workspace: this.runner.cwd,
+			tool: this.tool,
+			args: resolvedArgs,
+			tier: resolved.tier,
+			requestTool: () => this.runner.hasNativeTool("sandbox_request"),
+		});
+		// Awaited only when there is something to check, so the common path keeps its timing.
+		const sandboxDenial = pendingSandboxDenial && (await pendingSandboxDenial);
+		if (sandboxDenial !== undefined) {
+			cancelPreflight();
+			throw new Error(sandboxDenial);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// Outer approvals only cover the original input. `xd://` approval skips

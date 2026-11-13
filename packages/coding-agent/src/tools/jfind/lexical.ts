@@ -4,6 +4,7 @@
  * judgment is spent.
  */
 import * as natives from "@oh-my-pi/pi-natives";
+import { containedGrep } from "../../sandbox/file-access";
 import { countOccurrences } from "./text";
 
 export interface GrepIndex {
@@ -45,7 +46,7 @@ export async function grepIndex(
 	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0 };
 	if (keywords.length === 0) return index;
 	const { perFileKw } = index;
-	const result = await natives.grep({
+	const result = await containedGrep({
 		pattern: keywords.map(escapeRegex).join("|"),
 		path: root,
 		ignoreCase: true,

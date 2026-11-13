@@ -10,6 +10,7 @@
 import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs";
 import { InternalUrlRouter } from "../internal-urls/router";
+import { isPublicAddress, parseIPv4 } from "../utils/ip-address";
 import { approvalCacheKeyForPath } from "./approval-cache";
 import { resolveToCwd } from "./path-utils";
 
@@ -45,31 +46,13 @@ export function isApprovalPublicUrl(url: string): boolean {
 	}
 	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
 	if (host.length === 0) return false;
-	// Intranet names: a single label, or a reserved local suffix.
+	// Intranet names: a single label (IPv6 literals included: `URL` writes them dotless), or a
+	// reserved local suffix.
 	if (!host.includes(".") || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".internal")) {
 		return false;
 	}
-	const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-	if (v4) {
-		const a = Number(v4[1]);
-		const b = Number(v4[2]);
-		if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-		if (a === 192 && b === 168) return false;
-		if (a === 172 && b >= 16 && b <= 31) return false;
-		if (a === 169 && b === 254) return false;
-		if (a === 100 && b >= 64 && b <= 127) return false;
-		return true;
-	}
-	// IPv6 literals: loopback, link-local, unique-local and v4-mapped ranges are private.
-	if (host.includes(":")) {
-		return !(
-			host === "::1" ||
-			host.startsWith("fe80:") ||
-			host.startsWith("fc") ||
-			host.startsWith("fd") ||
-			host.startsWith("::ffff:")
-		);
-	}
+	// IPv4 literals: loopback, private, link-local, reserved and multicast ranges are private.
+	if (parseIPv4(host)) return isPublicAddress(host);
 	return true;
 }
 

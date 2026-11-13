@@ -1,14 +1,22 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { glob } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import {
+	containedFileAccess,
+	containedGlob,
+	outsideContainedFileAccess,
+	readFileText,
+	withContainedFileAccess,
+} from "../sandbox/file-access";
+import { sandboxWritePathsDenial } from "../sandbox/file-tools";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, workspaceEditPaths } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
@@ -848,7 +856,11 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	}
 
 	try {
-		await applyWorkspaceEditWithLsp(params.edit, client.cwd);
+		// The server sends this outside any tool call: its file work still runs in the contained
+		// host under the OS sandbox. A call already contained (the lsp tool's own) keeps its host.
+		const { edit } = params;
+		const apply = () => applyWorkspaceEditWithLsp(edit, client.cwd);
+		await (containedFileAccess() ? apply() : withContainedFileAccess({ cwd: client.cwd }, apply));
 		await sendResponse(client, message.id, { applied: true }, "workspace/applyEdit");
 	} catch (err) {
 		await sendResponse(client, message.id, { applied: false, failureReason: String(err) }, "workspace/applyEdit");
@@ -938,6 +950,9 @@ export async function applyWorkspaceEditWithLsp(
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<string[]> {
+	// The server picks the files: hold them to the sandbox's write policy before anything changes.
+	const denial = await sandboxWritePathsDenial(cwd, "lsp", workspaceEditPaths(edit));
+	if (denial !== undefined) throw new ToolError(denial);
 	const executed: ExecutedWorkspaceChange[] = [];
 	let applied: string[];
 	try {
@@ -1148,7 +1163,13 @@ function commandBasename(command: string): string {
  * can tell whether the crate set changed since initialize (gitignored dirs such as `target/` skipped).
  */
 export async function listCargoManifests(root: string, signal?: AbortSignal): Promise<string> {
-	const { matches } = await glob({ pattern: "**/Cargo.toml", path: root, gitignore: true, cache: false, signal });
+	const { matches } = await containedGlob({
+		pattern: "**/Cargo.toml",
+		path: root,
+		gitignore: true,
+		cache: false,
+		signal,
+	});
 	return matches
 		.map(match => match.path)
 		.sort()
@@ -1523,7 +1544,8 @@ export async function getOrCreateClient(
 
 		// Start background message reader. The client is shared by every session
 		// in the process, so its reader's records name none of them.
-		logger.withoutContext(() => startMessageReader(client));
+		// The pump outlives the call that started the client: it must not inherit that call's contained host.
+		logger.withoutContext(() => outsideContainedFileAccess(() => startMessageReader(client)));
 
 		try {
 			// Send initialize request
@@ -2056,7 +2078,7 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 	info.lastUsedAt = Date.now();
 
 	throwIfAborted(signal);
-	const text = saveIncludesText(client) ? await Bun.file(filePath).text() : undefined;
+	const text = saveIncludesText(client) ? await readFileText(filePath) : undefined;
 	throwIfAborted(signal);
 	await sendNotification(
 		client,

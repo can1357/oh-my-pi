@@ -10,6 +10,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { buildPathTree, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
+import { containedGlob } from "../../sandbox/file-access";
 import { type InternalUrlFilesystem, type UrlFileStat, UrlFsError } from "../../internal-urls/url-filesystem";
 import { resolveSearchBase, resolveSearchResultPath } from "../path-utils";
 
@@ -259,7 +260,7 @@ export async function listFiles(root: SearchRoot, options: ListFilesOptions): Pr
 	}
 	// `sortByMtime` is the walker mode that stats entries, which is the only
 	// way the native glob reports sizes; the order is re-established below.
-	const result = await natives.glob({
+	const result = await containedGlob({
 		pattern: "*",
 		path: root.path,
 		recursive: true,

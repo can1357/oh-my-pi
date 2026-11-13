@@ -6,19 +6,30 @@
  * writes `{"type":"interrupt","id":…}` naming the execution, then sends
  * `kill("SIGINT")`, which interrupts that cell with a `KeyboardInterrupt`.
  * Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
- * timeout.
+ * timeout. When the sandbox applies to `eval`, the runner is launched contained
+ * through `SandboxRuntime` (see `spawnContainedKernel` for signal mapping).
  */
 import * as path from "node:path";
 import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
+import { containedEnv, definedEnv } from "../../sandbox/env";
+import { readSandboxConfig } from "../../sandbox/policy";
+import { SandboxRuntime, type SandboxSpawnRequest } from "../../sandbox/runtime";
 import {
 	BaseKernel,
 	getRemainingTimeMs,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
+	type KernelProcess,
 	type KernelStartOptions,
 } from "../kernel-base";
-import { type BackendProbeOptions, probeCandidates } from "../probe";
+import {
+	awaitBoundedProbe,
+	type BackendProbeOptions,
+	type BoundedProbeRunner,
+	probeBound,
+	probeCandidates,
+} from "../probe";
 import { stageRunnerScript } from "../runner-cache";
 import type { ShadowPlan } from "../speculation/types";
 import { PYTHON_PRELUDE } from "./prelude";
@@ -27,6 +38,7 @@ import {
 	enumeratePythonRuntimes,
 	filterEnv,
 	type PythonRuntime,
+	pythonReadRoots,
 	resolveExplicitPythonRuntime,
 	resolvePythonRuntime,
 } from "./runtime";
@@ -170,13 +182,17 @@ async function probePythonKernelAvailability(
 		if (runtimes.length === 0) {
 			return { ok: false, reason: "Python executable not found on PATH" };
 		}
+		// While eval runs contained, a workspace-controlled interpreter (`.venv/bin/python`, a project
+		// `python.interpreter`) must not execute on the host: probe the candidates inside the sandbox.
+		// Ruled out by configuration: no lookup, the host probe runs exactly as before.
+		const runProbe = evalSandboxRuledOut() ? undefined : await containedProbeRunner(cwd, runtimes);
 		const result = await probeCandidates(
 			runtimes.map(runtime => ({
 				command: [runtime.pythonPath, "-c", "import sys;sys.exit(0)"],
 				env: runtime.env,
 				label: runtime.pythonPath,
 			})),
-			{ cwd, signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs },
+			{ cwd, signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs, runProbe },
 		);
 		if (result.ok) {
 			const runtime = runtimes[result.index];
@@ -201,13 +217,40 @@ async function probePythonKernelAvailability(
 	}
 }
 
+/**
+ * Fingerprint of the sandbox policy an `eval` kernel for `cwd` starts under now; `undefined` when
+ * it would run uncontained. Throws when the sandbox is required but unavailable (`fallback: block`).
+ * When the effective configuration already rules containment out (sandbox off, or `eval` outside
+ * its scope) this answers without awaiting, so the uncontained path keeps its exact ordering
+ * between concurrent callers sharing a retained kernel.
+ */
+export function evalSandboxFingerprint(cwd: string): Promise<string | undefined> | undefined {
+	if (evalSandboxRuledOut()) return undefined;
+	return SandboxRuntime.for(cwd).then(runtime => (runtime.applies("eval") ? runtime.fingerprint() : undefined));
+}
+
+function evalSandboxRuledOut(): boolean {
+	let settings: Settings;
+	try {
+		settings = Settings.instance;
+	} catch {
+		return false;
+	}
+	const config = readSandboxConfig(settings);
+	return !config.enabled || !config.scope.includes("eval");
+}
+
 export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 	#installedPreludes = new Map<string, PythonPreludeSource>();
 
-	/** @param pythonPath Interpreter executable this kernel runs on; reported as the runtime in eval state. */
+	/**
+	 * @param pythonPath Interpreter executable this kernel runs on; reported as the runtime in eval state.
+	 * @param sandbox Fingerprint of the sandbox policy the kernel runs contained under; `undefined` when uncontained.
+	 */
 	private constructor(
 		id: string,
 		readonly pythonPath: string,
+		readonly sandbox: string | undefined,
 	) {
 		super(id, {
 			languageName: "Python",
@@ -329,33 +372,57 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 				? resolveExplicitPythonRuntime(options.interpreter, options.cwd, filterEnv(shellEnv))
 				: resolvePythonRuntime(options.cwd, filterEnv(shellEnv));
 		}
-		const spawnEnv: Record<string, string> = {};
-		for (const [key, value] of Object.entries(runtime.env)) {
-			if (typeof value === "string") spawnEnv[key] = value;
-		}
-		for (const [key, value] of Object.entries(options.env ?? {})) {
-			if (typeof value === "string") spawnEnv[key] = value;
-		}
-		spawnEnv.PYTHONUNBUFFERED = "1";
-		spawnEnv.PYTHONIOENCODING = "utf-8";
+		const kernelEnv: Record<string, string> = {
+			...definedEnv(options.env ?? {}),
+			PYTHONUNBUFFERED: "1",
+			PYTHONIOENCODING: "utf-8",
+		};
+		const spawnEnv: Record<string, string> = { ...definedEnv(runtime.env), ...kernelEnv };
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
-		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);
+		// No sandbox lookup at all when the configuration rules containment out.
+		const sandbox = evalSandboxRuledOut() ? undefined : await SandboxRuntime.for(options.cwd);
+		const contained = sandbox?.applies("eval") === true;
+		if (sandbox && contained) {
+			const closed = closedLoopbackMode(sandbox, await Settings.init());
+			if (closed) {
+				throw new Error(
+					`Python kernel cannot start: the Windows sandbox closes loopback in network mode ${closed}, and the Python kernel needs it. Set sandbox.network.windowsLoopback to true (contained commands can then reach every service on this machine's 127.0.0.1) or use network mode allow.`,
+				);
+			}
+		}
+		const kernel = new PythonKernel(
+			Snowflake.next(),
+			runtime.pythonPath,
+			contained ? sandbox?.fingerprint() : undefined,
+		);
 
-		const proc = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {
-			cwd: options.cwd,
-			detached: shouldDetachKernel(process.platform),
-			env: spawnEnv,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: shouldHideKernelWindow({
-				platform: process.platform,
-				hostHasInheritableConsole: hostHasInheritableConsole(),
-			}),
-		});
-
-		kernel.setProcess(proc);
+		const argv = [runtime.pythonPath, "-u", scriptPath];
+		if (sandbox && contained) {
+			kernel.setProcess(
+				await spawnContainedKernel(sandbox, {
+					argv,
+					cwd: options.cwd,
+					env: containedEnv(runtime.env, kernelEnv),
+					extraRead: await pythonReadRoots(runtime, scriptPath),
+					extraWrite: options.sandboxExtraWrite,
+				}),
+			);
+		} else {
+			const proc = Bun.spawn(argv, {
+				cwd: options.cwd,
+				detached: shouldDetachKernel(process.platform),
+				env: spawnEnv,
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				windowsHide: shouldHideKernelWindow({
+					platform: process.platform,
+					hostHasInheritableConsole: hostHasInheritableConsole(),
+				}),
+			});
+			kernel.setProcess(proc);
+		}
 
 		const startup = { signal: options.signal, deadlineMs: options.deadlineMs };
 		const startupBudget = Math.min(getRemainingTimeMs(startup.deadlineMs) ?? STARTUP_TIMEOUT_MS, STARTUP_TIMEOUT_MS);
@@ -425,6 +492,19 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 	}
 }
 
+/**
+ * The network mode a contained kernel would run under when the Windows sandbox keeps loopback
+ * closed there, else `undefined`. Loopback is closed outside network `allow` unless
+ * `sandbox.network.windowsLoopback` opens it, and the kernel (asyncio's socketpair, the TCP tool
+ * bridge) can never start without it: refusing up front spares a startup timeout per attempt.
+ */
+function closedLoopbackMode(sandbox: SandboxRuntime, settings: Settings): string | undefined {
+	if (process.platform !== "win32") return undefined;
+	const status = sandbox.status();
+	if (status.state !== "active" || status.network === "allow") return undefined;
+	return readSandboxConfig(settings).loopback ? undefined : status.network;
+}
+
 function buildInitScript(cwd: string, env?: Record<string, string | undefined>): string {
 	const envEntries = Object.entries(env ?? {}).filter(([, value]) => value !== undefined);
 	const envPayload = Object.fromEntries(envEntries);
@@ -436,4 +516,71 @@ function buildInitScript(cwd: string, env?: Record<string, string | undefined>):
 		"for __omp_key, __omp_val in __omp_env.items():\n    os.environ[__omp_key] = __omp_val",
 		"if __omp_cwd not in sys.path:\n    sys.path.insert(0, __omp_cwd)",
 	].join("\n");
+}
+
+/**
+ * A probe runner that executes interpreter candidates inside the sandbox when it applies to `eval`
+ * for `cwd`, so a workspace-controlled interpreter (`.venv/bin/python`, a project
+ * `python.interpreter`) never runs on the host; `undefined` when probes run on the host as before.
+ * Same bound/abort/result semantics as {@link runBoundedProbe}; no network.
+ */
+async function containedProbeRunner(
+	cwd: string,
+	runtimes: readonly PythonRuntime[],
+): Promise<BoundedProbeRunner | undefined> {
+	const sandbox = await SandboxRuntime.for(cwd);
+	if (!sandbox.applies("eval")) return undefined;
+	return async (command, { env, signal, timeoutMs }) => {
+		if (signal?.aborted) return { exitCode: null, timedOut: false, aborted: true };
+		const runtime = runtimes.find(candidate => candidate.pythonPath === command[0]);
+		const child = await sandbox.spawn({
+			argv: command,
+			cwd,
+			env: containedEnv(env),
+			extraRead: runtime ? await pythonReadRoots(runtime) : undefined,
+			network: "deny",
+		});
+		child.stdin.end();
+		void new Response(child.stdout).arrayBuffer().catch(() => undefined);
+		void new Response(child.stderr).arrayBuffer().catch(() => undefined);
+		return awaitBoundedProbe(child.exited, () => child.kill(), probeBound(timeoutMs), signal);
+	};
+}
+
+/**
+ * Launch the runner contained and adapt it to the kernel's process surface. Termination maps to
+ * the contained tree kill. SIGINT (cell interrupt) reaches the runner directly only on seatbelt,
+ * where the reported pid is the runner itself (`/bin/sh` exec'd into Python, its own session).
+ * Other backends report a wrapper pid (bwrap, processcontainer) whose signal disposition would
+ * kill the tree, so there the interrupt is not delivered and the kernel's interrupt escalation
+ * restarts the kernel after its grace window.
+ */
+async function spawnContainedKernel(sandbox: SandboxRuntime, request: SandboxSpawnRequest): Promise<KernelProcess> {
+	const child = await sandbox.spawn(request);
+	const status = sandbox.status();
+	const directInterrupt = status.state === "active" && status.backend === "seatbelt";
+	return {
+		pid: child.pid,
+		stdin: child.stdin,
+		stdout: child.stdout,
+		stderr: child.stderr,
+		exited: child.exited,
+		kill(signal) {
+			if (signal !== "SIGINT") {
+				child.kill();
+				return;
+			}
+			if (!directInterrupt) {
+				logger.debug("Sandboxed Python kernel cannot receive SIGINT; interrupt escalates to a restart", {
+					backend: status.state === "active" ? status.backend : undefined,
+				});
+				return;
+			}
+			try {
+				process.kill(child.pid, "SIGINT");
+			} catch {
+				// Already gone.
+			}
+		},
+	};
 }

@@ -1,10 +1,14 @@
 import { BashInteractiveOverlayComponent } from "@oh-my-pi/pi-tui/tools/bash-interactive";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { type PtyRunResult, PtySession, type PtyStartOptions } from "@oh-my-pi/pi-natives";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { resolveBashSandbox } from "../exec/bash-executor";
+import { containedEnv } from "../sandbox/env";
+import { SandboxedPtySession, sandboxProcessEnv } from "../sandbox/shell-client";
+import type { SandboxResultMeta } from "../sandbox/types";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 
@@ -14,6 +18,16 @@ export interface BashInteractiveResult extends OutputSummary {
 	timedOut: boolean;
 	/** Terminal graphics extracted from raw PTY output before transcript sanitization. */
 	images?: ImageContent[];
+	/** Set when the command ran inside the OS sandbox. */
+	sandbox?: SandboxResultMeta;
+}
+
+/** The `PtySession` surface this runner drives: native, or relayed from a sandbox host. */
+interface InteractivePty {
+	start(options: PtyStartOptions, onChunk?: (error: Error | null, chunk: string) => void): Promise<PtyRunResult>;
+	write(data: string): void;
+	resize(cols: number, rows: number): void;
+	kill(): void;
 }
 
 export async function runInteractiveBashPty(
@@ -26,9 +40,13 @@ export async function runInteractiveBashPty(
 		env?: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
+		/** The agent session's workspace; the command runs in the OS sandbox when it applies there. */
+		sandboxWorkspace?: string;
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
+	// Throws when the sandbox is required but unavailable: never a silent uncontained PTY.
+	const sandbox = await resolveBashSandbox(options.sandboxWorkspace);
 	// Load the xterm Terminal ctor here (async boundary) — the ui.custom factory below is sync.
 	const XtermTerminal = await loadXtermTerminal();
 	const { shell: resolvedShell, env: shellEnv } = settings.getShellConfig();
@@ -50,7 +68,10 @@ export async function runInteractiveBashPty(
 	try {
 		const result = await ui.custom<BashInteractiveResult>(
 			(tui, uiTheme, _keybindings, done) => {
-				const session = new PtySession();
+				const session: InteractivePty = sandbox
+					? new SandboxedPtySession(sandbox.runtime, { cwd: sandbox.workspace })
+					: new PtySession();
+				const blockedSince = Date.now();
 				const component = new BashInteractiveOverlayComponent(
 					options.command,
 					uiTheme,
@@ -69,12 +90,18 @@ export async function runInteractiveBashPty(
 						const tail = graphics.finish();
 						if (tail) sink.push(tail);
 						const [summary, images] = await Promise.all([sink.dump(), graphics.images()]);
+						const meta = sandbox?.runtime.resultMeta({
+							blockedSince,
+							output: run.exitCode !== 0 ? summary.output : undefined,
+							exitCode: run.exitCode,
+						});
 						done({
 							exitCode: run.exitCode,
 							cancelled: run.cancelled,
 							timedOut: run.timedOut,
 							...summary,
 							...(images.length > 0 ? { images } : {}),
+							...(meta ? { sandbox: meta } : {}),
 						});
 					})();
 				};
@@ -110,8 +137,14 @@ export async function runInteractiveBashPty(
 							cwd: options.cwd,
 							timeoutMs: options.timeoutMs,
 							// A real TERM so editors, pagers, and TUIs behave like a normal
-							// terminal; direnv's values win over everything.
-							env: { ...interactiveShellEnv, TERM: "xterm-256color", ...options.env },
+							// terminal; direnv's values win over everything. Contained: the
+							// container's temp dir and (allowlist) proxy apply over all of it.
+							env: sandbox
+								? sandboxProcessEnv(
+										sandbox.runtime,
+										containedEnv(interactiveShellEnv, { TERM: "xterm-256color", ...options.env }),
+									)
+								: { ...interactiveShellEnv, TERM: "xterm-256color", ...options.env },
 							signal: options.signal,
 							cols,
 							rows,

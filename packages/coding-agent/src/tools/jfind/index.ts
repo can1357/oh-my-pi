@@ -20,6 +20,7 @@ import {
 	sharedJudgmentCache,
 } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
+import { withContainedFileAccess } from "../../sandbox/file-access";
 import { SPOTLIGHT_ENTRY } from "../../spotlight/types";
 import type { ToolSession } from "..";
 import { resolveToolTier } from "../approval";
@@ -86,6 +87,16 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	constructor(private readonly session: ToolSession) {}
 
 	async execute(
+		toolCallId: string,
+		params: FindToolInput,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<FindToolDetails>,
+	): Promise<AgentToolResult<FindToolDetails>> {
+		// Under the OS sandbox, the tree walk, lexical scan and candidate reads of this call run in the contained host.
+		return withContainedFileAccess(this.session, () => this.#execute(toolCallId, params, signal, onUpdate));
+	}
+
+	async #execute(
 		toolCallId: string,
 		params: FindToolInput,
 		signal?: AbortSignal,

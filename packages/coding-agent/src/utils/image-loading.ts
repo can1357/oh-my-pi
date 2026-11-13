@@ -1,4 +1,3 @@
-import * as fs from "node:fs/promises";
 import {
 	MAX_IMAGE_INPUT_BYTES,
 	SUPPORTED_INPUT_IMAGE_MIME_TYPES,
@@ -7,10 +6,11 @@ import {
 	InvalidImageDataError,
 	imageDecodeFailureReason,
 } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { peekReadableFile, readFileBytes } from "../sandbox/file-access";
 import * as path from "node:path";
 import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { $which, isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
+import { $which, IMAGE_METADATA_HEADER_BYTES, isRecord, logger, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
@@ -342,7 +342,7 @@ export async function loadImageInput(options: LoadImageInputOptions): Promise<Lo
 	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd);
 	const metadata = options.detectedMimeType
 		? { mimeType: options.detectedMimeType }
-		: await readImageMetadata(resolvedPath);
+		: await peekReadableFile(resolvedPath, IMAGE_METADATA_HEADER_BYTES, parseImageMetadata);
 	const mimeType = metadata?.mimeType;
 	if (!mimeType) return null;
 
@@ -351,7 +351,7 @@ export async function loadImageInput(options: LoadImageInputOptions): Promise<Lo
 		throw new ImageInputTooLargeError(stat.size, maxBytes);
 	}
 
-	const inputBuffer = await fs.readFile(resolvedPath);
+	const inputBuffer = await readFileBytes(resolvedPath);
 	return loadInMemoryImageInput({
 		image: { type: "image", data: inputBuffer.toBase64(), mimeType },
 		bytes: inputBuffer,
@@ -375,7 +375,7 @@ export async function loadSvgImageInput(options: LoadImageInputOptions): Promise
 		throw new ImageInputTooLargeError(stat.size, maxBytes);
 	}
 
-	const source = await fs.readFile(resolvedPath);
+	const source = await readFileBytes(resolvedPath);
 	if (source.byteLength > maxBytes) {
 		throw new ImageInputTooLargeError(source.byteLength, maxBytes);
 	}

@@ -9,6 +9,12 @@ CMAKE_GENERATOR = "Ninja"
 # (`packages/natives/scripts/build-bindings.ts`): a system libpcre2 would make
 # `obash` load a Homebrew dylib at every start and depend on it.
 PCRE2_SYS_STATIC = "1"
+# mxc-sdk: build without Microsoft telemetry routing. Newer MXC releases route
+# Windows release builds through a bundled telemetry component unless this is
+# set and empty; 1.0.1 routes only when MXC_TELEMETRY_PROVIDER_GROUP_GUID is
+# set, so this pins the unrouted build across upgrades. Mirrored for Bazel by
+# the mxc-sdk crate.annotation in MODULE.bazel.
+MXC_TELEMETRY_COMPONENT_PATH = ""
 # Store each crate's metadata only in its .rmeta instead of duplicating it into
 # every rlib. Measured on a reqwest-sized graph: 196 MB -> 130 MB target dir at
 # identical build times. Requires the pinned nightly (rust-toolchain.toml).

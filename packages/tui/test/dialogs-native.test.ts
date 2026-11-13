@@ -302,7 +302,7 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
-	it("approval: the session row sits between Approve and Deny; the arrows reach it, Enter or a Tern click takes it", () => {
+	it("approval: the session choice sits between Approve and Deny; the arrows reach it, Enter or a Tern button takes it", () => {
 		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
 		try {
 			const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
@@ -314,28 +314,48 @@ describe("dialogs under a native surface", () => {
 				stripVTControlCharacters(dialog.render(80).join("\n"))
 					.split("\n")
 					.filter(line => /Approve|Deny/.test(line));
-			const choices = () => find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
-			const selected = () => {
-				const props = choices().node.p;
-				return props && "selected" in props ? props.selected : undefined;
-			};
 			expect(rows().map(line => line.replace(/[│❯>\s]+/g, " ").trim())).toEqual([
 				"Approve",
 				"Approve bash for this session",
 				"Deny",
 			]);
+			// Tern draws the choices once, as buttons, with no list repeating them.
+			const described = dialog.describe();
+			expect(find(described, node => node.k === "list")).toBeUndefined();
+			const buttons = find(described, node => node.p?.role === "omp.actions")!;
+			expect(buttons.node.c?.flatMap(child => ("k" in child && child.k !== "spacer" ? [child.key] : []))).toEqual([
+				"session",
+				"deny",
+				"approve",
+			]);
 			dialog.handleInput(DOWN);
-			// Tern's list shows the same highlight the arrows moved.
-			expect(selected()).toBe("session");
 			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
 			dialog.handleInput(ENTER);
 			expect(onSession).toHaveBeenCalledTimes(1);
 			expect(callbacks.onApprove).not.toHaveBeenCalled();
 
+			const sessionClicked = vi.fn();
+			new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", callbacks, {
+				session: {
+					label: "Approve bash for this session",
+					onApprove: sessionClicked,
+				},
+			}).handleNativeEvent({
+				type: "action",
+				key: "session",
+				act: "session",
+				mods: [],
+			});
+			expect(sessionClicked).toHaveBeenCalledTimes(1);
+
 			const clicked = { onApprove: vi.fn(), onDeny: vi.fn() };
 			const pointed = new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", clicked);
-			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
-			pointed.handleNativeEvent({ type: "select", key: list.path, item: "deny" });
+			pointed.handleNativeEvent({
+				type: "action",
+				key: "deny",
+				act: "deny",
+				mods: [],
+			});
 			expect(clicked.onDeny).toHaveBeenCalledTimes(1);
 		} finally {
 			now.mockRestore();
@@ -375,9 +395,23 @@ describe("dialogs under a native surface", () => {
 				grants: [folder, file],
 				onGrant: clicked,
 			});
-			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
-			pointed.handleNativeEvent({ type: "select", key: list.path, item: "grant0" });
-			expect(clicked).toHaveBeenCalledWith(folder, false);
+			// The remember toggle is a button too: it relabels the grants instead of answering.
+			pointed.handleNativeEvent({
+				type: "action",
+				key: "grants/remember",
+				act: "remember",
+				mods: [],
+			});
+			const grant0 = find(pointed.describe(), node => node.p?.role === "omp.btn" && node.key === "grant0")!;
+			expect(JSON.stringify(grant0.node.p)).toContain("Always Approve Directory: ~/src");
+			expect(clicked).not.toHaveBeenCalled();
+			pointed.handleNativeEvent({
+				type: "action",
+				key: "grants/grant0",
+				act: "grant0",
+				mods: [],
+			});
+			expect(clicked).toHaveBeenCalledWith(folder, true);
 		} finally {
 			now.mockRestore();
 		}
@@ -399,8 +433,6 @@ describe("dialogs under a native surface", () => {
 		expect(highlighted()).toContain("Approve");
 		dialog.handleInput("k");
 		expect(highlighted()).toContain("Deny and send message");
-		const choices = find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
-		expect(choices.node.p && "selected" in choices.node.p ? choices.node.p.selected : undefined).toBe("deny");
 		draft = "";
 		expect(highlighted()).toContain("Approve");
 		expect(highlighted()).not.toContain("Deny");

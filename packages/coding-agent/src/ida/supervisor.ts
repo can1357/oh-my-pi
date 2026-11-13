@@ -1,6 +1,7 @@
 /**
- * Supervisor for one IDA Python worker (`worker.py`), run inside the broker-supervised IDA
- * host daemon (`host.ts`).
+ * Supervisor for one IDA Python worker (`worker.py`), run inside the IDA host (`host.ts`): the
+ * broker-supervised daemon, or, while the OS sandbox is active, the omp process itself, which
+ * then spawns the worker contained (`contained.ts`).
  *
  * idalib supports one kernel and one open database per process, so each database gets its own
  * worker. The worker speaks NDJSON over stdin/stdout; requests are serialized, dirty databases
@@ -10,7 +11,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type FileLockHandle, logger, readLines, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { Subprocess } from "bun";
 import { hostHasInheritableConsole, shouldHideKernelWindow } from "../eval/py/spawn-options";
 import { stageRunnerScript } from "../eval/runner-cache";
 import type { IdaRuntime } from "./runtime";
@@ -55,6 +55,57 @@ export interface IdaDatabaseInfo {
 export interface IdaRequestOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+}
+
+/** The process surface {@link IdaWorker} drives: Bun's `Subprocess`, or a contained sandbox child. */
+export interface IdaWorkerProcess {
+	readonly pid: number;
+	readonly stdin: { write(data: string): unknown; flush(): unknown };
+	readonly stdout: ReadableStream<Uint8Array>;
+	readonly stderr: ReadableStream<Uint8Array>;
+	readonly exited: Promise<number>;
+	kill(signal?: "SIGINT" | "SIGKILL"): void;
+}
+
+/** A started worker process and how a running request is interrupted. */
+export interface IdaWorkerLaunch {
+	proc: IdaWorkerProcess;
+	/**
+	 * `frame`: write `{"interrupt": id}` to stdin (the worker reads it on a thread). `signal`: SIGINT.
+	 * A worker that signals cannot reach (Windows, or behind a sandbox wrapper) must use frames.
+	 */
+	interrupt: "frame" | "signal";
+}
+
+/** Start the worker process running `script` (the staged `worker.py`) for `loc`. */
+export type IdaWorkerSpawner = (loc: IdbLocation, runtime: IdaRuntime, script: string) => Promise<IdaWorkerLaunch>;
+
+/** Options for {@link IdaWorker.start}. */
+export interface IdaWorkerStartOptions {
+	/** Defaults to {@link spawnIdaWorker}: an ordinary child of this process. */
+	spawn?: IdaWorkerSpawner;
+	/** Receives the worker's stderr; defaults to this process's stderr (the daemon log). */
+	onStderr?: (text: string) => void;
+}
+
+/** The worker as an ordinary child of this process, in this process's process group. */
+export async function spawnIdaWorker(loc: IdbLocation, runtime: IdaRuntime, script: string): Promise<IdaWorkerLaunch> {
+	const proc = Bun.spawn([runtime.pythonPath, "-u", script], {
+		cwd: loc.dir,
+		env: runtime.env,
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+		// Stay in the host's process group: the broker's stop/kill signals the whole group.
+		// worker.py ignores SIGTERM so the host can save and close it first.
+		detached: false,
+		windowsHide: shouldHideKernelWindow({
+			platform: process.platform,
+			hostHasInheritableConsole: hostHasInheritableConsole(),
+		}),
+	});
+	// Windows has no per-process SIGINT (kill terminates it); worker.py reads an interrupt frame instead.
+	return { proc, interrupt: process.platform === "win32" ? "frame" : "signal" };
 }
 
 interface IdaOpenResult extends IdaDatabaseInfo {
@@ -110,7 +161,9 @@ export class IdaWorker {
 	readonly pid: number;
 	#idbPath: string;
 	#info: IdaDatabaseInfo = { module: "", format: "", arch: "", bitness: 0 };
-	readonly #proc: Subprocess<"pipe", "pipe", "pipe">;
+	readonly #proc: IdaWorkerProcess;
+	readonly #interrupt: IdaWorkerLaunch["interrupt"];
+	readonly #onStderr: (text: string) => void;
 	readonly #lock: FileLockHandle;
 	readonly #streamsDrained: Promise<unknown>;
 	#queue: Promise<void> = Promise.resolve();
@@ -136,16 +189,20 @@ export class IdaWorker {
 
 	private constructor(
 		loc: IdbLocation,
-		proc: Subprocess<"pipe", "pipe", "pipe">,
+		launch: IdaWorkerLaunch,
 		lock: FileLockHandle,
 		idleCloseMs: number,
+		onStderr: (text: string) => void,
 	) {
+		const { proc } = launch;
 		this.id = loc.id;
 		this.sourcePath = loc.sourcePath;
 		this.fat = loc.fat;
 		this.pid = proc.pid;
 		this.#idbPath = loc.openPath;
 		this.#proc = proc;
+		this.#interrupt = launch.interrupt;
+		this.#onStderr = onStderr;
 		this.#lock = lock;
 		this.#idleCloseMs = idleCloseMs;
 		this.#streamsDrained = Promise.all([this.#readStdout(proc.stdout), this.#drainStderr(proc.stderr)]);
@@ -163,23 +220,11 @@ export class IdaWorker {
 		runtime: IdaRuntime,
 		lock: FileLockHandle,
 		idleCloseMs: number,
+		options: IdaWorkerStartOptions = {},
 	): Promise<IdaWorker> {
 		const script = await stageRunnerScript("omp-ida-worker", "py", IDA_WORKER);
-		const proc = Bun.spawn([runtime.pythonPath, "-u", script], {
-			cwd: loc.dir,
-			env: runtime.env,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			// Stay in the host's process group: the broker's stop/kill signals the whole group.
-			// worker.py ignores SIGTERM so the host can save and close it first.
-			detached: false,
-			windowsHide: shouldHideKernelWindow({
-				platform: process.platform,
-				hostHasInheritableConsole: hostHasInheritableConsole(),
-			}),
-		});
-		const db = new IdaWorker(loc, proc, lock, idleCloseMs);
+		const launch = await (options.spawn ?? spawnIdaWorker)(loc, runtime, script);
+		const db = new IdaWorker(loc, launch, lock, idleCloseMs, options.onStderr ?? writeProcessStderr);
 		try {
 			const opened = await db.request<IdaOpenResult>("open", { path: loc.openPath, new: loc.isNew });
 			if (db.#exitCode !== null) throw db.#exitError();
@@ -387,8 +432,7 @@ export class IdaWorker {
 			}
 
 			try {
-				if (process.platform === "win32") {
-					// Windows has no per-process SIGINT (kill terminates); worker.py reads this frame on its stdin thread.
+				if (this.#interrupt === "frame") {
 					await this.#writeFrame(`${JSON.stringify({ interrupt: id })}\n`);
 				} else {
 					this.#proc.kill("SIGINT");
@@ -466,8 +510,7 @@ export class IdaWorker {
 
 	#appendStderr(text: string): void {
 		if (!text) return;
-		// The host's output is the daemon log (`omp ps logs`).
-		process.stderr.write(text);
+		this.#onStderr(text);
 		const tail = this.#stderrTail + text;
 		this.#stderrTail = tail.length > STDERR_TAIL_CHARS ? tail.slice(-STDERR_TAIL_CHARS) : tail;
 	}
@@ -506,6 +549,11 @@ export class IdaWorker {
 	#release(): void {
 		this.#lock.release();
 	}
+}
+
+/** The default worker stderr sink: the host daemon's log. */
+function writeProcessStderr(text: string): void {
+	process.stderr.write(text);
 }
 
 /** Delete everything a failed creation left in the store dir except the staged input and the lock file. */

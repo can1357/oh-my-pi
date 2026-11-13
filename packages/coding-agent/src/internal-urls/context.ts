@@ -3,9 +3,11 @@
  * their {@link ResolveContext}/{@link WriteContext} here instead of assembling
  * per-tool literals, so every handler sees the same caller identity.
  */
+import * as fs from "node:fs";
 import type { ToolSession } from "../tools";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
+import { InternalUrlRouter } from "./router";
 import type { ResolveContext, WriteContext } from "./types";
 
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
@@ -70,4 +72,15 @@ export function sessionWriteContext(
 		session,
 		toolCall: options.toolCall,
 	};
+}
+
+/**
+ * Roots of the session's sandbox-scope URL schemes (`local://`), created so a contained process
+ * (bash host, eval kernel) can write them; the policy grants them as extra writable roots.
+ */
+export function sessionSandboxWritableRoots(session: ToolSession | undefined): string[] {
+	if (!session) return [];
+	const roots = InternalUrlRouter.instance().sandboxRoots(sessionResolveContext(session));
+	for (const root of roots) fs.mkdirSync(root, { recursive: true });
+	return roots;
 }

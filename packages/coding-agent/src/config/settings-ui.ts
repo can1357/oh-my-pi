@@ -19,6 +19,21 @@ import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
 import { cfgToolsRestrictedFolders } from "../tools/settings";
+import {
+	cfgSandboxAllowedHosts,
+	cfgSandboxAllowRead,
+	cfgSandboxAllowWrite,
+	cfgSandboxDenyRead,
+	cfgSandboxEnabled,
+	cfgSandboxFallback,
+	cfgSandboxMode,
+	cfgSandboxListDrives,
+	cfgSandboxLoopback,
+	cfgSandboxNetworkMode,
+	cfgSandboxReadScope,
+	cfgSandboxScope,
+} from "../sandbox/settings";
+import { readSandboxConfig } from "../sandbox/policy";
 
 /** Condition over the global settings; hidden (false) until they are initialized. */
 function whenSettings(test: (settings: Settings) => boolean): () => boolean {
@@ -27,6 +42,7 @@ function whenSettings(test: (settings: Settings) => boolean): () => boolean {
 
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
+	windows: () => process.platform === "win32",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	nativeRendering: () => isNativeRendering(),
 	advisorEnabled: whenSettings(s => cfgAdvisorEnabled.get(s) === true),
@@ -43,7 +59,27 @@ const CONDITIONS: Record<string, () => boolean> = {
 	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
+	sandboxScopeNotProject: whenSettings(s => cfgSandboxScope.provenance(s) !== "project"),
+	sandboxAllowWriteNotProject: whenSettings(s => cfgSandboxAllowWrite.provenance(s) !== "project"),
+	sandboxAllowReadNotProject: whenSettings(s => cfgSandboxAllowRead.provenance(s) !== "project"),
+	sandboxDenyReadNotProject: whenSettings(s => cfgSandboxDenyRead.provenance(s) !== "project"),
+	sandboxAllowedHostsNotProject: whenSettings(s => cfgSandboxAllowedHosts.provenance(s) !== "project"),
 };
+
+/**
+ * Rows that show the value in force rather than the layered one. The sandbox drops project values
+ * that would loosen it, so its scalar rows show what {@link readSandboxConfig} applies; edits still
+ * write the global layer.
+ */
+const EFFECTIVE_VALUES = new Map<string, (settings: Settings) => unknown>([
+	[cfgSandboxEnabled.id, s => readSandboxConfig(s).enabled],
+	[cfgSandboxMode.id, s => readSandboxConfig(s).mode],
+	[cfgSandboxFallback.id, s => readSandboxConfig(s).fallback],
+	[cfgSandboxReadScope.id, s => readSandboxConfig(s).readScope],
+	[cfgSandboxNetworkMode.id, s => readSandboxConfig(s).networkMode],
+	[cfgSandboxListDrives.id, s => readSandboxConfig(s).listDrives],
+	[cfgSandboxLoopback.id, s => readSandboxConfig(s).loopback],
+]);
 
 /** Description suffix telling the panel user that an environment variable is in play. */
 function envNote(setting: AnySetting): string {
@@ -57,6 +93,7 @@ function envNote(setting: AnySetting): string {
  * Adapt the application schema and settings store to the terminal overlay. The panel shows and
  * edits the value of the settings layers, never an environment-supplied one (so an env credential
  * is never pre-filled or written to config); descriptions note an active environment variable.
+ * Rows in {@link EFFECTIVE_VALUES} show the value in force instead.
  */
 export function createSettingsHost(): SettingsHost {
 	const entries: SettingsDisplayEntry[] = [];
@@ -83,7 +120,10 @@ export function createSettingsHost(): SettingsHost {
 	};
 	return {
 		entries,
-		get: path => lookup(path)?.layered(settings),
+		get: path => {
+			const effective = EFFECTIVE_VALUES.get(path);
+			return effective ? effective(settings) : lookup(path)?.layered(settings);
+		},
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,

@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
+import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult } from "@oh-my-pi/pi-natives";
 import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	type ArchiveReader,
 	type ExtractedArchiveFile,
+	archiveFormatFromPath,
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
@@ -17,6 +18,14 @@ import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import {
+	containedFileAccess,
+	containedGrep,
+	openReadableByteSource,
+	recordFileSnapshot,
+	withContainedFileAccess,
+} from "../sandbox/file-access";
+import { SandboxRuntime } from "../sandbox/runtime";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import {
 	DEFAULT_MAX_BYTES,
@@ -273,6 +282,25 @@ function mergeRangesInto(map: Map<string, LineRange[]>, absKey: string, ranges: 
 }
 
 /**
+ * Opens the archive at `archiveAbs`. Contained, its bytes are read through the container-verified
+ * handle (closed by `closers` once the search ends) instead of by path in omp.
+ */
+async function openSearchArchive(archiveAbs: string, closers: (() => Promise<void>)[]): Promise<ArchiveReader> {
+	if (!containedFileAccess()) return openArchive(archiveAbs);
+	const format = archiveFormatFromPath(archiveAbs);
+	if (!format) throw new Error(`Unsupported archive format: ${archiveAbs}`);
+	const { source, close } = await openReadableByteSource(archiveAbs);
+	try {
+		const archive = await openArchive({ source, format, path: archiveAbs });
+		closers.push(close);
+		return archive;
+	} catch (error) {
+		await close();
+		throw error;
+	}
+}
+
+/**
  * Pre-resolve any `paths` entries that point at a member inside an archive
  * (e.g. `bundle.zip:src/foo.ts`, `release.tar.gz:notes.md`). Native grep
  * cannot read archive members, so we materialize each text member to a
@@ -301,6 +329,7 @@ async function resolveArchiveSearchPaths(
 	const unreadable: string[] = [];
 	let tempDir: string | undefined;
 	const archiveCache = new Map<string, ArchiveReader>();
+	const archiveClosers: (() => Promise<void>)[] = [];
 
 	for (let idx = 0; idx < pathSpecs.length; idx++) {
 		const spec = pathSpecs[idx];
@@ -314,7 +343,7 @@ async function resolveArchiveSearchPaths(
 		let archive = archiveCache.get(archiveAbs);
 		if (!archive) {
 			try {
-				archive = await openArchive(archiveAbs);
+				archive = await openSearchArchive(archiveAbs, archiveClosers);
 			} catch (err) {
 				unreadable.push(`${entry} (cannot open archive: ${(err as Error).message})`);
 				continue;
@@ -343,7 +372,9 @@ async function resolveArchiveSearchPaths(
 		}
 
 		if (!tempDir) {
-			tempDir = await mkdtemp(path.join(tmpdir(), "omp-search-archive-"));
+			// The contained host searches the scratch file and reads only its own private temp dir.
+			const scratchRoot = containedFileAccess() ? (await SandboxRuntime.for(cwd)).tempDir() : tmpdir();
+			tempDir = await mkdtemp(path.join(scratchRoot, "omp-search-archive-"));
 		}
 		// Per-entry filename keeps the scratch path unique even when two selectors
 		// resolve to members with the same basename.
@@ -356,6 +387,7 @@ async function resolveArchiveSearchPaths(
 	}
 
 	const cleanup = async () => {
+		await Promise.all(archiveClosers.map(close => close().catch(() => {})));
 		if (tempDir) {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 		}
@@ -402,6 +434,11 @@ const snapshotStampsByStore = new WeakMap<EditStore, LRUCache<string, SnapshotSt
  * stale tag.
  */
 async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly string[]): Promise<(string | null)[]> {
+	// Contained, every snapshot read goes through the verified handle: no stamp shortcut, so the
+	// container decides each access.
+	if (containedFileAccess()) {
+		return Promise.all(snapshotPaths.map(filePath => recordFileSnapshot(store, filePath)));
+	}
 	const stamps = snapshotStampsByStore.get(store) ?? new LRUCache<string, SnapshotStamp>({ max: SNAPSHOT_STAMP_MAX });
 	snapshotStampsByStore.set(store, stamps);
 	const stats = await Promise.all(snapshotPaths.map(filePath => stat(filePath, { bigint: true }).catch(() => null)));
@@ -648,6 +685,19 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	}
 
 	async execute(
+		toolCallId: string,
+		params: SearchParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<GrepToolDetails>,
+		toolContext?: AgentToolContext,
+	): Promise<AgentToolResult<GrepToolDetails>> {
+		// Under the OS sandbox, the tree walk and file reads of this call run in the contained host.
+		return withContainedFileAccess(this.session, () =>
+			this.#execute(toolCallId, params, signal, onUpdate, toolContext),
+		);
+	}
+
+	async #execute(
 		_toolCallId: string,
 		params: SearchParams,
 		signal?: AbortSignal,
@@ -838,7 +888,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								}))
 							: (multiTargets ?? []);
 						for (const target of targets) {
-							const targetResult = await grep(
+							const targetResult = await containedGrep(
 								{
 									pattern: normalizedPattern,
 									path: target.basePath,
@@ -892,7 +942,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							limitReached,
 						};
 					} else {
-						result = await grep(
+						result = await containedGrep(
 							{
 								pattern: normalizedPattern,
 								path: searchPath,
