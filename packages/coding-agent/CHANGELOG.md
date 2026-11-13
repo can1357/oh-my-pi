@@ -4,7 +4,7 @@
 
 ### Added
 
-- `/fork pane` and `/fork tab` now open native Herdr Desktop panes and tabs; in headless Herdr Core they start a background terminal and warn that no pane or tab is visible.
+- `/fork pane` and `/fork tab` now open native Herdr Desktop panes and tabs; in headless Herdr Core they start a background terminal and warn that no pane or tab is visible ([#19201](https://github.com/can1357/oh-my-pi/pull/19201) by [@sapran](https://github.com/sapran)).
 - Subagents now preserve @upstream provider pinning on inherited models
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
