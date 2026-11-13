@@ -177,6 +177,8 @@ interface VirtualNode {
 	entries?: ReadonlyMap<string, ShellFsFileType>;
 	/** Host directory a directory resource lists. */
 	sourcePath?: string;
+	/** JSON path named no stored value. Bytes stay the `"null"` sentinel. */
+	absent?: boolean;
 }
 
 type FsNode = NativeNode | HostNode | VirtualNode;
@@ -245,6 +247,11 @@ export interface UrlFileStat {
 	size: number;
 	/** Host modification time; 0 for rendered resources, which have none. */
 	mtimeMs: number;
+	/**
+	 * The URL named no stored JSON value. Bytes are still the `"null"` sentinel.
+	 * Only the search-list split probe treats this as missing.
+	 */
+	absent?: boolean;
 }
 
 export interface InternalUrlFilesystemOptions {
@@ -319,9 +326,11 @@ export class InternalUrlFilesystem {
 		try {
 			const node = await this.#node(input, true, false);
 			if (node.kind === "virtual") {
-				return node.directory
+				const stat: UrlFileStat = node.directory
 					? { type: "directory", size: 0, mtimeMs: 0 }
 					: { type: "file", size: node.bytes.length, mtimeMs: 0 };
+				if (node.absent === true) stat.absent = true;
+				return stat;
 			}
 			const stats = await fs.stat(node.path);
 			return {
@@ -743,7 +752,6 @@ export class InternalUrlFilesystem {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new UrlFsError(message.startsWith("MCP resource read error") ? "EIO" : "ENOENT", message);
 		}
-		if (resource.absent === true) throw new UrlFsError("ENOENT", `JSON path not found: ${url}`);
 		if (resource.isDirectory) {
 			return {
 				kind: "virtual",
@@ -754,7 +762,14 @@ export class InternalUrlFilesystem {
 				sourcePath: resource.sourcePath,
 			};
 		}
-		return { kind: "virtual", url, spec, directory: false, bytes: Buffer.from(resource.content, "utf-8") };
+		return {
+			kind: "virtual",
+			url,
+			spec,
+			directory: false,
+			bytes: Buffer.from(resource.content, "utf-8"),
+			...(resource.absent === true ? { absent: true } : {}),
+		};
 	}
 
 	#enumerated(scheme: string): Promise<Map<string, string>> {

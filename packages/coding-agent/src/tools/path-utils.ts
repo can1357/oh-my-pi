@@ -18,7 +18,7 @@ import {
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
-import { InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
+import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -712,6 +712,9 @@ async function probeInternalUrlTarget(
 ): Promise<boolean> {
 	try {
 		const stat = await filesystem.stat(url);
+		// A missing JSON field stats as a file of the "null" sentinel. Readers keep
+		// that sentinel; only this probe treats it as not found.
+		if (stat.absent === true) return false;
 		return !requireDirectory || stat.type === "directory";
 	} catch (err) {
 		return !(err instanceof UrlFsError && MISSING_OR_INVALID_URL_CODES.has(err.code));
@@ -747,14 +750,12 @@ export async function splitDelimitedPathEntry(
 		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
 		exclusionParts?: boolean;
 		/**
-		 * Split a `;` list that starts with an internal URL and also names local
-		 * paths or globs (`artifact://1;src/*.ts`). Search tools opt in. Rewrite
-		 * tools leave this off so a `;` inside one internal URL cannot select an
-		 * extra file.
+		 * Filesystem that probes a `;` list starting with an internal URL and also
+		 * naming local paths or globs (`artifact://1;src/*.ts`). Search tools pass
+		 * the filesystem they search with. Omit it so a `;` inside one internal
+		 * URL cannot select an extra file.
 		 */
-		mixedLocalPaths?: boolean;
-		/** Confirm whether a semicolon-containing internal URL names one resource before splitting it. */
-		filesystem?: InternalUrlFilesystem;
+		mixedLocalPaths?: InternalUrlFilesystem;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -767,7 +768,7 @@ export async function splitDelimitedPathEntry(
 			? parts
 			: null;
 	}
-	if (options.mixedLocalPaths === true && isInternalUrlPath(normalizedEntry)) {
+	if (options.mixedLocalPaths !== undefined && isInternalUrlPath(normalizedEntry)) {
 		// Before the all-internal branch, which keeps the whole string when any
 		// part is not itself an internal URL. All-URL lists always split. For a
 		// mixed list, probe the range-free URL (or its non-glob base directory)
@@ -778,8 +779,9 @@ export async function splitDelimitedPathEntry(
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
 		if (!parts || parts.length <= 1) return null;
 		if (parts.every(isUrlPart)) return parts;
-		const filesystem = options.filesystem ?? new InternalUrlFilesystem({ context: { cwd }, tier: "read" });
-		return (await internalUrlEntryResolves(normalizedEntry, filesystem)) ? null : parts;
+		// No resolve cache: a URL that does resolve is read again during the search.
+		// Only mixed `;` lists pay that second read, including ssh:// and mcp://.
+		return (await internalUrlEntryResolves(normalizedEntry, options.mixedLocalPaths)) ? null : parts;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
@@ -861,8 +863,7 @@ export async function expandDelimitedPathEntries(
 	options: {
 		splitter?: PathEntrySplitter;
 		exclusionParts?: boolean;
-		mixedLocalPaths?: boolean;
-		filesystem?: InternalUrlFilesystem;
+		mixedLocalPaths?: InternalUrlFilesystem;
 	} = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];

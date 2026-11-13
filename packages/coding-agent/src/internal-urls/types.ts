@@ -197,8 +197,9 @@ export interface InternalResource {
 	shape?: "document" | "value";
 	/**
 	 * The JSON path named no stored value (`agent://id/missing`). `content` stays
-	 * the read sentinel `"null"`; existence checks treat this as not found so a
-	 * `;` list is not kept whole on that sentinel.
+	 * the read sentinel `"null"`, and readers still see that sentinel. Only the
+	 * search-list split probe treats this as not found, so a `;` list is not
+	 * kept whole on it.
 	 */
 	absent?: boolean;
 	/**

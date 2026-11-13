@@ -12,11 +12,14 @@ import {
 	InternalUrlRouter,
 	LocalProtocolHandler,
 	type ProtocolHandler,
+	sessionResolveContext,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as sshFileTransfer from "@oh-my-pi/pi-coding-agent/ssh/file-transfer";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ShellFsOp } from "@oh-my-pi/pi-natives";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -518,6 +521,39 @@ describe("GrepTool internal URL resolution", () => {
 			}),
 		);
 		expect(realNull).toContain("null");
+	});
+
+	it("reads and searches a missing agent field as the null sentinel", async () => {
+		await Bun.write(path.join(artifactsDir, "worker.md"), JSON.stringify({ report: "agent report needle" }));
+		const session = createSession();
+		const filesystem = new InternalUrlFilesystem({
+			context: sessionResolveContext(session),
+			tier: "read",
+		});
+		const opened = await filesystem.handle({
+			op: ShellFsOp.Open,
+			path: "agent://worker/missing",
+			open: { read: true, write: false, append: false, truncate: false, create: false, createNew: false },
+		});
+		expect(opened.error).toBeUndefined();
+		if (opened.handle === undefined) throw new Error("open returned no handle");
+		const read = await filesystem.handle({
+			op: ShellFsOp.Read,
+			handle: opened.handle,
+			offset: 0n,
+			length: 16,
+		});
+		await filesystem.handle({ op: ShellFsOp.Close, handle: opened.handle });
+		expect(new TextDecoder().decode(read.data)).toBe("null");
+
+		const text = getResultText(
+			await new GrepTool(session).execute("agent-missing-field", {
+				pattern: "null",
+				path: "agent://worker/missing",
+			}),
+		);
+		expect(text).toContain("null");
+		expect(text).not.toContain("JSON path not found");
 	});
 
 	it("searches virtual internal URL content without a backing file", async () => {
