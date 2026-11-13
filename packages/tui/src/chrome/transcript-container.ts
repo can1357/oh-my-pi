@@ -1,7 +1,13 @@
 import { type Component, Container, type HistoryBatch, ownDescription } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
-import { measureRender, renderForScrollback } from "../components/image";
+import { getImageRenderContext, measureRender, renderForScrollback } from "../components/image";
+import {
+	mathImageOwnerPending,
+	releaseMathImageOwner,
+	releaseMathImageRenderCaches,
+	withMathImageOwner,
+} from "../components/math-image";
 import { col } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import { sameItems } from "../native/memo";
@@ -206,7 +212,11 @@ interface MeasuredBlock {
 
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
-	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
+	return (
+		(block.isTranscriptBlockFinalized?.() ?? true) &&
+		block.isTranscriptBlockPending?.() !== true &&
+		!mathImageOwnerPending(component)
+	);
 }
 
 function isCompact(component: Component): boolean {
@@ -453,12 +463,14 @@ export class TranscriptContainer extends Container {
 		// index. This class renders through its own entries, never Container's
 		// memoized render, so splicing children directly is the whole removal.
 		this.children.splice(index, 1);
+		releaseMathImageOwner(component);
 		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
 	}
 
 	override clear(): void {
+		for (const child of this.children) releaseMathImageOwner(child);
 		super.clear();
 		this.#entries = [];
 		this.#frontier = 0;
@@ -596,6 +608,9 @@ export class TranscriptContainer extends Container {
 		}
 		this.#startReplay();
 	}
+	get hasPendingReplay(): boolean {
+		return this.#replayPending || this.#replayRequested;
+	}
 	/**
 	 * Drop a not-yet-offered replay so a shutdown flush emits only un-retired
 	 * rows. The terminal already holds the committed ledger; re-streaming it at
@@ -697,7 +712,8 @@ export class TranscriptContainer extends Container {
 	#measureEntry(entry: TranscriptEntry, width: number): MeasuredBlock {
 		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 		const { value: rows, images } = measureRender(() => this.#renderEntry(entry, width));
-		return { rows, images };
+		if (entry.state !== "committed") entry.state = isFinalized(entry.component) ? "settled" : "active";
+		return { rows, images: images || mathImageOwnerPending(entry.component) };
 	}
 
 	#closeFrame(): void {
@@ -889,6 +905,15 @@ export class TranscriptContainer extends Container {
 			return this.#offered.kind === "replay" ? this.#offered.batch : undefined;
 		}
 		if (!this.#replayPending) return undefined;
+		const head = this.#entries[this.#frontier];
+		const replayEnd =
+			this.#frontier + (head?.split !== undefined || (head?.mode === "appendOnly" && head.emitted > 0) ? 1 : 0);
+		const replayPending = () => {
+			for (let index = 0; index < replayEnd; index++)
+				if (mathImageOwnerPending(this.#entries[index]!.component)) return true;
+			return false;
+		};
+		if (replayPending()) return undefined;
 		// The one path that must compose the whole ledger in a single frame; the
 		// phase label attributes any watchdog block here instead of "unknown".
 		pushLoopPhase("ui.transcript-replay");
@@ -898,6 +923,7 @@ export class TranscriptContainer extends Container {
 		} finally {
 			popLoopPhase();
 		}
+		if (replayPending()) return undefined;
 		this.#replayPending = false;
 		if (replay.rows.length === 0) {
 			// The cleared history holds no transcript rows.
@@ -976,6 +1002,7 @@ export class TranscriptContainer extends Container {
 		if (this.#offered !== undefined) return this.#offered.batch;
 		const replay = this.#peekReplayBatch(width);
 		if (replay !== undefined) return replay;
+		if (this.#replayPending) return undefined;
 
 		this.#completeFullyEmittedHeads(width);
 		const room = Math.max(0, Math.trunc(capacity));
@@ -1259,7 +1286,7 @@ export class TranscriptContainer extends Container {
 		for (let index = this.#entries.length - 1; index >= 0; index--) {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const block = trimBlankEdges(entry.component.render(width));
+			const block = trimBlankEdges(this.#renderOwned(entry.component, width));
 			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			const compact = isCompact(entry.component);
@@ -1378,8 +1405,20 @@ export class TranscriptContainer extends Container {
 		return this.#childStartRows.get(child);
 	}
 
+	#renderOwned(component: Component, width: number): readonly string[] {
+		const context = getImageRenderContext();
+		return withMathImageOwner(
+			component,
+			() => {
+				component.invalidate?.();
+				context?.requestRender();
+			},
+			() => component.render(width),
+		);
+	}
+
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
-		const rendered = trimBlankEdges(entry.component.render(width));
+		const rendered = trimBlankEdges(this.#renderOwned(entry.component, width));
 		if (entry.state === "committed" || entry.mode === "mutable" || entry.stableFrozen) return rendered;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		const stable = appendOnly.getTranscriptStableRows();
@@ -1662,7 +1701,9 @@ export class TranscriptContainer extends Container {
 			// keeps a complete-ledger replay at one render per block. These rows go
 			// to native scrollback, where nothing can repaint them.
 			const rendered = renderForScrollback(() =>
-				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width)),
+				index === start
+					? this.#renderEntry(entry, width)
+					: trimBlankEdges(this.#renderOwned(entry.component, width)),
 			);
 			const emittedRows = index === start ? this.#emittedRowCount(entry, width) : 0;
 			const block = rendered.slice(emittedRows);
@@ -1758,6 +1799,7 @@ export class TranscriptContainer extends Container {
 	}
 
 	#releaseRenderCaches(entry: TranscriptEntry): void {
+		releaseMathImageRenderCaches(entry.component);
 		const release = entry.component.releaseRenderCaches;
 		if (release === undefined) return;
 		try {
@@ -1904,7 +1946,7 @@ export class TranscriptContainer extends Container {
 	#settleFinalized(): void {
 		for (let index = this.#frontier; index < this.#entries.length; index++) {
 			const entry = this.#entries[index]!;
-			if (entry.state === "active" && isFinalized(entry.component)) entry.state = "settled";
+			if (entry.state !== "committed") entry.state = isFinalized(entry.component) ? "settled" : "active";
 		}
 	}
 
@@ -1951,6 +1993,7 @@ export class TranscriptContainer extends Container {
 		this.#syncedChildren = children;
 		if (this.#entriesMatch(children, 0)) return;
 		const existing = new Map(this.#entries.map(entry => [entry.component, entry]));
+		for (const component of existing.keys()) if (!children.includes(component)) releaseMathImageOwner(component);
 		this.#entries = this.children.map(
 			component =>
 				existing.get(component) ?? {

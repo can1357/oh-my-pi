@@ -2,6 +2,9 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import {
 	detectStyledUnderlineSupport,
+	encodeITerm2,
+	renderImage,
+	TERMINAL,
 	detectTerminalId,
 	getTerminalInfo,
 	hyperlinksUserOverride,
@@ -19,6 +22,25 @@ import {
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { withFakeTmux } from "./helpers/fake-tmux";
+
+describe("iTerm2 cursor preservation opt-in", () => {
+	it("leaves ordinary output unchanged and preserves only opted-in output", () => {
+		const previous = TERMINAL.imageProtocol;
+		try {
+			TERMINAL.imageProtocol = ImageProtocol.Iterm2;
+			expect(encodeITerm2("AAAA")).toBe("\x1b]1337;File=inline=1:AAAA\x07");
+			const dimensions = { widthPx: 9, heightPx: 18 };
+			const ordinary = renderImage("AAAA", dimensions)!.sequence!;
+			const preserved = renderImage("AAAA", dimensions, { preserveCursor: true })!.sequence!;
+			expect(ordinary).not.toContain("size=");
+			expect(ordinary).not.toContain("doNotMoveCursor=");
+			expect(preserved).toContain("doNotMoveCursor=1");
+			expect(preserved).not.toContain("size=");
+		} finally {
+			TERMINAL.imageProtocol = previous;
+		}
+	});
+});
 
 describe("hasTerminalMultiplexerSession", () => {
 	it("recognizes Herdr session identity while ignoring client-only settings", () => {

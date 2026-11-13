@@ -532,6 +532,8 @@
 	},
 	"dependencies": {
 		"@babel/parser": "catalog:",
+		"@mathjax/mathjax-tex-font": "catalog:",
+		"@mathjax/src": "catalog:",
 		"@oh-my-pi/omp-stats": "catalog:",
 		"@oh-my-pi/omptype": "catalog:",
 		"@oh-my-pi/pi-agent-core": "catalog:",

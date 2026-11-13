@@ -11,6 +11,8 @@ export * from "./components/disclosure";
 export * from "./components/editor";
 export * from "./components/form";
 export * from "./components/image";
+export * from "./components/math-image";
+export * from "./math-image-renderer";
 export * from "./components/input";
 export * from "./components/key-value-list";
 export * from "./components/layout/geometry";

@@ -365,6 +365,20 @@ describe("terminal image rendering", () => {
 		expect(imageLine).not.toContain("\x1b[0B");
 		expect(imageLine).not.toMatch(/\x1b\[\d+[AB]/);
 	});
+
+	it("preserves opted-in single-row direct Kitty output", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const image = new Image(
+			BASE64_DUMMY,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 1, preserveCursor: true },
+			SQUARE_DIMENSIONS,
+		);
+		const line = image.render(20)[0]!;
+		expect(line.startsWith("\x1b7\x1b_Ga=T")).toBe(true);
+		expect(line.endsWith("\x1b\\\x1b8")).toBe(true);
+	});
 });
 
 describe("Windows Terminal Preview SIXEL detection", () => {
@@ -418,4 +432,48 @@ describe("isImageLine — composed placeholder rows", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		expect(TERMINAL.isImageLine("\x1b[38;2;255;179;102m│\x1b[39m plain text row")).toBe(false);
 	});
+});
+
+it("exposes ready, fallback and exact capped presentation without changing render rows", () => {
+	const original = terminal.imageProtocol;
+	const metrics = getCellDimensions();
+	try {
+		setCellDimensions({ widthPx: 10, heightPx: 20 });
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 1, maxHeightCells: 1 },
+			{ widthPx: 10, heightPx: 20 },
+		);
+		terminal.imageProtocol = null;
+		expect(image.renderPresentation(102).graphic).toBe(false);
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const result = image.renderPresentation(102);
+		expect(result.graphic).toBe(true);
+		expect(result.pending).toBe(false);
+		expect(result.lines.length).toBe(1);
+		expect(image.render(102)).toBe(result.lines);
+	} finally {
+		terminal.imageProtocol = original;
+		setCellDimensions(metrics);
+	}
+});
+
+it("reports Sixel pending until its native encoding completion requests repaint", async () => {
+	const original = terminal.imageProtocol;
+	const completion = Promise.withResolvers<void>();
+	try {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const image = await translucentImage(() => completion.resolve());
+		const pending = image.renderPresentation(12);
+		expect(pending.pending).toBe(true);
+		expect(pending.graphic).toBe(false);
+		await completion.promise;
+		const ready = image.renderPresentation(12);
+		expect(ready.pending).toBe(false);
+		expect(ready.graphic).toBe(true);
+	} finally {
+		terminal.imageProtocol = original;
+	}
 });

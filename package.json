@@ -14,6 +14,8 @@
 			"@babel/parser": "^7.29.7",
 			"@babel/traverse": "^7.29.7",
 			"@babel/types": "^7.29.7",
+			"@mathjax/mathjax-tex-font": "4.1.3",
+			"@mathjax/src": "4.1.3",
 			"@napi-rs/cli": "3.7.2",
 			"@oh-my-pi/omp-stats": "18.20.0",
 			"@oh-my-pi/omptype": "18.20.0",

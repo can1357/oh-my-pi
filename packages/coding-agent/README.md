@@ -15,6 +15,22 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Math images
+
+Enable **Render Math as Images** in `/settings` → Appearance → Display, or set `tui.renderMath: true` in your configuration. The default is `false`; `terminal.showImages` must also be enabled. The agent applies both settings through `setMarkdownMathRendering(renderMath && showImages)` at startup and on live changes. Changing `tui.renderMath` rebuilds the transcript; changing `terminal.showImages` rebuilds it only when math is enabled. With math off, image visibility changes repaint existing components without rebuilding the transcript.
+
+Display formulas replace their Unicode blocks in place on Kitty, iTerm2, and Sixel terminals. Inline formulas use a single row only on terminals with proven Kitty Unicode-placeholder support. Scripted formulas and simple fractions may shrink uniformly down to 0.6× to fit that row; nested stacks that would need more shrinking and inline matrices remain Unicode. Unsupported, oversized, pending, or failed formulas use the existing Unicode rendering.
+
+Math images explicitly preserve the cursor, including single-row and clipped placements; ordinary-image transport defaults remain unchanged. Markdown without recognized math still uses the shared render cache when math is enabled, while math-containing documents retain their own placements and asynchronous rendering state.
+
+Math images do not count toward `tui.maxInlineImages`. A separate internal cap retains 512 math placements per terminal surface, including scrollback. Beyond that cap, least-recently-used off-screen math can be deleted: its committed scrollback placeholders become blank until history replay regenerates them. On-screen math is not deleted to enforce the cap.
+
+This applies to shared ANSI Markdown, not thinking or scratchpad output. Original LaTeX remains unchanged in copied text, session data, exports, and native TSP Markdown. The bundled MathJax renderer and TeX font run offline; enabling math does not change prompts or the separate image-display preference.
+
+Interactive startup registers only a lightweight facade: MathJax and its font load in a separate worker on the first eligible formula, not when you enable math or open a math-free session. Disabling math or stopping/disposing the interactive mode terminates the worker and settles pending requests. Hiding images cancels queued formulas but retains a started worker; an active conversion may finish without repainting retired content. Re-enabling either setting does not prewarm the worker.
+
+Worker startup and each active conversion have a ten-second timeout. Infrastructure failure allows one replacement worker on later demand per enabled lifecycle, without retrying the failed formula. Further failures use Unicode until math is disabled and re-enabled or a new interactive lifecycle starts. Formula errors do not consume that recovery allowance; production never typesets synchronously in the main thread.
+
 ## Bash visualization
 
 Embedded-shell calls default to Python-like **Pseudo**; switch to **Raw** for the original command. Syntax appears incrementally as the shell compiles it. Active commands retain their colors while inactive code fades; only failures get `×`. Values appear beside each variable's latest observed setter.

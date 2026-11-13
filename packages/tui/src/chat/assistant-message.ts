@@ -1398,11 +1398,9 @@ export class AssistantMessageComponent extends Container {
 				// Closed child: only the streaming tail may mutate in place, so
 				// everything before it is final. Same form as the frozen prefix it
 				// published while streaming, so the snapshot still extends.
-				parts.push({
-					kind: item.blockType,
-					text: streamingMarkdownSource(item.lastText),
-					contentIndex: item.contentIndex,
-				});
+				const stable = md.getMathImageStableSource();
+				if (stable.trim()) parts.push({ kind: item.blockType, text: stable, contentIndex: item.contentIndex });
+				if (stable.length < streamingMarkdownSource(item.lastText).length) break;
 				itemIndex++;
 				continue;
 			}
@@ -1513,7 +1511,12 @@ export class AssistantMessageComponent extends Container {
 						italic: true,
 					});
 		md.tableLocks = tableLocks;
-		return md;
+		return md.setMathImagesAllowed(kind !== "thinking").setMathImageChangeHandler(() => {
+			this.#blockVersion++;
+			this.#stableHeadRenderer = undefined;
+			this.#stableReplayRenderer = undefined;
+			this.#onImageUpdate?.();
+		});
 	}
 
 	/** The table locks of content block `contentIndex`. */

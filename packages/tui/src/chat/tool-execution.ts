@@ -15,6 +15,7 @@ import {
 	spinnerTickDelay,
 } from "../spinner-clock";
 import { Image } from "../components/image";
+import { withMathImageOwner } from "../components/math-image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { getImageDimensions, ImageProtocol, imageFallback, TERMINAL } from "../terminal-capabilities";
@@ -1714,7 +1715,16 @@ export class ToolExecutionComponent extends Container {
 				this.#allocation,
 			);
 		}
-		let lines = super.render(width);
+		let lines = withMathImageOwner(
+			this,
+			() => {
+				this.#displayInputVersion++;
+				this.#updateDisplay();
+				this.#blockVersion++;
+				this.#ui.requestRender();
+			},
+			() => super.render(width),
+		);
 		if (this.#allocation < 3) {
 			// A squeezed allocation degrades only blocks that genuinely overflow it.
 			// The allocator measures blocks by trimmed height and never squeezes one

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Host math renderers must now return `Promise<MathImageSvg>` from `render`; Markdown layout and measurement remain synchronous with pending Unicode fallback and repaint on completion ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
+
+### Added
+
+- Added opt-in Markdown math images through a host-supplied renderer and `setMarkdownMathRendering`: in-place display graphics on Kitty, iTerm2, and Sixel, fitting one-row inline graphics on proven Kitty-placeholder clients, and Unicode fallback. Math alone opts into cursor preservation and, on Kitty, separate 512-placement retention; ordinary-image defaults and math-free shared caching remain unchanged. Source and native TSP Markdown remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

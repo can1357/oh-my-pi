@@ -66,7 +66,7 @@ describe("kitty direct-placement wire format", () => {
 		budget.endPass();
 		expect(lines.length).toBe(6);
 		const parsed = parseKittyDirectPlacementLine(lines[lines.length - 1]!);
-		expect(parsed).toEqual({ imageId, placementId: imageId, columns: 4, rows: 6 });
+		expect(parsed).toEqual({ imageId, placementId: imageId, columns: 4, rows: 6, column: 0 });
 	});
 
 	it("rejects non-placement image lines", () => {
@@ -79,7 +79,13 @@ describe("kitty direct-placement wire format", () => {
 
 	it("recognizes passthrough placements so tmux redraws can delete the old image", () => {
 		const line = `\x1b7\x1b[3A${wrapTmuxPassthrough("\x1b_Ga=p,q=2,C=1,i=5,p=5,c=4,r=4\x1b\\")}\x1b8`;
-		expect(parseKittyDirectPlacementLine(line)).toEqual({ imageId: 5, placementId: 5, columns: 4, rows: 4 });
+		expect(parseKittyDirectPlacementLine(line)).toEqual({
+			imageId: 5,
+			placementId: 5,
+			columns: 4,
+			rows: 4,
+			column: 0,
+		});
 	});
 
 	it("encodes the anchored, clipped, and last-row-only placement forms", () => {
@@ -97,6 +103,31 @@ describe("kitty direct-placement wire format", () => {
 		expect(encodeKittyPlacementLine({ ...base, placementId: 3, screenRow: 0 })).toBe(
 			"\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\",
 		);
+	});
+	it("preserves opted-in unindented last-row-only placements", () => {
+		expect(
+			encodeKittyPlacementLine({
+				imageId: 7,
+				placementId: 3,
+				columns: 4,
+				rows: 6,
+				imageHeightPx: 60,
+				screenRow: 0,
+				preserveCursor: true,
+			}),
+		).toBe("\x1b7\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\\x1b8");
+	});
+	it("retains the structural column when reanchoring a clipped graphic", () => {
+		const line = encodeKittyPlacementLine({
+			imageId: 7,
+			placementId: 1,
+			columns: 4,
+			rows: 6,
+			imageHeightPx: 60,
+			screenRow: 3,
+			column: 5,
+		});
+		expect(line).toContain("\x1b[3A\x1b[6G");
 	});
 });
 

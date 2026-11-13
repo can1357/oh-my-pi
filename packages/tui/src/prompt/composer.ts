@@ -956,6 +956,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 		if (this.#headerReplayPending) {
 			const transcriptReplay = transcript.peekReplayBatch(width);
+			if (!transcriptReplay && transcript.hasPendingReplay) return undefined;
 			// A replay follows a scrollback clear, so the header recomposes at
 			// the new width exactly like transcript entries do. An empty
 			// recompose (welcome unmounted after retirement) falls back to the

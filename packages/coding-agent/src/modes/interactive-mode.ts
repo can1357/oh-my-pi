@@ -28,6 +28,8 @@ import {
 	Loader,
 	Markdown,
 	minFrameIntervalMs,
+	releaseMathImages,
+	setMarkdownMathRendering,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -74,6 +76,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { registerCodingAgentMathImageRenderer, type MathImageRendererLifecycle } from "./math-image-renderer";
 import { pickTableChart } from "../auto-graph/planner";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
@@ -446,6 +449,7 @@ import {
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderMath,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiCompleteScrollback,
@@ -523,6 +527,7 @@ const cfgLiveUiSettings = combine({
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.renderMath": cfgTuiRenderMath,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"extensionRenderers.transcriptPresenters": cfgExtensionTranscriptPresenters,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -1415,6 +1420,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	statusLine: StatusLineComponent;
 
 	isInitialized = false;
+	#mathImageRendererLifecycle: MathImageRendererLifecycle | undefined;
 	initialChatRendered = false;
 	isBashMode = false;
 	toolOutputExpanded = false;
@@ -2175,9 +2181,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 
+		this.#mathImageRendererLifecycle = registerCodingAgentMathImageRenderer({
+			renderMath: cfgTuiRenderMath.get(this.settings),
+			showImages: cfgTerminalShowImages.get(this.settings),
+		});
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
+		setMarkdownMathRendering(cfgTuiRenderMath.get(this.settings) && cfgTerminalShowImages.get(this.settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
@@ -2449,6 +2460,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		this.#mathImageRendererLifecycle ??= registerCodingAgentMathImageRenderer({
+			renderMath: cfgTuiRenderMath.get(this.settings),
+			showImages: cfgTerminalShowImages.get(this.settings),
+		});
 		this.#idleMaintenanceActivity.scheduledTurn = target =>
 			target === this.session &&
 			(this.#goalContinuationTimer !== undefined ||
@@ -2481,6 +2496,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#signalTeardown = createSessionTeardown({
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => {
+				this.#mathImageRendererLifecycle?.dispose();
+				this.#mathImageRendererLifecycle = undefined;
 				this.#closeAttempt?.abort();
 				this.session.beginDispose();
 				this.statusLine.dispose();
@@ -4313,6 +4330,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Visibility changes must rebuild retired terminal history.
 			resetDisplay = true;
 		}
+		if (any("terminal.showImages", "tui.renderMath")) {
+			this.#mathImageRendererLifecycle?.setPolicy({
+				renderMath: cfgTuiRenderMath.get(this.settings),
+				showImages: cfgTerminalShowImages.get(this.settings),
+			});
+			setMarkdownMathRendering(cfgTuiRenderMath.get(this.settings) && cfgTerminalShowImages.get(this.settings));
+		}
 		if (any("terminal.showImages")) {
 			const visible = cfgTerminalShowImages.get(this.settings);
 			for (const child of this.chatContainer.children) {
@@ -4322,8 +4346,21 @@ export class InteractiveMode implements InteractiveModeContext {
 					child.setImagesVisible(visible);
 				}
 			}
-			if (!visible) this.ui.clearInlineImages();
-			this.ui.requestRender(true);
+			if (!visible) {
+				releaseMathImages();
+				this.ui.clearInlineImages();
+			}
+			if (cfgTuiRenderMath.get(this.settings)) {
+				rebuildChat = true;
+				this.ui.invalidate();
+			} else {
+				this.ui.requestRender(true);
+			}
+		}
+		if (any("tui.renderMath")) {
+			releaseMathImages();
+			this.ui.invalidate();
+			rebuildChat = true;
 		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
@@ -8112,6 +8149,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#mathImageRendererLifecycle?.dispose();
+		this.#mathImageRendererLifecycle = undefined;
 		this.#closeAttempt?.abort();
 		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();

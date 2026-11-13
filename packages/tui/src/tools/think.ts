@@ -24,7 +24,7 @@ export const thinkToolRenderer = {
 		return new Markdown(thoughts, 1, 0, getMarkdownTheme(), {
 			color: (text: string) => uiTheme.fg("thinkingText", text),
 			italic: true,
-		});
+		}).setMathImagesAllowed(false);
 	},
 	renderResult(): undefined {
 		return undefined;

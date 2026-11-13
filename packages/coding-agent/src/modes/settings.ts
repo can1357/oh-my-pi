@@ -483,6 +483,19 @@ export const cfgTuiRenderSvg = register({
 	},
 });
 
+export const cfgTuiRenderMath = register({
+	id: "tui.renderMath",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Render Math as Images",
+		description:
+			"Render display and supported one-row inline math as images. Math has a separate 512-placement retention cap; older off-screen graphics may be evicted beyond it.",
+	},
+});
+
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",
