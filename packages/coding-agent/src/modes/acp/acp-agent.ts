@@ -61,6 +61,9 @@ import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
+import { AgentRegistry } from "../../registry/agent-registry";
+import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
@@ -74,6 +77,7 @@ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
+import { sumSubagentTreeCost } from "../agent-hub-runtime";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import {
 	blockText,
@@ -1030,6 +1034,9 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	/** ACP has no Agent Hub, so tree costs read each subagent's live session directly. */
+	#subagentObservers = new SessionObserverRegistry();
+	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -2887,14 +2894,14 @@ export class AcpAgent implements Agent {
 
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
-			const usageStats = record.session.sessionManager.getUsageStatistics();
+			const cost = this.#sessionTreeCost(record);
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "usage_update",
 					size: contextUsage.contextWindow,
 					used: contextUsage.tokens ?? 0,
-					cost: usageStats.cost > 0 ? { amount: usageStats.cost, currency: "USD" } : undefined,
+					cost: cost > 0 ? { amount: cost, currency: "USD" } : undefined,
 				},
 			});
 		}
@@ -2907,6 +2914,26 @@ export class AcpAgent implements Agent {
 				updatedAt: new Date().toISOString(),
 			},
 		});
+	}
+
+	/**
+	 * The session's own spend plus its subagent tree, totalled as the TUI status
+	 * line does. `task` results carry only blocking children's spend, so the tree
+	 * cost adds background children; the task-result sum stays its floor.
+	 */
+	#sessionTreeCost(record: ManagedSessionRecord): number {
+		const usage = record.session.sessionManager.getUsageStatistics();
+		// ACP roots register as `kind: "main"` under `acp:<id>`, not `MAIN_AGENT_ID`,
+		// so drop them (and their advisors, billed apart) or the root counts twice.
+		const refs = AgentRegistry.global().list();
+		const mainIds = new Set(refs.filter(ref => ref.kind === "main").map(ref => ref.id));
+		const treeCost = sumSubagentTreeCost({
+			refs: refs.filter(ref => ref.kind !== "main" && !(ref.kind === "advisor" && mainIds.has(ref.parentId ?? ""))),
+			observers: this.#subagentObservers,
+			rootSessionFile: record.session.sessionManager.getSessionFile() ?? undefined,
+			sessionCosts: this.#subagentSessionCosts,
+		});
+		return Math.max(0, usage.cost - usage.subagentCost) + Math.max(treeCost, usage.subagentCost);
 	}
 
 	#cloneUsageStatistics(usage: UsageStatistics): UsageStatistics {
