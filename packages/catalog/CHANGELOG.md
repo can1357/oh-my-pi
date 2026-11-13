@@ -9,6 +9,7 @@
 - Fixed 14 Command Code models reporting $0 spend, including Claude Haiku 5.5, GPT-6.1 Sol and Terra, Kimi K3.1 Pro, Muse Wonder 1.0 and Mistral Large 4; they now bill at the rates Command Code's CLI lists. Haiku 5.5 (above 100K input) and GPT-6.1 Sol and Terra (above 272K) gain a long-context tier, so their default window now starts at that threshold, with `/extended-context on` opening the full window ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed Command Code under-reporting Grok 4.7 spend at $1.20/$3.60 per million tokens and over-reporting Claude Sonnet 5.5 cache reads at $0.20; they now follow Command Code's CLI: Grok 4.7 at $2/$6 with a 2x tier above 200K input, and Sonnet 5.5 cache reads at $0.10. With that tier, Grok 4.7's default window now starts at 200K, with `/extended-context on` opening the full 500K ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch))
 - Google Antigravity now lists Gemini 4 Hydrogen once, with selectable low, medium, high, and xhigh thinking levels, instead of a separate entry per thinking tier ([#19070](https://github.com/can1357/oh-my-pi/pull/19070) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed `opencode-go/claude-haiku-5-5` offering `minimal` and capping `--thinking max` at `xhigh`; it now offers low through max like OpenCode Zen, and thinking Off sends Anthropic's explicit `disabled` ([#19128](https://github.com/can1357/oh-my-pi/issues/19128)).
 
 ## [18.20.0] - 2026-11-12
 
