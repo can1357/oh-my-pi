@@ -932,6 +932,32 @@ describe("wakeup restore after in-process session transitions", () => {
 		await delivered.promise;
 		expect(records(session).at(-1)).toMatchObject({ id: original.id, owner: original.owner, state: "claimed" });
 	}, 20_000);
+
+	it("leaves an in-flight schedule alone when switchSession fails before the transition starts", async () => {
+		const dir = temporaryDirectory();
+		const asked = Promise.withResolvers<void>();
+		const approval = Promise.withResolvers<string>();
+		const { session } = await sdkSession(
+			dir,
+			{ settings: checkSettings({ "tools.approval": { bash: "prompt" } }) },
+			async () => {
+				asked.resolve();
+				return approval.promise;
+			},
+		);
+		const pending = schedule(session, delayedCheck("printf stable"));
+		await asked.promise;
+
+		const unauthenticated = { ...getBundledModel("openai", "gpt-4o-mini"), provider: "no-auth-provider" };
+		await expect(
+			session.switchSession(session.sessionFile!, { model: unauthenticated as typeof session.model }),
+		).rejects.toThrow(/No API key/);
+		approval.resolve("Approve");
+
+		const record = await pending;
+		expect(record.state).toBe("scheduled");
+		expect(records(session).at(-1)).toMatchObject({ id: record.id, state: "scheduled" });
+	}, 20_000);
 });
 
 describe("wakeups arriving in an unpacked session", () => {

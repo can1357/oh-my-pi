@@ -1432,6 +1432,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	};
 	/** Transitions requested from outside and not yet released (queued, running, or awaiting nested ones). */
 	#queuedSessionTransitions = 0;
+	/** Set when a transition suspends wakeups; only then does the drained queue restore them. */
+	#wakeupsSuspendedByTransition = false;
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
 	readonly #sessionTransitionScope: Disposable = {
 		[Symbol.dispose]: () => {
@@ -6376,6 +6378,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// a pending idle check or an in-flight recap that belong to the transcript being replaced.
 		this.#idleMaintenance?.invalidate();
 		this.#evalToolSession?.wakeupManager?.suspend();
+		this.#wakeupsSuspendedByTransition = true;
 		this.yieldQueue.clear("wakeup");
 		if (this.#sessionTransitionDepth++ === 0) {
 			const settled = Promise.withResolvers<void>();
@@ -6461,7 +6464,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		done.resolve();
 		// Only now is the queue empty: a hook enabled() reads isSessionTransitioning, so the scope's
 		// disposal (one transition done, others may still be queued) is too early to restore timers.
-		if (this.isSessionTransitioning) return;
+		// A transition that failed before suspending (switchSession's auth check) leaves live timers
+		// and in-flight schedules alone.
+		if (this.isSessionTransitioning || !this.#wakeupsSuspendedByTransition) return;
+		this.#wakeupsSuspendedByTransition = false;
 		void this.#evalToolSession?.wakeupManager?.activate().catch(() => {
 			logger.warn("Could not restore session wakeups after transition");
 		});
