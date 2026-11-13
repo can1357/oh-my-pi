@@ -51,6 +51,28 @@ test.each([
 	expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 });
 
+test.each([
+	["opencode-go", "https://opencode.ai/zen/go"],
+	["opencode-zen", "https://opencode.ai/zen"],
+])("%s serves Claude Haiku 5.5 with Anthropic's low..max ladder and explicit Off (#19128)", (provider, baseUrl) => {
+	const model = buildModel({
+		id: "claude-haiku-5-5",
+		name: "Claude Haiku 5.5",
+		api: "anthropic-messages",
+		provider,
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	});
+
+	expect(model.thinking?.mode).toBe("anthropic-adaptive");
+	expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+	expect(model.compat?.disabledThinking).toBe("disabled");
+});
+
 function modelListResponse(ids: readonly string[]): Response {
 	return Response.json({
 		object: "list",

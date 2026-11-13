@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Gemini 4 Argon, Carbon and Hydrogen on the Gemini API and Vertex AI stopping long answers at 32,768 or 65,536 output tokens, often before any visible text; they now allow up to 262,144, so long answers continue past the first segment ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed `opencode-go/claude-haiku-5-5` offering `minimal` and capping `--thinking max` at `xhigh`; it now offers low through max like OpenCode Zen, and thinking Off sends Anthropic's explicit `disabled` ([#19128](https://github.com/can1357/oh-my-pi/issues/19128)).
 
 ## [18.20.0] - 2026-11-12
 
