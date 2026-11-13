@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `mixHex` for blending two hex colors
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
