@@ -10,6 +10,7 @@ import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { AmbiguousIdentityError } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -34,7 +35,7 @@ import {
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -1352,9 +1353,27 @@ export async function discoverOpenAIModelsList(
 		specs.push(withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"));
 	}
 	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
-	return providerConfig.discovery.type === "litellm"
-		? specs.map(spec => buildDiscoveredModel(spec, "litellm"))
-		: specs.map(spec => buildModel(spec));
+	const build =
+		providerConfig.discovery.type === "litellm"
+			? (spec: ModelSpec<Api>) => buildDiscoveredModel(spec, "litellm")
+			: (spec: ModelSpec<Api>) => buildModel(spec);
+	const built: Model<Api>[] = [];
+	for (const spec of specs) {
+		try {
+			built.push(build(spec));
+		} catch (error) {
+			// Catalog classification stays strict, so an upstream id that names two
+			// vendors (`amazon/openai.gpt-...`) throws; skip that one model rather
+			// than losing the provider's whole list.
+			if (!(error instanceof AmbiguousIdentityError)) throw error;
+			logger.warn("Skipping discovered model with an ambiguous identity", {
+				provider: providerConfig.provider,
+				model: spec.id,
+				error: error.message,
+			});
+		}
+	}
+	return built;
 }
 
 export async function discoverLiteLLMModels(
