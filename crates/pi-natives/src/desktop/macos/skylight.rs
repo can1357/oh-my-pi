@@ -3390,6 +3390,7 @@ mod tests {
 		arrives:            Cell<Option<(Instant, ProcessSerialNumber)>>,
 		signals:            Cell<SwitchSignals>,
 		refused_for:        Cell<Option<SwitchSignals>>,
+		after_hand_back:    Option<ProcessSerialNumber>,
 		hand_backs:         Cell<usize>,
 		keys:               std::cell::RefCell<Vec<u32>>,
 		/// The key window the user's app reports.
@@ -3433,7 +3434,7 @@ mod tests {
 				self.signals.set(after);
 				return Ok(FrontRequest::UserActed);
 			}
-			self.front.set(PREVIOUS);
+			self.front.set(self.after_hand_back.unwrap_or(PREVIOUS));
 			Ok(FrontRequest::Done)
 		}
 
@@ -3463,6 +3464,30 @@ mod tests {
 	}
 
 	#[test]
+	fn the_guard_skips_make_key_when_front_moves_after_hand_back() {
+		let t0 = Instant::now();
+		let desktop = FakeDesktop {
+			clock:              Cell::new(t0 + ms(20)),
+			end:                t0 + ms(20),
+			front:              Cell::new(TARGET),
+			arrives:            Cell::new(None),
+			signals:            Cell::new(input(0, NO_MODIFIERS)),
+			refused_for:        Cell::new(None),
+			after_hand_back:    Some(THIRD),
+			hand_backs:         Cell::new(0),
+			keys:               std::cell::RefCell::default(),
+			user_window:        42,
+			switch_on_key_read: Cell::new(None),
+			key_read_takes:     Duration::ZERO,
+		};
+		let lease = Mutex::new(lease_at(t0, None));
+		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_err());
+		assert_eq!(desktop.hand_backs.get(), 1);
+		assert!(desktop.front.get() == THIRD);
+		assert!(desktop.keys.into_inner().is_empty());
+	}
+
+	#[test]
 	fn the_guard_asks_again_after_a_refusal_for_typing_but_not_for_a_switch() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
@@ -3477,6 +3502,7 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(idle),
 				refused_for:        Cell::new(Some(input)),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        42,
@@ -3618,6 +3644,7 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(signals),
 				refused_for:        Cell::new(None),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        43,
@@ -3657,6 +3684,7 @@ mod tests {
 			arrives:            Cell::new(None),
 			signals:            Cell::new(clicked_at(t0 + ms(15)).in_user_app()),
 			refused_for:        Cell::new(None),
+			after_hand_back:    None,
 			hand_backs:         Cell::new(0),
 			keys:               std::cell::RefCell::default(),
 			user_window:        43,
@@ -3699,6 +3727,7 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(input(0, NO_MODIFIERS)),
 				refused_for:        Cell::new(Some(input(0, SHIFT))),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        42,
@@ -3730,6 +3759,7 @@ mod tests {
 			arrives:            Cell::new(Some((sent + ACTION_REFLEX - ms(10), THIRD))),
 			signals:            Cell::new(input(0, NO_MODIFIERS).sent_at(sent)),
 			refused_for:        Cell::new(None),
+			after_hand_back:    None,
 			hand_backs:         Cell::new(0),
 			keys:               std::cell::RefCell::default(),
 			user_window:        42,
