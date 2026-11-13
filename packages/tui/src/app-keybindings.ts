@@ -44,6 +44,7 @@ interface AppKeybindings {
 	"app.local.open": true;
 	"app.message.followUp": true;
 	"app.retry": true;
+	"app.restart": true;
 	"app.message.dequeue": true;
 	"app.btw.inject": true;
 	"app.clipboard.pasteImage": true;
@@ -182,6 +183,10 @@ export const KEYBINDINGS = {
 		// fold into plain Enter. The idle "F5 to Retry" status row advertises it.
 		defaultKeys: ["f5", "alt+r"],
 		description: "Retry last failed assistant turn",
+	},
+	"app.restart": {
+		defaultKeys: [],
+		description: "Restart omp with the same launch flags, resuming this session (/restart)",
 	},
 	"app.message.dequeue": {
 		// Shift+Up is listed alongside Alt+Up because macOS Terminal.app consumes Option

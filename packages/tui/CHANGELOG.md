@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Registered the `app.restart` keybinding action (unbound by default) and listed it in `/hotkeys` ([#10585](https://github.com/can1357/oh-my-pi/issues/10585), [#18994](https://github.com/can1357/oh-my-pi/pull/18994) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

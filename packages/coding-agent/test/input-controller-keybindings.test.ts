@@ -1479,6 +1479,22 @@ describe("InputController global editor actions", () => {
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("/local is host-only during a collab session");
 	});
 
+	it("restarts on a bound app.restart key, but stays host-only for collab guests", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.restart", ["alt+shift+r"]);
+		const restart = vi.fn(async () => {});
+		Object.assign(context.ctx, { restart });
+		new context.InputController(context.ctx).setupKeyHandlers();
+
+		context.customHandlers.get("alt+shift+r")?.();
+		expect(restart).toHaveBeenCalledTimes(1);
+
+		Object.assign(context.ctx, { collabGuest: {} });
+		context.customHandlers.get("alt+shift+r")?.();
+		expect(restart).toHaveBeenCalledTimes(1);
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("/restart is host-only during a collab session");
+	});
+
 	it("defers the tree selector's Ctrl+Shift+O filter binding", async () => {
 		const context = await createContext();
 		const controller = new context.InputController(context.ctx);

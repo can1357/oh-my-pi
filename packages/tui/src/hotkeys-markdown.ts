@@ -146,6 +146,7 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				{ keys: [act("app.editor.external")], action: "Edit message in external editor" },
 				{ keys: [act("app.local.open")], action: "Open a local:// file in external editor" },
 				{ keys: [act("app.retry")], action: "Retry last failed assistant turn" },
+				{ keys: [act("app.restart")], action: "Restart omp, resuming this session (/restart)" },
 				{ keys: [act("app.clipboard.pasteImage")], action: "Paste image or text from clipboard" },
 				{
 					keys:
