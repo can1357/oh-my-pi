@@ -28,6 +28,7 @@ import {
 	Loader,
 	Markdown,
 	minFrameIntervalMs,
+	SEGMENT_RESET,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -245,6 +246,8 @@ import {
 	setTranscriptPresenters,
 } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
+import { wrapTreeLine } from "@oh-my-pi/pi-tui/render/hanging-wrap";
+import { WidthAwareText } from "@oh-my-pi/pi-tui/render/width-aware-text";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
@@ -5354,13 +5357,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (closedTasks > 0) filled = Math.max(filled, 1);
 		if (closedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
 
-		const lines = ["", theme.bold(theme.fg("accent", "TODO"))];
-		for (let i = 0; i < contentLines.length; i++) {
-			lines.push(` ${theme.fg(i < filled ? "accent" : "dim", spineGlyphs[i]!)}${contentLines[i]}`);
-		}
+		const title = theme.bold(theme.fg("accent", "TODO"));
 		const tailFilled = Math.max(0, Math.min(filled - contentLines.length, tail.length));
-		lines.push(` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`);
-		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		const tailLine = ` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`;
+		// Rows are wrapped here, against the panel width, rather than by `Text`:
+		// `Text` wraps the joined string and restarts every continuation at the
+		// panel edge, cutting the spine and the task rail. A wide row instead
+		// hangs beneath its own content — a task under its checkbox, a stage
+		// under its name — with the spine running on beside it.
+		//
+		// The formatter outlives a theme switch (`ui.invalidate()` re-runs it
+		// without rebuilding the rows), so everything it needs is styled now and
+		// it keeps this theme: `wrapTreeLine` finds a connector by its styled bytes.
+		const rowTheme = theme;
+		const hudRows = contentLines.map((content, i) => {
+			const color = i < filled ? "accent" : "dim";
+			return {
+				content,
+				spine: ` ${theme.fg(color, spineGlyphs[i]!)}`,
+				hang: ` ${theme.fg(color, `${theme.tree.vertical}  `)}`,
+			};
+		});
+		const formatRows = (contentWidth: number): string => {
+			const lines = ["", title];
+			for (const { content, spine, hang } of hudRows) {
+				const rowWidth = Math.max(1, contentWidth - visibleWidth(spine));
+				const rows = wrapTreeLine(content, rowWidth, rowTheme) ?? wrapTextWithAnsi(content, rowWidth);
+				// The inner `Text` carries SGR state from one row into the next, and a
+				// wrapped row can end with a style still open (a bold stage name), so a
+				// row that continues ends in a reset to keep that style off the spine.
+				const last = rows.length - 1;
+				for (let r = 0; r <= last; r++) {
+					lines.push(`${r === 0 ? spine : hang}${rows[r]}${r < last ? SEGMENT_RESET : ""}`);
+				}
+			}
+			lines.push(tailLine);
+			return lines.join("\n");
+		};
+		this.todoContainer.addChild(new WidthAwareText(formatRows, 1, 0));
 
 		// Native: the same stage window as a tree, overall progress as a bar.
 		const describeTask = (todo: TodoItem, id: string): TspTreeNode => {
@@ -6929,10 +6963,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Approved plans land in a fresh (or compacted) session whose first user-visible
 		// turn is the synthetic plan-approved prompt — that path bypasses the
 		// input-controller's title generation. Seed an auto-name from the plan title
-		// so the session is not left unnamed. `setSessionName("auto")` is a no-op
-		// when the user has already chosen a name (preserveContext paths).
+		// so the session is not left unnamed, unless automatic titling is disabled
+		// (`--no-title` / PI_NO_TITLE). `setSessionName("auto")` is a no-op when the
+		// user has already chosen a name (preserveContext paths).
 		const seededName = humanizePlanTitle(options.title);
-		if (seededName && !this.sessionManager.getSessionName()) {
+		if (!$env.PI_NO_TITLE && seededName && !this.sessionManager.getSessionName()) {
 			await this.sessionManager.setSessionName(seededName, "auto");
 		}
 

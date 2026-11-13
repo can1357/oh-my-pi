@@ -6,10 +6,33 @@
 
 - The bash tool now reports when `exit` or an armed `set -e` ends a call before its remaining statements ran: the result carries an `endedByExit` flag, a notice says the rest of the call did not run and that options like `set -e` stay set in the session (a call that ran in a copy of a busy session shell gets a notice without the persistence claim), and the same flag crosses the RPC wire for `bash` results; a trailing `exit` at the end of the input is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
 
+- A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found" ([#19095](https://github.com/can1357/oh-my-pi/pull/19095) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/` ([#19106](https://github.com/can1357/oh-my-pi/pull/19106) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
+- `/annotate session` now opens the same fullscreen message picker as `/copy` in classic terminals and Tern ([#19145](https://github.com/can1357/oh-my-pi/pull/19145) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Edit responses now show inserted or replaced runs of up to 41 lines in full instead of collapsing them to `…`, so the next edit can target lines it just wrote without a "never displayed" rejection ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
+- Edit responses mark skipped lines between separate hunks with `…` instead of a blank line ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
+- After a file changes outside the edit tool (formatter, build step, another writer), lines an earlier read displayed that kept their number and content can still be edited after a partial re-read, instead of being rejected as never displayed ([#19092](https://github.com/can1357/oh-my-pi/issues/19092))
+- `omp stats` no longer freezes the dashboard for seconds each time an open Spotlight tab rebuilds after a sync ([#19118](https://github.com/can1357/oh-my-pi/pull/19118) by [@will-bogusz](https://github.com/will-bogusz))
+- In Chromium browser tabs, a click on an element inside a frame the page removes while the mouse button is down fails as unconfirmed instead of reporting a click the element never got, and sends no remaining presses of a double-click to the exposed page; a frame that navigates on the press still counts as delivered ([#19094](https://github.com/can1357/oh-my-pi/pull/19094) by [@will-bogusz](https://github.com/will-bogusz))
+- Hashline edits from a truncated `@file` mention can no longer target rows the mention never showed, and a mention whose first line exceeds the size limit no longer offers a partial line as editable ([#19093](https://github.com/can1357/oh-my-pi/pull/19093) by [@apoc](https://github.com/apoc))
+- Long tasks and stage names in the pinned TODO panel now wrap beneath their own text with the tree lines intact, instead of restarting at the panel's left edge ([#19117](https://github.com/can1357/oh-my-pi/pull/19117) by [@chan1103](https://github.com/chan1103))
+- Fixed prompt-history search returning unrelated prompts for punctuated queries such as `a/b` ([#18762](https://github.com/can1357/oh-my-pi/issues/18762)) ([#19111](https://github.com/can1357/oh-my-pi/pull/19111) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- `omp zsh` on Windows: `zsh/files` (`mkdir`, `rmdir`, `rm`, `mv`, `ln`) and `zstat` work on real directories instead of failing with "the filename, directory name, or volume label syntax is incorrect" ([#19146](https://github.com/can1357/oh-my-pi/pull/19146) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- `omp zsh` on Windows: after a failed `zsh/system` call, `syserror` prints the POSIX error (`Bad file descriptor`, `Illegal seek`) instead of a Windows message such as "The operation completed successfully." ([#19107](https://github.com/can1357/oh-my-pi/pull/19107) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- On Windows, `find -exec`, `xargs` and `env` no longer fail with `not found` (status 127) when running an external program such as `sh` ([#19108](https://github.com/can1357/oh-my-pi/pull/19108) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Fixed loading a session another omp process has open (e.g. ACP `session/load` from a second process) and then exiting creating a duplicate "open-elsewhere" copy of the session ([#19103](https://github.com/can1357/oh-my-pi/issues/19103))
+- Approving a plan no longer names an untitled session when automatic titles are off (`--no-title` / `PI_NO_TITLE`) ([#19140](https://github.com/can1357/oh-my-pi/issues/19140))
+- ACP `usage_update` cost now includes what background subagents spend ([#19102](https://github.com/can1357/oh-my-pi/issues/19102)) ([#19113](https://github.com/can1357/oh-my-pi/pull/19113) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+### Changed
+
+- The install script now prints the exact command for your shell (zsh, bash, fish, or sh) to add the install directory to your PATH ([#19099](https://github.com/can1357/oh-my-pi/pull/19099) by [@wescopeland](https://github.com/wescopeland))
 
 ## [18.20.0] - 2026-11-12
+- With the Spotlight experiment on, a `read` with `:raw` returns the selected bytes instead of an outlined, compacted, collapsed or cut rendering ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+- With the Spotlight experiment on, a `;`/`,` path `read` is shaped as one call: each part as that read alone would be (an outlined source file beside a `:raw` part kept verbatim), no part collapsed as already shown against another, and one trace whose notice opens the original ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+- ACP `/session delete` no longer leaves an empty, untitled session in `session/list`; the replacement session is written only once it has content ([#19068](https://github.com/can1357/oh-my-pi/issues/19068))
 
 ### Breaking Changes
 
@@ -113,6 +136,10 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+
+### Fixed
+
+- Fixed `web_search` leaving pages open in the shared headless browser when a search was cancelled while its page was still opening or the page failed to close, so the browser's memory no longer grows over a long session ([#19058](https://github.com/can1357/oh-my-pi/pull/19058) by [@tuschla](https://github.com/tuschla))
 
 ## [18.19.0] - 2026-11-12
 

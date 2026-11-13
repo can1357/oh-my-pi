@@ -71,8 +71,9 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const configuredDbPath = cfgMnemopiDbPath.get(settings);
 	const cwd = settings.getCwd();
 	const scoping = cfgMnemopiScoping.get(settings);
+	// Separators only: `path.normalize` would also collapse `..`, which names another directory after a symlink.
 	const dbPath = configuredDbPath?.trim()
-		? expandTilde(configuredDbPath.trim())
+		? expandTilde(configuredDbPath.trim()).replaceAll("/", path.sep)
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
 	const scope = computeMnemopiBankScope(cfgMnemopiBank.get(settings), cwd, scoping);
 	const recallBanks =
