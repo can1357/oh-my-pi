@@ -58,6 +58,28 @@ function notice(id: string, parentId: string): object {
 	};
 }
 
+/** Entries that start a new request below a user message: an invoked skill and a `/clear`. */
+function skill(id: string, parentId: string): object {
+	return {
+		type: "custom_message",
+		id,
+		parentId,
+		timestamp,
+		customType: "skill-prompt",
+		content: "run the skill",
+		display: true,
+		attribution: "user",
+	};
+}
+
+function reset(id: string, parentId: string): object {
+	return { type: "reset_boundary", id, parentId, timestamp };
+}
+
+function bash(id: string, parentId: string): object {
+	return { type: "message", id, parentId, timestamp, message: { role: "bashExecution", command: "ls", output: "" } };
+}
+
 function lines(entries: object[]): string {
 	return entries.map(entry => `${JSON.stringify(entry)}\n`).join("");
 }
@@ -82,7 +104,7 @@ function models(): Record<string, string | null> {
 }
 
 describe("user message reply links", () => {
-	it("links a reply written behind non-message entries, but not a reply on another branch", async () => {
+	it("links a reply written behind non-message entries, but not past another branch or request", async () => {
 		await writeSession("session", [
 			user("u1", null),
 			notice("n1", "u1"),
@@ -92,23 +114,43 @@ describe("user message reply links", () => {
 			user("u2", "a1"),
 			digest("d2", "u2"),
 			assistant("a2", "a1"),
+			// A message on a sibling branch leaves u3's reply to link.
+			user("u3", "a2"),
+			bash("b3", "u3"),
+			assistant("a3", "u3"),
+			// The reply below an invoked skill or a `/clear` answers that request, not u4 or u5.
+			user("u4", "a3"),
+			skill("s4", "u4"),
+			assistant("a4", "s4"),
+			user("u5", "a4"),
+			reset("r5", "u5"),
+			assistant("a5", "r5"),
 		]);
 		await syncAllSessions({ workers: 1 });
 
-		expect(models()).toEqual({ u1: "gpt-5.4", u2: null });
+		expect(models()).toEqual({ u1: "gpt-5.4", u2: null, u3: "gpt-5.4", u4: null, u5: null });
 	});
 
-	it("links a reply that a later sync pass reads", async () => {
+	it("links a reply that a later sync pass reads, also from a cursor written before replies were tracked", async () => {
 		const file = await writeSession("session", [user("u1", null), digest("d1", "u1")]);
+		const legacy = await writeSession("legacy", [user("u2", null)]);
 		await syncAllSessions({ workers: 1 });
-		expect(models()).toEqual({ u1: null });
+		expect(models()).toEqual({ u1: null, u2: null });
 		expect(getFileOffset(file)?.parserState?.pendingReplies).toEqual({ u1: "u1", d1: "u1" });
+		closeDb();
 
+		const database = new Database(getStatsDbPath());
+		database.run(
+			"UPDATE file_offsets SET parser_state = json_remove(parser_state, '$.pendingReplies') WHERE session_file = ?",
+			[legacy],
+		);
+		database.close();
 		await fs.appendFile(file, lines([assistant("a1", "d1")]));
+		await fs.appendFile(legacy, lines([assistant("a2", "u2")]));
 		await syncAllSessions({ workers: 1 });
 
-		expect(models()).toEqual({ u1: "gpt-5.4" });
-		expect(getFileOffset(file)?.parserState?.pendingReplies).toBeUndefined();
+		expect(models()).toEqual({ u1: "gpt-5.4", u2: "gpt-5.4" });
+		expect(getFileOffset(file)?.parserState?.pendingReplies).toEqual({});
 	});
 
 	it("re-links stored rows once by re-parsing only the sessions holding unlinked messages", async () => {

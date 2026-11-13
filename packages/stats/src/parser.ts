@@ -504,9 +504,21 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 }
 
 /**
+ * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as pi-tui's
+ * `isUserTurnInitiator` defines them.
+ */
+function startsNewRequest(entry: SessionEntry): boolean {
+	if (entry.type === "reset_boundary") return true;
+	if (entry.type !== "custom_message" || !("customType" in entry) || !("attribution" in entry)) return false;
+	return entry.attribution === "user" && (entry.customType === "skill-prompt" || entry.customType === "collab-prompt");
+}
+
+/**
  * Links each user message to its reply across tail reads. The agent writes non-message entries (the system-prompt
  * digest, extension notices, side-model usage, title changes) between a user message and its reply, so the reply is
- * the first assistant message descending from the user message through non-message entries only.
+ * the first assistant message descending from the user message through such entries. Another message or a new
+ * request on the way ends that branch only; a sibling branch can still carry the reply.
  */
 class ReplyTracker {
 	/** User messages still awaiting a reply and the non-message entries beneath them, each to its user message. */
@@ -516,8 +528,8 @@ class ReplyTracker {
 		this.#waiting = new Map(waiting ? Object.entries(waiting) : undefined);
 	}
 
-	get state(): Record<string, string> | undefined {
-		return this.#waiting.size > 0 ? Object.fromEntries(this.#waiting) : undefined;
+	get state(): Record<string, string> {
+		return Object.fromEntries(this.#waiting);
 	}
 
 	/** The user message `entry` answers, if `entry` is an assistant message descending from it through non-message entries. */
@@ -526,17 +538,19 @@ class ReplyTracker {
 			this.#waiting.set(entry.id, entry.id);
 			return undefined;
 		}
-		const { id, parentId } = entry as { id?: unknown; parentId?: unknown };
+		const parentId = "parentId" in entry ? entry.parentId : undefined;
 		const user = typeof parentId === "string" ? this.#waiting.get(parentId) : undefined;
 		if (!user) return undefined;
-		if (entry.type !== "message") {
-			if (typeof id === "string") this.#waiting.set(id, user);
-			return undefined;
+		if (isAssistantMessage(entry)) {
+			for (const [waitingId, waitingUser] of this.#waiting) {
+				if (waitingUser === user) this.#waiting.delete(waitingId);
+			}
+			return user;
 		}
-		for (const [waitingId, waitingUser] of this.#waiting) {
-			if (waitingUser === user) this.#waiting.delete(waitingId);
+		if (entry.type !== "message" && !startsNewRequest(entry) && "id" in entry && typeof entry.id === "string") {
+			this.#waiting.set(entry.id, user);
 		}
-		return isAssistantMessage(entry) ? user : undefined;
+		return undefined;
 	}
 }
 
@@ -565,7 +579,7 @@ export interface SessionParserState {
 	serviceTier: ServiceTierByFamily | null;
 	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
 	spotlight?: SpotlightParserState;
-	/** Absent when no user message awaits its reply, and in cursors persisted before replies were tracked. */
+	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
 	pendingReplies?: Record<string, string>;
 }
 
@@ -695,7 +709,8 @@ export async function parseSessionFile(
 					const previous = await readCheckpoint(handle, fromOffset);
 					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
 				}
-				resume = !reset;
+				// A cursor written before replies were tracked rebuilds its state from the prefix instead.
+				resume = !reset && state.pendingReplies !== undefined;
 			}
 			if (fromOffset > info.size) reset = true;
 			if (replay) resume = false;
