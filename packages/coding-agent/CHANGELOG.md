@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp zsh` on Windows: after a failed `zsh/system` call, `syserror` prints the POSIX error (`Bad file descriptor`, `Illegal seek`) instead of a Windows message such as "The operation completed successfully."
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

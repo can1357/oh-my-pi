@@ -135,6 +135,9 @@ impl FsErr {
 
 /// The C `errno` of `err` (0: unknown).
 fn errno_of(err: &io::Error, text: &[u8]) -> i32 {
+	// Off Unix a raw code is a host (Win32) code, not an errno: only the
+	// kind says which POSIX errno the error stands for.
+	#[cfg(unix)]
 	if let Some(code) = err.raw_os_error() {
 		return code;
 	}
@@ -165,8 +168,76 @@ fn errno_of(err: &io::Error, text: &[u8]) -> i32 {
 	}
 	#[cfg(not(unix))]
 	{
-		let _ = text;
-		0
+		use io::ErrorKind as K;
+		match err.kind() {
+			K::NotFound => posix::ENOENT,
+			K::PermissionDenied => posix::EACCES,
+			K::AlreadyExists => posix::EEXIST,
+			K::IsADirectory => posix::EISDIR,
+			K::NotADirectory => posix::ENOTDIR,
+			K::DirectoryNotEmpty => posix::ENOTEMPTY,
+			K::InvalidInput => posix::EINVAL,
+			K::Unsupported => posix::ENOTSUP,
+			K::CrossesDevices => posix::EXDEV,
+			K::ReadOnlyFilesystem => posix::EROFS,
+			K::StorageFull => posix::ENOSPC,
+			K::WouldBlock => posix::EAGAIN,
+			K::Interrupted => posix::EINTR,
+			K::TooManyLinks => posix::EMLINK,
+			K::OutOfMemory => posix::ENOMEM,
+			K::NotSeekable => posix::ESPIPE,
+			_ if text == b"Bad file descriptor" => posix::EBADF,
+			_ => 0,
+		}
+	}
+}
+
+/// The Linux `errno` numbers (what `$errnos` names off Unix) of the errors
+/// the engine reports.
+#[cfg(not(unix))]
+pub mod posix {
+	pub const EPERM: i32 = 1;
+	pub const ENOENT: i32 = 2;
+	pub const EINTR: i32 = 4;
+	pub const EBADF: i32 = 9;
+	pub const EAGAIN: i32 = 11;
+	pub const ENOMEM: i32 = 12;
+	pub const EACCES: i32 = 13;
+	pub const EEXIST: i32 = 17;
+	pub const EXDEV: i32 = 18;
+	pub const ENOTDIR: i32 = 20;
+	pub const EISDIR: i32 = 21;
+	pub const EINVAL: i32 = 22;
+	pub const ENOSPC: i32 = 28;
+	pub const ESPIPE: i32 = 29;
+	pub const EROFS: i32 = 30;
+	pub const EMLINK: i32 = 31;
+	pub const ENOTEMPTY: i32 = 39;
+	pub const ENOTSUP: i32 = 95;
+
+	/// The `strerror` text of a number above.
+	pub const fn text(num: i32) -> Option<&'static str> {
+		Some(match num {
+			EPERM => "Operation not permitted",
+			ENOENT => "No such file or directory",
+			EINTR => "Interrupted system call",
+			EBADF => "Bad file descriptor",
+			EAGAIN => "Resource temporarily unavailable",
+			ENOMEM => "Cannot allocate memory",
+			EACCES => "Permission denied",
+			EEXIST => "File exists",
+			EXDEV => "Invalid cross-device link",
+			ENOTDIR => "Not a directory",
+			EISDIR => "Is a directory",
+			EINVAL => "Invalid argument",
+			ENOSPC => "No space left on device",
+			ESPIPE => "Illegal seek",
+			EROFS => "Read-only file system",
+			EMLINK => "Too many links",
+			ENOTEMPTY => "Directory not empty",
+			ENOTSUP => "Operation not supported",
+			_ => return None,
+		})
 	}
 }
 

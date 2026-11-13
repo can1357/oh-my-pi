@@ -437,6 +437,12 @@ pub fn errnos() -> Vec<BString> {
 
 /// The platform's `strerror(num)` text.
 fn strerror_of(num: i32) -> String {
+	// Off Unix `from_raw_os_error` reads the Win32 message table, whose
+	// numbers are not errnos.
+	#[cfg(not(unix))]
+	if let Some(text) = crate::bash::vm::fsprobe::posix::text(num) {
+		return text.to_owned();
+	}
 	strerror(&io::Error::from_raw_os_error(num)).into_owned()
 }
 
