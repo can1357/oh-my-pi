@@ -237,8 +237,22 @@ describe("antigravity usage provider", () => {
 		const argon = { modelId: "gemini-4-argon" };
 		expect(scopeAntigravityLimitsForModel(report, argon)).toEqual([]);
 		expect(antigravityRankingStrategy.findWindowLimits(report, argon).primary).toBeUndefined();
-		expect(antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => scope.blockScope)).toEqual([
-			"counter:google",
+		// Ranking leaves Argon unconstrained, but a stale Argon block heals only
+		// while the shared Gemini quota it now draws on has headroom.
+		expect(
+			antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => ({
+				blockScope: scope.blockScope,
+				limits: scope.limits.map(limit => limit.id).sort(),
+			})),
+		).toEqual([
+			{
+				blockScope: "counter:google-argon",
+				limits: ["google-antigravity:google:default:gemini-5h", "google-antigravity:google:default:gemini-weekly"],
+			},
+			{
+				blockScope: "counter:google",
+				limits: ["google-antigravity:google:default:gemini-5h", "google-antigravity:google:default:gemini-weekly"],
+			},
 		]);
 	});
 

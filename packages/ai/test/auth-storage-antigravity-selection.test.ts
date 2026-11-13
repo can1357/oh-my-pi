@@ -360,6 +360,55 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		expect(argonKey).toBe("api-acct-recovered");
 	});
 
+	for (const { name, googleUsed, healed } of [
+		{ name: "heals", googleUsed: 0.02, healed: true },
+		{ name: "keeps", googleUsed: 1, healed: false },
+	]) {
+		test(`${name} a stale Argon block when the quota summary drops the Argon bucket and shared Gemini quota is ${healed ? "left" : "exhausted"}`, async () => {
+			if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
+				throw new Error("test setup failed");
+			}
+
+			await authStorage.credentials.set("google-antigravity", [
+				{
+					type: "oauth",
+					...createCredential("acct-upgraded", "proj-upgraded", "upgraded@example.com"),
+				},
+			]);
+			const row = store.listAuthCredentials("google-antigravity")[0];
+			if (!row) throw new Error("expected credential row");
+
+			// The Argon weekly bucket ran out and a 429 blocked Argon until its
+			// reset. The plan then changed, and the quota summary stopped
+			// reporting a separate Argon bucket.
+			const weekAhead = Date.now() + 6 * 24 * HOUR_MS;
+			store.upsertCredentialBlock({
+				credentialId: row.id,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "counter:google-argon",
+				blockedUntilMs: weekAhead,
+			});
+			ageCredentialBlockRows(dbPath);
+			store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
+
+			const report = createAntigravityReport({
+				accountId: "acct-upgraded",
+				projectId: "proj-upgraded",
+				windows: [{ counter: "google", usedFraction: googleUsed, resetInMs: 5 * HOUR_MS }],
+			});
+			usageByAccount.set("acct-upgraded", {
+				...report,
+				metadata: { ...report.metadata, quotaSource: "quota-summary" },
+			});
+
+			await authStorage.usage.reports();
+
+			expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBe(
+				healed ? undefined : weekAhead,
+			);
+		});
+	}
+
 	test("prefers less-pressured antigravity account when neither is exhausted", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
