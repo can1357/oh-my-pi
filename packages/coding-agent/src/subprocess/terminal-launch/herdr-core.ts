@@ -3,7 +3,6 @@ import type {
 	SupportedMultiplexerCapabilities,
 	TerminalLaunchBackend,
 	TerminalLaunchCliResult,
-	TerminalLaunchCliRunner,
 	TerminalLaunchProvider,
 	TerminalLaunchRequest,
 } from "./types";
@@ -31,22 +30,6 @@ function desktopFailure(request: TerminalLaunchRequest, operation: string, resul
 	}
 	const exit = result.exitCode === null ? "did not exit successfully" : `failed (exit ${result.exitCode})`;
 	return launchError(request, operation, `herdr-core ${operation} ${exit}. ${detail}`, result.exitCode);
-}
-
-async function desktopStep(
-	request: TerminalLaunchRequest,
-	operation: string,
-	argv: readonly string[],
-	runCli: TerminalLaunchCliRunner,
-): Promise<string> {
-	let result: TerminalLaunchCliResult;
-	try {
-		result = await runCli(argv, request.cwd);
-	} catch {
-		throw launchError(request, operation, `herdr-core ${operation} could not start its CLI.`);
-	}
-	if (result.exitCode !== 0) throw desktopFailure(request, operation, result);
-	return result.stdout;
 }
 
 function locations(request: TerminalLaunchRequest, stdout: string, terminalId: string): DesktopLocation[] {
@@ -116,14 +99,9 @@ const launchHerdrCore: TerminalLaunchBackend<"herdr-core", typeof capabilities> 
 				(/^herdr-app: no Herdr window at [^:\r\n]+: No such file or directory(?: \(os error 2\))?\s*$/.test(
 					listing.stderr ?? "",
 				) ||
-					(platform === "darwin" &&
-						/^herdr-app: no Herdr window at [^:\r\n]+: Connection refused \(os error 61\)\s*$/.test(
-							listing.stderr ?? "",
-						)) ||
-					(platform === "linux" &&
-						/^herdr-app: no Herdr window at [^:\r\n]+: Connection refused \(os error 111\)\s*$/.test(
-							listing.stderr ?? "",
-						)))
+					/^herdr-app: no Herdr window at [^:\r\n]+: Connection refused \(os error (?:61|111)\)\s*$/.test(
+						listing.stderr ?? "",
+					))
 			)
 		) {
 			throw desktopFailure(request, "desktop list", listing);
@@ -178,19 +156,34 @@ const launchHerdrCore: TerminalLaunchBackend<"herdr-core", typeof capabilities> 
 	}
 
 	const operation = request.placement === "pane" ? "pane.split" : "tab.new";
-	// pane.split has an explicit pane but no folder option. env changes cwd without shell interpolation.
+	// pane.split has no folder option; pass cwd and command as literal shell arguments.
 	const args =
 		request.placement === "pane"
 			? {
 					pane: location.pane,
 					direction: request.direction ?? "right",
-					argv: ["/usr/bin/env", "-C", request.cwd, "--", ...command],
+					argv: [
+						"/bin/sh",
+						"-c",
+						'CDPATH= cd -P -- "$1" || exit; shift; exec -- "$@"',
+						"herdr-core",
+						request.cwd,
+						...request.command,
+					],
 				}
 			: { space: location.space, folder: request.cwd, argv: request.command };
 	const output = parseJson(
 		request,
 		operation,
-		await desktopStep(request, operation, ["herdr-app", "do", operation, JSON.stringify(args)], runCli),
+		await runStep(
+			request,
+			operation,
+			["herdr-app", "do", operation, JSON.stringify(args)],
+			request.cwd,
+			runCli,
+			undefined,
+			result => desktopFailure(request, operation, result),
+		),
 	);
 	const id = nestedString(output, request.placement === "pane" ? "pane" : "tab");
 	if (!id || !nestedString(output, "terminal")) {

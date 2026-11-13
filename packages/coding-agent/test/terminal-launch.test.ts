@@ -676,12 +676,109 @@ describe("terminal launch dispatcher", () => {
 						JSON.stringify({
 							pane: "source-pane",
 							direction: "right",
-							argv: ["/usr/bin/env", "-C", cwd, "--", ...command],
+							argv: [
+								"/bin/sh",
+								"-c",
+								'CDPATH= cd -P -- "$1" || exit; shift; exec -- "$@"',
+								"herdr-core",
+								cwd,
+								...command,
+							],
 						}),
 					],
 					cwd,
 				},
 			]);
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"runs a Desktop pane in the requested directory without env -C",
+			async () => {
+				const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-core-")));
+				try {
+					const paneCwd = path.join(tempRoot, "cwd spaces ' $(literal)");
+					await fs.mkdir(paneCwd);
+					const recorder = path.join(tempRoot, "recorder.js");
+					await Bun.write(
+						recorder,
+						"process.stdout.write(JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }));\n",
+					);
+					const env = path.join(tempRoot, "env");
+					await Bun.write(env, '#!/bin/sh\nif [ "$1" = "-C" ]; then exit 1; fi\nexec /usr/bin/env "$@"\n');
+					await fs.chmod(env, 0o755);
+					const args = ["spaces and 'quotes'", "$(printf injected); *", "", "line\nbreak"];
+					const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+						{ stdout: listing, exitCode: 0 },
+						{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+					]);
+					await launch({
+						multiplexer: "herdr-core",
+						placement: "pane",
+						command: [process.execPath, recorder, ...args],
+						cwd: paneCwd,
+					});
+					const paneArgv: string[] = JSON.parse(calls[1]!.argv[3]!).argv;
+					if (paneArgv[0] === "/usr/bin/env") paneArgv[0] = env;
+					const executed = await processCli(paneArgv, tempRoot);
+					expect(executed.exitCode).toBe(0);
+					expect(JSON.parse(executed.stdout)).toEqual({ cwd: paneCwd, args });
+				} finally {
+					await fs.rm(tempRoot, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"resolves a Desktop pane cwd physically through a symlink and ..",
+			async () => {
+				const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-physical-")));
+				try {
+					const physicalParent = path.join(tempRoot, "physical");
+					await fs.mkdir(path.join(physicalParent, "child"), { recursive: true });
+					await fs.symlink(path.join(physicalParent, "child"), path.join(tempRoot, "link"));
+					const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+						{ stdout: listing, exitCode: 0 },
+						{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+					]);
+					await launch({
+						multiplexer: "herdr-core",
+						placement: "pane",
+						command: ["/bin/pwd", "-P"],
+						cwd: `${tempRoot}/link/..`,
+					});
+					const paneArgv: string[] = JSON.parse(calls[1]!.argv[3]!).argv;
+					const executed = await processCli(paneArgv, tempRoot);
+					expect(executed.exitCode).toBe(0);
+					expect(executed.stdout.trim()).toBe(physicalParent);
+				} finally {
+					await fs.rm(tempRoot, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it.skipIf(process.platform === "win32")("runs a PATH-resolved Desktop pane executable named -c", async () => {
+			const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "herdr-dash-command-")));
+			try {
+				const executable = path.join(tempRoot, "-c");
+				await Bun.write(executable, "#!/bin/sh\nprintf 'dash-command-ran\\n'\n");
+				await fs.chmod(executable, 0o755);
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: listing, exitCode: 0 },
+					{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+				]);
+				await launch({ multiplexer: "herdr-core", placement: "pane", command: ["-c"], cwd: tempRoot });
+				const paneArgv: string[] = JSON.parse(calls[1]!.argv[3]!).argv;
+				const executed = Bun.spawnSync(paneArgv, {
+					cwd: tempRoot,
+					env: { ...process.env, PATH: tempRoot },
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				expect(executed.exitCode).toBe(0);
+				expect(executed.stdout.toString()).toBe("dash-command-ran\n");
+			} finally {
+				await fs.rm(tempRoot, { recursive: true, force: true });
+			}
 		});
 
 		it("creates a tab in the terminal's own space with the requested folder and literal argv", async () => {
@@ -782,6 +879,24 @@ describe("terminal launch dispatcher", () => {
 			expect(calls[1]?.argv[0]).toBe("hc");
 		});
 
+		it("treats a refused FreeBSD Desktop socket as headless", async () => {
+			const { calls, launch } = createHarness(
+				{ HC_TERMINAL_ID: "t7" },
+				[
+					{
+						stdout: "",
+						stderr: "herdr-app: no Herdr window at /tmp/herdr-app.sock: Connection refused (os error 61)",
+						exitCode: 2,
+					},
+					{ stdout: '{"address":"t8"}', exitCode: 0 },
+				],
+				"freebsd",
+			);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.warning).toContain("no visible");
+			expect(calls[1]?.argv[0]).toBe("hc");
+		});
+
 		it.each([
 			["Permission denied (os error 13)", "permission denied"],
 			["Connection refused (os error 13)", "connection refused"],
@@ -857,14 +972,11 @@ describe("terminal launch dispatcher", () => {
 				cwd,
 			});
 			expect(JSON.parse(calls[1].argv[3]).argv).toEqual([
-				"/usr/bin/env",
-				"-C",
-				cwd,
-				"--",
 				"/bin/sh",
 				"-c",
-				'exec "$@"',
+				'CDPATH= cd -P -- "$1" || exit; shift; exec -- "$@"',
 				"herdr-core",
+				cwd,
 				"/path/name=value",
 				"$(literal)",
 			]);

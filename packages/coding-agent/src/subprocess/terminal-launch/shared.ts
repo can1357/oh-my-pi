@@ -27,6 +27,7 @@ export async function runStep(
 	cwd: string,
 	runCli: TerminalLaunchCliRunner,
 	env?: NodeJS.ProcessEnv,
+	formatFailure?: (result: TerminalLaunchCliResult) => Error,
 ): Promise<string> {
 	let result: TerminalLaunchCliResult;
 	try {
@@ -35,6 +36,7 @@ export async function runStep(
 		throw launchError(request, operation, `${request.multiplexer} ${operation} could not start its CLI.`);
 	}
 	if (result.exitCode !== 0) {
+		if (formatFailure) throw formatFailure(result);
 		const exit = result.exitCode === null ? "did not exit successfully" : `failed (exit ${result.exitCode})`;
 		throw launchError(request, operation, `${request.multiplexer} ${operation} ${exit}.`, result.exitCode);
 	}
