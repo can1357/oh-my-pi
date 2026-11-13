@@ -503,31 +503,57 @@ mod tests {
 	#[test]
 	fn pending_tracks_partial_drain_progress() {
 		let (read_fd, write_fd) = pipe_pair();
+		// A new pipe's buffer size is not fixed: Linux gives 64 KiB, but only two
+		// pages once the user's pipes pass `fs.pipe-user-pages-soft`. That is
+		// smaller than one write chunk, so with no reader the pump's first
+		// `write(2)` never returns and nothing is ever reported. Pin the smallest
+		// buffer (shrinking is never refused) so every run covers that case, and
+		// let a reader consume a known byte count instead of relying on how much
+		// the buffer absorbs.
+		#[cfg(target_os = "linux")]
+		{
+			// SAFETY: sysconf has no memory-safety preconditions.
+			let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+			// SAFETY: write_fd is an open pipe owned by this test.
+			assert!(unsafe { libc::fcntl(write_fd, libc::F_SETPIPE_SZ, page as libc::c_int) } >= 0);
+		}
 		let mut writer = TtyWriter::new(write_fd).unwrap();
-		// Far larger than any kernel pipe buffer, so the pump writes what fits
-		// and then blocks on the remainder with no reader draining.
+		// Far larger than any kernel pipe buffer plus what the reader takes, so
+		// the pump stays blocked on the undrained tail.
 		let total = 1024 * 1024;
 		push(&writer, &vec![b'x'; total]);
-		// Wait until the pump has written at least one chunk, but remains blocked
-		// on the undrained tail. Do not treat one unchanged sample as stability:
-		// under full-suite load the pump thread may not be scheduled before the
-		// first poll.
+		// Every consumed byte went through a write; two chunks consumed means at
+		// least two writes completed, whatever the pipe buffer size.
+		let consumed = 2 * MAX_TTY_WRITE_CHUNK_BYTES;
 		let deadline = Instant::now() + Duration::from_secs(2);
+		let mut buf = vec![0u8; 64 * 1024];
+		let mut got = 0usize;
+		while got < consumed {
+			let mut pollfd = libc::pollfd { fd: read_fd, events: libc::POLLIN, revents: 0 };
+			let left = deadline.saturating_duration_since(Instant::now());
+			// SAFETY: pollfd points to one valid element; read_fd is open.
+			let ready = unsafe { libc::poll(&mut pollfd, 1, left.as_millis() as libc::c_int) };
+			assert!(ready > 0, "pump wrote only {got} of {consumed} bytes before the deadline");
+			// SAFETY: buf holds at least `consumed - got` bytes; read_fd is open.
+			let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), consumed - got) };
+			assert!(n > 0, "read from the pipe failed");
+			got += n as usize;
+		}
+		// Stop reading: the pump blocks again, and pending must show the drain.
 		loop {
-			std::thread::sleep(Duration::from_millis(20));
-			let pending = writer.pending();
-			if pending > 0 && pending < total as u32 {
+			let pending = writer.pending() as usize;
+			assert!(pending > 0, "pump wrote more than the pipe could hold");
+			if pending <= total - consumed {
 				break;
 			}
 			assert!(
 				Instant::now() < deadline,
-				"pump made no observable partial progress; pending {pending} of {total}"
+				"pending {pending} of {total} after the reader consumed {consumed} bytes"
 			);
+			std::thread::sleep(Duration::from_millis(5));
 		}
 		// Drain the rest so stop() can join the pump thread.
 		let reader = std::thread::spawn(move || {
-			let mut buf = vec![0u8; 64 * 1024];
-			let mut got = 0usize;
 			while got < total {
 				// SAFETY: buf is a valid out-buffer for read(2).
 				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
