@@ -331,6 +331,7 @@ Open `/models` → **Roles** → **Judge** to declare native judge routes withou
 | TypeSafe SystemOne | `typesafe` | `/v1/systemone` |
 | OpenRouter Decisions | `openrouter-decisions` | `/decisions` (root `https://openrouter.ai/api/alpha`) |
 | OpenAI Decisions | `openai-decisions` | `/decisions` |
+| Gemini Decisions | `google-decisions` | `/decisions` (root `https://generativelanguage.googleapis.com/v1beta`) |
 | Workers AI SystemOne | `workers-ai-systemone` | `/{model}` (root `https://api.cloudflare.com/client/v4/accounts/<account>/ai/run`) |
 | Liquid SystemOne | `liquid-systemone` | `/decisions/v1/systemone` |
 | Nace SystemOne | `nace-systemone` | `/v1/systemone` |

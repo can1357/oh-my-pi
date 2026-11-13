@@ -22,6 +22,7 @@ const ROOTS: Record<JudgmentApi, string> = {
 	"openrouter-decisions": "https://native.invalid/api/alpha",
 	"workers-ai-systemone": "https://api.cloudflare.com/client/v4/accounts/<account>/ai/run",
 	"openai-decisions": "https://native.invalid/v1",
+	"google-decisions": "https://native.invalid/v1beta",
 	"liquid-systemone": "https://native.invalid/liquid",
 	"nace-systemone": "https://native.invalid/nace",
 };
