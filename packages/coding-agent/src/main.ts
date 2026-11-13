@@ -130,6 +130,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { configureSessionBoundaryRoot, resolveSessionBoundaryRoot } from "./session/session-boundary";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -195,6 +196,7 @@ import {
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
 	cfgPrewalkInto,
+	cfgSessionBoundaryRoot,
 	cfgSessionMaxCost,
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
@@ -1278,6 +1280,8 @@ export async function createSessionManager(
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
 	} = {},
 ): Promise<SessionManager | undefined> {
+	const boundaryRoot = resolveSessionBoundaryRoot(parsed.sessionBoundaryRoot, cfgSessionBoundaryRoot.get(activeSettings));
+	if (boundaryRoot !== undefined) configureSessionBoundaryRoot(boundaryRoot);
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
@@ -1989,6 +1993,11 @@ export async function runRootCommand(
 		}
 
 		const settingsInstance = await settingsPromise;
+		if (parsedArgs.sessionBoundaryRoot !== undefined) {
+			cfgSessionBoundaryRoot.override(settingsInstance, parsedArgs.sessionBoundaryRoot);
+		}
+		const boundaryRoot = resolveSessionBoundaryRoot(parsedArgs.sessionBoundaryRoot, cfgSessionBoundaryRoot.get(settingsInstance));
+		if (boundaryRoot !== undefined) configureSessionBoundaryRoot(boundaryRoot);
 		// Process-lifetime: broker/account-policy edits reconfigure the shared credential store.
 		createAuthStorageSettingsSync(settingsInstance, authStorage);
 		if (parsedArgs.approvalMode) {

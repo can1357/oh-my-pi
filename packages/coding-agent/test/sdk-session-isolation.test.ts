@@ -11,7 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { configureSessionBoundaryRoot, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as secrets from "@oh-my-pi/pi-coding-agent/secrets";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -118,6 +118,37 @@ describe("createAgentSession session storage isolation", () => {
 		LocalProtocolHandler.resetOverrideForTests();
 		for (const tempDir of tempDirs.splice(0)) {
 			removeSyncWithRetries(tempDir);
+		}
+	});
+
+	it("rejects a supplied foreign manager before SDK context construction", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-session-boundary-"));
+		tempDirs.push(tempDir);
+		const manager = SessionManager.create(tempDir, path.join(tempDir, "foreign"));
+		manager.appendMessage({ role: "user", content: "foreign secret", timestamp: Date.now() });
+		await manager.rewriteEntries();
+		const release = configureSessionBoundaryRoot();
+		const context = spyOn(manager, "buildSessionContext");
+		try {
+			await expect(createAgentSession({
+				cwd: tempDir,
+				agentDir: path.join(tempDir, "agent"),
+				sessionManager: manager,
+				sessionBoundaryRoot: path.join(tempDir, "owned"),
+				modelRegistry: sharedModelRegistry,
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			})).rejects.toThrow("outside session boundary");
+			expect(context).not.toHaveBeenCalled();
+		} finally {
+			release();
+			await manager.close();
 		}
 	});
 

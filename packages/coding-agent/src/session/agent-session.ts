@@ -477,6 +477,7 @@ import {
 import { type ObservedPromptCacheEntry, promptCacheStatus } from "./prompt-cache-status";
 import { PromptFollowUps } from "./prompt-follow-ups";
 import type { PromptCacheStatus } from "@oh-my-pi/pi-tui/status-line/host";
+import { assertSessionBoundary } from "./session-boundary";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
 import {
@@ -14063,6 +14064,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onModelFallback?: (warning: string) => void;
 		},
 	): Promise<boolean> {
+		assertSessionBoundary(sessionPath);
 		const queued = this.#enterSessionTransition(() => this.switchSession(sessionPath, options));
 		if (queued) return queued;
 		const explicitModel = options?.model;

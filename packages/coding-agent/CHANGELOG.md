@@ -1052,6 +1052,7 @@
 - Fixed an edit under an older `[path#TAG]` header, after another edit had changed the file, applying to lines that read never displayed, including a line it had cut at the column cap; such an edit now shows the anchored lines first, as it does under the file's current tag ([#16208](https://github.com/can1357/oh-my-pi/issues/16208), [#17033](https://github.com/can1357/oh-my-pi/pull/17033) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `omp gc --compress` (and the `gc.autoCompress` background run) taking minutes on large session histories ([#17195](https://github.com/can1357/oh-my-pi/pull/17195) by [@H4vC](https://github.com/H4vC))
 - Fixed `omp gc --compress --apply` spending time on every idle session where the filesystem does not actually compress files (e.g. macOS 27); it now reports `compress skipped: <reason>`, and `gc.autoCompress` no longer slows interactive startup with that check ([#17195](https://github.com/can1357/oh-my-pi/pull/17195) by [@H4vC](https://github.com/H4vC))
+- Added opt-in `sessionBoundaryRoot`, `OMP_SESSION_BOUNDARY_ROOT`, and `--session-boundary-root` to reject foreign native journals before initial resume/fork reads, picker previews, SDK hydration, or interactive switches; canonical ancestor checks reject symlink escapes while preserving nested child journals.
 
 ## [18.13.1] - 2026-10-27
 

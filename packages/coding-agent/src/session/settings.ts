@@ -1675,6 +1675,18 @@ function validateCostThreshold(id: string): (raw: unknown) => void {
 	};
 }
 
+/** Opt-in process boundary for native session journals, including artifact children. */
+export const cfgSessionBoundaryRoot = register({
+	id: "sessionBoundaryRoot",
+	type: "string",
+	default: undefined,
+	validate: value => {
+		if (value !== undefined && (typeof value !== "string" || !value.trim())) {
+			throw new Error("sessionBoundaryRoot must be a non-empty path");
+		}
+	},
+});
+
 /** Session-tree spend (USD) at which omp warns once; `--warn-cost` overrides it for one run. */
 export const cfgSessionWarnCost = register({
 	id: "session.warnCost",

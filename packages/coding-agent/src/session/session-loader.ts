@@ -24,6 +24,7 @@ import {
 	resolveImageDataUrlSync,
 } from "./blob-store";
 import { buildSessionContext } from "./session-context";
+import { assertSessionBoundary } from "./session-boundary";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
@@ -197,6 +198,7 @@ const HEADER_INCOMPLETE = Symbol("header-incomplete");
  * {@link SESSION_HEADER_READ_LIMIT} only when the first record runs past them.
  */
 export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
+	assertSessionBoundary(filePath);
 	try {
 		const id = await peekFile(filePath, SESSION_HEADER_FIRST_READ, prefix =>
 			sessionHeaderIdFromPrefix(prefix, prefix.length < SESSION_HEADER_FIRST_READ),
@@ -249,6 +251,7 @@ export async function visitEntriesFromFileStream(
 	visit: (entry: FileEntry) => void | boolean,
 	options: VisitEntriesFromFileStreamOptions = {},
 ): Promise<SessionTitleUpdate | undefined> {
+	assertSessionBoundary(filePath);
 	let titleSlot: SessionTitleUpdate | undefined;
 	let sawFirstLine = false;
 	let sawFirstEntry = false;
@@ -548,6 +551,7 @@ export async function loadSessionFile(
 	storage: SessionStorage = new FileSessionStorage(),
 	options: LoadSessionOptions = {},
 ): Promise<SessionLoadResult> {
+	assertSessionBoundary(filePath);
 	try {
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
@@ -600,6 +604,7 @@ export async function visitEntriesFromFile(
 	visit: (entry: FileEntry) => void | boolean,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<void> {
+	assertSessionBoundary(filePath);
 	const size = storage.statSync(filePath).size;
 	if (shouldStreamEntries(storage, size)) {
 		let sawFirstEntry = false;

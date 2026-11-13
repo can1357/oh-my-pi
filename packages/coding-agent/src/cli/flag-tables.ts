@@ -236,6 +236,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--session-dir": (result, value) => {
 		result.sessionDir = value;
 	},
+	"--session-boundary-root": (result, value) => {
+		if (!value.trim()) throw new CliUsageError("--session-boundary-root requires a path.");
+		result.sessionBoundaryRoot = value;
+	},
 	"--models": (result, value) => {
 		result.models = value.split(",").map(s => s.trim());
 	},

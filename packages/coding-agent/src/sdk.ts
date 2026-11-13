@@ -253,6 +253,8 @@ import {
 	SPOTLIGHT_NOTICE_SOURCE,
 	startSpotlightExperiment,
 } from "./spotlight/session";
+import { assertSessionBoundary, configureSessionBoundaryRoot, resolveSessionBoundaryRoot } from "./session/session-boundary";
+export { configureSessionBoundaryRoot } from "./session/session-boundary";
 import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
@@ -404,6 +406,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 	systemPromptTemplatePatterns,
+	cfgSessionBoundaryRoot,
 } from "./session/settings";
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
@@ -955,6 +958,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
+	/** Process-wide journal boundary. Activate before separately opening a manager to reject before its first read. */
+	sessionBoundaryRoot?: string;
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
@@ -1985,6 +1990,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
+	const boundaryRoot = resolveSessionBoundaryRoot(options.sessionBoundaryRoot, cfgSessionBoundaryRoot.get(settings));
+	if (boundaryRoot !== undefined) configureSessionBoundaryRoot(boundaryRoot);
+	const suppliedSessionFile = options.sessionManager?.getSessionFile();
+	if (suppliedSessionFile) assertSessionBoundary(suppliedSessionFile);
 	// Discovery provider toggles and process-wide setting effects (theme, request limits, …)
 	// follow the newest holder: each top-level session holds both on its settings until disposed,
 	// then hands them back to the previous holder. Subagents and helper sessions never take them,

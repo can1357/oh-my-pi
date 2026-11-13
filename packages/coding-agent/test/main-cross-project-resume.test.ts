@@ -91,7 +91,7 @@ function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" 
 	};
 }
 
-const stubSettings = { get: () => undefined } as unknown as Settings;
+const stubSettings = Settings.isolated();
 
 describe("createSessionManager — cross-project --resume", () => {
 	let existingProject: string;
