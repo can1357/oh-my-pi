@@ -721,13 +721,22 @@ describe("SDK async task guidance", () => {
 						if (match) return match[1]!;
 					}
 				};
-				sessionFile = await Promise.race([
-					waitForMarker(),
-					// 子进程崩溃前可能无法发送锚点，真实超时负责终止并回收该进程。
-					Bun.sleep(15_000).then(() => {
-						throw new Error("隔离宿主等待锚点超时");
-					}),
-				]);
+				let timeoutId: NodeJS.Timeout | undefined;
+				const { promise: timeoutPromise, reject } = Promise.withResolvers<never>();
+				timeoutId = setTimeout(
+					() => reject(new Error("Isolated host did not report a crash anchor within 15s")),
+					15_000,
+				);
+				// The timeout arm loses the race when the marker arrives; pre-attach a catch so the
+				// discarded promise can never surface as an unhandled rejection.
+				timeoutPromise.catch(() => undefined);
+				try {
+					sessionFile = await Promise.race([waitForMarker(), timeoutPromise]);
+				} finally {
+					// The child may crash before sending its anchor; the real timeout above terminates
+					// and reaps the process in that case.
+					clearTimeout(timeoutId);
+				}
 			} finally {
 				child.kill("SIGKILL");
 				await child.exited;
