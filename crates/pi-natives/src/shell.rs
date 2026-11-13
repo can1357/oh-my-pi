@@ -20,9 +20,10 @@ use napi_derive::napi;
 use pi_shell::{
 	MinimizerResult as CoreMinimizerResult, PipeTaps, Shell as CoreShell,
 	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
-	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
+	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult, StreamSinks,
 	bash::trace::viz::{self, model},
-	execute_shell as core_execute_shell, minimizer,
+	execute_shell as core_execute_shell, execute_shell_streams as core_execute_shell_streams,
+	minimizer,
 };
 
 use self::vfs::ShellFilesystem;
@@ -635,6 +636,64 @@ pub fn execute_shell<'env>(
 	})
 }
 
+/// Options for [`execute_shell_stdout`]: [`ShellExecuteOptions`] without a
+/// minimizer, whose rewrite contract presumes merged decoded text.
+#[napi(object, object_to_js = false)]
+pub struct ShellStdoutOptions<'env> {
+	/// Command string to execute in the shell.
+	pub command:       String,
+	/// Working directory for the command.
+	pub cwd:           Option<String>,
+	/// Environment variables to apply for this command only.
+	pub env:           Option<HashMap<String, String>>,
+	/// Environment variables to apply once per session.
+	pub session_env:   Option<HashMap<String, String>>,
+	/// Timeout in milliseconds before cancelling the command.
+	pub timeout_ms:    Option<u32>,
+	/// Optional snapshot file to source on session creation.
+	pub snapshot_path: Option<String>,
+	/// Abort signal for cancelling the operation.
+	pub signal:        Option<Unknown<'env>>,
+	/// Filesystem backing the command (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
+}
+
+/// Execute an embedded bash command, delivering only its stdout, as raw bytes.
+///
+/// Creates a fresh session for each call. `on_stdout` receives stdout exactly
+/// as the command wrote it: never decoded, never merged with stderr, never
+/// minimized. Stderr is drained and discarded. A cancelled or timed-out run
+/// resolves only after its processes have been terminated.
+#[napi]
+pub fn execute_shell_stdout<'env>(
+	env: &'env Env,
+	options: ShellStdoutOptions<'env>,
+	#[napi(ts_arg_type = "(error: Error | null, chunk: Uint8Array) => void")]
+	on_stdout: ThreadsafeFunction<Buffer, UnknownReturnValue>,
+) -> Result<PromiseRaw<'env, ShellRunResult>> {
+	let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
+	let exec_options = CoreShellExecuteOptions {
+		command:       options.command,
+		cwd:           options.cwd,
+		env:           options.env,
+		session_env:   options.session_env,
+		timeout_ms:    options.timeout_ms,
+		snapshot_path: options.snapshot_path,
+		minimizer:     None,
+		filesystem:    options.filesystem.map_or_default(ShellFilesystem::into_fs),
+	};
+	task::future(env, "shell.execute_stdout", async move {
+		let (stdout_tx, drain_handle) = bridge_bytes(on_stdout);
+		let streams = StreamSinks { stdout: Some(stdout_tx), stderr: None };
+		let result = core_execute_shell_streams(exec_options, streams, cancel_token.into_core())
+			.await
+			.map(Into::into)
+			.map_err(|err| Error::from_reason(err.to_string()));
+		await_drain(Some(drain_handle), &result).await;
+		result
+	})
+}
+
 /// Capacity (in chunks) of the queue between the output readers (pipe or PTY)
 /// and the JS forwarding pump. One queued chunk is at most one read (≤64 KiB),
 /// so the Rust side of the bridge holds ~4 MiB worst case before the readers'
@@ -678,6 +737,39 @@ fn bridge_chunks(
 	(Some(tx), Some(handle))
 }
 
+/// [`bridge_chunks`] for raw bytes: the same bounded queue, ≤64 KiB
+/// coalescing, awaited forwarding, and stall bound, with no decoding.
+fn bridge_bytes<T: AsRef<[u8]> + Send + 'static>(
+	on_chunk: ThreadsafeFunction<Buffer, UnknownReturnValue>,
+) -> (flume::Sender<T>, napi::tokio::task::JoinHandle<()>) {
+	let (tx, rx) = flume::bounded::<T>(BRIDGE_QUEUE_CHUNKS);
+	let handle = napi::tokio::spawn(async move {
+		while let Ok(first) = rx.recv_async().await {
+			let mut batch = first.as_ref().to_vec();
+			while batch.len() < MAX_BATCH_BYTES {
+				match rx.try_recv() {
+					Ok(more) => batch.extend_from_slice(more.as_ref()),
+					Err(_) => break,
+				}
+			}
+			let forwarded = napi::tokio::time::timeout(
+				FORWARD_STALL_TIMEOUT,
+				on_chunk.call_async(Ok(Buffer::from(batch))),
+			)
+			.await;
+			if !matches!(forwarded, Ok(Ok(_))) {
+				return;
+			}
+		}
+	});
+	(tx, handle)
+}
+
+/// Hard cap on one coalesced bridge batch so the JS main thread never sees a
+/// multi-MB napi callback (a giant single string would stall sanitize +
+/// tail-buffer maintenance for the whole copy).
+const MAX_BATCH_BYTES: usize = 64 * 1024;
+
 /// One item on a reader→JS bridge queue.
 pub(crate) trait BridgeItem {
 	/// The output text, or `None` for an explicit end-of-output marker. The
@@ -709,10 +801,6 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 	busy: Option<&AtomicBool>,
 	mut forward: impl AsyncFnMut(String) -> bool,
 ) {
-	// Hard cap on one coalesced batch so the JS main thread never sees a
-	// multi-MB napi callback (a giant single string would stall sanitize +
-	// tail-buffer maintenance for the whole copy).
-	const MAX_BATCH_BYTES: usize = 64 * 1024;
 	// Initial capacity sized for typical bursty pipe output. Re-allocated
 	// each batch because `String` ownership is moved into the napi call.
 	const INITIAL_BATCH_CAP: usize = 8 * 1024;

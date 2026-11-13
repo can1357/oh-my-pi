@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added scheduled wakeup IDs, states and due times to the `proc://` table in terminal and native renderers
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

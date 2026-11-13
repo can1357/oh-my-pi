@@ -26,10 +26,15 @@
 - Queued peer messages are checked first. Already-settled but undelivered owned jobs are returned without another wait. A wake already queued before execution still lets `wait` drain its message or owned job instead of being skipped; host-owned notices inject at the next boundary after the normal wait result. If a peer message wins a race with job completion, that job remains eligible for normal async delivery.
 - Job waits emit progress snapshots every 500 ms when an update callback is present. Job results/snapshots use `details: { op: "wait", jobs: ... }`; peer-message results use the messaging result shape.
 - A running subagent's row carries its latest progress, e.g. ``- `AcpSurface` [task] — <label> — 5h7m · 90 req · $18.40 · ctx 160K/1M · stage: <stage>``: run time, requests, cost, context fill, self-estimated completion and stage, whichever its progress record reports. Bash and eval rows, and task rows without a progress record, stay ``- `<id>` [<type>] — <label>``. `read proc://` and `read proc://<id>` show the same progress on running task rows.
+- A pending `wakeup` timer is not an execution job: it neither keeps `wait` blocked nor postpones stop hooks. Finish the turn after scheduling a timer.
 
 ## Related surfaces
 
-- `read proc://` lists caller-visible jobs and project services; `read proc://<id>` inspects state/output without consuming delivery.
-- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; no `content` needed. Bare `proc://<id>` writes send stdin only to a service, including empty input.
+- `read proc://` lists caller-visible jobs, wakeup timers and project services; `read proc://<id>` inspects state/output without consuming delivery.
+- `write proc://<id>/kill` cancels a job, owned subagent or wakeup timer, or stops a service; no `content` needed. Bare `proc://<id>` writes send stdin only to a service, including empty input.
 - `write agent://<id>` sends a peer message; `agent://all` broadcasts to visible live peers from the main agent only. Bare `read history://` discovers registered agent transcripts. The final result of a subagent is delivered to its parent automatically.
 - Start supervised services with `bash` `name` and optional `ready`; inspect and control them through `proc://`.
+
+## Delayed checkbacks
+
+Use [`wakeup`](wakeup.md) for a delayed follow-up; a pending timer is not a job and never keeps `wait` blocked.

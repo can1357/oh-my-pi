@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `wakeup` for durable one-shot delayed checkbacks in persistent interactive sessions, with optional bounded conditional shell checks, same-session restore, and `proc://` inspection/cancellation. Timers use a separate eight-timer quota, do not block `wait` or defer stop hooks, and never inherit into forks or unpacked archives. OMP must be alive in the owning session to fire; delivery claims favor avoiding duplicates over crash-gap recovery
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))

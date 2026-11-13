@@ -21,7 +21,7 @@ import {
 	serviceStatus,
 	stopService,
 } from "../launch/services";
-import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
+import { PROC_EMPTY_TEXT, type ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import procReferenceDoc from "../prompts/internal-urls/proc-reference.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -171,6 +171,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const { id, action } = target(url);
 		if (!id || action !== "stdin" || !cfgLaunchEnabled.get(session.settings)) return null;
 		if (ownerJobs(session).some(job => job.id === id)) return null;
+		if (session.wakeupManager?.list().some(wakeup => wakeup.id === id)) return null;
 		if (runningAgentsOutsideJobs(session).some(agent => agent.id === id)) return null;
 		const logPath = await serviceLogPath(session, id);
 		return options?.create || (await Bun.file(logPath).exists()) ? logPath : null;
@@ -184,6 +185,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (procTarget.action === "streams") return streamsResource(url, session, id, procTarget.stream);
 		if (procTarget.action !== "stdin") throw new Error(writeOnlyError(id || "<id>", procTarget.action));
 		const jobs = ownerJobs(session);
+		const wakeups = session.wakeupManager?.list(id ? undefined : "scheduled") ?? [];
 		// Jobs and agents are in-process; a hung broker must not hide them.
 		const { services, error: servicesError } = cfgLaunchEnabled.get(session.settings)
 			? await listServicesTolerant(session, context?.signal)
@@ -205,17 +207,33 @@ export class ProcProtocolHandler implements ProtocolHandler {
 					agent =>
 						`${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}${agentStaleNote(agent)}`,
 				),
+				...wakeups.map(
+					wakeup =>
+						`${wakeup.id} [wakeup] ${wakeup.state} next=${new Date(wakeup.dueAt).toISOString()}${wakeup.deadline === undefined ? "" : ` deadline=${new Date(wakeup.deadline).toISOString()}`}`,
+				),
 				...services.map(service => serviceStatus(service)),
 				...(servicesError ? [`Services unavailable (daemon broker): ${servicesError}`] : []),
 			];
-			return textResource(url, rows.join("\n") || "No background jobs or services.", undefined, true, {
+			return textResource(url, rows.join("\n") || PROC_EMPTY_TEXT, undefined, true, {
 				jobs: snapshots,
 				agents: runningAgentsOutsideJobs(session),
 				daemons: services,
+				// Display-safe rows only: the prompt and check command stay in the journal.
+				wakeups: wakeups.map(wakeup => ({
+					id: wakeup.id,
+					state: wakeup.state,
+					dueAt: wakeup.dueAt,
+					...(wakeup.deadline === undefined ? {} : { deadline: wakeup.deadline }),
+				})),
 			});
 		}
 		const service = services.find(item => item.name === id);
 		const job = jobs.find(item => item.id === id) ?? (service ? undefined : runningJobOfAgent(jobs, id));
+		const wakeup = wakeups.find(item => item.id === id);
+		if (wakeup) {
+			if (job || service) throw new Error(`proc://${id} is ambiguous: both a wakeup and job/service exist.`);
+			return textResource(url, JSON.stringify(wakeup, null, 2));
+		}
 		if (job && service) throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
 		if (service) {
 			const header = `${serviceStatus(service)}\nready=${service.readyAt !== undefined || service.state === "ready" || service.state === "running"} persist=${service.persist} detached=${service.detached}${service.exitCode === undefined ? "" : ` exit=${service.exitCode}`}`;
@@ -286,6 +304,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const exactJob = jobs.find(item => item.id === id);
 		const agentJob = exactJob ? undefined : runningJobOfAgent(jobs, id);
 		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
+		const wakeup = session.wakeupManager?.list().find(item => item.id === id);
 		let service: DaemonSnapshot | undefined;
 		if (cfgLaunchEnabled.get(session.settings)) {
 			try {
@@ -294,7 +313,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				// Killing an in-process job or agent needs no broker. Skipping the
 				// lookup only loses the job/service collision check, which cannot be
 				// answered while the broker is down anyway.
-				if (context?.signal?.aborted || action !== "kill" || !(exactJob || agentJob || agent)) throw error;
+				if (context?.signal?.aborted || action !== "kill" || !(exactJob || agentJob || agent || wakeup))
+					throw error;
 				logger.warn("Daemon broker lookup failed; cancelling in-process target", {
 					id,
 					error: error instanceof Error ? error.message : String(error),
@@ -305,6 +325,24 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const job = exactJob ?? (service ? undefined : agentJob);
 		if ((job || agent) && service)
 			throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
+		if (wakeup) {
+			if (job || agent || service)
+				throw new Error(`proc://${id} is ambiguous: both a wakeup and job/agent/service exist.`);
+			if (action !== "kill") throw new Error(`${id} is a wakeup timer; only inspection and /kill are supported.`);
+			const cancelled = await session.wakeupManager!.cancel(id);
+			return {
+				content: [
+					{ type: "text", text: cancelled ? `Cancelled wakeup ${id}.` : `Wakeup ${id} is already cancelled.` },
+				],
+				details: {
+					proc: {
+						op: "cancel",
+						jobs: [],
+						cancelled: [{ id, status: cancelled ? "cancelled" : "already_completed" }],
+					},
+				},
+			};
+		}
 		if ((job || agent) && !service && action !== "kill")
 			throw new Error(
 				`${id} is an in-process ${job ? "job" : "agent"}; stdin and persist/session/detached modes are services-only. Start long-lived work as a named service when it needs stdin or lifetime controls. To cancel, ${killCall(id)}.`,

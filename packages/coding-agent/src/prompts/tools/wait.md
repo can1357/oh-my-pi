@@ -5,3 +5,4 @@ Nothing you started running and no answer owed? Returns at once.
 - NEVER wait for another agent's progress or for messages nobody owes you.
 - Result in, other jobs still running? SHOULD act on it before waiting again.
 Results and messages auto-deliver. NEVER poll while work remains.
+Pending wakeup timers are not jobs: finish this turn instead of waiting or polling for them.

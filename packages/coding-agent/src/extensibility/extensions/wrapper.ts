@@ -475,11 +475,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
 			let approved: boolean;
 			try {
+				// The call's signal dismisses the dialog and rejects an answer that lands after it aborts,
+				// so a cancelled or timed-out call records no session approval or grant.
 				const answer = await requestApproval(uiContext, this.tool, resolvedArgs, {
 					reason: approvalCheck.reason,
 					appendix: safetyAppendix,
 					sessionSubject: sessionScope?.subject,
 					grants: cacheTargets,
+					signal,
 				});
 				approved = answer !== "deny";
 				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);

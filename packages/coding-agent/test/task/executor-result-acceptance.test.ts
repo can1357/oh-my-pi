@@ -134,6 +134,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
+		completeExtensionStartup: async () => {},
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],

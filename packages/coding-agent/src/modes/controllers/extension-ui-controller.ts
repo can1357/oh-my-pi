@@ -258,6 +258,7 @@ export class ExtensionUiController {
 		const extensionRunner = this.ctx.session.extensionRunner;
 		this.#syncExtensionComposerShapes();
 		if (!extensionRunner) {
+			await this.ctx.session.completeExtensionStartup();
 			return; // No hooks loaded
 		}
 
@@ -409,6 +410,7 @@ export class ExtensionUiController {
 		await extensionRunner.emit({
 			type: "session_start",
 		});
+		await this.ctx.session.completeExtensionStartup();
 	}
 
 	/**

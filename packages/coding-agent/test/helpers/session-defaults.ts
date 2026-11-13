@@ -19,5 +19,6 @@ export function createSessionDefaults() {
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
 		addDisposer: () => {},
+		completeExtensionStartup: async () => {},
 	} satisfies Partial<AgentSession>;
 }

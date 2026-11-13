@@ -1,5 +1,4 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
-import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import {
 	approvalRestrictions,
@@ -130,9 +129,7 @@ async function approvePreludeInvocation(
 				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
 		);
 	}
-	const answer = await untilAborted(context.signal, () =>
-		requestApproval(ui, subject, parameters, { reason: resolved.reason }),
-	);
+	const answer = await requestApproval(ui, subject, parameters, { reason: resolved.reason, signal: context.signal });
 	if (answer === "deny") throw new Error(`Eval prelude call denied by user: ${definition.name}`);
 }
 

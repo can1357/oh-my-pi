@@ -1726,8 +1726,10 @@ async fn read_output_bytes(
 		};
 		let _ = activity.try_send(());
 		buf.truncate(n);
+		// `send_async` parks on a full bounded sink (backpressuring the child
+		// through its pipe) without blocking a runtime worker thread.
 		if let Some(sink) = sink.as_ref()
-			&& sink.send(Bytes::from(buf)).is_err()
+			&& sink.send_async(Bytes::from(buf)).await.is_err()
 		{
 			// Receiver dropped — stop forwarding and let the pipe close.
 			break;

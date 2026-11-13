@@ -3262,6 +3262,65 @@ export class SessionManager {
 		return this.#sessionFile;
 	}
 
+	/** Whether persistent writes acquire an exclusive cross-process session lease. */
+	supportsExclusiveOwnership(): boolean {
+		return this.#persist && this.#storage.claimSessionStrict !== undefined && !this.#storage.defersSyncPublish;
+	}
+
+	/** Hold a real cross-process lease for security-sensitive work; never use best-effort fallback. */
+	claimExclusiveOwnership(): () => void {
+		if (!this.supportsExclusiveOwnership() || !this.#sessionFile)
+			throw new Error("Session storage does not support exclusive ownership");
+		const release = this.#storage.claimSessionStrict!(this.#sessionId, this.#sessionFile);
+		if (!release) throw new Error("Another process owns this session");
+		return release;
+	}
+
+	/**
+	 * Reconcile a journal loaded before its previous owner exited. The caller
+	 * must hold {@link claimExclusiveOwnership} throughout this operation.
+	 * Foreign entries remain off the selected branch; cwd, messages and branch
+	 * authorization are not silently replaced by a second transcript load.
+	 */
+	async refreshExclusiveJournal(): Promise<void> {
+		const sessionFile = this.#sessionFile;
+		const sessionId = this.#sessionId;
+		if (!this.supportsExclusiveOwnership() || !sessionFile)
+			throw new Error("Session storage does not support exclusive journal refresh");
+		const epoch = this.#diskEpoch;
+		const revision = this.#bodyRevision;
+		const expectedSize = this.#expectedDiskSize;
+		const unchanged = () =>
+			this.#sessionFile === sessionFile &&
+			this.#sessionId === sessionId &&
+			this.#diskEpoch === epoch &&
+			this.#bodyRevision === revision &&
+			this.#expectedDiskSize === expectedSize;
+		// A genuinely new lazy session has no durable history to reconcile.
+		// An existing journal disappearing is instead a hard ownership failure.
+		if (expectedSize === null && !this.#storage.existsSync(sessionFile)) return;
+		if (!this.#fileIsCurrent || this.#rewriteRequired || this.#diskFailure)
+			throw new Error("Session journal needs a coordinated reload before restoring wakeups");
+		const content = await this.#storage.readText(sessionFile);
+		if (!unchanged()) throw new Error("Session changed while refreshing its wakeup journal");
+		const parsed = parseSessionContent(content);
+		const header = parsed.entries[0];
+		if (parsed.invalidHeader || parsed.malformedRecords > 0 || header?.type !== "session" || header.id !== sessionId)
+			throw new Error("Session journal was replaced or corrupted before restoring wakeups");
+		const diskEntries = parsed.entries.slice(1) as SessionEntry[];
+		const diskIds = new Set(diskEntries.map(entry => entry.id));
+		if (
+			(expectedSize !== null && Buffer.byteLength(content, "utf8") < expectedSize) ||
+			this.#entries.some(entry => !diskIds.has(entry.id))
+		)
+			throw new Error("Session journal diverged; reload the session before restoring wakeups");
+		const foreign = diskEntries.filter(entry => !this.#index.has(entry.id));
+		await resolveBlobRefsInEntries(foreign, this.#blobs);
+		if (!unchanged() || !this.#fileIsCurrent || this.#rewriteRequired || this.#diskFailure)
+			throw new Error("Session changed while refreshing its wakeup journal");
+		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
+	}
+
 	/**
 	 * Whether the current session has actually been materialized to durable
 	 * storage (the JSONL exists on disk / in the active storage backend).

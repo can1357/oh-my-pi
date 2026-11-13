@@ -6,7 +6,7 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
@@ -839,15 +839,24 @@ function approvalGrantChoices(
  * lines follow the prompt on both. With a `sessionSubject`, both also offer to approve that
  * subject for the rest of the session; with `grants`, both offer the `always-ask-cached` grants
  * the call can record, and the prompt lists the folder a directory grant would cover. Anything
- * but an explicit approval is `deny`.
+ * but an explicit approval is `deny`. A `signal` dismisses the pending dialog when it aborts and
+ * rejects the call with an abort error, so an answer that arrives after the abort never counts as
+ * an approval and the caller never records a grant from it.
  */
 export async function requestApproval(
 	ui: Pick<ExtensionUIContext, "select" | "approve">,
 	tool: ApprovalSubject,
 	args: unknown,
-	options: { reason?: string; appendix?: readonly string[]; sessionSubject?: string; grants?: boolean } = {},
+	options: {
+		reason?: string;
+		appendix?: readonly string[];
+		sessionSubject?: string;
+		grants?: boolean;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<ExtensionApprovalAnswer> {
-	const { reason, appendix = [], sessionSubject } = options;
+	const { reason, appendix = [], sessionSubject, signal } = options;
+	signal?.throwIfAborted();
 	const header = approvalHeader(tool, reason);
 	const details = approvalDetails(tool, args);
 	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
@@ -857,7 +866,11 @@ export async function requestApproval(
 	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
 	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
 	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
+	// The host dismisses its dialog on `signal`; racing it as well settles this call even when a host
+	// leaves the dialog pending, and the check after it drops an answer that landed with the abort.
+	const dialogOptions = signal ? { signal } : undefined;
 	if (ui.approve) {
+		const approve = ui.approve;
 		const summary = approvalSummary(details);
 		const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
 		const compact = [
@@ -866,12 +879,16 @@ export async function requestApproval(
 			...(compactBlock ? [compactBlock] : []),
 			...appendix,
 		].join("\n");
-		const answer = await ui.approve({
+		const approvalPrompt: ExtensionApprovalPrompt = {
 			full,
 			compact,
 			...(session ? { session } : {}),
 			...(grants.length > 0 ? { grants } : {}),
-		});
+		};
+		const answer = await untilAborted(signal, () =>
+			dialogOptions ? approve.call(ui, approvalPrompt, dialogOptions) : approve.call(ui, approvalPrompt),
+		);
+		signal?.throwIfAborted();
 		if (answer === "once" || (answer === "session" && session)) return answer;
 		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
 			return { grant: answer.grant, always: answer.always === true };
@@ -879,7 +896,12 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
+	const labels = approvalChoiceLabels(choices);
+	const choice = await untilAborted(signal, () =>
+		dialogOptions ? ui.select(full, labels, dialogOptions) : ui.select(full, labels),
+	);
+	signal?.throwIfAborted();
+	return approvalAnswerForChoice(choices, choice);
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

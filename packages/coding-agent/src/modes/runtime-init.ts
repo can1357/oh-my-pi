@@ -56,7 +56,10 @@ export interface InitializeExtensionsOptions {
  */
 export async function initializeExtensions(session: AgentSession, options: InitializeExtensionsOptions): Promise<void> {
 	const runner = session.extensionRunner;
-	if (!runner) return;
+	if (!runner) {
+		await session.completeExtensionStartup();
+		return;
+	}
 
 	const {
 		reportSendError,
@@ -212,4 +215,5 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 
 	runner.onError(reportRuntimeError);
 	await runner.emit({ type: "session_start" });
+	await session.completeExtensionStartup();
 }

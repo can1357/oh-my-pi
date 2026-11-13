@@ -31,7 +31,12 @@ beforeAll(async () => {
 	setThemeInstance(dark);
 });
 
-function makeHarness() {
+function makeHarness(
+	startup: {
+		runner?: InteractiveModeContext["session"]["extensionRunner"];
+		complete?: () => Promise<void>;
+	} = {},
+) {
 	const editor = new CustomEditor(getEditorTheme());
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
@@ -69,7 +74,8 @@ function makeHarness() {
 		sessionManager: { getCwd: () => process.cwd() },
 		session: {
 			agent,
-			extensionRunner: undefined,
+			extensionRunner: startup.runner,
+			completeExtensionStartup: startup.complete ?? vi.fn(async () => {}),
 			setUsageFallbackConfirmer: vi.fn(),
 			getQueuedMessages: () => ({ steering: steeringChips(), followUp: [], liveSteered: 0 }),
 			subscribe(listener: (event: { type: string; steering?: string[] }) => void) {
@@ -127,6 +133,36 @@ function makeHarness() {
 		},
 	};
 }
+
+describe("ExtensionUiController startup readiness", () => {
+	it("finishes startup only after the actual interactive session_start emitter settles", async () => {
+		const entered = Promise.withResolvers<void>();
+		const policy = Promise.withResolvers<void>();
+		const events: string[] = [];
+		const complete = vi.fn(async () => {
+			events.push("ready");
+		});
+		const runner = {
+			getComposerShapes: () => [],
+			initialize: () => events.push("initialized"),
+			onError: () => {},
+			emit: async () => {
+				events.push("session_start");
+				entered.resolve();
+				await policy.promise;
+				events.push("restored-policy");
+			},
+		} as unknown as InteractiveModeContext["session"]["extensionRunner"];
+		const harness = makeHarness({ runner, complete });
+		const initialized = harness.init();
+		await entered.promise;
+		expect(harness.controller.getToolUIContext()).toBeDefined();
+		expect(complete).not.toHaveBeenCalled();
+		policy.resolve();
+		await initialized;
+		expect(events).toEqual(["initialized", "session_start", "restored-policy", "ready"]);
+	});
+});
 
 describe("ExtensionUiController Ask dialog input", () => {
 	const questions: ExtensionAskDialogQuestion[] = [

@@ -116,8 +116,19 @@ export const coordinationFixtures: Record<string, GalleryFixture> = {
 		streamingArgs: { path: "proc://" },
 		args: { path: "proc://" },
 		result: {
-			content: [{ type: "text", text: "build-42 [bash] cancelled\nweb [service] ready" }],
-			details: { proc: { jobs: [job], daemons: [service] } },
+			content: [
+				{
+					type: "text",
+					text: "build-42 [bash] cancelled\nwakeup_1 [wakeup] scheduled next=2030-01-01T12:00:00.000Z\nweb [service] ready",
+				},
+			],
+			details: {
+				proc: {
+					jobs: [job],
+					daemons: [service],
+					wakeups: [{ id: "wakeup_1", state: "scheduled", dueAt: Date.UTC(2030, 0, 1, 12) }],
+				},
+			},
 		},
 		errorResult: failure("proc:// requires a tool session"),
 	},
