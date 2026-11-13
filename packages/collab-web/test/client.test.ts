@@ -527,8 +527,8 @@ describe("GuestClient frame apply", () => {
 			const client = liveClient([e1]);
 			const hellos = () => sent.filter(frame => frame.t === "hello").length;
 			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
-			// An earlier welcome is still loading its snapshot when the next one arrives and throws
-			// once the snapshot is primed, before the state from before it is reset.
+			// An earlier welcome is still loading its snapshot when a malformed one arrives
+			// and fails to apply; the chunks after it must not complete the earlier snapshot.
 			client.applyFrameForTest(welcomeFrame(2));
 			client.applyFrameForTest(snapshotChunk([e1], false));
 			client.applyFrameForTest({ ...welcomeFrame(2), agents: undefined } as unknown as HostFrame);
