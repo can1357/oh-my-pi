@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed the `/btw` branch action being unreachable on Tern surfaces: a completed side answer can now be promoted from the BTW history sheet with `b` or Branch to chat ([#19105](https://github.com/can1357/oh-my-pi/issues/19105)).
+- Fixed the `/btw` branch action being unreachable on Tern surfaces: a completed side answer can now be promoted from the BTW history sheet with `b` or Branch to chat ([#19105](https://github.com/can1357/oh-my-pi/issues/19105), [#19135](https://github.com/can1357/oh-my-pi/pull/19135) by [@Clannad47](https://github.com/Clannad47)).
 
 ## [18.19.0] - 2026-11-12
 
