@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { Snowflake, tempSubpath, untilAborted } from "@oh-my-pi/pi-utils";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
@@ -1119,7 +1118,7 @@ export class CmuxTab implements InProcessRunTab {
 					context.session.browserScreenshotDir,
 					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
 				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
+			: tempSubpath(`sshots-${Snowflake.next()}.${ext}`);
 		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
 		await Bun.write(dest, savedBuffer);
 		const info: ScreenshotResult = {
@@ -1156,7 +1155,7 @@ export class CmuxTab implements InProcessRunTab {
 		const changed = diff.pixelChangeRatio > threshold;
 		const diffPath = opts.output
 			? resolveToCwd(opts.output, context.session.cwd)
-			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
+			: tempSubpath(`screenshot-diff-${Snowflake.next()}.png`);
 		await fs.promises.mkdir(path.dirname(diffPath), { recursive: true });
 		await Bun.write(diffPath, diff.png);
 		const resized = await resizeImage(

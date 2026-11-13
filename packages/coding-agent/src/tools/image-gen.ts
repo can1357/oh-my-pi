@@ -1,6 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
@@ -21,6 +19,7 @@ import {
 	prompt,
 	ptree,
 	Snowflake,
+	tempSubpath,
 	truncate,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
@@ -142,7 +141,7 @@ function imageExtension(mimeType: string): string {
 async function saveImagesToTemp(images: ImageGenerationResult["images"]): Promise<string[]> {
 	return Promise.all(
 		images.map(async image => {
-			const filepath = path.join(os.tmpdir(), `omp-image-${Snowflake.next()}.${imageExtension(image.mimeType)}`);
+			const filepath = tempSubpath(`image-${Snowflake.next()}.${imageExtension(image.mimeType)}`);
 			await Bun.write(filepath, Buffer.from(image.data, "base64"));
 			return filepath;
 		}),

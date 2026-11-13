@@ -2,12 +2,11 @@ import { repairCollapsedScheme, tryExtractEmbeddedUrlSelector } from "@oh-my-pi/
 import type { ReadUrlToolDetails } from "@oh-my-pi/pi-tui/tools/fetch";
 import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
-import { $which, ptree } from "@oh-my-pi/pi-utils";
+import { $which, mkdtempInTempRoot, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
 import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
@@ -938,7 +937,7 @@ async function withTempBinaryFile<T>(
 	bytes: Uint8Array,
 	readTempFile: (tempPath: string) => Promise<T>,
 ): Promise<T> {
-	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	const tempDir = await mkdtempInTempRoot(prefix);
 	const tempPath = path.join(tempDir, `payload${extension}`);
 	try {
 		await Bun.write(tempPath, bytes);
@@ -949,13 +948,13 @@ async function withTempBinaryFile<T>(
 }
 
 async function renderNotebookPayload(bytes: Uint8Array, displayUrl: string): Promise<string> {
-	return withTempBinaryFile("omp-url-notebook-", ".ipynb", bytes, async tempPath =>
+	return withTempBinaryFile("url-notebook-", ".ipynb", bytes, async tempPath =>
 		notebookToEditableText(await Bun.file(tempPath).text(), displayUrl),
 	);
 }
 
 async function renderSqlitePayload(bytes: Uint8Array): Promise<string> {
-	return withTempBinaryFile("omp-url-sqlite-", ".sqlite", bytes, async tempPath => {
+	return withTempBinaryFile("url-sqlite-", ".sqlite", bytes, async tempPath => {
 		let db: Database | null = null;
 		try {
 			db = await openSqliteReadConnection(tempPath);

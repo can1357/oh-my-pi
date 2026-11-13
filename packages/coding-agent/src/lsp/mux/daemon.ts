@@ -9,9 +9,8 @@
  * a locally spawned server. Every failure degrades to `null` so callers fall
  * back to a process-local spawn.
  */
-import * as os from "node:os";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { logger, ptree, toError } from "@oh-my-pi/pi-utils";
+import { getTempRoot, logger, ptree, toError } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
@@ -327,7 +326,7 @@ export async function connectSharedLspTransport(opts: {
 
 /** Exercise worker-host mux startup and the ping handshake for distribution smoke tests. */
 export async function smokeTestLspMux(): Promise<void> {
-	const endpoint = ipcEndpoint(os.tmpdir(), `omp-lsp-mux-smoke-${process.pid.toString(36)}`);
+	const endpoint = ipcEndpoint(getTempRoot(), `lsp-mux-smoke-${process.pid.toString(36)}`);
 	const spawn = resolveWorkerSpawnCmd(LSP_MUX_WORKER_ARG);
 	const proc = ptree.spawn(spawn.cmd, {
 		cwd: spawn.cwd,

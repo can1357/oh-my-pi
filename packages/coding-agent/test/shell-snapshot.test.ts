@@ -21,10 +21,11 @@ const REAL_ECHO = Bun.which("echo") ?? "/bin/echo";
 // the Git Bash the product itself resolves.
 const HELPER_BASH = process.platform === "win32" ? procmgr.resolveWindowsShell() : "bash";
 
-/** Mirrors the per-uid snapshot dir name computed in `getOrCreateSnapshot`. */
+/** Mirrors the per-uid root and snapshot dir name computed in `getOrCreateSnapshot`. */
 function snapshotDirIn(tmpRoot: string): string {
 	const uid = process.getuid?.();
-	return path.join(tmpRoot, uid === undefined ? "omp-shell-snapshots" : `omp-shell-snapshots-${uid}`);
+	const root = path.join(tmpRoot, uid === undefined ? "omp" : `omp-${uid}`);
+	return path.join(root, uid === undefined ? "shell-snapshots" : `shell-snapshots-${uid}`);
 }
 
 // `__omp_emit_referenced_exports` (shell-snapshot-fn-env.sh) re-exports env

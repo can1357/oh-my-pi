@@ -19,10 +19,9 @@
  * mid-write) is ignored on load.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { TUI } from "@oh-my-pi/pi-tui";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, tempSubpath } from "@oh-my-pi/pi-utils";
 import { STREAM_FLUSH_INTERVAL_MS, StreamPaintEncoder } from "./paint-encoder";
 import { isDimension, isSessionFrame, type StreamScreenFrame } from "./protocol";
 import type { StreamRedactor } from "./redactor";
@@ -56,7 +55,7 @@ export interface Recording {
 
 /** Directory `/record` writes into (temporary storage for now). */
 export function recordingsDir(): string {
-	return path.join(os.tmpdir(), "omp-recordings");
+	return tempSubpath("recordings");
 }
 
 /** Fresh, sortable recording path for one session: `<recordingsDir>/<utc-stamp>-<session>.ompcast`. */

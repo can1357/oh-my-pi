@@ -863,7 +863,7 @@ await Promise.withResolvers().promise;`;
 				}),
 			) as { path: string; bytes: number };
 			tempDirs.push(path.dirname(download.path));
-			expect(path.dirname(download.path)).toStartWith(path.join(os.tmpdir(), "omp-downloads-"));
+			expect(path.dirname(download.path)).toStartWith(path.join(os.tmpdir(), "omp", "downloads-"));
 			expect(download.bytes).toBe(payload.byteLength);
 			expect(new Uint8Array(await Bun.file(download.path).arrayBuffer())).toEqual(payload);
 		} finally {

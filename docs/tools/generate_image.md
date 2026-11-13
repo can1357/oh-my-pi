@@ -64,7 +64,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 
 ## Side Effects
 
-- Filesystem: reads local input images and writes generated output images to `omp-image-<snowflake>.<ext>` files under the OS temporary directory.
+- Filesystem: reads local input images and writes generated output images to `image-<snowflake>.<ext>` files under `<os temp>/omp-<uid>/`.
 - Network: sends prompts and optional images through the selected catalog model's API transport. OpenRouter/xAI image URLs in responses are downloaded before saving.
 - Session state: reads the active model and its image capabilities/target, session id, cwd, credentials, `modelRoles.image`, `retry.fallbackChains.image`, model endpoints/headers, and optional injected `fetch`.
 - Background work / cancellation: provider calls use the caller abort signal combined with a 3 minute timeout.

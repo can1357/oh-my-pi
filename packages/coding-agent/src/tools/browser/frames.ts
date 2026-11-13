@@ -1,8 +1,7 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
-import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { Snowflake, tempSubpath, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppeteer-core";
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
@@ -443,7 +442,7 @@ export async function captureFrameScreenshot(
 				session.browserScreenshotDir,
 				`frame-screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
 			)
-		: path.join(os.tmpdir(), `omp-frame-sshots-${Snowflake.next()}.${ext}`);
+		: tempSubpath(`frame-sshots-${Snowflake.next()}.${ext}`);
 	await fs.promises.mkdir(path.dirname(dest), { recursive: true });
 	await Bun.write(dest, savedBuffer);
 	screenshots.push({

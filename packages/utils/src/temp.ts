@@ -73,14 +73,80 @@ export class TempDir {
 	}
 }
 
-const kTempDir = os.tmpdir();
+/**
+ * `<os temp>/omp-<uid>`, the single directory omp keeps its own temp paths in.
+ *
+ * A shared `/tmp` then holds one entry per user instead of one per run, and
+ * `rm -rf "$TMPDIR/omp-<uid>"` clears everything omp left behind. The suffix is
+ * the user id wherever the platform has one: a bare `omp` in a world-writable
+ * directory is a name another user can create first, and a directory or symlink
+ * they own is one they can read from, swap, or point elsewhere. macOS and
+ * Windows already hand each user a private temp directory, so the suffix is
+ * only added where `getuid` exists.
+ *
+ * The directory is created 0700 on first use and an existing one is checked:
+ * anything that is not a directory this user owns, or that others can read, is
+ * refused rather than written through. New temp paths belong under
+ * {@link tempSubpath} / {@link mkdtempInTempRoot} rather than beside it.
+ */
+export function getTempRoot(): string {
+	// `os.tmpdir()` is re-read per call: tests swap TMPDIR mid-process and the
+	// staging paths must follow it. It is also resolved, because TMPDIR may be
+	// relative and a temp path that moves under `chdir` is not a temp path.
+	const root = path.join(path.resolve(os.tmpdir()), tempRootLeaf());
+	ensureOwnedDirectory(root);
+	return root;
+}
 
-function normalizePrefix(prefix?: string): string {
-	if (!prefix) {
-		return `${kTempDir}${path.sep}pi-temp-`;
-	} else if (prefix.startsWith("@")) {
-		return path.join(kTempDir, prefix.slice(1));
+/** The root's leaf name: `omp-<uid>` where the user id is available, else `omp`. */
+function tempRootLeaf(): string {
+	const uid = process.getuid?.();
+	return uid === undefined ? "omp" : `omp-${uid}`;
+}
+
+/**
+ * Create `dir` (0700) or confirm the existing one is a directory this user owns
+ * and that nobody else can read.
+ *
+ * The path is derived from the environment, so this check is the difference
+ * between a private staging area and one another user chose: a symlink, a
+ * regular file, or a directory owned by someone else is an error rather than
+ * something to write into.
+ */
+function ensureOwnedDirectory(dir: string): void {
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const stats = fs.lstatSync(dir);
+	if (!stats.isDirectory()) throw new Error(`The temp directory ${dir} is not a directory`);
+	const uid = process.getuid?.();
+	if (uid !== undefined && stats.uid !== uid) {
+		throw new Error(`The temp directory ${dir} belongs to another user`);
 	}
+	if ((stats.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
+}
+
+/** Joins leaf segments below `getTempRoot()`; leaves carry no `omp-` prefix. */
+export function tempSubpath(...segments: string[]): string {
+	return path.join(getTempRoot(), ...segments);
+}
+
+/** `mkdtemp` below `getTempRoot()`. */
+export function mkdtempInTempRootSync(prefix: string): string {
+	return fs.mkdtempSync(path.join(getTempRoot(), prefix));
+}
+
+/** Async `mkdtempInTempRootSync`. */
+export async function mkdtempInTempRoot(prefix: string): Promise<string> {
+	return fsPromises.mkdtemp(path.join(getTempRoot(), prefix));
+}
+
+/**
+ * `mkdtemp`-style prefix to a real one: no prefix means the temp root, a
+ * `@name-` prefix means the temp root too (the `@` marks "omp's own, clean it
+ * up"), and any other prefix is the path the caller named.
+ */
+function normalizePrefix(prefix?: string): string {
+	if (!prefix) return path.join(getTempRoot(), "pi-temp-");
+	if (prefix.startsWith("@")) return path.join(getTempRoot(), prefix.slice(1));
 	return prefix;
 }
 

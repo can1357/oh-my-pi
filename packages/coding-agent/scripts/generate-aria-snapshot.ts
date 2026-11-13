@@ -18,8 +18,8 @@
  * Usage: bun scripts/generate-aria-snapshot.ts
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { mkdtempInTempRoot } from "@oh-my-pi/pi-utils";
 
 const PLAYWRIGHT_TAG = "v1.61.0";
 const RAW_BASE = `https://raw.githubusercontent.com/microsoft/playwright/${PLAYWRIGHT_TAG}/packages`;
@@ -154,7 +154,7 @@ export function resolveAriaRef(ref: string): Element | null {
 `;
 
 async function main(): Promise<void> {
-	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-aria-"));
+	const tmp = await mkdtempInTempRoot("aria-");
 	try {
 		// Fetch pinned upstream sources into the temp dir.
 		for (const [src, dst] of VENDOR_FILES) {

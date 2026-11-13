@@ -8,9 +8,7 @@
  * failure returns `null` so callers fall back to an in-process backend.
  */
 
-import * as os from "node:os";
-import * as path from "node:path";
-import { logger, ptree } from "@oh-my-pi/pi-utils";
+import { logger, ptree, tempSubpath } from "@oh-my-pi/pi-utils";
 import { daemonClientForProject } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { daemonRuntimeDir } from "../launch/paths";
@@ -295,7 +293,7 @@ export async function connectDaemonBlobBackend(
 
 /** Exercise worker-host blob daemon startup and the /info probe for distribution smoke tests. */
 export async function smokeTestBlobBroker(): Promise<void> {
-	const socket = path.join(os.tmpdir(), `omp-blob-smoke-${process.pid.toString(36)}.sock`);
+	const socket = tempSubpath(`blob-smoke-${process.pid.toString(36)}.sock`);
 	const config: BlobBrokerWorkerConfig = {
 		kind: "direct",
 		options: {},

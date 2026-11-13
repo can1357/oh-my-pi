@@ -9,7 +9,7 @@ afterEach(() => {
 
 describe("FileSessionStorage streamed rewrite durability", () => {
 	it("preserves the saved transcript when a pending write later fails with ENOSPC", async () => {
-		using tempDir = TempDir.createSync("omp-streamed-rewrite-");
+		using tempDir = TempDir.createSync("@omp-streamed-rewrite-");
 		const sessionPath = path.join(tempDir.path(), "session.jsonl");
 		const storage = new FileSessionStorage();
 		const saved = '{"type":"session","id":"saved"}\n{"type":"message","text":"durable history"}\n';

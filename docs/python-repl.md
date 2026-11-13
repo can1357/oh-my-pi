@@ -39,7 +39,7 @@ The session-scoped wire schema advertises only enabled runtimes ("py" and "js").
 
 ## Kernel lifecycle
 
-Each Python kernel is a single subprocess: `<resolved-python> -u <runner.py>`. The runner is bundled with the host binary (Bun text import), written to a per-user `omp-python-runner-<uid>` cache under the OS temp directory once per script hash, and reused by subsequent spawns.
+Each Python kernel is a single subprocess: `<resolved-python> -u <runner.py>`. The runner is bundled with the host binary (Bun text import), written to a per-user `<os temp>/omp-<uid>/python-runner-<uid>` cache once per script hash, and reused by subsequent spawns.
 
 Kernel startup sequence:
 

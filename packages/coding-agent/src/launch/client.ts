@@ -1,8 +1,15 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
-import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
+import {
+	getGlobalDaemonRuntimeDir,
+	isEexist,
+	isEnoent,
+	logger,
+	mkdtempInTempRoot,
+	postmortem,
+	toError,
+} from "@oh-my-pi/pi-utils";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
@@ -497,8 +504,8 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 	// Keep the broker's runtime dir under a private parent this process owns, so
 	// the broker's dead-scope sweep (pruneDeadDaemonRuntimeDirs, fired on startup)
 	// can only ever reclaim siblings inside it — never unrelated neighbours in
-	// os.tmpdir() such as tmux/ssh sockets or build trees (issue #8721).
-	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
+	// the OS temp dir such as tmux/ssh sockets or build trees (issue #8721).
+	const smokeRoot = await mkdtempInTempRoot("daemon-smoke-");
 	const projectDir = path.join(smokeRoot, "project");
 	const runtimeDir = path.join(smokeRoot, "run");
 	await fs.mkdir(projectDir, { recursive: true });

@@ -1109,7 +1109,7 @@ describe("computer prelude", () => {
 				realm,
 			);
 			for (const zoom of zooms) {
-				expect(zoom.path).toMatch(/omp-computer-.*\.png$/);
+				expect(zoom.path).toMatch(/computer-.*\.png$/);
 				expect(zoom).toMatchObject({
 					width: 128,
 					height: 64,
@@ -1613,12 +1613,12 @@ describe("computer worker round trips", () => {
 		const images = result.payload.displays.filter(block => block.type === "image");
 		expect(texts).toHaveLength(1);
 		expect(texts[0]?.text).toMatch(
-			/^screenshot desktop 64×32; coordinateWidth=64 coordinateHeight=32 → .*omp-computer-.*\.png$/,
+			/^screenshot desktop 64×32; coordinateWidth=64 coordinateHeight=32 → .*computer-.*\.png$/,
 		);
 		expect(images).toEqual([{ type: "image", data: "iVBORw==", mimeType: "image/png", detail: "original" }]);
 		expect(result.payload.screenshots).toHaveLength(1);
 		expect(result.payload.screenshots[0]).toMatchObject({ width: 64, height: 32, target: "desktop" });
-		expect(result.payload.screenshots[0]?.path).toMatch(/omp-computer-.*\.png$/);
+		expect(result.payload.screenshots[0]?.path).toMatch(/computer-.*\.png$/);
 	});
 
 	it("reports source dimensions when a screenshot is scaled", async () => {
@@ -1635,7 +1635,7 @@ describe("computer worker round trips", () => {
 			expect.objectContaining({
 				type: "text",
 				text: expect.stringMatching(
-					/^screenshot desktop 64×32 \(scaled from 128×64\); coordinateWidth=64 coordinateHeight=32 → .*omp-computer-.*\.png$/,
+					/^screenshot desktop 64×32 \(scaled from 128×64\); coordinateWidth=64 coordinateHeight=32 → .*computer-.*\.png$/,
 				),
 			}),
 		);

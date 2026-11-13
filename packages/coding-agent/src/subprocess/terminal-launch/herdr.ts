@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { mkdtempInTempRoot } from "@oh-my-pi/pi-utils";
 import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { quotePosixArgument, quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
@@ -40,7 +40,7 @@ const shellNeutralWord = /^[A-Za-z0-9_./-]+$/;
  * written before the Herdr surface exists so a local failure leaves no orphaned pane or tab.
  */
 async function prepareLaunchScript(request: TerminalLaunchRequest): Promise<{ directory: string; typed: string }> {
-	const directory = await fs.mkdtemp(path.join(path.resolve(os.tmpdir()), "omp-herdr-"));
+	const directory = await mkdtempInTempRoot("herdr-");
 	try {
 		const script = path.join(directory, "launch");
 		if (!shellNeutralWord.test(script)) {

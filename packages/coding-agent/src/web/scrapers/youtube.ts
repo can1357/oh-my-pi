@@ -1,7 +1,5 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { ptree, Snowflake } from "@oh-my-pi/pi-utils";
+import { ptree, Snowflake, tempSubpath } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
 import type { AgentStorageApi } from "../../session/agent-storage";
 import { throwIfAborted } from "../../tools/tool-errors";
@@ -172,7 +170,7 @@ export const handleYouTube: SpecialHandler = async (
 
 	// Unique base for the metadata/subtitle output so concurrent scrapes of the
 	// same video cannot write over each other.
-	const tmpBase = path.join(os.tmpdir(), `yt-${yt.videoId}-${Snowflake.next()}`);
+	const tmpBase = tempSubpath(`yt-${yt.videoId}-${Snowflake.next()}`);
 
 	// Fetch video metadata and English manual subtitles in one process.
 	// --no-simulate is required: --dump-json forces simulate mode, which makes

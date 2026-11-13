@@ -2,9 +2,8 @@
  * Utilities for launching an external text editor ($VISUAL / $EDITOR).
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $which, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, $which, Snowflake, tempSubpath } from "@oh-my-pi/pi-utils";
 
 /**
  * Returns the user's preferred editor command, or a platform default.
@@ -81,7 +80,7 @@ export async function openInEditor(
 	options?: OpenInEditorOptions,
 ): Promise<string | null> {
 	const ext = options?.extension ?? ".md";
-	const tmpFile = path.join(os.tmpdir(), `omp-editor-${Snowflake.next()}${ext}`);
+	const tmpFile = tempSubpath(`editor-${Snowflake.next()}${ext}`);
 
 	try {
 		await Bun.write(tmpFile, content);

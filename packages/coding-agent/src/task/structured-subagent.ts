@@ -5,9 +5,8 @@
  * every decision that affects what a child may run lives here.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, prompt, Snowflake, tempSubpath } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -748,10 +747,7 @@ async function leaseArtifacts(
 		await fs.mkdir(artifactsDir, { recursive: true });
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}
-	const artifactsDir = path.join(
-		os.tmpdir(),
-		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
-	);
+	const artifactsDir = tempSubpath(`${invocationKind === "eval" ? "eval-agent" : "task"}-${Snowflake.next()}`);
 	await fs.mkdir(artifactsDir, { recursive: true });
 	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
 }

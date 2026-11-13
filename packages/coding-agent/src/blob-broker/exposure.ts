@@ -9,8 +9,7 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
-import { $which, getSafeProjectCwd, logger } from "@oh-my-pi/pi-utils";
+import { $which, getSafeProjectCwd, logger, tempSubpath } from "@oh-my-pi/pi-utils";
 import { credentialString, type DestinationRuntimeConfig, optionString } from "./uploader-runtime";
 
 /** User-selectable exposure strategy. */
@@ -238,7 +237,7 @@ async function spawnUrlTunnel(
 	extract: (line: string) => string | null,
 	readyPattern?: RegExp,
 ): Promise<{ proc: Bun.Subprocess; baseUrl: string }> {
-	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
+	const logPath = tempSubpath(`blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
 	try {

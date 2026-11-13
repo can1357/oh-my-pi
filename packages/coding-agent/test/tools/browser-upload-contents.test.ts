@@ -16,6 +16,7 @@ import {
 	UploadStaging,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/upload-files";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { getTempRoot, tempSubpath } from "@oh-my-pi/pi-utils";
 import type { ElementHandle, Page } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
@@ -280,14 +281,13 @@ afterAll(async () => {
 	if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 	// Connected tabs leave their staging folders for the sweep; this process made them.
 	for (const name of await stagingFolders()) {
-		if (name.startsWith(`omp-uploads-${process.pid}-`))
-			await fs.rm(path.join(os.tmpdir(), name), { recursive: true, force: true });
+		if (name.startsWith(`uploads-${process.pid}-`)) await fs.rm(tempSubpath(name), { recursive: true, force: true });
 	}
 });
 
 /** omp's upload staging folders now in the temp directory. */
 async function stagingFolders(): Promise<Set<string>> {
-	return new Set((await fs.readdir(os.tmpdir())).filter(name => name.startsWith("omp-uploads-")));
+	return new Set((await fs.readdir(getTempRoot())).filter(name => name.startsWith("uploads-")));
 }
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp did not launch", () => {
@@ -335,7 +335,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp did 
 				// The route check, then one call per path upload, versus only the refused route check.
 				expect(proxy.filePathCalls).toBe(route === "paths" ? 6 : 1);
 				created = [...(await stagingFolders())].filter(
-					name => !before.has(name) && name.startsWith(`omp-uploads-${process.pid}-`),
+					name => !before.has(name) && name.startsWith(`uploads-${process.pid}-`),
 				);
 				// One folder for the tab's copies; the contents route copies nothing, so it makes none.
 				expect(created).toHaveLength(route === "paths" ? 1 : 0);
@@ -530,23 +530,23 @@ test("sweeps a staging folder a day after its last upload unless an open tab or 
 	const dayAgo = new Date(now - 25 * 60 * 60 * 1000);
 	// No process has a pid this large; the parent of this test process is running.
 	const folders = {
-		open: [`omp-uploads-${process.pid}-sweep-open`, dayAgo],
-		closed: [`omp-uploads-${process.pid}-sweep-closed`, dayAgo],
-		orphaned: [`omp-uploads-99999999-sweep-orphaned`, dayAgo],
-		otherOmp: [`omp-uploads-${process.ppid}-sweep-other`, dayAgo],
+		open: [`uploads-${process.pid}-sweep-open`, dayAgo],
+		recent: [`uploads-${process.pid}-sweep-recent`, new Date(now)],
+		closed: [`uploads-${process.pid}-sweep-closed`, dayAgo],
+		orphaned: [`uploads-99999999-sweep-orphaned`, dayAgo],
+		otherOmp: [`uploads-${process.ppid}-sweep-other`, dayAgo],
 	} as const;
 	for (const [name, modified] of Object.values(folders)) {
-		const folder = path.join(os.tmpdir(), name);
+		const folder = tempSubpath(name);
 		await fs.mkdir(folder, { recursive: true });
 		await fs.utimes(folder, modified, modified);
 	}
 	try {
-		await sweepUploadStaging(new Set([path.join(os.tmpdir(), folders.open[0])]), now);
+		await sweepUploadStaging(new Set([tempSubpath(folders.open[0])]), now);
 		const left = await stagingFolders();
-		expect(Object.values(folders).map(([name]) => left.has(name))).toEqual([true, false, false, true]);
+		expect(Object.values(folders).map(([name]) => left.has(name))).toEqual([true, true, false, false, true]);
 	} finally {
-		for (const [name] of Object.values(folders))
-			await fs.rm(path.join(os.tmpdir(), name), { recursive: true, force: true });
+		for (const [name] of Object.values(folders)) await fs.rm(tempSubpath(name), { recursive: true, force: true });
 	}
 });
 
@@ -648,7 +648,7 @@ test("stages a symlinked file's contents, once while the file is unchanged", asy
 test("marks the staging folder used when an upload reuses a copy, so the sweep keeps it", async () => {
 	const file = path.join(tempDir, "reused.txt");
 	await Bun.write(file, "reused");
-	const directory = path.join(os.tmpdir(), `omp-uploads-${process.pid}-reuse-${crypto.randomUUID().slice(0, 8)}`);
+	const directory = tempSubpath(`uploads-${process.pid}-reuse-${crypto.randomUUID().slice(0, 8)}`);
 	const staging = new UploadStaging(directory);
 	try {
 		await staging.stage([await openUploadSource(file)]);

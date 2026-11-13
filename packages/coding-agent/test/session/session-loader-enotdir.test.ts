@@ -8,7 +8,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 // malformed session path is not masked as a missing session.
 describe("loadSessionFile path errors", () => {
 	it("detects a file component by inspecting the leaf and climbing", async () => {
-		await using dir = await TempDir.create("omp-session-enotdir-");
+		await using dir = await TempDir.create("@omp-session-enotdir-");
 		const file = path.join(dir.path(), "plain-file.txt");
 		await Bun.write(file, "not a directory");
 		// A component below the file, and the file named as a directory
@@ -19,7 +19,7 @@ describe("loadSessionFile path errors", () => {
 	});
 
 	it("rejects a session path with a regular-file component", async () => {
-		await using dir = await TempDir.create("omp-session-enotdir-");
+		await using dir = await TempDir.create("@omp-session-enotdir-");
 		const file = path.join(dir.path(), "plain-file.txt");
 		await Bun.write(file, "not a directory");
 		const sessionPath = path.join(file, "sub", "session.jsonl");

@@ -2,14 +2,13 @@
  * Shared on-disk staging for subprocess kernel runner scripts.
  *
  * Each language kernel (Python/Julia/Ruby) ships its runner as a compiled-in
- * text asset, then stages it under a per-user directory in `os.tmpdir()` so
+ * text asset, then stages it under a per-user directory in the omp temp root so
  * the interpreter can load it as a normal file. Staging is cached per language
  * directory so repeated kernel starts within a process avoid redundant writes.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, mkdtempInTempRoot, tempSubpath } from "@oh-my-pi/pi-utils";
 import { assertOwnerPrivateDir } from "../utils/owner-private-dir";
 
 // Memoized staged path per cache directory. The value is re-validated on every
@@ -18,9 +17,9 @@ import { assertOwnerPrivateDir } from "../utils/owner-private-dir";
 const stagedPaths = new Map<string, string>();
 
 /**
- * Stage `script` under `os.tmpdir()/<dirName>-<uid>` and return the runner path.
+ * Stage `script` under `<temp root>/<dirName>-<uid>` and return the runner path.
  *
- * The directory is per-uid because `os.tmpdir()` is shared between accounts: a
+ * The directory is per-uid because the OS temp dir is shared between accounts: a
  * single shared name lets whichever account creates it first own it, and every
  * other account's runner write then fails with EACCES. The per-uid name is
  * still predictable, so an existing entry must be a real directory owned by us
@@ -77,17 +76,17 @@ async function resolveStagingDir(dirName: string): Promise<string> {
 	const uid = process.getuid?.();
 	// No uid (Windows): the temp dir is already per-user, and O_NOFOLLOW is unavailable.
 	if (uid === undefined) {
-		const dir = path.join(os.tmpdir(), dirName);
+		const dir = tempSubpath(dirName);
 		await fs.promises.mkdir(dir, { recursive: true });
 		return dir;
 	}
-	const dir = path.join(os.tmpdir(), `${dirName}-${uid}`);
+	const dir = tempSubpath(`${dirName}-${uid}`);
 	try {
 		await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 		assertOwnerPrivateDir(dir, "Runner staging directory");
 		return dir;
 	} catch (err) {
 		logger.warn("Runner staging dir unusable; staging in a fresh private dir", { dir, error: String(err) });
-		return await fs.promises.mkdtemp(`${dir}-`);
+		return await mkdtempInTempRoot(`${dirName}-${uid}-`);
 	}
 }
