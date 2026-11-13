@@ -29,6 +29,7 @@ import type {
 	FrustrationCounts,
 	MessageStats,
 	MessageStatsInput,
+	SnapcompactCompactionStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -150,6 +151,11 @@ const SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY = "spotlight_v5_arg_tokens";
 // count only with the arm that shipped. Every transcript that can hold
 // Spotlight entries is re-parsed once by the new rules.
 const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
+// Snapcompact compactions are filled by the parser; transcripts ingested before
+// the table existed are re-parsed once. Compaction entries carry `method` and
+// `tokensAfter` only since this date, so older cursors stay put.
+const SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY = "snapcompact_compactions_v1";
+const SNAPCOMPACT_COMPACTIONS_SINCE_MS = Date.parse("2026-08-20T00:00:00Z");
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -388,6 +394,18 @@ export async function initDb(): Promise<Database> {
 			edit TEXT NOT NULL,
 			PRIMARY KEY (session_file, tool_call_id)
 		) WITHOUT ROWID;
+
+		-- Snapcompact compactions: the session's context estimate before and after each one.
+		CREATE TABLE IF NOT EXISTS snapcompact_compactions (
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			folder TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			tokens_before INTEGER NOT NULL,
+			tokens_after INTEGER NOT NULL,
+			PRIMARY KEY (session_file, entry_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_snapcompact_compactions_entry ON snapcompact_compactions(entry_id, timestamp);
 	`);
 
 	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
@@ -541,11 +559,12 @@ export async function initDb(): Promise<Database> {
 	backfillMissingCatalogCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
-	backfillSpotlight(db, SPOTLIGHT_BACKFILL_KEY);
+	reparseModifiedSince(db, SPOTLIGHT_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
 	reparseSpotlightSessions(db, SPOTLIGHT_EDITS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
-	backfillSpotlight(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY);
+	reparseModifiedSince(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
+	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -783,18 +802,19 @@ function backfillNoCacheInputCosts(database: Database): void {
 }
 
 /**
- * Re-parse, once per key, the transcripts that can hold Spotlight entries
- * (modified since {@link SPOTLIGHT_SINCE_MS}) by dropping their cursors; every
- * older cursor stays, so this never triggers a full-history re-parse. The next
- * sync rebuilds those files from byte zero, replacing their Spotlight rows.
- * Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the tables are new),
- * {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became a toggle).
+ * Re-parse, once per key, the transcripts modified since `sinceMs` (the first
+ * day they can hold the entries the key's rows come from) by dropping their
+ * cursors; every older cursor stays, so this never triggers a full-history
+ * re-parse. The next sync rebuilds those files from byte zero, replacing their
+ * parser-filled rows. Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the Spotlight
+ * tables are new), {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became
+ * a toggle), {@link SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY} (the table is new).
  */
-function backfillSpotlight(database: Database, key: string): void {
+function reparseModifiedSince(database: Database, key: string, sinceMs: number): void {
 	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
 	if (row?.value === BACKFILL_COMPLETE) return;
 	database.transaction(() => {
-		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(SPOTLIGHT_SINCE_MS);
+		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(sinceMs);
 		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
 	})();
 }
@@ -1062,6 +1082,9 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					for (const table of SPOTLIGHT_TABLES) {
 						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
 					}
+					changes += database
+						.query("DELETE FROM snapcompact_compactions WHERE session_file = ?")
+						.run(sessionFile).changes;
 					if (messages.length > 0) {
 						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
 					}
@@ -1087,6 +1110,7 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			updateUserMessageLinks(parsedRows(writes, result => result.userLinks)) +
 			insertToolCalls(parsedRows(writes, result => result.toolCalls)) +
 			updateToolResults(parsedRows(writes, result => result.toolResults)) +
+			insertSnapcompactCompactions(parsedRows(writes, result => result.snapcompactCompactions)) +
 			insertSpotlightSessions(parsedRows(writes, result => result.spotlight.sessions)) +
 			updateSpotlightTitles(parsedRows(writes, result => result.spotlight.titles)) +
 			upsertSpotlightShapes(parsedRows(writes, result => result.spotlight.shapes)) +
@@ -1931,6 +1955,30 @@ export function updateToolResults(links: Iterable<ToolResultLink>): number {
 		}
 	});
 	return updated;
+}
+
+/**
+ * Insert snapcompact compaction rows. Forked transcripts copy compaction
+ * entries verbatim, so the fork guard keeps one row per entry across the lineage.
+ */
+export function insertSnapcompactCompactions(rows: Iterable<SnapcompactCompactionStats>): number {
+	if (!db) return 0;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "snapcompact_compactions",
+		columns: ["session_file", "entry_id", "folder", "timestamp", "tokens_before", "tokens_after"],
+		identity: ["entry_id", "timestamp"],
+	});
+	return atomically(db, () => {
+		for (const row of rows) {
+			writer.add(
+				row.sessionFile,
+				[row.entryId, row.timestamp],
+				[row.sessionFile, row.entryId, row.folder, row.timestamp, row.tokensBefore, row.tokensAfter],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /** Tables the parser fills for the Spotlight dashboard, all keyed by `session_file`. */
