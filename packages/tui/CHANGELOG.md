@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line
+- A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line ([#19202](https://github.com/can1357/oh-my-pi/pull/19202) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [18.20.0] - 2026-11-12
 
