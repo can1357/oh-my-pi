@@ -5,7 +5,12 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
+import {
+	DEFAULT_XAI_VOICE_ID,
+	speechModelSupportsFormat,
+	synthesizeSpeech,
+	XAI_MAX_TEXT_LENGTH,
+} from "@oh-my-pi/pi-ai/speech";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -73,17 +78,36 @@ export function resolveSpeechCandidates(
 }
 
 /**
+ * Rewrite `outputPath` to a sibling ending in `.${codec}` when it names another
+ * container, flagged so the tool result can note the substitution.
+ */
+export function resolveCodecPath(outputPath: string, codec: TtsCodec): { path: string; substituted: boolean } {
+	if (outputPath.toLowerCase().endsWith(`.${codec}`)) return { path: outputPath, substituted: false };
+	const slash = Math.max(outputPath.lastIndexOf("/"), outputPath.lastIndexOf("\\"));
+	const dot = outputPath.lastIndexOf(".");
+	const base = dot > slash ? outputPath.slice(0, dot) : outputPath;
+	return { path: `${base}.${codec}`, substituted: true };
+}
+
+/**
  * Resolve the on-disk path for local synthesis. Local output is always WAV (no
  * MP3 encoder is bundled), so an `.mp3` (or any non-`.wav`) request is rewritten
  * to a sibling `.wav` and flagged so the tool result can note the substitution.
  */
 export function resolveLocalWavPath(outputPath: string): { wavPath: string; substituted: boolean } {
-	const lower = outputPath.toLowerCase();
-	if (lower.endsWith(".wav")) return { wavPath: outputPath, substituted: false };
-	const slash = Math.max(outputPath.lastIndexOf("/"), outputPath.lastIndexOf("\\"));
-	const dot = outputPath.lastIndexOf(".");
-	const base = dot > slash ? outputPath.slice(0, dot) : outputPath;
-	return { wavPath: `${base}.wav`, substituted: true };
+	const { path, substituted } = resolveCodecPath(outputPath, "wav");
+	return { wavPath: path, substituted };
+}
+
+/**
+ * Container to request from a cloud speech model: the requested codec when the
+ * model returns it, else the other codec the tool writes (a wav-only Gemini TTS
+ * asked for MP3 returns WAV), else `undefined` when it returns neither.
+ */
+export function resolveCloudCodec(model: Model, requested: TtsCodec): TtsCodec | undefined {
+	if (speechModelSupportsFormat(model, requested)) return requested;
+	const other: TtsCodec = requested === "mp3" ? "wav" : "mp3";
+	return speechModelSupportsFormat(model, other) ? other : undefined;
 }
 
 function readLocalVoice(settingsInstance: Settings): string {
@@ -102,6 +126,7 @@ async function synthesizeCloud(
 	outputPath: string,
 	displayPath: string,
 	codec: TtsCodec,
+	codecSubstituted: boolean,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
 	const sessionId = ctx.sessionManager.getSessionId();
@@ -124,13 +149,13 @@ async function synthesizeCloud(
 	// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
 	assertNotHeldOpen(outputPath);
 	await Bun.write(outputPath, result.audio);
-	const voiceId = params.voice_id ?? (model.api === "xai-tts" ? DEFAULT_XAI_VOICE_ID : "default");
+	const voiceId = params.voice_id ?? model.voice ?? (model.api === "xai-tts" ? DEFAULT_XAI_VOICE_ID : "default");
 	const backend: Exclude<TtsBackend, "local-inference"> = model.api === "xai-tts" ? "xai-tts" : "openai-speech";
 	return {
 		content: [
 			{
 				type: "text",
-				text: `Saved ${result.audio.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceId}, codec=${codec}).`,
+				text: `Saved ${result.audio.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceId}, codec=${codec}).${codecSubstituted ? ` This model only returns ${codec.toUpperCase()}, so ${codec.toUpperCase()} was written instead of the requested container.` : ""}`,
 			},
 		],
 		details: { bytes: result.audio.length, voiceId, codec, backend },
@@ -199,7 +224,6 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 	): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
 		const cwd = ctx.sessionManager.getCwd();
 		const outputPath = resolveToCwd(params.output_path, cwd);
-		const displayPath = formatPathRelativeToCwd(outputPath, cwd);
 		const codec: TtsCodec = outputPath.toLowerCase().endsWith(".wav") ? "wav" : "mp3";
 
 		const settingsInstance = ctx.settings ?? settings;
@@ -222,7 +246,22 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 					return await synthesizeLocal(model, params, settingsInstance, cwd, outputPath, signal);
 				}
 				if (model.api === "xai-tts" || model.api === "openai-speech") {
-					return await synthesizeCloud(model, params, ctx, outputPath, displayPath, codec, signal);
+					const modelCodec = resolveCloudCodec(model, codec);
+					if (!modelCodec) {
+						failures.push(`${model.provider}/${model.id}: returns only ${model.speechFormats?.join(", ")}`);
+						continue;
+					}
+					const cloudPath = modelCodec === codec ? outputPath : resolveCodecPath(outputPath, modelCodec).path;
+					return await synthesizeCloud(
+						model,
+						params,
+						ctx,
+						cloudPath,
+						formatPathRelativeToCwd(cloudPath, cwd),
+						modelCodec,
+						modelCodec !== codec,
+						signal,
+					);
 				}
 				throw new Error(`Unsupported speech model API: ${model.api}`);
 			} catch (error) {

@@ -56,3 +56,60 @@ export function encodeWav(samples: Float32Array, sampleRate: number): Uint8Array
 function writeAscii(view: DataView, offset: number, text: string): void {
 	for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
 }
+
+/**
+ * Decode a PCM16 RIFF/WAVE byte buffer (what cloud speech endpoints return for
+ * `response_format: wav`) into mono Float32 PCM. Walks the chunk list, so
+ * `LIST`/`fact` chunks before `data` are skipped; a streamed `data` size of
+ * 0xFFFFFFFF (or any size past the buffer) means "until the end". Multichannel
+ * audio is downmixed by averaging. Throws on anything but 16-bit integer PCM.
+ */
+export function decodeWav(bytes: Uint8Array): { pcm: Float32Array; sampleRate: number } {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (bytes.byteLength < 12 || readAscii(view, 0) !== "RIFF" || readAscii(view, 8) !== "WAVE") {
+		throw new Error("Not a RIFF/WAVE audio buffer");
+	}
+	let channels = 0;
+	let sampleRate = 0;
+	let offset = 12;
+	while (offset + 8 <= bytes.byteLength) {
+		const id = readAscii(view, offset);
+		const declared = view.getUint32(offset + 4, true);
+		const start = offset + 8;
+		const size = Math.min(declared, bytes.byteLength - start);
+		if (id === "fmt ") {
+			if (size < 16) throw new Error("Truncated WAV fmt chunk");
+			const format = view.getUint16(start, true);
+			const bits = view.getUint16(start + 14, true);
+			if (format !== PCM16_FORMAT || bits !== BITS_PER_SAMPLE) {
+				throw new Error(`Unsupported WAV encoding (format ${format}, ${bits}-bit); expected PCM16`);
+			}
+			channels = view.getUint16(start + 2, true);
+			sampleRate = view.getUint32(start + 4, true);
+		} else if (id === "data") {
+			if (channels === 0 || sampleRate === 0) throw new Error("WAV data chunk precedes its fmt chunk");
+			const frames = Math.floor(size / (2 * channels));
+			const pcm = new Float32Array(frames);
+			for (let frame = 0; frame < frames; frame += 1) {
+				let sum = 0;
+				for (let channel = 0; channel < channels; channel += 1) {
+					sum += view.getInt16(start + (frame * channels + channel) * 2, true);
+				}
+				pcm[frame] = sum / channels / -INT16_MIN;
+			}
+			return { pcm, sampleRate };
+		}
+		// Chunks are word-aligned: an odd-sized chunk carries one pad byte.
+		offset = start + declared + (declared & 1);
+	}
+	throw new Error("WAV buffer has no data chunk");
+}
+
+function readAscii(view: DataView, offset: number): string {
+	return String.fromCharCode(
+		view.getUint8(offset),
+		view.getUint8(offset + 1),
+		view.getUint8(offset + 2),
+		view.getUint8(offset + 3),
+	);
+}

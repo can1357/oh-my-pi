@@ -19,7 +19,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 | Field         | Type             | Required | Description                                                                                                                                          |
 | ------------- | ---------------- | -------: | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `text`        | `string`         |      Yes | Text to synthesize. Must be `1..15000` JavaScript string characters.                                                                                 |
-| `voice_id`    | `string`         |       No | Cloud voice id. xAI defaults to `eve`; OpenAI-compatible speech forwards it only when explicitly set. Local synthesis uses `tts.localVoice` instead. |
+| `voice_id`    | `string`         |       No | Cloud voice id. Omitted: the model's configured `voice`, else xAI's `eve`; OpenAI-compatible speech without either sends no voice. Local synthesis uses `tts.localVoice` instead. |
 | `language`    | `string`         |       No | Speech language for xAI; omitted sends `auto` (auto-detect). Ignored by local and OpenAI-compatible speech.                                         |
 | `output_path` | `string`         |      Yes | Destination resolved relative to session cwd. Case-insensitive `.wav` requests WAV; any other suffix requests MP3.                                   |
 | `sample_rate` | `number.integer` |       No | xAI sample-rate override. Ignored by local and OpenAI-compatible speech.                                                                             |
@@ -42,7 +42,8 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 4. Try candidates sequentially:
    - `local-inference` calls the local worker with the selected model id, `tts.localVoice`, and `tts.localSpeed`, encodes PCM16 WAV, and writes it. Per-call voice, language, sample rate, and bit rate are ignored.
    - `xai-tts` calls the selected model's `<baseUrl>/tts` through the model-registry credential resolver. It sends text, voice, and `language` (`auto` when the caller gives none), and an explicit `output_format` only when WAV or non-default sample/MP3 bit rates require it.
-   - `openai-speech` calls the selected model's `<baseUrl>/audio/speech` with `{ model, input, response_format, voice? }`; voice is sent only when explicitly supplied. This includes compatible providers such as DeepInfra, not just OpenAI.
+   - `openai-speech` calls the selected model's `<baseUrl>/audio/speech` with `{ model, input, response_format, voice? }`; voice is `voice_id`, else the model's configured `voice`, else omitted. This includes compatible providers such as DeepInfra, not just OpenAI.
+   - A cloud model whose `speechFormats` lacks the requested codec is asked for the other one (MP3 ↔ WAV) and the result goes to the sibling path with that extension; a model that returns neither is recorded as a failure and skipped.
 5. Missing API keys and provider HTTP errors advance to the next candidate. A local `null` response returns its error immediately; other failures do not trigger fallback.
 
 ## Modes / Variants
@@ -54,7 +55,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 
 ## Side Effects
 
-- Filesystem: writes the destination, or a sibling `.wav` when the chain reaches local for a non-WAV destination.
+- Filesystem: writes the destination, or a sibling `.wav` when the chain reaches local (or a WAV-only cloud model) for a non-WAV destination, or a sibling `.mp3` when an MP3-only cloud model serves a `.wav` destination.
 - Network: cloud synthesis calls the selected endpoint; local model loading may download/cache weights.
 - Session state: reads cwd, model registry, session id, speech-role settings, `tts.localVoice`, and `tts.localSpeed`.
 - Cancellation: cloud requests combine the caller signal with a 60-second timeout; local synthesis receives the caller signal.
@@ -80,3 +81,4 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 
 - No local MP3 encoder is bundled. A local request for `speech.mp3` writes `speech.wav` and reports the substitution.
 - There is no per-call model selector. Configure the speech role and fallback chain; local voice selection remains a setting.
+- `speech.enabled` (vocalizer) uses the same role chain: an explicitly configured cloud model first in the chain speaks each segment as WAV (models whose `speechFormats` lack `wav` are skipped), dropping a failing model for the rest of the utterance; otherwise it streams through local Kokoro.

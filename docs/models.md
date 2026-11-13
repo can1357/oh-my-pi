@@ -116,6 +116,21 @@ models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay 
 
 `omitMaxOutputTokens` omits the model-derived output cap.
 
+Speech (`openai-speech`/`xai-tts`) models take `voice`, sent when the `tts` tool or the vocalizer names none (some OpenAI-compatible gateways, such as Bifrost, answer a voiceless speech request with 400 `voice is required`), and `speechFormats`, the only containers the endpoint returns (`mp3`, `wav`, `pcm`, `opus`, `aac`, `flac`; absent means any). A WAV-only model asked for MP3 is asked for WAV instead and the `tts` tool writes the sibling `.wav`:
+
+```yaml
+providers:
+  my-gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: GATEWAY_API_KEY
+    models:
+      - id: gemini/gemini-2.5-flash-preview-tts
+        api: openai-speech
+        voice: kore
+        speechFormats: [wav]
+```
+
 `compat.base64SkipThoughtSignature` (Google APIs, default `false`): sends the unsigned-tool-call bypass sentinel base64-encoded. Set it on a `google-generative-ai` model behind a gateway that decodes `thoughtSignature` as base64 and answers the raw `skip_thought_signature_validator` literal with a 400, for example when Gemini replays another model's tool-call history:
 
 ```yaml
@@ -457,7 +472,7 @@ Provider defaults vs per-model overrides:
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
-  `imageInputDecoder`, `imageCountBudget`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `imageInputDecoder`, `imageCountBudget`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `voice`, `speechFormats`, `contextWindow`,
   `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
   `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`; `SPEECH_FORMATS`/`SpeechFormat` now live in `@oh-my-pi/pi-catalog/types` and stay re-exported here)
+
 ### Changed
 
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))

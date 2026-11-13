@@ -8,6 +8,8 @@
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
 - Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` fires the rule again on later matching turns, at most once per turn and never on the retry or follow-up turn its own reminder started ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
+- `models.yml` speech models accept `voice` (sent when the `tts` tool or the vocalizer names no voice, for gateways that reject a voiceless request) and `speechFormats` (the only containers the model returns). The `tts` tool asks a WAV-only model for WAV when the path ends in `.mp3` (and an MP3-only one for MP3 when it ends in `.wav`) and writes the sibling file with that extension; a model that returns neither is skipped
+- `speech.enabled` speaks through cloud speech models: when the `speech` role chain starts with a configured `openai-speech` or `xai-tts` model, the vocalizer synthesizes each segment as WAV through the chain, dropping a failing model for the rest of the utterance and reaching a later local model on-device. Without a configured cloud model it stays on local Kokoro; `--offline` keeps only the session provider's models, as before
 
 ### Changed
 

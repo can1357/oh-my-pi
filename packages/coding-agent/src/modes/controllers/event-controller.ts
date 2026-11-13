@@ -370,6 +370,7 @@ export class EventController {
 						settings: session.settings,
 						registry: session.modelRegistry,
 						getSessionProvider: () => session.model?.provider,
+						sessionId: session.sessionId,
 					}
 				: null,
 		);

@@ -1,5 +1,5 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
-import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
+import { MODEL_KINDS, RUNNER_API_KINDS, SPEECH_FORMATS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
 
 function validateMaxContextWindow(
@@ -128,6 +128,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
 	);
 	const ModelKindSchema = type.enumerated(...MODEL_KINDS.filter(kind => kind !== "search"));
+	const SpeechFormatsSchema = type.enumerated(...SPEECH_FORMATS).array();
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
@@ -235,6 +236,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"long?": "number",
 		},
 		"premiumMultiplier?": "number",
+		"voice?": "string",
+		"speechFormats?": SpeechFormatsSchema,
 		"contextWindow?": "number",
 		"maxContextWindow?": "number",
 		"maxTokens?": "number",
@@ -295,6 +298,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"long?": "number",
 		},
 		"premiumMultiplier?": "number",
+		"voice?": "string",
+		"speechFormats?": SpeechFormatsSchema,
 		"contextWindow?": "number",
 		"maxContextWindow?": "number",
 		"maxTokens?": "number",
