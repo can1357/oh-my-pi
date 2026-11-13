@@ -915,24 +915,9 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		}
 		previousFilteredTree = currentFilteredTree;
 	}
-	if (tip === baselineSha) {
-		// No filtered commit landed. Synthesising `HEAD + rootPatch` fails
-		// whenever rootPatch's WIP context can't be applied to a HEAD-only
-		// index (untracked WIP + agent modifies, staged-new WIP + agent
-		// modifies — see #4136), so collapse the isolation output onto a
-		// single WIP-seeded commit, matching the no-agent-commit path. This
-		// also covers an agent that committed only baseline WIP.
-		if (!opts.rootPatch.trim()) return tip;
-		const msg = (opts.commitMessage && (await opts.commitMessage(opts.rootPatch))) || opts.fallbackMessage;
-		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
-	}
-	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
-	// and 3-way synthesis used above; anything left is uncommitted work. The
-	// same WIP context applies: `rootPatch` is captured against `HEAD + WIP`,
-	// so synthesise through `patchTree` or hunks touching WIP paths fail on the
-	// clean baseline tree ("patch does not apply: … does not exist").
 	// `rootPatch` is measured from the dirty baseline; rebase it onto the fork
-	// point like the commits above.
+	// point like the commits above. Both the no-commit path and the leftover
+	// below use it.
 	const finalStatePatch =
 		forkSha === baselineSha
 			? opts.rootPatch
@@ -941,6 +926,22 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 					dirtyForkTree,
 					await writeSyntheticTree(opts.isolationDir, dirtyBaselineTree, [opts.rootPatch]),
 				);
+	if (tip === baselineSha) {
+		// No filtered commit landed. Synthesising `HEAD + rootPatch` fails
+		// whenever rootPatch's WIP context can't be applied to a HEAD-only
+		// index (untracked WIP + agent modifies, staged-new WIP + agent
+		// modifies — see #4136), so collapse the isolation output onto a
+		// single WIP-seeded commit, matching the no-agent-commit path. This
+		// also covers an agent that committed only baseline WIP.
+		if (!finalStatePatch.trim()) return tip;
+		const msg = (opts.commitMessage && (await opts.commitMessage(finalStatePatch))) || opts.fallbackMessage;
+		return commitPatch(opts.repoRoot, tip, opts.taskId, finalStatePatch, msg, undefined, opts.baseline.root);
+	}
+	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
+	// and 3-way synthesis used above; anything left is uncommitted work. The
+	// same WIP context applies: `rootPatch` is captured against `HEAD + WIP`,
+	// so synthesise through `patchTree` or hunks touching WIP paths fail on the
+	// clean baseline tree ("patch does not apply: … does not exist").
 	const finalFilteredTree = await patchTree(
 		opts.repoRoot,
 		baselineSha,

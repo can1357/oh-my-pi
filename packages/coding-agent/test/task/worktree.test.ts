@@ -457,6 +457,36 @@ describe("worktree isolation helpers", () => {
 				}
 			});
 
+			it("keeps the baseline commit when the agent only leaves uncommitted work on an older parent", async () => {
+				await fs.writeFile(path.join(repo, "added-at-baseline.txt"), "baseline commit\n");
+				await runGit(repo, ["add", "added-at-baseline.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "baseline commit"]);
+				const baselineSha = await runGit(repo, ["rev-parse", "HEAD"]);
+				await fs.writeFile(path.join(repo, "staged.txt"), "user wip\n");
+				const baseline = await captureBaseline(repo);
+
+				const isoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-iso-"));
+				tempDirs.push(isoRoot);
+				const iso = path.join(isoRoot, "repo");
+				await runGit(isoRoot, ["clone", "-q", repo, iso]);
+				await fs.writeFile(path.join(iso, "staged.txt"), "user wip\n");
+				// No agent commit: the task branch comes from the no-commit path alone.
+				await runGit(iso, ["checkout", "-q", "-b", "work", initialSha]);
+				await fs.writeFile(path.join(iso, "agent.txt"), "uncommitted\n");
+
+				const taskId = `older-uncommitted-${path.basename(isoRoot)}`;
+				let branchName = `omp/task/${taskId}`;
+				try {
+					const commitResult = await commitToBranch(iso, baseline, taskId, "older parent, uncommitted");
+					if (!commitResult?.branchName) throw new Error("expected task branch");
+					branchName = commitResult.branchName;
+
+					expect(await runGit(repo, ["diff", "--name-status", baselineSha, branchName])).toBe("A\tagent.txt");
+				} finally {
+					await cleanupTaskBranches(repo, [branchName]);
+				}
+			});
+
 			it("subtracts baseline dirty state even when the task commits it", async () => {
 				await Promise.all([
 					fs.writeFile(path.join(repo, "merged.txt"), "baseline dirty change\n"),
