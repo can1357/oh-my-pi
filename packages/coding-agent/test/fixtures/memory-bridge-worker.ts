@@ -56,6 +56,8 @@ export interface SupermemoryChildReport {
 	editError: string;
 	/** `memory_edit preview_forget` output. */
 	previewed: string;
+	/** `memory_edit update` outcome (its document upload fails in the test server). */
+	updated: string;
 	/** `getMemory` text and earlier-version ids, read through the alias. */
 	memoryRead: string;
 	/** HTTP status of a `getMemory` miss, as rebuilt on the worker. */
@@ -183,6 +185,12 @@ function buildProbe(): MemoryProbe {
 				op: "preview_forget",
 				query: "old build",
 			});
+			const updated = await new MemoryEditTool(tools)
+				.execute("worker-update", { op: "update", id: "mem-1", content: "build on 9200" })
+				.then(
+					() => "no error",
+					(error: unknown) => (error instanceof Error ? error.message : String(error)),
+				);
 			const memory = await alias.getMemory("mem-1");
 			const missingStatus = await alias.getMemory("missing").then(
 				() => undefined,
@@ -194,6 +202,7 @@ function buildProbe(): MemoryProbe {
 				retained: retained.content.map(part => (part.type === "text" ? part.text : "")).join(""),
 				editError,
 				previewed: previewed.content.map(part => (part.type === "text" ? part.text : "")).join(""),
+				updated,
 				memoryRead: `${memory.memory} <- ${memory.parents.map(item => item.id).join(",")}`,
 				missingStatus,
 			};

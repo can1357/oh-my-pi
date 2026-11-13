@@ -443,6 +443,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		if (this.aliasOf) return this.aliasOf.search(query, limit, signal);
+		if (this.#disposed) return Promise.reject(closedError("nothing recalled"));
 		const config = this.#config;
 		const resultLimit = Math.max(1, Math.min(limit ?? config.recallLimit, config.recallLimit));
 		return this.#local().client.search(
@@ -517,9 +518,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	/**
 	 * Recall for a compaction summary: one search on the latest user turn of the messages being
-	 * summarized, rendered like the first-turn block's memories. Only the primary state recalls
-	 * (an alias or subagent never does) and only with `autoRecall` on. Fails open: no match, an
-	 * abort or an error returns `undefined`, so compaction never waits on memory.
+	 * summarized, adding memories relevant to that turn to the summary prompt (the first-turn
+	 * block stays in the system prompt). Only the primary state recalls (an alias or subagent
+	 * never does) and only with `autoRecall` on. Fails open: no match, an abort or an error
+	 * returns `undefined`; compaction waits at most the request timeout.
 	 */
 	async recallForCompaction(messages: HindsightMessage[], signal?: AbortSignal): Promise<string | undefined> {
 		if (this.aliasOf || !this.automatic || this.#disposed || !this.#config.autoRecall) return undefined;
@@ -533,9 +535,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				found.map(item => ({ text: item.content, note: recallNote(item) })),
 				MAX_RECALL_CHARS,
 			);
-			return prompt.render(recallTemplate, { profile: "", memories }).trim() || undefined;
+			return prompt.render(recallTemplate, { profile: "", memories, compaction: true }).trim() || undefined;
 		} catch (error) {
-			logger.warn("Supermemory: compaction recall failed", { error: String(error) });
+			// A cancelled compaction is not a failure.
+			if (!signal?.aborted) logger.warn("Supermemory: compaction recall failed", { error: String(error) });
 			return undefined;
 		}
 	}

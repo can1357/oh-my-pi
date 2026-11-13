@@ -84,7 +84,8 @@ export const supermemoryBackend: MemoryBackend = {
 	async preCompactionContext(messages, settings, session, signal): Promise<string | undefined> {
 		if (!isSupermemoryConfigured(loadSupermemoryConfig(settings))) return undefined;
 		const state = session?.getSupermemorySessionState();
-		return await state?.recallForCompaction(flattenMessagesForRecall(messages), signal);
+		if (!state) return undefined;
+		return await state.recallForCompaction(flattenMessagesForRecall(messages), signal);
 	},
 
 	async clear(_agentDir, _cwd, session): Promise<void> {

@@ -261,6 +261,7 @@ describe("memory thread service", () => {
 				retained: "1 memory queued.",
 				editError: "Memory missing was not found in namespace omp-global.",
 				previewed: expect.stringContaining("- old build on 9000 (id: mem-9)"),
+				updated: expect.stringContaining("HTTP 503"),
 				memoryRead: "build on 9100 <- mem-0",
 				missingStatus: 404,
 			});
@@ -277,9 +278,13 @@ describe("memory thread service", () => {
 				query: "old build",
 				dryRun: true,
 			});
-			expect(requests.find(request => request.method === "POST")?.body).toMatchObject({
+			expect(requests.find(request => request.body.content === "worker fact")?.body).toMatchObject({
 				content: "worker fact",
 				metadata: { source: "coding-agent-retain" },
+			});
+			// A worker child's correction still asks for instant processing once it reaches main.
+			expect(requests.find(request => request.body.content === "build on 9200")?.body).toMatchObject({
+				dreaming: "instant",
 			});
 			// The undelivered write waits in main's outbox, reported on the parent session.
 			const files = await fs.readdir(path.join(tempDir, "supermemory-outbox"), { recursive: true });

@@ -346,7 +346,8 @@ function relatedSection(title: string, items: readonly SupermemoryRelatedMemory[
  * Every server string is stripped of terminal controls; frontmatter values stay on one line.
  */
 function renderSupermemoryMemory(url: InternalUrl, namespace: string, memory: SupermemoryMemory): InternalResource {
-	const meta = Object.keys(memory.metadata).length > 0 ? `metadata: ${JSON.stringify(memory.metadata)}\n` : "";
+	const meta =
+		Object.keys(memory.metadata).length > 0 ? `metadata: ${sanitizeText(JSON.stringify(memory.metadata))}\n` : "";
 	const header =
 		"---\n" +
 		`id: ${serverLine(memory.id)}\n` +
