@@ -102,6 +102,9 @@ export class ReplyWriteComponent extends AssistantMessageComponent implements To
 
 	setExecutionStarted(): void {}
 
+	/** A reply write renders as prose, not a tool card, so it shows no passive context. */
+	setAdditionalContext(): void {}
+
 	updateResult(result: ToolResultFrame, isPartial = false): void {
 		if (isPartial || this.isTranscriptBlockFinalized()) return;
 		this.#argsComplete = true;

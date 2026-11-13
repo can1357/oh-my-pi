@@ -66,6 +66,10 @@
 - Fixed concurrent OAuth requests rejected as `claude_code_version_too_old` failing instead of retrying with the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))
 - Chat Completions gateway requests preserve explicit tool strict-mode choices, so Codex tools can omit optional arguments when callers set `strict: false` ([#18672](https://github.com/can1357/oh-my-pi/pull/18672) by [@0xeb](https://github.com/0xeb)).
 
+### Changed
+
+- Developer messages carrying passive tool context now include a persisted presentation marker for host UIs; providers still receive only the message role and content ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.18.7] - 2026-11-10
 
 ### Added

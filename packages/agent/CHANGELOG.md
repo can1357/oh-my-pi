@@ -18,6 +18,10 @@
 
 - Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Fixed
+
+- Passive tool context developer messages now carry a presentation marker so host UIs can show their provenance without inspecting instruction text ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
