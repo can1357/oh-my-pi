@@ -1082,9 +1082,27 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					for (const table of SPOTLIGHT_TABLES) {
 						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
 					}
+				}
+				// The parse covers the whole transcript: drop compactions it no longer holds or has
+				// rewritten. A removed one may live on in a fork, which only another replay can credit.
+				const parsedCompactions = new Map(result.snapcompactCompactions.map(row => [row.entryId, row]));
+				const storedCompactions = database
+					.query<{ entry_id: string; timestamp: number; tokens_before: number; tokens_after: number }, [string]>(
+						"SELECT entry_id, timestamp, tokens_before, tokens_after FROM snapcompact_compactions WHERE session_file = ?",
+					)
+					.all(sessionFile);
+				for (const stored of storedCompactions) {
+					const parsed = parsedCompactions.get(stored.entry_id);
+					if (parsed?.timestamp !== stored.timestamp) {
+						reconcile = true;
+					} else if (parsed.tokensBefore === stored.tokens_before && parsed.tokensAfter === stored.tokens_after) {
+						continue;
+					}
 					changes += database
-						.query("DELETE FROM snapcompact_compactions WHERE session_file = ?")
-						.run(sessionFile).changes;
+						.query("DELETE FROM snapcompact_compactions WHERE session_file = ? AND entry_id = ?")
+						.run(sessionFile, stored.entry_id).changes;
+				}
+				if (replace) {
 					if (messages.length > 0) {
 						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
 					}

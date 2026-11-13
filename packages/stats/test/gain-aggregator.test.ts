@@ -161,5 +161,10 @@ describe("getGainDashboardStats", () => {
 		await Bun.write(parent, (await Bun.file(parent).text()).replace('"tokensAfter":400', '"tokensAfter":500'));
 		await syncAllSessions({ workers: 1 });
 		expect((await getGainDashboardStats("all")).bySource.compaction.savedTokens).toBe(500);
+
+		// A parent that drops the entry hands it to the fork still holding the original.
+		await writeSession("01_parent.jsonl", [entries[1]]);
+		await syncAllSessions({ workers: 1 });
+		expect((await getGainDashboardStats("all")).bySource.compaction.savedTokens).toBe(600);
 	});
 });
