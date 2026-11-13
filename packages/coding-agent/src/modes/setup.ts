@@ -10,6 +10,7 @@ import {
 	type SetupSceneSelectionOptions,
 	setupWizardAllowed,
 } from "@oh-my-pi/pi-tui/setup/wizard";
+import { addCustomProvider, customProviderContext } from "../config/custom-provider";
 import type { Settings } from "../config/settings";
 import { canSelfUpdate } from "../cli/update-cli";
 import { captureBrowserSession } from "../utils/browser-session";
@@ -75,6 +76,7 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
 			await ctx.session.refreshScopedModels();
 		},
+		addCustomProvider: provider => addCustomProvider(provider, customProviderContext(ctx.session.modelRegistry)),
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();

@@ -71,6 +71,11 @@
 - Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 - Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
 
+### Added
+
+- Added a custom OpenAI-compatible endpoint option to the setup provider list ([#12997](https://github.com/can1357/oh-my-pi/pull/12997) by [@DrB0rk](https://github.com/DrB0rk)).
+- Added a provider editor to the `/models` hub for adding, editing, and deleting custom OpenAI-compatible providers (`+ Add provider…`, `Ctrl+N` / `Ctrl+E` / `Ctrl+D`); saves keep `models.yml` comments ([#13874](https://github.com/can1357/oh-my-pi/pull/13874) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.18.7] - 2026-11-10
 
 ### Changed

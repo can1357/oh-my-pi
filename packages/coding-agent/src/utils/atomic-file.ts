@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import * as fsAsync from "node:fs/promises";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
 
@@ -28,6 +29,13 @@ export async function replaceFileWithRetry(tempPath: string, targetPath: string)
 			await Bun.sleep(Math.min(remaining, RENAME_RETRY_MAX_MS, RENAME_RETRY_INITIAL_MS * 2 ** failures));
 		}
 	}
+}
+
+export interface AtomicWriteOptions {
+	/** Permission bits for the published file; a new file is private (`0600`) unless given. */
+	mode?: number;
+	/** Runs once the sibling is durable and immediately before the rename; if it throws, nothing is published. */
+	beforePublish?: () => Promise<void>;
 }
 
 /**
@@ -96,9 +104,15 @@ async function replaceAfterWindowsRenameFailure(
  *
  * The staged file is created with `mode` (0600 by default) and published with
  * that mode, so the destination stays readable only by its owner even when it
- * carries a secret.
+ * carries a secret. Missing parent directories are created.
  */
-export async function writeFileAtomically(filePath: string, content: string, mode: number = 0o600): Promise<void> {
+export async function writeFileAtomically(
+	filePath: string,
+	content: string,
+	options: AtomicWriteOptions = {},
+): Promise<void> {
+	const mode = options.mode ?? 0o600;
+	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let removeTemp = false;
 	try {
@@ -112,6 +126,7 @@ export async function writeFileAtomically(filePath: string, content: string, mod
 		}
 		// The umask narrows the mode passed to open(); restore it explicitly.
 		await fs.promises.chmod(tempPath, mode);
+		await options.beforePublish?.();
 		await replaceFileAtomically(tempPath, filePath);
 		removeTemp = false;
 	} finally {
