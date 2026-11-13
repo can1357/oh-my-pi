@@ -8,6 +8,7 @@
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
 - Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` fires the rule again on later matching turns, at most once per turn and never on the retry or follow-up turn its own reminder started ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
+- Images you paste into a prompt now show as real image previews under your sent message in the transcript, not only as `#N` chips, in terminals that can draw images ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19185](https://github.com/can1357/oh-my-pi/pull/19185) by [@Skare69](https://github.com/Skare69))
 
 ### Changed
 
