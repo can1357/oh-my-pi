@@ -89,6 +89,29 @@ class "gemini" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
+		// Gemini 4 Hydrogen adds an `xhigh` level (default `high`).
+		models "gemini-4-hydrogen" {
+			thinking-upgrade-neutral #true
+			thinking-efforts "low" "medium" "high" "xhigh"
+		}
+	}
+	// Gemini 4 models decode past one 65,536-token streaming segment only when
+	// the request's `maxOutputTokens` is larger (up to 1,048,576 minus input);
+	// the provider then follows Google's continuation tokens. The reported caps
+	// (65,536 on Vertex, and the 32,768 non-streaming segment that the Gemini
+	// API's models.get lists for Argon and Carbon) end every long answer with
+	// MAX_TOKENS at the first segment, often before any visible text. 262,144
+	// is the output cap Google's own Antigravity client advertises for Carbon
+	// and Hydrogen. Zen is left alone: its continuation passthrough is
+	// unverified.
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#long-decodes
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
+	on "google" "google-vertex" {
+		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" {
+			limits-patch {
+				max-tokens 262144
+			}
+		}
 	}
 	// Gemini 4 Argon's and Carbon's introductory list price ($2/$10, $0.10
 	// cached) ends 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20
@@ -116,6 +139,21 @@ class "gemini" {
 						cache-write 0
 					}
 				}
+			}
+		}
+	}
+
+	// Gemini 4 Hydrogen: $1.50/$7.50, cache read $0.075 on the Gemini API and
+	// Vertex; Antigravity discovery reports $0, so the collapsed row is pinned to
+	// the same card.
+	// https://aistudio.google.com/docs/whats-new-gemini-4-hydrogen
+	on "google-antigravity" {
+		models "gemini-4-hydrogen" {
+			cost-patch {
+				input 1.5
+				output 7.5
+				cache-read 0.075
+				cache-write 0
 			}
 		}
 	}

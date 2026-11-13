@@ -8887,7 +8887,6 @@ DEALINGS IN THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - atspi-common 0.14.0 (https://github.com/odilia-app/atspi)
-- atspi-connection 0.14.0 (https://github.com/odilia-app/atspi/)
 - atspi-proxies 0.14.0 (https://github.com/odilia-app/atspi)
 - atspi 0.30.0 (https://github.com/odilia-app/atspi)
 

@@ -1,13 +1,15 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-function createSession(cwd: string): ToolSession {
+/** `lsp` settings turn LSP on for the session; without them its writes bypass LSP. */
+function createSession(cwd: string, lsp?: Record<string, unknown>): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -15,8 +17,8 @@ function createSession(cwd: string): ToolSession {
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
 		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
-		settings: Settings.isolated(),
-		enableLsp: false,
+		settings: Settings.isolated(lsp),
+		enableLsp: lsp !== undefined,
 	};
 }
 
@@ -43,6 +45,7 @@ describe("write tool shebang chmod", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await removeWithRetries(tmpDir);
 	});
 
@@ -64,6 +67,22 @@ describe("write tool shebang chmod", () => {
 		// Notice remains model-facing so callers see that chmod changed the file mode.
 		expect(details(result).madeExecutable).toBe(true);
 		expect(resultText(result)).toContain("[Notice: Made executable via chmod +x]");
+	});
+
+	// LSP on, yet nothing to format or diagnose: the writethrough commits without servers.
+	posixIt.each([
+		["has no server for the file", {}],
+		["neither formats nor diagnoses writes", { "lsp.formatOnWrite": false, "lsp.diagnosticsOnWrite": false }],
+	] as const)("marks a shebang file executable when LSP %s", async (_condition, lsp) => {
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
+		const filePath = path.join(tmpDir, "run.sh");
+		const tool = new WriteTool(createSession(tmpDir, lsp));
+
+		const result = await tool.execute("call-lsp", { path: filePath, content: "#!/bin/sh\necho hi\n" });
+
+		expect((await fs.stat(filePath)).mode & 0o111).toBe(0o111);
+		expect(details(result).madeExecutable).toBe(true);
 	});
 
 	it.skipIf(process.platform !== "win32")("does not claim chmod +x where execute bits cannot stick", async () => {

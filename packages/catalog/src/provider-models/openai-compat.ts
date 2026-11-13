@@ -532,6 +532,27 @@ function mapWithBundledReference<TApi extends Api>(
 }
 
 /**
+ * {@link mapWithBundledReference} plus the `input_modalities` /
+ * `max_output_length` / `supported_features` row vocabulary. Each field falls
+ * back to the reference when absent; a present feature list decides tool support.
+ */
+function mapWithFeatureListMetadata<TApi extends Api>(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<TApi>,
+	reference: ModelSpec<TApi> | undefined,
+): ModelSpec<TApi> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	return {
+		...model,
+		input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
+		maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
+		...(Array.isArray(entry.supported_features) && {
+			supportsTools: entry.supported_features.includes("tools"),
+		}),
+	};
+}
+
+/**
  * Rates from an OpenRouter-shaped `pricing` object (USD per token, as decimal
  * strings). Missing, zero, or negative legs (`-1` marks router-priced rows)
  * map to 0, which the model manager fills from its reference sources.
@@ -801,6 +822,10 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 	config?: SimpleProviderConfig;
 	headers?: SimpleProviderDiscoveryHeaders;
 	dynamicModelsAuthoritative?: true;
+	/** Live rows are the whole truth for reasoning (no OR-merge with the bundle). */
+	dynamicReasoningAuthoritative?: true;
+	/** Live rows are the whole truth for input modality (no OR-merge with the bundle). */
+	dynamicInputAuthoritative?: true;
 	requireApiKey?: true;
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	cacheProviderId?: string;
@@ -828,6 +853,8 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 		providerId: options.providerId,
 		...(options.cacheProviderId && { cacheProviderId: options.cacheProviderId }),
 		...(options.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
+		...(options.dynamicReasoningAuthoritative && { dynamicReasoningAuthoritative: true }),
+		...(options.dynamicInputAuthoritative && { dynamicInputAuthoritative: true }),
 		...(options.dropCachedModelIdsOnStaticMismatch && {
 			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
 		}),
@@ -4831,6 +4858,63 @@ export function togetherModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Chutes
+// ---------------------------------------------------------------------------
+
+/**
+ * Chutes rows carry a flat `pricing` object in USD per million tokens
+ * (`prompt`, `completion`, `input_cache_read`), plus `context_length`,
+ * `max_output_length`, `input_modalities`, and `supported_features`. Each
+ * field falls back independently to the bundled row when absent, so a row
+ * missing one field keeps the rest of its live metadata.
+ */
+function mapChutesModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithFeatureListMetadata(entry, defaults, reference);
+	const reasoning = Array.isArray(entry.supported_features)
+		? entry.supported_features.includes("reasoning")
+		: model.reasoning;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	return {
+		...model,
+		reasoning,
+		// A row that reports no reasoning must not carry a reference effort ladder.
+		...(reasoning ? {} : { thinking: undefined }),
+		// Chutes reports a nonzero price for every priced chute; an absent
+		// price falls back to the bundled row, so cost is not authoritative.
+		cost: {
+			input: toPositiveNumber(pricing.prompt, model.cost.input),
+			output: toPositiveNumber(pricing.completion, model.cost.output),
+			cacheRead: toPositiveNumber(pricing.input_cache_read, model.cost.cacheRead),
+			cacheWrite: model.cost.cacheWrite,
+		},
+	};
+}
+
+/** Builds Chutes' model-discovery manager (`https://llm.chutes.ai/v1/models`). */
+export function chutesModelManagerOptions(config?: SimpleProviderConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "chutes",
+		defaultBaseUrl: "https://llm.chutes.ai/v1",
+		config,
+		requireApiKey: true,
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+		// `supported_features` / `input_modalities` are the deployment's whole
+		// truth: a live row without `reasoning` or `image` must not regain them
+		// from the bundled row.
+		dynamicReasoningAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		mapModel: mapChutesModel,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Inception
 // ---------------------------------------------------------------------------
 
@@ -4855,16 +4939,10 @@ export function inceptionModelManagerOptions(config?: ModelManagerConfig): Model
 				if (!Array.isArray(entry.supported_endpoints) || !entry.supported_endpoints.includes("chat.completions")) {
 					return null;
 				}
-				const model = mapWithBundledReference(entry, defaults, reference);
+				const model = mapWithFeatureListMetadata(entry, defaults, reference);
 				return {
 					...model,
-					input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
 					cost: isRecord(entry.pricing) ? perTokenPricingCost(entry.pricing) : model.cost,
-					contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
-					maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
-					...(Array.isArray(entry.supported_features) && {
-						supportsTools: entry.supported_features.includes("tools"),
-					}),
 				};
 			},
 		}),
@@ -7408,8 +7486,19 @@ const GOOGLE_VERTEX_OPENAI_BASE_URL =
 	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi";
 const GOOGLE_VERTEX_ANTHROPIC_BASE_URL =
 	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict";
+const GOOGLE_VERTEX_MISTRAL_BASE_URL =
+	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/mistralai/models/{model}:streamRawPredict";
 
 function resolveGoogleVertexApi(modelId: string, raw: ModelsDevModel): { api: Api; baseUrl: string } {
+	// Vertex hosts partner models on publisher-scoped raw-predict endpoints;
+	// the Mistral publisher serves the OpenAI chat-completions wire shape
+	// (unlike the Anthropic publisher's Messages shape below).
+	if (raw.provider?.npm === "@ai-sdk/mistral") {
+		return {
+			api: "openai-completions",
+			baseUrl: GOOGLE_VERTEX_MISTRAL_BASE_URL.replace("{model}", modelId),
+		};
+	}
 	if (raw.provider?.npm === "@ai-sdk/google-vertex/anthropic") {
 		return {
 			api: "anthropic-messages",

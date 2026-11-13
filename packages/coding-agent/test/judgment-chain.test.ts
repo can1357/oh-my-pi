@@ -240,6 +240,154 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
+	it.each(["models.noJudge", "models.offline"])(
+		"%s prevents foreign judge requests and retains same-provider fallback",
+		async key => {
+			const settings = Settings.isolated({
+				[key]: true,
+				modelRoles: { judge: "typesafe/jev-preview" },
+			});
+			const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+			const fetch = vi.spyOn(globalThis, "fetch");
+			const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async model => reply(model, "level: low"));
+			const judge = new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE });
+
+			const result = await judge.judge({ state: "rename a local", questions: { level: TIER_QUESTION } });
+
+			expect(result.answers.level.choice).toBe("low");
+			expect(fetch).not.toHaveBeenCalled();
+			expect(complete).toHaveBeenCalled();
+		},
+	);
+	it.each([false, true])("tries the lead first and falls back on failure (%s)", async leadFails => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (leadFails && String(url) === OPENROUTER_DECISIONS_URL) {
+					return new Response("rejected", { status: 400 });
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const onUsage = vi.fn();
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			leadModel: "openrouter/~typesafe/jev-latest",
+			onUsage,
+		});
+
+		expect(judge.primaryModel()?.id).toBe(OPENROUTER_JEV.id);
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(urls).toEqual(
+			leadFails ? [OPENROUTER_DECISIONS_URL, "https://judge.example.test/v1/systemone"] : [OPENROUTER_DECISIONS_URL],
+		);
+		expect(onUsage).toHaveBeenCalledTimes(leadFails ? 2 : 1);
+		expect(onUsage).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ model: OPENROUTER_JEV.id, stopReason: leadFails ? "error" : "stop" }),
+		);
+		if (leadFails) {
+			expect(onUsage).toHaveBeenNthCalledWith(
+				2,
+				expect.objectContaining({ model: JEV_PREVIEW.id, stopReason: "stop" }),
+			);
+		}
+	});
+
+	it("does not retry a lead that also appears in the role chain", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: ["openrouter/~typesafe/jev-latest"] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return new Response("rejected", { status: 400 });
+			}),
+		);
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			leadModel: "openrouter/~typesafe/jev-latest",
+		});
+
+		await expect(
+			judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } }),
+		).rejects.toThrow("every judge candidate failed");
+		expect(urls).toEqual([OPENROUTER_DECISIONS_URL, "https://judge.example.test/v1/systemone"]);
+	});
+
+	it("ignores a lead that matches no candidate", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const judge = new ChainJudge({ settings, registry, purpose: "test", leadModel: "nace/drex-max-v1.1" });
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(judge.primaryModel()?.id).toBe(JEV_PREVIEW.id);
+		expect(urls).toEqual(["https://judge.example.test/v1/systemone"]);
+	});
+
+	it("never degrades a native lead to a prompted model, and keeps the native gate on the judge role", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
+		});
+		const registry = makeRegistry([LOCAL, ONLINE, OPENROUTER_JEV], {
+			openrouter: "or-key",
+			[ONLINE.provider]: "online-key",
+		});
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return new Response("rejected", { status: 400 });
+			}),
+		);
+		const local = vi.spyOn(tinyModelClient, "complete").mockRejectedValue(new Error("prompted judge must not run"));
+		const online = vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("prompted judge must not run"));
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			leadModel: "openrouter/~typesafe/jev-latest",
+			sessionModel: ONLINE_BACKUP,
+		});
+
+		await expect(
+			judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } }),
+		).rejects.toThrow("400");
+		expect(urls).toEqual([OPENROUTER_DECISIONS_URL]);
+		expect(local).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+		expect(hasNativeJudge(settings, registry)).toBe(false);
+	});
+
 	it("falls from a coarse local question to a tiered online question", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },

@@ -8,7 +8,6 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 <skills>
 {{#each skills}}
 {{#unless @first}}
-
 {{/unless}}
 <skill name="{{name}}">
 {{description}}
@@ -43,4 +42,7 @@ Rules are local constraints. You MUST read `rule://<name>` when working in that 
 <redacted-content>
 Some values in tool output are redacted for security. They appear as placeholder tokens such as `$$HASH$$`, `$$HASH:CASE$$`, or `$$NAME_HASH:CASE$$` (uppercase-alphanumeric digest, optional case hint, optional friendly-name prefix). These are **not errors** — they are intentional placeholders for sensitive values (API keys, passwords, tokens). Treat them as opaque strings. NEVER attempt to decode, fix, or report them as problems.
 </redacted-content>
+{{/if}}
+{{#if resultShaping}}
+{{resultShaping}}
 {{/if}}

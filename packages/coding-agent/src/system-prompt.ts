@@ -38,12 +38,13 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
-import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { expandTilde } from "./tools/path-utils";
+import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
@@ -53,10 +54,12 @@ import { cfgTuiAutoGraph, cfgTuiReactions, cfgTuiRenderMermaid, cfgTuiRenderSvg 
 import { cfgSecretsEnabled } from "./secrets/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import {
+	cfgEncourageEdits,
 	cfgIncludeModelInPrompt,
 	cfgIncludeWorkspaceTree,
 	cfgInlineToolDescriptors,
 	cfgPersonality,
+	cfgSystemPromptTemplates,
 } from "./session/settings";
 import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
@@ -76,6 +79,7 @@ import {
  */
 export const cfgSystemPromptInputs = combine({
 	personality: cfgPersonality,
+	systemPromptTemplates: cfgSystemPromptTemplates,
 	includeModelInPrompt: cfgIncludeModelInPrompt,
 	includeWorkspaceTree: cfgIncludeWorkspaceTree,
 	inlineToolDescriptors: cfgInlineToolDescriptors,
@@ -89,6 +93,7 @@ export const cfgSystemPromptInputs = combine({
 	renderSvg: cfgTuiRenderSvg,
 	autoGraph: cfgTuiAutoGraph,
 	reactions: cfgTuiReactions,
+	encourageEdits: cfgEncourageEdits,
 	// Rendered into the bash/eval/task tool descriptions (inline catalog) or read by
 	// the prompt builder (eager/batch delegation).
 	asyncEnabled: cfgAsyncEnabled,
@@ -513,6 +518,12 @@ export interface BuildSystemPromptOptions {
 	resolvedCustomPrompt?: string;
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
+	/**
+	 * Compiled `systemPromptTemplates` setting, matched against `model`. The selected file replaces
+	 * only the bundled default and is read only then: explicit and discovered (`SYSTEM.md`/
+	 * `SYSTEM_TEMPLATE.md`) prompts win. A missing, empty, or invalid file warns and keeps the bundled prompt.
+	 */
+	modelSystemPromptTemplates?: readonly ModelPatternEntry<string>[];
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -558,8 +569,6 @@ export interface BuildSystemPromptOptions {
 	eagerTasksAlways?: boolean;
 	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
-	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
-	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
 	taskIrcEnabled?: boolean;
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
@@ -571,6 +580,8 @@ export interface BuildSystemPromptOptions {
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
 	secretsEnabled?: boolean;
+	/** Spotlight's result-shaping notice (`SHAPE_RULE`), rendered under Tool I/O; omitted when Spotlight is off. */
+	resultShaping?: string;
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Active `memory.backend` id; undefined when memory is off. */
@@ -603,6 +614,8 @@ export interface BuildSystemPromptOptions {
 	autoGraph?: boolean;
 	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
 	reactions?: boolean;
+	/** Whether a critical rule makes file edits go through `edit` (sed/perl/python edits forbidden); false omits edit guidance. Default: true */
+	encourageEdits?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
 	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
@@ -720,9 +733,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
-		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
+		resultShaping = "",
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
 		delegationBias = "balanced",
@@ -739,6 +752,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		renderSvg = false,
 		autoGraph = false,
 		reactions = false,
+		encourageEdits = true,
 		xdevTools = [],
 		xdevDocs = "",
 		autoQaEnabled = false,
@@ -771,6 +785,30 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			resolvedSystemPromptTemplate = undefined;
 		} else {
 			throw new Error("System prompt template must not be empty");
+		}
+	}
+	// A `systemPromptTemplates` file is discovered input like SYSTEM_TEMPLATE.md: it applies only when
+	// nothing above did, and a missing, empty, or invalid file falls back to the bundled prompt.
+	const modelTemplatePath =
+		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
+			? matchModelPattern(options.modelSystemPromptTemplates ?? [], model)
+			: undefined;
+	if (modelTemplatePath !== undefined) {
+		const templateFile = expandTilde(modelTemplatePath);
+		try {
+			const content = await Bun.file(templateFile).text();
+			if (content.trim()) resolvedSystemPromptTemplate = content;
+			else
+				logger.warn("Ignoring empty systemPromptTemplates template; using the bundled prompt", {
+					model,
+					path: templateFile,
+				});
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
+				model,
+				path: templateFile,
+			});
 		}
 	}
 
@@ -1069,6 +1107,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree,
 		hasSkillUriAccess,
 		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
+		internalUrlReference: InternalUrlRouter.instance().reference(),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
@@ -1084,10 +1123,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,
-		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
+		resultShaping,
 		browserEnabled: evalPreludes.some(prelude => prelude.name === "browser"),
 		computerEnabled: evalPreludes.some(prelude => prelude.name === "computer"),
 		includeWorkspaceTree,
@@ -1095,6 +1134,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		renderSvg,
 		autoGraph,
 		reactions,
+		encourageEdits,
 		xdevTools,
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
@@ -1108,10 +1148,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rendered = prompt.renderTracked(selectedTemplate, data, sourceItems);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
-		if (!hasDiscoveredTemplate) {
+		if (options.systemPromptTemplate !== undefined) {
 			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
 		}
-		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
+		logger.warn("Ignoring invalid system prompt template file; using the bundled prompt", {
 			error: String(error),
 		});
 		resolvedSystemPromptTemplate = undefined;

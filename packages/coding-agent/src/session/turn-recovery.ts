@@ -26,6 +26,7 @@ import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -2002,13 +2003,16 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { wrapAround?: boolean },
 	): RetryFallbackSelector[] {
-		return findRetryFallbackCandidates(
+		const candidates = findRetryFallbackCandidates(
 			this.#getRetryFallbackResolutionContext(),
 			role,
 			currentSelector,
 			currentModel,
 			options,
 		);
+		if (!cfgOffline.get(this.#host.settings)) return candidates;
+		const provider = this.#host.model()?.provider;
+		return candidates.filter(candidate => provider !== undefined && candidate.provider === provider);
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
@@ -2147,6 +2151,7 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
+				if (cfgOffline.get(this.#host.settings) && candidateModel.provider !== currentModel.provider) continue;
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
 				// Skip a candidate whose window cannot hold the live context so we
 				// never switch onto an oversized request (issue #8065).
@@ -2253,6 +2258,7 @@ export class TurnRecovery {
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
+		if (cfgOffline.get(this.#host.settings) && candidate.provider !== this.#host.model()?.provider) return false;
 		const apiKey =
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
@@ -2449,6 +2455,7 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				if (cfgOffline.get(this.#host.settings) && candidate.provider !== sourceModel?.provider) continue;
 				// A candidate that would leave the request exactly as it is — same
 				// routed model, same effective thinking level — is not a switch, and
 				// must never be applied: `findRetryFallbackCandidates` excludes the
@@ -2723,6 +2730,7 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
+		if (cfgOffline.get(this.#host.settings) && primaryModel.provider !== currentModel.provider) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId(), { signal });
 		if (!apiKey) return false;
 

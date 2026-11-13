@@ -544,6 +544,7 @@ const fn posix_text(kind: io::ErrorKind) -> Option<&'static str> {
 		io::ErrorKind::FileTooLarge => "File too large",
 		io::ErrorKind::TooManyLinks => "Too many links",
 		io::ErrorKind::CrossesDevices => "Invalid cross-device link",
+		io::ErrorKind::NotSeekable => "Illegal seek",
 		_ => return None,
 	})
 }

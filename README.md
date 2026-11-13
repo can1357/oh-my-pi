@@ -292,7 +292,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
 - `wait` — block until the next background result, peer message, or steering interrupt; message peers and control jobs via `agent://` and `proc://`.
 - `todo` — ordered mutations over the session todo list with phase tracking.
-- `ask` — structured follow-up questions for interactive runs.
+- `ask` — HTML form follow-ups (radios, checkboxes, selects, text) for interactive runs.
 
 **Desktop & web**
 
@@ -346,7 +346,7 @@ Auth tags below: `oauth` signs in with your provider account, `plan` routes thro
 
 Direct APIs and gateways. Mix providers per role.
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
 
 ### Coding plans
 
@@ -508,11 +508,11 @@ Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt
 
 ### Interactive — when in doubt, the agent asks
 
-The TUI is the default surface. Tool calls render as cards, edits preview before they land, and ambiguity routes through the `ask` tool — a structured option picker the agent can call mid-turn. The keyboard handles the rest.
+The TUI is the default surface. Tool calls render as cards, edits preview before they land, and ambiguity routes through the `ask` tool — a form the agent can put up mid-turn, with its recommendation preselected. The keyboard handles the rest.
 
-The same prompt cards surface over ACP, so editors get the picker without writing one.
+The same forms surface over ACP as elicitations, so editors get them without writing a dialog.
 
-![omp TUI showing a multi-select question from the ask tool.](assets/ask.webp)
+![omp TUI showing a multi-select field of an ask form.](assets/ask.webp)
 
 ### SDK — embed in Node
 
