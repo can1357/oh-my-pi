@@ -2174,19 +2174,14 @@ export class WorkerCore {
 		}
 		// The omp relay withholds a tab Chrome refused to attach, and says why beside `Target.getTargetInfo`. A refusal over
 		// another extension's frame fails at once, so the supervisor can keep the tab for a later call.
-		let refusal: string | undefined;
-		try {
-			const result: unknown = await browserConnection(this.#browser).send("Target.getTargetInfo", { targetId });
-			if (isRecord(result) && typeof result.refusal === "string") refusal = result.refusal;
-		} catch {
-			// Not the omp relay, or the target is gone: decided below.
-		}
+		const targetInfo = await this.#browserHasTarget(this.#browser, targetId);
+		const refusal = isRecord(targetInfo) && typeof targetInfo.refusal === "string" ? targetInfo.refusal : undefined;
 		if (refusal && FOREIGN_FRAME_REFUSAL.test(refusal)) {
 			throw new ToolError(`Chrome refused to attach to target ${targetId}: ${refusal}`);
 		}
 		// Puppeteer lists a page only once its URL is non-empty, and a crashed page revived by this attach reloads
 		// with an empty URL for a moment. Wait for it while Chromium still has the target; fail at once when not.
-		if (await this.#browserHasTarget(this.#browser, targetId)) {
+		if (targetInfo) {
 			const target = await this.#browser
 				.waitForTarget(async candidate => (await targetIdForTarget(candidate).catch(() => "")) === targetId, {
 					timeout: ATTACHED_TARGET_EXPOSE_TIMEOUT_MS,
@@ -2197,14 +2192,13 @@ export class WorkerCore {
 		throw new ToolError(`Target ${targetId} is no longer available on the attached browser`);
 	}
 
-	async #browserHasTarget(browser: Browser, targetId: string): Promise<boolean> {
+	async #browserHasTarget(browser: Browser, targetId: string): Promise<unknown> {
 		let session: CDPSession | undefined;
 		try {
 			session = await browser.target().createCDPSession();
-			await session.send("Target.getTargetInfo", { targetId });
-			return true;
+			return await session.send("Target.getTargetInfo", { targetId });
 		} catch {
-			return false;
+			return undefined;
 		} finally {
 			await session?.detach().catch(() => undefined);
 		}

@@ -50,11 +50,12 @@ class ChromeBackedExtension {
 	 * the tab.
 	 */
 	refuseAttach: string | undefined;
+	attachAttempts = 0;
 
 	private constructor(
 		relay: WebSocket,
 		chrome: WebSocket,
-		readonly targetId: string,
+		public targetId: string,
 	) {
 		this.#relay = relay;
 		this.#chrome = chrome;
@@ -149,6 +150,7 @@ class ChromeBackedExtension {
 		const id = message.id;
 		switch (message.op) {
 			case "attach": {
+				this.attachAttempts++;
 				if (this.refuseAttach) return this.#reply(id, { error: this.refuseAttach });
 				const answer = await this.#chromeSend("Target.attachToTarget", { targetId: this.targetId, flatten: true })
 					.promise;
@@ -165,6 +167,23 @@ class ChromeBackedExtension {
 				this.#relay.send(
 					JSON.stringify({ t: "detached", tabId: TAB_ID, reason: "target_closed", relayInitiated: true }),
 				);
+				return this.#reply(id, { result: {} });
+			}
+			case "createTab": {
+				const url = String(message.url ?? "about:blank");
+				const answer = await this.#chromeSend("Target.createTarget", { url }).promise;
+				if (!isRecord(answer.result) || typeof answer.result.targetId !== "string")
+					return this.#reply(id, { error: "create failed" });
+				this.targetId = answer.result.targetId;
+				this.refuseAttach = undefined;
+				return this.#reply(id, {
+					result: {
+						tab: { tabId: TAB_ID, url, title: "", active: true, discarded: false, windowId: 1, pinned: false, groupId: -1 },
+					},
+				});
+			}
+			case "closeTab": {
+				await this.#chromeSend("Target.closeTarget", { targetId: this.targetId }).promise;
 				return this.#reply(id, { result: {} });
 			}
 			case "send": {
@@ -308,7 +327,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
-	async function openRelayTab(query = ""): Promise<ChromeBackedExtension> {
+	async function openRelayTab(query = "", owned = false): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
 		page = await chromium.newPage();
 		pageUrl = `${site.url}login?case=${crypto.randomUUID()}${query}`;
@@ -332,7 +351,15 @@ describe("relay tabs Chrome detaches omp from", () => {
 				"tools.maxTimeout": 0,
 			}),
 		};
-		await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 });
+		await invoke({ action: "open", app: "relay", ...(owned ? { url: pageUrl } : { target: "case=" }), timeout: 20 });
+		if (owned) {
+			page = (await chromium.pages()).find(candidate => {
+				// Puppeteer exposes the CDP target id only on its private field.
+				const target = candidate.target() as unknown as { _targetId: string };
+				return target._targetId === extension?.targetId;
+			});
+			if (!page) throw new Error("created relay page missing");
+		}
 		await invoke({ action: "run", code: "await page.evaluate(() => { window.mark = 'kept'; });", timeout: 10 });
 		return extension;
 	}
@@ -714,10 +741,33 @@ describe("relay tabs Chrome detaches omp from", () => {
 		60_000,
 	);
 
+	it.skipIf(!CHROMIUM_AVAILABLE).each([
+		{ owned: true, label: "owned tab closed" },
+		{ owned: false, label: "adopted tab left open" },
+	])("replaces a held-out tab without re-adopting ($label)", async ({ owned }) => {
+		const ext = await openRelayTab("", owned);
+		const original = page!;
+		const originalTab = getTab(name);
+		ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
+		const evaluating = ext.hanging();
+		const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+		await evaluating;
+		await ext.chromeDetach("target_closed");
+		expect(String(await stalled)).toContain("omp kept the tab open");
+		const attempts = ext.attachAttempts;
+		const started = Date.now();
+		await invoke({ action: "open", app: "relay", url: pageUrl, dialogs: "accept", timeout: 20 });
+		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(ext.attachAttempts - attempts).toBe(1);
+		expect(getTab(name)).not.toBe(originalTab);
+		expect(original.isClosed()).toBe(owned);
+	}, 60_000);
+
 	it.skipIf(!CHROMIUM_AVAILABLE).each(["release", "release keeping the page"] as const)(
 		"lets go of a tab Chrome keeps omp out of (%s)",
 		async mode => {
-			const ext = await openRelayTab();
+			await openRelayTab("", mode === "release");
+			const ext = extension!;
 			ext.refuseAttach = FOREIGN_FRAME_REFUSAL;
 			const evaluating = ext.hanging();
 			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
@@ -727,7 +777,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 			// No worker drives the held-out tab, so nothing waits for one to answer the release.
 			await releaseTab(name, mode === "release" ? {} : { keepPage: true });
 			expect(getTab(name)).toBeUndefined();
-			expect(page?.isClosed()).toBe(false);
+			expect(page?.isClosed()).toBe(mode === "release");
 		},
 		60_000,
 	);

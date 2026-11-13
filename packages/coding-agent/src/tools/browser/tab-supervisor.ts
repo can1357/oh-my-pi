@@ -482,11 +482,6 @@ async function acquireTabImpl(
 	// below cannot drop it to refCount 0 and dispose the instance we are about
 	// to reuse (e.g. reopening the sole tab with a different dialogs policy).
 	let tempHold = false;
-	// A tab Chrome refused over another extension's frame is re-adopted first, as a run does it.
-	const heldOut = tabs.get(name);
-	if (heldOut?.backend === "worker" && heldOut.heldOut && !heldOut.workerRecovery) {
-		readoptHeldOutTab(heldOut, opts.timeoutMs);
-	}
 	// A tab whose worker exited is being reattached: the open reuses the tab the reattach leaves, or opens a fresh
 	// one if the reattach closed it, instead of reporting a tab whose worker is gone.
 	const reattaching = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
@@ -511,6 +506,9 @@ async function acquireTabImpl(
 				tempHold = true;
 				await releaseTab(name, { kill: false });
 			} else {
+				readoptHeldOutTab(name, opts.timeoutMs);
+				const readopting = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
+				if (readopting) await readopting;
 				// Reuse counts as use: refresh the idle clock and resume a
 				// settle-frozen page before driving it again. A refused
 				// resume fails the open here with the same actionable
@@ -1143,10 +1141,7 @@ async function runInTabWithSnapshot(
 ): Promise<RunResultOk> {
 	// Chrome refused this tab's last re-adoption over another extension's frame: re-adopt it first, a reattach this
 	// call and any beside it wait for as for one after a worker exit.
-	const heldOut = tabs.get(name);
-	if (heldOut?.backend === "worker" && heldOut.heldOut && !heldOut.workerRecovery) {
-		readoptHeldOutTab(heldOut, opts.timeoutMs);
-	}
+	readoptHeldOutTab(name, opts.timeoutMs);
 	// A worker that exited on its own is being replaced: wait for that within this call's budget, and run only on the
 	// same tab. A tab closed and reopened under this name meanwhile is not the one this call was meant for.
 	const waitStartedAt = performance.now();
@@ -2316,7 +2311,9 @@ async function dispatchToolCall(
  * that started it and any beside it wait for it. A refusal again rejects them with {@link TabHeldOutError}, the tab
  * still kept; a re-adoption that works is reported by the next result.
  */
-function readoptHeldOutTab(tab: WorkerTabSession, timeoutMs: number): void {
+function readoptHeldOutTab(name: string, timeoutMs: number): void {
+	const tab = tabs.get(name);
+	if (tab?.backend !== "worker" || !tab.heldOut || tab.workerRecovery) return;
 	const readoption: Promise<boolean> = recoverWorkerTab(
 		tab,
 		tab.name,
