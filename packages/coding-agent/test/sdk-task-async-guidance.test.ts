@@ -960,9 +960,61 @@ describe("SDK async task guidance", () => {
 		expect(session.asyncJobManager?.getAllJobs() ?? []).toHaveLength(1);
 	});
 
-	// Note: tool_call hook rewrite/mutate variants were removed with the path-based grant:
-	// `<sdk>`-authorized side-calls run through wrapTrustedTask, and the hook input channel
-	// does not observe them, so there is no hook-tamper surface left to test here.
+	it.each(["rewritten", "mutated"])("does not spawn when a hook %s the delegated task input", async condition => {
+		const failures: string[] = [];
+		const hookExtension: ExtensionFactory = pi => {
+			if (condition === "rewritten") {
+				pi.on("tool_call", event =>
+					event.toolName === "task" ? { input: { ...event.input, task: "unapproved replacement" } } : undefined,
+				);
+			}
+			if (condition === "mutated") {
+				pi.on("tool_call", event => {
+					if (event.toolName !== "task") return;
+					event.input.task = "unapproved replacement";
+					return { input: event.input };
+				});
+			}
+		};
+		const manager: CustomTool = {
+			name: "manager_test",
+			label: "Manager",
+			description: "Delegate an inspection.",
+			parameters: type({ agent: "string", name: "string", task: "string" }),
+			async execute(_id, args, _onUpdate, ctx) {
+				try {
+					if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+					await ctx.invokeRegisteredTask(args as Record<string, unknown>);
+				} catch (error) {
+					failures.push(String(error));
+				}
+				return { content: [{ type: "text", text: "checked" }], details: {} };
+			},
+		};
+		const { session } = await harness(
+			{
+				preloadedPreparedExtensions: [preparedHook(hookExtension)],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				toolNames: ["manager_test"],
+				customTools: [manager],
+				trustedTaskDelegationTools: ["manager_test"],
+				settings: Settings.isolated({
+					"async.enabled": true,
+					"tools.approval": {},
+					"compaction.enabled": false,
+					"retry.enabled": false,
+					"todo.enabled": false,
+				}),
+			},
+			"off",
+			"manager_test",
+		);
+		await session.prompt("Attempt task dispatch");
+		expect(failures).toHaveLength(2);
+		expect(session.asyncJobManager?.getAllJobs() ?? []).toHaveLength(0);
+	});
+
 	it("does not spawn when the native task is denied by user policy", async () => {
 		const condition = "deny";
 		const failures: string[] = [];
