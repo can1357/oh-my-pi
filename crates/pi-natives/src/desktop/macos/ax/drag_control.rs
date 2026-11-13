@@ -5,7 +5,7 @@ use objc2_application_services::AXUIElement;
 use objc2_core_foundation::{CFNumber, CFRetained};
 
 use super::{
-	AxBounds, TextSurface, bounds, copy_attribute, copy_element, copy_string,
+	AxBounds, TextSurface, bounds, copy_attribute, copy_element, copy_elements, copy_string,
 	copy_strings_from_action_names, open_menu::hit_test, perform_action, probe_application,
 	text_surface,
 };
@@ -75,6 +75,18 @@ impl Control {
 		number(&self.element, "AXValue")
 	}
 
+	/// Signed distance from the thumb's centre to the release, clamped to
+	/// the track. Positive means an increment moves toward the release.
+	pub(crate) fn distance_to(&self, x: f64, y: f64) -> Option<f64> {
+		let frame = self.steps?;
+		let thumb = copy_elements(&self.element, "AXChildren")
+			.ok()?
+			.into_iter()
+			.find(|child| copy_string(child, "AXRole").as_deref() == Some("AXValueIndicator"))?;
+		let thumb = bounds(&thumb)?;
+		thumb_distance(frame, thumb, self.vertical, x, y)
+	}
+
 	/// Moves the control one step up (`AXIncrement`) or down (`AXDecrement`).
 	pub(crate) fn step(&self, up: bool) -> CoreResult<()> {
 		perform_action(&self.element, if up { "AXIncrement" } else { "AXDecrement" })
@@ -101,4 +113,29 @@ fn number(element: &AXUIElement, attribute: &str) -> Option<f64> {
 		.ok()?
 		.as_f64()
 		.filter(|value| value.is_finite())
+}
+
+fn thumb_distance(frame: AxBounds, thumb: AxBounds, vertical: bool, x: f64, y: f64) -> Option<f64> {
+	let (start, length, centre, half, end) = if vertical {
+		(frame.y, frame.height, thumb.y + thumb.height / 2.0, thumb.height / 2.0, y)
+	} else {
+		(frame.x, frame.width, thumb.x + thumb.width / 2.0, thumb.width / 2.0, x)
+	};
+	if length <= 2.0 * half {
+		return None;
+	}
+	let distance = end.clamp(start + half, start + length - half) - centre;
+	Some(if vertical { -distance } else { distance })
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_slider_path_past_the_track_finishes_at_its_limit() {
+		let frame = AxBounds { x: 0.0, y: 0.0, width: 100.0, height: 16.0 };
+		let thumb = AxBounds { x: 90.0, y: 0.0, width: 10.0, height: 16.0 };
+		assert_eq!(thumb_distance(frame, thumb, false, 150.0, 8.0), Some(0.0));
+	}
 }

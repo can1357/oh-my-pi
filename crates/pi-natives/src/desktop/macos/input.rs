@@ -2443,11 +2443,23 @@ fn background_gesture(
 						pressed,
 						target,
 						range,
+						(range.1 - range.0) * SLIDER_POSITION_TOLERANCE
+							/ if control.vertical { frame.height } else { frame.width },
+						|| control.distance_to(end.x, end.y),
 						|| control.value(),
 						control::settle,
 					) {
 						AfterWebDrag::Done => return Ok(()),
 						AfterWebDrag::Short(at) => at,
+						AfterWebDrag::Unconfirmed(at) => {
+							return Err(DesktopError::input_failed(format!(
+								"the drag on window {} ({}) stopped at {at}, outside the path-end \
+								 estimate {target}; the slider exposes no thumb position or reliable \
+								 linear step, so its outcome could not be confirmed. Read the target \
+								 before retrying; takeover (takeover: true) drags it with the pointer",
+								window.id, window.app,
+							)));
+						},
 						AfterWebDrag::Unsure => {
 							return Err(DesktopError::input_failed(format!(
 								"the drag reached window {} ({}), but its outcome could not be confirmed: \
@@ -2472,6 +2484,21 @@ fn background_gesture(
 						)
 						.map_err(sent_refusal)
 					};
+					if let Some(distance) = control.distance_to(end.x, end.y) {
+						return step_slider_geometry(
+							window,
+							target,
+							distance,
+							recheck,
+							|up| {
+								control::intervention::check_press()?;
+								control.step(up)
+							},
+							|| control.value(),
+							|| control.distance_to(end.x, end.y),
+							control::settle,
+						);
+					}
 					step_slider(
 						window,
 						&control.role,
@@ -3096,7 +3123,7 @@ fn slider_value_at(frame: AxBounds, (min, max): (f64, f64), vertical: bool, at: 
 /// [`after_web_drag`] reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AfterWebDrag {
-	/// The pointer moved it, or it is no longer readable: done.
+	/// The pointer reached the release, or the value is no longer readable.
 	Done,
 	/// The page left it short at this value: it is stepped on from there.
 	Short(f64),
@@ -3105,6 +3132,8 @@ enum AfterWebDrag {
 	/// other way (right to left), so the value under the path's end is not
 	/// known.
 	Unsure,
+	/// A moved slider without geometry cannot establish a linear mapping.
+	Unconfirmed(f64),
 }
 
 /// After a background drag on a slider a web page draws, whether to step it
@@ -3120,6 +3149,8 @@ fn after_web_drag(
 	pressed: f64,
 	target: f64,
 	(min, max): (f64, f64),
+	press_tolerance: f64,
+	mut distance: impl FnMut() -> Option<f64>,
 	mut value: impl FnMut() -> Option<f64>,
 	mut wait: impl FnMut(Duration),
 ) -> AfterWebDrag {
@@ -3139,11 +3170,68 @@ fn after_web_drag(
 			Some(next) => at = next,
 		}
 	}
-	if (at - target).abs() < (at - pressed).abs() {
-		AfterWebDrag::Done
-	} else {
-		AfterWebDrag::Short(at)
+	match distance() {
+		Some(distance) if distance.abs() <= SLIDER_POSITION_TOLERANCE => AfterWebDrag::Done,
+		Some(_) => AfterWebDrag::Short(at),
+		None if at == target => AfterWebDrag::Done,
+		None if (at - pressed).abs() <= press_tolerance => AfterWebDrag::Short(at),
+		None => AfterWebDrag::Unconfirmed(at),
 	}
+}
+
+const SLIDER_POSITION_TOLERANCE: f64 = 4.0;
+
+/// A thumb's position, unlike its value, measures even a non-linear slider's
+/// progress toward the release. Read every step: its distance need not be linear.
+fn step_slider_geometry(
+	window: &DesktopWindow,
+	target: f64,
+	mut distance: f64,
+	mut check: impl FnMut() -> CoreResult<()>,
+	mut step: impl FnMut(bool) -> CoreResult<()>,
+	mut value: impl FnMut() -> Option<f64>,
+	mut position: impl FnMut() -> Option<f64>,
+	mut wait: impl FnMut(Duration),
+) -> CoreResult<()> {
+	let failure = |now: Option<f64>| {
+		DesktopError::input_failed(format!(
+			"the drag on window {} ({}) stopped: the slider now reads {}, with path-end \
+			 estimate {target}, but its thumb did not reach the release. Read the target before \
+			 retrying; takeover (takeover: true) drags it with the pointer",
+			window.id,
+			window.app,
+			now.map_or_else(|| "nothing".to_owned(), |now| now.to_string()),
+		))
+	};
+	for _ in 0..MAX_SLIDER_STEPS {
+		if distance.abs() <= SLIDER_POSITION_TOLERANCE {
+			return Ok(());
+		}
+		check().map_err(sent_refusal)?;
+		let up = distance > 0.0;
+		step(up).map_err(|_| failure(value()))?;
+		let Some(next) = settle(0.0, SLIDER_POSITION_TOLERANCE, &mut position, &mut wait) else {
+			return Err(failure(value()));
+		};
+		if next == distance {
+			return Err(failure(value()));
+		}
+		if (next > 0.0) != up {
+			if next.abs() > distance.abs() {
+				check().map_err(sent_refusal)?;
+				step(!up).map_err(|_| failure(value()))?;
+				let Some(corrected) = settle(distance, 0.0, &mut position, &mut wait) else {
+					return Err(failure(value()));
+				};
+				if corrected != distance {
+					return Err(failure(value()));
+				}
+			}
+			return Ok(());
+		}
+		distance = next;
+	}
+	Err(failure(value()))
 }
 
 /// A slider a web page draws that a background drag left at `before`, short
@@ -3217,7 +3305,17 @@ fn step_slider(
 		if !short(first) && (first - target).abs() > (before - target).abs() {
 			check().map_err(|error| stopped(error, value()))?;
 			step(!up).map_err(|error| stopped(error, value()))?;
-			followed(first, &mut value, &mut wait);
+			if let Some(settled) = settle(before, size * 1e-6, &mut value, &mut wait)
+				&& (settled - before).abs() > size * 1e-6
+			{
+				return Err(DesktopError::input_failed(format!(
+					"the drag on window {} ({}) left the {role} it started on at {before}, short of \
+					 {target}, the value under the path's end, and the corrective step stopped: \
+					 the {role} went from {before} to {settled}, where the steps lead to {before}. \
+					 Read the target before retrying; takeover (takeover: true) drags it with the pointer",
+					window.id, window.app,
+				)));
+			}
 		}
 		return Ok(());
 	}
@@ -8509,6 +8607,8 @@ mod tests {
 				2.0,
 				75.0,
 				(0.0, 100.0),
+				1.0,
+				|| Some(75.0 - reads[next.get().saturating_sub(1).min(reads.len() - 1)].unwrap_or(75.0)),
 				|| {
 					let value = reads[next.get().min(reads.len() - 1)];
 					next.update(|v| v + 1);
@@ -8525,17 +8625,51 @@ mod tests {
 		assert_eq!(run(0.0, &[Some(0.0), Some(2.0)]), (AfterWebDrag::Short(2.0), 3));
 		// A partial pointer move past the midpoint still needs steps.
 		assert_eq!(run(0.0, &[Some(40.0)]), (AfterWebDrag::Short(40.0), 2));
-		// The pointer moved it, to the step nearest the end or past it: done,
-		// even when the first changed read caught it at the press.
+		// A thumb at the release is done; a coarser step is checked by stepping.
 		assert_eq!(run(0.0, &[Some(75.0)]), (AfterWebDrag::Done, 2));
-		assert_eq!(run(0.0, &[Some(80.0)]), (AfterWebDrag::Done, 2));
+		assert_eq!(run(0.0, &[Some(80.0)]), (AfterWebDrag::Short(80.0), 2));
 		assert_eq!(run(0.0, &[Some(2.0), Some(30.0), Some(75.0)]), (AfterWebDrag::Done, 4));
 		// A slider no longer readable has nothing left to step.
 		assert_eq!(run(0.0, &[None]), (AfterWebDrag::Done, 1));
 		assert_eq!(run(0.0, &[Some(2.0), None]), (AfterWebDrag::Done, 2));
+		// Without a thumb, a partial move cannot establish a linear mapping.
+		assert_eq!(
+			after_web_drag(0.0, 2.0, 75.0, (0.0, 100.0), 1.0, || None, || Some(40.0), |_| {}),
+			AfterWebDrag::Unconfirmed(40.0),
+		);
+		// A non-linear slider's thumb reached the release: its own value is
+		// done, not stepped toward the linear estimate.
+		assert_eq!(
+			after_web_drag(0.0, 2.0, 75.0, (0.0, 100.0), 1.0, || Some(0.0), || Some(40.0), |_| {}),
+			AfterWebDrag::Done,
+		);
 		// Unmoved and far from the value under the press (a slider that runs
 		// right to left, pressed on its thumb): not stepped.
 		assert_eq!(run(98.0, &[Some(98.0)]).0, AfterWebDrag::Unsure);
+	}
+
+	#[test]
+	fn a_non_linear_web_slider_is_stepped_to_the_nearest_thumb_position() {
+		use std::cell::Cell;
+		let index = Cell::new(0usize);
+		let positions = [35.0, 10.0, -20.0];
+		let steps = Cell::new(0);
+		let outcome = step_slider_geometry(
+			&background_window("Electron"),
+			75.0,
+			positions[0],
+			|| Ok(()),
+			|up| {
+				steps.update(|steps| steps + 1);
+				index.set(if up { index.get() + 1 } else { index.get() - 1 });
+				Ok(())
+			},
+			|| Some(index.get() as f64),
+			|| Some(positions[index.get()]),
+			|_| {},
+		);
+		assert!(outcome.is_ok(), "{outcome:?}");
+		assert_eq!((index.get(), steps.get()), (1, 3));
 	}
 
 	#[test]
