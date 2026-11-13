@@ -4,7 +4,8 @@
  * Unlike `session-dump-format.ts` (verbose `/dump` export), this emits a
  * compressed transcript: full user/assistant/developer text, tool call +
  * result pairs collapsed to single lines, thinking elided, custom messages
- * as one-liners. No system prompt, no tool catalog, no config sections.
+ * as one-liners except user-invoked skills, which preserve the user's request.
+ * No system prompt, no tool catalog, no config sections.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -19,6 +20,7 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
+import { isUserInvokedSkillPrompt } from "./messages";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 export interface HistoryFormatOptions {
@@ -38,7 +40,7 @@ export interface HistoryFormatOptions {
 	 * instructions, not its own. The advisor sets this: a truncated rule (plan
 	 * mode's "NEVER create files … except the plan file") makes it raise false
 	 * blockers. See {@link PRIMARY_CONTEXT_CUSTOM_TYPES}. Other custom messages
-	 * still collapse to a one-liner.
+	 * still collapse to a one-liner, except user-invoked skills.
 	 */
 	expandPrimaryContext?: boolean;
 	/**
@@ -430,6 +432,11 @@ const LEGACY_IMAGE_ATTACHMENT_PATH = /^Source path: `(.+)`$/m;
 function customOneLiner(msg: CustomMessage | HookMessage, transform?: ToolIOTransform): string {
 	const details = (msg.details ?? {}) as Record<string, unknown>;
 	const str = (key: string): string => (typeof details[key] === "string" ? (details[key] as string) : "");
+	if (msg.role === "custom" && isUserInvokedSkillPrompt(msg)) {
+		const request = str("args") || str("prompt");
+		const skill = `[${msg.customType}] ${previewLine(contentToText(msg.content), transform)}`;
+		return request ? `${skill}\nUser: ${transform ? transform(request) : request}` : skill;
+	}
 	switch (msg.customType) {
 		case "irc:incoming":
 			return `[irc] ${str("from") || "?"} → me: ${previewLine(str("message"), transform)}`;

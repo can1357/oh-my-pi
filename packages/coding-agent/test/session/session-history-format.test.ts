@@ -88,6 +88,53 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).not.toContain("Available Tools");
 	});
 
+	it("preserves a user-invoked skill request after a long skill body", () => {
+		const request = `Explain ${"carefully ".repeat(20)}\nwhy the moon appears brighter tonight`;
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "custom",
+					customType: "skill-prompt",
+					attribution: "user",
+					display: true,
+					content: `[IMPORTANT: User invoked the "in-your-own-words" skill.]\n${"Skill instructions. ".repeat(30)}\nUser: ${request}`,
+					details: { name: "in-your-own-words", args: request },
+					timestamp: 1,
+				},
+			],
+			{ watchedRoles: true, expandPrimaryContext: true },
+		);
+
+		expect(output).toContain(request);
+		expect(output).not.toContain("Skill instructions. ".repeat(30));
+	});
+
+	it("uses the submitted prompt when older skill details have no args, without promoting agent skills", () => {
+		const prompt = "/skill:rewrite Explain the conclusion";
+		const messages = [
+			{
+				role: "custom",
+				customType: "skill-prompt",
+				attribution: "user",
+				content: "Skill instructions. ".repeat(30),
+				details: { prompt },
+				timestamp: 1,
+			},
+			{
+				role: "custom",
+				customType: "skill-prompt",
+				attribution: "agent",
+				content: "Autoload skill instructions. ".repeat(30),
+				details: { args: "internal agent arguments" },
+				timestamp: 2,
+			},
+		];
+		const output = formatSessionHistoryMarkdown(messages);
+
+		expect(output).toContain(prompt);
+		expect(output).not.toContain("internal agent arguments");
+	});
+
 	it("prefixes an H1 title when requested", () => {
 		const output = formatSessionHistoryMarkdown(buildMessages(), { title: "Spawnling (idle)" });
 		expect(output.startsWith("# Spawnling (idle)\n")).toBe(true);
