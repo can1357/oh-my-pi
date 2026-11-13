@@ -138,7 +138,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag                       | Description                                                                                                                                                                                          |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--tools <a,b,c>`          | Comma-separated list of tools to enable (default: all).                                                                                                                                              |
+| `--tools <a,b,c>`          | Comma-separated list of tools to enable (default: tools enabled in settings; a tool whose setting is off stays off).                                                                                 |
 | `--no-tools`               | Disable all built-in tools.                                                                                                                                                                          |
 | `--no-lsp`                 | Disable LSP tools, formatting, and diagnostics.                                                                                                                                                      |
 | `--no-pty`                 | Disable PTY-based interactive bash execution.                                                                                                                                                        |
