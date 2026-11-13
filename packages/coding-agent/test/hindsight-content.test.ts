@@ -58,6 +58,18 @@ describe("stripMemoryTags", () => {
 		expect(stripped).toContain("alpha");
 		expect(stripped).toContain("beta");
 	});
+
+	// The per-turn delta is delivered inside the transcript (hidden custom
+	// message): without stripping, its payload becomes the next recall query —
+	// the self-echo feedback loop the delta plan gates on (echo-guard).
+	it("removes <memory_delta> blocks so the per-turn delta never re-enters query composition or retention", () => {
+		const text = ["hello", "<memory_delta>", "- freshly recalled fact", "</memory_delta>", "end"].join("\n");
+		const stripped = stripMemoryTags(text);
+		expect(stripped).not.toContain("<memory_delta>");
+		expect(stripped).not.toContain("freshly recalled fact");
+		expect(stripped).toContain("hello");
+		expect(stripped).toContain("end");
+	});
 });
 
 describe("composeRecallQuery", () => {
@@ -91,6 +103,24 @@ describe("composeRecallQuery", () => {
 		];
 		const out = composeRecallQuery("Latest", tagged, 5);
 		expect(out).not.toContain("secret");
+		expect(out).toContain("visible");
+	});
+
+	// Echo-guard contract: whatever a memory channel injected must never become
+	// recall-query text, or retrieval self-reinforces on its own output.
+	it("keeps every injected memory payload out of the composed query", () => {
+		const injected: HindsightMessage[] = [
+			{ role: "user", content: "before" },
+			{
+				role: "assistant",
+				content:
+					"<memories>\n- sticky block fact\n</memories>\n<memory_delta>\n- delta fact\n</memory_delta>\nvisible",
+			},
+			{ role: "user", content: "Latest" },
+		];
+		const out = composeRecallQuery("Latest", injected, 5);
+		expect(out).not.toContain("sticky block fact");
+		expect(out).not.toContain("delta fact");
 		expect(out).toContain("visible");
 	});
 
