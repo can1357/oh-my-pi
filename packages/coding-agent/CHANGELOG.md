@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- Fixed Spotlight compacted JSON views rounding 64-bit integers and rewriting number literals ([#19189](https://github.com/can1357/oh-my-pi/pull/19189) by [@eggpeat](https://github.com/eggpeat))
 - `write` no longer fails with "content is required" on strict-mode providers such as Wafer and Fireworks, where models sent `content: null` for an ordinary file write
 - A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found" ([#19095](https://github.com/can1357/oh-my-pi/pull/19095) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/` ([#19106](https://github.com/can1357/oh-my-pi/pull/19106) by [@zhivko-kocev](https://github.com/zhivko-kocev))
@@ -79,7 +80,6 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
-- Fixed Spotlight compacted JSON views rounding 64-bit integers and rewriting number literals ([#19189](https://github.com/can1357/oh-my-pi/pull/19189) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.0] - 2026-11-12
 

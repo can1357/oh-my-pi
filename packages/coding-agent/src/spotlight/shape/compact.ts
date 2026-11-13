@@ -9,11 +9,18 @@ interface RawJson {
 	readonly rawJSON: string;
 }
 
+declare global {
+	interface JSON {
+		rawJSON(text: string): RawJson;
+		isRawJSON(value: unknown): value is RawJson;
+	}
+}
+
 type Scalar = null | boolean | number | string | RawJson;
 type Json = Scalar | Json[] | { [key: string]: Json };
 
-const rawJson = (JSON as unknown as { rawJSON(text: string): RawJson }).rawJSON;
-const isRaw = (JSON as unknown as { isRawJSON(v: unknown): v is RawJson }).isRawJSON;
+const rawJson = JSON.rawJSON;
+const isRaw = JSON.isRawJSON;
 const isObj = (v: Json): v is { [key: string]: Json } =>
 	v !== null && typeof v === "object" && !Array.isArray(v) && !isRaw(v);
 const isScalar = (v: Json): v is Scalar => v === null || typeof v !== "object" || isRaw(v);
@@ -144,9 +151,7 @@ function pyToJson(src: string): string | undefined {
 }
 
 function parseJson(text: string): Json {
-	return (
-		JSON.parse as (text: string, reviver: (_key: string, value: Json, ctx?: { source?: string }) => Json) => Json
-	)(text, (_key, value, ctx) =>
+	return JSON.parse(text, (_key: string, value: Json, ctx?: { source?: string }) =>
 		typeof value === "number" && ctx?.source && String(value) !== ctx.source ? rawJson(ctx.source) : value,
 	);
 }
