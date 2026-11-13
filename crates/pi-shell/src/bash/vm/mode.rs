@@ -79,7 +79,7 @@ pub fn set_mode(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, mod
 		return;
 	}
 	vp.mode = mode;
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		root.set_misc(store, MiscKey::Mode, <&'static str>::from(mode));
 	}
 }
@@ -718,7 +718,7 @@ mod tests {
 		assert_eq!(features(&mut r, &mut s, &vp, Features::EXTGLOB).unwrap(), Features::EXTGLOB);
 	}
 
-	/// A subshell's zsh options are its own (overlay records).
+	/// A subshell's zsh options are its own (image records).
 	#[test]
 	fn subshell_options_stay_in_the_subshell() {
 		let (mut s, mut r, vp) = shell(ModeId::Zsh);
@@ -727,7 +727,7 @@ mod tests {
 			Some(vp.vpid),
 			FdTable::default(),
 			BString::from("/"),
-			Some(state::Overlay::default()),
+			Some(crate::bash::StateStore::snapshot(&mut s).unwrap()),
 			true,
 		);
 		sub.mode = ModeId::Zsh;
