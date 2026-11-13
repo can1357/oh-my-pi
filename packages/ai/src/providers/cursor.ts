@@ -377,7 +377,7 @@ const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 const CURSOR_H2_IDLE_MS = 60_000;
 const idleCursorH2 = new Map<
 	string,
-	{ client: http2.ClientHttp2Session; timer: ReturnType<typeof setTimeout>; discard: () => void }
+	{ client: http2.ClientHttp2Session; timer: NodeJS.Timeout; discard: () => void }
 >();
 
 function takeIdleCursorH2(key: string): http2.ClientHttp2Session | undefined {
