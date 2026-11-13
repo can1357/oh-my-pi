@@ -160,13 +160,17 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		const provider = slot.current;
 		expect(provider).toBeDefined();
 
-		// Empty `/` shows the full menu.
-		const all = await fetchSlashSuggestions(provider!, "/");
-		expect(all).toContain("review");
+		// The namespace lists every template under its prefixed name only.
+		const all = await fetchSlashSuggestions(provider!, "/snippet:");
+		expect(all).toContain("snippet:review");
+		expect(all).not.toContain("review");
 
-		// Fuzzy prefix `/rev` also surfaces the template.
-		const prefixMatches = await fetchSlashSuggestions(provider!, "/rev");
-		expect(prefixMatches).toContain("review");
+		// Typing the namespace narrows to the template.
+		const prefixMatches = await fetchSlashSuggestions(provider!, "/snippet:rev");
+		expect(prefixMatches).toContain("snippet:review");
+
+		// A bare name surfaces the snippet without typing the namespace.
+		expect(await fetchSlashSuggestions(provider!, "/rev")).toContain("snippet:review");
 	});
 
 	it("shows session-backed builtin status descriptions in slash-command autocomplete", async () => {
@@ -207,14 +211,10 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		expect(inlineHint).not.toMatch(/[\t\r\n]/);
 	});
 
-	it("does not duplicate templates whose names collide with builtin slash commands", async () => {
+	it("advertises templates under snippet:<name> so builtin names and aliases stay unambiguous", async () => {
 		const created = createHarness([
-			{
-				name: "exit",
-				description: "Custom exit template (project)",
-				content: "ignored",
-				source: "(project)",
-			},
+			{ name: "exit", description: "Custom exit (project)", content: "ignored", source: "(project)" },
+			{ name: "models", description: "Custom models (project)", content: "ignored", source: "(project)" },
 		]);
 		const slot = captureAutocompleteProvider(created.mode);
 
@@ -222,30 +222,39 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 
 		const provider = slot.current;
 		expect(provider).toBeDefined();
-		const matches = await fetchSlashSuggestions(provider!, "/exit");
-		// Builtin `/exit` stays; the colliding template is filtered out so the picker
-		// shows a single entry rather than two `exit` rows.
-		expect(matches.filter(name => name === "exit")).toHaveLength(1);
+		const exit = await fetchSlashSuggestions(provider!, "/exit");
+		// An equal-strength builtin match keeps the snippet collapsed, exactly like `/skill:`.
+		expect(exit.filter(name => name === "exit")).toHaveLength(1);
+		expect(exit).not.toContain("snippet:exit");
+		expect(await fetchSlashSuggestions(provider!, "/snippet:exit")).toContain("snippet:exit");
+		const models = await fetchSlashSuggestions(provider!, "/snippet:models");
+		expect(models).toContain("snippet:models");
+		expect(models).not.toContain("models");
 	});
 
-	it("does not duplicate templates whose names collide with builtin slash command aliases", async () => {
+	it("keeps SDK-supplied templates when the templates are reloaded from disk", async () => {
 		const created = createHarness([
-			{
-				name: "models",
-				description: "Custom models template (project)",
-				content: "ignored",
-				source: "(project)",
-			},
+			{ name: "supplied", description: "From the SDK caller", content: "body", source: "sdk" },
 		]);
 		const slot = captureAutocompleteProvider(created.mode);
 
-		await created.mode.refreshSlashCommandState(tempDir.path());
+		await created.mode.refreshPromptTemplates();
 
-		const provider = slot.current;
-		expect(provider).toBeDefined();
-		const matches = await fetchSlashSuggestions(provider!, "/models");
-		// Builtin `/model` owns the `/models` alias. The colliding template is filtered
-		// out so autocomplete follows the interactive slash-command resolution path.
-		expect(matches.filter(name => name === "models")).toHaveLength(1);
+		expect(created.session.promptTemplates.map(t => t.name)).toContain("supplied");
+		expect(await fetchSlashSuggestions(slot.current!, "/snippet:supp")).toContain("snippet:supplied");
+	});
+
+	it("does not advertise a template under a snippet: token another command already owns", async () => {
+		const created = createHarness([{ name: "foo", description: "Template foo", content: "body", source: "(user)" }]);
+		const slot = captureAutocompleteProvider(created.mode);
+
+		await created.mode.refreshSlashCommandState(tempDir.path(), [
+			{ name: "snippet:foo", description: "File command", content: "x", source: "test" },
+		]);
+
+		const matches = await fetchSlashItems(slot.current!, "/snippet:foo");
+		expect(matches.filter(item => item.value === "snippet:foo").map(item => item.description)).toEqual([
+			"File command",
+		]);
 	});
 });
