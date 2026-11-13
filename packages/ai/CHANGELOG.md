@@ -4,6 +4,7 @@
 
 ### Changed
 
+- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed

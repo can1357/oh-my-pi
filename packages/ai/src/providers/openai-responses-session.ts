@@ -53,6 +53,12 @@ export class StandardResponsesWebSocketSession {
 		return this.#completed && this.connection.isHealthyForReuse();
 	}
 
+	/** Input of the completed request the next `events` call may append to. */
+	get appendBaselineInput(): ResponseInput | undefined {
+		const input = this.#lastResponseId ? this.#lastRequest?.input : undefined;
+		return Array.isArray(input) ? input : undefined;
+	}
+
 	#clearBaseline(): void {
 		this.#lastResponseId = undefined;
 		this.#lastRequest = undefined;
