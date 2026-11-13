@@ -531,7 +531,8 @@ describe("model thinking derivation", () => {
 		});
 		expect(mapEffortToGoogleThinkingLevel(Effort.Low)).toBe("LOW");
 		expect(mapEffortToGoogleThinkingLevel(Effort.High)).toBe("HIGH");
-		expect(mapEffortToGoogleThinkingLevel(Effort.XHigh)).toBe("HIGH");
+		// The ladder, not the wire mapper, keeps `xhigh` off models that reject it.
+		expect(() => requireSupportedEffort(model, Effort.XHigh)).toThrow(/not supported/);
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
@@ -602,7 +603,7 @@ describe("model thinking derivation", () => {
 		// Google documents LOW/MEDIUM/HIGH for Gemini 4:
 		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
 		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
-		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive", "gemini-4-carbon"]) {
+		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive", "gemini-4-carbon", "gemini-4-hydrogen"]) {
 			for (const [provider, api] of [
 				["google-vertex", "google-vertex"],
 				["google", "google-generative-ai"],

@@ -19,6 +19,10 @@
 //! - [`grep`]: pattern compilation in pi's regex dialect, buffer scanning, and
 //!   the directory/file content search.
 //!
+//! Below an ovnfs checkout, [`glob::glob`] and [`grep::grep`] ask the ovnfs
+//! daemon serving it first, which searches its overlay in-process instead of
+//! paying an NFS round trip per file, and walk when it cannot answer.
+//!
 //! Walker futures spawn their tasks on the current tokio runtime (a
 //! multi-thread runtime keeps them parallel); dropping a future cancels its
 //! work.
@@ -43,6 +47,7 @@ pub mod fs;
 pub mod glob;
 pub mod grep;
 pub mod ignore;
+mod ovnfs;
 pub mod pattern;
 #[cfg(test)]
 mod testing;

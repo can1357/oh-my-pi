@@ -1,0 +1,1 @@
+proc://<id>/streams lists a bash job's pipes, proc://<id>/streams/<n> reads what crossed pipe n so far. Write sends stdin to services only (empty = Enter); proc://<id>/mode: persist|session|detached (services only); start long-lived work as a named service when it needs stdin or lifetime controls. Completed jobs evicted (process-local).

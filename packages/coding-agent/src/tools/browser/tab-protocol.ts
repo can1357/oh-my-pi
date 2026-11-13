@@ -93,7 +93,7 @@ export type WorkerInitPayload =
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
-			ignoreHttpsErrors?: boolean;
+			insecure?: boolean;
 	  }
 	| {
 			mode: "attach";
@@ -113,7 +113,7 @@ export type WorkerInitPayload =
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
-			ignoreHttpsErrors?: boolean;
+			insecure?: boolean;
 			/**
 			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
 			 * stop a pending navigation so a blocked target cannot stall worker init (which

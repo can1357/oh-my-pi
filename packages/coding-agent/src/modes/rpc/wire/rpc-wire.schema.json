@@ -2296,8 +2296,7 @@
 				"pending",
 				"in_progress",
 				"completed",
-				"abandoned",
-				"blocked"
+				"abandoned"
 			],
 			"type": "string"
 		},
@@ -2367,10 +2366,6 @@
 				},
 				"status": {
 					"$ref": "#/$defs/TodoStatus"
-				},
-				"blocker": {
-					"type": "string",
-					"description": "What a `blocked` task is waiting on."
 				},
 				"details": {
 					"type": "string"
@@ -5206,6 +5201,29 @@
 						"$ref": "#/$defs/SelectOptionDetail"
 					}
 				},
+				"initialIndex": {
+					"type": "integer",
+					"description": "Index into `options` to focus first."
+				},
+				"selectionMarker": {
+					"enum": [
+						"radio",
+						"checkbox"
+					],
+					"type": "string",
+					"description": "Marker style for the first `markableCount` options."
+				},
+				"checkedIndices": {
+					"type": "array",
+					"items": {
+						"type": "integer"
+					},
+					"description": "For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."
+				},
+				"markableCount": {
+					"type": "integer",
+					"description": "Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."
+				},
 				"timeout": {
 					"type": "integer"
 				}
@@ -5337,7 +5355,7 @@
 				"method",
 				"questions"
 			],
-			"description": "Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."
+			"description": "Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."
 		},
 		"CancelUiRequest": {
 			"type": "object",
@@ -5584,7 +5602,7 @@
 				"id",
 				"selectedOptions"
 			],
-			"description": "Answer to one `ask` question: exact option labels, plus optional free text."
+			"description": "Answer to one `ui.askDialog` question: exact option labels, plus optional free text."
 		},
 		"ValueUiResponse": {
 			"type": "object",
@@ -5647,7 +5665,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers)."
+			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",

@@ -1,6 +1,8 @@
+mod activity;
 mod capture;
 mod input;
 mod keymap;
+pub(crate) mod listener;
 mod mpx;
 mod toolkit;
 mod uinput;
@@ -33,7 +35,7 @@ pub struct X11Backend {
 impl X11Backend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		let capture = X11Capture::new(display)?;
-		let input = X11Input::new(capture.connection(), capture.root())?;
+		let input = X11Input::new(capture.connection(), capture.root(), None)?;
 		let ax = AtSpiAx::new()
 			.ok()
 			.map(|ax| ax.with_native_windows(Box::new(capture.clone())));
@@ -44,6 +46,11 @@ impl X11Backend {
 impl Backend for X11Backend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let displays = self.capture.displays();
+		let watched = self
+			.input
+			.watch_user()
+			.and_then(|activity| activity.sync())
+			.is_ok();
 		DesktopCapabilities {
 			backend: "x11".to_string(),
 			display_server: self.display_server.clone(),
@@ -51,14 +58,17 @@ impl Backend for X11Backend {
 			input: true,
 			ax: self.ax.is_some(),
 			background_window_input: true,
-			takeover: true,
+			takeover: watched,
 			applications: crate::desktop::applications::supported(),
 			menus: self.ax.is_some(),
 			held_input: true,
 			spaces: false,
-			global_escape: std::env::var_os("WAYLAND_DISPLAY").is_none()
+			global_escape: watched
+				&& std::env::var_os("WAYLAND_DISPLAY").is_none()
 				&& !std::env::var("XDG_SESSION_TYPE")
 					.is_ok_and(|session| session.eq_ignore_ascii_case("wayland")),
+			secure_input: false,
+			secure_input_app: None,
 			capture_permission: if displays.is_ok() {
 				"granted"
 			} else {
@@ -86,12 +96,23 @@ impl Backend for X11Backend {
 		self.capture.windows()
 	}
 
+	fn admit_takeover(&mut self) -> CoreResult<()> {
+		self.input.admit_takeover()
+	}
+
+	fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		self.input.takeover_admitted()
+	}
+
 	fn capture(
 		&mut self,
 		target: &Target,
 		_caps: &CaptureCaps,
 		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
+		// Inspection remains available when watching fails; takeover propagates
+		// the retained startup error before activation or input.
+		let _ = self.input.watch_user();
 		self.capture.capture(target, selector)
 	}
 

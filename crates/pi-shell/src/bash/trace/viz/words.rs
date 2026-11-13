@@ -19,6 +19,16 @@ pub struct WordPrinter<'a> {
 fn text(bytes: &[u8]) -> String {
 	String::from_utf8_lossy(bytes).into_owned()
 }
+/// Whether any part substitutes a value, looking through nested double quotes.
+fn expands(parts: Seq<'_, WordPart<'_>>) -> bool {
+	parts.iter().any(|p| match p.get() {
+		Part::DQuote(v) | Part::Locale(v) => expands(v),
+		Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote => {
+			false
+		},
+		_ => true,
+	})
+}
 /// Python string syntax, including controls that must not create physical rows.
 pub fn quote(value: &str) -> String {
 	let mut out = String::from("\"");
@@ -45,11 +55,7 @@ impl WordPrinter<'_> {
 		if let Some(p) = parts.one() {
 			return self.part(p);
 		}
-		if parts.is_empty() {
-			return quote("");
-		}
-		let parts: Vec<_> = parts.iter().map(|p| self.part(p)).collect();
-		format!("concat({})", parts.join(", "))
+		self.interpolation(parts)
 	}
 
 	fn part(&self, p: WordPart<'_>) -> String {
@@ -89,41 +95,46 @@ impl WordPrinter<'_> {
 		}
 	}
 
+	/// Adjacent parts as one Python string: `f"…{expr}…"` when any part expands,
+	/// a plain literal otherwise. Nested double quotes merge into the same
+	/// string.
 	fn interpolation(&self, parts: Seq<'_, WordPart<'_>>) -> String {
-		let dynamic = parts.iter().any(|p| {
-			!matches!(
-				p.get(),
-				Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote
-			)
-		});
+		let dynamic = expands(parts);
 		let mut content = String::new();
+		self.interpolate(parts, dynamic, &mut content);
+		format!("{}\"{content}\"", if dynamic { "f" } else { "" })
+	}
+
+	fn interpolate(&self, parts: Seq<'_, WordPart<'_>>, dynamic: bool, content: &mut String) {
 		for part in parts {
 			let literal = match part.get() {
-				Part::Lit(v) | Part::Escaped(v) | Part::SQuote(v) => Some(text(v)),
-				Part::AnsiC(v) => Some(text(&crate::bash::syntax::ansi_decode_all(v))),
-				Part::DroppedQuote => Some("\"".into()),
-				_ => None,
+				Part::DQuote(v) | Part::Locale(v) => {
+					self.interpolate(v, dynamic, content);
+					continue;
+				},
+				Part::Lit(v) | Part::Escaped(v) | Part::SQuote(v) => text(v),
+				Part::AnsiC(v) => text(&crate::bash::syntax::ansi_decode_all(v)),
+				Part::DroppedQuote => "\"".into(),
+				_ => {
+					content.push('{');
+					content.push_str(&self.part(part));
+					content.push('}');
+					continue;
+				},
 			};
-			if let Some(literal) = literal {
-				let escaped = quote(&literal);
-				let escaped = &escaped[1..escaped.len() - 1];
-				if dynamic {
-					for c in escaped.chars() {
+			let escaped = quote(&literal);
+			let escaped = &escaped[1..escaped.len() - 1];
+			if dynamic {
+				for c in escaped.chars() {
+					content.push(c);
+					if matches!(c, '{' | '}') {
 						content.push(c);
-						if matches!(c, '{' | '}') {
-							content.push(c);
-						}
 					}
-				} else {
-					content.push_str(escaped);
 				}
 			} else {
-				content.push('{');
-				content.push_str(&self.part(part));
-				content.push('}');
+				content.push_str(escaped);
 			}
 		}
-		format!("{}\"{content}\"", if dynamic { "f" } else { "" })
 	}
 
 	fn elements(&self, e: Seq<'_, ArrayElem<'_>>) -> String {
@@ -455,6 +466,11 @@ mod tests {
 	fn quoted_interpolation_keeps_expression_and_literal_braces() {
 		assert_eq!(render(br#"echo "$ROOT/path{literal}""#), "print(f\"{ROOT}/path{{literal}}\")");
 		assert_eq!(render(br#"echo "plain{literal}""#), "print(\"plain{literal}\")");
+	}
+	#[test]
+	fn adjacent_parts_merge_into_one_string() {
+		assert_eq!(render(br#"echo repos/org/$r/"x y"'{z}'"#), "print(f\"repos/org/{r}/x y{{z}}\")");
+		assert_eq!(render(b"echo 'a'\"b\"c"), "print(\"abc\")");
 	}
 	#[test]
 	fn canonical_expansions_preserve_operator_distinctions() {

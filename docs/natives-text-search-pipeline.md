@@ -68,15 +68,16 @@ Terminology follows `docs/natives-architecture.md`:
 ### Execution branches
 
 - **In-memory branch**
-   - `search` -> `search_sync` / search helpers over provided content bytes.
+   - `search` (`search_sync` -> `pi_walker::grep::search` -> `Scanner::scan`) scans provided content bytes with binary detection: a NUL in the first 64 KiB returns zero matches with no error or binary flag on `SearchResult`, and past 64 KiB a NUL on a reported match or context line ends the scan.
    - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
    - No filesystem scan or listing cache.
 - **Single-file branch**
-   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched over their leading 4 MiB in a second pass; native oversized file roots are streamed through grep-searcher's reader inline, provider files are read async.
+   - `grep` resolves the path through the selected filesystem, checks metadata, and searches an explicit file root as text (`ScanParams.text = true`; streamed scans, used only for file roots, never apply binary detection). In line mode, native oversized file roots (`> 4 MiB`) stream in full through `grep-searcher`'s reader inline and provider files are read in full async; in multiline mode, oversized file roots read only their leading 4 MiB.
 - **Directory branch**
    - `pi_walker::grep::grep` walks with `walk::Options::cache` left `false`: directory searches never read or populate the shared listing cache.
    - The glob compiles to a `pi_walker::glob::Selector::scope` (files it matches plus every file under a directory it matches) that also prunes the walk; `exclude` patterns compile to `Selector::exclude`.
    - Files larger than 4 MiB are searched over their first 4 MiB after all other files.
+   - Binary detection skips a file with a NUL byte in the first 64 KiB, probing it only for a first match, and stops scanning when a later reported match or context line contains a NUL (keeping earlier matches). Files whose skipped content holds a match are listed, sorted and walk-relative, in `binaryMatches` (`binary_matches`); a match-free binary or a NUL in context after the last match is not listed.
 
 ### Search/collection semantics
 
@@ -107,7 +108,7 @@ Batches flow through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>` (each bat
 
 - Rust `SearchResult`/`GrepResult` fields map to TS interfaces via N-API object conversion.
 - Counters are clamped before crossing N-API where needed.
-- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be searched even via the trailing bounded prefix pass.
+- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` and `binaryMatches` are emitted only when non-empty (`skippedOversized` counts oversized files that could not be searched even over their 4 MiB prefix).
 - `onMatches` receives shaped batches during scanning; the positional directory `onMatch` callback receives one shaped entry after aggregation.
 
 ### Failure behavior
