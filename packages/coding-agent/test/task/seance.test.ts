@@ -134,7 +134,7 @@ describe("seance source resolution", () => {
 		});
 	});
 
-	it("fails closed for missing paths and IDs, ambiguous prefixes, and files without a session header", async () => {
+	it("fails closed for missing paths, ambiguous prefixes, and files without a session header", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-source-invalid-");
 		const cwd = path.join(tempDir.path(), "project");
 		const sessionDir = path.join(tempDir.path(), "sessions");
