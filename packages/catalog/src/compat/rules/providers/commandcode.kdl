@@ -801,9 +801,11 @@ provider "commandcode" {
 	// ---------------------------------------------------------------------------
 	// Ids served after 2026-09-29 follow the model list in command-code@1.88.5,
 	// read on 2026-11-12. A two-tier `contextTiers` card becomes
-	// `long-context-cost` at the first tier's `maxContext`. Claude Fable 5.2,
-	// Muse Ember and Gemini 4 Carbon are served but absent from 1.88.5, so they
-	// keep the zero discovery default.
+	// `long-context-cost` at the first tier's `maxContext`, except Haiku 5.5,
+	// whose 5x tier above 100K comes from the classes/anthropic.kdl multiplier
+	// and matches the 1.88.5 card. Claude Fable 5.2, Muse Ember and Gemini 4
+	// Carbon are served but absent from 1.88.5, so they keep the zero discovery
+	// default.
 	// ---------------------------------------------------------------------------
 	models "claude-haiku-5-5" {
 		cost-patch {
@@ -811,13 +813,6 @@ provider "commandcode" {
 			output 0.5
 			cache-read 0.01
 			cache-write 0.125
-		}
-		long-context-cost {
-			input-threshold 100000
-			input 0.5
-			output 2.5
-			cache-read 0.05
-			cache-write 0.625
 		}
 	}
 	models "gpt-6.1-sol" {
