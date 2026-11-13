@@ -24,6 +24,7 @@ import {
 	truncate,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
@@ -269,8 +270,14 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			const failures: ProviderHttpError[] = [];
 			const skipped: string[] = [];
+			const offline = cfgOffline.get(effectiveSettings);
+			const activeProvider = ctx.model?.provider;
 			let inputImages: ImageGenerationRequest["inputImages"];
 			for (const model of candidates) {
+				if (offline && (!activeProvider || model.provider !== activeProvider)) {
+					skipped.push(`${model.provider}/${model.id} (offline provider restriction)`);
+					continue;
+				}
 				if (!isImageGenerationApi(model.api)) {
 					logger.warn("Skipping unsupported image model API", {
 						provider: model.provider,
@@ -297,6 +304,10 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					carrier = model.hostedImage ? model : resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model);
 					if (!carrier) {
 						skipped.push(`${model.provider}/${model.id} (hosted chat carrier unavailable)`);
+						continue;
+					}
+					if (offline && carrier.provider !== activeProvider) {
+						skipped.push(`${carrier.provider}/${carrier.id} (offline provider restriction)`);
 						continue;
 					}
 					const carrierKey = await ctx.modelRegistry.getApiKey(carrier, sessionId, { signal: requestSignal });

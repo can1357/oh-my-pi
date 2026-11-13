@@ -178,10 +178,12 @@ impl ControlHandle {
 		self.0.request(RESUME, PAUSE);
 	}
 
-	/// Cancel everything the shell runs. `TERM` runs traps then unwinds
-	/// (status 143), `KILL` unwinds without traps (137), `INT` follows bash's
-	/// SIGINT semantics (130). Externals receive the signal; every running
-	/// script reports `Done` with that status. The shell stays usable.
+	/// Cancel everything the shell runs except detached (`nohup`) trees and
+	/// the background jobs the root's earlier scripts left running. `TERM`
+	/// runs traps then unwinds (status 143), `KILL` unwinds without traps
+	/// (137), `INT` follows bash's SIGINT semantics (130). Externals receive
+	/// the signal; every cancelled script reports `Done` with that status.
+	/// The shell stays usable.
 	pub fn cancel(&self, sig: Signal) {
 		self.0.request_cancel(sig);
 	}
