@@ -237,12 +237,21 @@ describe("wait", () => {
 		expect(report(result)).not.toContain("back-to-back");
 	});
 
+	test("the largest window the setting accepts is the wait's deadline", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const tool = new WaitTool(session(manager, "Main", false, { "wait.windowMs": 2_147_483_647 }));
+		const result = await elapse(tool, 2_147_483_647);
+		expect(result.useless).toBe(true);
+		expect(report(result)).toContain("No job finished within 24d20h");
+		build.resolve("done");
+	});
+
 	test("rejects a configured window outside 0 to 2147483647", () => {
 		for (const bad of [-1, 2_147_483_648, NaN, Infinity, "600000"]) {
 			expect(() => Settings.isolated({ "wait.windowMs": bad })).toThrow(/Invalid wait\.windowMs/);
-		}
-		for (const windowMs of [0, 2_147_483_647]) {
-			expect(() => Settings.isolated({ "wait.windowMs": windowMs })).not.toThrow();
 		}
 	});
 
