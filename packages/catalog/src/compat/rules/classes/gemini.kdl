@@ -85,7 +85,7 @@ class "gemini" {
 		// Exact ids: a revision-wide rule would tie with the Pro low/high ladder.
 		// Gemini API discovery infers `reasoning: false` for a Gemini 4 id with no
 		// bundled reference; repair it so the ladder is selectable.
-		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" "gemini-4-carbon" {
+		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" "gemini-4-carbon" "gemini-4-hydrogen" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
@@ -139,6 +139,21 @@ class "gemini" {
 						cache-write 0
 					}
 				}
+			}
+		}
+	}
+
+	// Gemini 4 Hydrogen: $1.50/$7.50, cache read $0.075 on the Gemini API and
+	// Vertex; Antigravity discovery reports $0, so the collapsed row is pinned to
+	// the same card.
+	// https://aistudio.google.com/docs/whats-new-gemini-4-hydrogen
+	on "google-antigravity" {
+		models "gemini-4-hydrogen" {
+			cost-patch {
+				input 1.5
+				output 7.5
+				cache-read 0.075
+				cache-write 0
 			}
 		}
 	}
