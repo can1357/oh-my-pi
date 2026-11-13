@@ -142,6 +142,12 @@ const PREVIEW_EXCERPT_CHARS = 1200;
 const PREVIEW_SETTLE_MS = 60;
 const DAY_MS = 86_400_000;
 const PINNED_GROUP = { id: "pinned", label: "Pinned" };
+/** Search Input actions that delete backward: on a typed query they edit it even when bound to `app.session.delete`. */
+const SEARCH_BACKWARD_DELETE = [
+	"tui.editor.deleteCharBackward",
+	"tui.editor.deleteWordBackward",
+	"tui.editor.deleteToLineStart",
+] as const;
 
 /** Day group of a session's last modification, relative to local midnight today. */
 function sessionDayGroup(modified: Date, startOfToday: number): { id: string; label: string } {
@@ -194,6 +200,20 @@ function sessionPreview(session: SessionSelectorEntry, forkedFrom: string | unde
 	]);
 }
 
+/** BCP 47 tag from the POSIX locale variables (`LC_ALL`, then `LC_TIME`, then `LANG`), or `undefined` to use the runtime default. */
+export function systemDateLocale(env: Readonly<Record<string, string | undefined>>): string | undefined {
+	const raw = env.LC_ALL || env.LC_TIME || env.LANG;
+	const tag = raw?.replace(/[.@].*$/, "").replace(/_/g, "-");
+	if (!tag || tag === "C" || tag === "POSIX") return undefined;
+	try {
+		return Intl.DateTimeFormat.supportedLocalesOf(tag)[0];
+	} catch {
+		return undefined;
+	}
+}
+
+const dateLocale = systemDateLocale(process.env);
+
 /** Absolute dates of week-old sessions; `toLocaleDateString` goes through Intl on every call. */
 const localeDateCache = new WeakMap<Date, { time: number; text: string }>();
 
@@ -213,7 +233,7 @@ function formatSessionDate(date: Date): string {
 
 	const cached = localeDateCache.get(date);
 	if (cached?.time === time) return cached.text;
-	const text = date.toLocaleDateString();
+	const text = date.toLocaleDateString(dateLocale);
 	localeDateCache.set(date, { time, text });
 	return text;
 }
@@ -918,7 +938,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		if (selected) this.onSelect?.(selected);
 	}
 
-	/** Delete / Backspace on an empty query: ask the parent to confirm deleting the selected session. */
+	/** `app.session.delete`: ask the parent to confirm deleting the selected session. */
 	requestDelete(): void {
 		const selected = this.#menu.selectedItem;
 		if (selected) this.onDeleteRequest?.(selected);
@@ -1371,16 +1391,20 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	}
 
 	handleInput(keyData: string): void {
-		// Delete key — or Backspace on an empty search query — request delete
+		const keybindings = getKeybindings();
+		// `app.session.delete` (Backspace or Delete by default) requests delete
 		// confirmation from the parent. macOS laptops have no dedicated Forward
 		// Delete key: Fn+Backspace is the only way to send \e[3~, and many macOS
 		// terminals (Terminal.app, some iTerm2 profiles) deliver \x7f for that
-		// combo instead. Regular Backspace on an empty query means "delete
-		// session"; with a typed query it stays bound to the search Input so users
-		// can still edit their filter text.
+		// combo instead, hence Backspace. A bound key that also deletes backward
+		// in the search Input (Backspace, Ctrl+W, Ctrl+U by default) keeps editing
+		// a typed query; it deletes the session only once the query is empty.
+		// Checked before the Input so a binding such as Ctrl+D wins over its
+		// forward delete.
 		if (
-			matchesKey(keyData, "delete") ||
-			(matchesKey(keyData, "backspace") && this.#searchInput.getValue().length === 0)
+			keybindings.matches(keyData, "app.session.delete") &&
+			(this.#searchInput.getValue().length === 0 ||
+				!SEARCH_BACKWARD_DELETE.some(action => keybindings.matches(keyData, action)))
 		) {
 			this.requestDelete();
 			return;
@@ -1391,7 +1415,6 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 			this.requestRename();
 			return;
 		}
-		const keybindings = getKeybindings();
 		if (keybindings.matches(keyData, "app.session.pin")) {
 			this.requestPin(true);
 			return;
@@ -2026,9 +2049,10 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const cancel = interruptKey();
 		const pin = this.#pinAction();
 		const pinKey = pin && getKeybindings().getKeys(pin.binding)[0];
+		const deleteKeys = this.#onDelete ? getKeybindings().getKeys("app.session.delete") : [];
 		const hint = theme.fg(
 			"muted",
-			`[${this.#onDelete ? `${formatKeyHints(["delete", "backspace"])} delete · ` : ""}${this.#onRename ? `${formatKeyHint("f2")} rename · ` : ""}${pinKey ? `${formatKeyHint(pinKey)} ${pin.label} · ` : ""}${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
+			`[${deleteKeys.length > 0 ? `${formatKeyHints(deleteKeys)} delete · ` : ""}${this.#onRename ? `${formatKeyHint("f2")} rename · ` : ""}${pinKey ? `${formatKeyHint(pinKey)} ${pin.label} · ` : ""}${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
 		);
 		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}
@@ -2085,7 +2109,10 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			children.push(this.#sessionList.searchInput, list);
 		}
 		const hints: (NativeHint | undefined)[] = [];
-		if (this.#onDelete) hints.push({ keys: ["delete", "backspace"], label: "delete" });
+		if (this.#onDelete) {
+			const keys = getKeybindings().getKeys("app.session.delete");
+			if (keys.length > 0) hints.push({ keys, label: "delete" });
+		}
 		if (this.#onRename) hints.push({ keys: ["f2"], label: "rename" });
 		const pin = this.#pinAction();
 		if (pin) hints.push(actionHint(pin.binding, pin.label));
@@ -2112,7 +2139,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/**
 	 * `lg` cards sheet (`screen` for the standalone app): sessions grouped by
 	 * day (ranked flat while searching), the selected session's preview, the
-	 * delete confirm strip, and the actions of the keys Enter, Delete/Backspace,
+	 * delete confirm strip, and the actions of the keys Enter, `app.session.delete`,
 	 * F2 (rename), the pin keys (Pin / Unpin, whichever applies to the selected
 	 * session), Tab (the scope toggle, labelled with the scope it switches
 	 * to) and Esc. Untitled unless the caller named it; the placeholder says the scope.
@@ -2140,7 +2167,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const loading = message?.kind === "loading";
 		const toggle = list.onToggleScope !== undefined;
 		const actions = [pickerAction("resume", this.#actionLabel, "enter", { primary: true })];
-		if (this.#onDelete) actions.push(pickerAction("delete", "Delete", "backspace"));
+		if (this.#onDelete) actions.push(pickerAction("delete", "Delete", bindingKeys("app.session.delete")));
 		if (this.#onRename) actions.push(pickerAction("rename", "Rename", "f2"));
 		const pin = this.#pinAction();
 		if (pin) actions.push(pickerAction("pin", pin.label === "pin" ? "Pin" : "Unpin", bindingKeys(pin.binding)));
@@ -2230,7 +2257,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 
 	/**
 	 * Picker pointer events run the keys' paths: a row click selects (arrows),
-	 * a second click or `Resume` resumes (Enter), `Delete` asks (Delete),
+	 * a second click or `Resume` resumes (Enter), `Delete` asks (`app.session.delete`),
 	 * `Rename` renames (F2), `Pin` / `Unpin` flips the pin, the tab or `All projects` toggles scope (Tab),
 	 * `Close` cancels (Esc), and the confirm strip answers the delete dialog (Yes / Esc).
 	 */

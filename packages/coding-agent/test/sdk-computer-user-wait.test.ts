@@ -103,6 +103,7 @@ describe("SDK session dialogs and the computer display hold", () => {
 			releaseDisplay(turn) {
 				releases.push(turn);
 			},
+			async reset() {},
 			async close() {},
 		});
 		return session;

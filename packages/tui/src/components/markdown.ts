@@ -1858,6 +1858,8 @@ export interface MarkdownTheme {
 	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
 	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
+	/** Color the label of a link an extension handles (a registered extension scheme); defaults to `link`. */
+	extensionLink?: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
@@ -3029,6 +3031,12 @@ export class Markdown implements Component {
 		for (let i = 0; i < index; i++) start += tokens[i]!.raw.length;
 		const key = tableLockKey(start, token.raw);
 		if (key === undefined) return;
+		// Widths locked before a body row ends would come from the header
+		// alone, and every later row would wrap inside them. Such a lock
+		// settles no rows either (see below), so offer one only once the first
+		// body row has ended.
+		const body = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		if (!token.raw.includes("\n", body)) return;
 		this.#openTableKey = key;
 		if (!this.tableLocks?.has(key)) return;
 		// Like a list, the table must start at the settled boundary: a
@@ -3049,7 +3057,7 @@ export class Markdown implements Component {
 		// the settled rows also stop in front of the first row holding one.
 		const table = token as TableToken;
 		if (table.header.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) return;
-		let finished = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		let finished = body;
 		for (const row of table.rows) {
 			const next = token.raw.indexOf("\n", finished) + 1;
 			if (next === 0) break;
@@ -4532,7 +4540,10 @@ export class Markdown implements Component {
 					// Its label gets its own (dotted) underline instead of the web-link one.
 					if (href && extensionLinkScheme(href)) {
 						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
-						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						const styledLabel = this.#theme.extensionLink
+							? this.#theme.extensionLink(linkText)
+							: this.#theme.link(linkText);
+						result += formatExtensionLink(styledLabel, href, key) + stylePrefix;
 						break;
 					}
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));

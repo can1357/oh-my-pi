@@ -4,7 +4,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	isVertexAnthropicRawPredictUrl,
+	isVertexExpressOpenAIUrl,
+	isVertexRawPredictUrl,
+	resolveVertexEndpointHost,
+} from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
@@ -85,7 +90,8 @@ import { withTransportFetch } from "./utils/transport-fetch";
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
 		model.provider === "google-vertex" &&
-		((model.api === "openai-completions" && isVertexExpressOpenAIUrl(model.baseUrl)) ||
+		((model.api === "openai-completions" &&
+			(isVertexExpressOpenAIUrl(model.baseUrl) || isVertexRawPredictUrl(model.baseUrl))) ||
 			(model.api === "anthropic-messages" && isVertexRawPredictUrl(model.baseUrl)))
 	);
 }
@@ -263,7 +269,14 @@ async function releaseProviderInFlightStaleLock(lockDir: string, stale: Provider
 		const stat = await fs.stat(lockDir);
 		if (stat.mtimeMs !== stale.mtimeMs || Date.now() - stat.mtimeMs <= PROVIDER_INFLIGHT_LOCK_STALE_MS) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		// A concurrent reclaimer removing the stale dir first is expected, not a failure.
+		if (isEnoent(error)) return;
+		logger.warn("ai: failed to remove stale provider in-flight lock", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 // Best-effort token-checked release. A token mismatch means another process has
@@ -273,7 +286,12 @@ async function releaseProviderInFlightLock(lockDir: string, token: string): Prom
 		const info = await readProviderInFlightInfo(path.join(lockDir, "info.json"));
 		if (!info || info.token !== token) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to release provider in-flight lock", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function releaseProviderInFlightLockDirIfSame(
@@ -285,7 +303,15 @@ async function releaseProviderInFlightLockDirIfSame(
 		const current = await readProviderInFlightLockIdentity(lockDir);
 		if (!isSameProviderInFlightLock(current, identity)) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		// Normal contention: another process removed the lock dir between our write
+		// and this cleanup, which the caller already handles by retrying.
+		if (isEnoent(error)) return;
+		logger.warn("ai: failed to release provider in-flight lock dir", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 // On Windows, mkdir on a lock directory another process is concurrently deleting
@@ -458,7 +484,12 @@ async function signalProviderInFlightWaitersInDir(dir: string): Promise<void> {
 	try {
 		await fs.mkdir(dir, { recursive: true });
 		await Bun.write(path.join(dir, ".wakeup"), String(Date.now()));
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to signal provider in-flight waiters", {
+			dir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function signalProviderInFlightWaiters(provider: string): Promise<void> {
@@ -726,7 +757,9 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		if (isVertexRawPredictUrl(url)) {
+		// Partner publishers other than Anthropic (e.g. Mistral) take OpenAI-shaped
+		// bodies, where `model` is required and `anthropic_version` is rejected.
+		if (isVertexAnthropicRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
 			return baseFetch(url, {
@@ -786,7 +819,9 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 					.replaceAll("{location}", encodeURIComponent(location))
 					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
 			: url;
-		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
+		return rewritten
+			.replace(":streamRawPredict/v1/messages", ":streamRawPredict")
+			.replace(":streamRawPredict/chat/completions", ":streamRawPredict");
 	};
 
 	if (input instanceof Request) {
@@ -1084,19 +1119,20 @@ function isRetryableUpstreamError(
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
-	// `cyber_policy` are likewise rotatable. The exact ChatGPT-account model
-	// denial is rotatable only when its provider and requested model match.
+	// `cyber_policy` are likewise rotatable. A denial of only the requested
+	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404)
+	// is rotatable when its provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
 	// without transient rate-limit wording mean this account is parked but a
 	// sibling credential can usually pick the request up. Both are rotatable
-	// via `onAuthError` — the auth-gateway maps hard auth failures to
-	// `invalidateCredentialMatching` and temporary account constraints to a
-	// credential block. Transient 429s ("Too many requests", per-minute caps)
-	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
-	// provider's own backoff layer instead of burning siblings.
-	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
+	// via `onAuthError`, whose resolver hands the error to `limits.rotate` to
+	// choose between a credential block and invalidation. Transient 429s
+	// ("Too many requests", per-minute caps) classify as RATE_LIMIT_EXCEEDED in
+	// `parseRateLimitReason` and stay in the provider's own backoff layer
+	// instead of burning siblings.
+	if (AIError.isModelEntitlementDenial(error, model.provider, model.id)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
 	return isUsageLimitOutcome(status, message);
 }
@@ -1112,14 +1148,9 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 }
 
 function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown {
-	if (
-		!error ||
-		typeof error !== "object" ||
-		!AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)
-	) {
-		return error;
-	}
-	return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy | AIError.Flag.ContentBlocked));
+	if (!error || typeof error !== "object" || AIError.isAccountPolicyError(error)) return error;
+	const kinds = AIError.modelEntitlementDenialKinds(error, model.provider, model.id);
+	return kinds === 0 ? error : AIError.attach(error, AIError.create(kinds));
 }
 
 function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {

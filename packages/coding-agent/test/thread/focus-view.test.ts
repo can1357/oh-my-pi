@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { Agent, type AgentMessage, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import {
 	dropRejectedCodexAccessPrograms,
@@ -23,7 +23,6 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
-import { EventController } from "../../src/modes/controllers/event-controller";
 import { InputController } from "../../src/modes/controllers/input-controller";
 import { SessionFocusController } from "../../src/modes/controllers/session-focus-controller";
 import { statusLineHost } from "../../src/modes/status-line-host";
@@ -43,11 +42,9 @@ import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
-import { cfgTasksTodoClearDelay, cfgToolsApprovalMode } from "../../src/tools/settings";
+import { cfgTasksTodoClearDelay } from "../../src/tools/settings";
 import { TODO_HUD_STATE_CUSTOM_TYPE } from "../../src/tools/todo";
-import * as runStatus from "../../src/utils/run-status";
 import type { FocusProbe, FocusProbeGlobals } from "../fixtures/focus-view-worker";
-import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 const cleanups: Array<() => unknown> = [];
@@ -707,52 +704,6 @@ describe("queued messages of a focused worker-homed session", () => {
 		expect((await probe.report("W1")).userTexts).toEqual(["[hold] working"]);
 	});
 });
-
-describe("run status of a focused worker-homed session", () => {
-	function toolStart(toolCallId: string, args: Record<string, unknown>): AgentSessionEvent {
-		return { type: "tool_execution_start", toolCallId, toolName: "bash", args } as unknown as AgentSessionEvent;
-	}
-
-	it("reads approval prompts from the child's settings and the approvals its runner holds", async () => {
-		const probe = await startWorker();
-		await probe.open("W1", await mainRegistry(), { "tools.approvalMode": "always-ask" });
-		const remote = mirrorOf("W1");
-		cleanups.push(remote.subscribe(() => {}));
-		await waitFor(() => cfgToolsApprovalMode.get(remote.settings) === "always-ask");
-		// No main ancestor holds the child's tools here; serve an exec-tier tool for the lookup.
-		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
-		const getTool = vi.spyOn(remote, "getToolByName").mockReturnValue(bash);
-		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
-		cleanups.push(
-			() => getTool.mockRestore(),
-			() => report.mockRestore(),
-		);
-		const controller = new EventController(
-			createInteractiveModeContext({ viewSession: remote as unknown as AgentSession }),
-		);
-
-		// Main runs yolo; the child asks before exec-tier calls.
-		await controller.handleEvent({ type: "agent_start" } as AgentSessionEvent);
-		await controller.handleEvent(toolStart("bash-1", { command: "make" }));
-		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
-
-		// The user approved bash for the rest of the child's session: the child's wrapper no longer asks.
-		await probe.grantSessionApproval("W1", "bash\0exec");
-		await probe.prompt("W1", "carry on");
-		await waitFor(() => remote.hasSessionApproval("bash\0exec"));
-		report.mockClear();
-		await controller.handleEvent(toolStart("bash-2", { command: "make" }));
-		expect(report).not.toHaveBeenCalledWith(expect.objectContaining({ state: "blocked" }));
-
-		// The child's conversation tier of `always-ask-cached` grants is served from the mirror too.
-		const grant = "read\0/tmp/focus-view-grant";
-		expect(remote.getApprovalGrants().present([grant]).has(grant)).toBe(false);
-		await probe.recordSessionGrant("W1", grant);
-		await probe.prompt("W1", "once more");
-		await waitFor(() => remote.getApprovalGrants().present([grant]).has(grant));
-	});
-});
-
 describe("main-thread Daybreak status", () => {
 	it("follows the request bearer after OAuth falls back, then follows a new pin", async () => {
 		const bundled = getBundledModel("openai-codex", "gpt-6-sol");

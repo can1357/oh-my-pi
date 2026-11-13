@@ -19,3 +19,83 @@ export function compileSecretRegex(pattern: string, flags?: string): RegExp {
 
 	return new RegExp(resolvedPattern, enforceGlobalFlag(resolvedFlags));
 }
+
+/** Shortest derived literal worth a gate; a shorter one occurs in too much text to skip anything. */
+const MIN_REQUIRED_LITERAL = 3;
+
+/** Characters an identity escape (`\.`) turns into a literal. */
+const ESCAPED_LITERALS = new Set("^$\\.*+?()[]{}|/-");
+
+/** Characters that end a literal run: syntax, or literal only in some contexts. */
+const SYNTAX = new Set("^$\\.*+?()[]{}|");
+
+/**
+ * A literal every match of `regex` contains, read from the pattern's leading
+ * literal run (after zero-width `^`, `\b`, `\B` and lookarounds), so the
+ * obfuscator can skip text without it. Conservative: undefined when the
+ * pattern has a top-level alternation, uses the `v` flag, or starts with
+ * anything but ASCII literals; a quantified last character is left out.
+ *
+ * Example: `api_?key=\w+` → `"api"`; `(?<=x)tok_[0-9]+` → `"tok_"`.
+ */
+export function requiredLiteral(regex: RegExp): string | undefined {
+	const source = regex.source;
+	if (regex.unicodeSets || hasTopLevelAlternation(source)) return undefined;
+	let at = 0;
+	for (;;) {
+		if (source[at] === "^") at++;
+		else if (source.startsWith("\\b", at) || source.startsWith("\\B", at)) at += 2;
+		else if (/^\(\?<?[=!]/.test(source.slice(at, at + 4))) at = groupEnd(source, at);
+		else break;
+	}
+	let literal = "";
+	while (at < source.length) {
+		let char = source[at]!;
+		let next = at + 1;
+		if (char === "\\") {
+			char = source[at + 1] ?? "";
+			if (!ESCAPED_LITERALS.has(char)) break;
+			next = at + 2;
+		} else if (SYNTAX.has(char) || char.charCodeAt(0) > 0x7f) {
+			break;
+		}
+		const quantifier = source[next];
+		// `?`, `*` and `{0,…}` let the character be absent; `+` keeps one copy.
+		if (quantifier === "?" || quantifier === "*" || quantifier === "{") break;
+		literal += char;
+		at = next;
+		if (quantifier === "+") break;
+	}
+	return literal.length >= MIN_REQUIRED_LITERAL ? literal : undefined;
+}
+
+/** Index just past the group opened at `start`, skipping escapes and classes. */
+function groupEnd(source: string, start: number): number {
+	let depth = 0;
+	let inClass = false;
+	for (let at = start; at < source.length; at++) {
+		const char = source[at];
+		if (char === "\\") at++;
+		else if (inClass) inClass = char !== "]";
+		else if (char === "[") inClass = true;
+		else if (char === "(") depth++;
+		else if (char === ")" && --depth === 0) return at + 1;
+	}
+	return source.length;
+}
+
+/** Whether `|` splits the whole pattern, outside every group and class. */
+function hasTopLevelAlternation(source: string): boolean {
+	let depth = 0;
+	let inClass = false;
+	for (let at = 0; at < source.length; at++) {
+		const char = source[at];
+		if (char === "\\") at++;
+		else if (inClass) inClass = char !== "]";
+		else if (char === "[") inClass = true;
+		else if (char === "(") depth++;
+		else if (char === ")") depth--;
+		else if (char === "|" && depth === 0) return true;
+	}
+	return false;
+}

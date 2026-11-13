@@ -33,6 +33,8 @@ export interface OriginalSpec {
 	kept: [number, number][];
 	/** Spotlight's per-line heat (`0`–`9`, `-` unscored); default none. */
 	heat?: string;
+	/** A `;`/`,` list read's windows (`start`/`path` then left at 1/absent). */
+	windows?: { at: number; lines: number; start: number; path?: string; wholeFile?: true }[];
 }
 
 /** What the experiment did to one result. */
@@ -53,6 +55,8 @@ export interface ShapeSpec {
 	ms?: number;
 	/** Spotlight calls that failed (the no-score fallback shaped the result). */
 	failures?: number;
+	/** The failed calls by cause, as pi journals them; omitted, the entry predates causes. */
+	failureCauses?: Record<string, number>;
 	/**
 	 * Held out: the model saw the result unshaped (`text`), while the counts and `original` describe the would-be cut
 	 * and `shapedUrl` names its text.
@@ -301,8 +305,9 @@ export class SpotlightSessionBuilder {
 				...(spec.scoreFree ? { scoreFree: true } : {}),
 				...gateFields(spec),
 				spotlight: {
-					calls: spec.costUsd ? 1 : 0,
+					calls: (spec.costUsd ? 1 : 0) + (spec.failures ?? 0),
 					failures: spec.failures ?? 0,
+					...(spec.failureCauses ? { failureCauses: spec.failureCauses } : {}),
 					ms: spec.ms ?? 120,
 					tokens: spec.inTokens,
 					costUsd: spec.costUsd ?? 0,
@@ -348,6 +353,7 @@ export class SpotlightSessionBuilder {
 											lines: shape.original.lines,
 											start: shape.original.start ?? 1,
 											...(shape.original.path ? { path: shape.original.path } : {}),
+											...(shape.original.windows ? { windows: shape.original.windows } : {}),
 											heat: shape.original.heat ?? "",
 											kept: shape.original.kept,
 											...(shape.holdout ? { shapedUrl: shape.holdout.shapedUrl } : {}),

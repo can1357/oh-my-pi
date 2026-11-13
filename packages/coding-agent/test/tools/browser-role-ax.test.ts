@@ -57,6 +57,46 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 		}
 	});
 
+	it("treats a document role as visible while a hidden wait remains pending until aborted", async () => {
+		const puppeteer = await loadPuppeteer();
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent("<title>Root wait</title>");
+			const root = await page.waitForSelector("role/RootWebArea", { visible: true });
+			expect(await root?.evaluate(node => node.nodeType)).toBe(9);
+			await root?.dispose();
+			const controller = new AbortController();
+			const checked = Promise.withResolvers<void>();
+			const send = page.mainFrame().client.send.bind(page.mainFrame().client);
+			let probes = 0;
+			const probe = spyOn(page.mainFrame().client, "send").mockImplementation(async (method, ...args) => {
+				const result = await send(method, ...args);
+				if (method === "Accessibility.getPartialAXTree" && ++probes === 2) checked.resolve();
+				return result;
+			});
+			try {
+				const reason = new Error("stop hidden root wait");
+				const pending = rejectionOf(
+					page.waitForSelector("role/RootWebArea", { hidden: true, signal: controller.signal }),
+				);
+				await Promise.race([
+					checked.promise,
+					pending.then(error => {
+						throw error;
+					}),
+				]);
+				controller.abort(reason);
+				expect(await pending).toBe(reason);
+			} finally {
+				probe.mockRestore();
+			}
+		} finally {
+			await browser.close();
+		}
+	});
+
 	it.each(["timeout", "abort"] as const)("ends a role wait during a pending AX probe on %s", async mode => {
 		const puppeteer = await loadPuppeteer();
 		registerSemanticQueryHandlers(puppeteer);
@@ -320,13 +360,82 @@ function unreselectable(): { role: string; name: string }[] {
 }
 
 interface TernKitProbe {
-	observe(options: { includeAll: boolean }): { elements: { id: number; role: string; name?: string }[] };
+	observe(options: { includeAll: boolean }): {
+		elements: { id: number; role: string; name?: string; value?: string | number; description?: string }[];
+	};
 	count(selector: unknown): number;
 	mark(selector: unknown): string;
 	markAll(selector: unknown): string[];
 }
 
 describe.skipIf(!available)("Tern kit roles and names", () => {
+	it("masks filled password values in serialized kit observations without changing text values", async () => {
+		const puppeteer = await loadPuppeteer();
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent(`<input id="pw" type="password" aria-label="Password">
+				<input aria-label="Username">
+				<input aria-labelledby="pw">
+				<input aria-label="Described" aria-describedby="pw">
+				<button>Reveal <input type="password" value="SENTINEL-pw-123"></button>`);
+			await page.locator("#pw").fill("SENTINEL-pw-123");
+			await page.locator('input[aria-label="Username"]').fill("plain-text");
+			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			const observed = await page.evaluate(() => {
+				// The serialized kit installs this object in the page's realm.
+				const pageGlobal = globalThis as unknown as { __ompTernKit: TernKitProbe };
+				const kit = pageGlobal.__ompTernKit;
+				return kit.observe({ includeAll: true });
+			});
+			expect(observed.elements).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ role: "textbox", name: "Password", value: "•".repeat(15) }),
+					expect.objectContaining({ role: "textbox", name: "Username", value: "plain-text" }),
+					expect.objectContaining({ role: "textbox", name: "•".repeat(15) }),
+					expect.objectContaining({ role: "textbox", name: "Described", description: "•".repeat(15) }),
+					expect.objectContaining({ role: "button", name: "Reveal " + "•".repeat(15) }),
+				]),
+			);
+			expect(JSON.stringify(observed)).not.toContain("SENTINEL-pw-123");
+		} finally {
+			await browser.close();
+		}
+	});
+
+	it("keeps DOM roles and names independent of a Turkish default locale", async () => {
+		const puppeteer = await loadPuppeteer();
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent(
+				'<input type="image" alt="Send"><input aria-label="Address"><span role="LINK">Home</span>',
+			);
+			await page.evaluate(() => {
+				// CDP's locale override changes Intl but not V8's default string casing.
+				const lower = String.prototype.toLocaleLowerCase;
+				String.prototype.toLocaleLowerCase = function (locales) {
+					return lower.call(this, locales ?? "tr");
+				};
+			});
+			expect(await page.evaluate(() => "INPUT".toLocaleLowerCase())).toBe("ınput");
+			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			expect(
+				await page.evaluate(() => {
+					const kit = (globalThis as unknown as { __ompTernKit: TernKitProbe }).__ompTernKit;
+					return [
+						kit.observe({ includeAll: true }).elements.map(entry => `${entry.role} ${entry.name ?? ""}`),
+						kit.count({ engine: "role", query: 'BUTTON[name="Send" exact]' }),
+						kit.count({ engine: "role", query: 'textbox[name="Address" exact]' }),
+						kit.count({ engine: "role", query: 'LINK[name="Home" exact]' }),
+					];
+				}),
+			).toEqual([expect.arrayContaining(["button Send", "textbox Address", "link Home"]), 1, 1, 1]);
+		} finally {
+			await browser.close();
+		}
+	});
+
 	it("reports names in observe() that its role/ selector finds again, Codex's #17895 cases included", async () => {
 		const puppeteer = await loadPuppeteer();
 		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });

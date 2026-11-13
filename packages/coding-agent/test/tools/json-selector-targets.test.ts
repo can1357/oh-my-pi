@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { Settings } from "../../src/config/settings";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
 import type { ToolSession } from "../../src/sdk";
@@ -47,7 +48,7 @@ describe("JSON selector target admission", () => {
 		const file = path.join(dir, "invalid.json.bak");
 		await Bun.write(file, "not JSON");
 		await expect(tool.execute("invalid-backup", { path: `${file}?q=.` })).rejects.toThrow(
-			/Failed to execute JSON query:.*failed to parse/i,
+			/Failed to execute JSON query: jq: parse error:/,
 		);
 	});
 
@@ -71,6 +72,50 @@ describe("JSON selector target admission", () => {
 		expect(textOf(await tool.execute("literal-backup-question", { path: `${backup}?q=.ok` }))).toContain(
 			"literal backup question-mark file",
 		);
+	});
+
+	describe("archive member queries", () => {
+		let archivePath: string;
+
+		beforeAll(async () => {
+			archivePath = path.join(dir, "targets.tar");
+			await writeArchive(archivePath, "tar", [
+				["nested/receipt.json", JSON.stringify({ label: "paper receipt", items: [1, 2, 3] })],
+				["literal.json", '{"x":-1}'],
+				["literal.json?q=.x", "literal member\nsecond line"],
+				["binary.bin", new Uint8Array([0, 255, 1, 2])],
+				["sample.pdf", "%PDF-1.4\n"],
+			]);
+		});
+
+		it("runs the query, its options, and a trailing line selector against the member", async () => {
+			const raw = await tool.execute("archive-json-raw", {
+				path: `${archivePath}:nested/receipt.json?q=.label&raw=true`,
+			});
+			expect(textOf(raw)).toBe("paper receipt");
+			const queryLine = await tool.execute("archive-query-line", {
+				path: `${archivePath}:nested/receipt.json?q=.items[]:raw:2`,
+			});
+			expect(textOf(queryLine)).toBe("2");
+		});
+
+		it("prefers a literal question-mark member over its query-shaped suffix", async () => {
+			const literalLine = await tool.execute("archive-literal-query-line", {
+				path: `${archivePath}:literal.json?q=.x:2:raw`,
+			});
+			expect(textOf(literalLine)).toBe("second line");
+		});
+
+		it("reports a missing member as missing and non-text members by type", async () => {
+			await expect(
+				tool.execute("archive-missing-json", { path: `${archivePath}:missing.json?q=.x` }),
+			).rejects.toThrow(/missing\.json.*not found inside archive/);
+			for (const member of ["nested", "binary.bin", "sample.pdf"]) {
+				await expect(tool.execute("archive-query-type", { path: `${archivePath}:${member}?q=.` })).rejects.toThrow(
+					"JSON selectors require a text archive member",
+				);
+			}
+		});
 	});
 
 	it("queries a local URL backup while preserving its internal source identity", async () => {
