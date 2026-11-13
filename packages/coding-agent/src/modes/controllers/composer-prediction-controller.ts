@@ -134,20 +134,27 @@ function parseReply(reply: string, alternatives: boolean): string[] | undefined 
 /**
  * How long a prediction on `session` may take before it is no longer worth showing. The side turn
  * reasons at the session's effort when the session thinks and the model's transport has no
- * per-message control to lower it (Anthropic per-message effort; OpenAI Responses and Codex
- * `configuration_update`, which Responses skips in pro mode), and that longer pass gets a longer
- * deadline.
+ * per-message control to lower it (OpenAI Responses and Codex `configuration_update`, which
+ * Responses skips in pro mode; Anthropic per-message effort, which lowers only once an earlier
+ * assistant message recorded an effort), and that longer pass gets a longer deadline.
  */
-export function composerPredictionDeadlineMs(session: Pick<AgentViewSession, "model" | "thinkingLevel">): number {
+export function composerPredictionDeadlineMs(
+	session: Pick<AgentViewSession, "model" | "thinkingLevel" | "messages">,
+): number {
 	const { model } = session;
 	if (!model?.reasoning || shouldDisableReasoning(session.thinkingLevel)) return PREDICTION_DEADLINE_MS;
 	const { compat } = model;
 	const configurationUpdate =
 		compat !== undefined && "supportsConfigurationUpdate" in compat && compat.supportsConfigurationUpdate === true;
+	const perMessageEffort =
+		compat !== undefined &&
+		"supportsPerMessageEffort" in compat &&
+		compat.supportsPerMessageEffort === true &&
+		session.messages.some(message => message.role === "assistant" && message.requestControls?.effort !== undefined);
 	const lowersEffort =
 		(model.api === "openai-responses" && configurationUpdate && model.reasoningMode !== "pro") ||
 		(model.api === "openai-codex-responses" && configurationUpdate) ||
-		(compat !== undefined && "supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true);
+		perMessageEffort;
 	return lowersEffort ? PREDICTION_DEADLINE_MS : PREDICTION_DEADLINE_MS_AT_SESSION_EFFORT;
 }
 

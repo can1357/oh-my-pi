@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Message, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -21,6 +22,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/composer-prediction-controller";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -225,30 +227,30 @@ describe("ComposerPredictionController", () => {
 	});
 
 	it("waits longer for a prediction only where the side turn reasons at the session's effort", () => {
-		const reasoning = { ...MODEL, reasoning: true };
-		const deadline = (model: object, thinkingLevel: ThinkingLevel) =>
-			composerPredictionDeadlineMs({ model: model as Model, thinkingLevel });
+		const deadline = (model: Model, thinkingLevel: ThinkingLevel, messages: AgentMessage[] = []) =>
+			composerPredictionDeadlineMs({ model, thinkingLevel, messages });
+		const recordedEffort: AssistantMessage = {
+			...createAssistantMessage("Fixed."),
+			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "high" } },
+		};
+		const gemini = getBundledModel("google-gemini-cli", "gemini-3.1-pro-preview");
 
 		// Gemini transports cannot lower effort per message: a high-effort pass outlasts 15 s.
-		expect(deadline({ ...reasoning, api: "google-gemini-cli" }, ThinkingLevel.High)).toBe(45_000);
-		expect(deadline({ ...reasoning, api: "google-gemini-cli" }, ThinkingLevel.Off)).toBe(15_000);
-		expect(deadline({ ...reasoning, compat: { supportsPerMessageEffort: true } }, ThinkingLevel.High)).toBe(15_000);
-		// OpenAI lowers effort only through `configuration_update`, and Responses not in pro mode.
-		const configurationUpdate = { supportsConfigurationUpdate: true };
-		expect(
-			deadline({ ...reasoning, api: "openai-codex-responses", compat: configurationUpdate }, ThinkingLevel.High),
-		).toBe(15_000);
-		expect(deadline({ ...reasoning, api: "openai-codex-responses", compat: {} }, ThinkingLevel.High)).toBe(45_000);
-		expect(deadline({ ...reasoning, api: "openai-responses", compat: configurationUpdate }, ThinkingLevel.High)).toBe(
-			15_000,
+		expect(deadline(gemini, ThinkingLevel.High)).toBe(45_000);
+		expect(deadline(gemini, ThinkingLevel.Off)).toBe(15_000);
+		expect(deadline(getBundledModel("google-gemini-cli", "gemini-2.0-flash"), ThinkingLevel.High)).toBe(15_000);
+		// Anthropic lowers effort per message only once an earlier request recorded one.
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-5-5");
+		expect(deadline(sonnet, ThinkingLevel.High, [recordedEffort])).toBe(15_000);
+		expect(deadline(sonnet, ThinkingLevel.High, [createAssistantMessage("Fixed.")])).toBe(45_000);
+		expect(deadline(getBundledModel("anthropic", "claude-sonnet-4-6"), ThinkingLevel.High, [recordedEffort])).toBe(
+			45_000,
 		);
-		expect(
-			deadline(
-				{ ...reasoning, api: "openai-responses", compat: configurationUpdate, reasoningMode: "pro" },
-				ThinkingLevel.High,
-			),
-		).toBe(45_000);
-		expect(deadline(MODEL, ThinkingLevel.High)).toBe(15_000);
+		// OpenAI lowers effort only through `configuration_update`, and Responses not in pro mode.
+		expect(deadline(getBundledModel("openai-codex", "gpt-6-astra"), ThinkingLevel.High)).toBe(15_000);
+		expect(deadline(getBundledModel("openai-codex", "gpt-5.6-luna"), ThinkingLevel.High)).toBe(45_000);
+		expect(deadline(getBundledModel("openai", "gpt-6-astra"), ThinkingLevel.High)).toBe(15_000);
+		expect(deadline(getBundledModel("openai", "gpt-5.6-luna-pro"), ThinkingLevel.High)).toBe(45_000);
 	});
 
 	it("aborts a stalled prediction at the deadline", async () => {
