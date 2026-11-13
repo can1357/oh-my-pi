@@ -24,7 +24,7 @@ function bundled(provider: GeneratedProvider, id: string): Model<Api> {
 async function captureGenerationConfig(
 	model: Model<Api>,
 	maxTokens: number | undefined,
-	options: { apiKey?: string; thinkingBudgets?: ThinkingBudgets } = {},
+	options: { apiKey?: string; thinkingBudgets?: ThinkingBudgets; reasoning?: Effort } = {},
 ): Promise<GenerationConfig | undefined> {
 	let generationConfig: GenerationConfig | undefined;
 	const fetch: FetchImpl = async (_url, init) => {
@@ -38,7 +38,7 @@ async function captureGenerationConfig(
 	await streamSimple(model, ctx, {
 		apiKey: options.apiKey ?? "k",
 		maxTokens,
-		reasoning: Effort.High,
+		reasoning: options.reasoning ?? Effort.High,
 		thinkingBudgets: options.thinkingBudgets,
 		fetch,
 	}).result();
@@ -110,5 +110,17 @@ describe("Google thinking headroom in maxOutputTokens", () => {
 
 		expect(config).toBeDefined();
 		expect(config?.maxOutputTokens).toBeUndefined();
+	});
+});
+
+describe("Gemini 4 Hydrogen xhigh thinking level", () => {
+	// Google's SDK enum stops at HIGH; clamping xhigh to it silently drops Hydrogen's deepest tier.
+	it.each([
+		["google-generative-ai", bundled("google", "gemini-4-hydrogen")],
+		["google-vertex", bundled("google-vertex", "gemini-4-hydrogen")],
+	])("%s sends the documented xhigh level", async (_name, model) => {
+		const config = await captureGenerationConfig(model, 512, { reasoning: Effort.XHigh });
+
+		expect(config?.thinkingConfig?.thinkingLevel).toBe("xhigh");
 	});
 });

@@ -13,6 +13,10 @@
  *   present, it is also a provider allow-list: a provider it omits is refused,
  *   so a binding can never be bypassed through another provider's accounts.
  *
+ * Chat routes drop a client's attribution, billing and transport options,
+ * upstream headers included (the `gateway` tier in `caller-options.ts`). The
+ * unscoped gateway token keeps them.
+ *
  * Account binding reuses `AuthStorage.sessions.restrict`. Each admitted
  * version of a client (its token, models and accounts) resolves a bound
  * provider's credentials under a session id of its own, restricted before the

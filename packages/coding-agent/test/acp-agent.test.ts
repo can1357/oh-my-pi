@@ -3958,7 +3958,7 @@ describe("ACP agent", () => {
 					],
 					default: "staging",
 				},
-				target_other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
+				target__other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
 				checks: {
 					type: "array",
 					title: "Checks",
@@ -3970,7 +3970,7 @@ describe("ACP agent", () => {
 					},
 					default: ["lint"],
 				},
-				checks_other: {
+				checks__other: {
 					type: "string",
 					title: "Checks — Other",
 					description: "Another answer, added to those checked",
@@ -3996,9 +3996,9 @@ describe("ACP agent", () => {
 				action: "accept",
 				content: {
 					target: "staging",
-					target_other: " canary ",
+					target__other: " canary ",
 					checks: ["lint"],
-					checks_other: "smoke",
+					checks__other: "smoke",
 					replicas: 2,
 				},
 			}));
