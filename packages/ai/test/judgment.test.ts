@@ -1686,6 +1686,126 @@ describe("NativeJudge OpenAI Decisions dialect", () => {
 	});
 });
 
+describe("NativeJudge Gemini Decisions dialect", () => {
+	const decision = buildModel({
+		id: "gemini-decision-1",
+		name: "Gemini Decision 1",
+		api: "google-decisions",
+		provider: "google",
+		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: null,
+	});
+
+	it("sends questions under positional keys with the API key header and maps the answers back to their ids", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = createNativeJudge(decision, {
+			apiKey: "AIza-test",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					answers: {
+						q0: { type: "noul", noul: 0.94, confidence: 0.94 },
+						q1: {
+							type: "choice",
+							choice: "billing",
+							probabilities: { billing: 0.93, shipping: 0.07 },
+							confidence: 0.93,
+						},
+						q2: {
+							type: "score",
+							score: 1.1,
+							legend: { "0": "Cosmetic", "1": "Workaround", "2": "Blocked" },
+							probabilities: { "0": 0.1, "1": 0.7, "2": 0.2 },
+							confidence: 0.7,
+						},
+					},
+					usage: { total_input_tokens: 42, total_output_tokens: 0, total_tokens: 42 },
+				});
+			},
+		});
+
+		// Ids outside the API's `[A-Za-z0-9_-]{1,64}` question keys.
+		const result = await judge.judge({
+			state: { ticket: "The package arrived with a broken screen." },
+			questions: {
+				"src/order.ts:damaged": {
+					type: "noul",
+					instructions: "Does the customer report a damaged item?",
+					criteria: { true: "The item itself is damaged." },
+				},
+				"team?": {
+					type: "choice",
+					instructions: "Who handles it?",
+					criteria: { billing: "Refunds", shipping: null },
+				},
+				severity: { type: "score", instructions: "How severe?", criteria: ["Cosmetic", "Workaround", "Blocked"] },
+			},
+		});
+
+		expect(calls[0].url).toBe("https://generativelanguage.googleapis.com/v1beta/decisions");
+		const headers = new Headers(calls[0].init?.headers);
+		expect(headers.get("x-goog-api-key")).toBe("AIza-test");
+		expect(headers.get("authorization")).toBeNull();
+		expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+			model: "gemini-decision-1",
+			input: '{"ticket":"The package arrived with a broken screen."}',
+			questions: {
+				q0: {
+					type: "noul",
+					instructions: "Does the customer report a damaged item?",
+					criteria: { true_description: "The item itself is damaged." },
+				},
+				q1: { type: "choice", instructions: "Who handles it?", criteria: { billing: "Refunds", shipping: "" } },
+				q2: { type: "score", instructions: "How severe?", criteria: ["Cosmetic", "Workaround", "Blocked"] },
+			},
+		});
+		expect(result.answers).toEqual({
+			"src/order.ts:damaged": { type: "noul", noul: 0.94 },
+			"team?": {
+				type: "choice",
+				choice: "billing",
+				confidence: 0.93,
+				probabilities: { billing: 0.93, shipping: 0.07 },
+			},
+			severity: { type: "score", score: 1.1, confidence: 0.7, probabilities: { "0": 0.1, "1": 0.7, "2": 0.2 } },
+		});
+		expect(result).toMatchObject({ api: "google-decisions", provider: "google", model: "gemini-decision-1" });
+		expect(result.usage).toMatchObject({ input: 42, output: 0, totalTokens: 42 });
+	});
+
+	it("sends images as base64 image blocks after the state text", async () => {
+		const inputs: unknown[] = [];
+		const judge = createNativeJudge(decision, {
+			apiKey: "AIza-test",
+			fetch: async (_url, init) => {
+				inputs.push(JSON.parse(String(init?.body)).input);
+				return Response.json({
+					answers: { q0: { type: "noul", noul: 0.5, confidence: 0.5 } },
+					usage: { total_input_tokens: 2, total_output_tokens: 0 },
+				});
+			},
+		});
+
+		await judge.judge({
+			state: "Inspect the photos.",
+			questions: { urgent: { type: "noul", instructions: "Is it urgent?" } },
+			images: IMAGE_REFS,
+		});
+
+		expect(inputs).toEqual([
+			[
+				{ type: "text", text: "Inspect the photos." },
+				{ type: "image", data: "AQID", mime_type: "image/png" },
+				{ type: "image", data: "BAUG", mime_type: "image/jpeg" },
+			],
+		]);
+	});
+});
+
 describe("NativeJudge Workers AI dialect", () => {
 	const clef = buildModel({
 		id: "@cf/cloudflare/clef",

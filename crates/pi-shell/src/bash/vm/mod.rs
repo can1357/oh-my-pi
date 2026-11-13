@@ -57,9 +57,10 @@ pub use self::{
 use self::{
 	control::{CANCEL, Ctl, PAUSE, RESUME, SIGNAL, SUSPEND},
 	proc::{Frame, FrameKind, Live, PendingWrite, ScriptKind},
-	state::{Overlay, Root, Var},
+	state::{Root, Var},
 };
 use crate::bash::{
+	Image,
 	diag::{Diag, DiagSite, render},
 	engine::Engine,
 	error::ShellError,
@@ -68,6 +69,7 @@ use crate::bash::{
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
+	image::Records,
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
@@ -449,6 +451,16 @@ pub struct Kernel {
 	/// slice: that kept ~600 bytes per idle vproc; the target is ≤ 2 KiB).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
 	pub spawned:            Vec<Box<Vproc>>,
+	/// The records an asynchronous command's signal ignores
+	/// (`exec::ignore_async_signals`) last turned which (mode, records)
+	/// into: the next one forked from the same records shares them. Held
+	/// weakly, so neither the root's records nor an exited job's stay
+	/// shared through it.
+	pub async_ignored:      Option<(ModeId, Records, Records)>,
+	/// Subshells the host submitted to the root since the last turn (no
+	/// store at hand): `adopt` gives each the root's state then, with its
+	/// script's changes.
+	pending_forks:          Vec<(Vpid, ForkEdits)>,
 	/// `$RANDOM` generator state (written through as `MiscKey::Random` by
 	/// [`Kernel::next_random`] and [`Kernel::seed_random`]).
 	pub rand:               state::Random,
@@ -522,8 +534,8 @@ pub struct Kernel {
 	/// (a restored shell signals the job's vproc).
 	pub pid_owners:         Vec<(u32, Vpid, Vpid)>,
 	/// The math options ([`zsh::arith::math_options`]) last read for a vproc
-	/// without an overlay, with the [`state::Root::opts_gen`] and mode they
-	/// were read under: every `(( ))` asks.
+	/// without an image (the root), with the [`state::Root::opts_gen`] and mode
+	/// they were read under: every `(( ))` asks.
 	pub math_opts:          Option<(u64, ModeId, zsh::math::Options)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
@@ -613,6 +625,8 @@ impl Kernel {
 			shell_pid,
 			dropped_fs: 0,
 			spawned: Vec::new(),
+			pending_forks: Vec::new(),
+			async_ignored: None,
 			rand: state::Random::new(1),
 			start_ns: 0,
 			startup: Vec::new(),
@@ -1029,11 +1043,11 @@ impl Kernel {
 		let utf8 = locale::is_utf8(self, cx.store, vp);
 		// An in-engine nested shell names itself (its `$0`).
 		let shell_name = match vp
-			.overlay
+			.image
 			.as_ref()
-			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)))
+			.and_then(|image| image.get(Key::Misc(MiscKey::Argv0)))
 		{
-			Some(Some(Record::Misc(name))) => name.as_slice(),
+			Some(Record::Misc(name)) => name.as_slice(),
 			_ => self.argv0.as_slice(),
 		};
 		render(diag, DiagSite { shell_name, origin, line, utf8 })
@@ -1750,7 +1764,7 @@ impl Shell {
 		&mut self,
 		parent: usize,
 		script: Script,
-		mut store: Option<&mut dyn StateStore>,
+		store: Option<&mut dyn StateStore>,
 		lineage: Option<crate::bash::host::Lineage>,
 	) -> RunId {
 		let id = RunId(self.k.next_run);
@@ -1782,47 +1796,13 @@ impl Shell {
 			VprocSel::NewSubshell => None,
 			VprocSel::NewSubshellWithStdio(stdio) => Some(stdio),
 		};
+		let edits = ForkEdits {
+			env:          script.env,
+			foreign_env:  script.foreign_env,
+			unexport_env: script.unexport_env,
+			args:         script.args,
+		};
 		let p = &self.procs[parent];
-		let mut overlay = p.overlay.clone().unwrap_or_default();
-		if !script.foreign_env.is_empty() {
-			let mut foreign = match store.as_deref_mut() {
-				Some(store) => match state::record(store, p, Key::Misc(MiscKey::ForeignEnv)) {
-					Ok(Some(Record::Words(entries))) => entries.clone(),
-					Ok(_) => Vec::new(),
-					Err(err) => {
-						self.k.root.fail(err);
-						Vec::new()
-					},
-				},
-				None => match overlay.records.get(&KeyBuf::Misc(MiscKey::ForeignEnv)) {
-					Some(Some(Record::Words(entries))) => entries.clone(),
-					_ => Vec::new(),
-				},
-			};
-			for (name, value) in script.foreign_env {
-				if let Some(name) = name {
-					foreign.retain(|entry| entry.split(|&b| b == b'=').next() != Some(name.as_slice()));
-					if let Some(value) = value {
-						let mut entry = name;
-						entry.push(b'=');
-						entry.extend_from_slice(&value);
-						foreign.push(entry);
-					}
-				} else {
-					foreign.clear();
-				}
-			}
-			overlay
-				.records
-				.insert(KeyBuf::Misc(MiscKey::ForeignEnv), Some(Record::Words(foreign)));
-		}
-		for (name, value) in script.env {
-			if is_ident(&name) {
-				overlay
-					.vars
-					.insert(name, Some(Var::scalar(value, Attrs::EXPORT)));
-			}
-		}
 		let mut fds = p.fds.clone();
 		if let Some(stdio) = stdio {
 			for (fd, s) in stdio.into_iter().enumerate() {
@@ -1835,43 +1815,46 @@ impl Shell {
 		}
 		let cwd = script.cwd.unwrap_or_else(|| p.cwd.clone());
 		let status = p.status;
-		let mut scopes = match store.as_deref_mut() {
-			Some(store) => state::copy_scopes(&self.k.root, store, p).unwrap_or_else(|err| {
-				self.k.root.fail(err);
-				Vec::new()
-			}),
-			None if p.overlay.is_some() => p.scopes.clone(),
-			None => Vec::new(),
-		};
-		for name in script.unexport_env {
-			overlay.vars.insert(name.clone(), None);
-			for scope in &mut scopes {
-				if let Some(Some(var)) = scope.vars.get_mut(&name) {
-					var.attrs = var.attrs.without(Attrs::EXPORT);
+		// The parent's global state now; a host's submission (no store) to
+		// the root takes it when the scheduler adopts the subshell, before
+		// the root runs again.
+		let base = match store {
+			Some(store) => {
+				let image = state::fork_image(&self.k.root, store, p);
+				let scopes = state::copy_scopes(&self.k.root, store, p);
+				match image.and_then(|image| Ok((image, scopes?))) {
+					Ok(base) => Some(base),
+					Err(err) => {
+						self.k.root.fail(err);
+						Some(((Image::default(), None), Vec::new()))
+					},
 				}
-			}
-		}
+			},
+			None => p
+				.image
+				.clone()
+				.map(|image| ((image, p.locale_gen), p.scopes.clone())),
+		};
 		let parent_vpid = p.vpid;
 		// Written as `MiscKey::NextVpid` before the next step returns
 		// (`Kernel::sync_root`).
 		let vpid = Vpid(self.k.next_vpid);
 		self.k.next_vpid += 1;
 		let parent_lineage = self.procs[parent].lineage;
-		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
+		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(Image::default()), true);
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
-		vp.scopes = scopes;
-		if let Some(args) = script.args {
-			// A copied function scope takes precedence over the overlay: install
-			// the script's arguments at that level, as `set --` does.
-			if let Some(store) = store {
-				state::set_positional(&mut self.k.root, store, &mut vp, args);
-			} else if let Some(overlay) = &mut vp.overlay {
-				overlay.positional = Some(args);
-			}
-		}
 		vp.mode = mode;
 		vp.runs.push_back(run);
+		match base {
+			Some(((image, locale_gen), scopes)) => {
+				vp.image = Some(image);
+				vp.locale_gen = locale_gen;
+				vp.scopes = scopes;
+				edits.apply(&mut vp);
+			},
+			None => self.k.pending_forks.push((vpid, edits)),
+		}
 		self.k.spawned.push(Box::new(vp));
 		id
 	}
@@ -1983,6 +1966,19 @@ impl Shell {
 	/// Move children created during the turn into the scheduler and reap
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
+		for (vpid, edits) in std::mem::take(&mut self.k.pending_forks) {
+			let base = state::fork_image(&self.k.root, cx.store, &self.procs[0]);
+			let Some(vp) = self.k.spawned.iter_mut().find(|p| p.vpid == vpid) else {
+				continue;
+			};
+			let (image, locale_gen) = base.unwrap_or_else(|err| {
+				self.k.root.fail(err);
+				(Image::default(), None)
+			});
+			vp.image = Some(image);
+			vp.locale_gen = locale_gen;
+			edits.apply(vp);
+		}
 		for p in &self.k.spawned {
 			let rec = Record::Proc { parent: p.parent, status: None };
 			self
@@ -2772,13 +2768,88 @@ fn pause_handles(p: &mut Vproc, on: bool) {
 	}
 }
 
+/// What a submitted script changes in the state its new subshell forks
+/// ([`Script::env`], [`Script::foreign_env`], [`Script::unexport_env`],
+/// [`Script::args`]).
+struct ForkEdits {
+	env:          Vec<(BString, BString)>,
+	foreign_env:  Vec<(Option<BString>, Option<BString>)>,
+	unexport_env: Vec<BString>,
+	args:         Option<Vec<BString>>,
+}
+
+impl ForkEdits {
+	/// Apply the changes to `vp`, a subshell holding its forked state.
+	fn apply(self, vp: &mut Vproc) {
+		// A locale variable among them: the subshell no longer has its
+		// parent's locale values (`state::locale_token`).
+		if self
+			.env
+			.iter()
+			.map(|(name, _)| name)
+			.chain(&self.unexport_env)
+			.any(|name| state::is_locale_name(name))
+		{
+			vp.locale_gen = None;
+		}
+		let Some(image) = vp.image.as_mut() else {
+			return;
+		};
+		if !self.foreign_env.is_empty() {
+			let mut foreign = match image.get(Key::Misc(MiscKey::ForeignEnv)) {
+				Some(Record::Words(entries)) => entries.clone(),
+				_ => Vec::new(),
+			};
+			for (name, value) in self.foreign_env {
+				if let Some(name) = name {
+					foreign.retain(|entry| entry.split(|&b| b == b'=').next() != Some(name.as_slice()));
+					if let Some(value) = value {
+						let mut entry = name;
+						entry.push(b'=');
+						entry.extend_from_slice(&value);
+						foreign.push(entry);
+					}
+				} else {
+					foreign.clear();
+				}
+			}
+			image.put(Key::Misc(MiscKey::ForeignEnv), Record::Words(foreign));
+		}
+		for (name, value) in self.env {
+			if is_ident(&name) {
+				image.set_var(&name, Some(Var::scalar(value, Attrs::EXPORT)));
+			}
+		}
+		for name in self.unexport_env {
+			image.del_var(&name);
+			for scope in &mut vp.scopes {
+				if let Some(Some(var)) = scope.vars.get_mut(&name) {
+					var.attrs = var.attrs.without(Attrs::EXPORT);
+				}
+			}
+		}
+		if let Some(args) = self.args {
+			// A copied function scope takes precedence: install the
+			// script's arguments at that level, as `set --` does.
+			match vp.scopes.iter_mut().rev().find(|s| s.positional.is_some()) {
+				Some(scope) => scope.positional = Some(args),
+				None => {
+					if let Some(image) = vp.image.as_mut() {
+						image.put(Key::Misc(MiscKey::Positional), Record::Words(args));
+					}
+				},
+			}
+		}
+	}
+}
+
 impl Vproc {
 	fn new(
 		vpid: Vpid,
 		parent: Option<Vpid>,
 		fds: FdTable,
 		cwd: BString,
-		overlay: Option<Overlay>,
+		image: Option<Image>,
 		transient: bool,
 	) -> Self {
 		Self {
@@ -2791,7 +2862,8 @@ impl Vproc {
 			cwd,
 			status: 0,
 			pipestatus: Vec::new(),
-			overlay,
+			image,
+			locale_gen: None,
 			out: VecDeque::new(),
 			blocked: None,
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
@@ -2878,17 +2950,15 @@ impl Vproc {
 		mut frame: Frame,
 	) -> Self {
 		let vpid = k.vpid(store);
-		let mut vp = Self::new(
-			vpid,
-			Some(self.vpid),
-			fds,
-			self.cwd.clone(),
-			Some(self.overlay.clone().unwrap_or_default()),
-			true,
-		);
+		let (image, locale_gen) = state::fork_image(&k.root, store, self).unwrap_or_else(|err| {
+			k.fail(err);
+			(Image::default(), None)
+		});
+		let mut vp = Self::new(vpid, Some(self.vpid), fds, self.cwd.clone(), Some(image), true);
+		vp.locale_gen = locale_gen;
 		// `$BASH_SUBSHELL`: one more than the parent's (a pipeline stage
 		// or background job adjusts it, `exec::spawn`). The parent's
-		// caught-signal traps stay in the overlay: the child lists them but
+		// caught-signal traps stay in the image: the child lists them but
 		// does not run them (`state::inherited_trap`).
 		set_subshell_depth(&mut vp, subshell_depth(self).saturating_add(1));
 		vp.status = self.status;
@@ -2964,18 +3034,18 @@ pub const fn subshell_depth(vp: &Vproc) -> u32 {
 	vp.subshell
 }
 
-/// Set `vp`'s `$BASH_SUBSHELL` (a vproc without an overlay is the shell
+/// Set `vp`'s `$BASH_SUBSHELL` (a vproc without an image is the shell
 /// itself and stays at zero). Called by `child_running` and by
 /// `exec::spawn` for pipeline stages and background jobs.
 pub const fn set_subshell_depth(vp: &mut Vproc, depth: u32) {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		vp.subshell = depth;
 	}
 }
 
 /// Scope of an assignment made by `vp`.
 pub const fn assign_scope(vp: &Vproc) -> AssignScope {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		AssignScope::Subshell
 	} else {
 		AssignScope::Global
