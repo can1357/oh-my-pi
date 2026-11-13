@@ -149,7 +149,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
-import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -4124,7 +4124,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// advertised while exact dispatch still answered from the snapshot.
 		// Callers with no request snapshot (the Cursor exec bridge) pass none and
 		// get device resolution only.
-		const resolveDeviceTool = (name: string, advertised: readonly AgentTool[] = []): AgentTool | undefined => {
+		const resolveDeviceSpelling = (name: string, advertised: readonly AgentTool[]): AgentTool | undefined => {
 			const bareName = stripXdUrlPrefix(name);
 			const state = toolSession.xdev;
 			// An exact mounted name is the name itself, not a guess.
@@ -4147,6 +4147,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				candidate =>
 					(state ? resolveMountedXdevExecutable(state, candidate) : undefined) ??
 					advertised.find(tool => tool.name === candidate),
+			);
+		};
+		// A model whose tool-name charset cannot carry `://` spells the prefix with
+		// underscores (`xd__recall`). Only a name every exact spelling missed is
+		// read that way, so a tool actually named `xd_<something>` keeps its own
+		// dispatch.
+		const resolveDeviceTool = (name: string, advertised: readonly AgentTool[] = []): AgentTool | undefined => {
+			const unprefixed = stripXdUnderscorePrefix(name);
+			return (
+				resolveDeviceSpelling(name, advertised) ??
+				(unprefixed === name ? undefined : resolveDeviceSpelling(unprefixed, advertised))
 			);
 		};
 		// Mounted devices are absent from the advertised tool set, so a miss on a
