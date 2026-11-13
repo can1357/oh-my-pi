@@ -64,6 +64,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { reloadTuiPluginState } from "../../slash-commands/builtin-marketplace";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type BlockedKind, type BlockedStatus, holdBlockedStatus } from "../../utils/run-status";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
@@ -300,6 +301,7 @@ export class ExtensionUiController {
 			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			reloadPlugins: () => this.#reloadPlugins(),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
@@ -525,6 +527,7 @@ export class ExtensionUiController {
 			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			reloadPlugins: () => this.#reloadPlugins(),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
@@ -1680,6 +1683,15 @@ export class ExtensionUiController {
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
 		await this.ctx.executeCompaction(instructionsOrOptions, false);
+	}
+
+	async #reloadPlugins(): Promise<void> {
+		const session = this.ctx.session;
+		if (session.isStreaming || session.isCompacting || session.isRetrying || session.isSessionTransitioning) {
+			throw new Error("Cannot reload plugins while the session is busy");
+		}
+		await reloadTuiPluginState(this.ctx);
+		this.ctx.showStatus("Plugins reloaded.");
 	}
 
 	async #compactSession(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
