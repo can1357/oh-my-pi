@@ -3,8 +3,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
+import { handleApi } from "@oh-my-pi/omp-stats/server";
 import type { SpotlightAgentScope, SpotlightDashboardStats } from "@oh-my-pi/omp-stats/shared-types";
-import { buildSpotlightDashboard, getSpotlightSessionContext } from "@oh-my-pi/omp-stats/spotlight-aggregator";
+import {
+	buildSpotlightDashboard,
+	getSpotlightDashboardStats,
+	getSpotlightSessionContext,
+} from "@oh-my-pi/omp-stats/spotlight-aggregator";
 import { argumentTokens } from "@oh-my-pi/omp-stats/spotlight-ingest";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { SpotlightSessionBuilder } from "./helpers/spotlight-session";
@@ -810,6 +815,33 @@ describe("Spotlight session scope", () => {
 		const all = await dashboard("all");
 		expect(all.sessions).toBe(2);
 		expect([toolTokens(all, "shaped"), toolTokens(all, "outside")]).toEqual([300, 800]);
+	});
+
+	it("builds the dashboard route off the server thread, with the on-thread payload", async () => {
+		for (const rel of ["main.jsonl", "main/Worker.jsonl"]) {
+			const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+			b.user("go");
+			shortenedRead(b);
+			await write(rel, b);
+		}
+		await syncAllSessions({ workers: 1 });
+
+		let answered = false;
+		const route = handleApi(new Request("http://stats.test/api/stats/spotlight?range=all&agent=subagent")).then(
+			response => {
+				answered = true;
+				return response.text();
+			},
+		);
+		// Another request reaches the server on a later event-loop turn; a build on the server's thread ends first.
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
+		expect(answered).toBe(false);
+
+		const json = await route;
+		expect(json).toBe(JSON.stringify(await getSpotlightDashboardStats("all", "subagent")));
+		expect((JSON.parse(json) as SpotlightDashboardStats).sessions).toBe(1);
 	});
 });
 

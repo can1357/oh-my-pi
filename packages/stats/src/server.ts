@@ -39,7 +39,7 @@ import {
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
 import { getStatsByModel, getTimeSeries } from "./rollup";
-import { getSpotlightDashboardStats, getSpotlightSessionContext } from "./spotlight-aggregator";
+import { buildSpotlightDashboardJson, getSpotlightSessionContext } from "./spotlight-aggregator";
 import {
 	buildSessionTrace,
 	getTraceEntry,
@@ -176,7 +176,7 @@ let spotlightViews: { version: number; views: Map<string, { at: number; json: Pr
 
 /**
  * The Spotlight dashboard as JSON, built once per data version and view. Every open page refetches on each version
- * bump and a build takes seconds on the thread that also ingests, so pages showing the same view share one build.
+ * bump and a build takes seconds of a worker's CPU, so pages showing the same view share one build.
  */
 function spotlightView(range: string | null, agent: string | null): Promise<string> {
 	const version = statsLive().status().version;
@@ -185,7 +185,7 @@ function spotlightView(range: string | null, agent: string | null): Promise<stri
 	const key = `${range ?? ""}\0${agent ?? ""}`;
 	const cached = views.get(key);
 	if (cached && Date.now() - cached.at < SPOTLIGHT_VIEW_TTL_MS) return cached.json;
-	const json = getSpotlightDashboardStats(range, agent).then(stats => JSON.stringify(stats));
+	const json = buildSpotlightDashboardJson(range, agent);
 	const entry = { at: Date.now(), json };
 	views.set(key, entry);
 	// A failed build is not reused.

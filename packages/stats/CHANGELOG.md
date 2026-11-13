@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The stats dashboard keeps serving its other pages and the Live status while the Spotlight view rebuilds, instead of freezing for the seconds each rebuild after a sync takes
+
 ## [18.20.0] - 2026-11-12
 
 ### Fixed
