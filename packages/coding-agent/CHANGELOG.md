@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `tui.renderMath` (default off, requires `terminal.showImages`): render display LaTeX in place on Kitty, iTerm2, and Sixel and fitting one-row inline formulas on proven Kitty-placeholder clients, with Unicode fallback and live transcript redraws. Math retains up to 512 placements independently of `tui.maxInlineImages`; image visibility changes avoid transcript rebuilds when math is off. Original source, thinking, and native TSP output remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
+
+### Changed
+
+- Isolated optional MathJax typesetting from interactive startup and the UI thread in a demand-started CLI worker. Math disable and mode teardown terminate pending work; image hiding retains the worker, and bounded failures retain Unicode fallback with one later-demand recovery attempt ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
@@ -20,11 +28,6 @@
 
 ### Added
 
-- Added opt-in `tui.renderMath` (default off, requires `terminal.showImages`): render display LaTeX in place on Kitty, iTerm2, and Sixel and fitting one-row inline formulas on proven Kitty-placeholder clients, with Unicode fallback and live transcript redraws. Math retains up to 512 placements independently of `tui.maxInlineImages`; image visibility changes avoid transcript rebuilds when math is off. Original source, thinking, and native TSP output remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
-
-### Changed
-
-- Isolated optional MathJax typesetting from interactive startup and the UI thread in a demand-started CLI worker. Math disable and mode teardown terminate pending work; image hiding retains the worker, and bounded failures retain Unicode fallback with one later-demand recovery attempt ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
 - Added the Gemini Decision 1 judge (`google/gemini-decision-1`) for the `judge` role, and `models.yml` accepts the `google-decisions` API ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
 - Added `find.verifyModel`, a model selector whose judge answers only `find`'s passage verification while filename and sketch ranking stay on the `judge` role ([#19006](https://github.com/can1357/oh-my-pi/pull/19006) by [@alphastorm](https://github.com/alphastorm))
