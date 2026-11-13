@@ -522,22 +522,25 @@ describe("GuestClient frame apply", () => {
 		});
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			const e1 = messageEntry("e1", { role: "user", content: "hi", timestamp: 1 });
+			const e1 = messageEntry("e1", { role: "user", content: "one", timestamp: 1 });
+			const e2 = messageEntry("e2", { role: "user", content: "two", timestamp: 2 });
 			const client = liveClient([e1]);
-			client.applyFrameForTest({ t: "event", event: { type: "agent_start" } });
 			const hellos = () => sent.filter(frame => frame.t === "hello").length;
 			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
-			expect(hellos()).toBe(1);
-			// Throws once the snapshot is primed, before the state from before the shed is reset.
-			client.applyFrameForTest({ ...welcomeFrame(1), agents: undefined } as unknown as HostFrame);
-			client.applyFrameForTest(snapshotChunk([e1]));
+			// An earlier welcome is still loading its snapshot when the next one arrives and throws
+			// once the snapshot is primed, before the state from before it is reset.
+			client.applyFrameForTest(welcomeFrame(2));
+			client.applyFrameForTest(snapshotChunk([e1], false));
+			client.applyFrameForTest({ ...welcomeFrame(2), agents: undefined } as unknown as HostFrame);
+			client.applyFrameForTest(snapshotChunk([e1, e2]));
 			expect(client.getSnapshot().phase).toBe("reconnecting");
 			vi.advanceTimersByTime(30_000);
-			expect(hellos()).toBe(2);
-			client.applyFrameForTest(welcomeFrame(1));
-			client.applyFrameForTest(snapshotChunk([e1]));
+			expect(client.getSnapshot().phase).toBe("reconnecting");
+			expect(hellos()).toBe(3);
+			client.applyFrameForTest(welcomeFrame(2));
+			client.applyFrameForTest(snapshotChunk([e1, e2]));
 			expect(client.getSnapshot().phase).toBe("live");
-			expect(client.getSnapshot().working).toBe(false);
+			expect(client.getSnapshot().entries).toEqual([e1, e2]);
 			client.close();
 		} finally {
 			warnSpy.mockRestore();
