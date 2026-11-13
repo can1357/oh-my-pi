@@ -17,6 +17,7 @@
 - Fixed prompt-history search returning unrelated prompts for punctuated queries such as `a/b` ([#18762](https://github.com/can1357/oh-my-pi/issues/18762)) ([#19111](https://github.com/can1357/oh-my-pi/pull/19111) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 - `omp zsh` on Windows: `zsh/files` (`mkdir`, `rmdir`, `rm`, `mv`, `ln`) and `zstat` work on real directories instead of failing with "the filename, directory name, or volume label syntax is incorrect" ([#19146](https://github.com/can1357/oh-my-pi/pull/19146) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - `omp zsh` on Windows: after a failed `zsh/system` call, `syserror` prints the POSIX error (`Bad file descriptor`, `Illegal seek`) instead of a Windows message such as "The operation completed successfully." ([#19107](https://github.com/can1357/oh-my-pi/pull/19107) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- On Windows, `find -exec`, `xargs` and `env` no longer fail with `not found` (status 127) when running an external program such as `sh` ([#19108](https://github.com/can1357/oh-my-pi/pull/19108) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 
 ## [18.20.0] - 2026-11-12
 

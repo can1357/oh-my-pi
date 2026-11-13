@@ -378,7 +378,7 @@ impl Lookup {
 		let cwd = command.dir().unwrap_or(&self.cwd);
 		if has_separator(name) {
 			return match executable(&cwd.join(name)) {
-				Some(true) => Ok(Program::Path(cwd.join(name))),
+				Some(true) => Ok(Program::Path(runnable(cwd.join(name)))),
 				Some(false) => Err(io::ErrorKind::PermissionDenied.into()),
 				None => Err(io::ErrorKind::NotFound.into()),
 			};
@@ -400,7 +400,7 @@ impl Lookup {
 		for dir in std::env::split_paths(OsStr::new(path)) {
 			let candidate = cwd.join(dir).join(name);
 			match executable(&candidate) {
-				Some(true) => return Ok(Program::Path(candidate)),
+				Some(true) => return Ok(Program::Path(runnable(candidate))),
 				Some(false) => denied = true,
 				None => {},
 			}
@@ -442,6 +442,22 @@ fn executable(path: &Path) -> Option<bool> {
 #[cfg(not(unix))]
 fn executable(path: &Path) -> Option<bool> {
 	(path.is_file() || path.with_extension("exe").is_file()).then_some(true)
+}
+
+/// The file `executable` accepted at `path`: off Unix, `path` itself or its
+/// `.exe` sibling, as that is the one that runs.
+#[cfg(unix)]
+fn runnable(path: PathBuf) -> PathBuf {
+	path
+}
+
+#[cfg(not(unix))]
+fn runnable(path: PathBuf) -> PathBuf {
+	if path.is_file() {
+		path
+	} else {
+		path.with_extension("exe")
+	}
 }
 
 #[cfg(test)]
