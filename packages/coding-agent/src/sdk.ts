@@ -268,6 +268,7 @@ import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
 import {
 	type BuildSystemPromptResult,
+	type LoadContextFilesOptions,
 	buildSystemPrompt as buildSystemPromptInternal,
 	cfgSystemPromptInputs,
 	composeAppendPrompt,
@@ -378,7 +379,7 @@ import {
 	cfgToolsXdevInlineDevices,
 	cfgSessionToolGates,
 } from "./tools/settings";
-import { cfgToolsFormat } from "./session/context-settings";
+import { cfgContextStopAtRepoRoot, cfgToolsFormat } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
 import { cfgBrowserEnabled } from "./tools/browser/settings";
 import {
@@ -1378,14 +1379,18 @@ export async function discoverSkills(
 
 /**
  * Discover context files (AGENTS.md) walking up from cwd.
+ * Pass the resolved session boundary in options; unset keeps the walk-to-home behavior.
  * Returns files sorted by depth (farther from cwd first, so closer files appear last/more prominent).
  */
 export async function discoverContextFiles(
 	cwd?: string,
-	_agentDir?: string,
+	agentDir?: string,
 	disabledExtensions?: string[],
+	options: Omit<LoadContextFilesOptions, "cwd" | "agentDir" | "disabledExtensions"> = {},
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	return await loadContextFilesInternal({
+		...options,
+		agentDir,
 		cwd: cwd ?? getProjectDir(),
 		disabledExtensions,
 	});
@@ -1435,6 +1440,8 @@ export async function discoverMCPServers(cwd?: string): Promise<MCPToolsLoadResu
 // System Prompt
 
 export interface BuildSystemPromptOptions {
+	/** Inputs for context-file discovery when contextFiles are not provided. */
+	contextDiscovery?: Omit<LoadContextFilesOptions, "cwd">;
 	tools?: Tool[];
 	skills?: Skill[];
 	contextFiles?: Array<{ path: string; content: string }>;
@@ -2100,7 +2107,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 	const contextFilesPromise = pinnedContextFiles
 		? Promise.resolve(pinnedContextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir).then(contextFileFilter);
+		: logger
+				.time(
+					"discoverContextFiles",
+					discoverContextFiles,
+					cwd,
+					agentDir,
+					[...cfgDisabledExtensions.get(settings)],
+					{ stopAtRepoRoot: cfgContextStopAtRepoRoot.get(settings) },
+				)
+				.then(contextFileFilter);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
@@ -4269,9 +4285,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const [repoContext, refreshedContextFiles, ruleItems] = await Promise.all([
 					logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd),
 					pinnedContextFiles === undefined
-						? logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-								...cfgDisabledExtensions.get(settings),
-							])
+						? logger.time(
+								"discoverContextFiles",
+								discoverContextFiles,
+								promptCwd,
+								agentDir,
+								[...cfgDisabledExtensions.get(settings)],
+								{
+									stopAtRepoRoot: cfgContextStopAtRepoRoot.get(settings),
+									extensionRoots: buildSessionExtensionRoots(),
+								},
+							)
 						: undefined,
 					options.rules ??
 						logger
@@ -4416,6 +4440,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
+				contextDiscovery: {
+					agentDir,
+					stopAtRepoRoot: cfgContextStopAtRepoRoot.get(settings),
+					disabledExtensions: [...cfgDisabledExtensions.get(settings)],
+					extensionRoots: buildSessionExtensionRoots(),
+				},
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
 				excludeAgentsMd,

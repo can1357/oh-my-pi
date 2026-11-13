@@ -72,6 +72,18 @@ export const cfgContextFilesExtra = register({
 // Context
 // ────────────────────────────────────────────────────────────────────────
 
+export const cfgContextStopAtRepoRoot = register({
+	id: "context.stopAtRepoRoot",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "General",
+		label: "Stop Context at Repo Root",
+		description: "Stop ancestor context-file discovery at the git repository root instead of continuing to home",
+	},
+});
+
 // Context promotion
 export const cfgContextPromotionEnabled = register({
 	id: "contextPromotion.enabled",

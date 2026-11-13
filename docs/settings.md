@@ -793,6 +793,9 @@ Compaction headroom is separate from this opt-in. With the default 15% reserve, 
 ```yaml
 extendedContext: false
 
+context:
+  stopAtRepoRoot: false
+
 contextPromotion:
    enabled: false
 
@@ -809,6 +812,7 @@ memory:
 | Key                                      | Type    | Default                                     | Notes                                                                                                                                                                                                                                           |
 | ---------------------------------------- | ------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `extendedContext`                        | boolean | `false`                                     | Opt in to larger model windows; `/extended-context on`, `off`, or `status`.                                                                                                                                                                     |
+| `context.stopAtRepoRoot` | boolean | `false` | Stop standalone context-file discovery at the git repository root instead of walking through enclosing workspace directories toward home. |
 | `workspace.additionalDirectories`        | array   | `[]`                                        | Additional workspace roots added to every session; relative paths resolve from cwd. `/add-dir` and `/remove-dir` manage them live.                                                                                                              |
 | `contextPromotion.enabled`               | boolean | `false`                                     | Promote to the active model's explicit `contextPromotionTarget` on context overflow. Does not affect `retry.fallbackChains`; `retry.modelFallback` controls those switches.                                                                     |
 | `compaction.enabled`                     | boolean | `true`                                      | Automatic conversation compaction.                                                                                                                                                                                                              |
