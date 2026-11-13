@@ -510,6 +510,37 @@ time on a client instance. If a host needs concurrent orchestration, use
 separate `RpcClient` instances instead of overlapping lifecycle waiters on one
 session.
 
+## Stopping and Restarting
+
+`stop()` closes the server's stdin, sends SIGTERM and then SIGKILL to the
+server's process group, and returns `True` only when its last check of the group
+finds positive evidence that no member, process or thread, is alive. Anything it
+cannot read or prove counts as alive: `stop()` then returns `False`, keeps the
+survivor in `survivor_pids`, and a later `reap()` or `stop()` tries again. On
+Linux, after SIGKILL, `/proc` can show a member that is dead but not yet reaped
+as dead; elsewhere such a member counts as alive until it is reaped. While such
+a member keeps the group id in use, another process of the server's session can
+join the group; one that joins after the last check is not seen. `stop()` trusts
+`/proc` as the kernel presents it: a process with CAP_SYS_ADMIN that forges
+`/proc` (for example with mounts over it) is outside what it defends against.
+
+A stopped client can be started again. A call acts only on the child it began
+for: once that child is stopped or replaced, the call raises
+`RpcProcessExitError` (or, for a dialog answer or a host tool's reply, is
+dropped) instead of reaching the new child. While the client is stopped, calls
+raise `RpcError("RPC client is not started")`.
+
+When the server exits on its own, the client closes: pending requests, dialog
+waits and lifecycle waits raise `RpcProcessExitError` with its exit code. Every
+frame the server wrote before it exited is handled first, however long your
+listeners take: a reply still answers its request, and a dialog comes out of
+`next_ui_request()` before the exit error. This also holds when a process
+outside the server's group (a daemon it started) keeps the server's stdout
+open: the client then closes once those frames are handled, 1 s after the exit
+at the earliest. On POSIX a write to a server that has exited raises
+`RpcProcessExitError` at once, also one stuck on a stdin that another process
+holds and never reads.
+
 ## Text Helpers
 
 `assistant_text()` and `message_text()` now return visible text blocks only.

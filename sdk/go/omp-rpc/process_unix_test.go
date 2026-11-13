@@ -7,22 +7,44 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// processGone reports whether pid no longer exists, waiting up to timeout.
+// processGone reports whether pid is dead, waiting up to timeout. Dead means
+// kill(pid, 0) fails with ESRCH or, on Linux, /proc proves the process and
+// each of its threads dead (a zombie its parent has not reaped yet). A /proc
+// read that fails for any other reason proves nothing, so it keeps waiting.
 func processGone(pid int, timeout time.Duration) bool {
 	for deadline := time.Now().Add(timeout); ; time.Sleep(20 * time.Millisecond) {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) || procProvesDead(pid) {
 			return true
 		}
 		if time.Now().After(deadline) {
 			return false
 		}
 	}
+}
+
+// procProvesDead reports whether /proc proves pid dead: its entry is gone, or
+// it and every one of its threads are in a dead state. Off Linux it is false.
+func procProvesDead(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	name := strconv.Itoa(pid)
+	state, _, err := readProcStat(procFS, name)
+	if errors.Is(err, errProcVanished) {
+		return true
+	}
+	if err != nil || !procDead(state) {
+		return false
+	}
+	dead, err := procThreadsDead(procFS, name)
+	return err == nil && dead
 }
 
 // A server that ignores SIGTERM and leaves a background child: Close escalates

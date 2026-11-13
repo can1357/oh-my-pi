@@ -54,9 +54,9 @@ The client closes on any of these: a fatal transport error, the server closing s
 1. cancel host tool and URI work
 2. close stdin
 3. send SIGTERM to the group
-4. if the leader is still running after one second, send SIGKILL to the group and reap the leader
+4. if the leader is still running after one second, or any member of the group remains, send SIGKILL to the group and reap the leader
 
-`close()` returns an error when it cannot confirm that the leader was reaped and the group is empty. Off Unix only the leader is killed. `pid()` returns the server's pid, which is also the process group id.
+`close()` returns an error unless it confirms that the leader was reaped and its last check of the group finds positive evidence that no member, process or thread, is alive. Anything it cannot read or prove counts as alive. On Linux, after SIGKILL, `/proc` can show a member that is dead but not yet reaped as dead; elsewhere such a member counts as alive until it is reaped. While such a member keeps the group id in use, another process of the same session can join the group; one that joins after the last check is not seen. `close()` trusts `/proc` as the kernel presents it: a process with CAP_SYS_ADMIN that forges `/proc` (for example with mounts over it) is outside what it defends against. Off Unix only the leader is killed. `pid()` returns the server's pid, which is also the process group id.
 
 The bash tool runs each command in its own process group, so jobs that command leaves running in the background are outside the server's group and survive teardown.
 
