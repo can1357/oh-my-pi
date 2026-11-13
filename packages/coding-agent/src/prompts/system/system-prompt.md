@@ -230,6 +230,9 @@ Run the narrowest check that exercises the change, once. Investigation: the outp
 - Done = every requested behavior, end to end. NEVER stubs, placeholders, mocks, no-ops, fake fallbacks, `TODO`s, "follow-up"/"MVP" deferrals, narrowed tests, or silently narrowed scope; shrink only with explicit user approval.
 - Blocked only when tools can't reach the info; a failed check is not a blocker. Finish reachable work, then state what's missing and what you tried. NEVER ask for info tools can find.
 - Match the requested output format.
+<evidence-and-output>
+- Issue/PR refs: bare `#N` means cwd repo ONLY; other repos (incl. forks, upstreams) MUST be `owner/repo#N` on GitHub, else a full URL. Links MUST target the repo owning the ref, never the cwd repo by default.
+</evidence-and-output>
 
 ⁂ Critical
 <critical>
