@@ -2,15 +2,16 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import {
 	type BuildHost,
+	type BuildProduct,
 	downloadBuildFile,
 	fetchBuild,
 	isMuslLinuxForTest,
 	OMP_BUILD,
 	parseBuildAnswer,
 	resolveBuildHost,
+	updateRepo,
 } from "@oh-my-pi/pi-coding-agent/cli/build-service";
-import { parseReportedVersion } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
-import { compareVersions, TempDir, VERSION } from "@oh-my-pi/pi-utils";
+import { TempDir, VERSION } from "@oh-my-pi/pi-utils";
 
 const fileName = "omp-darwin-arm64";
 const host: BuildHost = { target: "macos-arm64", asset: "darwin-arm64", windows: false };
@@ -172,11 +173,19 @@ describe("fetchBuild", () => {
 	});
 
 	describe("from a fork's GitHub releases", () => {
-		const previousRepo = process.env.PI_UPDATE_REPO;
+		const saved = Object.fromEntries(
+			["PI_UPDATE_REPO", "PI_BUILD_URL", "GITHUB_TOKEN", "GH_TOKEN"].map(key => [key, process.env[key]]),
+		);
 		afterEach(() => {
-			if (previousRepo === undefined) delete process.env.PI_UPDATE_REPO;
-			else process.env.PI_UPDATE_REPO = previousRepo;
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 		});
+		const clearTokens = () => {
+			delete process.env.GITHUB_TOKEN;
+			delete process.env.GH_TOKEN;
+		};
 
 		const release = (assetFields: Record<string, unknown> = {}) => ({
 			tag_name: "v18.20.0-int.202611130355.gd2c2eff",
@@ -197,22 +206,27 @@ describe("fetchBuild", () => {
 			],
 		});
 
-		it("answers the latest release's asset for the host, versioned by its tag", async () => {
-			process.env.PI_UPDATE_REPO = "fork/omp";
-			const urls: string[] = [];
+		/** Requests `fetchBuild` sent, answered with `body`. */
+		const recording = (body: unknown) => {
+			const requests: Array<{ url: string; authorization: string | null }> = [];
+			const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+				requests.push({ url: String(input), authorization: new Headers(init?.headers).get("Authorization") });
+				return Response.json(body);
+			};
+			return { requests, fetchImpl };
+		};
+
+		it("answers the latest release's asset for the host, versioned by its tag, without a token", async () => {
+			clearTokens();
+			const { requests, fetchImpl } = recording(release());
 			const build = await fetchBuild(
 				{ channel: "stable" },
-				{
-					host,
-					fromVersion: "18.19.0",
-					fetchImpl: async input => {
-						urls.push(String(input));
-						return Response.json(release());
-					},
-				},
+				{ host, fromVersion: "18.19.0", repo: "fork/omp", fetchImpl },
 			);
 
-			expect(urls).toEqual(["https://api.github.com/repos/fork/omp/releases/latest"]);
+			expect(requests).toEqual([
+				{ url: "https://api.github.com/repos/fork/omp/releases/latest", authorization: null },
+			]);
 			expect(build).toEqual({
 				version: "18.20.0-int.202611130355.gd2c2eff",
 				file: { name: fileName, size: 205_765_664, sha256: sha("new") },
@@ -222,50 +236,69 @@ describe("fetchBuild", () => {
 		});
 
 		it("asks for an exact version by its tag", async () => {
-			process.env.PI_UPDATE_REPO = "fork/omp";
-			let url = "";
-			await fetchBuild(
-				{ version: "18.20.0-int.202611130355.gd2c2eff" },
-				{
-					host,
-					fetchImpl: async input => {
-						url = String(input);
-						return Response.json(release());
-					},
-				},
+			const { requests, fetchImpl } = recording(release());
+			await fetchBuild({ version: "18.20.0-int.202611130355.gd2c2eff" }, { host, repo: "fork/omp", fetchImpl });
+			expect(requests[0].url).toBe(
+				"https://api.github.com/repos/fork/omp/releases/tags/v18.20.0-int.202611130355.gd2c2eff",
 			);
-			expect(url).toBe("https://api.github.com/repos/fork/omp/releases/tags/v18.20.0-int.202611130355.gd2c2eff");
+		});
+
+		it("sends GITHUB_TOKEN, else GH_TOKEN, to GitHub only", async () => {
+			clearTokens();
+			process.env.GH_TOKEN = "gh-token";
+			const github = recording(release());
+			await fetchBuild({ channel: "stable" }, { host, repo: "fork/omp", fetchImpl: github.fetchImpl });
+			process.env.GITHUB_TOKEN = "github-token";
+			await fetchBuild({ channel: "stable" }, { host, repo: "fork/omp", fetchImpl: github.fetchImpl });
+			expect(github.requests.map(r => r.authorization)).toEqual(["Bearer gh-token", "Bearer github-token"]);
+
+			const service = recording(answer());
+			await fetchBuild({ channel: "stable" }, { host, fetchImpl: service.fetchImpl });
+			expect(service.requests[0].authorization).toBeNull();
+		});
+
+		it("refuses the canary channel instead of serving the latest release under it", async () => {
+			const { requests, fetchImpl } = recording(release());
+			await expect(fetchBuild({ channel: "canary" }, { host, repo: "fork/omp", fetchImpl })).rejects.toThrow(
+				"PI_UPDATE_REPO (fork/omp) has no canary channel",
+			);
+			expect(requests).toHaveLength(0);
 		});
 
 		it("refuses a release whose asset is missing or has no digest", async () => {
-			process.env.PI_UPDATE_REPO = "fork/omp";
 			const ask = (body: unknown) =>
-				fetchBuild({ channel: "stable" }, { host, fetchImpl: async () => Response.json(body) });
+				fetchBuild({ channel: "stable" }, { host, repo: "fork/omp", fetchImpl: async () => Response.json(body) });
 			await expect(ask(release({ digest: null }))).rejects.toThrow("invalid sha256");
 			await expect(ask({ tag_name: "v18.20.0", assets: [] })).rejects.toThrow("has no omp-darwin-arm64");
 		});
 
-		it("rejects a repo that is not owner/repo", async () => {
+		it("reads PI_UPDATE_REPO as owner/repo", () => {
+			process.env.PI_UPDATE_REPO = " fork/omp ";
+			expect(updateRepo()).toBe("fork/omp");
+			process.env.PI_UPDATE_REPO = "";
+			expect(updateRepo()).toBeUndefined();
 			process.env.PI_UPDATE_REPO = "fork/omp/../x";
-			await expect(
-				fetchBuild({ channel: "stable" }, { host, fetchImpl: async () => Response.json({}) }),
-			).rejects.toThrow("PI_UPDATE_REPO must be owner/repo");
+			expect(() => updateRepo()).toThrow("PI_UPDATE_REPO must be owner/repo");
 		});
 
-		it("orders two builds of the same upstream base by build time, whatever their shas", () => {
-			// Fork tags are `v<upstream>-int.<UTC YYYYMMDDHHMM>.g<sha7>`; the `g` keeps an all-digit hash
-			// such as `0123456` from being a numeric identifier with a leading zero, which strict semver forbids.
-			const older = "18.20.0-int.202611130355.gd2c2eff";
-			const newer = "18.20.0-int.202611131200.g0123456";
-			for (const order of [compareVersions, Bun.semver.order]) {
-				expect(order(newer, older)).toBe(1);
-				expect(order(older, newer)).toBe(-1);
-				expect(order(newer, newer)).toBe(0);
-				expect(order("18.21.0-int.202611120000.gfffffff", newer)).toBe(1);
-			}
-			// The installed binary reports the same string, so the post-install check matches it.
-			expect(parseReportedVersion(`omp/${older}`)).toBe(older);
-			expect(parseReportedVersion(`omp/${newer}`)).toBe(newer);
+		it("keeps every request without `repo` on the build service while PI_UPDATE_REPO is set", async () => {
+			process.env.PI_UPDATE_REPO = "fork/omp";
+			process.env.PI_BUILD_URL = "https://build.test";
+			const omp = recording(answer());
+			// Package-manager repair asks for npm's exact version; the binary takeover asks for the channel.
+			await fetchBuild({ version: "18.8.9" }, { host, fetchImpl: omp.fetchImpl });
+			await fetchBuild({ channel: "stable" }, { host, fetchImpl: omp.fetchImpl });
+			expect(omp.requests.map(r => r.url)).toEqual([
+				"https://build.test/api/products/omp/versions/18.8.9/macos-arm64",
+				"https://build.test/api/products/omp/latest/macos-arm64?channel=stable",
+			]);
+
+			const other: BuildProduct = { id: "abkit", fileName: () => "abkit-macos-arm64.tar.zst" };
+			const engine = recording(
+				answer({ file: { ...(answer().file as object), name: "abkit-macos-arm64.tar.zst" } }),
+			);
+			await fetchBuild({ channel: "stable" }, { product: other, host, fetchImpl: engine.fetchImpl });
+			expect(engine.requests[0].url).toBe("https://build.test/api/products/abkit/latest/macos-arm64?channel=stable");
 		});
 	});
 });

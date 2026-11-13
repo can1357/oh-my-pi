@@ -5,6 +5,7 @@ import { embeddedAddonFiles, type NativeEmbedTarget } from "../../natives/script
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
+import { parseUpdateRepo } from "../src/cli/update-repo";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
 export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze([
@@ -46,6 +47,8 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY = "1";
 	}
 	try {
+		// Checked here so a typo fails the build instead of every update check of the shipped binary.
+		const updateRepo = parseUpdateRepo(Bun.env.PI_UPDATE_REPO);
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
@@ -55,7 +58,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 				// A fork's release build names its GitHub repo as the update source; unset keeps the build service.
-				...(Bun.env.PI_UPDATE_REPO ? { "process.env.PI_UPDATE_REPO": JSON.stringify(Bun.env.PI_UPDATE_REPO) } : {}),
+				...(updateRepo ? { "process.env.PI_UPDATE_REPO": JSON.stringify(updateRepo) } : {}),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
 			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).

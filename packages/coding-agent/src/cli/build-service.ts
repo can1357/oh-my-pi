@@ -29,8 +29,9 @@
  * for the target (on the channel, or at the version).
  *
  * A fork that publishes its own GitHub releases sets `PI_UPDATE_REPO`
- * ({@link updateRepo}): omp's own binary then comes from that repo's latest
- * release ({@link parseGithubRelease}) instead, without patches.
+ * ({@link updateRepo}): `omp update` on a binary install and the compiled
+ * startup check pass it as `repo`, so omp's own binary comes from that repo's
+ * latest release ({@link parseGithubRelease}) instead, without patches.
  */
 import * as fs from "node:fs";
 import { Transform } from "node:stream";
@@ -43,6 +44,7 @@ import {
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
+import { parseUpdateRepo } from "./update-repo";
 
 export type UpdateChannel = "stable" | "canary";
 
@@ -262,15 +264,12 @@ export function parseBuildAnswer(
 }
 
 /**
- * GitHub `owner/repo` whose releases replace the build service as the source of
- * omp's own binary: `PI_UPDATE_REPO`, which a fork's compile bakes in, else
+ * GitHub `owner/repo` whose releases replace the build service for omp's
+ * binary updates: `PI_UPDATE_REPO`, which a fork's compile bakes in, else
  * undefined. Read as `process.env` so the compile's `define` can replace it.
  */
 export function updateRepo(): string | undefined {
-	const repo = (process.env.PI_UPDATE_REPO ?? "").trim();
-	if (!repo) return undefined;
-	if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`PI_UPDATE_REPO must be owner/repo, not ${repo}`);
-	return repo;
+	return parseUpdateRepo(process.env.PI_UPDATE_REPO);
 }
 
 /**
@@ -304,18 +303,28 @@ export interface FetchBuildOptions {
 	fetchImpl?: Fetch;
 	/** Defaults to {@link currentBuildHost}. */
 	host?: BuildHost;
+	/**
+	 * GitHub `owner/repo` to read the build from its releases ({@link parseGithubRelease})
+	 * instead of the build service. Only omp's binary-update paths pass {@link updateRepo}.
+	 */
+	repo?: string;
 }
 
 /** Ask the build service for a build of this host's target ({@link BuildSelector}). */
 export async function fetchBuild(selector: BuildSelector, options: FetchBuildOptions = {}): Promise<BuildAnswer> {
 	const product = options.product ?? OMP_BUILD;
 	const host = options.host ?? (await currentBuildHost());
-	const repo = product === OMP_BUILD ? updateRepo() : undefined;
+	const repo = options.repo;
+	if (repo && "channel" in selector && selector.channel === "canary") {
+		throw new Error(`PI_UPDATE_REPO (${repo}) has no canary channel. Run \`${APP_NAME} update --stable\`.`);
+	}
 	const origin = repo ? `https://github.com/${repo}` : buildServiceUrl();
 	const timeoutMs = options.timeoutMs ?? BUILD_CHECK_TIMEOUT_MS;
+	// Only GitHub gets a token, to lift its 60 requests/hour anonymous API limit.
+	const token = repo ? $env.GITHUB_TOKEN || $env.GH_TOKEN : undefined;
+	const githubAuth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 	let url: URL;
 	if (repo) {
-		// shortcut: GitHub has no channels, so canary also gets the latest release; add a prerelease lookup if a fork ships canaries.
 		const release = "channel" in selector ? "latest" : `tags/v${encodeURIComponent(selector.version)}`;
 		url = new URL(`https://api.github.com/repos/${repo}/releases/${release}`);
 	} else {
@@ -343,7 +352,7 @@ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOpt
 	let body: unknown;
 	try {
 		response = await (options.fetchImpl ?? fetch)(url, {
-			headers: { Accept: "application/json", "User-Agent": `${APP_NAME}/${VERSION}` },
+			headers: { Accept: "application/json", "User-Agent": `${APP_NAME}/${VERSION}`, ...githubAuth },
 			signal: withTimeoutSignal(timeoutMs),
 		});
 		try {

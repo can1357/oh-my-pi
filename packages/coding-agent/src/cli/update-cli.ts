@@ -39,6 +39,7 @@ import {
 	type Fetch,
 	fetchBuild,
 	type UpdateChannel,
+	updateRepo,
 } from "./build-service";
 import {
 	DEFAULT_NPM_REGISTRY,
@@ -2185,7 +2186,9 @@ function announceOffer(version: string, request: UpdateRequest): boolean {
 /**
  * Update a standalone binary install from the build service: the newest build
  * on the channel, asked with the installed version so the answer can carry a
- * patch from it. npm is never consulted.
+ * patch from it. A fork's `PI_UPDATE_REPO` replaces the service here (and in
+ * the compiled startup check) only; package-manager installs keep the service.
+ * npm is never consulted.
  */
 async function runBinaryUpdate(
 	target: BinaryUpdateTarget | undefined,
@@ -2195,7 +2198,7 @@ async function runBinaryUpdate(
 	let build: BuildAnswer;
 	try {
 		const fromVersion = target ? await installedBuildVersion(target.path) : VERSION;
-		build = await fetchBuild({ channel: request.channel }, { fromVersion });
+		build = await fetchBuild({ channel: request.channel }, { fromVersion, repo: updateRepo() });
 	} catch (err) {
 		throw updateError("Failed to check for updates", err);
 	}
