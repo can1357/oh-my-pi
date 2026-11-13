@@ -794,6 +794,27 @@ describe("terminal launch dispatcher", () => {
 			expect(calls).toHaveLength(1);
 		});
 
+		it("accepts a lowercase alphanumeric headless terminal address", async () => {
+			const { launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				{ stdout: '{"address":"t12q"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd });
+			expect(result.id).toBe("t12q");
+			expect(result.warning).toContain("hc attach t12q");
+		});
+
+		it("rejects an option-like terminal address", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				{ stdout: '{"address":"--help"}', exitCode: 0 },
+			]);
+			await expect(launch({ multiplexer: "herdr-core", placement: "pane", command, cwd })).rejects.toThrow(
+				"invalid terminal address",
+			);
+			expect(calls).toHaveLength(2);
+		});
+
 		it("rejects an unsafe terminal address without attempting another launch", async () => {
 			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
 				{ stdout: '{"spaces":[]}', exitCode: 0 },

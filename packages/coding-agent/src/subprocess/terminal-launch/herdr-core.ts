@@ -163,7 +163,7 @@ const launchHerdrCore: TerminalLaunchBackend<"herdr-core", typeof capabilities> 
 		const output = parseJson(request, "core run", await runStep(request, "core run", argv, request.cwd, runCli));
 		const id = nestedString(output, "address");
 		if (!id) throw launchError(request, "core run", "Herdr Core run returned no terminal address.");
-		if (!/^t[0-9]+$/.test(id))
+		if (!/^t[0-9a-z]+$/.test(id))
 			throw launchError(
 				request,
 				"core run",
