@@ -287,31 +287,37 @@ impl MacInput {
 				})
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-				skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
-					control::wait(first_key_settle(activated))?;
-					element_keys(pid, element, || {
-						if remote.is_some() {
-							// A remote screen may read modifiers from the keyboard
-							// state, which only bare key
-							// transitions at the HID tap move. They
-							// post globally, so every press first checks that the
-							// target still has focus.
-							post_bare_keys(&bare_transitions(&keys), gap, || {
-								skylight::require_front_window(pid, wid)
-							})
-						} else {
-							// Stop rather than typing into a newly user-selected app
-							// or window.
-							type_keys(
-								&self.source,
-								&keys,
-								gap,
-								|| skylight::require_front_window(pid, wid),
-								post_global,
-							)
-						}
-					})
-				})
+				skylight::with_foreground(
+					pid,
+					wid,
+					returns_focus(mode),
+					skylight::ForegroundInput::Keys,
+					|activated| {
+						control::wait(first_key_settle(activated))?;
+						element_keys(pid, element, || {
+							if remote.is_some() {
+								// A remote screen may read modifiers from the keyboard
+								// state, which only bare key
+								// transitions at the HID tap move. They
+								// post globally, so every press first checks that the
+								// target still has focus.
+								post_bare_keys(&bare_transitions(&keys), gap, || {
+									skylight::require_front_window(pid, wid)
+								})
+							} else {
+								// Stop rather than typing into a newly user-selected
+								// app or window.
+								type_keys(
+									&self.source,
+									&keys,
+									gap,
+									|| skylight::require_front_window(pid, wid),
+									post_global,
+								)
+							}
+						})
+					},
+				)
 			},
 		}
 	}
@@ -369,22 +375,28 @@ impl MacInput {
 				Ok(delivery)
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-				skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
-					control::wait(first_key_settle(activated))?;
-					element_keys(pid, element, || {
-						let chord = chord_keys(window, keys, remote, layout_strokes)?;
-						if remote.is_some() {
-							// As for typed text: a remote screen may read modifiers
-							// from the keyboard state, which only
-							// bare transitions move.
-							press_bare_chord(&chord, gap, || skylight::require_front_window(pid, wid))
-						} else {
-							press_chord(&self.source, &chord, gap, |event| {
-								post_takeover_key(pid, wid, event)
-							})
-						}
-					})
-				})
+				skylight::with_foreground(
+					pid,
+					wid,
+					returns_focus(mode),
+					skylight::ForegroundInput::Keys,
+					|activated| {
+						control::wait(first_key_settle(activated))?;
+						element_keys(pid, element, || {
+							let chord = chord_keys(window, keys, remote, layout_strokes)?;
+							if remote.is_some() {
+								// As for typed text: a remote screen may read modifiers
+								// from the keyboard state, which only
+								// bare transitions move.
+								press_bare_chord(&chord, gap, || skylight::require_front_window(pid, wid))
+							} else {
+								press_chord(&self.source, &chord, gap, |event| {
+									post_takeover_key(pid, wid, event)
+								})
+							}
+						})
+					},
+				)
 			},
 		}
 	}
@@ -448,27 +460,33 @@ impl MacInput {
 						)
 					},
 					DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-						skylight::with_foreground(pid, wid, returns_focus(mode), |activated| {
-							control::wait(first_key_settle(activated))?;
-							let held = chord_keys(&window, keys, remote, layout_strokes)?;
-							let body = || control::wait(duration);
-							if remote.is_some() {
-								hold_bare_keys(
-									&held,
-									gap,
-									|| skylight::require_front_window(pid, wid),
-									body,
-								)
-							} else {
-								hold_presses(
-									&self.source,
-									&held,
-									gap,
-									|event| post_takeover_key(pid, wid, event),
-									body,
-								)
-							}
-						})
+						skylight::with_foreground(
+							pid,
+							wid,
+							returns_focus(mode),
+							skylight::ForegroundInput::Keys,
+							|activated| {
+								control::wait(first_key_settle(activated))?;
+								let held = chord_keys(&window, keys, remote, layout_strokes)?;
+								let body = || control::wait(duration);
+								if remote.is_some() {
+									hold_bare_keys(
+										&held,
+										gap,
+										|| skylight::require_front_window(pid, wid),
+										body,
+									)
+								} else {
+									hold_presses(
+										&self.source,
+										&held,
+										gap,
+										|event| post_takeover_key(pid, wid, event),
+										body,
+									)
+								}
+							},
+						)
 					},
 				}
 			},
@@ -4064,7 +4082,7 @@ fn foreground_pointer(
 		ax::open_menu::CONTROL_MENU_TIMEOUT
 	};
 	preserving_cursor(source, || {
-		skylight::with_foreground(pid, wid, return_focus, |_| {
+		skylight::with_foreground(pid, wid, return_focus, skylight::ForegroundInput::Pointer, |_| {
 			let choices = control::user_choices();
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
@@ -4140,15 +4158,19 @@ fn uncover(
 		let mut first = None;
 		for (x, y) in points.into_iter().flatten() {
 			control::check()?;
-			let owner = ax::point_owner(x, y).ok_or_else(|| {
+			let (owner, element) = ax::point_owner(x, y).ok_or_else(|| {
 				DesktopError::input_failed(format!(
 					"cannot determine which window owns takeover point ({x}, {y}); no input was sent"
 				))
 			})?;
 			if owner.window.is_none() {
-				return Err(DesktopError::input_failed(
-					"takeover point has no identifiable native window; no input was sent",
-				));
+				return Err(DesktopError::input_failed(unowned_point(
+					owner.pid,
+					ax::listed_window_id(owner.pid, &element),
+					pid,
+					wid,
+					skylight::window_parent,
+				)));
 			}
 			if covers(&owner, pid, wid) && first.is_none() {
 				first = Some(owner);
@@ -4181,6 +4203,28 @@ fn uncover(
 			},
 			Some(_) => control::wait(Duration::from_millis(20))?,
 		}
+	}
+}
+
+/// The refusal for a takeover point whose surface, of process `owner`, AX
+/// places in no window. When the window that lists it (`listed`) is attached
+/// to the target, as a suggestion list is to the window it drops from, the
+/// refusal names the route that reaches it.
+fn unowned_point(
+	owner: libc::pid_t,
+	listed: Option<u32>,
+	pid: libc::pid_t,
+	wid: u32,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> String {
+	match listed
+		.filter(|&listed| owner == pid && attached_under(listed, parent_of, |parent| parent == wid))
+	{
+		Some(listed) => format!(
+			"takeover point is on window {listed}, which is attached to window {wid}; no input was \
+			 sent: a click without takeover reaches it in the background"
+		),
+		None => "takeover point has no identifiable native window; no input was sent".to_owned(),
 	}
 }
 
@@ -7010,6 +7054,22 @@ mod tests {
 		assert!(covers(&owner(7, None), 7, 42));
 		assert!(covers(&owner(8, Some(42)), 7, 42));
 		assert!(covers(&owner(8, None), 7, 42));
+	}
+
+	#[test]
+	fn a_takeover_point_on_an_attached_suggestion_list_names_the_background_route() {
+		// Safari's autofill list, window 62, hangs off its page window 46.
+		let parents = |wid| (wid == 62).then_some(46);
+		assert_eq!(
+			unowned_point(7, Some(62), 7, 46, parents),
+			"takeover point is on window 62, which is attached to window 46; no input was sent: a \
+			 click without takeover reaches it in the background"
+		);
+		let unowned = "takeover point has no identifiable native window; no input was sent";
+		// Another process's window, one attached elsewhere, or nothing listed.
+		assert_eq!(unowned_point(8, Some(62), 7, 46, parents), unowned);
+		assert_eq!(unowned_point(7, Some(62), 7, 50, parents), unowned);
+		assert_eq!(unowned_point(7, None, 7, 46, parents), unowned);
 	}
 
 	#[test]
