@@ -61,7 +61,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 				const formatted = formatMemories(
 					results.map(item =>
 						item.kind === "memory"
-							? { text: `${item.content} (id: ${item.id})` }
+							? { text: `${item.content} (id: ${item.id})`, type: item.inferred ? "inferred" : undefined }
 							: { text: item.content, type: "document chunk" },
 					),
 				);

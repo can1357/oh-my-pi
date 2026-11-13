@@ -21,6 +21,8 @@ import {
 	type SupermemoryDocument,
 	type SupermemoryForgetResult,
 	SupermemoryHttpError,
+	type SupermemoryMemory,
+	type SupermemoryMemoryMatch,
 	type SupermemorySearchItem,
 } from "./client";
 import type { ConfiguredSupermemoryConfig } from "./config";
@@ -29,6 +31,8 @@ import type { ConfiguredSupermemoryConfig } from "./config";
 export const SUPERMEMORY_NOTICE_SOURCE = "Supermemory";
 
 const MAX_RECALL_QUERY_CHARS = 1_000;
+/** Semantic forget queries are limited to 2,000 chars server-side. */
+const MAX_FORGET_QUERY_CHARS = 2_000;
 const MAX_RECALL_ITEM_CHARS = 1_000;
 /** Budget for the escaped lines of one recall block, split evenly between profile and search results. */
 const MAX_RECALL_CHARS = 8_000;
@@ -77,9 +81,9 @@ interface SettledHistory {
 	transcriptId: string;
 }
 
-/** A write through a state that was disposed (e.g. a subagent's alias after a settings change). */
-function closedError(): Error {
-	return new Error("Supermemory state is closed after a settings change; memory NOT stored. Restart the subagent.");
+/** A request through a state that was disposed (e.g. a subagent's alias after a settings change). */
+function closedError(outcome = "memory NOT stored"): Error {
+	return new Error(`Supermemory state is closed after a settings change; ${outcome}. Restart the subagent.`);
 }
 
 /**
@@ -146,6 +150,8 @@ export interface SupermemorySessionStateApi {
 		id?: string,
 	): Promise<SupermemoryDocument>;
 	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult>;
+	previewForget(query: string, signal?: AbortSignal): Promise<SupermemoryMemoryMatch[]>;
+	getMemory(id: string, signal?: AbortSignal): Promise<SupermemoryMemory>;
 }
 
 /** Config, client and outbox a primary state owns. */
@@ -155,12 +161,18 @@ interface SupermemoryOwnResources {
 	outbox: MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>;
 }
 
+/** One recall-block bullet: `text` is cut to the item limit, `note` (id, marker) is kept whole after it. */
+interface RecallLine {
+	text: string;
+	note: string;
+}
+
 /** Escaped bullet lines for `items` within `budget` chars; an item that does not fit is skipped, not the rest. */
-function renderLines(items: readonly string[], budget: number): string {
+function renderLines(items: readonly RecallLine[], budget: number): string {
 	const lines: string[] = [];
 	let remaining = budget;
 	for (const item of items) {
-		const line = `- ${escapeXmlText(truncate(item.trim(), MAX_RECALL_ITEM_CHARS))}`;
+		const line = `- ${escapeXmlText(truncate(item.text.trim(), MAX_RECALL_ITEM_CHARS) + item.note)}`;
 		if (line.length > remaining) continue;
 		remaining -= line.length + 1;
 		lines.push(line);
@@ -390,6 +402,21 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return this.#track(this.#local().client.forgetMemories(this.namespace, [id], signal));
 	}
 
+	/** `memory_edit preview_forget`: memories a semantic forget of `query` would match; changes nothing, so untracked. */
+	previewForget(query: string, signal?: AbortSignal): Promise<SupermemoryMemoryMatch[]> {
+		if (this.aliasOf) return this.aliasOf.previewForget(query, signal);
+		if (this.#disposed) return Promise.reject(closedError("nothing previewed"));
+		// Redact before cutting: a cut inside a token defeats the redactor.
+		const sent = this.#redact(query).slice(0, MAX_FORGET_QUERY_CHARS);
+		return this.#local().client.previewForget(this.namespace, sent, signal);
+	}
+
+	/** `memory://<id>`: one memory with its versions, links and source document. */
+	getMemory(id: string, signal?: AbortSignal): Promise<SupermemoryMemory> {
+		if (this.aliasOf) return this.aliasOf.getMemory(id, signal);
+		return this.#local().client.getMemory(this.namespace, id, signal);
+	}
+
 	async search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		if (this.aliasOf) return this.aliasOf.search(query, limit, signal);
 		const config = this.#config;
@@ -445,8 +472,18 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		}
 
 		const half = MAX_RECALL_CHARS / 2;
-		const facts = profile.status === "fulfilled" ? [...profile.value.static, ...profile.value.dynamic] : [];
-		const found = memories.status === "fulfilled" ? memories.value.map(item => item.content) : [];
+		// Synthesized `aggregated_` summaries are no single memory: no id to edit.
+		const facts =
+			profile.status === "fulfilled"
+				? [...profile.value.static, ...profile.value.dynamic].map(fact => ({
+						text: fact.memory,
+						note: fact.id && !fact.id.startsWith("aggregated_") ? ` (id: ${fact.id})` : "",
+					}))
+				: [];
+		const found =
+			memories.status === "fulfilled"
+				? memories.value.map(item => ({ text: item.content, note: item.inferred ? " [inferred]" : "" }))
+				: [];
 		const text = prompt
 			.render(recallTemplate, { profile: renderLines(facts, half), memories: renderLines(found, half) })
 			.trim();

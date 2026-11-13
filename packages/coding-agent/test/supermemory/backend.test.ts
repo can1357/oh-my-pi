@@ -114,7 +114,7 @@ async function start(session: { settings: Settings }, taskDepth = 0) {
 function spyRecall() {
 	const profile = vi
 		.spyOn(SupermemoryClient.prototype, "profile")
-		.mockResolvedValue({ static: ["prefers <tabs>"], dynamic: [] });
+		.mockResolvedValue({ static: [{ memory: "prefers <tabs>" }], dynamic: [] });
 	const search = vi
 		.spyOn(SupermemoryClient.prototype, "search")
 		.mockResolvedValue([{ id: "m1", kind: "memory", content: "uses bun" }]);
@@ -998,13 +998,15 @@ describe("supermemoryBackend", () => {
 	it("a disposed state refuses new saves and edits instead of writing to its old namespace", async () => {
 		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument");
 		const forget = vi.spyOn(SupermemoryClient.prototype, "forgetMemories");
+		const preview = vi.spyOn(SupermemoryClient.prototype, "previewForget");
 		const session = makeSession();
 		await start(session);
 		const state = session.getSupermemorySessionState();
 		await state?.dispose();
 		await expect(state!.save("x", { source: "t" })).rejects.toThrow("memory NOT stored");
 		await expect(state!.forgetMemory("m1")).rejects.toThrow("memory NOT stored");
-		expect([create, forget].map(spy => spy.mock.calls.length)).toEqual([0, 0]);
+		await expect(state!.previewForget("old")).rejects.toThrow("state is closed");
+		expect([create, forget, preview].map(spy => spy.mock.calls.length)).toEqual([0, 0, 0]);
 	});
 
 	it("repeated /memory enqueue tails re-send one open window instead of adding documents", async () => {
@@ -1040,6 +1042,74 @@ describe("supermemoryBackend", () => {
 		expect(output).toContain("- uses bun (id: m1)");
 		expect(output).toContain("- doc text [document chunk]");
 		expect(output).not.toContain("c1");
+	});
+
+	it("first-turn recall shows editable profile ids, none for aggregated summaries, and marks inferred memories", async () => {
+		vi.spyOn(SupermemoryClient.prototype, "profile").mockResolvedValue({
+			static: [{ id: "s1", memory: "works in <design>" }, { memory: "legacy fact" }],
+			dynamic: [{ id: "aggregated_7", memory: "summary of older work" }],
+		});
+		vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue([
+			{ id: "m1", kind: "memory", content: "likes bun", inferred: true },
+			{ id: "m2", kind: "memory", content: "uses biome", inferred: false },
+			{ id: "c1", kind: "chunk", content: "doc text" },
+		]);
+		const session = makeSession();
+		await start(session);
+		const context = (await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined))?.context;
+		const lines = context?.split("\n") ?? [];
+		expect(lines).toContain("- works in &lt;design&gt; (id: s1)");
+		expect(lines).toContain("- legacy fact");
+		expect(lines).toContain("- summary of older work");
+		expect(lines).toContain("- likes bun [inferred]");
+		expect(lines).toContain("- uses biome");
+		expect(lines).toContain("- doc text");
+		expect(context).not.toContain("aggregated_7");
+	});
+
+	it("recall marks inferred memories, never document chunks", async () => {
+		serve([
+			200,
+			{
+				results: [
+					{ id: "m1", memory: "likes bun", isInference: true },
+					{ id: "m2", memory: "uses biome", isInference: false },
+					{ id: "c1", chunk: "doc text", isInference: true },
+				],
+			},
+		]);
+		const { recall } = await startedTools();
+		const output = text(await recall.execute("call", { query: "bun" }));
+		expect(output).toContain("- likes bun (id: m1) [inferred]");
+		expect(output).toContain("- uses biome (id: m2)\n");
+		expect(output).toContain("- doc text [document chunk]");
+		expect(output.match(/\[inferred\]/g)).toHaveLength(1);
+	});
+
+	it("memory_edit preview_forget lists matches from a redacted dry run and forgets nothing", async () => {
+		const requests = serve([
+			200,
+			{ count: 1, matches: [{ id: "m9", memory: "old build on port 9000" }], errors: [] },
+		]);
+		const { edit, tag } = await startedTools();
+		const query = `old build key sm-synthetic-key ${"x".repeat(3_000)}`;
+		const result = await edit.execute("call", { op: "preview_forget", query });
+		const output = text(result);
+		expect(requests).toHaveLength(1);
+		const [request] = requests;
+		expect([request.method, request.url]).toEqual(["DELETE", `http://127.0.0.1:1/ns/${tag}/memories/semantic`]);
+		const body = request.body as { query: string; dryRun: boolean };
+		expect(body.dryRun).toBe(true);
+		expect(body.query.startsWith("old build key [REDACTED] ")).toBe(true);
+		expect(body.query).toHaveLength(2_000);
+		expect(output).toContain("Preview only, nothing was forgotten.");
+		expect(output).toContain("- old build on port 9000 (id: m9)");
+		expect(output).toContain("op `forget`, one call per id");
+		expect(result.details).toEqual({
+			status: "previewed",
+			namespace: tag,
+			matches: [{ id: "m9", memory: "old build on port 9000" }],
+		});
 	});
 
 	it("memory_edit update stores the redacted text as a document first, then forgets the old memory", async () => {

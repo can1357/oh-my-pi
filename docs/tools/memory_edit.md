@@ -1,12 +1,12 @@
 # memory_edit
 
-> Update, forget, or invalidate Mnemopi or Supermemory long-term memories by id.
+> Update, forget, or invalidate Mnemopi or Supermemory long-term memories by id; preview a Supermemory forget by meaning.
 
 ## Source
 
 - Entry: `packages/coding-agent/src/tools/memory-edit.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/memory-edit.md`
-- Backend collaborators: `packages/coding-agent/src/mnemopi/state.ts` (`editScopedMemory(...)`); `packages/coding-agent/src/supermemory/state.ts` (`save(...)`, `forgetMemory(...)`) and `packages/coding-agent/src/supermemory/client.ts` (`addDocument`/`forgetMemories`)
+- Backend collaborators: `packages/coding-agent/src/mnemopi/state.ts` (`editScopedMemory(...)`); `packages/coding-agent/src/supermemory/state.ts` (`save(...)`, `forgetMemory(...)`, `previewForget(...)`) and `packages/coding-agent/src/supermemory/client.ts` (`addDocument`/`forgetMemories`/`previewForget`)
 
 ## Registration / Visibility
 
@@ -18,13 +18,14 @@
 
 ## Inputs
 
-| Field            | Type                                   | Required | Description                                                                                         |
-| ---------------- | -------------------------------------- | -------: | --------------------------------------------------------------------------------------------------- |
-| `op`             | `"update" \| "forget" \| "invalidate"` |      Yes | Edit operation to apply.                                                                            |
-| `id`             | `string`                               |      Yes | Memory id returned by `recall`.                                                                     |
-| `content`        | `string`                               |       No | Replacement memory text for `update`.                                                               |
-| `importance`     | `number`                               |       No | Replacement importance for `update`; clamped to `0..1`.                                             |
-| `replacement_id` | `string`                               |       No | Superseding memory id recorded for `invalidate` (Mnemopi only; Supermemory accepts and ignores it). |
+| Field            | Type                                                       | Required | Description                                                                                         |
+| ---------------- | ---------------------------------------------------------- | -------: | --------------------------------------------------------------------------------------------------- |
+| `op`             | `"update" \| "forget" \| "invalidate" \| "preview_forget"` |      Yes | Edit operation to apply. `preview_forget` is Supermemory only.                                      |
+| `id`             | `string`                                                   |       No | Memory id returned by `recall`; required for every op except `preview_forget`.                      |
+| `query`          | `string`                                                   |       No | Natural-language description of what to forget; required for `preview_forget`, ignored otherwise.   |
+| `content`        | `string`                                                   |       No | Replacement memory text for `update`.                                                               |
+| `importance`     | `number`                                                   |       No | Replacement importance for `update`; clamped to `0..1`.                                             |
+| `replacement_id` | `string`                                                   |       No | Superseding memory id recorded for `invalidate` (Mnemopi only; Supermemory accepts and ignores it). |
 
 ## Outputs
 
@@ -52,7 +53,8 @@
 2. Every request goes to the session's namespace (`/ns/{namespace}/…`), the same one recall and retain use.
 3. `forget` and `invalidate` → `DELETE /ns/{namespace}/memories` `{ ids: [id] }`. HTTP success does not mean the id changed: the tool succeeds only when the id is in the response's `matches`, and otherwise maps its per-id `errors` entry (see Errors). v5 has no forget reason, so `replacement_id` is accepted but not recorded.
 4. `update`: v5 has no memory update. The tool first stores `content` (required, secret-redacted like other Supermemory writes) as a new document, `POST /ns/{namespace}/document` `{ content, metadata: { source: "coding-agent-memory-edit", replaces: <id> } }`, then forgets the old id as in step 3. Adding first means a failure never loses the fact: if the add fails nothing changed and the tool throws; if the forget fails after it, the tool throws saying the corrected text was stored (naming the document id) but the old memory remains, with the reason. The new memory appears after Supermemory processes the document. `importance` has no Supermemory equivalent: alone it is rejected; next to `content` it is ignored and the output says so. Both requests are tracked by the state's pending-write barrier (`/memory clear` and dispose wait for them).
-5. Output: `Memory <id> forgotten|invalidated in namespace <ns>.`, or for `update` `Memory <id> replaced in namespace <ns>: the corrected text was stored as document <docId> and the old memory forgotten. …`; `details` is `{ status, namespace, documentId? }`.
+5. `preview_forget` → `DELETE /ns/{namespace}/memories/semantic` `{ query, dryRun: true }`; `dryRun: false` is never sent, so it changes nothing. The query is secret-redacted, then cut to 2,000 characters; the server returns at most 100 matches. The output lists them as `- <memory> (id: <id>)` and tells the model to `forget` the ones it is sure about, one call per id (the guide's drift-free preview-then-exact-id flow); `details` is `{ status: "previewed", namespace, matches }`. It is a read, so it is not tracked in the pending-write barrier, but a disposed state still refuses it.
+6. Output: `Memory <id> forgotten|invalidated in namespace <ns>.`, or for `update` `Memory <id> replaced in namespace <ns>: the corrected text was stored as document <docId> and the old memory forgotten. …`; `details` is `{ status, namespace, documentId? }`.
 
 ## Modes / Variants
 
@@ -66,14 +68,14 @@
 ## Side Effects
 
 - Filesystem (Mnemopi): mutates the local Mnemopi SQLite database containing the resolved row, which may be a retain, recall, shared, or safely discovered legacy bank.
-- Network: none for Mnemopi; edit operations do not invoke embedding or extraction providers. Supermemory sends `DELETE /ns/{namespace}/memories`, preceded for `update` by `POST /ns/{namespace}/document`.
+- Network: none for Mnemopi; edit operations do not invoke embedding or extraction providers. Supermemory sends `DELETE /ns/{namespace}/memories`, preceded for `update` by `POST /ns/{namespace}/document`; `preview_forget` sends one dry-run `DELETE /ns/{namespace}/memories/semantic`.
 - Session state: reads the active session's scoped Mnemopi state; it does not rewrite already injected `<memories>` context.
 
 ## Limits & Caps
 
 - Availability requires `memory.backend = "mnemopi"` or a configured `"supermemory"`; Hindsight and local file-backed memory do not expose this tool.
-- `id` must be supplied directly; the tool does not search by content.
-- Mnemopi recall previews are capped at 500 characters by default. Always fetch `read memory://<id>` before `update`; the URL resolves the full row from the calling session's scoped banks. Supermemory recall shows full memory content; `memory://` does not resolve Supermemory ids.
+- `id` must be supplied directly; the tool does not search by content (Supermemory `preview_forget` only lists candidates).
+- Mnemopi recall previews are capped at 500 characters by default. Always fetch `read memory://<id>` before `update`; the URL resolves the full row from the calling session's scoped banks. Supermemory recall shows full memory content; `read memory://<id>` adds its versions, linked memories and source document.
 - `update` with neither `content` nor `importance` is rejected before any backend write.
 - `importance` values outside `0..1` are clamped rather than rejected.
 
@@ -82,8 +84,9 @@
 - Throws `Mnemopi backend is not initialised for this session.` when the tool is exposed but session state is missing.
 - Throws `memory_edit update requires content or importance.` for an empty update.
 - Supermemory throws `Supermemory backend is not initialised for this session.` when state is missing; `memory_edit update requires content.` (or `… requires content: Supermemory memories have no importance.` for an importance-only update) before any request; `Memory <id> was not found in namespace <ns>.` when the id's forget error says not found; `Memory <id> is already forgotten in namespace <ns>.` when it says already forgotten; otherwise `Memory <id> was not forgotten in namespace <ns>: <server error>.` (control characters stripped, bounded). A failed `update` forget is reported as `Stored the corrected text as document <docId> in namespace <ns>, but memory <id> remains: …`. HTTP, timeout and invalid-JSON failures throw the client's messages, which never include the API key or response body.
+- `preview_forget` throws `memory_edit preview_forget requires query.` for an empty query and, under Mnemopi, `memory_edit preview_forget is only available with Supermemory. …` naming `recall` then `forget` by id; other ops without `id` throw `memory_edit <op> requires id.`
 - Missing, episodic-for-update/forget, and fact ids are normal results rather than thrown errors; inspect `details.status`.
-- `read memory://<id>` throws `Mnemopi memory <id> not found in the calling session's scoped bank` when that session's banks do not contain the row; a row held only by another live session is not reachable.
+- `read memory://<id>` throws `Mnemopi memory <id> not found in the calling session's scoped bank` when that session's banks do not contain the row; a row held only by another live session is not reachable. Under Supermemory it throws `Supermemory memory <id> not found in namespace <ns>.` on HTTP 404.
 
 ## Notes
 

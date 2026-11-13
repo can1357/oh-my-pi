@@ -1,11 +1,14 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { replaceTabs, singleLine } from "@oh-my-pi/pi-tui/utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionStateApi } from "../mnemopi/state";
 import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
+import { type SupermemoryMemory, SupermemoryHttpError, type SupermemoryRelatedMemory } from "../supermemory/client";
+import type { SupermemorySessionStateApi } from "../supermemory/state";
 import {
 	buildDirectoryResource,
 	containedRealPath,
@@ -37,7 +40,7 @@ const MEMORY_NAMESPACE = "root";
  * error (issue #7587).
  */
 const HINDSIGHT_UNADDRESSABLE =
-	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.";
+	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi or supermemory.";
 
 /**
  * Snapshot of memory roots for every registered session, deduped.
@@ -242,9 +245,14 @@ function callerMnemopiState(session: AgentSessionHandle): MnemopiSessionStateApi
 	return state?.aliasOf ?? state;
 }
 
+/** Supermemory state of a local caller session; an alias routes reads to its parent (over RPC on a worker). */
+function callerSupermemoryState(session: AgentSessionHandle): SupermemorySessionStateApi | undefined {
+	return isLocalAgentSession(session) ? session.getSupermemorySessionState?.() : undefined;
+}
+
 function unknownNamespaceError(namespace: string): Error {
 	return new Error(
-		`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+		`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a memory id when memory.backend=mnemopi or supermemory is active.`,
 	);
 }
 
@@ -268,7 +276,7 @@ function fileBackedRootUnavailableError(backend: string | undefined): Error {
 			: backend === "hindsight"
 				? " Use `recall`/`reflect` to search Hindsight memories."
 				: backend === "supermemory"
-					? " Use `recall` to search Supermemory memories."
+					? " Use `recall` to search Supermemory memories, or `read memory://<memory-id>` for one memory's history and source."
 					: "";
 	return new Error(
 		`File-backed memory artifacts only exist with memory.backend=local (active backend: ${backend}).${searchHint}`,
@@ -320,6 +328,53 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
 			notes: [],
 		};
 	});
+}
+
+function relatedSection(title: string, items: readonly SupermemoryRelatedMemory[]): string {
+	if (items.length === 0) return "";
+	return `\n\n## ${title}\n${items.map(item => `- ${singleLine(item.memory)} (id: ${item.id})`).join("\n")}`;
+}
+
+/**
+ * Render a Supermemory memory as text/markdown, mirroring {@link renderMnemopiMemory}: frontmatter,
+ * the memory text, then its earlier/later versions, linked memories and source document when present.
+ */
+function renderSupermemoryMemory(url: InternalUrl, namespace: string, memory: SupermemoryMemory): InternalResource {
+	const meta = Object.keys(memory.metadata).length > 0 ? `metadata: ${JSON.stringify(memory.metadata)}\n` : "";
+	const header =
+		"---\n" +
+		`id: ${memory.id}\n` +
+		`namespace: ${namespace}\n` +
+		(memory.version !== undefined ? `version: ${memory.version}\n` : "") +
+		`isStatic: ${memory.isStatic}\n` +
+		`isInference: ${memory.isInference}\n` +
+		`isLatest: ${memory.isLatest}\n` +
+		`isForgotten: ${memory.isForgotten}\n` +
+		(memory.createdAt ? `createdAt: ${memory.createdAt}\n` : "") +
+		(memory.updatedAt ? `updatedAt: ${memory.updatedAt}\n` : "") +
+		meta +
+		"---\n\n";
+	const { document } = memory;
+	const source = document
+		? `\n\n## Source document\n- id: ${document.id}` +
+			(document.title ? `\n- title: ${singleLine(document.title)}` : "") +
+			(document.summary ? `\n- summary: ${singleLine(document.summary)}` : "")
+		: "";
+	const content = replaceTabs(
+		header +
+			memory.memory +
+			relatedSection("Earlier versions", memory.parents) +
+			relatedSection("Later versions", memory.children) +
+			relatedSection("Linked memories", memory.siblings) +
+			source,
+	);
+	return {
+		url: url.href,
+		content,
+		contentType: "text/markdown",
+		size: Buffer.byteLength(content, "utf-8"),
+		notes: [],
+	};
 }
 
 /**
@@ -399,14 +454,25 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			throw new Error("memory:// URL requires a namespace: memory://root or memory://<memory-id>");
 		}
 
-		// Mnemopi rows live in SQLite banks per session, keyed by memory id.
-		// Any host other than the file-backed `root` namespace is treated as a
-		// mnemopi memory id lookup. This is the read counterpart to
-		// `memory_edit update` and lets agents inspect the full content of a
-		// clipped recall preview before overwriting it (issue #4443).
+		// Any host other than the file-backed `root` namespace is a memory id: a
+		// Mnemopi row in the session's SQLite banks, or a Supermemory memory in the
+		// caller's namespace. This is the read counterpart to `memory_edit` and lets
+		// agents inspect full content, history and source before editing (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
 			if (!caller.legacy) {
 				if (backend === "hindsight") throw new Error(HINDSIGHT_UNADDRESSABLE);
+				if (backend === "supermemory") {
+					const state = caller.session ? callerSupermemoryState(caller.session) : undefined;
+					if (!state) throw new Error("Supermemory backend is not initialised for the calling session.");
+					try {
+						return renderSupermemoryMemory(url, state.namespace, await state.getMemory(namespace));
+					} catch (error) {
+						if (!(error instanceof SupermemoryHttpError && error.status === 404)) throw error;
+						throw new Error(
+							`Supermemory memory ${namespace} not found in namespace ${state.namespace}. Use \`recall\` to list available ids.`,
+						);
+					}
+				}
 				if (backend === "mnemopi") {
 					const hit = caller.session ? callerMnemopiState(caller.session)?.getScopedMemory(namespace) : undefined;
 					if (hit) return renderMnemopiMemory(url, hit);

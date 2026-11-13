@@ -48,8 +48,15 @@ describe("SupermemoryClient", () => {
 		const captured = serve(() =>
 			Response.json({
 				results: [
-					{ id: "a", memory: "memory text", chunk: "chunk text", similarity: 0.9, system: { updatedAt: "t1" } },
-					{ id: "b", chunk: "chunk only" },
+					{
+						id: "a",
+						memory: "memory text",
+						chunk: "chunk text",
+						similarity: 0.9,
+						isInference: true,
+						system: { updatedAt: "t1" },
+					},
+					{ id: "b", chunk: "chunk only", isInference: true },
 					{ id: "c" },
 				],
 				searchTime: 3,
@@ -72,17 +79,24 @@ describe("SupermemoryClient", () => {
 			rewriteQuery: false,
 		});
 		expect(results).toEqual([
-			{ id: "a", kind: "memory", content: "memory text", similarity: 0.9, updatedAt: "t1" },
-			{ id: "b", kind: "chunk", content: "chunk only", similarity: undefined, updatedAt: undefined },
+			{ id: "a", kind: "memory", content: "memory text", similarity: 0.9, updatedAt: "t1", inferred: true },
+			{
+				id: "b",
+				kind: "chunk",
+				content: "chunk only",
+				similarity: undefined,
+				updatedAt: undefined,
+				inferred: false,
+			},
 		]);
 	});
 
-	it("reads profile entries as objects or plain strings from an empty-body request", async () => {
+	it("reads profile entries as { id, memory } objects or plain strings (no id) from an empty-body request", async () => {
 		const captured = serve(() =>
 			Response.json({
 				profile: {
 					static: [{ id: "s1", memory: "works in design" }, "legacy string", { id: "s2" }],
-					dynamic: [{ id: "d1", memory: "[2026-10-01] preparing a launch" }],
+					dynamic: [{ id: "aggregated_1", memory: "[2026-10-01] preparing a launch" }],
 					buckets: { preferences: [] },
 				},
 			}),
@@ -95,8 +109,8 @@ describe("SupermemoryClient", () => {
 			{},
 		]);
 		expect(profile).toEqual({
-			static: ["works in design", "legacy string"],
-			dynamic: ["[2026-10-01] preparing a launch"],
+			static: [{ id: "s1", memory: "works in design" }, { memory: "legacy string" }],
+			dynamic: [{ id: "aggregated_1", memory: "[2026-10-01] preparing a launch" }],
 		});
 	});
 
@@ -116,6 +130,73 @@ describe("SupermemoryClient", () => {
 			{ ids: ["m1", "m2"] },
 		]);
 		expect(result).toEqual({ matches: ["m1"], errors: [{ id: "m2", error: "Memory not found" }] });
+	});
+
+	it("previews a semantic forget with dryRun true and returns the matched memories", async () => {
+		const captured = serve(() =>
+			Response.json({
+				count: 2,
+				matches: [{ id: "m1", memory: "old build on port 9000" }, { id: "m2" }],
+				errors: [],
+			}),
+		);
+		const client = new SupermemoryClient("http://127.0.0.1:1", KEY);
+		const matches = await client.previewForget("team:a", "old build");
+		expect([captured[0]?.method, captured[0]?.url, captured[0]?.body]).toEqual([
+			"DELETE",
+			"http://127.0.0.1:1/ns/team%3Aa/memories/semantic",
+			{ query: "old build", dryRun: true },
+		]);
+		expect(matches).toEqual([{ id: "m1", memory: "old build on port 9000" }]);
+	});
+
+	it("gets one memory with related versions and its source document, sending no body", async () => {
+		const bodies: unknown[] = [];
+		const captured = serve(init => {
+			bodies.push(init?.body);
+			return Response.json({
+				id: "m/2",
+				memory: "build runs on port 9100",
+				metadata: { source: "t" },
+				isStatic: false,
+				isInference: true,
+				isLatest: true,
+				isForgotten: false,
+				version: 2,
+				system: { createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-02T00:00:00Z" },
+				included: {
+					related: {
+						parents: [{ id: "m1", relation: "updates", memory: "build runs on port 9000", metadata: {} }],
+						children: [],
+						siblings: [{ id: "x" }],
+					},
+					document: { id: "d1", title: "Build notes", type: "text", summary: null, metadata: {} },
+				},
+			});
+		});
+		const client = new SupermemoryClient("http://127.0.0.1:1", KEY);
+		const memory = await client.getMemory("omp-global", "m/2");
+		expect([captured[0]?.method, captured[0]?.url, bodies[0]]).toEqual([
+			"GET",
+			"http://127.0.0.1:1/ns/omp-global/memories/m%2F2?include=related,documents&relatedLimit=10",
+			undefined,
+		]);
+		expect(memory).toEqual({
+			id: "m/2",
+			memory: "build runs on port 9100",
+			metadata: { source: "t" },
+			isStatic: false,
+			isInference: true,
+			isLatest: true,
+			isForgotten: false,
+			version: 2,
+			createdAt: "2026-11-01T00:00:00Z",
+			updatedAt: "2026-11-02T00:00:00Z",
+			parents: [{ id: "m1", memory: "build runs on port 9000", relation: "updates" }],
+			children: [],
+			siblings: [],
+			document: { id: "d1", title: "Build notes", summary: undefined },
+		});
 	});
 
 	it("maps HTTP errors and invalid JSON without leaking the key or body", async () => {

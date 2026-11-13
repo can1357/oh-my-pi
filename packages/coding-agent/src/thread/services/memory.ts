@@ -14,7 +14,7 @@
  *   remote holds no banks; it routes every scoped-bank read and write to the parent, so
  *   saves land in main's live SQLite banks.
  * - `SupermemorySessionState` → {@link RemoteSupermemorySessionState}: the worker alias
- *   routes every tool search, retain, save and edit to the parent, so writes land in main's
+ *   routes every tool search, retain, save, edit and memory read to the parent, so writes land in main's
  *   outbox and container; `SupermemoryHttpError` keeps its `status` across the hop.
  *
  * Nothing is held per worker: the link releases exported objects when it closes.
@@ -108,6 +108,8 @@ const serveSupermemoryState: RpcServe<SupermemorySessionState, SupermemorySessio
 	enqueueRetain: (state, toolCallId, items) => state.enqueueRetain(toolCallId, items),
 	save: (state, content, metadata, id) => state.save(content, metadata, id),
 	forgetMemory: (state, id, signal) => state.forgetMemory(id, signal),
+	previewForget: (state, query, signal) => state.previewForget(query, signal),
+	getMemory: (state, id, signal) => state.getMemory(id, signal),
 };
 
 let memoryErrorsRegistered = false;

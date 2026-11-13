@@ -49,7 +49,13 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
-import type { SupermemoryDocument, SupermemoryForgetResult, SupermemorySearchItem } from "../../supermemory/client";
+import type {
+	SupermemoryDocument,
+	SupermemoryForgetResult,
+	SupermemoryMemory,
+	SupermemoryMemoryMatch,
+	SupermemorySearchItem,
+} from "../../supermemory/client";
 import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RpcMethod } from "../rpc";
 
@@ -145,4 +151,6 @@ export type SupermemorySessionStateProtocol = {
 		SupermemoryDocument
 	>;
 	forgetMemory: RpcMethod<[id: string, signal?: AbortSignal], SupermemoryForgetResult>;
+	previewForget: RpcMethod<[query: string, signal?: AbortSignal], SupermemoryMemoryMatch[]>;
+	getMemory: RpcMethod<[id: string, signal?: AbortSignal], SupermemoryMemory>;
 };

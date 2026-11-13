@@ -18,11 +18,59 @@ export interface SupermemorySearchItem {
 	content: string;
 	similarity?: number;
 	updatedAt?: string;
+	/** Inferred rather than stated directly; chunks never are. */
+	inferred?: boolean;
+}
+
+/** A profile fact; plain-string entries carry no id. Ids starting `aggregated_` are synthesized summaries. */
+export interface SupermemoryProfileFact {
+	id?: string;
+	memory: string;
 }
 
 export interface SupermemoryProfile {
-	static: string[];
-	dynamic: string[];
+	static: SupermemoryProfileFact[];
+	dynamic: SupermemoryProfileFact[];
+}
+
+/** A memory matched by a semantic forget preview. */
+export interface SupermemoryMemoryMatch {
+	id: string;
+	memory: string;
+}
+
+/** An earlier/later version or linked memory of a {@link SupermemoryMemory}. */
+export interface SupermemoryRelatedMemory {
+	id: string;
+	memory: string;
+	relation?: string;
+}
+
+export interface SupermemorySourceDocument {
+	id: string;
+	title?: string;
+	summary?: string;
+}
+
+/** One memory with its version history, links and source document (`GET /memories/{id}`). */
+export interface SupermemoryMemory {
+	id: string;
+	memory: string;
+	metadata: Record<string, unknown>;
+	isStatic: boolean;
+	isInference: boolean;
+	isLatest: boolean;
+	isForgotten: boolean;
+	version?: number;
+	createdAt?: string;
+	updatedAt?: string;
+	/** Earlier versions, nearest first. */
+	parents: SupermemoryRelatedMemory[];
+	/** Later versions, nearest first. */
+	children: SupermemoryRelatedMemory[];
+	/** Direct extends/derives links. */
+	siblings: SupermemoryRelatedMemory[];
+	document?: SupermemorySourceDocument;
 }
 
 /** Per-id outcome of `forgetMemories`: HTTP success does not mean every id changed. */
@@ -55,12 +103,28 @@ export interface SupermemorySearchInput {
 	threshold: number;
 }
 
-/** Profile entries are `{ id, memory }` objects; plain strings are tolerated. */
-function profileMemories(value: unknown): string[] {
+/** Profile entries are `{ id, memory }` objects; plain strings are tolerated (no id). */
+function profileMemories(value: unknown): SupermemoryProfileFact[] {
 	if (!Array.isArray(value)) return [];
 	return value.flatMap(entry => {
-		const memory = typeof entry === "string" ? entry : asRecord(entry)?.memory;
-		return typeof memory === "string" && memory ? [memory] : [];
+		if (typeof entry === "string") return entry ? [{ memory: entry }] : [];
+		const record = asRecord(entry);
+		const memory = record?.memory;
+		if (typeof memory !== "string" || !memory) return [];
+		return [typeof record?.id === "string" ? { id: record.id, memory } : { memory }];
+	});
+}
+
+function optionalString(value: unknown): string | undefined {
+	return typeof value === "string" && value ? value : undefined;
+}
+
+function relatedMemories(value: unknown): SupermemoryRelatedMemory[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(raw => {
+		const item = asRecord(raw);
+		if (!item || typeof item.id !== "string" || typeof item.memory !== "string") return [];
+		return [{ id: item.id, memory: item.memory, relation: optionalString(item.relation) }];
 	});
 }
 
@@ -111,6 +175,7 @@ export class SupermemoryClient {
 				content,
 				similarity: typeof item.similarity === "number" ? item.similarity : undefined,
 				updatedAt: typeof updatedAt === "string" ? updatedAt : undefined,
+				inferred: kind === "memory" && item.isInference === true,
 			});
 		}
 		return results;
@@ -141,6 +206,54 @@ export class SupermemoryClient {
 		return { matches, errors };
 	}
 
+	/**
+	 * Previews a semantic forget (`dryRun: true`, at most 100 matches): changes nothing. A real
+	 * forget goes through {@link forgetMemories} with reviewed ids, so the set cannot drift.
+	 */
+	async previewForget(namespace: string, query: string, signal?: AbortSignal): Promise<SupermemoryMemoryMatch[]> {
+		const body = { query, dryRun: true };
+		const matches = asRecord(await this.#request("DELETE", namespace, "memories/semantic", body, signal))?.matches;
+		if (!Array.isArray(matches)) throw new Error("Supermemory returned an invalid forget preview response.");
+		return matches.flatMap(raw => {
+			const item = asRecord(raw);
+			return item && typeof item.id === "string" && typeof item.memory === "string"
+				? [{ id: item.id, memory: item.memory }]
+				: [];
+		});
+	}
+
+	/** One memory with its versions, links and source document; HTTP 404 when it does not exist. */
+	async getMemory(namespace: string, id: string, signal?: AbortSignal): Promise<SupermemoryMemory> {
+		const resource = `memories/${encodeURIComponent(id)}?include=related,documents&relatedLimit=10`;
+		const object = asRecord(await this.#request("GET", namespace, resource, undefined, signal));
+		if (!object || typeof object.id !== "string" || typeof object.memory !== "string") {
+			throw new Error("Supermemory returned an invalid memory response.");
+		}
+		const system = asRecord(object.system);
+		const included = asRecord(object.included);
+		const related = asRecord(included?.related);
+		const document = asRecord(included?.document);
+		return {
+			id: object.id,
+			memory: object.memory,
+			metadata: asRecord(object.metadata) ?? {},
+			isStatic: object.isStatic === true,
+			isInference: object.isInference === true,
+			isLatest: object.isLatest === true,
+			isForgotten: object.isForgotten === true,
+			version: typeof object.version === "number" ? object.version : undefined,
+			createdAt: optionalString(system?.createdAt),
+			updatedAt: optionalString(system?.updatedAt),
+			parents: relatedMemories(related?.parents),
+			children: relatedMemories(related?.children),
+			siblings: relatedMemories(related?.siblings),
+			document:
+				document && typeof document.id === "string"
+					? { id: document.id, title: optionalString(document.title), summary: optionalString(document.summary) }
+					: undefined,
+		};
+	}
+
 	async #request(
 		method: string,
 		namespace: string,
@@ -156,7 +269,7 @@ export class SupermemoryClient {
 			response = await fetch(`${this.#baseUrl}/ns/${encodeURIComponent(namespace)}/${resource}`, {
 				method,
 				headers: { Authorization: `Bearer ${this.#apiKey}`, "Content-Type": "application/json" },
-				body: JSON.stringify(body),
+				body: body === undefined ? undefined : JSON.stringify(body),
 				redirect: "error",
 				signal,
 			});

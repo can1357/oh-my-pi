@@ -11,6 +11,7 @@ import type { MnemopiSessionStateApi } from "../../src/mnemopi/state";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import { supermemoryBackend } from "../../src/supermemory/backend";
+import { SupermemoryHttpError } from "../../src/supermemory/client";
 import type { SupermemorySessionStateApi } from "../../src/supermemory/state";
 import type { ToolSession } from "../../src/tools";
 import { MemoryEditTool } from "../../src/tools/memory-edit";
@@ -53,6 +54,12 @@ export interface SupermemoryChildReport {
 	namespace: string;
 	retained: string;
 	editError: string;
+	/** `memory_edit preview_forget` output. */
+	previewed: string;
+	/** `getMemory` text and earlier-version ids, read through the alias. */
+	memoryRead: string;
+	/** HTTP status of a `getMemory` miss, as rebuilt on the worker. */
+	missingStatus: number | undefined;
 }
 
 /** Worker-side operations the test drives; each crosses to main as an async function. */
@@ -172,11 +179,23 @@ function buildProbe(): MemoryProbe {
 				() => "no error",
 				(error: unknown) => (error instanceof Error ? error.message : String(error)),
 			);
+			const previewed = await new MemoryEditTool(tools).execute("worker-preview", {
+				op: "preview_forget",
+				query: "old build",
+			});
+			const memory = await alias.getMemory("mem-1");
+			const missingStatus = await alias.getMemory("missing").then(
+				() => undefined,
+				(error: unknown) => (error instanceof SupermemoryHttpError ? error.status : undefined),
+			);
 			const report: SupermemoryChildReport = {
 				aliasesRemoteParent: alias.aliasOf === parent && parent instanceof RemoteSupermemorySessionState,
 				namespace: alias.namespace,
 				retained: retained.content.map(part => (part.type === "text" ? part.text : "")).join(""),
 				editError,
+				previewed: previewed.content.map(part => (part.type === "text" ? part.text : "")).join(""),
+				memoryRead: `${memory.memory} <- ${memory.parents.map(item => item.id).join(",")}`,
+				missingStatus,
 			};
 			await session.dispose();
 			return report;

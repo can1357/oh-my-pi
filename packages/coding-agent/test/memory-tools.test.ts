@@ -2204,6 +2204,21 @@ describe("memory_edit.execute (Mnemopi backend)", () => {
 		expect((result.content[0] as { text: string }).text).toContain("not found");
 	});
 
+	it("rejects preview_forget, naming recall then forget by id, and changes nothing", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		registerMnemopiState();
+		await retainAndRecallId(settings, "old build server runs on port 9000", "build server");
+
+		await expect(
+			MemoryEditTool.createIf(makeSession(settings))!.execute("call-memory-edit-preview", {
+				op: "preview_forget",
+				query: "old build server",
+			}),
+		).rejects.toThrow("preview_forget is only available with Supermemory. Use `recall` to find the memories");
+		const recalled = await registeredMnemopiState!.recallResultsScoped("build server");
+		expect(recalled.map(memory => memory.content)).toContain("old build server runs on port 9000");
+	});
+
 	it("throws when no per-session Mnemopi state is registered", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const tool = MemoryEditTool.createIf(makeSession(settings))!;

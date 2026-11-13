@@ -48,7 +48,13 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
-import type { SupermemoryDocument, SupermemoryForgetResult, SupermemorySearchItem } from "../../supermemory/client";
+import type {
+	SupermemoryDocument,
+	SupermemoryForgetResult,
+	SupermemoryMemory,
+	SupermemoryMemoryMatch,
+	SupermemorySearchItem,
+} from "../../supermemory/client";
 import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RemoteObject } from "../rpc";
 import type {
@@ -328,5 +334,13 @@ export class RemoteSupermemorySessionState implements SupermemorySessionStateApi
 
 	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult> {
 		return this.#remote.call("forgetMemory", id, signal);
+	}
+
+	previewForget(query: string, signal?: AbortSignal): Promise<SupermemoryMemoryMatch[]> {
+		return this.#remote.call("previewForget", query, signal);
+	}
+
+	getMemory(id: string, signal?: AbortSignal): Promise<SupermemoryMemory> {
+		return this.#remote.call("getMemory", id, signal);
 	}
 }

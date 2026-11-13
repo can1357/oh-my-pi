@@ -192,17 +192,38 @@ describe("memory thread service", () => {
 		}
 	});
 
-	it("lands a worker Supermemory alias's retain in main's outbox and maps a remote per-id forget error", async () => {
+	it("lands a worker Supermemory alias's retain in main's outbox, maps a remote per-id forget error, and previews and reads through main", async () => {
 		const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
 		using server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			async fetch(request) {
 				const { pathname } = new URL(request.url);
-				const body = (await request.json()) as Record<string, unknown>;
+				const body = (request.method === "GET" ? {} : await request.json()) as Record<string, unknown>;
 				requests.push({ method: request.method, path: pathname, body });
 				// Documents stay undelivered so the write is observable in the outbox; forgets find nothing.
 				if (pathname.endsWith("/document")) return Response.json({}, { status: 503 });
+				if (pathname.endsWith("/memories/semantic")) {
+					return Response.json({ count: 1, matches: [{ id: "mem-9", memory: "old build on 9000" }], errors: [] });
+				}
+				if (pathname.endsWith("/memories/mem-1")) {
+					return Response.json({
+						id: "mem-1",
+						memory: "build on 9100",
+						metadata: {},
+						isStatic: false,
+						isInference: false,
+						isLatest: true,
+						isForgotten: false,
+						version: 2,
+						system: { createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z" },
+						included: {
+							related: { parents: [{ id: "mem-0", memory: "build on 9000" }], children: [], siblings: [] },
+						},
+					});
+				}
+				if (pathname.endsWith("/memories/missing"))
+					return Response.json({ error: "Memory not found" }, { status: 404 });
 				return Response.json({ count: 0, matches: [], errors: [{ id: "missing", error: "Memory not found" }] });
 			},
 		});
@@ -239,10 +260,23 @@ describe("memory thread service", () => {
 				namespace: "omp-global",
 				retained: "1 memory queued.",
 				editError: "Memory missing was not found in namespace omp-global.",
+				previewed: expect.stringContaining("- old build on 9000 (id: mem-9)"),
+				memoryRead: "build on 9100 <- mem-0",
+				missingStatus: 404,
 			});
 			// Delivery runs in the background and the drain retries it, so dedupe and ignore order.
 			const sent = new Set(requests.map(request => `${request.method} ${request.path}`));
-			expect([...sent].sort()).toEqual(["DELETE /ns/omp-global/memories", "POST /ns/omp-global/document"]);
+			expect([...sent].sort()).toEqual([
+				"DELETE /ns/omp-global/memories",
+				"DELETE /ns/omp-global/memories/semantic",
+				"GET /ns/omp-global/memories/mem-1",
+				"GET /ns/omp-global/memories/missing",
+				"POST /ns/omp-global/document",
+			]);
+			expect(requests.find(request => request.path.endsWith("/semantic"))?.body).toEqual({
+				query: "old build",
+				dryRun: true,
+			});
 			expect(requests.find(request => request.method === "POST")?.body).toMatchObject({
 				content: "worker fact",
 				metadata: { source: "coding-agent-retain" },
