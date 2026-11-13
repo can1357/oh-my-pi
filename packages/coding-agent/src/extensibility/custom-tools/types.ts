@@ -105,7 +105,7 @@ export interface CustomToolContext {
 	fetch?: FetchImpl;
 	/** Calling session's `local://` root mapping for tools that bridge out of the OMP process. */
 	localProtocolOptions?: LocalProtocolOptions;
-	/** 仅在宿主按 SDK 工具身份显式授权时可用。 */
+	/** Available only when the host explicitly grants this SDK tool identity. */
 	invokeRegisteredTask?: ExtensionContext["invokeRegisteredTask"];
 	queryRegisteredTask?: ExtensionContext["queryRegisteredTask"];
 	/** Whether to auto-approve all destructive tool operations (--auto-approve CLI flag) */

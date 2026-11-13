@@ -7513,7 +7513,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		return this.#tools.getToolForEvalBridge(name);
 	}
-	/** 仅供宿主显式授权的受限 task 侧调用。 */
+	/** Restricted task side-call reserved for explicit host authorization. */
 	wrapTrustedTask(task: AgentTool): AgentTool {
 		return this.#tools.wrapTrustedTask(task);
 	}

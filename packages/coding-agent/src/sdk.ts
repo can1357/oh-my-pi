@@ -617,7 +617,7 @@ export interface CreateAgentSessionOptions {
 	spawns?: string;
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
-	/** 仅授予受限 SDK 会话中点名的 custom tool 隐藏原生 task 侧调用。 */
+	/** Grants only the named custom tools of a restricted SDK session the hidden native task side-call. */
 	trustedTaskDelegationTools?: readonly string[];
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
@@ -2529,7 +2529,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.allowRestrictedCustomTools !== true ||
 			normalizeToolNames(options.toolNames ?? []).includes("task")
 		) {
-			throw new Error("受控 SDK task 需要受限工具集且不得暴露原生 task");
+			throw new Error(
+				"Controlled SDK task delegation requires a restricted tool set and must not expose the native task",
+			);
 		}
 		if (
 			new Set(trustedSideTaskTools).size !== trustedSideTaskTools.length ||
@@ -2540,7 +2542,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.length !== 1,
 			)
 		) {
-			throw new Error("受控 SDK task 必须绑定唯一且已启用的 SDK 工具");
+			throw new Error("Controlled SDK task delegation must bind to exactly one enabled SDK tool");
 		}
 	}
 	// The session tree shares one cost gate: a subagent is given its parent's; a root
@@ -2891,7 +2893,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 		const sideNativeTask = trustedSideTaskTools.length > 0 ? await BUILTIN_TOOLS.task(toolSession) : undefined;
 		if (trustedSideTaskTools.length > 0 && (!sideNativeTask || toolRegistry.has("task"))) {
-			throw new Error("原生 task 侧调用不可用或已暴露");
+			throw new Error("Native task side-call is unavailable or already exposed");
 		}
 		const initialBrowserPreludeAvailable = shouldFilterBrowserMCPForPrelude({
 			restrictToolNames,
@@ -3983,17 +3985,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const sameSession = () =>
 				sessionManager.getSessionId() === expected.sessionId &&
 				sessionManager.getSessionFile() === expected.sessionFile;
-			if (!sameSession()) throw new Error("受控 task 会话已改变");
+			if (!sameSession()) throw new Error("Controlled task session changed");
 			await sessionManager.ensureOnDisk();
-			if (!sameSession()) throw new Error("受控 task 会话已改变");
+			if (!sameSession()) throw new Error("Controlled task session changed");
 			sessionManager.appendCustomEntry(REGISTERED_TASK_ENTRY, record);
 			await sessionManager.flush();
-			if (!sameSession()) throw new Error("受控 task 会话已改变");
+			if (!sameSession()) throw new Error("Controlled task session changed");
 		};
 		toolSession.isRegisteredTask = toolCallId => extensionRunner.isRegisteredTask(toolCallId);
 		toolSession.persistRegisteredTaskJobs = async (toolCallId, jobIds) => {
 			const expected = registeredTaskSessions.get(toolCallId);
-			if (!expected) throw new Error("受控 task 持久意图不存在");
+			if (!expected) throw new Error("Controlled task persistence intent is missing");
 			await persistRegisteredTaskRecord(
 				{ kind: "jobs", sessionId: expected.sessionId, toolCallId, jobIds },
 				expected,
@@ -4036,12 +4038,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		extensionRunner.setRegisteredTaskInvoker(async (extensionPath, outerToolCallId, params, signal) => {
 			if (!extensionRunner.canInvokeRegisteredTask(extensionPath)) {
-				throw new Error("受控 task 未获授权或不再是原生工具");
+				throw new Error("Controlled task is not authorized or is no longer the native tool");
 			}
 			const task = sideTask && session.wrapTrustedTask(sideTask);
-			if (!task || task.name !== "task") throw new Error("原生 task 未启用");
+			if (!task || task.name !== "task") throw new Error("Native task is not enabled");
 			const sessionFile = sessionManager.getSessionFile();
-			if (!sessionFile) throw new Error("受控 task 需要可持久化会话");
+			if (!sessionFile) throw new Error("Controlled task delegation requires a persistent session");
 			const expected = { sessionId: sessionManager.getSessionId(), sessionFile };
 			const toolCallId = `extension-task-${crypto.randomUUID()}`;
 			const input = validateAgentToolArguments(task, {

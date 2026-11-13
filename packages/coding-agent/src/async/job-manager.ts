@@ -148,7 +148,7 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
-	/** 启动作业的原生工具调用身份。 */
+	/** Native tool call identity that started the job. */
 	toolCallId?: string;
 	/**
 	 * Whether this job's turn published the agent's `<agentId>.md` output. A
@@ -291,8 +291,9 @@ export interface AsyncJobRegisterOptions {
 	ownerId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
+	/** Native tool call identity that started the job; mirrors {@link AsyncJob.toolCallId}. */
 	toolCallId?: string;
-	/** 内部预留凭据，防止持久绑定期间作业标识被其他注册占用。 */
+	/** Internal reservation credential keeping reserved job IDs out of competing registrations while persistence binds. */
 	reservationToken?: string;
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
@@ -554,7 +555,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 
 		if (options?.reservationToken !== undefined) {
 			if (!options.id || this.#reservedJobIds.get(options.id) !== options.reservationToken) {
-				throw new Error("作业 ID 预留无效");
+				throw new Error("Invalid job ID reservation");
 			}
 			this.#reservedJobIds.delete(options.id);
 		}

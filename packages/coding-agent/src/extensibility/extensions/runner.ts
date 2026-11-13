@@ -601,13 +601,13 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
 });
 
-/** 受控 task 执行失败时保留原调用身份，供调用方只读对账。 */
+/** Preserves the originating tool call ID when a controlled task fails so callers can reconcile read-only. */
 export class RegisteredTaskInvocationError extends Error {
 	constructor(
 		readonly toolCallId: string,
 		cause: unknown,
 	) {
-		super(`受控 task ${toolCallId} 失败: ${String(cause)}`, { cause });
+		super(`Controlled task ${toolCallId} failed: ${String(cause)}`, { cause });
 		this.name = "RegisteredTaskInvocationError";
 	}
 }
@@ -788,11 +788,13 @@ export class ExtensionRunner {
 	) => Promise<{ toolCallId: string; result: AgentToolResult }>;
 	#registeredTaskQuery?: (extensionPath: string, outerToolCallId: string) => RegisteredTaskObservation[];
 	#registeredTaskInputs = new Map<string, unknown>();
+	/** Whether this outer tool call ID belongs to a controlled native task invocation. */
 	isRegisteredTask(toolCallId: string): boolean {
 		return this.#registeredTaskInputs.has(toolCallId);
 	}
 	#registeredTaskExtensions = new Set<string>();
 
+	/** Record the principals allowed to invoke the native task from inside a tool call. */
 	authorizeRegisteredTaskExtensions(paths: readonly string[]): void {
 		this.#registeredTaskExtensions = new Set(paths);
 	}
@@ -812,6 +814,7 @@ export class ExtensionRunner {
 		this.#registeredTaskInvoker = invoker;
 	}
 
+	/** Snapshot the approved arguments of a controlled task call for tamper detection. */
 	setRegisteredTaskInput(toolCallId: string, params: unknown): void {
 		this.#registeredTaskInputs.set(toolCallId, structuredClone(params));
 	}
@@ -819,7 +822,7 @@ export class ExtensionRunner {
 	checkRegisteredTaskInput(toolCallId: string, params: unknown): void {
 		const expected = this.#registeredTaskInputs.get(toolCallId);
 		if (expected !== undefined && !Bun.deepEquals(expected, params)) {
-			throw new Error("受控 task 参数在审批前被修改");
+			throw new Error("Controlled task arguments were modified before approval");
 		}
 	}
 
@@ -835,7 +838,7 @@ export class ExtensionRunner {
 
 	queryRegisteredTask(extensionPath: string, outerToolCallId: string): RegisteredTaskObservation[] {
 		if (!this.canInvokeRegisteredTask(extensionPath) || !this.#registeredTaskQuery)
-			throw new Error("受控 task 查询不可用");
+			throw new Error("Controlled task queries are unavailable");
 		return this.#registeredTaskQuery(extensionPath, outerToolCallId);
 	}
 
@@ -845,7 +848,7 @@ export class ExtensionRunner {
 		params: Record<string, unknown>,
 		signal?: AbortSignal,
 	) {
-		if (!this.#registeredTaskInvoker) throw new Error("受控 task 调用不可用");
+		if (!this.#registeredTaskInvoker) throw new Error("Controlled task invocation is unavailable");
 		return this.#registeredTaskInvoker(extensionPath, outerToolCallId, params, signal);
 	}
 

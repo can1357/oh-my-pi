@@ -386,7 +386,7 @@ function noUiRunner(): ExtensionRunner {
 		checkRegisteredTaskInput(toolCallId: string, params: unknown): void {
 			const expected = registeredTaskInputs.get(toolCallId);
 			if (expected !== undefined && !Bun.deepEquals(expected, params)) {
-				throw new Error("受控 task 参数在审批前被修改");
+				throw new Error("Controlled task arguments were modified before approval");
 			}
 		},
 		isRegisteredTask(toolCallId: string): boolean {

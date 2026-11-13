@@ -12,10 +12,10 @@ import * as executor from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import * as fs from "node:fs/promises";
 
-it("供父测试在真实宿主边界中止进程", async () => {
+it("aborts the process at the real host boundary for the parent test", async () => {
 	const root = Bun.env.OMP_REGISTERED_TASK_PROBE_ROOT;
 	const stage = Bun.env.OMP_REGISTERED_TASK_PROBE_STAGE;
-	if (!root || (stage !== "before" && stage !== "after")) throw new Error("缺少隔离实验参数");
+	if (!root || (stage !== "before" && stage !== "after")) throw new Error("Missing isolation experiment arguments");
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
 		agents: [{ name: "task", description: "Task worker", systemPrompt: "Worker", source: "bundled" }],
 		projectAgentsDir: null,
@@ -32,7 +32,7 @@ it("供父测试在真实宿主边界中止进程", async () => {
 			const wait = Promise.withResolvers<void>();
 			await wait.promise;
 		}
-		throw new Error("隔离实验不应运行模型");
+		throw new Error("Isolation experiment must not run the model");
 	});
 	if (stage === "before") {
 		const register = AsyncJobManager.prototype.register;
@@ -94,6 +94,6 @@ it("供父测试在真实宿主边界中止进程", async () => {
 		toolNames: ["manager_test"],
 	});
 	const tool = session.getToolForEvalBridge("manager_test");
-	if (!tool) throw new Error("管理工具不可用");
+	if (!tool) throw new Error("manager tool unavailable");
 	await tool.execute("outer-crash", { agent: "task", name: "crash-job", task: "Inspect" });
 }, 120_000);

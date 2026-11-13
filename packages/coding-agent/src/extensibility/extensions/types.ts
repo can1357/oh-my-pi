@@ -918,9 +918,9 @@ export interface ExtensionContext {
 	 * must stay in the ordinary tool result.
 	 */
 	addAdditionalContext?(context: string): void;
-	/** 经宿主显式授权的扩展工具可在当前调用期间提交一次原生 task。 */
+	/** Submit at most one native task on behalf of the current call; available only to extensions the host explicitly authorizes. */
 	invokeRegisteredTask?(params: Record<string, unknown>): Promise<{ toolCallId: string; result: AgentToolResult }>;
-	/** 只读查询此扩展发起的原外层调用；无作业记录时保持 unknown。 */
+	/** Read-only lookup of the native task started for this outer call; stays "unknown" when no job record exists. */
 	queryRegisteredTask?(outerToolCallId: string): RegisteredTaskObservation[];
 	/**
 	 * Run the NATIVE built-in implementation of the tool this handler re-registered, with `params`,

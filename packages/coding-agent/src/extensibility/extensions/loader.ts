@@ -382,7 +382,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	appendEntry(customType: string, data?: unknown): void {
-		if (customType === REGISTERED_TASK_ENTRY) throw new Error("受控 task 记录只能由宿主写入");
+		if (customType === REGISTERED_TASK_ENTRY)
+			throw new Error("Controlled task records can only be written by the host");
 		this.runtime.appendEntry(customType, data);
 	}
 

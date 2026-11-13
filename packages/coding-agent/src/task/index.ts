@@ -1201,7 +1201,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 
 		if (this.session.isRegisteredTask?.(toolCallId) && (!manager || asyncItems.length !== spawnItems.length)) {
-			throw new Error("受控 task 必须全部使用后台作业");
+			throw new Error("Controlled task delegations must all be background jobs");
 		}
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
@@ -1363,7 +1363,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		try {
 			if (reservation) {
-				if (!this.session.persistRegisteredTaskJobs) throw new Error("受控 task 持久绑定不可用");
+				if (!this.session.persistRegisteredTaskJobs)
+					throw new Error("Controlled task persistence binding is unavailable");
 				await this.session.persistRegisteredTaskJobs(toolCallId, reservation.jobIds);
 				signal?.throwIfAborted();
 			}
@@ -1402,7 +1403,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (reservation) manager.releaseTaskJobIds?.(reservation.token);
 		}
 		if (controlled && failedSchedules.length > 0) {
-			throw new Error(`受控 task 部分注册失败: ${failedSchedules.join("; ")}`);
+			throw new Error(`Controlled task partially failed to register: ${failedSchedules.join("; ")}`);
 		}
 
 		if (started.length === 0 && syncSpawns.length === 0) {

@@ -604,7 +604,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const postflight = await this.runner.runToolCallPreflightAfter?.(toolCallId, result, context);
 			if (postflight) result = postflight as AgentToolResult<TDetails, TParameters>;
 			if (nativeTaskResult && !Bun.deepEquals(nativeTaskResult, result)) {
-				throw new Error("受控 task 的原生回执被修改");
+				throw new Error("Native task receipt was modified");
 			}
 		}
 
@@ -632,7 +632,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					resultResult?.details !== undefined ||
 					resultResult?.isError !== undefined)
 			) {
-				throw new Error("受控 task 的原生回执被修改");
+				throw new Error("Native task receipt was modified");
 			}
 
 			// Handler context reports into this call's sink like tool-authored

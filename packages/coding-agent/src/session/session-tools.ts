@@ -924,9 +924,9 @@ export class SessionTools {
 		);
 		return alias && this.#wrapToolForAcpPermission(alias);
 	}
-	/** 仅供宿主显式授予的受限 task 侧调用，不改变模型启用集。 */
+	/** Restricted task side-call reserved for explicit host grants; does not change the model-enabled tool set. */
 	wrapTrustedTask(task: AgentTool): AgentTool {
-		if (task.name !== "task") throw new Error("受控侧调用只能使用原生 task");
+		if (task.name !== "task") throw new Error("Controlled side-call can only use the native task");
 		return this.#wrapToolForAcpPermission(task);
 	}
 

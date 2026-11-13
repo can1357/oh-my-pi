@@ -247,7 +247,7 @@ describe("SDK async task guidance", () => {
 				customTools: [manager],
 				trustedTaskDelegationTools: ["manager_test"],
 			}),
-		).rejects.toThrow("不得暴露原生 task");
+		).rejects.toThrow("must not expose the native task");
 	});
 
 	it.each(["not granted", "denied"])("keeps restricted SDK task %s", async mode => {
@@ -414,7 +414,7 @@ describe("SDK async task guidance", () => {
 			const tool = session.getToolForEvalBridge("manager_test");
 			expect(tool).toBeDefined();
 			await tool?.execute("outer", { agent: "task", name: "storage", task: "Inspect" });
-			expect(failure).toMatch(mode === "volatile" ? /可持久化/ : /disk failed/);
+			expect(failure).toMatch(mode === "volatile" ? /persistent session/ : /disk failed/);
 			expect(session.asyncJobManager?.getAllJobs() ?? []).toHaveLength(0);
 		},
 	);
@@ -715,7 +715,7 @@ describe("SDK async task guidance", () => {
 					let received = "";
 					for (;;) {
 						const next = await reader.read();
-						if (next.done) throw new Error("隔离宿主未报告崩溃锚点");
+						if (next.done) throw new Error("Isolated host did not report a crash anchor");
 						received += new TextDecoder().decode(next.value);
 						const match = /PROBE_READY:([^\r\n]+)/.exec(received);
 						if (match) return match[1]!;
