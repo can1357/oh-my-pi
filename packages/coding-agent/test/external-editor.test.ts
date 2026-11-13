@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { getEditorCommand, getEditorName, openInEditor, resolveEditorSpawnCommand } from "../src/utils/external-editor";
+import {
+	getEditorCommand,
+	getEditorName,
+	openInEditor,
+	resolveEditorSpawnCommand,
+	stripEditorContext,
+} from "../src/utils/external-editor";
 
 interface MutableProcess {
 	platform: NodeJS.Platform;
@@ -134,5 +140,73 @@ describe("openInEditor", () => {
 		} finally {
 			await tempDir.remove();
 		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"shows the context below the draft's scissors line and strips it from the result",
+		async () => {
+			const tempDir = TempDir.createSync("@external-editor-");
+			try {
+				const editorPath = path.join(tempDir.path(), "edit");
+				const seenPath = path.join(tempDir.path(), "seen");
+				// Records what the editor was shown, then prepends to the draft without leaving backup files.
+				await Bun.write(
+					editorPath,
+					`#!/bin/sh\ncp "$1" "${seenPath}"\n{ printf 'my reply '; cat "$1"; } > "$1.new" && mv "$1.new" "$1"\n`,
+				);
+				fs.chmodSync(editorPath, 0o755);
+
+				const result = await openInEditor(`"${editorPath}"`, "hello\n", { context: "assistant says hi" });
+
+				expect(result).toBe("my reply hello");
+				const seen = await Bun.file(seenPath).text();
+				const scissors = seen.indexOf(`# ${"-".repeat(24)} >8 ${"-".repeat(24)}`);
+				expect(seen.startsWith("hello\n")).toBe(true);
+				expect(scissors).toBeGreaterThan("hello".length);
+				expect(seen.indexOf("assistant says hi")).toBeGreaterThan(scissors);
+			} finally {
+				await tempDir.remove();
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"never truncates a draft that already contains the scissors line",
+		async () => {
+			const tempDir = TempDir.createSync("@external-editor-");
+			try {
+				const editorPath = path.join(tempDir.path(), "edit");
+				const seenPath = path.join(tempDir.path(), "seen");
+				await Bun.write(editorPath, `#!/bin/sh\ncp "$1" "${seenPath}"\n`);
+				fs.chmodSync(editorPath, 0o755);
+				const draft = `subject\n\n# ${"-".repeat(24)} >8 ${"-".repeat(24)}\ndiff --git a/x b/x`;
+
+				const result = await openInEditor(`"${editorPath}"`, draft, { context: "assistant says hi" });
+
+				expect(result).toBe(draft);
+				expect(await Bun.file(seenPath).text()).toBe(draft);
+			} finally {
+				await tempDir.remove();
+			}
+		},
+	);
+});
+
+describe("stripEditorContext", () => {
+	it("cuts at the first scissors line even when the context quotes one", () => {
+		const line = `# ${"-".repeat(24)} >8 ${"-".repeat(24)}`;
+
+		expect(stripEditorContext(`draft\n\n${line}\nnotes\n\n${line}\nquoted\n`)).toBe("draft");
+	});
+
+	it("keeps the whole text when the user deleted the scissors line", () => {
+		expect(stripEditorContext("draft\n\nreference\n")).toBe("draft\n\nreference\n");
+	});
+
+	it("tolerates CRLF line endings and trailing whitespace on the scissors line", () => {
+		const line = `# ${"-".repeat(24)} >8 ${"-".repeat(24)}`;
+
+		expect(stripEditorContext(`draft\r\n\r\n${line}\r\nreference\r\n`)).toBe("draft");
+		expect(stripEditorContext(`draft\n\n${line} \t\nreference\n`)).toBe("draft");
 	});
 });

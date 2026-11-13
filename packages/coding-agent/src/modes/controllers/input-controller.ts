@@ -3192,10 +3192,11 @@ export class InputController {
 		}
 
 		const currentText = this.ctx.editor.getExpandedText?.() ?? this.ctx.editor.getText();
+		const context = this.ctx.session.getLastAssistantText();
 
 		try {
 			this.ctx.ui.stop();
-			const result = await openInEditor(editorCmd, currentText, { extension: ".omp.md" });
+			const result = await openInEditor(editorCmd, currentText, { extension: ".omp.md", context });
 			if (result !== null) {
 				this.ctx.editor.setText(result);
 			}
