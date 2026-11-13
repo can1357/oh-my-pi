@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `wait.windowMs` setting (milliseconds, 0 to 2147483647; unset keeps the 5s to 5m ladder): one fixed window for a `wait` on your own background jobs, so a long job no longer returns a "Still Running" snapshot every few seconds to minutes; `0` waits until a job settles, a service finishes, a direct message arrives or the call is interrupted. Reply waits and waits on a service alone keep the ladder ([#17218](https://github.com/can1357/oh-my-pi/issues/17218), [#18485](https://github.com/can1357/oh-my-pi/issues/18485), [#19122](https://github.com/can1357/oh-my-pi/pull/19122) by [@alphastorm](https://github.com/alphastorm))
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
