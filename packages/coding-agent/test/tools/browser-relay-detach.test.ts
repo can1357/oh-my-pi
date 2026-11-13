@@ -377,7 +377,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	it.skipIf(!CHROMIUM_AVAILABLE).each(["fresh", "reuse", "refused", "cancelled"] as const)(
-		"keeps only a successfully recovered open's page (%s)",
+		"keeps an open's page unless the open was cancelled (%s)",
 		async mode => {
 			const ext = await openRelayTab();
 			if (mode !== "reuse") await releaseTab(name, { keepPage: true });
@@ -434,11 +434,18 @@ describe("relay tabs Chrome detaches omp from", () => {
 					finish.resolve(new Response(""));
 					const outcome = await opened;
 					await settled.promise;
-					if (mode === "refused" || mode === "cancelled") {
+					if (mode === "cancelled") {
 						if (!("error" in outcome)) throw new Error("expected open to fail");
-						if (mode === "cancelled") expect(outcome.error).toBeInstanceOf(ToolAbortError);
-						else expect(String(outcome.error)).toContain("could not reattach");
+						expect(outcome.error).toBeInstanceOf(ToolAbortError);
 						expect(getTab(name)).toBeUndefined();
+						return;
+					}
+					if (mode === "refused") {
+						// Chrome refused the re-adoption over another extension's frame: the open fails, the tab stays.
+						if (!("error" in outcome)) throw new Error("expected open to fail");
+						expect(String(outcome.error)).toContain("omp kept the tab open");
+						expect(getTab(name)).toBeDefined();
+						expect(page?.isClosed()).toBe(false);
 						return;
 					}
 					if ("error" in outcome) throw outcome.error;
@@ -671,7 +678,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"fails fast once Chrome refuses the re-adoption",
+		"keeps a tab Chrome refuses to re-adopt, and re-adopts it at a later call",
 		async () => {
 			const ext = await openRelayTab();
 			ext.refuseAttach = true;
@@ -681,16 +688,17 @@ describe("relay tabs Chrome detaches omp from", () => {
 			await ext.chromeDetach("target_closed");
 			const failure = String(await stalled);
 			expect(failure).toContain("Chrome detached omp from this tab (target_closed) during this call");
-			expect(failure).toContain("could not reattach");
-			const later = String(await invoke(readMark).catch((error: unknown) => error));
-			expect(later).toContain("could not reattach");
-			expect(later).toContain("navigate it in Chrome first");
-			// The guidance holds: once the frame is gone and the tab's URL changed, it opens again, page state intact.
+			expect(failure).toContain("omp kept the tab open");
+			expect(getTab(name)).toBeDefined();
+			// While the frame stays, each call says so and the tab stays.
+			const refused = String(await invoke(readMark).catch((error: unknown) => error));
+			expect(refused).toContain("Chrome still keeps omp out of tab");
+			expect(getTab(name)).toBeDefined();
+			// Once it is gone, the next call reattaches to the same page, its state intact, and says so.
 			ext.refuseAttach = false;
-			await page?.evaluate("location.hash = 'moved'");
-			ext.urlChanged(`${pageUrl}#moved`);
-			await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 });
-			expect((await invoke(readMark)).value).toBe("kept");
+			const later = await invoke(readMark);
+			expect(later.value).toBe("kept");
+			expect(later.text).toContain("Chrome had kept omp out of this tab");
 		},
 		60_000,
 	);
