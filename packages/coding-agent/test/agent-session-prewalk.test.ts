@@ -652,6 +652,52 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(target.id);
 	});
 
+	it("skips a prewalk hand-off onto a target whose lowest effort is above its effort ceiling", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = {
+			...modelOrThrow("claude-sonnet-4-6"),
+			id: "mock-high-only",
+			thinking: { mode: "effort", efforts: [Effort.High] },
+		} as Model<Api>;
+		const mock = createMockModel({
+			responses: [toolCall("t1", "todo"), toolCall("t2", "write"), { content: ["done"] }],
+		});
+		const calls: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [writeTool as AgentTool, todoTool as AgentTool],
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				calls.push(model.id);
+				return mock.stream(model, context, options);
+			},
+		});
+		const notices: string[] = [];
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry,
+			prewalk: { target },
+			thinkingLevelCeiling: model => (model?.id === target.id ? Effort.Low : undefined),
+		});
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+
+		await session.prompt("do the task");
+
+		expect(calls).toEqual([primary.id, primary.id, primary.id]);
+		expect(session.model?.id).toBe(primary.id);
+		expect(notices.some(message => message.includes("Prewalk: skipped anthropic/mock-high-only"))).toBe(true);
+	});
+
 	it("an edit before any todo call does not switch while a todo tool exists; the next edit after todo does", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");

@@ -4,7 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
+import { assertModelSupportsEffortCeiling, type ThinkingLevelCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelStringWithRouting,
@@ -54,7 +54,12 @@ import {
 	PerCallModelUnavailableError,
 	type PerCallModelGrants,
 } from "./model-approval";
-import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
+import {
+	cfgTaskAgentAccountPools,
+	cfgTaskMaxActualEffort,
+	cfgTaskMaxEffort,
+	resolveEffortCeilingForModel,
+} from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -278,6 +283,10 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const parentSession = resolveParentSession();
 	let perCallModel: Model | undefined;
 	let assertApprovedModel: ((model: Model) => void) | undefined;
+	// Re-apply the live ceiling setting the spawn used: task.maxActualEffort for an `actualEffort` spawn.
+	const ceilingSetting = init.actualEffort !== undefined ? cfgTaskMaxActualEffort : cfgTaskMaxEffort;
+	const effortCeiling: ThinkingLevelCeiling = model =>
+		resolveEffortCeilingForModel(ceilingSetting.get(spec.settings), model);
 	if (init.perCallModel) {
 		try {
 			if (!init.perCallModelIdentity || init.perCallThinkingLevel === undefined) {
@@ -354,7 +363,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				}
 			};
 			assertApprovedModel(perCallModel);
-			assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(spec.settings));
+			const ceiling = effortCeiling(perCallModel);
+			if (ceiling) assertModelSupportsEffortCeiling(perCallModel, ceiling, ceilingSetting.id);
 		} catch (error) {
 			await reopened.close();
 			throw error;
@@ -455,15 +465,17 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			parentAgentId: ref.parentId,
 			oauthAccountPools,
 			// A per-call model is held to the operator's current grants, not the transcript's,
-			// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
+			// never switches models, and keeps the live per-model effort ceiling the spawn ran under.
 			...(assertApprovedModel
 				? {
-						thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
+						thinkingLevelCeiling: effortCeiling,
+						thinkingLevelCeilingSetting: ceilingSetting.id,
 						disableModelFallback: true,
 						disableServerSideFallback: true,
 						assertDispatchModel: (model: Model) => {
 							assertApprovedModel(model);
-							assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
+							const ceiling = effortCeiling(model);
+							if (ceiling) assertModelSupportsEffortCeiling(model, ceiling, ceilingSetting.id);
 						},
 					}
 				: {}),

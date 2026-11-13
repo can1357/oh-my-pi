@@ -443,6 +443,50 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.sessionManager.getEntries().some(entry => entry.type === "model_usage")).toBe(false);
 	});
 
+	it("drops a classification that resolves after a model switch, keeping the new model's ceiling", async () => {
+		const base = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const outgoing = {
+			...base,
+			id: "mock-medium-high",
+			thinking: { mode: "effort", efforts: [Effort.Medium, Effort.High] },
+		} as typeof base;
+		const incoming = {
+			...base,
+			id: "mock-low-medium-high",
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+		} as typeof base;
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		sessionSettings = Settings.isolated();
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: outgoing, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+			thinkingLevelCeiling: model => (model?.id === incoming.id ? Effort.Low : Effort.High),
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierStarted = Promise.withResolvers<void>();
+		const releaseClassifier = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+			classifierStarted.resolve();
+			await releaseClassifier.promise;
+			return Effort.High;
+		});
+
+		const prompt = session.prompt("Classify this turn");
+		await classifierStarted.promise;
+		await session.setModelTemporary(incoming);
+		releaseClassifier.resolve();
+		await prompt;
+
+		// Clamping `high` on the outgoing ladder under the incoming cap finds no tier and keeps `high`.
+		expect(session.model?.id).toBe(incoming.id);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+		expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+	});
+
 	it("classifies a user-invoked /skill turn under auto (resolves concrete effort)", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		await createSession({

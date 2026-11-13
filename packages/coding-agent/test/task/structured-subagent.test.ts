@@ -490,7 +490,7 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
-	it("starts a level-tagged agent at its tagged effort and other agents at the capped hint", async () => {
+	it("starts a level-tagged agent at its tagged effort and other agents at the capped effort or actualEffort", async () => {
 		const model = buildModel({
 			id: "effort-target",
 			name: "Effort Target",
@@ -508,7 +508,11 @@ describe("structured subagent primitive", () => {
 		mockDiscovery({ ...AGENT, model: [selector], thinkingLevel: Effort.High });
 		const tagged: AgentDefinition = { ...AGENT, name: "m1", model: [`${selector}:high`], thinkingLevel: Effort.High };
 		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: [selector], thinkingLevel: Effort.Medium };
-		const settings = Settings.isolated({ "task.maxEffort": "low", "task.isolation.enabled": false });
+		const settings = Settings.isolated({
+			"task.maxEffort": "low",
+			"task.maxActualEffort": "medium",
+			"task.isolation.enabled": false,
+		});
 		const parent = Object.assign(session({ settings, sessionAgents: [tagged, untagged] }), {
 			modelRegistry: { authStorage: {}, refresh: async () => {}, getAvailable: () => [model] },
 			getApiKey: async () => "test-key",
@@ -550,13 +554,21 @@ describe("structured subagent primitive", () => {
 		for (const agent of ["m1", "m2", "worker"]) {
 			await runStructuredSubagent(request({ session: parent, agent, effort: "hi" }));
 		}
+		for (const agent of ["m1", "m2", "worker"]) {
+			await runStructuredSubagent(request({ session: parent, agent, effort: "lo", actualEffort: Effort.High }));
+		}
 
+		// The tag drops both caller hints; elsewhere each is capped by its own setting.
 		expect(create.mock.calls.map(([options]) => options?.thinkingLevel)).toEqual([
 			Effort.High,
 			Effort.Low,
 			Effort.Low,
+			Effort.High,
+			Effort.Medium,
+			Effort.Medium,
 		]);
 		expect(create.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBeUndefined();
+		expect(create.mock.calls[3]?.[0]?.thinkingLevelCeiling).toBeUndefined();
 	});
 	it("holds the parent on an inline child until it settles, but not on a detached one", async () => {
 		mockDiscovery();

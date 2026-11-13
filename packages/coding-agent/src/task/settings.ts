@@ -5,20 +5,23 @@
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type AgentCompactionThresholdOverride,
+	checkModelThresholdKey,
+	matchModelSelectorKey,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
+import type { Effort, Model } from "@oh-my-pi/pi-ai";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
-import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
 const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
 const EMPTY_AGENT_SOFT_REQUEST_BUDGET: Record<string, number | null> = {};
+const EMPTY_EFFORT_CEILINGS: Readonly<Record<string, Effort>> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -363,6 +366,19 @@ export const cfgTaskEnableEffort = register({
 	},
 });
 
+export const cfgTaskEnableActualEffort = register({
+	id: "task.enableActualEffort",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Task Exact Effort",
+		description:
+			"Expose the optional actualEffort parameter on task spawns, letting callers request an exact thinking level (minimal..max) that overrides effort",
+	},
+});
+
 export const cfgTaskPerCallModel = register({
 	id: "task.perCallModel",
 	type: "enum",
@@ -625,19 +641,66 @@ export const cfgTaskSoftRequestBudgetNotice = register({
 	},
 });
 
+/**
+ * A `task.maxEffort`/`task.maxActualEffort` value: a per-model map, or a bare effort meaning
+ * `{ "*": effort }`. `validate` guarantees every value is an {@link Effort}.
+ */
+export type EffortCeilingSetting = string | Readonly<Record<string, Effort>>;
+
+function isEffort(value: unknown): value is Effort {
+	return THINKING_EFFORTS.some(effort => effort === value);
+}
+
+function validateEffortCeilingSetting(id: string): (value: unknown) => void {
+	const invalidEffort = (path: string, effort: unknown) =>
+		new Error(`Invalid effort for ${path}: ${String(effort)}. Expected one of: ${THINKING_EFFORTS.join(", ")}.`);
+	return value => {
+		if (value === undefined || value === null) return;
+		if (typeof value === "string") {
+			if (!isEffort(value)) throw invalidEffort(id, value);
+			return;
+		}
+		if (!isRecord(value)) {
+			const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+			throw new Error(`Invalid ${id}: expected an effort or a map of model selector to effort, got ${received}.`);
+		}
+		for (const [key, effort] of Object.entries(value)) {
+			const keyError = key === "*" ? undefined : checkModelThresholdKey(key);
+			if (keyError) throw new Error(`Invalid ${id} key "${key}": ${keyError}.`);
+			if (!isEffort(effort)) throw invalidEffort(`${id}.${key}`, effort);
+		}
+	};
+}
+
+/**
+ * Effort ceiling `value` sets for `model`: the exact `provider/modelId` key, else the
+ * longest matching `*`-terminated prefix key, else `"*"`; `undefined` means uncapped.
+ * A string value is `{ "*": value }`. Same matching as `compaction.modelThresholds`.
+ */
+export function resolveEffortCeilingForModel(
+	value: EffortCeilingSetting,
+	model: Model | undefined,
+): Effort | undefined {
+	if (typeof value === "string") return isEffort(value) ? value : undefined;
+	const key = model ? matchModelSelectorKey(value, model) : "*";
+	return key !== undefined && Object.hasOwn(value, key) ? value[key] : undefined;
+}
+
+// Record settings carry no settings-panel UI; edit them with `omp config set` or config.yml.
 export const cfgTaskMaxEffort = register({
 	id: "task.maxEffort",
-	type: "enum",
-	values: THINKING_EFFORTS,
-	default: "max",
-	ui: {
-		tab: "tasks",
-		group: "Subagents",
-		label: "Maximum Per-Spawn Effort",
-		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
-		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
-	},
+	type: "record",
+	stringShorthandKey: "*",
+	default: EMPTY_EFFORT_CEILINGS,
+	validate: validateEffortCeilingSetting("task.maxEffort"),
+});
+
+export const cfgTaskMaxActualEffort = register({
+	id: "task.maxActualEffort",
+	type: "record",
+	stringShorthandKey: "*",
+	default: EMPTY_EFFORT_CEILINGS,
+	validate: validateEffortCeilingSetting("task.maxActualEffort"),
 });
 
 export const cfgTaskDisabledAgents = register({

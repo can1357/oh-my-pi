@@ -45,11 +45,13 @@ import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-c
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { resolveEffortCeilingForModel } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -6808,6 +6810,153 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("clamps a Fireworks Fast degrade to the base model's own effort ceiling", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k3");
+		if (!fastModel || !baseModel) throw new Error("Expected the bundled Fireworks Fast and base models to exist");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push(
+					model.id === fastModel.id
+						? { throw: "rate limit exceeded retry-after-ms=200" }
+						: { content: ["the base model did the work"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+		settings.setModelRole("default", `${fastModel.provider}/${fastModel.id}`);
+		const ceilings = { "fireworks/kimi-k3-fast": Effort.High, "fireworks/kimi-k3": Effort.Low };
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+		expect(session.thinkingLevel).toBe(Effort.High);
+
+		await session.prompt("Degrade off Fast under the base model's ceiling");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["fireworks/kimi-k3-fast", "fireworks/kimi-k3"]);
+		expect(session.model?.id).toBe(baseModel.id);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("restores the primary at its requested effort after a chain fallback degrades off Fireworks Fast", async () => {
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k3");
+		if (!primaryModel || !fastModel || !baseModel) throw new Error("Expected bundled test models to exist");
+
+		let primaryDown = true;
+		const requests: Array<[string, ConfiguredThinkingLevel | undefined]> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requests.push([model.id, session?.thinkingLevel]);
+				const fails = model.id === fastModel.id || (model.id === primaryModel.id && primaryDown);
+				mock.push(
+					fails ? { throw: "rate limit exceeded retry-after-ms=200" } : { content: [`served by ${model.id}`] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fastModel.provider}/${fastModel.id}`] },
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const ceilings = {
+			"openai-codex/gpt-5.6-sol": Effort.High,
+			"fireworks/kimi-k3-fast": Effort.High,
+			"fireworks/kimi-k3": Effort.Low,
+		};
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Primary fails, then Fast fails");
+		await session.waitForIdle();
+		expect(requests).toEqual([
+			[primaryModel.id, Effort.High],
+			[fastModel.id, Effort.High],
+			[baseModel.id, Effort.Low],
+		]);
+
+		primaryDown = false;
+		now += 240;
+		await session.prompt("Cooldown expired: revert to the primary");
+		await session.waitForIdle();
+
+		// The Standard tier's `low` was the chain's own clamp, not a user override.
+		expect(requests.at(-1)).toEqual([primaryModel.id, Effort.High]);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("holds an `auto` turn's resolved level to the base model's ceiling on a Fireworks Fast degrade", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k3");
+		if (!fastModel || !baseModel) throw new Error("Expected the bundled Fireworks Fast and base models to exist");
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+
+		const requestedLevels: Array<[string, ConfiguredThinkingLevel | undefined]> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedLevels.push([model.id, session?.thinkingLevel]);
+				mock.push(
+					model.id === fastModel.id
+						? { throw: "rate limit exceeded retry-after-ms=200" }
+						: { content: ["the base model did the work"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+		settings.setModelRole("default", `${fastModel.provider}/${fastModel.id}`);
+		const ceilings = { "fireworks/kimi-k3-fast": Effort.High, "fireworks/kimi-k3": Effort.Low };
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+
+		await session.prompt("Classified high, then degrade off Fast");
+		await session.waitForIdle();
+
+		// The retry does not reclassify, so the base request must already run under its own cap.
+		expect(requestedLevels).toEqual([
+			[fastModel.id, Effort.High],
+			[baseModel.id, Effort.Low],
+		]);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+	});
+
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {
 		// Regression for #7952: a cooldown-expiry revert reverts the model at a
 		// turn boundary. The user-prompt path re-checks context after the revert
@@ -6988,6 +7137,71 @@ describe("AgentSession retry fallback", () => {
 		} else {
 			expect(requestedModels).toContain(largeId);
 			expect(requestedModels).not.toContain(smallId);
+		}
+	});
+
+	it.each([
+		{ label: "promotes onto a model the effort ceiling allows", ceiling: undefined },
+		{ label: "skips a target whose effort floor exceeds its ceiling", ceiling: Effort.Low },
+	])("context promotion under an effort ceiling: $label", async ({ ceiling }) => {
+		const target = getBundledModel("openrouter", "deepseek/deepseek-v4-pro");
+		if (!target) throw new Error("Expected bundled deepseek-v4-pro model to exist");
+		const modelsConfigPath = path.join(tempDir.path(), `promotion-ceiling-${ceiling}.json`);
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					openai: {
+						modelOverrides: {
+							"gpt-4o-mini": { contextWindow: 4000, contextPromotionTarget: `${target.provider}/${target.id}` },
+						},
+					},
+				},
+			}),
+		);
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+		const small = modelRegistry.find("openai", "gpt-4o-mini");
+		if (!small) throw new Error("Expected override model to resolve");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: small, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ content: ["ok"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 80,
+				"compaction.thresholdTokens": -1,
+				"contextPromotion.enabled": true,
+			}),
+			modelRegistry,
+			thinkingLevelCeiling: () => ceiling,
+		});
+
+		session.agent.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "lorem ipsum ".repeat(5000) }],
+			timestamp: Date.now(),
+		});
+		await session.prompt("continue");
+		await session.waitForIdle();
+
+		const targetId = `${target.provider}/${target.id}`;
+		if (ceiling === undefined) {
+			expect(requestedModels).toContain(targetId);
+		} else {
+			expect(requestedModels).not.toContain(targetId);
+			expect(session.model?.id).toBe(small.id);
 		}
 	});
 
@@ -7569,7 +7783,7 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: Effort.Low,
 			// Per-spawn cap (task.maxEffort resolved at spawn time): no recovery
 			// path may raise effective effort above it.
-			thinkingLevelCeiling: Effort.Low,
+			thinkingLevelCeiling: () => Effort.Low,
 		});
 
 		await session.prompt("First prompt triggers fallback with an above-ceiling selector");
@@ -7582,6 +7796,46 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		// Without the ceiling the fallback's `:high` would apply verbatim.
 		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("re-resolves the per-model effort ceiling for the fallback model", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}:high`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		// task.maxEffort map: the primary's exact entry is low, the fallback matches a `*` prefix at medium.
+		const ceilings = { [`${primaryModel.provider}/${primaryModel.id}`]: Effort.Low, "openai-codex/*": Effort.Medium };
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+
+		await session.prompt("Fallback runs under its own model's ceiling");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(fallbackModel.id);
+		// A single spawn-wide ceiling would have held the fallback at the primary's `low`.
+		expect(session.thinkingLevel).toBe(Effort.Medium);
+		// Later effort changes on the fallback are offered and clamped against its own entry too.
+		const selectors = session.getAvailableEffortSelectors();
+		expect(selectors).toContain(Effort.Medium);
+		expect(selectors).not.toContain(Effort.High);
+		session.setThinkingLevel(Effort.Max);
+		expect(session.thinkingLevel).toBe(Effort.Medium);
 	});
 
 	it("skips usage fallbacks whose effort floor exceeds the session ceiling", async () => {
@@ -7621,7 +7875,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			thinkingLevel: Effort.Low,
-			thinkingLevelCeiling: Effort.Low,
+			thinkingLevelCeiling: () => Effort.Low,
 		});
 
 		await session.prompt("Use an effort-compatible fallback");
@@ -9389,7 +9643,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			thinkingLevel: Effort.Low,
-			thinkingLevelCeiling: Effort.Low,
+			thinkingLevelCeiling: () => Effort.Low,
 		});
 		mockSchedulerWaitWithClock();
 

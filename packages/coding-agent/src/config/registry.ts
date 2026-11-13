@@ -166,6 +166,13 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
 	ui?: UiBase;
+	/**
+	 * Also accept a bare string as the whole value, meaning `{ [stringShorthandKey]: value }`
+	 * (e.g. `task.maxEffort: medium` for `{ "*": medium }`). Writes and `parse` keep the string as
+	 * written. A string in a higher layer replaces lower layers' value; a record merges over a lower
+	 * string as that key's entry. Reads see the record.
+	 */
+	stringShorthandKey?: string;
 }
 
 /** Any setting definition accepted by {@link register}. */
@@ -194,9 +201,11 @@ export type DefinitionValue<D> = D extends { type: "boolean"; default: undefined
 						? V extends readonly string[]
 							? V[number]
 							: never
-						: D extends { type: "array" | "record"; default: infer V }
-							? V
-							: never;
+						: D extends { type: "record"; stringShorthandKey: string; default: infer V }
+							? V | string
+							: D extends { type: "array" | "record"; default: infer V }
+								? V
+								: never;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Scopes
@@ -504,6 +513,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.definition.type === "enum" ? this.definition.values : undefined;
 	}
 
+	/** Record key a bare-string value of this record setting stands for (see {@link RecordDefinition.stringShorthandKey}). */
+	get stringShorthandKey(): string | undefined {
+		return this.definition.type === "record" ? this.definition.stringShorthandKey : undefined;
+	}
+
 	/** Settings-panel metadata; `undefined` for config-file-only settings. */
 	get ui(): AnyUiMetadata | undefined {
 		return this.definition.ui as AnyUiMetadata | undefined;
@@ -586,6 +600,8 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				try {
 					parsed = JSON.parse(trimmed);
 				} catch {
+					// Bare text that is not JSON (`medium`) is the record's string shorthand.
+					if (this.stringShorthandKey !== undefined) return trimmed as T;
 					throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
 				}
 				if (!this.accepts(parsed)) throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
@@ -625,7 +641,10 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 			case "array":
 				return Array.isArray(value);
 			case "record":
-				return typeof value === "object" && value !== null && !Array.isArray(value);
+				return (
+					(typeof value === "object" && value !== null && !Array.isArray(value)) ||
+					(this.stringShorthandKey !== undefined && typeof value === "string")
+				);
 		}
 	}
 

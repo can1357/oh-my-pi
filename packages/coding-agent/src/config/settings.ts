@@ -215,6 +215,76 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 }
 
 /**
+ * Key marking a shorthand record setting's value that replaces lower layers' value whole instead of
+ * merging into it: a record composed over a string of the same tier (one `--config` file's string, a
+ * later one's entries). Never valid configuration; {@link expandShorthandRecords} drops it.
+ */
+const SHORTHAND_REPLACES_KEY = "\u0000replaces";
+
+/**
+ * `layer` with every shorthand record setting in its read form: a bare string expanded to its record
+ * (`task.maxEffort: low` → `{ "*": low }`, unless `expandStrings` is false) and the
+ * {@link SHORTHAND_REPLACES_KEY} marker dropped. Read-time only: the layer itself, and the file it came
+ * from, stay as written.
+ */
+function expandShorthandRecords(layer: RawSettings, expandStrings = true): RawSettings {
+	let expanded = layer;
+	for (const setting of allSettings()) {
+		const key = setting.stringShorthandKey;
+		if (key === undefined) continue;
+		const value = getByPath(expanded, setting.segments);
+		let record: RawSettings;
+		if (typeof value === "string" && expandStrings) {
+			record = { [key]: value };
+		} else if (isRecord(value) && Object.hasOwn(value, SHORTHAND_REPLACES_KEY)) {
+			const { [SHORTHAND_REPLACES_KEY]: _marker, ...entries } = value;
+			record = entries;
+		} else {
+			continue;
+		}
+		if (expanded === layer) expanded = structuredClone(layer);
+		setByPath(expanded, setting.segments, record);
+	}
+	return expanded;
+}
+
+/**
+ * {@link getByPath} reading an entry of a string shorthand as its record form would hold it
+ * (`task.maxEffort: low` holds `"*"` = `low` and no other entry).
+ */
+function getEntryByPath(obj: RawSettings, segments: readonly string[]): unknown {
+	const recordSegments = segments.slice(0, -1);
+	const key = lookupSetting(recordSegments.join("."))?.stringShorthandKey;
+	const stored = key === undefined ? undefined : getByPath(obj, recordSegments);
+	if (typeof stored !== "string") return getByPath(obj, segments);
+	return segments[segments.length - 1] === key ? stored : undefined;
+}
+
+/**
+ * Expands, in `obj`, a string shorthand holding the record entry at `segments`, so writing that entry
+ * keeps the string as its shorthand-key entry.
+ */
+function expandShorthandAroundEntry(obj: RawSettings, segments: readonly string[]): void {
+	const recordSegments = segments.slice(0, -1);
+	const key = lookupSetting(recordSegments.join("."))?.stringShorthandKey;
+	if (key === undefined) return;
+	const value = getByPath(obj, recordSegments);
+	if (typeof value === "string") setByPath(obj, recordSegments, { [key]: value });
+}
+
+/** Sets `value` at `segments` of `obj`, replacing each record on the way by a copy rather than editing it. */
+function setByPathCopying(obj: RawSettings, segments: readonly string[], value: unknown): void {
+	let current = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const next = current[segments[i]];
+		const copy: RawSettings = isRecord(next) ? { ...next } : {};
+		current[segments[i]] = copy;
+		current = copy;
+	}
+	current[segments[segments.length - 1]] = value;
+}
+
+/**
  * Assign `obj[key]` as an own property. Plain assignment of a parsed
  * `__proto__` key (an agent name, say) would replace the prototype instead,
  * silently dropping that entry.
@@ -269,7 +339,7 @@ function pendingChangeApplies(
 ): boolean {
 	if (mutation === undefined || mutation.generation.kind === "unreadable") return false;
 	if (yamlGenerationsMatch(mutation.generation, generation)) return true;
-	const onDisk: RawSettings = { value: getByPath(current, segments) };
+	const onDisk: RawSettings = { value: getEntryByPath(current, segments) };
 	const captured: RawSettings = { value: mutation.baseValue };
 	for (const writtenPath of written) {
 		if (isPathPrefix(writtenPath, segments)) return true;
@@ -862,7 +932,7 @@ export class Settings {
 	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
 	#operatorLayers(): RawSettings {
 		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
-		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
+		return this.#parent ? this.#mergeLayer(this.#parent.#operatorLayers(), own) : own;
 	}
 
 	/**
@@ -1171,7 +1241,10 @@ export class Settings {
 		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeEntry", id: setting.id, key, value });
 		if (value !== undefined) setting.assertWritable({ [key]: value });
-		const record = getByPath(this.#global, setting.segments);
+		const stored = getByPath(this.#global, setting.segments);
+		const shorthandKey = setting.stringShorthandKey;
+		// A string shorthand is the record of its one shorthand-key entry.
+		const record = typeof stored === "string" && shorthandKey !== undefined ? { [shorthandKey]: stored } : stored;
 		// An entry re-set to its persisted value stages nothing (no config.yml rewrite).
 		const staged =
 			value !== undefined
@@ -1181,7 +1254,9 @@ export class Settings {
 		const prev = setting.get(this);
 		this.#releaseSoftPin(setting);
 		if (staged) {
-			// Replace rather than mutate the record: the merged view and cached reads may share it.
+			// Replace rather than mutate the record: the merged view and cached reads may share it. Only the
+			// entry is staged, also over a string shorthand (the save expands the file's string around it),
+			// so an entry another writer added to the file meanwhile survives.
 			if (isRecord(record)) setByPath(this.#global, setting.segments, { ...record });
 			this.#stageGlobal([...setting.segments, key], value);
 		}
@@ -1862,7 +1937,7 @@ export class Settings {
 	 * likewise reports its parent's layer under its own.
 	 */
 	getProjectSettings(): RawSettings {
-		const own = structuredClone(this.#project);
+		const own = expandShorthandRecords(structuredClone(this.#project), false);
 		return this.#parent ? this.#deepMerge(this.#parent.getProjectSettings(), own) : own;
 	}
 
@@ -2805,7 +2880,7 @@ export class Settings {
 		const sourcePaths: string[] = [];
 		let shellPathSource: string | undefined;
 		for (const item of items) {
-			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+			settings = this.#mergeLayer(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path));
 			sourcePaths.push(item.path);
 			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 		}
@@ -2842,7 +2917,7 @@ export class Settings {
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
-			settings = this.#deepMerge(settings, overlay);
+			settings = this.#mergeLayer(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
 		return { settings, shellPathSource };
@@ -4001,6 +4076,8 @@ export class Settings {
 				// Apply pending changes unless a newer file generation also
 				// changed that setting. Disjoint external edits still merge.
 				for (const [modKey, segments] of modifiedPaths) {
+					// An entry staged over a string shorthand lands beside the file's current string.
+					expandShorthandAroundEntry(current, segments);
 					const mutation = modifiedPathMutations.get(modKey);
 					if (!pendingChangeApplies(mutation, segments, current, loaded.generation, writtenPaths)) {
 						logger.warn("Settings: skipped stale change after external config edit", {
@@ -4086,7 +4163,7 @@ export class Settings {
 						other => isPathPrefix(other, segments) || isPathPrefix(segments, other),
 					);
 					if (!overlapping) continue;
-					const written = getByPath(current, segments);
+					const written = getEntryByPath(current, segments);
 					const mutation = this.#modifiedPathMutations.get(modKey);
 					if (settingValuesEqual(getByPath(this.#global, segments), written)) {
 						this.#modified.delete(modKey);
@@ -4180,6 +4257,7 @@ export class Settings {
 		}
 		for (const segments of this.#modified.values()) {
 			const value = getByPath(this.#global, segments);
+			expandShorthandAroundEntry(target, segments);
 			if (value === undefined) deleteByPath(target, segments);
 			else setByPath(target, segments, value);
 		}
@@ -4283,16 +4361,44 @@ export class Settings {
 		};
 	}
 
-	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
+	/**
+	 * `layers` (global, project, `--config` overlay, runtime) merged in precedence order. A shorthand
+	 * record's top-layer string stays unexpanded; {@link mergeOverParent} expands it.
+	 */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
-		merged = this.#deepMerge(merged, layers.configOverlay);
-		return this.#deepMerge(merged, layers.overrides);
+		let merged = this.#mergeLayer(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
+		merged = this.#mergeLayer(merged, layers.configOverlay);
+		return this.#mergeLayer(merged, layers.overrides);
 	}
 
-	/** `own` merged over an overlay parent's current view (itself for a root instance). */
+	/** `own` merged over an overlay parent's current view (itself for a root instance), shorthand records expanded. */
 	#mergeOverParent(own: RawSettings): RawSettings {
-		return this.#parent ? this.#deepMerge(this.#parent.#mergedView(), own) : own;
+		return expandShorthandRecords(this.#parent ? this.#mergeLayer(this.#parent.#mergedView(), own) : own);
+	}
+
+	/**
+	 * `layer` deep-merged over `base`. For a shorthand record setting: a bare string in `layer` replaces
+	 * the value below it whole, and so does a record marked {@link SHORTHAND_REPLACES_KEY}. A record over
+	 * a lower string merges over it as `{ "*": string }`, marked: had the two come from one source, the
+	 * string would have replaced everything below, so the composed record does too. Any other record
+	 * merges entry by entry.
+	 */
+	#mergeLayer(base: RawSettings, layer: RawSettings): RawSettings {
+		const merged = this.#deepMerge(base, layer);
+		for (const setting of allSettings()) {
+			const key = setting.stringShorthandKey;
+			if (key === undefined) continue;
+			const upper = getByPath(layer, setting.segments);
+			if (!isRecord(upper)) continue;
+			if (Object.hasOwn(upper, SHORTHAND_REPLACES_KEY)) {
+				setByPathCopying(merged, setting.segments, upper);
+				continue;
+			}
+			const lower = getByPath(base, setting.segments);
+			if (typeof lower !== "string") continue;
+			setByPathCopying(merged, setting.segments, { [SHORTHAND_REPLACES_KEY]: true, [key]: lower, ...upper });
+		}
+		return merged;
 	}
 
 	/**

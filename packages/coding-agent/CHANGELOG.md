@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- An invalid `task.maxEffort` or `task.maxActualEffort` value (e.g. `turbo`, a list, or a malformed model key) now stops startup with an error naming the setting, instead of logging a warning and using the default ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
+- `task.maxEffort` is now a per-model map (exact `provider/modelId`, a prefix ending in `*`, or `"*"` keys) so each model, including retry-fallback models, gets its own cap, and a model whose lowest effort is above its cap fails a spawn whose model resolves late, is skipped by retry fallback, context promotion and prewalk hand-offs, and is refused by a model switch; an existing `task.maxEffort: medium` still works as the `"*"` entry, a map in a higher config layer merges over it, and a string in a higher layer replaces a lower map (also across several `--config` files or project sources), and the setting leaves the settings panel ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
+
+### Added
+
+- The task tool can take an exact per-spawn thinking level with `actualEffort` (`minimal`…`max`), enabled by `task.enableActualEffort` and capped by the new `task.maxActualEffort`; it takes `effort`'s precedence one step above it, replacing `effort` entirely ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
+
+### Breaking Changes
+
+- SDK: `createAgentSession`'s `thinkingLevelCeiling` is now a per-model function `(model) => Effort | undefined` instead of a single `Effort`; pass `() => effort` for a fixed cap ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

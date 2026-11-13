@@ -88,6 +88,8 @@ export interface PrewalkCoordinatorHost {
 	classifyAutoPrewalk(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	setModelTemporary(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
+	/** Whether `model` can run under the session's effort ceiling (`ModelControls.fitsEffortCeiling`). */
+	modelFitsEffortCeiling(model: Model): boolean;
 	setActiveToolsByName(names: string[]): Promise<void>;
 	restoreNonMCPToolPresentation(
 		nonMCPToolNames: string[],
@@ -377,6 +379,16 @@ export class PrewalkCoordinator {
 		const target = prewalk.target;
 		if (this.#isNoop(prewalk)) {
 			this.#disarmNoop(prewalk);
+			return;
+		}
+		if (!this.#host.modelFitsEffortCeiling(target)) {
+			// Its lowest effort is above its effort ceiling: stay on the planning model.
+			this.#clearPrewalkState();
+			this.#host.emitNotice(
+				"warning",
+				`Prewalk: skipped ${target.provider}/${target.id}; it has no thinking effort within its effort ceiling.`,
+				"prewalk",
+			);
 			return;
 		}
 		const source = this.#host.model();
