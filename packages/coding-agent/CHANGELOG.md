@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `inlineImageByteBudget` to custom models and `modelOverrides` in models.yml, so gateways can configure image byte limits and give snapcompact archives half that budget ([#15091](https://github.com/can1357/oh-my-pi/pull/15091) by [@Ikaleio](https://github.com/Ikaleio)).
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
