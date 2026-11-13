@@ -116,6 +116,10 @@
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
 
+### Fixed
+
+- Fixed `web_search` leaving pages open in the shared headless browser when a search was cancelled while its page was still opening or the page failed to close, so the browser's memory no longer grows over a long session ([#19058](https://github.com/can1357/oh-my-pi/pull/19058) by [@tuschla](https://github.com/tuschla))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
