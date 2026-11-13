@@ -49,6 +49,7 @@ import {
 	imageLinksEnabled,
 	linkedImagePathText,
 	linkedImageText,
+	shouldShowImagePathCaption,
 	transcriptImagePath,
 } from "../prompt/image-references";
 import { Memo } from "../native/memo";
@@ -2098,6 +2099,7 @@ export class ToolExecutionComponent extends Container {
 		if (this.#result) {
 			const imageBlocks = this.#getAllImageBlocks();
 			const sourcePath = readMediaPath(this.#rawDetails);
+			let lastCaptionPath: string | undefined;
 
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
@@ -2133,7 +2135,8 @@ export class ToolExecutionComponent extends Container {
 						this.addChild(imageComponent);
 					}
 				}
-				if (imagePath) {
+				if (shouldShowImagePathCaption() && imagePath !== undefined && imagePath !== lastCaptionPath) {
+					lastCaptionPath = imagePath;
 					const caption = new Text(theme.fg("toolOutput", linkedImagePathText(imagePath, source)), 1, 0);
 					this.addChild(caption);
 					this.#imageExtras.push(caption);

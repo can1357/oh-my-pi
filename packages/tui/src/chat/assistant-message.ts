@@ -26,7 +26,12 @@ import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntri
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
-import { linkedImagePathText, linkedImageText, transcriptImagePath } from "../prompt/image-references";
+import {
+	linkedImagePathText,
+	linkedImageText,
+	shouldShowImagePathCaption,
+	transcriptImagePath,
+} from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { DEFAULT_SPINNER_INTERVAL_MS, spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
@@ -1826,6 +1831,7 @@ export class AssistantMessageComponent extends Container {
 		this.#convertImagesForKitty(entries);
 
 		if (withLeadingSpacer) this.#contentContainer.addChild(new Spacer(1));
+		let lastCaptionPath: string | undefined;
 		for (const { image, key, sourcePath } of entries) {
 			const imagePath = transcriptImagePath(image, sourcePath);
 			let displayImage: ImageContent | undefined = image;
@@ -1853,7 +1859,8 @@ export class AssistantMessageComponent extends Container {
 					new Text(theme.fg("toolOutput", linkedImageText(`[Image: ${image.mimeType}]`, image, imagePath)), 1, 0),
 				);
 			}
-			if (imagePath) {
+			if (imagePath && shouldShowImagePathCaption() && imagePath !== lastCaptionPath) {
+				lastCaptionPath = imagePath;
 				this.#contentContainer.addChild(
 					new Text(theme.fg("toolOutput", linkedImagePathText(imagePath, image)), 1, 0),
 				);

@@ -4,6 +4,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { span } from "../native/describe";
 import { isNativeRendering } from "../native/state";
 import { fileHyperlink, fileLinkSpan, isHyperlinkEnabled, isNativeLinkEnabled } from "../render/hyperlink";
+import { shortenPath } from "../render/render-utils";
 import { blobExtensionForImageMimeType } from "./image-format";
 
 /** Materialized image destination returned by the host blob writer. */
@@ -131,7 +132,7 @@ export function imageLinksEnabled(): boolean {
 	return isNativeRendering() ? isNativeLinkEnabled() : isHyperlinkEnabled();
 }
 
-/** The local file a transcript image can open or display, regardless of hyperlink settings. */
+/** The local file a transcript image can open or display; writes a blob even when hyperlinks are off. */
 export function transcriptImagePath(
 	image: Pick<ImageContent, "data" | "mimeType">,
 	sourcePath?: string,
@@ -173,8 +174,13 @@ export function linkedImageText(
 
 /** Link a visible transcript image path while keeping terminal controls out of its label. */
 export function linkedImagePathText(imagePath: string, image: Pick<ImageContent, "data" | "mimeType">): string {
-	const label = sanitizeText(imagePath).replaceAll("\n", "\\n").replaceAll("\t", "\\t");
+	const label = shortenPath(sanitizeText(imagePath).replaceAll("\n", "\\n").replaceAll("\t", "\\t"));
 	return linkedImageText(`Image file: ${label}`, image, imagePath);
+}
+
+/** Whether the `Image file:` fallback caption should render: only when links cannot carry the path. */
+export function shouldShowImagePathCaption(): boolean {
+	return !imageLinksEnabled();
 }
 
 /** Native counterpart of {@link linkedImageText}: a span linking to the image's file when one exists. */

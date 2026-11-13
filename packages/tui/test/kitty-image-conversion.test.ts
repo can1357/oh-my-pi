@@ -1,4 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
@@ -188,6 +190,33 @@ describe("Kitty PNG conversion cache", () => {
 					expect(Bun.stripANSI(component.render(80).join("\n"))).toContain(`Image file: ${filePath}`);
 				}
 			}
+			// With links enabled the caption is redundant and must not render.
+			applyHyperlinkSetting("always");
+			setTerminalImageProtocol(null);
+			const assistant = new AssistantMessageComponent(finishedMessage());
+			assistant.setToolResultImages("call-1", [image]);
+			expect(Bun.stripANSI(assistant.render(80).join("\n"))).not.toContain("Image file:");
+		} finally {
+			disposeWriter();
+			applyHyperlinkSetting("auto");
+		}
+	});
+
+	it("shortens caption paths to the tilde convention and captions each source path once", () => {
+		applyHyperlinkSetting("off");
+		const home = os.homedir();
+		const filePath = path.join(home, "blobs", "copy.png");
+		const disposeWriter = setImageBlobWriter(() => ({ displayPath: filePath }));
+		try {
+			const component = new AssistantMessageComponent(finishedMessage());
+			component.setToolResultImages("call-1", [
+				{ ...IMAGE, mimeType: "image/png" },
+				{ ...IMAGE, mimeType: "image/png" },
+			]);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain(home);
+			expect(output).toContain(`Image file: ~/blobs/copy.png`);
+			expect((output.match(/Image file:/g) ?? []).length).toBe(1);
 		} finally {
 			disposeWriter();
 			applyHyperlinkSetting("auto");
@@ -195,15 +224,14 @@ describe("Kitty PNG conversion cache", () => {
 	});
 
 	it("cleans control-byte image path labels without changing their link target", () => {
-		applyHyperlinkSetting("always");
+		applyHyperlinkSetting("off");
 		const sourcePath = "/tmp/image\x1b[?1049h\nname.png";
 		try {
 			const component = new AssistantMessageComponent(finishedMessage());
 			component.setToolResultImages("call-1", [{ ...IMAGE, mimeType: "image/png" }], sourcePath);
-			const output = component.render(120).join("\n");
+			const output = Bun.stripANSI(component.render(120).join("\n"));
 			expect(output).not.toContain("\x1b[?1049h");
-			expect(output).toContain("image%1B%5B%3F1049h%0Aname.png");
-			expect(Bun.stripANSI(output)).toContain("Image file: /tmp/image\\nname.png");
+			expect(output).toContain("Image file: /tmp/image\\nname.png");
 		} finally {
 			applyHyperlinkSetting("auto");
 		}

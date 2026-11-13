@@ -38,6 +38,7 @@ import {
 	linkedImagePathText,
 	linkedImageSpan,
 	linkedImageText,
+	shouldShowImagePathCaption,
 	transcriptImagePath,
 } from "../prompt/image-references";
 import { Memo } from "../native/memo";
@@ -436,6 +437,7 @@ export class BashExecutionComponent extends Container {
 		// Output
 		if (availableLines.length > 0) this.#contentContainer.addChild(this.#outputPane);
 
+		let lastCaptionPath: string | undefined;
 		for (let index = 0; index < this.#images.length; index++) {
 			const image = this.#images[index]!;
 			const imagePath = this.#showImages ? transcriptImagePath(image) : undefined;
@@ -463,7 +465,8 @@ export class BashExecutionComponent extends Container {
 					),
 				);
 			}
-			if (this.#showImages && imagePath) {
+			if (this.#showImages && imagePath && shouldShowImagePathCaption() && imagePath !== lastCaptionPath) {
+				lastCaptionPath = imagePath;
 				this.#contentContainer.addChild(new Text(theme.fg("muted", linkedImagePathText(imagePath, image)), 1, 0));
 			}
 		}
