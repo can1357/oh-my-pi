@@ -1316,10 +1316,12 @@ trait GuardedDesktop {
 	/// Puts the user's app back in front unless they pressed a key or clicked
 	/// after `since` ([`set_front_unless_user_acted`]).
 	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest>;
-	/// Makes `key` the user's key window again. Their app's hand-back
-	/// (`kCPSNoWindows`) leaves it with no key window, which nothing outside the
-	/// app can see, so this always sends the make-key records.
-	fn restore_key(&self, key: u32) -> CoreResult<()>;
+	/// Makes `key` the user's key window again unless they pressed a key or
+	/// clicked after `since` ([`make_window_key_unless_user_acted`]). Their
+	/// app's hand-back (`kCPSNoWindows`) leaves it with no key window, which
+	/// nothing outside the app can see, so this always sends the make-key
+	/// records when it is not refused.
+	fn restore_key(&self, key: u32, since: u64) -> CoreResult<FrontRequest>;
 	/// The name and pid of the app `psn`, for an error message.
 	fn describe(&self, psn: ProcessSerialNumber) -> String;
 	/// Whether the action and its settle are over.
@@ -1363,8 +1365,8 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 		set_front_unless_user_acted(self.spi, self.previous.psn, self.key.unwrap_or(0), since)
 	}
 
-	fn restore_key(&self, key: u32) -> CoreResult<()> {
-		make_exact_window_key(self.spi, self.previous.psn, key)
+	fn restore_key(&self, key: u32, since: u64) -> CoreResult<FrontRequest> {
+		make_window_key_unless_user_acted(self.spi, self.previous.psn, key, since)
 	}
 
 	fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -1411,6 +1413,19 @@ fn guard_focus(
 		let signals = desktop.signals(now);
 		lease.lock().observe(front, key, signals, now)
 	};
+	// The make-key records carry a front request for the user's app, made
+	// conditional like the hand-back's and asked only while their app is
+	// still in front, so a switch of theirs that races it wins.
+	let restore = |key| {
+		request_after_check(
+			|| desktop.event_clock(),
+			|| desktop.front() == Some(previous),
+			|since| desktop.restore_key(key, since),
+		)
+		.map(|request| request == Some(FrontRequest::Done))
+	};
+	// A key window still to put back after `WindowServer` refused it.
+	let mut owed = None;
 	loop {
 		// Once disarmed, nothing is sent back any more, but the lease keeps
 		// watching for the user coming to the target.
@@ -1457,28 +1472,46 @@ fn guard_focus(
 					// front again: that click may have picked another of its
 					// windows, which is then the one the lease keeps. That read can
 					// block, so the window is put back only while the lease is still
-					// armed, and the click is used up only then. Either way the
-					// make-key records carry a front request for their app, so they
-					// go out only while it is still in front. Otherwise the re-check
-					// observed instead (a disarm it recorded stops the hand-backs
-					// from the next poll), or `WindowServer` refused.
+					// armed, and the click is used up only then. Otherwise the
+					// re-check observed instead (a disarm it recorded stops the
+					// hand-backs from the next poll), or `WindowServer` refused.
 					if handed_back == Some(FrontRequest::Done) {
 						let (kept, own_click) = {
 							let lease = lease.lock();
 							(lease.key, lease.user.own_click_since(desktop.now()))
 						};
 						let fresh = if own_click { desktop.user_key() } else { None };
-						let current =
-							(!own_click || !lease.lock().disarmed) && desktop.front() == Some(previous);
-						if current && let Some(key) = fresh.or(kept) {
-							desktop.restore_key(key)?;
-							let mut lease = lease.lock();
-							lease.key = Some(key);
-							if own_click {
-								lease.user.own_click = None;
+						if (!own_click || !lease.lock().disarmed)
+							&& let Some(key) = fresh.or(kept)
+						{
+							owed = (!restore(key)?).then_some(key);
+							if owed.is_none() {
+								let mut lease = lease.lock();
+								lease.key = Some(key);
+								if own_click {
+									lease.user.own_click = None;
+								}
 							}
 						}
 					}
+				} else if let Some(key) = owed
+					&& front == previous
+				{
+					// A refused key window is asked for again while the user's app
+					// stays in front and the lease armed. Typing refuses it only
+					// for that instant; a click in their app picked a window,
+					// which is then key, and a switch away has disarmed the lease.
+					let chose = {
+						let lease = lease.lock();
+						lease.disarmed
+							|| lease.key != Some(key)
+							|| lease.user.own_click_since(desktop.now())
+					};
+					owed = if chose {
+						None
+					} else {
+						(!restore(key)?).then_some(key)
+					};
 				}
 			},
 		}
@@ -2579,6 +2612,51 @@ fn make_exact_window_key(
 			"window {wid} rejected exact key-window activation"
 		)));
 	}
+	post_make_key_records(spi, target, wid)
+}
+
+/// [`make_exact_window_key`] with its front request made conditional, as
+/// [`set_front_unless_user_acted`] makes the hand-back's: `WindowServer`
+/// refuses it when the user pressed a key or clicked after `since`, and then
+/// no records are sent, so a switch of theirs that raced the request keeps
+/// the app they chose in front. Where the conditional request is unavailable,
+/// the window is made key unconditionally.
+fn make_window_key_unless_user_acted(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+	since: u64,
+) -> CoreResult<FrontRequest> {
+	let Some(conditional) = spi.conditional else {
+		return make_exact_window_key(spi, target, wid).map(|()| FrontRequest::Done);
+	};
+	control::check()?;
+	let timestamp = CFNumber::new_i64(i64::try_from(since).unwrap_or(i64::MAX));
+	// SAFETY: `timestamp_key` is SkyLight's process-lived CFString constant.
+	let key = unsafe { &*conditional.timestamp_key };
+	let info = CFDictionary::<CFString, CFNumber>::from_slices(&[key], &[&*timestamp]);
+	// SAFETY: The PSN was resolved from WindowServer and `info` stays alive
+	// for the synchronous call. kCPSUserGenerated only changes how the request
+	// is attributed.
+	let status = unsafe {
+		(conditional.set_front)(&target, wid, CPS_USER_GENERATED, ptr::from_ref(&*info).cast())
+	};
+	match status {
+		0 => post_make_key_records(spi, target, wid).map(|()| FrontRequest::Done),
+		EXPIRED_FRONT_REQUEST => Ok(FrontRequest::UserActed),
+		_ => Err(DesktopError::input_failed(format!(
+			"window {wid} rejected exact key-window activation"
+		))),
+	}
+}
+
+/// The paired make-key records (`0x01`, then `0x02`) that make `wid` the
+/// native key window of its process once that process is in front.
+fn post_make_key_records(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+) -> CoreResult<()> {
 	for kind in [0x01, 0x02] {
 		if !post_record(spi.post_record, target, &make_key_record(wid, kind)) {
 			return Err(DesktopError::input_failed(format!(
@@ -3400,6 +3478,9 @@ mod tests {
 		switch_on_key_read: Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
 		/// How long that report takes to read.
 		key_read_takes:     Duration,
+		/// Refuses the next key-window request for the user's input after its
+		/// timestamp: the app then in front, and what the next reading sees.
+		refused_key_for:    Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
 	}
 
 	impl GuardedDesktop for FakeDesktop {
@@ -3438,9 +3519,14 @@ mod tests {
 			Ok(FrontRequest::Done)
 		}
 
-		fn restore_key(&self, key: u32) -> CoreResult<()> {
+		fn restore_key(&self, key: u32, _since: u64) -> CoreResult<FrontRequest> {
+			if let Some((front, after)) = self.refused_key_for.take() {
+				self.front.set(front);
+				self.signals.set(after);
+				return Ok(FrontRequest::UserActed);
+			}
 			self.keys.borrow_mut().push(key);
-			Ok(())
+			Ok(FrontRequest::Done)
 		}
 
 		fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -3479,6 +3565,7 @@ mod tests {
 			user_window:        42,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     Duration::ZERO,
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_err());
@@ -3508,6 +3595,7 @@ mod tests {
 				user_window:        42,
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let visit = AtomicBool::new(false);
@@ -3650,6 +3738,7 @@ mod tests {
 				user_window:        43,
 				switch_on_key_read: Cell::new(switch),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3673,6 +3762,40 @@ mod tests {
 	}
 
 	#[test]
+	fn a_switch_that_races_the_key_window_request_keeps_the_app_the_user_chose() {
+		// The guard handed the user's app back; `WindowServer` then refuses its
+		// key-window request for input of theirs after the request's timestamp.
+		let t0 = Instant::now();
+		let run = |refusal: (ProcessSerialNumber, SwitchSignals)| {
+			let desktop = FakeDesktop {
+				clock:              Cell::new(t0 + ms(20)),
+				end:                t0 + ms(60),
+				front:              Cell::new(TARGET),
+				arrives:            Cell::new(None),
+				signals:            Cell::new(input(0, NO_MODIFIERS)),
+				refused_for:        Cell::new(None),
+				hand_backs:         Cell::new(0),
+				keys:               std::cell::RefCell::default(),
+				user_window:        42,
+				switch_on_key_read: Cell::new(None),
+				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(Some(refusal)),
+				after_hand_back:    None,
+			};
+			let lease = Mutex::new(lease_at(t0, None));
+			assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
+			let lease = lease.into_inner();
+			(desktop.front.get().low, desktop.keys.into_inner(), lease.disarmed)
+		};
+		// A ⌘-Tab to a third app: no make-key records, and the app they chose
+		// stays in front.
+		assert_eq!(run((THIRD, input(1, COMMAND))), (THIRD.low, vec![], true));
+		// Typing in their own app refuses only that instant: the window is put
+		// back on the next poll.
+		assert_eq!(run((PREVIOUS, input(0, NO_MODIFIERS))), (PREVIOUS.low, vec![42], false));
+	}
+
+	#[test]
 	fn a_users_click_does_not_age_while_their_key_window_is_read() {
 		// Reading the user's key window takes the accessibility timeout; it
 		// reports window 43, which their click just before the read picked.
@@ -3690,6 +3813,7 @@ mod tests {
 			user_window:        43,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     ms(600),
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
@@ -3733,6 +3857,7 @@ mod tests {
 				user_window:        42,
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3765,6 +3890,7 @@ mod tests {
 			user_window:        42,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     Duration::ZERO,
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
