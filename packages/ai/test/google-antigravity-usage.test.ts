@@ -216,7 +216,7 @@ describe("antigravity usage provider", () => {
 		]);
 	});
 
-	it("leaves Argon unconstrained when the quota summary reports no Argon bucket", async () => {
+	it("judges Argon by the shared Gemini counter when the quota summary reports no Argon bucket", async () => {
 		const report = await antigravityUsageProvider.fetchUsage!(
 			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
 			makeCtx(
@@ -235,24 +235,55 @@ describe("antigravity usage provider", () => {
 		);
 		if (!report) throw new Error("expected usage report");
 		const argon = { modelId: "gemini-4-argon" };
-		expect(scopeAntigravityLimitsForModel(report, argon)).toEqual([]);
-		expect(antigravityRankingStrategy.findWindowLimits(report, argon).primary).toBeUndefined();
-		// Ranking leaves Argon unconstrained, but a stale Argon block heals only
-		// while the shared Gemini quota it now draws on has headroom.
+		const sharedGemini = [
+			"google-antigravity:google:default:gemini-5h",
+			"google-antigravity:google:default:gemini-weekly",
+		];
+		// Plans without a dedicated Argon bucket meter Argon from the shared
+		// Gemini quota, so ranking and block healing both read it.
+		expect(
+			scopeAntigravityLimitsForModel(report, argon)
+				.map(limit => limit.id)
+				.sort(),
+		).toEqual(sharedGemini);
+		expect(antigravityRankingStrategy.findWindowLimits(report, argon).primary?.id).toBe(
+			"google-antigravity:google:default:gemini-weekly",
+		);
 		expect(
 			antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => ({
 				blockScope: scope.blockScope,
 				limits: scope.limits.map(limit => limit.id).sort(),
 			})),
 		).toEqual([
-			{
-				blockScope: "counter:google-argon",
-				limits: ["google-antigravity:google:default:gemini-5h", "google-antigravity:google:default:gemini-weekly"],
-			},
-			{
-				blockScope: "counter:google",
-				limits: ["google-antigravity:google:default:gemini-5h", "google-antigravity:google:default:gemini-weekly"],
-			},
+			{ blockScope: "counter:google-argon", limits: sharedGemini },
+			{ blockScope: "counter:google", limits: sharedGemini },
+		]);
+	});
+
+	it("leaves Argon unconstrained when the quota summary marks the Argon bucket disabled", async () => {
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(
+				fakeFetch({
+					groups: [
+						{
+							displayName: "Gemini Models",
+							buckets: [
+								{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.9 },
+								{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 0, disabled: true },
+							],
+						},
+					],
+				}),
+			),
+		);
+		if (!report) throw new Error("expected usage report");
+		const argon = { modelId: "gemini-4-argon" };
+		// A disabled bucket says nothing about Argon's quota, so healthy shared
+		// Gemini quota must not vouch for an Argon block.
+		expect(scopeAntigravityLimitsForModel(report, argon)).toEqual([]);
+		expect(antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => scope.blockScope)).toEqual([
+			"counter:google",
 		]);
 	});
 
