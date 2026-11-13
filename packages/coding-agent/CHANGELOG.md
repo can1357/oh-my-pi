@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Judge candidates behind a gateway that answers HTTP 502 `upstream_credentials_exhausted` are now skipped for 5 minutes, like a rejected account or an unserved model, instead of costing every judgment three attempts before the fallback
+- Judge candidates behind a gateway that answers HTTP 502 `upstream_credentials_exhausted` are now skipped for 5 minutes, like a rejected account or an unserved model, instead of costing every judgment three attempts before the fallback ([#19158](https://github.com/can1357/oh-my-pi/pull/19158) by [@Xytronix](https://github.com/Xytronix))
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
 - `/annotate session` now opens the same fullscreen message picker as `/copy` in classic terminals and Tern ([#19145](https://github.com/can1357/oh-my-pi/pull/19145) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
