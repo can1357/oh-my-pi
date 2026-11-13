@@ -1891,6 +1891,47 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("counts a loaded session's persisted background subagent spend (#19102)", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		stored.sessionManager.appendMessage({ role: "user", content: "spawn", timestamp: Date.now() });
+		stored.sessionManager.appendMessage(costing(1));
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+		// A background child from before the restart: only its own transcript records its spend.
+		const artifacts = stored.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = SessionManager.create(harness.cwdA, artifacts);
+		child.appendMessage({ role: "user", content: "probe", timestamp: Date.now() });
+		child.appendMessage(costing(0.2));
+		await child.ensureOnDisk();
+		await child.flush();
+		await child.close();
+
+		try {
+			await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+			const loaded = harness.sessions.at(-1)!;
+			(loaded as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+			await harness.agent.prompt({ sessionId: stored.sessionId, prompt: [{ type: "text", text: "ping" }] });
+
+			const last = harness.updates
+				.filter(update => update.sessionId === stored.sessionId && update.update.sessionUpdate === "usage_update")
+				.at(-1)?.update as { cost?: { amount: number } } | undefined;
+			expect(last?.cost?.amount).toBeCloseTo(1.2, 10);
+		} finally {
+			for (const ref of AgentRegistry.global().list()) {
+				if (ref.sessionFile?.startsWith(artifacts)) AgentRegistry.global().unregister(ref.id);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
 	it("loads a session stored under a legacy/hashed project directory (#7779)", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);

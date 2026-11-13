@@ -62,6 +62,7 @@ import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { AgentRegistry } from "../../registry/agent-registry";
+import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -1037,6 +1038,7 @@ export class AcpAgent implements Agent {
 	/** ACP has no Agent Hub, so tree costs read each subagent's live session directly. */
 	#subagentObservers = new SessionObserverRegistry();
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
+	#subagentCostHydrations = new Map<string, Promise<void>>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -2894,7 +2896,7 @@ export class AcpAgent implements Agent {
 
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
-			const cost = this.#sessionTreeCost(record);
+			const cost = await this.#sessionTreeCost(record);
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
@@ -2921,19 +2923,35 @@ export class AcpAgent implements Agent {
 	 * line does. `task` results carry only blocking children's spend, so the tree
 	 * cost adds background children; the task-result sum stays its floor.
 	 */
-	#sessionTreeCost(record: ManagedSessionRecord): number {
-		const usage = record.session.sessionManager.getUsageStatistics();
-		// ACP roots register as `kind: "main"` under `acp:<id>`, not `MAIN_AGENT_ID`,
-		// so drop them (and their advisors, billed apart) or the root counts twice.
-		const refs = AgentRegistry.global().list();
-		const mainIds = new Set(refs.filter(ref => ref.kind === "main").map(ref => ref.id));
+	async #sessionTreeCost(record: ManagedSessionRecord): Promise<number> {
+		const sessionManager = record.session.sessionManager;
+		const rootSessionFile = sessionManager.getSessionFile() ?? undefined;
+		await this.#hydratePersistedSubagentCosts(rootSessionFile, sessionManager.isSessionOnDisk());
+		const usage = sessionManager.getUsageStatistics();
 		const treeCost = sumSubagentTreeCost({
-			refs: refs.filter(ref => ref.kind !== "main" && !(ref.kind === "advisor" && mainIds.has(ref.parentId ?? ""))),
+			refs: AgentRegistry.global().list(),
 			observers: this.#subagentObservers,
-			rootSessionFile: record.session.sessionManager.getSessionFile() ?? undefined,
+			rootSessionFile,
 			sessionCosts: this.#subagentSessionCosts,
 		});
 		return Math.max(0, usage.cost - usage.subagentCost) + Math.max(treeCost, usage.subagentCost);
+	}
+
+	/**
+	 * Register a loaded session's persisted subagent transcripts (with usage
+	 * history) once per root, as the TUI does, so background spend from before a
+	 * restart still counts after `session/load`.
+	 */
+	#hydratePersistedSubagentCosts(rootSessionFile: string | undefined, onDisk: boolean): Promise<void> {
+		if (!rootSessionFile || !onDisk) return Promise.resolve();
+		let hydration = this.#subagentCostHydrations.get(rootSessionFile);
+		if (!hydration) {
+			hydration = registerPersistedSubagents(AgentRegistry.global(), rootSessionFile).catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
+			});
+			this.#subagentCostHydrations.set(rootSessionFile, hydration);
+		}
+		return hydration;
 	}
 
 	#cloneUsageStatistics(usage: UsageStatistics): UsageStatistics {
