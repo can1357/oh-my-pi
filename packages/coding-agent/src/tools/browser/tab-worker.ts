@@ -2193,14 +2193,10 @@ export class WorkerCore {
 	}
 
 	async #browserHasTarget(browser: Browser, targetId: string): Promise<unknown> {
-		let session: CDPSession | undefined;
 		try {
-			session = await browser.target().createCDPSession();
-			return await session.send("Target.getTargetInfo", { targetId });
+			return await browserConnection(browser).send("Target.getTargetInfo", { targetId });
 		} catch {
 			return undefined;
-		} finally {
-			await session?.detach().catch(() => undefined);
 		}
 	}
 
