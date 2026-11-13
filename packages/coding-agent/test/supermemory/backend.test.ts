@@ -253,6 +253,60 @@ describe("supermemoryBackend", () => {
 		expect(sent[1]?.[1]).toContain("alpha-three");
 	});
 
+	describe("preCompactionContext", () => {
+		const compacted = [
+			{ role: "user", content: "older question" },
+			{ role: "assistant", content: [{ type: "text", text: "older answer" }] },
+			{ role: "user", content: [{ type: "text", text: "how do we build? key sm-synthetic-key" }] },
+		];
+		const compact = (session: { settings: Settings }) =>
+			supermemoryBackend.preCompactionContext!(compacted as never, session.settings, session as never);
+
+		it("recalls for the latest user turn of the summarized messages, redacted", async () => {
+			const { profile, search } = spyRecall();
+			const session = makeSession();
+			await start(session);
+			const context = await compact(session);
+			expect(context).toContain("<supermemory_recall>");
+			expect(context).toContain("- uses bun (id: m1)");
+			expect(context).not.toContain("supermemory_profile");
+			expect(profile).not.toHaveBeenCalled();
+			const query = search.mock.calls[0]?.[1]?.query ?? "";
+			expect(query).toContain("how do we build?");
+			expect(query).not.toContain("older question");
+			expect(query).not.toContain("sm-synthetic-key");
+		});
+
+		it("recalls nothing without a key, with autoRecall off, or for a subagent", async () => {
+			const { search } = spyRecall();
+			const off = makeSession({ settings: { "supermemory.autoRecall": false } });
+			await start(off);
+			expect(await compact(off)).toBeUndefined();
+
+			const child = makeSession();
+			await start(child, 1);
+			expect(await compact(child)).toBeUndefined();
+
+			const primary = makeSession();
+			await start(primary);
+			delete Bun.env.SUPERMEMORY_API_KEY;
+			expect(await compact(primary)).toBeUndefined();
+			expect(search).not.toHaveBeenCalled();
+		});
+
+		it("fails open: a failed search or no match yields no context", async () => {
+			const search = vi
+				.spyOn(SupermemoryClient.prototype, "search")
+				.mockRejectedValueOnce(new SupermemoryHttpError(503))
+				.mockResolvedValueOnce([]);
+			const session = makeSession();
+			await start(session);
+			expect(await compact(session)).toBeUndefined();
+			expect(await compact(session)).toBeUndefined();
+			expect(search).toHaveBeenCalledTimes(2);
+		});
+	});
+
 	it("stages first-turn recall, commits it once, and rejects a superseded preparation", async () => {
 		const { profile } = spyRecall();
 		const session = makeSession();

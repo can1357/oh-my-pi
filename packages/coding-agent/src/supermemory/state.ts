@@ -515,6 +515,31 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		};
 	}
 
+	/**
+	 * Recall for a compaction summary: one search on the latest user turn of the messages being
+	 * summarized, rendered like the first-turn block's memories. Only the primary state recalls
+	 * (an alias or subagent never does) and only with `autoRecall` on. Fails open: no match, an
+	 * abort or an error returns `undefined`, so compaction never waits on memory.
+	 */
+	async recallForCompaction(messages: HindsightMessage[], signal?: AbortSignal): Promise<string | undefined> {
+		if (this.aliasOf || !this.automatic || this.#disposed || !this.#config.autoRecall) return undefined;
+		const query = messages.findLast(message => message.role === "user")?.content.trim();
+		if (!query) return undefined;
+		try {
+			// Redact before cutting, as for first-turn recall.
+			const found = await this.search(this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS), undefined, signal);
+			if (signal?.aborted || found.length === 0) return undefined;
+			const memories = renderLines(
+				found.map(item => ({ text: item.content, note: recallNote(item) })),
+				MAX_RECALL_CHARS,
+			);
+			return prompt.render(recallTemplate, { profile: "", memories }).trim() || undefined;
+		} catch (error) {
+			logger.warn("Supermemory: compaction recall failed", { error: String(error) });
+			return undefined;
+		}
+	}
+
 	/** Adopts a first-turn recall unless a newer turn or reset superseded it; `""` means it found nothing. */
 	#commitRecall(generation: number, context: string, persist: boolean): boolean {
 		if (this.#recallGeneration !== generation) return false;

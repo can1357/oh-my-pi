@@ -13,6 +13,7 @@ import supermemoryInstructions from "../prompts/system/supermemory-instructions.
 import { SupermemoryClient } from "./client";
 import { isSupermemoryConfigured, loadSupermemoryConfig, resolveSupermemoryNamespace } from "./config";
 import { SupermemorySessionState } from "./state";
+import { flattenMessagesForRecall } from "../hindsight/transcript";
 
 const NOT_INITIALISED = "Supermemory backend is not initialised for this session.";
 
@@ -78,6 +79,12 @@ export const supermemoryBackend: MemoryBackend = {
 			context: preparation.context,
 			commit: () => session.getSupermemorySessionState() === state && preparation.commit(),
 		};
+	},
+
+	async preCompactionContext(messages, settings, session, signal): Promise<string | undefined> {
+		if (!isSupermemoryConfigured(loadSupermemoryConfig(settings))) return undefined;
+		const state = session?.getSupermemorySessionState();
+		return await state?.recallForCompaction(flattenMessagesForRecall(messages), signal);
 	},
 
 	async clear(_agentDir, _cwd, session): Promise<void> {
