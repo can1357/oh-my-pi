@@ -55,7 +55,7 @@ function decodeUsage(model: Model<Api>, raw: unknown): { usage: Usage; seconds?:
 	return { usage, seconds: finiteNumber(upstream.seconds) };
 }
 
-async function responseError(response: Response, model: Model<Api>): Promise<TranscriptionApiError> {
+export async function responseError(response: Response, model: Model<Api>): Promise<TranscriptionApiError> {
 	const text = await response.text();
 	let detail = text;
 	let code: string | undefined;
