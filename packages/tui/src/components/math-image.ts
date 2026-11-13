@@ -532,6 +532,10 @@ export function renderMathImage(
 		const presentation = slot.image.renderPresentation(maxWidthPx / request.cellWidthPx + 2);
 		slot.imageId = slot.image.imageId;
 		if (slot.imageId !== undefined)
+			// An evicted placement stays Unicode while this slot lives: a formula that
+			// keeps rendering off-screen would otherwise regenerate, evict, and
+			// regenerate again once the PNG cache no longer holds it. A rebuilt
+			// owner, a new budget, or new geometry gets a fresh slot and typesets again.
 			context.budget.setPlacementRetireHandler(slot.imageId, () => {
 				retained.image = undefined;
 				retained.raster = undefined;

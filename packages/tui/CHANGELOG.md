@@ -13,6 +13,7 @@
 
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
+- Added opt-in Markdown math images through a host-supplied renderer and `setMarkdownMathRendering`: in-place display graphics on Kitty, iTerm2, and Sixel, fitting one-row inline graphics on proven Kitty-placeholder clients, and Unicode fallback. Math alone opts into cursor preservation and, on Kitty, separate 512-placement retention; ordinary-image defaults and math-free shared caching remain unchanged. Source and native TSP Markdown remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
 ## [18.18.6] - 2026-11-09
 
 ### Added

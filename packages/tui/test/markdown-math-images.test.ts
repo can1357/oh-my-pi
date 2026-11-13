@@ -96,6 +96,16 @@ it("replaces display in place after pending fallback and preserves source", asyn
 	expect(rows[0]).toContain("before");
 	expect(rows.at(-1)).toContain("after");
 	expect(render()).toBe(rows);
+	// A settled graphic no longer holds back publication of what follows it.
+	expect(markdown.getMathImageStableSource()).toBe("before\n\n$$x+y=1$$\n\nafter");
+});
+it("disabling math releases a pending source barrier", () => {
+	render();
+	expect(markdown.getMathImageStableSource()).toBe("before\n\n");
+	setMarkdownMathRendering(false);
+	render();
+	expect(markdown.mathImagesPending).toBe(false);
+	expect(markdown.getMathImageStableSource()).toBe("before\n\n$$x+y=1$$\n\nafter");
 });
 it("retains failed Unicode without retry and releases the source barrier", async () => {
 	let calls = 0;

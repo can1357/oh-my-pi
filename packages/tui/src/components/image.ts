@@ -21,6 +21,13 @@ export interface ImageTheme {
 	fallbackColor: (str: string) => string;
 }
 
+/**
+ * A separately capped group of Kitty graphics. `cap` bounds how many of the
+ * group's transmitted ids the terminal store keeps; the sweep deletes the rest.
+ * iTerm2 and SIXEL carry their pixels inline in the emitted rows and have no
+ * id to delete, so the cap does not apply to them: classed images there are
+ * never demoted and the terminal's own scrollback limit bounds what it keeps.
+ */
 export interface ImagePlacementClass {
 	readonly cap: number;
 }
@@ -41,7 +48,7 @@ export interface ImageOptions {
 	 * repaint replaces the placement instead of stacking a duplicate.
 	 */
 	imageKey?: string;
-	/** Separately capped residency; omitted images use the ordinary budget. */
+	/** Separately capped Kitty residency, exempt from the ordinary budget; omitted images use the ordinary budget. */
 	placementClass?: ImagePlacementClass;
 	/** Preserve the cursor for direct graphics, including single-row placements. */
 	preserveCursor?: boolean;

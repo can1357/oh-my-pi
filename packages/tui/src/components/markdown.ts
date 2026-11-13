@@ -2660,8 +2660,18 @@ export class Markdown implements Component {
 	get mathImagesPending(): boolean {
 		return this.#mathPending;
 	}
+	/**
+	 * Source safe to publish: everything before the first formula whose image
+	 * is still pending. A settled graphic or fallback no longer blocks it.
+	 */
 	getMathImageStableSource(): string {
 		return streamingMarkdownSource(this.#text).slice(0, this.#mathBarrier);
+	}
+	#pendingMathBarrier(): number | undefined {
+		let barrier: number | undefined;
+		for (const item of this.#mathReplay)
+			if (item.presentation.pending) barrier = Math.min(barrier ?? Infinity, item.sourceStart);
+		return barrier;
 	}
 	#invalidateMathPresentation = (): void => {
 		this.invalidate();
@@ -2740,8 +2750,7 @@ export class Markdown implements Component {
 		if (previous < 0) this.#mathReplay.push(record);
 		else this.#mathReplay[previous] = record;
 		this.#mathPending ||= presentation.pending;
-		if (presentation.pending || presentation.graphic)
-			this.#mathBarrier = Math.min(this.#mathBarrier ?? Infinity, this.#mathTokenStart);
+		if (presentation.pending) this.#mathBarrier = Math.min(this.#mathBarrier ?? Infinity, this.#mathTokenStart);
 		return presentation;
 	}
 	#renderDisplayMath(token: Token & { text: string }, width: number, context?: InlineStyleContext): RenderedLine[] {
@@ -3459,6 +3468,8 @@ export class Markdown implements Component {
 			this.#listItemRowsCache = undefined;
 			this.#fastTail = undefined;
 			this.#mathReplay = [];
+			this.#mathBarrier = undefined;
+			this.#mathPending = false;
 		}
 		if (this.#mathReplay.length && this.#cachedText !== this.#text) {
 			this.#mathOccurrences = enumerateMathOccurrences(this.#lexTokens(mathSource));
@@ -3468,13 +3479,7 @@ export class Markdown implements Component {
 				releaseMathImageOccurrence(this.#mathDocument, item.occurrence);
 				return false;
 			});
-			this.#mathBarrier = this.#mathReplay.reduce<number | undefined>(
-				(barrier, item) =>
-					item.presentation.pending || item.presentation.graphic
-						? Math.min(barrier ?? Infinity, item.sourceStart)
-						: barrier,
-				undefined,
-			);
+			this.#mathBarrier = this.#pendingMathBarrier();
 			this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);
 		}
 		if (this.#mathEnabled() && this.#mathReplay.length) {
@@ -3497,6 +3502,7 @@ export class Markdown implements Component {
 				}
 			}
 			this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);
+			this.#mathBarrier = this.#pendingMathBarrier();
 		}
 		// L1: per-instance cache — fastest path for repeated renders of the same
 		// instance at the same width (e.g. resize debounce, repeated redraws).
@@ -3747,13 +3753,7 @@ export class Markdown implements Component {
 		this.#mathSpeculatedToken = speculated;
 		this.#mathReplay = this.#mathReplay.filter(item => item.sourceEnd <= normalizedText.length);
 		this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);
-		this.#mathBarrier = this.#mathReplay.reduce<number | undefined>(
-			(barrier, item) =>
-				item.presentation.pending || item.presentation.graphic
-					? Math.min(barrier ?? Infinity, item.sourceStart)
-					: barrier,
-			undefined,
-		);
+		this.#mathBarrier = this.#pendingMathBarrier();
 		this.#mathWidth = contentWidth;
 		let last = tokens.length - 1;
 		while (tokens[last]?.type === "space") last--;
