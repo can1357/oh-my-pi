@@ -309,16 +309,19 @@ fn mkdir(
 	}
 	let mut err = 0;
 	for arg in args {
-		// Trailing slashes go (a lone leading one stays).
-		let floor = usize::from(arg.first() == Some(&b'/'));
-		let mut end = arg.len();
-		while end > floor && arg[end - 1] == b'/' {
-			end -= 1;
-		}
-		let path: &[u8] = &arg[..end];
+		let (path, root) = trim_to_root(arg, cfg!(windows));
 		if ops.isset(b'p') {
-			// A Windows root (`C:/`, `//server/share/`) cannot be made.
-			let mut i = root_len(path, cfg!(windows));
+			// A Windows root (`C:/`, `//server/share/`) cannot be made even when
+			// it exists, so a bare root that is a directory is done; a missing
+			// one goes to `domkdir` for the error. Otherwise the walk starts past
+			// the root.
+			if root > 0 && root == path.len() {
+				if !matches!(q.stat(&host_path(ctx, path), true)?, Ok(st) if st.kind == StatKind::Dir) {
+					err |= domkdir(ctx, q, cs, path, mode, true)?;
+				}
+				continue;
+			}
+			let mut i = root;
 			loop {
 				while path.get(i) == Some(&b'/') {
 					i += 1;
@@ -340,6 +343,17 @@ fn mkdir(
 		}
 	}
 	Ok(err)
+}
+
+/// `arg` with its trailing slashes gone (a root stays whole), and the length
+/// of that root: `/`, or on Windows `C:/` or `//server/share/`.
+fn trim_to_root(arg: &[u8], windows: bool) -> (&[u8], usize) {
+	let root = root_len(arg, windows);
+	let mut end = arg.len();
+	while end > root && arg[end - 1] == b'/' {
+		end -= 1;
+	}
+	(&arg[..end], root)
 }
 
 /// zsh `domkdir`: make `path` with exactly `mode`; with `p` an existing
@@ -1046,5 +1060,14 @@ mod tests {
 		assert_eq!(win("//srv/share/./x"), "//srv/share/x");
 		assert_eq!(win("/tmp//x"), "/tmp/x");
 		assert_eq!(normalize_on(b"/tmp/./a//b/", Platform::Linux), "/tmp/a/b/");
+	}
+
+	#[test]
+	fn mkdir_trims_trailing_slashes_down_to_the_root() {
+		assert_eq!(trim_to_root(b"C:///", true), (b"C:/".as_slice(), 3));
+		assert_eq!(trim_to_root(b"C:/x/y//", true), (b"C:/x/y".as_slice(), 3));
+		assert_eq!(trim_to_root(b"//srv/share/", true), (b"//srv/share/".as_slice(), 12));
+		assert_eq!(trim_to_root(b"//", false), (b"/".as_slice(), 1));
+		assert_eq!(trim_to_root(b"x/y/", false), (b"x/y".as_slice(), 0));
 	}
 }
