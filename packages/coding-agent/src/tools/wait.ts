@@ -28,9 +28,11 @@ const waitSchema = type({});
  * its turn back early while work warms up, and a wait loop backs off. A
  * back-to-back wait that is the only call of its turn takes the top rung at
  * once: the agent has nothing else to do, so an early return would only cost
- * it a request.
+ * it a request. The top rung stays inside a 5-minute prompt-cache lifetime:
+ * an idle return re-reads the whole prompt, and subagents run without the
+ * cache warmer, so a longer window would make every top-rung return a miss.
  */
-const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 240_000] as const;
 const WAIT_TOP_RUNG = WAIT_LADDER_MS.length - 1;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
@@ -151,12 +153,13 @@ function noReplyText(replies: PendingReplies): string {
  * result, and agents then start `sleep` jobs to block for longer. Every result
  * and message starts the next turn of an `endTurn` caller (see
  * `ToolSession.tuiTranscript`), so it is told to end its turn; any other
- * caller, to wait with no other tool call, which takes the top rung.
+ * caller, to wait again right away with no other tool call, which takes the
+ * top rung (a minute away from `wait` restarts the ladder at the floor).
  */
 function elapsedReport(what: string, rung: number, endTurn: boolean): string {
 	const next = endTurn
 		? "Nothing else left? End your turn: results and messages start your next one."
-		: `Nothing else left? Call \`wait\` with no other tool call: it then blocks up to ${formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG])}.`;
+		: `Nothing else left? Call \`wait\` right away with no other tool call: it then blocks up to ${formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG])}.`;
 	return `${what} within ${formatDuration(WAIT_LADDER_MS[rung])}. ${next}`;
 }
 

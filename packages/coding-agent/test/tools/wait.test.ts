@@ -169,15 +169,15 @@ describe("wait", () => {
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
 		expect(report(first)).toContain("within 5.0s");
-		expect(report(first)).toContain("Call `wait` with no other tool call: it then blocks up to 5m.");
+		expect(report(first)).toContain("Call `wait` right away with no other tool call: it then blocks up to 4m.");
 		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
 		await elapse(tool, 60_000);
-		await elapse(tool, 300_000);
-		const capped = await elapse(tool, 300_000);
-		expect(report(capped)).toContain("within 5m");
-		expect(report(capped)).toContain("up to 5m");
-		expect(notice(capped)).toContain("11m45s");
+		await elapse(tool, 240_000);
+		const capped = await elapse(tool, 240_000);
+		expect(report(capped)).toContain("within 4m");
+		expect(report(capped)).toContain("up to 4m");
+		expect(notice(capped)).toContain("9m45s");
 		build.resolve("done");
 	});
 
@@ -211,9 +211,9 @@ describe("wait", () => {
 		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn() }));
 		// The first wait of a streak keeps the floor: the agent has not yet shown it has nothing else to do.
 		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
-		const top = await elapse(tool, 300_000);
-		expect(report(top)).toContain("within 5m");
-		expect(notice(top)).toContain("5m5s");
+		const top = await elapse(tool, 240_000);
+		expect(report(top)).toContain("within 4m");
+		expect(notice(top)).toContain("4m5s");
 		build.resolve("done");
 	});
 
@@ -232,7 +232,7 @@ describe("wait", () => {
 		expect(headless.description).not.toContain("End your turn");
 		const headlessReport = report(await elapse(headless, 5_000));
 		expect(headlessReport).not.toContain("End your turn");
-		expect(headlessReport).toContain("Call `wait` with no other tool call");
+		expect(headlessReport).toContain("Call `wait` right away with no other tool call");
 		build.resolve("done");
 	});
 
