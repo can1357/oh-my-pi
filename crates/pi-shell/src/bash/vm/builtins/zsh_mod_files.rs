@@ -379,12 +379,12 @@ fn domkdir(
 	Ok(1)
 }
 
-/// `EEXIST` (0 off Unix, where errors carry no errno).
+/// `EEXIST`.
 const fn eexist() -> i32 {
 	#[cfg(unix)]
 	return libc::EEXIST;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::EEXIST;
 }
 
 /// `ENOENT` (as [`eexist`]).
@@ -392,7 +392,7 @@ const fn enoent() -> i32 {
 	#[cfg(unix)]
 	return libc::ENOENT;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::ENOENT;
 }
 
 /// zsh `bin_rmdir`.
