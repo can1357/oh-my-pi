@@ -419,14 +419,16 @@ export class SkillDescriptionCatalog {
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
 		const store = this.#store;
+		const misses = new Map<string, Skill>();
 		const rendered = skills.map(skill => {
 			// Authored descriptions already within the preview budget need no model
-			// compression: use them verbatim so exclusions survive. `previewSkillDescription`
-			// returns short descriptions unchanged, so no snapshot entry is needed —
-			// `snapshot()` falls back to the same text. `keyFor` runs only for long
-			// descriptions that may schedule compression.
-			const verbatim = previewSkillDescription(skill.description);
-			if (verbatim.length <= MAX_PREVIEW_CHARS) return { ...skill, description: verbatim };
+			// compression: use them verbatim so exclusions survive. Only truly
+			// short input qualifies — `previewSkillDescription` truncates longer
+			// text to fit, which must still schedule compression. `keyFor` runs
+			// only for long descriptions that may schedule compression.
+			const collapsed = skill.description.replace(/\s+/g, " ").trim();
+			if (collapsed.length <= MAX_PREVIEW_CHARS)
+				return { ...skill, description: previewSkillDescription(skill.description) };
 			const key = keyFor(skill);
 			let description = this.#snapshot.get(key);
 			if (description === undefined) {
