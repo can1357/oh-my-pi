@@ -125,6 +125,7 @@ import {
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
 import { applyInsecure } from "./open-options";
+import { FOREIGN_FRAME_REFUSAL } from "./relay/protocol";
 import {
 	BrowserNetworkManager,
 	type HarContentPolicy,
@@ -2171,9 +2172,16 @@ export class WorkerCore {
 			if ((await targetIdForTarget(target).catch(() => "")) !== targetId) continue;
 			return target;
 		}
+		// The omp relay withholds a tab Chrome refused to attach, and says why beside `Target.getTargetInfo`. A refusal over
+		// another extension's frame fails at once, so the supervisor can keep the tab for a later call.
+		const targetInfo = await this.#browserHasTarget(this.#browser, targetId);
+		const refusal = isRecord(targetInfo) && typeof targetInfo.refusal === "string" ? targetInfo.refusal : undefined;
+		if (refusal && FOREIGN_FRAME_REFUSAL.test(refusal)) {
+			throw new ToolError(`Chrome refused to attach to target ${targetId}: ${refusal}`);
+		}
 		// Puppeteer lists a page only once its URL is non-empty, and a crashed page revived by this attach reloads
 		// with an empty URL for a moment. Wait for it while Chromium still has the target; fail at once when not.
-		if (await this.#browserHasTarget(this.#browser, targetId)) {
+		if (targetInfo) {
 			const target = await this.#browser
 				.waitForTarget(async candidate => (await targetIdForTarget(candidate).catch(() => "")) === targetId, {
 					timeout: ATTACHED_TARGET_EXPOSE_TIMEOUT_MS,
@@ -2184,16 +2192,11 @@ export class WorkerCore {
 		throw new ToolError(`Target ${targetId} is no longer available on the attached browser`);
 	}
 
-	async #browserHasTarget(browser: Browser, targetId: string): Promise<boolean> {
-		let session: CDPSession | undefined;
+	async #browserHasTarget(browser: Browser, targetId: string): Promise<unknown> {
 		try {
-			session = await browser.target().createCDPSession();
-			await session.send("Target.getTargetInfo", { targetId });
-			return true;
+			return await browserConnection(browser).send("Target.getTargetInfo", { targetId });
 		} catch {
-			return false;
-		} finally {
-			await session?.detach().catch(() => undefined);
+			return undefined;
 		}
 	}
 
