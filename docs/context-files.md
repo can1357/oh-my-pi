@@ -184,6 +184,8 @@ Loading is automatic — there is no need to instruct the agent to search for `A
 
 When workspace-tree scanning is enabled (`includeWorkspaceTree`), deeper-directory `AGENTS.md` files that were _not_ auto-loaded (for example, ones below the current directory) are surfaced separately in a `<dir-context>` block that lists their paths and tells the agent to read them before editing those directories. Those files are pointers, not full injected content.
 
+The workspace scan behind `<workspace-tree>` and `<dir-context>` is a snapshot: it is taken at startup and retaken when the session's directory changes (`/move`, or resuming a session from another project) or a fresh conversation starts (`/clear`, `/new`). It does not follow file edits or branch checkouts within a conversation, and resuming a session in the same directory keeps it, so an existing conversation's prompt prefix stays cacheable.
+
 ## `@` imports
 
 Inside any context file, an `@path` token expands inline to the referenced file's content before injection:
@@ -291,7 +293,7 @@ Two everyday uses:
 - **Non-interactive runs.** A user-level context file written for your own interactive sessions is usually wrong for `-p` runs driven by another program, which arrive with their own instructions. Disabling it in a `--config` overlay keeps your interactive setup untouched.
 - **Delegated work.** When one agent drives another, the caller's own operating instructions travel into the callee's prompt as user-level context and can contradict the task it was actually given.
 
-`disabledExtensions` is not path-scoped: only `enabledModels` and `disabledProviders` accept the `path:` form. Like every array setting it is replaced, not merged, by a higher-precedence layer.
+`disabledExtensions` is not path-scoped: only `enabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` accept the `path:` form. Like other array settings it is replaced, not merged, by a higher-precedence layer.
 
 Browse the ids interactively with `/extensions`, which lists every discovered context file with its level, source, and current state, and toggles the same setting.
 

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the README quick start and examples so they use the published agent and catalog packages ([#19192](https://github.com/can1357/oh-my-pi/pull/19192) by [@eggpeat](https://github.com/eggpeat))
+- Fixed context cost estimates for routes that omit reasoning history, ensuring thinking text is only included in billing estimates when it is actually sent or reconstructed for a tool call.
 
 ## [18.20.0] - 2026-11-12
 
