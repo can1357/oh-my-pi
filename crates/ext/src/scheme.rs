@@ -17,8 +17,9 @@
 //! built-in URL vocabulary, so refusing a built-in wire name such as `https`
 //! or `pr` belongs to `omp-py`, which packs `crates/tools/url-vocab.json`.
 //!
-//! Claims are stored inert: nothing in this crate binds a scheme to a
-//! resolver. ADR 0050 S2 folds live claims into the host URI generation.
+//! Claims are carried into the extension-host snapshot; ADR 0050 S2 folds live
+//! registrations into the envd-owned scheme generation served by
+//! `HostUriResolver`.
 
 use std::fmt;
 
