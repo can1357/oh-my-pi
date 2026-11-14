@@ -26,7 +26,12 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
 import { raceSignal } from "../auth/abort";
-import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
+import {
+	type AuthBrokerClient,
+	AuthBrokerError,
+	AuthBrokerStreamUnsupportedError,
+	isBrokerNoRouteBody,
+} from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
 	CredentialBlockSnapshot,
@@ -1552,8 +1557,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * Fold locally observed request usage into the pending report and schedule
 	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
 	 * final one when the process exits; on failure the batch is retained and
-	 * retried with the next flush. A 404 (pre-endpoint broker) disables
-	 * reporting for the life of this store.
+	 * retried with the next flush. The broker's own 404 (pre-endpoint broker)
+	 * disables reporting for the life of this store.
 	 *
 	 * `client` overrides the reporting identity — the auth-gateway attributes
 	 * each request to the originating install/app instead of the gateway host.
@@ -1630,7 +1635,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				});
 			} catch (error) {
 				const status = error instanceof AuthBrokerError ? error.status : undefined;
-				if (status === 400 || status === 404 || status === 501) {
+				// Only the broker's own 404 means the endpoint is missing; a proxy
+				// 404 (no route yet while the broker restarts) retries next flush.
+				const missingEndpoint = status === 404 && isBrokerNoRouteBody((error as AuthBrokerError).body);
+				if (status === 400 || missingEndpoint || status === 501) {
 					// Broker predates the endpoint or its request schema (or the store
 					// can't persist) — stop trying for the life of this process.
 					this.#observedUsageUnsupported = true;
