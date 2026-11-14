@@ -445,8 +445,9 @@ const FILTER_DRIVER_KEY_RE = /^filter\.([^=\s]+)\.(?:clean|smudge|process|requir
  */
 function runGitProbe(where: string, args: readonly string[]): string | undefined {
 	const base = ["git", "--no-optional-locks", ...GIT_PROBE_PINS, "-C", where];
+	const filterKeys = runProbe([...base, "config", "--name-only", "--get-regexp", "^filter\\."], where) ?? "";
 	const drivers = new Set<string>();
-	for (const line of (runProbe([...base, "config", "--name-only", "--get-regexp", "^filter\\."], where) ?? "").split("\n")) {
+	for (const line of filterKeys.split("\n")) {
 		const name = FILTER_DRIVER_KEY_RE.exec(line.trim())?.[1];
 		if (name) drivers.add(name);
 	}
