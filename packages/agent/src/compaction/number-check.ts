@@ -22,11 +22,24 @@ export interface NumberCheckReport {
 	blanked: string[];
 }
 
-/** A number as written: `1,234,567.8` or `1234.5`. A comma only groups thousands, so `538791,481979` is two numbers. */
-const NUMBER_SOURCE = String.raw`\d{1,3}(?:,\d{3})+(?!\d)(?:\.\d+)?|\d+(?:\.\d+)?`;
-const NUMBER = new RegExp(NUMBER_SOURCE, "g");
+/**
+ * A number as the input may show it, anywhere: `1,234,567.8` or `1234.5`. A comma only groups
+ * thousands, so `538791,481979` is two numbers. Deliberately loose (digits inside identifiers
+ * count too): a wider seen set can only make the check keep more.
+ */
+const NUMBER = /\d{1,3}(?:,\d{3})+(?!\d)(?:\.\d+)?|\d+(?:\.\d+)?/g;
+/** A dotted version as the input shows it (`18.20.2`), so a summary's version token can match it whole. */
+const VERSION = /\d+(?:\.\d+){2,}/g;
 /** A list of numbers as written (`120, 126, 131`); packed into a summary it may read `120,126`. */
 const NUMBER_LIST = /\d+(?:\.\d+)?(?:,\s+\d+(?:\.\d+)?)+/g;
+/**
+ * A number the summary states: a standalone token, never digits inside an identifier
+ * (`base64url`, `IPv6`, `claude-sonnet-4-5`, `HTTP/2`, `oauth2.ts`, a commit hash). It may carry
+ * one unit suffix (`88.4%`, `73.25s`, `4KB`, `3x`); any other letter or digit right after it
+ * makes it part of a word.
+ */
+const UNIT = String.raw`(?:KiB|MiB|GiB|TiB|KB|MB|GB|TB|ms|us|ns|px|[%smhdBkKMGx])`;
+const STANDALONE_NUMBER = String.raw`(?<![\p{L}\p{N}_./\-])(?:\d{1,3}(?:,\d{3})+(?!\d)(?:\.\d+)?|\d+(?:\.\d+)*)(?=${UNIT}?(?![\p{L}\p{N}_]))`;
 /**
  * Structure, not values: a list item's own number at the start of a line (`2. report`) and a
  * heading's section number (`## 3. Next`, `### 1.2 Scope`). Without this a plan's `2.` would be
@@ -34,16 +47,57 @@ const NUMBER_LIST = /\d+(?:\.\d+)?(?:,\s+\d+(?:\.\d+)?)+/g;
  */
 const LIST_MARK = String.raw`^[ \t]*\d{1,3}[.)](?=[ \t])`;
 const HEADING_MARK = String.raw`^[ \t]*#{1,6}[ \t]+\d{1,3}(?:\.\d{1,3})*[.)]?(?=[ \t])`;
-const MARK_OR_NUMBER = new RegExp(`(?<mark>${HEADING_MARK}|${LIST_MARK})|${NUMBER_SOURCE}`, "gm");
+const MARK_OR_NUMBER = new RegExp(`(?<mark>${HEADING_MARK}|${LIST_MARK})|${STANDALONE_NUMBER}`, "gu");
+/** A fenced code block's opening or closing line. */
+const FENCE = /^[ \t]*(`{3,}|~{3,})/;
+/** An inline code span. */
+const CODE_SPAN = /(`+)[^`].*?\1/g;
 
 const FIX_OLD = /^\s*OLD:[ \t]?(.*)$/;
 const FIX_NEW = /^\s*NEW:[ \t]?(.*)$/;
 
-/** `1,234.50` and `1234.5` are one number. */
+/** A number the summary states: where it is, as written, and the line that holds it. */
+interface NumberToken {
+	index: number;
+	text: string;
+	line: string;
+}
+
+/**
+ * The numbers `text` states, in order. Code is quoted, not stated: fenced blocks and inline
+ * code spans are skipped, as are list and heading numbering.
+ */
+function numberTokens(text: string): NumberToken[] {
+	const tokens: NumberToken[] = [];
+	let offset = 0;
+	let fence: string | undefined;
+	for (const line of text.split("\n")) {
+		const lineStart = offset;
+		offset += line.length + 1;
+		const marker = FENCE.exec(line)?.[1];
+		if (fence !== undefined) {
+			if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
+			continue;
+		}
+		if (marker) {
+			fence = marker;
+			continue;
+		}
+		const code = [...line.matchAll(CODE_SPAN)].map(span => [span.index, span.index + span[0].length]);
+		for (const match of line.matchAll(MARK_OR_NUMBER)) {
+			if (match.groups?.mark !== undefined) continue;
+			if (code.some(([start, end]) => match.index >= start && match.index < end)) continue;
+			tokens.push({ index: lineStart + match.index, text: match[0], line });
+		}
+	}
+	return tokens;
+}
+
+/** `1,234.50` and `1234.5` are one number; a dotted version (`1.10.0`) is kept as written. */
 function numberValue(number: string): string {
 	let plain = number.replaceAll(",", "");
-	if (plain.includes(".")) plain = plain.replace(/0+$/, "").replace(/\.$/, "");
-	return plain.replace(/^0+/, "") || "0";
+	if (plain.split(".").length === 2) plain = plain.replace(/0+$/, "").replace(/\.$/, "");
+	return plain.replace(/^0+(?=\d)/, "") || "0";
 }
 
 /** The numbers an input shows, and its lists of numbers, to tell whether a number in a summary was shown. */
@@ -53,6 +107,7 @@ export class SeenNumbers {
 
 	add(text: string): void {
 		for (const match of text.matchAll(NUMBER)) this.#values.add(numberValue(match[0]));
+		for (const match of text.matchAll(VERSION)) this.#values.add(numberValue(match[0]));
 		for (const match of text.matchAll(NUMBER_LIST)) {
 			this.#lists.push(new Set(match[0].split(",").map(item => numberValue(item.trim()))));
 		}
@@ -106,26 +161,28 @@ export function numbersSeenInContext(context: Context): SeenNumbers {
 	return numbersSeenIn(contextTexts(context));
 }
 
-/** The numbers in `text` that `seen` lacks, as `text` writes them, sorted and unique; list and heading numbering aside. */
+/** The numbers `text` states that `seen` lacks, as `text` writes them, sorted and unique. */
 export function unseenNumbers(text: string, seen: SeenNumbers): string[] {
-	const unseen = new Set<string>();
-	for (const match of text.matchAll(MARK_OR_NUMBER)) {
-		if (match.groups?.mark === undefined && !seen.has(match[0])) unseen.add(match[0]);
-	}
-	return [...unseen].sort();
+	return [...new Set(numberTokens(text).flatMap(token => (seen.has(token.text) ? [] : [token.text])))].sort();
 }
 
-/** `text` with every number `seen` lacks replaced by `?`; list and heading numbering stay. */
+/** `text` with every number it states that `seen` lacks replaced by `?`. */
 export function blankUnseenNumbers(text: string, seen: SeenNumbers): string {
-	return text.replace(MARK_OR_NUMBER, (match, mark: string | undefined) =>
-		mark !== undefined || seen.has(match) ? match : "?",
-	);
+	let out = "";
+	let at = 0;
+	for (const token of numberTokens(text)) {
+		if (seen.has(token.text)) continue;
+		out += `${text.slice(at, token.index)}?`;
+		at = token.index + token.text.length;
+	}
+	return out + text.slice(at);
 }
 
 /**
  * Apply the writer's `OLD:`/`NEW:` line fixes to `text`. A fix applies only when its OLD line
  * matches exactly one line of `text` (ignoring surrounding whitespace) and that line holds a
- * number `seen` lacks, so the fix round cannot rewrite anything else. An empty NEW drops the line.
+ * number `seen` lacks, so the fix round can only rewrite or drop lines that hold an unseen number.
+ * An empty NEW drops the line.
  */
 export function applyNumberFixes(text: string, reply: string, seen: SeenNumbers): string {
 	const lines: (string | null)[] = text.split("\n");
@@ -173,11 +230,17 @@ export class SummaryNumberCheck {
 		requestFix: (fixPrompt: string) => Promise<string | undefined>,
 		signal?: AbortSignal,
 	): Promise<string> {
-		const flagged = unseenNumbers(summary, seen);
-		if (flagged.length === 0) return summary;
+		const tokens = numberTokens(summary).filter(token => !seen.has(token.text));
+		if (tokens.length === 0) return summary;
+		const flagged = [...new Set(tokens.map(token => token.text))].sort();
+		// Each number with the first line that holds it, so the writer can copy that line as OLD.
+		const items = flagged.map(number => ({
+			number,
+			line: tokens.find(token => token.text === number)?.line.trim(),
+		}));
 		let text = summary;
 		try {
-			const reply = await requestFix(prompt.render(summaryNumberFixPrompt, { numbers: flagged.join(", ") }));
+			const reply = await requestFix(prompt.render(summaryNumberFixPrompt, { items }));
 			if (reply) text = applyNumberFixes(text, reply, seen);
 		} catch (error) {
 			if (signal?.aborted) throw error;

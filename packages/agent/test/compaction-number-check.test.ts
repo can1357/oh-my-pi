@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
+	blankUnseenNumbers,
 	type CompactionPreparation,
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateHandoffFromContext,
 	generateSummary,
+	numbersSeenIn,
 	SummaryNumberCheck,
+	unseenNumbers,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -105,7 +108,8 @@ describe("compaction.numberCheck", () => {
 			role: "assistant",
 			content: [{ type: "text", text: summary }],
 		});
-		expect(lastUserText(fix.context)).toContain("4871");
+		// The question gives the line that holds the number, so the writer can copy it as OLD.
+		expect(lastUserText(fix.context)).toContain("`4871` in: - 4871 tests pass");
 		expect(fix.options.maxTokens).toBe(first.options.maxTokens);
 		expect(check.report).toEqual({ unseenNumbers: ["4871"], blanked: [] });
 	});
@@ -136,6 +140,30 @@ describe("compaction.numberCheck", () => {
 
 		expect(await result).toBe(summary);
 		expect(calls).toHaveLength(1);
+	});
+
+	test("leaves digits inside identifiers alone", () => {
+		const seen = numbersSeenIn(["edited src/auth/oauth2.ts at commit 9f3c2e1a7b, tests pass"]);
+		const summary = "tokens are base64url, served over HTTP/2 on IPv6\n- Model: claude-sonnet-4-5";
+
+		expect(unseenNumbers(summary, seen)).toEqual([]);
+		expect(blankUnseenNumbers(summary, seen)).toBe(summary);
+	});
+
+	test("skips code but still checks standalone numbers with units and versions", () => {
+		const seen = numbersSeenIn(["upgraded to 18.20.2; bundle is 4KB, 3x smaller, 12ms load"]);
+		const summary = [
+			"- ran `sleep 9999` first",
+			"```sh",
+			"exit 4242",
+			"```",
+			"- version 18.20.3, 4KB, 3x, 12ms, 1234 left",
+		].join("\n");
+
+		expect(unseenNumbers(summary, seen)).toEqual(["1234", "18.20.3"]);
+		expect(blankUnseenNumbers(summary, seen)).toBe(
+			["- ran `sleep 9999` first", "```sh", "exit 4242", "```", "- version ?, 4KB, 3x, 12ms, ? left"].join("\n"),
+		);
 	});
 
 	test("reads a packed list as seen only when one input list holds every item", async () => {
