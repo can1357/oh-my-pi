@@ -457,6 +457,7 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
+- Fixed `lsp` `rename_file` reporting a plain file move as a completed rename when no language server supports `workspace/willRenameFiles`; the result now names the servers that could not update references and states that the imports were not updated, a preview now says the rename would be aborted when a supporting server fails, and a supporting server that finds no references reports `0 reference edits` ([#16411](https://github.com/can1357/oh-my-pi/pull/16411) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
