@@ -158,20 +158,14 @@ const LONG_LOG = Array.from({ length: 400 }, (_, i) =>
 
 describe("spotlight ranker", () => {
 	it("journals the ranker it shaped with and asks no Spotlight client under the judge ranker", async () => {
-		const cwd = await tmpDir();
-		const manager = SessionManager.inMemory(cwd);
-		const experiment = new SpotlightExperiment(undefined, "low", manager, { ranker: "judge" });
+		const { session, manager } = await toolSession(
+			{},
+			manager => new SpotlightExperiment(undefined, "low", manager, { ranker: "judge" }),
+		);
+		const experiment = session.spotlight as SpotlightExperiment;
 		expect(experiment.sessionEntry()).toMatchObject({ ranker: "judge", model: "", urlHost: "" });
 
-		const session: ToolSession = {
-			cwd,
-			hasUI: false,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			settings: Settings.isolated({ "spotlight.experiment.enabled": true }),
-			spotlight: experiment,
-		};
-		await Bun.write(path.join(cwd, "fixture.ts"), LONG_LOG.replaceAll("worker", "const worker"));
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
 		await new BashTool(session).execute("b1", { command: "cat fixture.ts" });
 
 		// No judge candidate in this fixture session, so shaping keeps its unranked rules and says why.
