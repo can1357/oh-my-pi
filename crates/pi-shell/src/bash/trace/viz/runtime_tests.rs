@@ -92,6 +92,44 @@ async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsi
 }
 
 #[test]
+fn streamed_tail_is_drawn_as_it_will_continue() {
+	// A command still streaming in ends mid-construct. Parsed as is it fails,
+	// and the whole command flipped to literal source until the construct
+	// closed; each case is one way the tail is cut off.
+	for (script, expected) in [
+		// Open quote: the word grows in place.
+		("cd /tmp && rg -n \"va", &["cwd /tmp", "and rg -n ‹va›"][..]),
+		// Pipe awaiting its next stage.
+		("cd /tmp && rg -n x a.cpp |", &["cwd /tmp", "and rg -n ‹x› a.cpp"]),
+		// Redirection awaiting its target: `2` stays an argument until then.
+		("make 2>", &["make 2"]),
+		// A command name that is so far a reserved word (`fi` of `find`).
+		("ls; fi", &["ls", "fi"]),
+		// The start of `done` is not drawn as a command of the loop body.
+		("for f in a b; do echo $f; d", &["for f in [\"a\", \"b\"]:", "print(f)"]),
+		// A pipe dangling inside `$(` reports the unclosed `$(`.
+		("x=$(cat a |", &["x = ⟨cat \"a\"⟩"]),
+		// Quoted, `|` is text: nothing is dropped.
+		("echo \"a | b", &["print(\"a | b\")"]),
+	] {
+		let p = present(&RunTrace::new(script), &Options::default());
+		let shown = rows(&p);
+		let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+		assert_eq!(texts, expected, "{script:?}");
+		assert!(shown.iter().all(|(_, row)| row["role"] != "raw"), "{script:?}: {p}");
+	}
+
+	// A compound still opening has no body a closer could complete: only it
+	// stays literal, not the commands before it.
+	let p = present(&RunTrace::new("cd /tmp && for"), &Options::default());
+	let shown = rows(&p);
+	let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+	assert_eq!(texts, ["cwd /tmp", " && for"]);
+	assert_ne!(shown[0].1["role"], "raw", "{p}");
+	assert_eq!(shown[1].1["role"], "raw", "{p}");
+}
+
+#[test]
 fn bare_test_bracket_without_operands_renders_instead_of_panicking() {
 	// Regression for #18320: a streamed `[` with no operands sliced
 	// `words[1..0]` and aborted the host process.
