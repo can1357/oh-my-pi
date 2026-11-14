@@ -528,6 +528,7 @@ class DeclarationRegistry:
         "_trust_runtime_declarations",
         "_manifest_requires",
         "_manifest_services",
+        "_manifest_schemes",
         "_manifest_tools",
         "_legacy_worker_tools",
         "_sealed",
@@ -577,6 +578,7 @@ class DeclarationRegistry:
         self._manifest_hooks: frozenset[_HookKey] = frozenset()
         self._manifest_capabilities: frozenset[str] = frozenset()
         self._manifest_services: frozenset[_ServiceKey] = frozenset()
+        self._manifest_schemes: tuple[object, ...] = ()
         self._manifest_content: tuple[_packages.ContentDeclaration, ...] = ()
         self._skills: dict[str, SkillDecl] = {}
         self._manifest_executables: dict[
@@ -612,6 +614,7 @@ class DeclarationRegistry:
         capabilities: Iterable[str] = (),
         services: Iterable[_ServiceKey] = (),
         requires: Iterable[_ServiceKey] = (),
+        schemes: Iterable[object] = (),
         declarations: Iterable[
             _packages.ContentDeclaration | Mapping[str, object]
         ] | None = None,
@@ -702,11 +705,14 @@ class DeclarationRegistry:
             raise ManifestError("omp.toml", "capabilities", "capabilities must be non-empty strings")
         self._manifest_capabilities = normalized_capabilities
         self._manifest_requires = frozenset(_service_key(*item) for item in requires)
+        self._manifest_schemes = tuple(schemes)
         self._manifest_executables = executable_declarations
         self._uniform_manifest_configured = declarations is not None
         self._trust_runtime_declarations = trust_runtime_declarations
         self._extension_id = extension
         self._configured = True
+        schemes_module = importlib.import_module("omp.schemes")
+        schemes_module.configure_claims(self._manifest_schemes)
 
     def register_tool(
         self,
@@ -1801,6 +1807,7 @@ def configure_manifest(
     capabilities: Iterable[str] = (),
     services: Iterable[_ServiceKey] = (),
     requires: Iterable[_ServiceKey] = (),
+    schemes: Iterable[object] = (),
     declarations: Iterable[
         _packages.ContentDeclaration | Mapping[str, object]
     ] | None = None,
@@ -1815,6 +1822,7 @@ def configure_manifest(
         capabilities=capabilities,
         services=services,
         requires=requires,
+        schemes=schemes,
         declarations=declarations,
         extension=extension,
         trust_runtime_declarations=trust_runtime_declarations,
@@ -1847,6 +1855,7 @@ def bootstrap_extension_registry(
         capabilities=manifest.get("capabilities", ()),
         services=manifest.get("services", ()),
         requires=manifest.get("requires", ()),
+        schemes=manifest.get("schemes", ()),
         declarations=manifest.get("declarations"),
         extension=manifest.get("extension"),
         trust_runtime_declarations=manifest.get(

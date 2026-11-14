@@ -78,7 +78,26 @@ Undefined: the field types, wire form and parse rule of `Verdict` (a starting po
 
 ## Status in omp
 
-**Status: Not started** for the judge role, structured verdict, acceptance criteria and recipe. **Implemented:** the Advisor Director, and the `Review` phase's first-word verdict. Unverified: OMP1's review prompts and how its `/review` aggregates several reviewers (not read); how `ai_advisor_*` settings interact with a future `@judge`.
+Status: Partially implemented.
+
+- `ProductionAdwHost::model_phase_selector_for` in
+  `crates/driver/src/adw/production.rs` already selects `@judge` for an implicit
+  review model; an explicit operator model remains authoritative. This existing
+  selector does not prove route diversity or context independence.
+- The Advisor Director and `Review` phase's first-word verdict are implemented.
+  Producing native Agent phases are still accepted on their completion claim.
+- `crates/driver/src/verification/policy.rs` now provides the S1 pure native
+  required-check inventory and PASS/FAIL/INCONCLUSIVE reducer. It checks supplied
+  scope/evidence identities and retains every declared result. Its public contract
+  tests are in `crates/driver/tests/verification_policy.rs`.
+- Not yet implemented: source/environment capture, evidence integrity/provenance
+  validation, structured independent verdict, required-gate integration into ADW
+  acceptance, durable verification receipts, acceptance criteria and Issue-to-PR
+  recipe. The S1 reducer is not a live gate and does not complete D1–D5.
+- Unverified: OMP1 review prompts and aggregation, current live reviewer route
+  independence, and the interaction of `ai_advisor_*` settings with judge routing.
+  Build/test observations for S1 are recorded in the verification research's
+  implementation validation note; source presence alone is not runtime proof.
 
 ## References
 

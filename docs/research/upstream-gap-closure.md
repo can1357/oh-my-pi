@@ -33,11 +33,11 @@ brief.
 | 11 | Context tools | a, b, d | [context-tools](context-tools.md) | [0058](../adr/0058-context-url-schemes.md) | reviewed | Ready to implement (`cfg://`); `out://` waits on ADR 0050 S2-S4 | |
 | 12 | TUI job widgets and charts | c (widgets), c deferred (auto-graph) | [tui-job-widgets](tui-job-widgets.md) | [0066](../adr/0066-tui-job-widgets.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-3 blocker (multi-line `<pre>` in the `/hub` inspector) closed by cutting the output window to single-row entries | ADR done; S1 (newest output line of the selected async `bash` job in `/hub`) behind `cl_hub_job_output` (default off), not started; O5 (foreground coverage) should be settled before S1 merges; widgets, sparkline and auto-graph deferred | #639 (merged) |
 | 13 | Browser inspection, ABKit | c (React, a11y), b (ABKit) | [browser-inspection](browser-inspection.md) | [0067](../adr/0067-browser-inspection.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-2 blocker closed by cutting the audit to axe-core only | ADR done; S1 (Chromium init scripts, `just test-browser`, CI step) ungated with no caller, S2 (React tree/inspect helpers) behind `sv_browser_inspect` (default off), not started; S3-S5 wait on owner O6 (browser@3 revision), S4 axe-core also on O3 | #641 (merged) |
-| 14 | Memory backends | c (decision files), b (Hindsight as extension only) | [memory-backends](memory-backends.md) | [0068](../adr/0068-decision-memory.md) | round 1 resolved; EGM rounds 2-3 in progress | ADR revision on `docs/gap14-decision-memory-review` | |
+| 14 | Memory backends | c (decision files), b (Hindsight as extension only) | [memory-backends](memory-backends.md) | [0068](../adr/0068-decision-memory.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-3 blockers closed by a factual correction (secret snapshot built at composition as `/share` does) and scope cuts (no extension rules; extraction off while any extension or plugin hook can deny or rewrite `before_agent_start`) | ADR done; S0-S5 behind `ai_decision_memory` (default off), not started; O1-O24 open | #644 (merged) |
 | 15 | Providers and sign-in | c, d | [providers-signin](providers-signin.md) | [0059](../adr/0059-provider-catalog-additions.md) | reviewed (EGM not required) | Ready to implement | |
 | 16 | Ratchet and skillshare | a (skillshare) + d (ratchet) | [ratchet-skillshare](ratchet-skillshare.md) | [0061](../adr/0061-ratchet-policy.md) | reviewed | Blocked on an ADR 0006 amendment for a bridged op (owner) | |
 | 17 | Forge URL schemes out of core | a (goal) + b (literal move) | [forge-url-schemes](forge-url-schemes.md) | none | not required | Closed: ADR 0049 D2.5 already routes pr:// and issue:// to forge extensions; moving the spellings is forbidden by ADR 0050 D1 and the additive rule | |
-| 18 | Generated RPC clients | d | [rpc-clients](rpc-clients.md) | [0069](../adr/0069-rpc-clients.md) | round 1 resolved; EGM rounds 2-3 in progress | ADR revision on `docs/gap18-rpc-clients-review` | |
+| 18 | Generated RPC clients | d | [rpc-clients](rpc-clients.md) | [0069](../adr/0069-rpc-clients.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-3 blockers closed by removing the bundle crate and the SDK probe harness | Closed for this pass: research and deferral only, no implementation slices; clients wait on a named consumer (O1) | #643 (merged) |
 | 19 | VM sandbox fallback, Windows CI | d (research and ADR only) | [platform-sandbox-ci](platform-sandbox-ci.md) | [0070](../adr/0070-platform-sandbox-ci.md) | research-only, machine-reviewed (EGM, 2 rounds), not owner-approved | Closed for this pass: concrete reopen triggers recorded; no implementation | #623 (merged) |
 
 ## Log
@@ -60,3 +60,8 @@ brief.
 - 2026-11-14 12:55 UTC: gap 13 (ADR 0067) merged as #641 after three EGM
   rounds with no open blocker. Gaps 14 (ADR 0068) and 18 (ADR 0069) resolved
   round 1 on their review branches; Goldfish round 2 is running for both.
+- 2026-11-14 13:20 UTC: gaps 14 (ADR 0068, #644) and 18 (ADR 0069, #643)
+  finished three EGM rounds with no open blocker. Every gap now has an ADR
+  that is reviewed or machine-reviewed (gap 16 waits on an owner ADR 0006
+  amendment). The remaining work is implementation slices behind default-off
+  gates; in flight: gap 6 S1, gap 9 S0, gap 15 S1.
