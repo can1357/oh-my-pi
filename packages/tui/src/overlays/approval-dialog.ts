@@ -109,7 +109,28 @@ function promptDetails(lines: string[]): string[] {
 const ALLOWED_SEGMENT_RE = /^(\s*)✓(\s+)(.+)(\s+\((?:allowed: .*|\d+ allowed segments?)\))$/u;
 const PROMPTED_SEGMENT_RE = /^(\s*)\?(\s+)(.+)(\s+\((?:requires approval|prompt: .*|critical pattern)\))$/u;
 
-function styleApprovalDetailLine(line: string): { ansi: string; spans?: TspSpan[] } {
+/**
+ * Indexes `[start, end)` of compound bash segment rows: the indented rows right after the first
+ * `Command:` row, when that row is bare. Lines elsewhere (a multi-line command, code, file
+ * content) are never styled as covered or prompted, however they read.
+ */
+function segmentRowRange(details: readonly string[]): readonly [number, number] {
+	const label = details.findIndex(line => line.startsWith("Command:"));
+	if (label < 0 || details[label] !== "Command:") return [0, 0];
+	let end = label + 1;
+	while (end < details.length && details[end]!.startsWith("  ")) end++;
+	return [label + 1, end];
+}
+
+/** Styles each detail row: segment rows by their covered/prompted marker, the rest in accent. */
+function styleApprovalDetails(details: readonly string[]): { ansi: string; spans?: TspSpan[] }[] {
+	const [start, end] = segmentRowRange(details);
+	return details.map((line, index) =>
+		index >= start && index < end ? styleSegmentLine(line) : { ansi: theme.fg("accent", line) },
+	);
+}
+
+function styleSegmentLine(line: string): { ansi: string; spans?: TspSpan[] } {
 	const allowed = ALLOWED_SEGMENT_RE.exec(line);
 	if (allowed) {
 		const [, indent = "", space = " ", command = "", suffix = ""] = allowed;
@@ -175,9 +196,12 @@ export class ApprovalDialogComponent implements Component {
 		this.#summary = promptDetails(lines);
 		this.#full =
 			options.fullPrompt === undefined ? undefined : promptDetails(sanitizeDisplayLines(options.fullPrompt));
-		const firstPrompted = this.#summary.findIndex(line => PROMPTED_SEGMENT_RE.test(line));
-		if (firstPrompted >= MAX_DETAIL_ROWS) {
-			this.#scrollOffset = firstPrompted - MAX_DETAIL_ROWS + 1;
+		const [segmentStart, segmentEnd] = segmentRowRange(this.#summary);
+		const firstPrompted = this.#summary
+			.slice(segmentStart, segmentEnd)
+			.findIndex(line => PROMPTED_SEGMENT_RE.test(line));
+		if (firstPrompted >= 0 && segmentStart + firstPrompted >= MAX_DETAIL_ROWS) {
+			this.#scrollOffset = segmentStart + firstPrompted - MAX_DETAIL_ROWS + 1;
 		}
 		this.#choices = this.#buildChoices();
 		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
@@ -395,8 +419,9 @@ export class ApprovalDialogComponent implements Component {
 		];
 		if (this.#details.length > 0) {
 			// One clipped row per detail like the text view; expanded details wrap.
+			const styledRows = styleApprovalDetails(this.#details);
 			const rows = this.#details.map((line, index) => {
-				const styled = styleApprovalDetailLine(line);
+				const styled = styledRows[index]!;
 				const content = styled.spans ? { spans: styled.spans } : { text: line };
 				return node("text", this.#expanded ? content : { ...content, truncate: "end" }, undefined, String(index));
 			});
@@ -439,10 +464,13 @@ export class ApprovalDialogComponent implements Component {
 	/** Detail rows at `width`: one clipped row per detail, or wrapped rows once expanded. */
 	#detailLines(width: number): string[] {
 		if (!this.#expanded) {
-			return this.#details.map(line => truncateToWidth(styleApprovalDetailLine(line).ansi, width, Ellipsis.Unicode));
+			return styleApprovalDetails(this.#details).map(styled =>
+				truncateToWidth(styled.ansi, width, Ellipsis.Unicode),
+			);
 		}
-		return this.#details.flatMap(line =>
-			line === "" ? [""] : wrapTextWithAnsi(styleApprovalDetailLine(line).ansi, width),
+		const styledRows = styleApprovalDetails(this.#details);
+		return this.#details.flatMap((line, index) =>
+			line === "" ? [""] : wrapTextWithAnsi(styledRows[index]!.ansi, width),
 		);
 	}
 
