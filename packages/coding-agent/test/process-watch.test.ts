@@ -18,12 +18,15 @@ class FakeJudge implements Judge {
 	readonly requests: JudgmentRequest[] = [];
 	answer: (jobId: string) => Probabilities = () => ({ progressing: 1 });
 	fail = false;
+	/** Never answers and ignores its abort signal, like a provider that hangs. */
+	hang = false;
 
 	constructor(readonly running: () => AsyncJob[]) {}
 
 	async judge<Q extends JudgmentRequest["questions"]>(request: JudgmentRequest<Q>): Promise<JudgmentResult<Q>> {
 		this.requests.push(request);
 		if (this.fail) throw new Error("judge unavailable");
+		if (this.hang) return Promise.withResolvers<JudgmentResult<Q>>().promise;
 		const answers: Record<string, unknown> = {};
 		for (const [i, running] of this.running().entries()) {
 			const probabilities = this.answer(running.id);
@@ -188,6 +191,36 @@ describe("ProcessWatch", () => {
 		await advance(30);
 		expect(judge.requests).toHaveLength(1);
 		expect(drain(queue)).toHaveLength(0);
+	});
+
+	it("withdraws an undelivered notice when the next look finds the job healthy", async () => {
+		jobs = [job("bg1", "npm install", "fetching metadata")];
+		judge.answer = () => ({ stalled: 0.9, progressing: 0.1 });
+		start();
+		await advance(30);
+		judge.answer = () => ({ progressing: 0.9, stalled: 0.1 });
+		await advance(30);
+
+		expect(judge.requests).toHaveLength(2);
+		expect(drain(queue)).toHaveLength(0);
+	});
+
+	it("bounds a look whose judge never answers and keeps looking on schedule", async () => {
+		jobs = [job("bg1", "sleep 1000")];
+		judge.hang = true;
+		start();
+
+		await advance(30);
+		expect(judge.requests).toHaveLength(1);
+		// The hung look times out 30 s later; its looks due by then count as come.
+		await advance(30);
+		judge.hang = false;
+		judge.answer = () => ({ stalled: 1 });
+		await advance(59);
+		expect(judge.requests).toHaveLength(1);
+		await advance(1);
+		expect(judge.requests).toHaveLength(2);
+		expect(drain(queue)).toHaveLength(1);
 	});
 
 	it("fails open: a judge error produces no notice and the next look still happens", async () => {

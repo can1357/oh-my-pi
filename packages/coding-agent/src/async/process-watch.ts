@@ -22,7 +22,7 @@
  * Ported from nace-ai/intern's `process_watch.py` (Apache-2.0).
  */
 import { type ChoiceAnswer, type Judge, type JsonValue, judgeQuestions, renderQuestion } from "@oh-my-pi/pi-ai";
-import { formatDuration, logger, prompt, truncate } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, prompt, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import questionFile from "../prompts/judge/process-watch.json" with { type: "json" };
 import noticeTemplate from "../prompts/system/process-watch-notice.md" with { type: "text" };
@@ -54,6 +54,13 @@ type FlaggedVerdict = (typeof FLAGGED)[number];
  * two jobs that started moments apart share one judgment rather than two.
  */
 const DUE_SLACK = 0.1;
+
+/**
+ * Deadline for one whole look, whatever the judge chain does inside it: a hung
+ * provider must not hold the watch, since no later look is armed until this one
+ * settles. A look that runs out is aborted and the next comes on schedule.
+ */
+const LOOK_TIMEOUT_MS = 30_000;
 
 /** Trailing output lines shown to the judge and in the notice. */
 const LAST_OUTPUT_LINES = 3;
@@ -96,7 +103,11 @@ export interface ProcessWatchHost {
 	judge(): Judge;
 	/** The session's recent conversation, shown to the judge beside the jobs. */
 	recent(): JsonValue;
-	/** Hands the agent-facing notice of one look; called only when a job is flagged. */
+	/**
+	 * Hands the agent-facing notice of one completed look, with no jobs when
+	 * nothing was flagged, so a newer verdict always replaces an older one.
+	 * A look that failed or timed out calls nothing.
+	 */
 	notify(notice: ProcessWatchNotice): void;
 }
 
@@ -185,15 +196,22 @@ export class ProcessWatch {
 		if (jobs.length === 0) return;
 		const controller = new AbortController();
 		this.#inFlight = controller;
+		const deadline = setTimeout(
+			() => controller.abort(new Error(`judge gave no answer within ${LOOK_TIMEOUT_MS / 1000}s`)),
+			LOOK_TIMEOUT_MS,
+		);
+		deadline.unref?.();
 		try {
 			await this.#check(jobs, controller.signal);
 		} catch (error) {
-			if (!controller.signal.aborted) {
+			if (!this.#disposed) {
+				const cause = controller.signal.aborted ? controller.signal.reason : error;
 				logger.debug("process-watch: look failed", {
-					error: error instanceof Error ? error.message : String(error),
+					error: cause instanceof Error ? cause.message : String(cause),
 				});
 			}
 		} finally {
+			clearTimeout(deadline);
 			if (this.#inFlight === controller) this.#inFlight = undefined;
 			if (!this.#disposed) {
 				this.#advance(this.#running());
@@ -226,7 +244,8 @@ export class ProcessWatch {
 			})),
 		};
 		const judge = this.#host.judge();
-		const { answers } = await judge.judge({ state, questions }, { signal });
+		// Raced against the look's signal: a judge that ignores its abort signal still releases the watch.
+		const { answers } = await untilAborted(signal, judge.judge({ state, questions }, { signal }));
 		if (signal.aborted || this.#disposed) return;
 
 		const threshold = cfgAsyncProcessWatchThreshold.get(this.#host.settings);
@@ -257,7 +276,7 @@ export class ProcessWatch {
 			}
 		}
 		logger.info("process-watch: look", { judge: judge.label, threshold, verdicts });
-		if (flagged.length > 0) this.#host.notify({ jobs: flagged });
+		this.#host.notify({ jobs: flagged });
 	}
 }
 
@@ -307,8 +326,9 @@ function worst(answer: ChoiceAnswer): FlaggedVerdict {
  * Registers process-watch notices on a session's yield queue and returns the
  * {@link ProcessWatchHost.notify} that queues one. The queue injects a notice
  * at the agent's next turn boundary, or between runs starts a turn the way a
- * finished job's result does. A newer look's notice replaces one not yet
- * delivered (the latest look only), and a notice names only the jobs
+ * finished job's result does. Every completed look replaces the notice not yet
+ * delivered: a look that flags nothing withdraws it, so a verdict the latest
+ * look ruled out never reaches the agent. A notice names only the jobs
  * `isRunning` still reports running when it is injected; once every flagged
  * job ended it is dropped.
  */
@@ -325,7 +345,7 @@ export function registerProcessWatchDelivery(
 	});
 	return notice => {
 		queue.clear(PROCESS_WATCH_MESSAGE_TYPE);
-		queue.enqueue(PROCESS_WATCH_MESSAGE_TYPE, notice);
+		if (notice.jobs.length > 0) queue.enqueue(PROCESS_WATCH_MESSAGE_TYPE, notice);
 	};
 }
 
