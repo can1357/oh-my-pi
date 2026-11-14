@@ -4367,7 +4367,7 @@ export class Settings {
 	 * `arrays` decides how an array setting declaring `merge` combines with the lower value:
 	 *  - `"replace"` (default): the higher array replaces it, like every other value.
 	 *  - `"combine"`: the setting's `merge` strategy applies over the lower array as found.
-	 *  - `"layer"`: as `"combine"`, and a lower layer leaving the setting unset contributes its default.
+	 *  - `"layer"`: as `"combine"`, and a lower layer leaving the setting unset (or `null`) contributes its default.
 	 * `prefix` is the dotted path of `base`/`overrides` within the settings tree.
 	 */
 	#deepMerge(
@@ -4406,7 +4406,7 @@ export class Settings {
 				const strategy = setting?.definition.type === "array" ? setting.definition.merge : undefined;
 				const fallbackBase =
 					arrays === "layer" &&
-					baseVal === undefined &&
+					(baseVal === undefined || baseVal === null) &&
 					override.length > 0 &&
 					setting?.definition.type === "array"
 						? setting.default
