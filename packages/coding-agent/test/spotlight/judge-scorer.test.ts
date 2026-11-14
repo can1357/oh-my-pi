@@ -84,11 +84,25 @@ describe("judge scorer", () => {
 		expect((request!.state.lines as Record<string, string>)[lineKey(1)]).toBe("beta");
 	});
 
-	it("keeps at most 8 judge requests in flight", async () => {
+	it("keeps at most 8 judge requests in flight across every stage of one result", async () => {
 		const { judge, peak } = fakeJudge(() => 0.5);
-		const items = Array.from({ length: JUDGE_CHUNK_ITEMS * 12 }, (_, i) => `line ${i}`);
-		await new JudgeScorer(judge, 5_000).score(items, context());
+		const scorer = new JudgeScorer(judge, 5_000);
+		const items = Array.from({ length: JUDGE_CHUNK_ITEMS * 4 }, (_, i) => `line ${i}`);
+		// `scoreLines` fans one score() call out per 32 KB chunk: the cap holds across the stages, not within one.
+		await Promise.all([scorer.score(items, context()), scorer.score(items, context()), scorer.score(items, context())]);
 		expect(peak()).toBe(8);
+	});
+
+	it("holds one budget for the whole result, so a later stage does not get a fresh one", async () => {
+		const { judge } = fakeJudge(() => 0.5);
+		const scorer = new JudgeScorer(judge, 60);
+		expect(await scorer.score(["a"], context())).toEqual([0.5]);
+		// The first stage spent the result's budget; a second one fails against the same deadline instead of resetting.
+		// Real elapsed time is the point: `AbortSignal.timeout` runs on the platform clock and fake timers do not
+		// drive it, so this is the one place the suite waits.
+		await Bun.sleep(80);
+		expect(await scorer.score(["a"], context())).toBeNull();
+		expect(scorer.usage.failureCauses).toEqual({ timeout: 1 });
 	});
 
 	it("answers null with a cause when the judge has no candidate, fails, or does not answer every line", async () => {
@@ -136,6 +150,17 @@ describe("judge scorer", () => {
 		const controller = new AbortController();
 		controller.abort();
 		await expect(new JudgeScorer(judge, 5_000).score(["a"], context(), controller.signal)).rejects.toThrow();
+	});
+
+	it("reports no_judge when the role resolves no candidate, not a provider failure", async () => {
+		// A registry is present but its `judge` role names nothing usable: the chain throws, and that is a missing
+		// judge, not a broken provider.
+		const { judge } = fakeJudge(() => {
+			throw new Error("judgment: no judge model available");
+		});
+		const scorer = new JudgeScorer(judge, 5_000);
+		expect(await scorer.score(["a"], context())).toBeNull();
+		expect(scorer.usage.failureCauses).toEqual({ no_judge: 1 });
 	});
 
 	it("answers nothing when there is nothing to rank", async () => {

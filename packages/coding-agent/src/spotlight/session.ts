@@ -18,7 +18,7 @@ import {
 	cfgSpotlightTimeoutMs,
 	cfgSpotlightUrl,
 } from "./settings";
-import { judgeScorerFor } from "./judge-scorer";
+import { type SpotlightScorerSession, judgeScorerFor } from "./judge-scorer";
 import { RecordingScorer } from "./scorer";
 import { newShapeState, type ShapeState } from "./shape";
 import { ArtifactShapeSink, readArtifactText } from "./sink";
@@ -79,12 +79,6 @@ export interface SpotlightExperimentOptions extends Partial<SpotlightShares> {
 	/** The service that ranks shaped output; default `spotlight` when a client was given, else `judge`. */
 	ranker?: SpotlightRanker;
 }
-
-/**
- * The session fields ranking reads: the judge resolves its role and bills the session from these, so a session
- * without a model registry ranks with nothing and shaping keeps its unranked rules.
- */
-export type SpotlightScorerSession = Parameters<typeof judgeScorerFor>[0];
 
 /** The `source` of the experiment's session notices. */
 export const SPOTLIGHT_NOTICE_SOURCE = "spotlight";

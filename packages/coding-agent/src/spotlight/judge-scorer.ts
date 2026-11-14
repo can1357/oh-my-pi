@@ -9,16 +9,18 @@
  * The chunk size is measured, not tuned here: 48 lines per request keeps the relevant lines at the top, while 96
  * flattens every score to the same prior on a 900-line read.
  */
-import type { JsonValue, Judge, NoulQuestion } from "@oh-my-pi/pi-ai";
+import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+import { type JsonValue, type Judge, type Model, type NoulQuestion, judgeQuestions, renderQuestion } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { judgeQuestions, renderQuestion } from "@oh-my-pi/pi-ai";
-import type { SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
-import { logger } from "@oh-my-pi/pi-utils";
-import questionFile from "../prompts/judge/shape.json" with { type: "json" };
-import type { JudgeDeps } from "../judgment";
+import type { Settings } from "../config/settings";
+import type { ModelRegistry } from "../config/model-registry";
+import type { JudgmentUsageLedger } from "../judgment";
 import { journalJudgmentUsage, resolveJudge } from "../judgment";
 import { sharedJudgmentCache } from "../judgment/cache";
-
+import type { CostGateApi } from "../session/cost-gate";
+import type { SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
+import questionFile from "../prompts/judge/shape.json" with { type: "json" };
+import { logger } from "@oh-my-pi/pi-utils";
 import type { CallContext, Scorer, ScorerUsage } from "./types";
 
 /** The one template this scorer sends; its rubric rides in the state's `criteria`. */
@@ -26,7 +28,10 @@ const QUESTIONS = judgeQuestions(questionFile);
 
 /** Items one judge request ranks: 48 keeps a cut sharp, 96 scores every line the same. */
 export const JUDGE_CHUNK_ITEMS = 48;
-/** Judge requests in flight for one result; a chunk is independent of its siblings. */
+/**
+ * Judge requests this scorer keeps in flight, across every chunk of every stage of one result: `scoreLines` fans one
+ * `score` call out per 32 KB chunk, so a per-call cap would multiply.
+ */
 const JUDGE_IN_FLIGHT = 8;
 
 /** Question key of the `i`th item of a chunk. */
@@ -62,20 +67,39 @@ export function lineBatch(
 	};
 }
 
+/** The session fields ranking reads: the judge resolves its role, bills the session and reports telemetry from these. */
+export interface SpotlightScorerSession {
+	settings: Settings;
+	/** Without one there is no judge to resolve, and shaping keeps its unranked rules. */
+	modelRegistry?: ModelRegistry;
+	getSessionId?: () => string | null;
+	getActiveModel?: () => Model | undefined;
+	getTelemetry?: () => AgentTelemetryConfig | undefined;
+	costGate?: CostGateApi;
+	sessionManager?: Partial<JudgmentUsageLedger>;
+}
+
 /**
  * A {@link Scorer} over one judge for one tool result: ranks every item's relevance, splits items that would
- * overflow one request into chunks of {@link JUDGE_CHUNK_ITEMS}, and records what it spent and what failed.
+ * overflow one request into chunks of {@link JUDGE_CHUNK_ITEMS}, and records what it spent and what failed. One
+ * scorer serves one result, so its budget and its in-flight cap hold across the stages shaping ranks in.
  */
 export class JudgeScorer implements Scorer {
 	readonly usage: ScorerUsage = { calls: 0, failures: 0, ms: 0, tokens: 0, costUsd: 0 };
 	/** Left unset: no Spotlight request happened, so the trace names none. */
 	readonly params: SpotlightRequestParams | undefined = undefined;
+	readonly fallback: Scorer | undefined;
 	readonly #judge: Pick<Judge, "judge"> | undefined;
 	readonly #budgetMs: number;
+	#inFlight = 0;
+	readonly #waiting: (() => void)[] = [];
+	/** The result's single budget: a later stage of the same result does not reset it. */
+	#deadline: AbortSignal | undefined;
 
-	constructor(judge: Pick<Judge, "judge"> | undefined, budgetMs: number) {
+	constructor(judge: Pick<Judge, "judge"> | undefined, budgetMs: number, fallback?: Scorer) {
 		this.#judge = judge;
 		this.#budgetMs = budgetMs;
+		this.fallback = fallback;
 	}
 
 	async score(items: readonly string[], ctx: CallContext, signal?: AbortSignal): Promise<number[] | null> {
@@ -86,22 +110,19 @@ export class JudgeScorer implements Scorer {
 			return null;
 		}
 		const started = performance.now();
-		const deadline = AbortSignal.timeout(this.#budgetMs);
-		const budget = signal ? AbortSignal.any([signal, deadline]) : deadline;
+		const budget = this.#budget(signal);
 		const chunks: (readonly string[])[] = [];
 		for (let start = 0; start < items.length; start += JUDGE_CHUNK_ITEMS) {
 			chunks.push(items.slice(start, start + JUDGE_CHUNK_ITEMS));
 		}
 		const scores: number[][] = chunks.map(() => []);
 		let failure: { cause: string; error: unknown } | undefined;
-		let next = 0;
-		const worker = async (): Promise<void> => {
-			for (;;) {
-				const index = next++;
-				const lines = chunks[index];
-				if (lines === undefined || failure) return;
-				this.usage.calls++;
+		await Promise.all(
+			chunks.map(async (lines, index) => {
+				await this.#acquire();
 				try {
+					if (failure) return;
+					this.usage.calls++;
 					const { state, questions } = lineBatch(ctx, lines);
 					const result = await judge.judge({ state, questions }, { signal: budget });
 					scores[index] = lines.map((_, i) => {
@@ -113,12 +134,12 @@ export class JudgeScorer implements Scorer {
 					this.usage.tokens += result.usage.input;
 					this.usage.costUsd += result.usage.cost.total;
 				} catch (error) {
-					failure ??= { cause: causeOf(error, deadline, signal), error };
-					return;
+					failure ??= { cause: causeOf(error, budget, signal), error };
+				} finally {
+					this.#release();
 				}
-			}
-		};
-		await Promise.all(Array.from({ length: Math.min(JUDGE_IN_FLIGHT, chunks.length) }, worker));
+			}),
+		);
 		this.usage.ms += Math.round(performance.now() - started);
 		if (failure) {
 			this.#fail(failure.cause, failure.error);
@@ -127,6 +148,28 @@ export class JudgeScorer implements Scorer {
 			return null;
 		}
 		return scores.flat();
+	}
+
+	/** The result's budget, started on first use and reused by every later stage and block it ranks. */
+	#budget(signal?: AbortSignal): AbortSignal {
+		this.#deadline ??= AbortSignal.timeout(this.#budgetMs);
+		const deadline = this.#deadline;
+		return signal ? AbortSignal.any([signal, deadline]) : deadline;
+	}
+
+	/** One of {@link JUDGE_IN_FLIGHT} slots, queued behind the chunks of the stages before it. */
+	async #acquire(): Promise<void> {
+		while (this.#inFlight >= JUDGE_IN_FLIGHT) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#waiting.push(resolve);
+			await promise;
+		}
+		this.#inFlight++;
+	}
+
+	#release(): void {
+		this.#inFlight--;
+		this.#waiting.shift()?.();
 	}
 
 	/** Records one failed ranking and the cause the journal reports. */
@@ -155,6 +198,8 @@ function causeOf(error: unknown, deadline: AbortSignal, signal?: AbortSignal): s
 	if (deadline.aborted && !signal?.aborted) return "timeout";
 	if (error instanceof AIError.ConfigurationError) return "refused";
 	if (signal?.aborted) return "cancelled";
+	// A session can hold a registry and still have a `judge` role that resolves no candidate; the chain says so.
+	if (error instanceof Error && error.message.includes("no judge model available")) return "no_judge";
 	return "provider";
 }
 
@@ -162,31 +207,25 @@ function causeOf(error: unknown, deadline: AbortSignal, signal?: AbortSignal): s
  * The judge this session ranks with, or undefined when the `judge` role has no native candidate (or the session has
  * no model registry): shaping then falls back to its unranked rules rather than reporting a score-free result.
  */
-export function judgeScorerFor(
-	session: {
-		settings: JudgeDeps["settings"];
-		modelRegistry?: JudgeDeps["registry"];
-		getSessionId?: () => string | null;
-		getActiveModel?: () => JudgeDeps["sessionModel"];
-		getTelemetry?: () => JudgeDeps["telemetry"];
-		costGate?: JudgeDeps["costGate"];
-		sessionManager?: Parameters<typeof journalJudgmentUsage>[0];
-	},
-	budgetMs: number,
-	purpose = "spotlight",
-): JudgeScorer {
+export function judgeScorerFor(session: SpotlightScorerSession, budgetMs: number, purpose = "spotlight"): JudgeScorer {
 	const registry = session.modelRegistry;
 	if (!registry) return new JudgeScorer(undefined, budgetMs);
-	const deps: JudgeDeps = {
-		settings: session.settings,
-		registry,
-		sessionModel: session.getActiveModel?.(),
-		sessionId: session.getSessionId?.() ?? undefined,
-		purpose,
-		onUsage: journalJudgmentUsage(session.sessionManager),
-		telemetry: session.getTelemetry?.(),
-		costGate: session.costGate,
-		cache: sharedJudgmentCache(),
-	};
-	return new JudgeScorer(resolveJudge(deps), budgetMs);
+	// No up-front candidate check: a `judge` role may name a prompted chat model as well as a native judgment API, and
+	// a role emptied by policy is not distinguishable here from one that answers. The chain throws without candidates,
+	// and that failure is classified `no_judge`.
+	const sessionModel = session.getActiveModel?.();
+	return new JudgeScorer(
+		resolveJudge({
+			settings: session.settings,
+			registry,
+			sessionModel,
+			sessionId: session.getSessionId?.() ?? undefined,
+			purpose,
+			onUsage: journalJudgmentUsage(session.sessionManager),
+			telemetry: session.getTelemetry?.(),
+			costGate: session.costGate,
+			cache: sharedJudgmentCache(),
+		}),
+		budgetMs,
+	);
 }
