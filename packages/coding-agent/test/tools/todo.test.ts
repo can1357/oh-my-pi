@@ -16,6 +16,7 @@ import {
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
+	type TodoStatus,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-tui/tools/todo";
@@ -180,6 +181,68 @@ describe("TodoTool operations", () => {
 
 		const allTasks = result.details?.phases.flatMap(phase => phase.tasks) ?? [];
 		expect(allTasks.map(task => task.status)).toEqual(["pending", "pending", "in_progress"]);
+	});
+
+	it("applies done and rm to every task in an array across phases", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", {
+			op: "init",
+			list: [
+				{ phase: "A", items: ["a1", "a2"] },
+				{ phase: "B", items: ["b1", "b2"] },
+			],
+		});
+
+		const done = await tool.execute("call-2", { op: "done", task: ["a1", "b1"] });
+		expect(done.isError).toBeUndefined();
+		expect(done.details?.completedTasks).toEqual([
+			{ phase: "A", content: "a1" },
+			{ phase: "B", content: "b1" },
+		]);
+		expect(done.details?.phases.flatMap(phase => phase.tasks.map(task => task.status))).toEqual([
+			"completed",
+			"in_progress",
+			"completed",
+			"pending",
+		]);
+
+		const removed = await tool.execute("call-3", { op: "rm", task: ["a2", "b2"] });
+		expect(removed.details?.phases.map(phase => phase.tasks.map(task => task.content))).toEqual([["a1"], ["b1"]]);
+	});
+
+	it("splits a flattened task string like a path list, preferring verbatim content", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["Fix foo, bar", "a1", "a2", "a3"] }] });
+		const statuses = (phases: TodoPhase[] | undefined) => phases?.[0]?.tasks.map(task => task.status);
+
+		const verbatim = await tool.execute("call-2", { op: "done", task: "Fix foo, bar" });
+		expect(statuses(verbatim.details?.phases)).toEqual(["completed", "in_progress", "pending", "pending"]);
+
+		const partial = await tool.execute("call-3", { op: "done", task: "a2; nope" });
+		const partialText = partial.content.find(part => part.type === "text");
+		expect(partialText?.type === "text" && partialText.text).toContain('Errors: Task "nope" not found');
+
+		const spaced = await tool.execute("call-4", { op: "done", task: " a1  a2 " });
+		expect(statuses(spaced.details?.phases)).toEqual(["completed", "completed", "completed", "in_progress"]);
+
+		const quoted = await tool.execute("call-5", { op: "drop", task: '"a3",' });
+		expect(statuses(quoted.details?.phases)).toEqual(["completed", "completed", "completed", "abandoned"]);
+	});
+
+	it("rejects a task array with a missing entry, or more than one task to start, without changing state", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["a1", "a2", "a3"] }] });
+		const before: TodoStatus[] = ["in_progress", "pending", "pending"];
+
+		const missing = await tool.execute("call-2", { op: "done", task: ["a2", "nope"] });
+		expect(missing.isError).toBe(true);
+		const missingText = missing.content.find(part => part.type === "text");
+		expect(missingText?.type === "text" && missingText.text).toContain('Task "nope" not found');
+		expect(missing.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
+
+		const start = await tool.execute("call-3", { op: "start", task: ["a2", "a3"] });
+		expect(start.isError).toBe(true);
+		expect(start.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
 	});
 
 	it("appends items to an existing phase", async () => {

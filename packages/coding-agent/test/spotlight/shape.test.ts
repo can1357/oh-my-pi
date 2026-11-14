@@ -1057,4 +1057,56 @@ describe("spotlight shaping", () => {
 		const shown = out.text.split("\n");
 		for (const gap of gaps) for (const row of saved.slice(gap.from - 1, gap.to)) expect(shown).not.toContain(row);
 	});
+
+	it("keeps exact number literals (64-bit integers, float spellings) in compacted JSON views", async () => {
+		const raw = `[\n${Array.from(
+			{ length: 60 },
+			(_, i) => `  {\n    "id": 9007199254740993,\n    "weight": 1.0,\n    "name": "item-${i + 1}"\n  }`,
+		).join(",\n")}\n]`;
+		const lines = raw.split("\n");
+		const shown = lines.map((l, i) => `${i + 1}|${l}`);
+
+		const readOut = await shapeResult(
+			{
+				tool: "read",
+				text: `[example.json#ab12]\n${shown.join("\n")}`,
+				read: { path: "example.json", lines, shown, firstLine: 1, selected: false },
+				cwd: "/nonexistent",
+			},
+			context(),
+			scorer(null),
+			newShapeState(),
+			sink(),
+		);
+		expect(readOut.steps).toEqual(["dump"]);
+		expect(readOut.text).toContain("(60 rows) id|weight|name");
+		expect(readOut.text).toContain("9007199254740993|1.0|item-1");
+		expect(readOut.text).not.toContain("9007199254740992");
+
+		const bashOut = await shapeResult(
+			bash("cat example.json", raw),
+			context(),
+			scorer(null),
+			newShapeState(),
+			sink(),
+		);
+		expect(bashOut.steps).toEqual(["dump"]);
+		expect(bashOut.text).toContain("9007199254740993|1.0|item-60");
+		expect(bashOut.text).not.toContain("9007199254740992");
+
+		const pyDump = Array.from(
+			{ length: 60 },
+			(_, i) => `{'id': 9007199254740993, 'weight': 1.0, 'name': 'item-${i + 1}'}`,
+		).join("\n");
+		const pyOut = await shapeResult(
+			bash("python3 dump.py", pyDump),
+			context(),
+			scorer(null),
+			newShapeState(),
+			sink(),
+		);
+		expect(pyOut.steps).toEqual(["dump"]);
+		expect(pyOut.text).toContain("9007199254740993|1.0|item-60");
+		expect(pyOut.text).not.toContain("9007199254740992");
+	});
 });

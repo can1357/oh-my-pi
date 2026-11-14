@@ -69,6 +69,44 @@ function mockCreateAgentSession(session: AgentSession) {
 	} satisfies CreateAgentSessionResult);
 }
 
+/** One assistant turn carrying `usage`, then a successful yield, so `runSubprocess` can finish. */
+function createYieldingSession(usage: Record<string, unknown>): AgentSession {
+	const session: Partial<AgentSession> = {
+		...createSessionDefaults(),
+		state: { messages: [] } as never,
+		agent: { state: { systemPrompt: ["test"] } } as never,
+		extensionRunner: undefined as never,
+		sessionManager: { appendSessionInit: () => {} } as never,
+		getActiveToolNames: () => ["read", "yield"],
+		getEnabledToolNames: () => ["read", "yield"],
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			queueMicrotask(() => {
+				listener({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "ok" }],
+						usage,
+					},
+				} as unknown as AgentSessionEvent);
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "tool-ok",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", data: { ok: true } },
+					},
+					isError: false,
+				} as AgentSessionEvent);
+			});
+			return () => {};
+		},
+		prompt: async () => true,
+	};
+	return session as AgentSession;
+}
+
 describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -651,55 +689,44 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		]);
 	});
 
-	it("propagates per-turn context tokens onto the SingleResult", async () => {
-		// Async task consumers (index.ts) copy `singleResult.contextTokens` and
-		// `singleResult.contextWindow` onto AgentProgress. This test pins the
-		// upstream contract: when an assistant message_end carries totalTokens,
-		// executor must surface it on SingleResult.contextTokens.
-		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
-		const fastSession: Partial<AgentSession> = {
-			...createSessionDefaults(),
-			state: { messages: [] } as never,
-			agent: { state: { systemPrompt: ["test"] } } as never,
-			extensionRunner: undefined as never,
-			sessionManager: { appendSessionInit: () => {} } as never,
-			getActiveToolNames: () => ["read", "yield"],
-			getEnabledToolNames: () => ["read", "yield"],
-			subscribe: (listener: (event: AgentSessionEvent) => void) => {
-				queueMicrotask(() => {
-					listener({
-						type: "message_end",
-						message: {
-							role: "assistant",
-							content: [{ type: "text", text: "ok" }],
-							usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 12345 },
-						},
-					} as unknown as AgentSessionEvent);
-					listener({
-						type: "tool_execution_end",
-						toolCallId: "tool-ok",
-						toolName: "yield",
-						result: {
-							content: [{ type: "text", text: "Result submitted." }],
-							details: { status: "success", data: { ok: true } },
-						},
-						isError: false,
-					} as AgentSessionEvent);
-				});
-				return () => {};
+	it.each([
+		{
+			// No provider occupancy: the billable total is the occupied window.
+			label: "the billable total when no occupied context is reported",
+			id: "subagent-context-tokens",
+			usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 12345 },
+			contextTokens: 12345,
+		},
+		{
+			// Segmented Gemini bills every continuation (275) while contextTokens
+			// (165) is the occupied window the session's own estimate uses.
+			label: "occupied context instead of summed continuation billing",
+			id: "subagent-occupied-context-tokens",
+			usage: {
+				input: 120,
+				output: 155,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 275,
+				contextTokens: 165,
 			},
-			prompt: async () => true,
-		};
-		mockCreateAgentSession(fastSession as AgentSession);
+			contextTokens: 165,
+		},
+	])("reports $label on the SingleResult", async ({ id, usage, contextTokens }) => {
+		// Async task consumers copy SingleResult.contextTokens and contextWindow
+		// onto AgentProgress. Each row is a distinct branch: totalTokens-only
+		// falls back to the billable total; a reported contextTokens wins.
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		mockCreateAgentSession(createYieldingSession(usage));
 
 		const result = await runSubprocess({
 			...baseOptions,
-			id: "subagent-context-tokens",
+			id,
 			settings,
 		});
 
 		expect(result.aborted).toBe(false);
-		expect(result.contextTokens).toBe(12345);
+		expect(result.contextTokens).toBe(contextTokens);
 		// contextWindow is only populated when the model registry resolves one;
 		// here we mock createAgentSession so it stays undefined. The async-task
 		// consumer's assignment is a straight copy, so undefined is acceptable.

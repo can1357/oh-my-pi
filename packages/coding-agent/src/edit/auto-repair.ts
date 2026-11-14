@@ -417,7 +417,8 @@ export async function attemptEditAutoRepair(options: {
 	const repair = await repairParseRegression({ ...snapshot, next: current }, complete);
 	if (!repair) return undefined;
 
-	await writethrough(snapshot.path, repair.content, options.signal, Bun.file(snapshot.path));
+	const written = await writethrough(snapshot.path, repair.content, options.signal, Bun.file(snapshot.path));
+	session.recordFileChange?.({ path: snapshot.path, tool: "edit", before: current, after: written.finalContent });
 	logger.debug("Edit auto-repair applied", {
 		path: snapshot.path,
 		attempts: repair.attempts,
