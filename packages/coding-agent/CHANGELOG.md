@@ -43,7 +43,7 @@
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
 - A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
-- The system, advisor, live and seance prompts no longer open with the RFC 2119 citation and its six-keyword list, the fixed sentence that Google Antigravity answered with a bare `429 RESOURCE_EXHAUSTED`; a plain "Requirement words" line keeps the same meaning ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@Xytronix](https://github.com/Xytronix))
+- The system, advisor, live and seance prompts no longer open with the RFC 2119 citation and its six-keyword list, the fixed sentence that Google Antigravity answered with a bare `429 RESOURCE_EXHAUSTED`; a plain "Requirement words" line keeps the same meaning ([#19270](https://github.com/can1357/oh-my-pi/pull/19270) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
