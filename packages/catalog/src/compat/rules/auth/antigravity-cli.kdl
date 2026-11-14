@@ -1,0 +1,11 @@
+// Sign-in runs `agy acp --login` with private file-backed auth, exports the real
+// consumer OAuth grant to omp's encrypted credential store, and removes the
+// temporary CLI login directory. Inference imports the resolved account into a
+// separate --gemini-dir; it never swaps the user's global agy/keychain account.
+auth "antigravity-cli" {
+	name "Antigravity CLI (Gemini, Claude, GPT-OSS)"
+	login-warning "Google explicitly supports ACP-compatible editors, but its guidance on third-party coding agents is inconsistent. This provider uses the official agy CLI over ACP with your Antigravity login."
+	login "custom" hook="antigravity-cli"
+	refresh hook="antigravity-cli"
+	api-key-format "structured"
+}
