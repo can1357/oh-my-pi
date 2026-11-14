@@ -849,6 +849,19 @@ interface FilteredAgentReplayOptions {
 }
 
 /**
+ * `treeish` with the baseline WIP applied, or bare `treeish` when the WIP does
+ * not apply there (it was captured against the baseline commit).
+ */
+async function dirtyTreeAt(repoDir: string, treeish: string, baselineWip: readonly string[]): Promise<string> {
+	try {
+		return await writeSyntheticTree(repoDir, treeish, baselineWip);
+	} catch (error) {
+		if (!vcs.isVcsError(error)) throw error;
+		return writeSyntheticTree(repoDir, treeish, []);
+	}
+}
+
+/**
  * Rewrite each agent commit against the captured baseline WIP so user
  * staged/unstaged/untracked changes never enter the task history. Returns the
  * tip commit (the baseline sha when nothing survived filtering).
@@ -864,11 +877,17 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	// cannot read objects created only inside isolation.
 	await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
 	const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
+	// The agent can branch from a commit older than the baseline (`git switch
+	// -c work <older>`). Measure its work from where it forked, or every state
+	// below also undoes what the baseline commit added since that fork.
+	const forkSha = (await isolationRepo.mergeBase(baselineSha, opts.isolationHead)) ?? baselineSha;
+	const dirtyForkTree =
+		forkSha === baselineSha ? dirtyBaselineTree : await dirtyTreeAt(opts.isolationDir, forkSha, baselineWip);
 	let tip = baselineSha;
 	let previousFilteredTree = baselineSha;
 
 	for (const commitSha of agentCommits) {
-		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
+		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyForkTree, `${commitSha}^{tree}`);
 		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
 		// filtered tree through `patchTree` with that WIP context: hunks that
 		// touch WIP paths — including deletions of untracked WIP the agent never
@@ -896,6 +915,17 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		}
 		previousFilteredTree = currentFilteredTree;
 	}
+	// `rootPatch` is measured from the dirty baseline; rebase it onto the fork
+	// point like the commits above. Both the no-commit path and the leftover
+	// below use it.
+	const finalStatePatch =
+		forkSha === baselineSha
+			? opts.rootPatch
+			: await diffTreeOrEmpty(
+					isolationRepo,
+					dirtyForkTree,
+					await writeSyntheticTree(opts.isolationDir, dirtyBaselineTree, [opts.rootPatch]),
+				);
 	if (tip === baselineSha) {
 		// No filtered commit landed. Synthesising `HEAD + rootPatch` fails
 		// whenever rootPatch's WIP context can't be applied to a HEAD-only
@@ -903,9 +933,9 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		// modifies — see #4136), so collapse the isolation output onto a
 		// single WIP-seeded commit, matching the no-agent-commit path. This
 		// also covers an agent that committed only baseline WIP.
-		if (!opts.rootPatch.trim()) return tip;
-		const msg = (opts.commitMessage && (await opts.commitMessage(opts.rootPatch))) || opts.fallbackMessage;
-		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
+		if (!finalStatePatch.trim()) return tip;
+		const msg = (opts.commitMessage && (await opts.commitMessage(finalStatePatch))) || opts.fallbackMessage;
+		return commitPatch(opts.repoRoot, tip, opts.taskId, finalStatePatch, msg, undefined, opts.baseline.root);
 	}
 	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
 	// and 3-way synthesis used above; anything left is uncommitted work. The
@@ -916,7 +946,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		opts.repoRoot,
 		baselineSha,
 		opts.taskId,
-		opts.rootPatch,
+		finalStatePatch,
 		opts.baseline.root,
 	);
 	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);

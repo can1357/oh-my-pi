@@ -94,6 +94,7 @@
 - Python eval cells now register their source in linecache under unique cell identifiers (`<cell-N>`), allowing `inspect.getsource` and `inspect.getsourcelines` to inspect functions defined in earlier cells ([#18857](https://github.com/can1357/oh-my-pi/issues/18857), [#19218](https://github.com/can1357/oh-my-pi/pull/19218) by [@harshaygadekar](https://github.com/harshaygadekar))
 - Nix builds with `withAppleFm = false` no longer compile the Apple Foundation Models bridge with the host's Xcode ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
 - Apple Silicon Nix builds include Apple Foundation Models support instead of silently building without it ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+- Isolated tasks that branch from a commit older than a dirty baseline no longer revert the baseline commit on their task branch ([#18958](https://github.com/can1357/oh-my-pi/issues/18958)) ([#19174](https://github.com/can1357/oh-my-pi/pull/19174) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 
 ### Removed
 
