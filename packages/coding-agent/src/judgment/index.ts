@@ -57,7 +57,7 @@ import { normalizeModelContextImages } from "../utils/image-loading";
 import { type FittedImage, fitImage } from "../utils/image-resize";
 import { cfgNoJudge, cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
+import { cfgJudgmentAttemptTimeoutMs, cfgJudgmentHedgeAfterMs } from "../config/model-settings";
 import {
 	formatModelStringWithRouting,
 	resolveModelRoleValue,
@@ -526,11 +526,19 @@ export class ChainJudge implements Judge {
 		return this.#resolveCandidates()[0]?.model;
 	}
 
+	/**
+	 * Run `run` against the chain's candidates until one succeeds. With `judgment.hedgeAfterMs`, `run` may be
+	 * running for two candidates at once; the loser's signal is aborted when the other answers.
+	 */
 	async withCandidate<T>(run: (judge: Judge, kind: JudgeKind) => Promise<T>, options: JudgeOptions = {}): Promise<T> {
 		return this.#withCandidate((judge, kind) => run(judge, kind), options);
 	}
 
-	/** Run `run` against each candidate able to answer `request` (any candidate when omitted) until one succeeds. */
+	/**
+	 * Run `run` against each candidate able to answer `request` (any candidate when omitted) until one succeeds.
+	 * With `judgment.hedgeAfterMs` set, a candidate still pending after that delay is raced against the next
+	 * available candidate when that one is an explicit native judge; the first answer wins and the other is aborted.
+	 */
 	async #withCandidate<T>(
 		run: (judge: Judge, kind: JudgeKind, model: Model, prepared?: PreparedImages) => Promise<T>,
 		options: JudgeOptions,
@@ -540,6 +548,8 @@ export class ChainJudge implements Judge {
 		const requiresImages = (request?.images?.length ?? 0) > 0;
 		const signal = options.signal;
 		const timeoutMs = cfgJudgmentAttemptTimeoutMs.get(this.#deps.settings);
+		const hedgeAfterMs = cfgJudgmentHedgeAfterMs.get(this.#deps.settings);
+		warnIfHedgeShadowed(hedgeAfterMs, timeoutMs);
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
@@ -552,52 +562,61 @@ export class ChainJudge implements Judge {
 		// to an implicit (priority-default or session) candidate.
 		const lastExplicitIndex = candidates.findLastIndex(candidate => candidate.explicit);
 		let timedOutBefore = false;
-		for (const [index, candidate] of candidates.entries()) {
-			if (signal?.aborted) {
-				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
-			}
-			if (timedOutBefore && !candidate.explicit) continue;
-			const configuredFallbackRemains = index < lastExplicitIndex;
+		const timeoutKeyOf = (identity: string) => `${this.#deps.sessionId ?? ""}\0${identity}`;
+
+		/** Whether candidate `index` may be tried now; records why not. */
+		const available = (index: number): boolean => {
+			const candidate = candidates[index]!;
+			if (timedOutBefore && !candidate.explicit) return false;
 			const identity = formatModelStringWithRouting(candidate.model);
 			const rejection = rejections.get(identity);
 			if (rejection !== undefined) {
 				if (rejection.until > Date.now()) {
 					lastUnavailable = `${identity} ${rejection.reason} recently`;
-					continue;
+					return false;
 				}
 				rejections.delete(identity);
 			}
-			const timeoutKey = `${this.#deps.sessionId ?? ""}\0${identity}`;
-			if (configuredFallbackRemains && (timeouts.get(timeoutKey) ?? 0) > Date.now()) {
+			if (index < lastExplicitIndex && (timeouts.get(timeoutKeyOf(identity)) ?? 0) > Date.now()) {
 				lastUnavailable = `${identity} timed out recently`;
 				timedOutBefore = true;
-				continue;
+				return false;
 			}
-			// Outside the candidate's failure handling: a refusal ends the judgment.
-			this.#deps.costGate?.admit();
+			return true;
+		};
+
+		/**
+		 * One candidate attempt: its answer, or `undefined` when it was unavailable, failed, or was
+		 * cancelled through `cancel` after losing a hedge race. Throws only what ends the judgment.
+		 */
+		const attempt = async (index: number, cancel?: AbortController): Promise<{ value: T } | undefined> => {
+			const candidate = candidates[index]!;
+			const identity = formatModelStringWithRouting(candidate.model);
 			const kind = kindOf(candidate);
+			const base = cancel ? (signal ? AbortSignal.any([signal, cancel.signal]) : cancel.signal) : signal;
 			let timeout: AbortSignal | undefined;
 			try {
 				// Image fitting is local work, not evidence that a provider route has stalled.
-				const prepared = prepare ? await untilAborted(signal, () => prepare(candidate.model, kind)) : undefined;
-				timeout = kind === "native" && configuredFallbackRemains ? AbortSignal.timeout(timeoutMs) : undefined;
-				const candidateSignal = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
+				const prepared = prepare ? await untilAborted(base, () => prepare(candidate.model, kind)) : undefined;
+				timeout = kind === "native" && index < lastExplicitIndex ? AbortSignal.timeout(timeoutMs) : undefined;
+				const candidateSignal = timeout ? (base ? AbortSignal.any([base, timeout]) : timeout) : base;
 				const judge = await untilAborted(candidateSignal, () => this.#createJudge(candidate, candidateSignal));
 				if (!judge) {
 					lastUnavailable = `no API key for ${candidate.model.provider}/${candidate.model.id}`;
-					continue;
+					return undefined;
 				}
 				if (requiresImages && judge.supportsImages !== true) {
 					unsupportedCandidate = true;
 					lastUnavailable = `${identity} does not support image inputs`;
-					continue;
+					return undefined;
 				}
 				compatibleCandidate = true;
-				return await untilAborted(candidateSignal, () => run(judge, kind, candidate.model, prepared));
+				return { value: await untilAborted(candidateSignal, () => run(judge, kind, candidate.model, prepared)) };
 			} catch (error) {
 				if (signal?.aborted) {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
+				if (cancel?.signal.aborted) return undefined;
 				const timedOut =
 					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
 				if (!timedOut && isAbortOrTimeout(error)) throw error;
@@ -606,7 +625,7 @@ export class ChainJudge implements Judge {
 					rejections.set(identity, { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: rejected });
 				}
 				if (timedOut) {
-					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
+					timeouts.set(timeoutKeyOf(identity), Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
 				}
 				lastFailure = error instanceof Error ? error.message : String(error);
@@ -620,7 +639,44 @@ export class ChainJudge implements Judge {
 							? CANDIDATE_TIMEOUT_COOLDOWN_MS
 							: undefined,
 				});
+				return undefined;
 			}
+		};
+
+		let next = 0;
+		/**
+		 * The next candidate to try alongside a pending one, consumed from the sequential order: the next
+		 * available candidate, only when it is an explicit native judge the cost gate admits.
+		 */
+		const takeHedge = (): number | undefined => {
+			if (signal?.aborted) return undefined;
+			while (next < candidates.length && !available(next)) next++;
+			const candidate = candidates[next];
+			if (!candidate?.explicit || kindOf(candidate) !== "native") return undefined;
+			try {
+				this.#deps.costGate?.admit();
+			} catch {
+				// The sequential loop reaches this candidate again and lets the refusal end the judgment.
+				return undefined;
+			}
+			return next++;
+		};
+
+		while (next < candidates.length) {
+			if (signal?.aborted) {
+				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
+			}
+			const index = next++;
+			if (!available(index)) continue;
+			// Outside the candidate's failure handling: a refusal ends the judgment.
+			this.#deps.costGate?.admit();
+			if (hedgeAfterMs <= 0) {
+				const outcome = await attempt(index);
+				if (outcome) return outcome.value;
+				continue;
+			}
+			const outcome = await this.#hedged(hedgeAfterMs, attempt, index, takeHedge);
+			if (outcome) return outcome.value;
 		}
 		if (requiresImages && !compatibleCandidate && unsupportedCandidate) {
 			throw new Error("judgment: no compatible judge candidate supports images");
@@ -633,6 +689,48 @@ export class ChainJudge implements Judge {
 			throw new Error("judgment: no judge model available");
 		}
 		throw new Error(`judgment: every judge candidate failed: ${lastFailure ?? lastUnavailable ?? "unknown error"}`);
+	}
+
+	/**
+	 * Attempt candidate `index`; if it has not settled after `hedgeAfterMs`, start the candidate `takeHedge`
+	 * yields beside it. The first answer wins and the other attempt is aborted; when one fails, the other is
+	 * awaited. `undefined` when every started attempt failed.
+	 */
+	async #hedged<T>(
+		hedgeAfterMs: number,
+		attempt: (index: number, cancel?: AbortController) => Promise<{ value: T } | undefined>,
+		index: number,
+		takeHedge: () => number | undefined,
+	): Promise<{ value: T } | undefined> {
+		const primaryCancel = new AbortController();
+		const primary = attempt(index, primaryCancel);
+		const due = Promise.withResolvers<"hedge">();
+		const timer = setTimeout(() => due.resolve("hedge"), hedgeAfterMs);
+		let first: { value: T } | undefined | "hedge";
+		try {
+			first = await Promise.race([primary, due.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
+		if (first !== "hedge") return first;
+		const hedgeIndex = takeHedge();
+		if (hedgeIndex === undefined) return primary;
+		const hedgeCancel = new AbortController();
+		const backup = attempt(hedgeIndex, hedgeCancel);
+		const attempts = [primary, backup] as const;
+		const cancels = [primaryCancel, hedgeCancel] as const;
+		// The losing attempt settles after this returns; its outcome is no longer observed.
+		for (const pending of attempts) pending.catch(() => {});
+		try {
+			const settled = await Promise.race(attempts.map((pending, i) => pending.then(outcome => ({ outcome, i }))));
+			const other = 1 - settled.i;
+			if (!settled.outcome) return await attempts[other];
+			cancels[other].abort();
+			return settled.outcome;
+		} catch (error) {
+			for (const cancel of cancels) cancel.abort();
+			throw error;
+		}
 	}
 
 	/** Attribute one attempt: the ledger unless answered wholly from cache, and one telemetry span. */
@@ -720,9 +818,11 @@ export class ChainJudge implements Judge {
 		return list;
 	}
 
+	/** Every judge kind runs under `signal`, so a deadline or a lost hedge race cancels its request. */
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference")
+			return withCandidateSignal(new TextJudge(new LocalTextBackend(model.id)), signal);
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
@@ -753,7 +853,7 @@ export class ChainJudge implements Judge {
 					startedAt: attempt.timestamp,
 				}),
 		});
-		return new TextJudge(backend);
+		return withCandidateSignal(new TextJudge(backend), signal);
 	}
 }
 
@@ -786,7 +886,7 @@ class LocalTextBackend implements TextBackend {
 	}
 }
 
-/** Bind native transport cancellation even when a withCandidate callback omits its call options. */
+/** Bind transport cancellation even when a withCandidate callback omits its call options. */
 function withCandidateSignal(judge: Judge, parent: AbortSignal | undefined): Judge {
 	return {
 		label: judge.label,
@@ -913,6 +1013,28 @@ function nativeJudge(
 interface CandidateRejection {
 	until: number;
 	reason: string;
+}
+
+/** The `[hedgeAfterMs, attemptTimeoutMs]` pair last warned about by {@link warnIfHedgeShadowed}. */
+let shadowedHedgeWarned: string | undefined;
+
+/**
+ * Warn once per setting pair when `judgment.hedgeAfterMs` is at or past `judgment.attemptTimeoutMs`: the deadline
+ * cancels a pending native candidate before the hedge delay elapses, so hedging never starts and the chain falls
+ * through sequentially instead.
+ */
+export function warnIfHedgeShadowed(hedgeAfterMs: number, attemptTimeoutMs: number): void {
+	if (hedgeAfterMs <= 0 || hedgeAfterMs < attemptTimeoutMs) return;
+	const pair = `${hedgeAfterMs}/${attemptTimeoutMs}`;
+	if (shadowedHedgeWarned === pair) return;
+	shadowedHedgeWarned = pair;
+	logger.warn(
+		"judgment.hedgeAfterMs is not below judgment.attemptTimeoutMs; native judge candidates time out before they can be hedged",
+		{
+			hedgeAfterMs,
+			attemptTimeoutMs,
+		},
+	);
 }
 
 /**

@@ -25,6 +25,7 @@
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
 - A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- Added the `judgment.hedgeAfterMs` setting (default `0`, off): a judge candidate that has not answered after that many milliseconds keeps running while the next candidate starts beside it, when that one is a native judge you configured; the first answer wins and the other request is cancelled, its usage still recorded. A delay at or above `judgment.attemptTimeoutMs` logs a warning, since that deadline cancels a native candidate before it can be hedged ([#19051](https://github.com/can1357/oh-my-pi/pull/19051) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
