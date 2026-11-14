@@ -34,7 +34,7 @@ import {
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
 } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModels, getBundledProviders, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
@@ -154,6 +154,16 @@ setCodexAttestationProvider(generateCodexAttestation);
 
 /** One built-in discovery pass rewriting more payload rows than this is debug-logged. */
 const MODEL_CACHE_REWRITE_LOG_THRESHOLD = 5;
+/**
+ * Built-in providers whose catalog is the live roster only: authoritative
+ * discovery and no bundled rows. A cold cache has nothing to restore until a
+ * scoped refresh runs, so session resume must be able to name them.
+ */
+const BUILT_IN_LIVE_ONLY_PROVIDER_IDS: ReadonlySet<string> = new Set(
+	PROVIDER_DESCRIPTORS.filter(
+		descriptor => descriptor.dynamicModelsAuthoritative === true && !isGeneratedProvider(descriptor.providerId),
+	).map(descriptor => descriptor.providerId),
+);
 /** Minimum spacing of {@link ModelRegistry.retryUnavailableDiscovery} passes. */
 const DISCOVERY_RETRY_INTERVAL_MS = 60_000;
 /** `scheme://user:pass@` in free text (e.g. a fetch error echoing the request URL). */
@@ -1058,10 +1068,11 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Refresh only named discovery providers (built-in managers, configured
-	 * `models.yml` providers, or extension `fetchDynamicModels` managers). Unlike
-	 * {@link refreshProvider}, this avoids a static reload and leaves unrelated
-	 * runtime discovery alone. Unknown ids have no effect.
+	 * Refresh only named discovery providers. Unlike {@link refreshProvider},
+	 * this avoids a static reload and leaves unrelated runtime discovery alone.
+	 * Configured `models.yml` providers, extension `fetchDynamicModels`
+	 * managers, and built-in live-only catalogs in the set are refreshed;
+	 * other ids have no effect.
 	 */
 	async refreshDiscoverableProviders(
 		providerIds: Iterable<string>,
@@ -3646,7 +3657,11 @@ export class ModelRegistry {
 			.map(provider => provider.provider);
 	}
 
-	/** Canonical id of a configured or extension-backed discovery provider. */
+	/**
+	 * Canonical id of a discovery provider a scoped refresh can reach:
+	 * configured `models.yml` discovery, an extension `fetchDynamicModels`
+	 * manager, or a built-in live-only catalog (no bundled rows).
+	 */
 	getDiscoveryProviderId(requestedId: string): string | undefined {
 		const normalized = requestedId.toLowerCase();
 		for (const { provider } of this.#discoverableProviders) {
@@ -3654,6 +3669,9 @@ export class ModelRegistry {
 		}
 		for (const provider of this.#runtimeModelManagers.keys()) {
 			if (provider.toLowerCase() === normalized) return provider;
+		}
+		for (const providerId of BUILT_IN_LIVE_ONLY_PROVIDER_IDS) {
+			if (providerId.toLowerCase() === normalized) return providerId;
 		}
 		return undefined;
 	}

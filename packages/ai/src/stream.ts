@@ -49,6 +49,7 @@ import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import { openAISamplingAllowance } from "./providers/openai-shared";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
@@ -1169,11 +1170,12 @@ type SamplingOptions = Pick<
 >;
 
 /**
- * Drop explicit sampling parameters before any provider builds its payload
- * when the model's resolved `compat.supportsSamplingParams` is `false`. The
- * catalog's class rules assign that per model lineage on every compat record,
- * and an explicit compat override still wins, so this one check covers every
- * provider.
+ * Drop sampling parameters the model rejects before any provider builds its
+ * payload. `supportsSamplingParams: false` drops temperature and top_p.
+ * `top_k`, `min_p`, and penalties stay when the authored spec set that flag
+ * true, so a roster that omitted temperature but listed the extension still
+ * sends it. Class rules that only turn the core group off do not count as
+ * that advertisement.
  */
 function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api>, options: T): T {
 	if (
@@ -1187,16 +1189,18 @@ function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api
 	) {
 		return options;
 	}
-	const compat = model.compat;
-	if (!compat || !("supportsSamplingParams" in compat) || compat.supportsSamplingParams !== false) return options;
+	const sampling = openAISamplingAllowance(model);
+	if (sampling.core) return options;
 	const supported = { ...options };
 	delete supported.temperature;
 	delete supported.topP;
-	delete supported.topK;
-	delete supported.minP;
-	delete supported.presencePenalty;
-	delete supported.repetitionPenalty;
-	delete supported.frequencyPenalty;
+	if (!sampling.topK) delete supported.topK;
+	if (!sampling.minP) delete supported.minP;
+	if (!sampling.penaltyAndStop) {
+		delete supported.presencePenalty;
+		delete supported.repetitionPenalty;
+		delete supported.frequencyPenalty;
+	}
 	return supported;
 }
 
@@ -1832,6 +1836,7 @@ function mapOptionsForApi<TApi extends Api>(
 		topK: options?.topK,
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
+		frequencyPenalty: options?.frequencyPenalty,
 		repetitionPenalty: options?.repetitionPenalty,
 		stopSequences: options?.stopSequences,
 		frequencyPenalty: options?.frequencyPenalty,
@@ -2071,6 +2076,7 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 			return castApi<"openai-completions">({
 				...base,
+				stopSequences: options?.stopSequences,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				// `OpenAICompletionsOptions` carries no forceReasoningOff; fold it.
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
@@ -2085,6 +2091,7 @@ function mapOptionsForApi<TApi extends Api>(
 		case "openai-completions":
 			return castApi<"openai-completions">({
 				...base,
+				stopSequences: options?.stopSequences,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				// `OpenAICompletionsOptions` carries no forceReasoningOff; fold it.
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,

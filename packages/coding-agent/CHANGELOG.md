@@ -26,6 +26,10 @@
 
 ### Fixed
 
+- Fixed `--provider openzoo` against a public tunnel that rejects the bearer exiting with an unknown-provider error instead of telling you to run /login.
+- Fixed OpenZoo public-tunnel discovery reporting a rejected bearer as a missing model instead of an authentication failure.
+- Fixed resuming a session saved on `openzoo/auto` when the OpenZoo model cache is empty.
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt

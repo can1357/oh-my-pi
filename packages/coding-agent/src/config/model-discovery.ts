@@ -11,6 +11,7 @@ import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { AmbiguousIdentityError } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { DiscoveryAuthRejectionError } from "@oh-my-pi/pi-catalog/discovery/auth-rejection";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -75,6 +76,7 @@ export class DiscoveryHttpError extends Error {
  * never masquerades as a dead endpoint (issue #12281).
  */
 export function isDiscoveryAuthRejection(error: unknown): boolean {
+	if (error instanceof DiscoveryAuthRejectionError) return true;
 	return error instanceof DiscoveryHttpError && (error.status === 401 || error.status === 403);
 }
 

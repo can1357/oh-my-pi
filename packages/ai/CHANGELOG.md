@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
 - Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
 
 ### Changed
@@ -12,6 +13,10 @@
 
 ### Fixed
 
+- Fixed auth-gateway requests dropping an advertised `top_k`, `min_p`, penalty, or stop sequence when the model rejects temperature and top_p. Chat completions sends that advertised stop sequence as well.
+- Fixed chat-completions and Responses requests sending `top_k` or `min_p` when model compat turns that extension off. Temperature and top_p are unchanged.
+- Fixed chat-completions and Responses requests dropping an advertised `top_k`, `min_p`, or penalty when the model rejects temperature and top_p.
+- A stored OpenZoo API key, including one copied to the auth broker, is used when `OPENZOO_API_KEY` is unset. The keyless `openzoo-local` placeholder remains only when nothing is stored.
 - Gemini 4 responses that exceed a single output segment now continue generating and are delivered as one complete reply across Google, Vertex AI, Gemini CLI, and Antigravity.
 - Fixed Cursor conversations so prompt content added by hooks remains part of the current user message and server-recorded context is replayed correctly on subsequent turns.
 - Improved Google Antigravity quota recovery so Gemini 4 Argon access can be restored after quota or plan changes when shared Gemini capacity is available.

@@ -4256,6 +4256,79 @@ export type ResponsesSamplingParamsExtras = {
 
 type CommonResponsesParams = ResponseCreateParamsStreaming & ResponsesSamplingParamsExtras;
 
+type SamplingExtensionFlag = "supportsTopK" | "supportsMinP" | "supportsPenaltyAndStopParams";
+
+/** Read one sampling-extension flag from a resolved compat record or the authored spec. */
+export function samplingCompatFlag(compat: unknown, key: SamplingExtensionFlag): boolean | undefined {
+	if (typeof compat !== "object" || compat === null || !(key in compat)) return undefined;
+	const value = Reflect.get(compat, key);
+	return typeof value === "boolean" ? value : undefined;
+}
+
+/**
+ * Whether `top_k`, `min_p`, or the penalty group may be serialized.
+ *
+ * Unset follows the core sampling group. `false` always suppresses. An
+ * authored `true` still sends when that group is off, which is how a roster
+ * that listed `top_k` but not `temperature` keeps `top_k`. The resolved
+ * default is also `true`, so only the authored spec distinguishes an
+ * advertisement from a model line that rejects the group.
+ */
+export function openAISamplingExtensionEnabled(
+	samplingOn: boolean,
+	resolved: boolean | undefined,
+	authored: boolean | undefined,
+): boolean {
+	if (resolved === false || authored === false) return false;
+	if (samplingOn) return true;
+	return authored === true;
+}
+
+/** Which sampling fields a caller may forward for this model. */
+export interface OpenAISamplingAllowance {
+	/** `temperature` and `top_p`. */
+	core: boolean;
+	topK: boolean;
+	minP: boolean;
+	/** Penalties and `stop`. */
+	penaltyAndStop: boolean;
+}
+
+/**
+ * Sampling fields safe to forward.
+ *
+ * The core group is on unless compat explicitly turns it off. While it is
+ * off, `top_k`, `min_p`, and the penalty/stop group stay on only when the
+ * authored spec advertised that extension. An unset authored flag follows
+ * the off core group, so a resolved default of true is not an advertisement.
+ * While the core group is on, every field stays forwardable and the provider
+ * applies its own extension flags.
+ */
+export function openAISamplingAllowance(model: Pick<Model<Api>, "compat" | "compatConfig">): OpenAISamplingAllowance {
+	const compat = model.compat;
+	const core = !compat || !("supportsSamplingParams" in compat) || compat.supportsSamplingParams !== false;
+	if (core) return { core: true, topK: true, minP: true, penaltyAndStop: true };
+	const authored = model.compatConfig;
+	return {
+		core: false,
+		topK: openAISamplingExtensionEnabled(
+			false,
+			samplingCompatFlag(compat, "supportsTopK"),
+			samplingCompatFlag(authored, "supportsTopK"),
+		),
+		minP: openAISamplingExtensionEnabled(
+			false,
+			samplingCompatFlag(compat, "supportsMinP"),
+			samplingCompatFlag(authored, "supportsMinP"),
+		),
+		penaltyAndStop: openAISamplingExtensionEnabled(
+			false,
+			samplingCompatFlag(compat, "supportsPenaltyAndStopParams"),
+			samplingCompatFlag(authored, "supportsPenaltyAndStopParams"),
+		),
+	};
+}
+
 type CommonSamplingOptions = Pick<
 	StreamOptions,
 	"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty" | "maxTokens"
@@ -4273,10 +4346,14 @@ type CommonSamplingOptions = Pick<
 export function applyCommonResponsesSamplingParams<P extends CommonResponsesParams>(
 	params: P,
 	options: CommonSamplingOptions | undefined,
-	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens" | "identity"> & {
+	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens" | "identity" | "compatConfig"> & {
 		compat: Pick<
 			ResolvedOpenAISharedCompat,
-			"supportsSamplingParams" | "supportsPenaltyAndStopParams" | "clampOutputToModelMax"
+			| "supportsSamplingParams"
+			| "supportsTopK"
+			| "supportsMinP"
+			| "supportsPenaltyAndStopParams"
+			| "clampOutputToModelMax"
 		>;
 	},
 ): void {
@@ -4288,16 +4365,43 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 		);
 	}
 	// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
-	// sampling params with a 400 on every serving host (#5606).
-	if (model.compat.supportsSamplingParams) {
+	// sampling params with a 400 on every serving host (#5606). top_k, min_p,
+	// and penalties stay out of that gate: an authored `true` still sends
+	// when the roster omitted temperature or top_p.
+	const samplingOn = model.compat.supportsSamplingParams;
+	if (samplingOn) {
 		if (options?.temperature !== undefined) params.temperature = options.temperature;
 		if (options?.topP !== undefined) params.top_p = options.topP;
-		if (options?.topK !== undefined) params.top_k = options.topK;
-		if (options?.minP !== undefined) params.min_p = options.minP;
-		if (model.compat.supportsPenaltyAndStopParams) {
-			if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
-			if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
-		}
+	}
+	if (
+		options?.topK !== undefined &&
+		openAISamplingExtensionEnabled(
+			samplingOn,
+			model.compat.supportsTopK,
+			samplingCompatFlag(model.compatConfig, "supportsTopK"),
+		)
+	) {
+		params.top_k = options.topK;
+	}
+	if (
+		options?.minP !== undefined &&
+		openAISamplingExtensionEnabled(
+			samplingOn,
+			model.compat.supportsMinP,
+			samplingCompatFlag(model.compatConfig, "supportsMinP"),
+		)
+	) {
+		params.min_p = options.minP;
+	}
+	if (
+		openAISamplingExtensionEnabled(
+			samplingOn,
+			model.compat.supportsPenaltyAndStopParams,
+			samplingCompatFlag(model.compatConfig, "supportsPenaltyAndStopParams"),
+		)
+	) {
+		if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
+		if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 }
