@@ -2,11 +2,8 @@ import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
-import {
-	followTranscriptTail,
-	Transcript,
-	updateTranscriptTailLock,
-} from "../src/components/transcript/Transcript";
+import { followTranscriptTail, Transcript } from "../src/components/transcript/Transcript";
+import { reconcileUserScroll } from "../src/components/transcript/use-transcript-scroll";
 import type { ActiveTool } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
@@ -59,6 +56,7 @@ function renderTranscript(props: {
 	entries?: readonly SessionEntry[];
 	activeTools?: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
+	compact?: boolean;
 }): string {
 	return renderToStaticMarkup(
 		<Transcript
@@ -67,6 +65,7 @@ function renderTranscript(props: {
 			streamDone={true}
 			activeTools={props.activeTools ?? new Map()}
 			working={props.working}
+			compact={props.compact}
 		/>,
 	);
 }
@@ -150,6 +149,23 @@ describe("Transcript message Markdown", () => {
 	});
 });
 
+describe("Transcript jump pill", () => {
+	it("does not render the jump pill in compact/drawer mode", () => {
+		const html = renderTranscript({ working: false, compact: true });
+		expect(html).not.toContain("Scroll to current");
+		expect(html).not.toContain("tr-shell");
+		expect(html).not.toContain('aria-label="Transcript"');
+	});
+
+	it("wraps the main scroller and labels it", () => {
+		const html = renderTranscript({ working: false });
+		expect(html).toContain("tr-shell");
+		expect(html).toContain("tr-content");
+		expect(html).toContain('aria-label="Transcript"');
+		expect(html).not.toContain("Scroll to current");
+	});
+});
+
 describe("Transcript tail-follow scroll operations", () => {
 	it("restores tail-follow when a connection becomes live", () => {
 		const element = { scrollTop: 0, scrollHeight: 1_000, clientHeight: 200 };
@@ -160,7 +176,7 @@ describe("Transcript tail-follow scroll operations", () => {
 		expect(element.scrollTop).toBe(1_000);
 
 		element.scrollTop = 600;
-		updateTranscriptTailLock(element, lock);
+		lock.current = reconcileUserScroll(element).locked;
 		expect(lock.current).toBe(false);
 
 		element.scrollHeight = 1_200;
