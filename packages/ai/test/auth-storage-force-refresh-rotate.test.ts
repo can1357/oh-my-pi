@@ -764,6 +764,59 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		).toBe("daybreak-denied");
 	});
 
+	test("a sibling refused the requested model does not pace a usage-limit retry", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await codexStorage.credentials.set(
+			CODEX_PROVIDER,
+			["spent", "refused-short", "refused-quota", "quota-only"].map(access => ({
+				type: "oauth" as const,
+				access,
+				refresh: `ref-${access}`,
+				expires: farExpiry(),
+				accountId: `account-${access}`,
+			})),
+		);
+		const rows = new Map(
+			store
+				.listAuthCredentials(CODEX_PROVIDER)
+				.flatMap(row => (row.credential.type === "oauth" ? [[row.credential.access, row.id] as const] : [])),
+		);
+		const idOf = (access: string): number => {
+			const id = rows.get(access);
+			if (id === undefined) throw new Error(`missing credential ${access}`);
+			return id;
+		};
+		const providerKey = `${CODEX_PROVIDER}:oauth`;
+		const modelPolicyScope = `model-policy:${DAYBREAK_MODEL}`;
+		const now = Date.now();
+		const quotaOnlyUntil = now + 2 * 60 * 60_000;
+		// A model refusal outlives any block expiry, including a shorter quota
+		// block the same account also holds; only the quota-only sibling recovers.
+		for (const block of [
+			{ access: "refused-short", blockScope: modelPolicyScope, blockedUntilMs: now + 60_000 },
+			{ access: "refused-quota", blockScope: modelPolicyScope, blockedUntilMs: now + 60_000 },
+			{ access: "refused-quota", blockScope: "chat", blockedUntilMs: now + 30 * 60_000 },
+			{ access: "quota-only", blockScope: "chat", blockedUntilMs: quotaOnlyUntil },
+		]) {
+			codexStorage.blocks.upsert({
+				credentialId: idOf(block.access),
+				providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: block.blockedUntilMs,
+			});
+		}
+
+		const mark = await codexStorage.limits.markReached(CODEX_PROVIDER, "spent-account", {
+			credentialId: idOf("spent"),
+			modelId: DAYBREAK_MODEL,
+			retryAfterMs: 3 * 24 * 60 * 60_000,
+		});
+
+		expect(mark.switched).toBe(false);
+		expect(mark.retryAtMs).toBe(quotaOnlyUntil);
+	});
+
 	test.each([
 		["claude-mythos-5-2", "claude-opus-5-5"],
 		["CLAUDE-MYTHOS-5-2", "claude-mythos-5-2"],

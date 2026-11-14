@@ -47,7 +47,6 @@ test("keeps Gemini 3.6 advisor context and accepts a silent review", async () =>
 		sessionManager: SessionManager.create(temp.path(), temp.path()),
 		settings: Settings.isolated({ "compaction.enabled": false }),
 		modelRegistry: registry,
-		advisorTools: [],
 		advisorStreamFn,
 	});
 	try {

@@ -108,7 +108,7 @@ export declare class DesktopSession {
    */
   drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopDragResult>
   scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
-  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
   keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
@@ -140,7 +140,7 @@ export declare class DesktopSession {
    * Types `text` into the element: native text fields take it by AX
    * insertion, other elements as keystrokes once they hold keyboard focus.
    */
-  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
   /** Presses a key chord in the element once it holds keyboard focus. */
   axKeyChord(reference: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   /**
@@ -851,8 +851,8 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** List tree paths. */
-  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List a tree's blobs and symlinks recursively with their modes. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsTreeEntry>>
   /** List submodule paths. */
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
@@ -1715,6 +1715,21 @@ export interface DesktopSessionOptions {
    * count, which `desktopEscapeStops` reads after they close.
    */
   escapeStopKey?: string
+}
+
+/** What a typing call did. */
+export interface DesktopTypeResult {
+  /**
+   * Why the text was sent but the target was not seen reading it before
+   * focus went back; absent when it was, or the backend does not wait for
+   * it (only Windows takeover typing does).
+   */
+  unconfirmed?: string
+  /**
+   * Where focus ended when typing ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -3998,6 +4013,11 @@ export interface ShellVizOptions {
   speed: number
   selectedNode?: string
   expandedNodes: Array<string>
+  /**
+   * The script is a command still streaming in, not yet run: its
+   * unfinished end is drawn as it will most likely continue.
+   */
+  streaming?: boolean
 }
 
 /**
@@ -4228,6 +4248,12 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
+  /** Build the commit from this index file instead of the repository's. */
+  indexPath?: string
+  /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
+  expectedHead?: string
+  /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
+  noVerify?: boolean
 }
 
 /** Detach copied Git metadata. */
@@ -4356,6 +4382,13 @@ export interface VcsStatusSummary {
   staged: number
   unstaged: number
   untracked: number
+}
+
+/** One blob or symlink of a tree listing. */
+export interface VcsTreeEntry {
+  path: string
+  /** Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or `120000`. */
+  mode: string
 }
 
 /** Validate hunk selections. */

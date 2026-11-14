@@ -569,6 +569,7 @@ const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"factory-droid-agent": false,
 	"gitlab-duo-agent": false,
 	"devin-agent": false,
+	"antigravity-acp": false,
 };
 
 /**
@@ -1211,7 +1212,7 @@ export function transformMessages<TApi extends Api>(
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),
-						[kDemotedThinking]: true,
+						[kDemotedThinking]: sanitized.thinking,
 					};
 				}
 

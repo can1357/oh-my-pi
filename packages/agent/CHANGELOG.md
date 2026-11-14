@@ -2,14 +2,23 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
+### Fixed
+
+- Corrected context cost estimates for requests that omit reasoning history, so billing estimates now include thinking text only when it is sent or reconstructed for a tool call.
+
+## [18.20.0] - 2026-11-12
+
+### Changed
+
+- `prepareCompaction()` runs as the `compaction.prepare` loop phase, so a `ui.loop-blocked` stall from a cold token walk over a long branch names compaction instead of "unknown" ([#15027](https://github.com/can1357/oh-my-pi/issues/15027), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
 
 - Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that run beside them and may write files (their approval, asked with their arguments, is not `read`) have finished; speculative results wait for those effects before validation, and cancellation while waiting prevents their commit ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
-### Changed
-
-- `prepareCompaction()` runs as the `compaction.prepare` loop phase, so a `ui.loop-blocked` stall from a cold token walk over a long branch names compaction instead of "unknown" ([#15027](https://github.com/can1357/oh-my-pi/issues/15027), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.18.8] - 2026-11-11
 

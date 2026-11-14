@@ -148,6 +148,53 @@ describe("Perplexity email OTP login", () => {
 		});
 		expect(requests[3]?.cookie).toBe("next-auth.csrf-token=csrf-cookie");
 	});
+
+	it("sends the code to an email address entered at the login-method prompt", async () => {
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected global fetch"));
+		const signinBodies: unknown[] = [];
+		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : input.toString());
+			if (url.pathname.endsWith("/csrf")) return Response.json({ csrfToken: "csrf-token" });
+			if (url.pathname.endsWith("/signin-email")) {
+				signinBodies.push(JSON.parse(String(init?.body)));
+				return new Response("{}", { status: 200 });
+			}
+			return Response.json({ token: "perplexity-jwe", status: "success" });
+		});
+		const answers = [" user@example.com ", "123456"];
+
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			const credentials = await loginPerplexity({
+				fetch: fetchMock,
+				onPrompt: async () => {
+					const answer = answers.shift();
+					if (answer === undefined) throw new Error("Unexpected extra prompt");
+					return answer;
+				},
+				onBrowserSession: async () => {
+					throw new Error("Email login must not open a browser");
+				},
+			});
+			expect(credentials.access).toBe("perplexity-jwe");
+		});
+		expect(signinBodies).toEqual([{ email: "user@example.com", csrfToken: "csrf-token" }]);
+	});
+
+	it("rejects a login-method answer that is neither a method nor an email address", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ csrfToken: "csrf-token" }));
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			await expect(
+				loginPerplexity({
+					fetch: fetchMock,
+					onPrompt: async () => "Vlad <vlad@example.com>",
+					onBrowserSession: async () => {
+						throw new Error("An unrecognized answer must not open a browser");
+					},
+				}),
+			).rejects.toBeInstanceOf(OAuthError);
+		});
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
 });
 
 describe("Perplexity browser SSO login", () => {

@@ -2413,10 +2413,13 @@ export interface AgentProgress {
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
 	/**
-	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
-	 * This is the number to compare against `contextWindow` — what compaction
-	 * decides on, what the user typically reads as "how full is the context".
-	 * Distinct from `tokens`, which is a lifetime billing-volume counter.
+	 * Current per-turn occupied context: the latest assistant message's
+	 * provider-reported `usage.contextTokens` when present, else its billable
+	 * `totalTokens` minus orchestration tokens (the same accounting session
+	 * compaction uses). This is the number to compare against `contextWindow` —
+	 * what compaction decides on, what the user typically reads as "how full
+	 * is the context". Distinct from `tokens`, which is a lifetime
+	 * billing-volume counter.
 	 */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. Lets the UI render `<curr>/<window>` gauges. */

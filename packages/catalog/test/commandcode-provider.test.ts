@@ -556,6 +556,10 @@ describe("Command Code provider support", () => {
 			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 1_000_000 },
 			{ id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_length: 1_000_000 },
 			{ id: "xai/grok-4.6", name: "Grok 4.6", context_length: 500_000 },
+			{ id: "xai/grok-4.7", name: "Grok 4.7", context_length: 500_000 },
+			{ id: "claude-sonnet-5", name: "Claude Sonnet 5", context_length: 1_000_000 },
+			{ id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", context_length: 1_000_000 },
+			{ id: "google/gemini-4-argon", name: "Gemini 4 Argon", context_length: 1_000_000 },
 			{ id: "poolside/laguna-s-2.1-free", name: "Laguna S 2.1", context_length: 256_000 },
 		]);
 
@@ -575,17 +579,29 @@ describe("Command Code provider support", () => {
 			},
 		});
 
-		// Grok 4.6's whole-request 2x tier above 200K input, as absolute rates
-		// (the xai class multiplier rule is scoped to xai/xai-oauth and never
-		// matches this provider).
-		expect(models.find(model => model.id === "xai/grok-4.6")).toMatchObject({
-			cost: {
-				input: 2,
-				output: 6,
-				cacheRead: 0.5,
-				cacheWrite: 0,
-				longContext: { inputThreshold: 200_000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
-			},
+		// Grok 4.6 and 4.7 share a whole-request 2x tier above 200K input, as
+		// absolute rates (the xai class multiplier rule is scoped to xai/xai-oauth
+		// and never matches this provider).
+		for (const id of ["xai/grok-4.6", "xai/grok-4.7"]) {
+			expect(models.find(model => model.id === id)).toMatchObject({
+				cost: {
+					input: 2,
+					output: 6,
+					cacheRead: 0.5,
+					cacheWrite: 0,
+					longContext: { inputThreshold: 200_000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
+				},
+			});
+		}
+		// Sonnet 5.5 reads cache at half Sonnet 5's rate (command-code@1.88.5).
+		expect(models.find(model => model.id === "claude-sonnet-5")).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		});
+		expect(models.find(model => model.id === "claude-sonnet-5-5")).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+		});
+		expect(models.find(model => model.id === "google/gemini-4-argon")).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
 		});
 		// Documented-free model keeps the zero discovery default.
 		expect(models.find(model => model.id === "poolside/laguna-s-2.1-free")).toMatchObject({
@@ -610,6 +626,46 @@ describe("Command Code provider support", () => {
 				expect(model.cost.output).toBeGreaterThan(0);
 			}
 		}
+	});
+
+	test("prices ids served after the 2026-09-29 snapshot from command-code@1.88.5", async () => {
+		const laterIds = [
+			"claude-haiku-5-5",
+			"deepseek/deepseek-v4.1-flash-ultrafast",
+			"gpt-6.1-sol",
+			"gpt-6.1-terra",
+			"inclusionai/ling-3.1-flash",
+			"inclusionai/ling-3.1-flash-1019",
+			"meta/muse-spark-open",
+			"meta/muse-wonder-1.0",
+			"minimax/minimax-m3.1-flash",
+			"mistral/mistral-large-4",
+			"moonshotai/Kimi-K3.1-Pro",
+			"nvidia/nemotron-3.5-super-vl",
+			"ornith/ornith-1.5-122b",
+			"Qwen/Qwen3.8-Max-Prime",
+		];
+		const models = await discoverModels(laterIds);
+		expect(models).toHaveLength(laterIds.length);
+		for (const model of models) {
+			expect(model.cost.input).toBeGreaterThan(0);
+			expect(model.cost.output).toBeGreaterThan(0);
+		}
+		// Two-tier `contextTiers` cards land in the long-context slot at the first tier's maxContext.
+		expect(models.find(model => model.id === "claude-haiku-5-5")?.cost).toMatchObject({
+			input: 0.1,
+			output: 0.5,
+			cacheRead: 0.01,
+			cacheWrite: 0.125,
+			longContext: { inputThreshold: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
+		});
+		expect(models.find(model => model.id === "gpt-6.1-sol")?.cost).toMatchObject({
+			input: 2,
+			output: 10,
+			cacheRead: 0.1,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 },
+		});
 	});
 
 	test("follows the command-code@1.67.0 effort registry", async () => {
@@ -678,6 +734,9 @@ describe("Command Code provider support", () => {
 		for (const model of models) {
 			expect(model.input).toEqual(textOnlyIds[model.id] ? ["text"] : ["text", "image"]);
 		}
+		// Gemini 4 Argon postdates the snapshot; command-code@1.88.5 lists it with image input.
+		const [argon] = await discoverModels(["google/gemini-4-argon"]);
+		expect(argon?.input).toEqual(["text", "image"]);
 	});
 
 	test("applies the command-code@1.67.0 per-model output caps", async () => {

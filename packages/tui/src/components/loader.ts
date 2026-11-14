@@ -6,7 +6,13 @@ import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { describeShimmer, type ShimmerPalette, shimmerEnabled } from "../theme/shimmer";
-import { spinnerAnimated, spinnerInterval, spinnerTickDelay } from "../spinner-clock";
+import {
+	sharedSpinnerFrame,
+	sharedSpinnerTick,
+	spinnerAnimated,
+	spinnerInterval,
+	spinnerTickDelay,
+} from "../spinner-clock";
 import type { TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
@@ -103,7 +109,8 @@ export type LoaderMessageColorFn = ColorFn & {
 export class Loader extends Text {
 	#frames = DEFAULT_SPINNER_FRAMES;
 	#currentFrame = 0;
-	#currentTick = 0;
+	/** Shared-clock period at the last tick (see {@link sharedSpinnerTick}); a later one earns a repaint. */
+	#spinnerTick = 0;
 	#intervalId?: NodeJS.Timeout;
 	#ui: TUI | null = null;
 	#layoutSource?: readonly string[];
@@ -299,9 +306,9 @@ export class Loader extends Text {
 	}
 
 	start() {
-		const interval = spinnerInterval();
-		this.#currentTick = interval > 0 ? Math.floor(Date.now() / interval) : 0;
-		this.#currentFrame = this.#currentTick % this.#frames.length;
+		const now = Date.now();
+		this.#spinnerTick = sharedSpinnerTick(now);
+		this.#currentFrame = sharedSpinnerFrame(this.#frames.length, now);
 		this.#syncText();
 		this.#requestPaint();
 		// The TSP terminal animates the described spinner; nothing to repaint.
@@ -373,16 +380,15 @@ export class Loader extends Text {
 				return;
 			}
 			const startedAt = performance.now();
-			// A one-frame spinner (or a whole cycle skipped under backpressure)
-			// still refreshes a live label once per shared clock period.
-			const interval = spinnerInterval();
-			const tick = interval > 0 ? Math.floor(Date.now() / interval) : 0;
-			const frame = tick % this.#frames.length;
+			// Fixed glyphs and skipped whole cycles still refresh live labels each period.
+			const now = Date.now();
+			const tick = sharedSpinnerTick(now);
+			const frame = sharedSpinnerFrame(this.#frames.length, now);
 			const advanced =
 				frame !== this.#currentFrame ||
-				(tick !== this.#currentTick &&
+				(tick !== this.#spinnerTick &&
 					(this.messageColorFn.animated === true || typeof this.message === "function"));
-			this.#currentTick = tick;
+			this.#spinnerTick = tick;
 			this.#currentFrame = frame;
 			// A static spinner still re-reads a dynamic message (countdown, elapsed) on its 1 s tick.
 			const animated = spinnerAnimated();

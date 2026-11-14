@@ -75,6 +75,13 @@ const NONBLANK_EMPTY_ELEMENTS: Readonly<Record<string, true>> = {
 	VIDEO: true,
 };
 
+/** Void elements that are inline content: the whitespace after one is kept, as after text. */
+const INLINE_VOID_ELEMENTS: Readonly<Record<string, true>> = {
+	EMBED: true,
+	IMG: true,
+	INPUT: true,
+};
+
 /** `filter` is `rule.filter` with string tag names lowercased once at registration. */
 type RuleEntry = { key: string; rule: TurndownRule; filter: RuleFilter };
 type Reference = { destination: string };
@@ -255,7 +262,7 @@ export default class TurndownService {
 		if (block) this.#previousSourceWhitespace = false;
 		const content = custom?.rule.skipContent ? "" : this.#convertChildren(node);
 		if (block) this.#previousSourceWhitespace = false;
-		if (node.nodeName === "CODE") this.#previousSourceWhitespace = false;
+		if (node.nodeName === "CODE" || INLINE_VOID_ELEMENTS[node.nodeName]) this.#previousSourceWhitespace = false;
 		if (custom) return custom.rule.replacement(content, node, this.options);
 		if (this.#keepFilters.some(filter => matchesFilter(filter, node, name, this.options))) {
 			return this.options.keepReplacement?.(content, node, this.options) ?? serializeNode(node);

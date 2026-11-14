@@ -22,7 +22,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { AdvisorLoopGuard } from "../src/advisor/loop-guard";
 import { cfgAdvisorReviewInterval } from "../src/advisor/settings";
-import { activateTodoTool, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { activateTodoTool, createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 const zeroUsage = {
 	input: 0,
@@ -184,7 +184,7 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry,
-			advisorTools: [failingReadTool],
+			advisorTools: fixedAdvisorTools(failingReadTool),
 			advisorStreamFn,
 			advisorGetToolContext: toolCall => primaryToolContext(toolCall),
 			advisorConfigs:
@@ -880,7 +880,6 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			advisorTools: [],
 			advisorStreamFn,
 			advisorConfigs: [
 				{ name: "Parked reviewer", syncBacklog: "off", instructions: "parked-reviewer-marker" },
@@ -941,7 +940,6 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			advisorTools: [],
 			advisorStreamFn,
 			advisorConfigs: [{ name: "Final reviewer", reviewMode: "agent-end", reviewInterval: 2 }],
 		});

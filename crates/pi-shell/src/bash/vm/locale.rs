@@ -55,8 +55,9 @@ const CTYPE_VARS: [&[u8]; 3] = [b"LC_ALL", b"LC_CTYPE", b"LANG"];
 ///
 /// Every pattern match asks (the compile options hold it), so the answer
 /// is kept in [`state::Root::charset`] under [`state::locale_token`]: while
-/// none of the three is bound in a scope or overlay and no root write touched a
-/// locale variable, the token is unchanged and the lookups are skipped.
+/// none of the three is bound in a scope or assigned by a forked vproc and
+/// no root write touched a locale variable, the token is unchanged and the
+/// lookups are skipped.
 pub fn charset(k: &mut Kernel, store: &mut dyn StateStore, vp: &Vproc) -> Charset {
 	charset_root(&mut k.root, store, vp).unwrap_or_else(|e| {
 		k.fail(e);

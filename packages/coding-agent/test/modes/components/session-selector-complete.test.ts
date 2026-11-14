@@ -1,11 +1,19 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { getKeybindings, setKeybindings } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
+const previousKeybindings = getKeybindings();
+
 beforeAll(async () => {
 	await initTheme();
+	// The app installs its keymap before any picker opens; `getKeybindings()` alone knows only `tui.*` actions.
+	setKeybindings(KeybindingsManager.inMemory());
 });
+
+afterAll(() => setKeybindings(previousKeybindings));
 
 function createSession(id: string, title: string | undefined, modified: string): SessionInfo {
 	return {

@@ -147,6 +147,70 @@ async fn mismatch_reply_keeps_the_provenance_of_recorded_content() {
 		.expect("the earlier read displayed line 20");
 }
 
+/// The tag an edit response header hands back.
+fn response_tag(text: &str) -> String {
+	let at = text.find('#').expect("response header carries a tag") + 1;
+	text[at..at + 4].to_owned()
+}
+
+#[tokio::test]
+async fn rows_an_edit_wrote_are_displayed_for_the_next_edit() {
+	// #19091: an eight-row insert used to collapse to `…` and hide line 7.
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = numbered_lines(6);
+	workspace.write("h.txt", &text);
+	let tag = workspace.snapshot("h.txt", &text, Some(&(1..=6).collect::<Vec<_>>()));
+	let body = ('a'..='h')
+		.map(|c| format!("+new {c}\n"))
+		.collect::<Vec<_>>()
+		.concat();
+	let writer = common::DiskWriter::default();
+	let outcome = workspace
+		.apply_json(&json!({ "input": format!("[h.txt#{tag}]\nPUT >3:\n{body}") }), &writer)
+		.await
+		.expect("insert applies");
+	assert!(outcome.text.contains("\n7:new d\n"), "{}", outcome.text);
+	let tag = response_tag(&outcome.text);
+	workspace
+		.apply_json(&json!({ "input": format!("[h.txt#{tag}]\nPUT 7.=7:\n+new D\n") }), &writer)
+		.await
+		.expect("the response displayed line 7");
+	assert!(
+		workspace
+			.read("h.txt")
+			.unwrap()
+			.contains("new c\nnew D\nnew e\n")
+	);
+}
+
+#[tokio::test]
+async fn lines_read_before_an_outside_change_stay_seen_where_unchanged() {
+	// #19092: a formatter or other writer changes line 50; a partial re-read
+	// must not forget line 5, which kept its number and content.
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = numbered_lines(60);
+	workspace.write("f.txt", &text);
+	workspace.snapshot("f.txt", &text, Some(&(1..=60).collect::<Vec<_>>()));
+	let changed = text.replace("line 50\n", "line FIFTY\n");
+	workspace.write("f.txt", &changed);
+	let tag = workspace.snapshot("f.txt", &changed, Some(&(47..=55).collect::<Vec<_>>()));
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[f.txt#{tag}]\nPUT 5.=5:\n+line FIVE\n") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("line 5 was read and is unchanged");
+	assert!(
+		workspace
+			.read("f.txt")
+			.unwrap()
+			.contains("line 4\nline FIVE\nline 6\n")
+	);
+}
+
 #[tokio::test]
 async fn each_mismatch_reply_adds_the_rows_it_displayed() {
 	let mut workspace = common::Workspace::new(EditMode::Hashline);

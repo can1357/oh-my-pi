@@ -4,7 +4,6 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
-	AuthCredentialSnapshotEntry,
 	Context,
 	Model,
 	OAuthAccess,
@@ -58,13 +57,17 @@ export interface DryBalanceAuthOptions {
 export interface DryBalanceAuthStorage {
 	readonly oauth: {
 		access(provider: string, sessionId?: string, options?: DryBalanceAuthOptions): Promise<OAuthAccess | undefined>;
-		accessAll?(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
+		accessAll(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
 		/**
-		 * Force-refresh a single credential by id (step (b) of the auth-retry
-		 * policy). The bench re-mints the failing account's token in place on a
-		 * 401 rather than rotating accounts — it is measuring each account.
+		 * Force-refresh one credential by id (step (b) of the auth-retry policy).
+		 * The bench re-mints the failing account's token in place on a 401 rather
+		 * than rotating accounts — it is measuring each account.
 		 */
-		refresh?(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+		accessById(
+			provider: string,
+			credentialId: number,
+			options?: { forceRefresh?: boolean },
+		): Promise<OAuthAccessResolution | undefined>;
 	};
 }
 
@@ -186,7 +189,7 @@ type DryBalanceBenchTarget =
 	| {
 			ok: true;
 			account: string;
-			accessToken: string;
+			apiKey: string;
 			credentialId?: number;
 	  }
 	| {
@@ -402,17 +405,17 @@ async function runBenchRequest(
 	streamFn: DryBalanceStreamSimple,
 	now: () => number,
 ): Promise<DryBalanceBenchResult> {
-	const { account, accessToken, credentialId } = target;
+	const { account, apiKey: initialKey, credentialId } = target;
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
 	// Re-mint the cached token on a 401: a peer/broker may have rotated it out
 	// from under our snapshot (Anthropic rotates refresh tokens on every use).
 	// The bench measures one account, so the switch step intentionally declines.
 	const apiKey: ApiKeyResolver = async ({ lastChance, error }) => {
-		if (error === undefined) return accessToken;
-		if (lastChance || credentialId === undefined || !authStorage.oauth.refresh) return undefined;
-		const refreshed = await authStorage.oauth.refresh(credentialId);
-		return refreshed.credential.type === "oauth" ? refreshed.credential.access : undefined;
+		if (error === undefined) return initialKey;
+		if (lastChance || credentialId === undefined) return undefined;
+		const refreshed = await authStorage.oauth.accessById(model.provider, credentialId, { forceRefresh: true });
+		return refreshed?.ok ? refreshed.apiKey : undefined;
 	};
 	try {
 		const context: Context = {
@@ -472,17 +475,10 @@ async function resolveBenchTargets(
 	model: Model<Api>,
 	authStorage: DryBalanceAuthStorage,
 ): Promise<DryBalanceBenchTarget[]> {
-	const resolved = authStorage.oauth.accessAll
-		? await authStorage.oauth.accessAll(model.provider, {
-				baseUrl: model.baseUrl,
-				modelId: model.id,
-			})
-		: await authStorage.oauth
-				.access(model.provider, undefined, {
-					baseUrl: model.baseUrl,
-					modelId: model.id,
-				})
-				.then(access => (access ? [{ ok: true as const, ...access }] : []));
+	const resolved = await authStorage.oauth.accessAll(model.provider, {
+		baseUrl: model.baseUrl,
+		modelId: model.id,
+	});
 	const targets: DryBalanceBenchTarget[] = [];
 	const seen = new Set<string>();
 	for (const entry of resolved) {
@@ -491,7 +487,7 @@ async function resolveBenchTargets(
 		seen.add(key);
 		const account = extractAccount(entry);
 		if (entry.ok) {
-			targets.push({ ok: true, account, accessToken: entry.accessToken, credentialId: entry.credentialId });
+			targets.push({ ok: true, account, apiKey: entry.apiKey, credentialId: entry.credentialId });
 		} else {
 			targets.push({ ok: false, account, error: entry.error });
 		}

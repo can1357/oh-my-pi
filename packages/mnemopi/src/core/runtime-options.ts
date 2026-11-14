@@ -36,6 +36,11 @@ export interface MnemopiEmbeddingProvider {
 export interface MnemopiEmbeddingRuntimeOptions {
 	disabled?: boolean;
 	model?: string;
+	/** Whether the resolved remote embedding endpoint may be called. */
+	allowRemote?: (baseUrl: string) => boolean;
+	/** Whether local inference and loading an uncached local model are allowed. */
+	allowLocal?: () => boolean;
+	allowLocalLoad?: () => boolean;
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider | ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>);
@@ -47,6 +52,8 @@ export interface MnemopiEmbeddingRuntimeOptions {
 
 export interface MnemopiLlmRuntimeOptions {
 	enabled?: boolean;
+	/** Whether a configured remote endpoint may be called at request time. */
+	allowRemote?: () => boolean;
 	baseUrl?: string;
 	apiKey?: ApiKey;
 	model?: string | Model<Api>;
@@ -68,6 +75,9 @@ export interface MnemopiRuntimeOptions {
 export interface ResolvedMnemopiEmbeddingRuntimeOptions {
 	disabled?: boolean;
 	model?: string;
+	allowRemote?: (baseUrl: string) => boolean;
+	allowLocal?: () => boolean;
+	allowLocalLoad?: () => boolean;
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider;
@@ -77,6 +87,7 @@ export interface ResolvedMnemopiEmbeddingRuntimeOptions {
 
 export interface ResolvedMnemopiLlmRuntimeOptions {
 	enabled?: boolean;
+	allowRemote?: () => boolean;
 	baseUrl?: string;
 	apiKey?: ApiKey;
 	model?: string | Model<Api>;

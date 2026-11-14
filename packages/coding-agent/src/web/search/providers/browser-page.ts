@@ -1,8 +1,21 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { getProjectDir, untilAborted } from "@oh-my-pi/pi-utils";
+import { getProjectDir, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page } from "puppeteer-core";
-import { applyStealthPatches, applyViewport } from "../../../tools/browser/launch";
-import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
+import { applyStealthPatches, applyViewport, browserConnection, privateTargetId } from "../../../tools/browser/launch";
+import {
+	closeSharedTargetUntilGone,
+	forgetSharedTarget,
+	markSharedTargetUnclosed,
+	recordSharedTarget,
+	retryUnclosedSharedTargets,
+} from "../../../tools/browser/orphan-registry";
+import {
+	acquireBrowser,
+	holdBrowser,
+	type PuppeteerBrowserHandle,
+	releaseBrowser,
+	sharedTargetScopeOf,
+} from "../../../tools/browser/registry";
 import { buildBrowserNavigationHeaders } from "./browser-headers";
 import { SEARCH_HARD_TIMEOUT_MS } from "./utils";
 
@@ -35,11 +48,96 @@ export interface BrowserFetchOptions {
 }
 
 /**
- * Upper bound on `page.close()` during teardown. A dead CDP session leaves
- * puppeteer's close pending forever; `.catch()` only covers rejection, not a
- * hang, so cleanup needs its own deadline (issue #8865).
+ * Upper bound on a search's page teardown; a close still unconfirmed by then
+ * finishes in the background under its own browser hold. A wedged connection
+ * can leave CDP calls pending forever (issue #8865).
  */
 const PAGE_CLOSE_TIMEOUT_MS = 5_000;
+
+/**
+ * Bound on a search page's `Target.createTarget`, overriding the 60 s protocol timeout: a timed-out
+ * create still opens its target, with no id to close it by. This bounds a stalled Chromium.
+ */
+const CREATE_TARGET_TIMEOUT_MS = 5 * 60_000;
+
+/** Claim a search page so the orphan reaper closes it if this process dies first (issue #10022). */
+function recordSearchPage(handle: PuppeteerBrowserHandle, targetId: string): void {
+	const scope = sharedTargetScopeOf(handle);
+	if (scope) void recordSharedTarget(scope, targetId);
+}
+
+/**
+ * Close a search page by target id and settle its ownership record; never rejects.
+ * Not `page.close()`: on a connection that outlives the search it can wait forever.
+ */
+async function closeSearchPage(handle: PuppeteerBrowserHandle, targetId: string): Promise<void> {
+	const scope = sharedTargetScopeOf(handle);
+	if (await closeSharedTargetUntilGone(handle.browser, targetId)) {
+		if (scope) void forgetSharedTarget(scope, targetId);
+		return;
+	}
+	if (handle.browser.connected) {
+		logger.warn("Could not confirm a web search page was closed; it may still be open", { targetId });
+	} else {
+		// The page most likely died with the browser; the next search's retry confirms it.
+		logger.debug("Lost the browser connection before a web search page close was confirmed", { targetId });
+	}
+	// Keep the record for a later retry. Unlike browser-tool tabs, never recheck (and maybe
+	// stop) the shared browser: that would close every other session's tabs.
+	if (scope) markSharedTargetUnclosed(scope, targetId);
+}
+
+/** Run `task` under its own browser hold, so the caller's last release cannot disconnect mid-task. */
+function whileHeld<T>(handle: PuppeteerBrowserHandle, task: () => Promise<T>): Promise<T> {
+	holdBrowser(handle);
+	return task().finally(() => releaseBrowser(handle, { kill: false }).catch(() => undefined));
+}
+
+/**
+ * Create and claim a search page's target. Not `newPage()`: it can reject after creating the target,
+ * leaving no id to close. An abort does not cancel the create, so a late target is closed under its
+ * own hold (unlike `untilAbortedOrReleased`, which cannot hold the browser while it waits), bounded
+ * by the create's own timeout.
+ */
+async function createSearchTarget(handle: PuppeteerBrowserHandle, signal: AbortSignal): Promise<string> {
+	// What `newPage()` sends for the default context.
+	const created = browserConnection(handle.browser).send(
+		"Target.createTarget",
+		{ url: "about:blank" },
+		{ timeout: CREATE_TARGET_TIMEOUT_MS },
+	);
+	try {
+		const { targetId } = await untilAborted(signal, created);
+		recordSearchPage(handle, targetId);
+		return targetId;
+	} catch (error) {
+		if (signal.aborted) {
+			void whileHeld(handle, () =>
+				created.then(
+					({ targetId }) => {
+						recordSearchPage(handle, targetId);
+						return closeSearchPage(handle, targetId);
+					},
+					error =>
+						logger.debug("An abandoned web search page create failed; its target may still be open", {
+							error: error instanceof Error ? error.message : String(error),
+						}),
+				),
+			);
+		}
+		throw error;
+	}
+}
+
+/** The `Page` of a created search target, resolved as `newPage()` does. */
+async function openSearchPage(handle: PuppeteerBrowserHandle, targetId: string, signal: AbortSignal): Promise<Page> {
+	const target = await untilAborted(signal, () =>
+		handle.browser.waitForTarget(candidate => privateTargetId(candidate) === targetId, { signal }),
+	);
+	const page = await untilAborted(signal, () => target.page());
+	if (!page) throw new Error(`Web search target ${targetId} exposed no page`);
+	return page;
+}
 
 async function fetchHtmlPage(url: string, options: BrowserFetchOptions, fetchImpl: FetchImpl): Promise<LoadedHtmlPage> {
 	const response = await fetchImpl(url, {
@@ -75,12 +173,15 @@ async function browseHtmlPage(
 		await releaseBrowser(handle, { kill: false });
 		throw new Error("Headless browser acquisition returned a non-Puppeteer browser");
 	}
+	const scope = sharedTargetScopeOf(handle);
+	// The orphan reaper skips this live process, so retry earlier searches' unconfirmed closes here.
+	if (scope) void whileHeld(handle, () => retryUnclosedSharedTargets(handle.browser, scope));
 
 	holdBrowser(handle);
-	let page: Page | undefined;
+	let targetId: string | undefined;
 	try {
-		const activePage = await untilAborted(signal, () => handle.browser.newPage());
-		page = activePage;
+		targetId = await createSearchTarget(handle, signal);
+		const activePage = await openSearchPage(handle, targetId, signal);
 		// Viewport and stealth setup talk to the same CDP session as the
 		// navigations below but were previously awaited raw. When the shared
 		// daemon or the page's target dies mid-setup, those puppeteer calls
@@ -116,10 +217,11 @@ async function browseHtmlPage(
 		throw new Error("Browser fallback exhausted without a response");
 	} finally {
 		// Teardown must complete even when the caller's signal already fired
-		// (navigating away from a dead session leaves `close()` pending), so
-		// bound it with a fresh deadline instead of reusing `signal`.
-		if (page) {
-			await untilAborted(AbortSignal.timeout(PAGE_CLOSE_TIMEOUT_MS), () => page!.close()).catch(() => undefined);
+		// (a wedged connection leaves CDP calls pending), so bound it with a
+		// fresh deadline instead of reusing `signal`.
+		if (targetId) {
+			const closing = whileHeld(handle, () => closeSearchPage(handle, targetId!));
+			await untilAborted(AbortSignal.timeout(PAGE_CLOSE_TIMEOUT_MS), closing).catch(() => undefined);
 		}
 		await releaseBrowser(handle, { kill: false });
 	}

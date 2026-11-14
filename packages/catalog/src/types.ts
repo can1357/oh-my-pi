@@ -23,6 +23,7 @@ export type KnownApi =
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
+	| "antigravity-acp"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
@@ -53,6 +54,7 @@ export const RUNNER_APIS = [
 	"typesafe",
 	"openrouter-decisions",
 	"openai-decisions",
+	"google-decisions",
 	"workers-ai-systemone",
 	"liquid-systemone",
 	"nace-systemone",
@@ -71,6 +73,7 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
 	"openai-decisions": "judge",
+	"google-decisions": "judge",
 	"workers-ai-systemone": "judge",
 	"liquid-systemone": "judge",
 	"nace-systemone": "judge",
@@ -1570,7 +1573,7 @@ export interface AntigravityModelWireProfile {
 	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
 	maxOutputTokens?: number;
 	/** SKU thinking level; the native client sends it in preference to a budget. */
-	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
+	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
 	thinkingBudget?: number;
 }

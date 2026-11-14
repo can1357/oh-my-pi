@@ -14,16 +14,41 @@ import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions"
 /** Original lines a result's heat and the sheet cover; later lines are shown in neither. */
 export const SPOTLIGHT_VIEW_LINES = 5_000;
 
+/**
+ * One window of an original that several reads make up (a `;`/`,` path `read`, one window per part): where its lines
+ * sit in the original and how they are numbered.
+ */
+export interface SpotlightWindow {
+	/** 0-based position of its first line in the original. */
+	at: number;
+	/** Its line count. */
+	lines: number;
+	/** Line number of its first line: a `read` window's first file line, else 1. */
+	start: number;
+	/** The file it shows (picks its grammar); absent for text no file names (a fetched page). */
+	path?: string;
+	/** How the step that cut its lines by rank chose them, positions relative to the window; absent when none did. */
+	rank?: SpotlightRank;
+	/** The part read its file with no line selector (a whole-file read): a tail of the file lies in it. */
+	wholeFile?: true;
+}
+
 /** The original of a result whose text shaping changed. */
 export interface SpotlightOriginal {
 	/** Session artifact holding the original text (`artifact://N`). */
 	url: string;
 	/** Its line count. */
 	lines: number;
-	/** Line number of its first line: a `read` window's first file line, else 1. */
+	/** Line number of its first line: a `read` window's first file line, else 1. With {@link windows}, 1. */
 	start: number;
-	/** The file a `read` showed (picks the sheet's grammar). */
+	/** The file a `read` showed (picks the sheet's grammar). Absent with {@link windows}. */
 	path?: string;
+	/**
+	 * The windows the original is made of, in order and covering it, when the result joins several reads (a `;`/`,`
+	 * path `read`): each numbered and ranked on its own, so {@link start}, {@link path} and {@link rank} are then
+	 * absent or 1. Absent for a result of one window: read it through {@link originalWindows}.
+	 */
+	windows?: SpotlightWindow[];
 	/**
 	 * One character per original line, from its first (at most {@link SPOTLIGHT_VIEW_LINES}): the line's rank among
 	 * the lines Spotlight scored, `0` (coldest) to `9` (hottest), `-` for a line it never scored. Lines past the end
@@ -37,7 +62,7 @@ export interface SpotlightOriginal {
 	 * hid the line. Absent on traces written before it.
 	 */
 	why?: string;
-	/** How the step that cut by rank chose its lines; absent when no step ranked them. */
+	/** How the step that cut by rank chose its lines; absent when no step ranked them, and with {@link windows}. */
 	rank?: SpotlightRank;
 	/**
 	 * One entry per line of the text the model saw (of a held-out result: the text it would have seen): the original
@@ -47,6 +72,23 @@ export interface SpotlightOriginal {
 	map?: (number | [number, number] | null)[];
 	/** A held-out result's would-be text, the cut the model was not shown (`artifact://N`). */
 	shapedUrl?: string;
+}
+
+/**
+ * The windows an original is made of: its {@link SpotlightOriginal.windows}, else (also for an empty or malformed
+ * value) the one window it is.
+ */
+export function originalWindows(original: SpotlightOriginal): SpotlightWindow[] {
+	if (Array.isArray(original.windows) && original.windows.length > 0) return original.windows;
+	return [
+		{
+			at: 0,
+			lines: original.lines,
+			start: original.start,
+			...(original.path !== undefined ? { path: original.path } : {}),
+			...(original.rank ? { rank: original.rank } : {}),
+		},
+	];
 }
 
 /**

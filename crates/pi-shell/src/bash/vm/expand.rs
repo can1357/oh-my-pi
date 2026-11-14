@@ -2370,7 +2370,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 				Val::Str(BString::from(self.vp.status.format_into(&mut NumBuffer::new())))
 			},
 			// The recorded `$$`: a nested shell (`bash -c` run in-engine)
-			// keeps its own in its overlay.
+			// keeps its own in its image.
 			ParamRef::ShellPid => match state::record(
 				self.cx.store,
 				self.vp,
@@ -2471,10 +2471,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 				if !self_ref {
 					return Ok(Val::Unset);
 				}
-				let global = match self.vp.overlay.as_ref().and_then(|ov| ov.vars.get(name)) {
-					Some(entry) => entry.clone(),
-					None => state::global(self.cx.store, name)?.cloned(),
-				};
+				let global = state::global_in(self.cx.store, self.vp, name)?.cloned();
 				return Ok(global
 					.filter(|v| !v.attrs.contains(Attrs::INVISIBLE) && !v.attrs.contains(Attrs::NAMEREF))
 					.map_or(Val::Unset, |v| plain_element(&v, index, list)));

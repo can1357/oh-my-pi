@@ -1,6 +1,19 @@
 import "@oh-my-pi/pi-utils/env";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { APP_NAME, CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { BUILTIN_TOOL_HELP, type BuiltinToolHelp } from "../tools/builtin-names";
+
+function renderBuiltinToolSummary(help: BuiltinToolHelp): string {
+	return help.defaultState === "detected" ? `${help.summary} (when ${help.detectedWhen})` : help.summary;
+}
+
+/** Lists tools in `BUILTIN_TOOL_HELP` entry order, which ranks them by how often they are used. */
+function renderBuiltinTools(group: "default" | "optional"): string {
+	return Object.entries(BUILTIN_TOOL_HELP)
+		.filter(([, help]) => (help.defaultState === "off") === (group === "optional"))
+		.map(([name, help]) => `  ${name.padEnd(14)}- ${renderBuiltinToolSummary(help)}`)
+		.join("\n");
+}
 
 export function getExtraHelpText(): string {
 	return `${chalk.bold("Environment Variables:")}
@@ -78,22 +91,15 @@ export function getExtraHelpText(): string {
   PI_NO_PTY                  - Disable PTY-based interactive bash execution
   For complete environment variable reference, see:
   ${chalk.dim("docs/environment-variables.md")}
-${chalk.bold("Available Tools (default-enabled unless noted):")}
-  read          - Read file contents
-  bash          - Execute bash commands
-  edit          - Edit files with find/replace
-  write         - Write files (creates/overwrites)
-  grep          - Search file contents
-  glob          - Find files by glob pattern
-  lsp           - Language server protocol (code intelligence)
-  python        - Execute Python code (requires: ${APP_NAME} setup python)
-  notebook      - Edit Jupyter notebooks
-  browser       - Browser automation (Puppeteer)
-  computer      - Native host desktop capture and input (disabled by default)
-  task          - Launch sub-agents for parallel tasks
-  todo          - Manage todo/task lists
-  web_search    - Search the web
-  ask           - Ask user questions (interactive mode only)
+${chalk.bold("Built-in Tools (names accepted by --tools):")}
+  ${chalk.dim("# Enabled by default")}
+${renderBuiltinTools("default")}
+
+  ${chalk.dim("# Optional (off by default; enable in settings)")}
+${renderBuiltinTools("optional")}
+
+  Browser and computer use run inside eval: toggle with the browser.enabled
+  (default on) and computer.enabled (default off) settings.
 
 ${chalk.bold("Plugin Options:")}
   --plugin-dir <path>        Load plugin from directory (repeatable)
