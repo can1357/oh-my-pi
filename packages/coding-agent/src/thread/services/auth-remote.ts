@@ -462,6 +462,9 @@ class RemoteSessions implements SessionsApi {
 	release(provider: string, sessionId: string): boolean {
 		return this.#remote.callSync("sessions.release", provider, sessionId);
 	}
+	isExplicit(provider: string, sessionId: string): boolean {
+		return this.#remote.callSync("sessions.isExplicit", provider, sessionId);
+	}
 }
 
 class RemoteUsage implements UsageApi {

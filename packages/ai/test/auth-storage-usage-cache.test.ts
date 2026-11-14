@@ -1190,6 +1190,39 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(requireLimit(mergedReport, "anthropic:7d").amount.used).toBe(90);
 		expect(requireLimit(mergedReport, "anthropic:7d:opus").amount.used).toBe(12);
 	});
+	it("repeated header merges keep the retained limits' original fetch stamps", async () => {
+		const start = Date.now();
+		const now = vi.spyOn(Date, "now").mockReturnValue(start);
+		const realReport = makeTieredReport("a@example.com");
+		const realFetchedAt = realReport.fetchedAt;
+		let calls = 0;
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			return realReport;
+		});
+
+		expect(requireAnthropicReport(await storage.usage.reports())).toBeDefined();
+		await storage.keys.get("anthropic", "merge-again");
+		now.mockReturnValue(start + 1_000);
+		expect(storage.usage.ingestHeaders("anthropic", usageHeaders("0.10", "0.9"), { sessionId: "merge-again" })).toBe(
+			true,
+		);
+		const firstMerge = requireAnthropicReport(await storage.usage.reports());
+		expect(calls).toBe(1);
+		expect(requireLimit(firstMerge, "anthropic:7d:opus").fetchedAt).toBe(realFetchedAt);
+
+		// Second partial overlay, past the one-ingest-per-minute throttle: the
+		// untouched tier limit must keep the stamp it carried after the first
+		// merge, not the newer report-wide stamp.
+		now.mockReturnValue(start + 61_000);
+		expect(storage.usage.ingestHeaders("anthropic", usageHeaders("0.15", "0.9"), { sessionId: "merge-again" })).toBe(
+			true,
+		);
+		const secondMerge = requireAnthropicReport(await storage.usage.reports());
+		expect(calls).toBe(1);
+		expect(requireLimit(secondMerge, "anthropic:5h").fetchedAt).toBe(start + 61_000);
+		expect(requireLimit(secondMerge, "anthropic:7d:opus").fetchedAt).toBe(realFetchedAt);
+	});
 	it("replaces the cached Fable weekly row by id when broker headers carry the weekly overage bucket", async () => {
 		const realReport: UsageReport = {
 			provider: "anthropic",

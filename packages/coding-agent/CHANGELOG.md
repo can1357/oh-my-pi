@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
 ### Added
 
 - Todo tool status line now displays task count for multiple targets
@@ -642,7 +645,9 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
-## [18.16.0] - 2026-11-02
+### Fixed
+
+
 
 ### Added
 
