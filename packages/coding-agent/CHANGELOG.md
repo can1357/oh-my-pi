@@ -182,6 +182,7 @@
 - Skill descriptions that already fit the 100-character preview budget are used verbatim instead of being sent for model compression, so exclusions like "not running existing tests" survive ([#19219](https://github.com/can1357/oh-my-pi/pull/19219) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed skill descriptions that already fit the 100-character preview budget being rewritten by model compression; they are now used verbatim, so exclusions like "not running existing tests" survive ([#19219](https://github.com/can1357/oh-my-pi/pull/19219) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Model discovery skips a listed model whose id names two vendors instead of dropping the provider’s whole list ([#18770](https://github.com/can1357/oh-my-pi/issues/18770)) ([#19175](https://github.com/can1357/oh-my-pi/pull/19175) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Judge candidates behind a gateway that answers HTTP 502 `upstream_credentials_exhausted` are now skipped for 5 minutes, like a rejected account or an unserved model, instead of costing every judgment three attempts before the fallback ([#19158](https://github.com/can1357/oh-my-pi/pull/19158) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 
