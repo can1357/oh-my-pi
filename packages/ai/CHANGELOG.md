@@ -113,6 +113,7 @@
 
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
+- Added an optional abort message to `raceWithSignal`, so it reports the same abort reason as the published `raceSignal` alias that already took one ([#15308](https://github.com/can1357/oh-my-pi/pull/15308) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 

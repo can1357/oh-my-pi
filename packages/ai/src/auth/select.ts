@@ -6,8 +6,8 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
+import { raceWithSignal } from "../utils/abort";
 import type { SessionAffinity } from "./affinity";
-import { raceSignal } from "./abort";
 import {
 	AUTH_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
@@ -419,7 +419,7 @@ export class CredentialSelector {
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const providerKey = providerTypeKey(provider, "oauth");
-		await raceSignal(
+		await raceWithSignal(
 			Promise.all(
 				credentials.map(selection =>
 					this.#fetchOAuthSelectionUsage(provider, providerKey, selection, blockScopes, options),
