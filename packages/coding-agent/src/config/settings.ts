@@ -2859,7 +2859,9 @@ export class Settings {
 		const sourcePaths: string[] = [];
 		let shellPathSource: string | undefined;
 		for (const item of items) {
-			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path), true);
+			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path), {
+				arrays: "combine",
+			});
 			sourcePaths.push(item.path);
 			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 		}
@@ -2896,7 +2898,7 @@ export class Settings {
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
-			settings = this.#deepMerge(settings, overlay, true);
+			settings = this.#deepMerge(settings, overlay, { arrays: "combine" });
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
 		return { settings, shellPathSource };
@@ -4339,13 +4341,10 @@ export class Settings {
 
 	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(
-			this.#deepMerge({}, layers.global),
-			projectLayerForMerge(layers.project),
-			true,
-			true,
-		);
-		merged = this.#deepMerge(merged, layers.configOverlay, true, true);
+		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project), {
+			arrays: "layer",
+		});
+		merged = this.#deepMerge(merged, layers.configOverlay, { arrays: "layer" });
 		return this.#deepMerge(merged, layers.overrides);
 	}
 
@@ -4365,14 +4364,18 @@ export class Settings {
 	/**
 	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
 	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
+	 * `arrays` decides how an array setting declaring `merge` combines with the lower value:
+	 *  - `"replace"` (default): the higher array replaces it, like every other value.
+	 *  - `"combine"`: the setting's `merge` strategy applies over the lower array as found.
+	 *  - `"layer"`: as `"combine"`, and a lower layer leaving the setting unset contributes its default.
+	 * `prefix` is the dotted path of `base`/`overrides` within the settings tree.
 	 */
 	#deepMerge(
 		base: RawSettings,
 		overrides: RawSettings,
-		mergeArrays = false,
-		useDefaultArrayBase = false,
-		prefix = "",
+		options: { readonly arrays?: "replace" | "combine" | "layer"; readonly prefix?: string } = {},
 	): RawSettings {
+		const { arrays = "replace", prefix = "" } = options;
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
@@ -4386,27 +4389,23 @@ export class Settings {
 			if (
 				isOverrideRecord &&
 				(isBaseRecord ||
-					(mergeArrays &&
-						useDefaultArrayBase &&
+					(arrays === "layer" &&
 						baseVal === undefined &&
 						Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
 			) {
 				setOwn(
 					result,
 					key,
-					this.#deepMerge(
-						(isBaseRecord ? baseVal : {}) as RawSettings,
-						override as RawSettings,
-						mergeArrays,
-						useDefaultArrayBase,
-						settingPath,
-					),
+					this.#deepMerge((isBaseRecord ? baseVal : {}) as RawSettings, override as RawSettings, {
+						arrays,
+						prefix: settingPath,
+					}),
 				);
-			} else if (mergeArrays && Array.isArray(override)) {
+			} else if (arrays !== "replace" && Array.isArray(override)) {
 				const setting = lookupSetting(settingPath);
 				const strategy = setting?.definition.type === "array" ? setting.definition.merge : undefined;
 				const fallbackBase =
-					useDefaultArrayBase &&
+					arrays === "layer" &&
 					baseVal === undefined &&
 					override.length > 0 &&
 					setting?.definition.type === "array"
