@@ -221,6 +221,7 @@ thread_local! {
 	static CLEANUP: Cell<bool> = const { Cell::new(false) };
 	static FOCUS_RETURN: Cell<Option<DesktopFocusReturn>> = const { Cell::new(None) };
 	static TEXT_UNCONFIRMED: RefCell<Option<String>> = const { RefCell::new(None) };
+	static DRAG_NOTE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Records where the current operation's takeover left focus.
@@ -246,6 +247,20 @@ pub(crate) fn report_text_unconfirmed(reason: String) {
 /// thread, leaving none for the next.
 pub(crate) fn take_text_unconfirmed() -> Option<String> {
 	TEXT_UNCONFIRMED.take()
+}
+
+/// Records what the current drag found about its outcome that the caller
+/// should read: a value it was left at or set to that the drag alone does not
+/// show.
+#[cfg(target_os = "macos")]
+pub(crate) fn report_drag_note(note: String) {
+	DRAG_NOTE.set(Some(note));
+}
+
+/// Takes the drag note of the operation running on this thread, leaving none
+/// for the next.
+pub(crate) fn take_drag_note() -> Option<String> {
+	DRAG_NOTE.take()
 }
 
 pub(crate) struct OperationScope {

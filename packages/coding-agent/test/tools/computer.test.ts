@@ -252,12 +252,15 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	/** The selection a text drag makes, or `null` for a posted drag. */
 	dragSelection: AxTextSelection | null = null;
+	/** What a posted drag notes about its outcome. */
+	dragNote: string | null = null;
 	async drag(
 		_target: string,
 		_points: DesktopPoint[],
 		_opts?: PointerOptions | null,
 	): Promise<DesktopDragResult | null | void> {
-		return this.dragSelection ? { selection: this.dragSelection } : null;
+		if (this.dragSelection) return { selection: this.dragSelection };
+		return this.dragNote ? { note: this.dragNote } : null;
 	}
 	async scroll(
 		_target: string,
@@ -2283,6 +2286,20 @@ describe("computer worker round trips", () => {
 			expect(longText).toContain(full.slice(0, 4));
 			expect(longText).not.toContain(full);
 		}
+	});
+
+	it("reports what a posted drag noted about its outcome", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.dragNote = "the AXSlider reads 56; the path's end would be 75 on a straight-line scale";
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"drag-note",
+			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+		);
+		expect(result.ok && result.payload.returnValue).toBeUndefined();
+		expect(result.ok && result.payload.displays).toEqual([{ type: "text", text: native.dragNote }]);
 	});
 
 	describe("numeric window ids", () => {

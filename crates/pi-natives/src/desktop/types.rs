@@ -253,6 +253,10 @@ pub struct DesktopDragResult {
 	/// Where focus ended when the drag ran in takeover; see
 	/// [`DesktopFocusReturn`].
 	pub focus_return: Option<DesktopFocusReturn>,
+	/// What the drag found about its outcome that it does not show by itself:
+	/// on macOS, the value a web slider was left at when it differs from the
+	/// straight-line value under the path's end, or that steps set it there.
+	pub note:         Option<String>,
 }
 
 /// What a typing call did.

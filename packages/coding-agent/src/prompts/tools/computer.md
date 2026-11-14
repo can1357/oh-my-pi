@@ -184,9 +184,10 @@ await win.click(120, 48, button="right")
   - A plain left drag across the text of one native text element (TextEdit, other AppKit text views and fields)
     becomes an AX selection with no mouse input: `drag` returns `{start, length, text}`,
     or throws `AxFailed`/`AxUnconfirmed` as `selectText` does (check the selection before retrying).
-  - A plain left drag on a web page's slider that the page does not follow is finished with `AXIncrement`/`AXDecrement` steps to the value under the path's end.
-    A drag whose slider, scroll bar or splitter value did not move, or whose steps stopped short, throws `InputFailed`
-    saying so; read the value before retrying.
+  - A plain left drag on a web page's slider that the page does not follow is finished with `AXIncrement`/`AXDecrement` steps
+    to the straight-line value under the path's end; a slider the pointer moved is left there, and the output names its value.
+    A drag whose slider, scroll bar or splitter value did not move, or whose steps stopped short or were uneven, throws
+    `InputFailed` saying so; read the value before retrying.
   - A left-button drag or `holdMouse` anywhere else (files, rows, font tiles, links, selected text, right-to-left text, web pages including their text)
     could start a drag and drop that macOS finishes at the user's real pointer, so it has no background route.
     - To select web page text in the background, click where it starts and shift-click where it ends, or double- or triple-click it.
