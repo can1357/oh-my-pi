@@ -370,6 +370,8 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			selector,
 			affinity,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
+			blocks,
+			strategies,
 			sourceLabel,
 		});
 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
