@@ -893,6 +893,9 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 		line_number: Option<u64>,
 		line_offset: u64,
 	) -> io::Result<()> {
+		// Match the line without its terminator, as GNU grep does, so `$`
+		// anchors at its end.
+		let line = line.strip_suffix(&[self.opts.record.terminator]).unwrap_or(line);
 		for_each_nonempty_match(self.matcher, line, line_offset, |found, match_offset| {
 			self.write_prefix(line_number, match_offset, b':')?;
 			self.write_record(&line[found.start()..found.end()])
@@ -2103,6 +2106,30 @@ mod tests {
 		assert_eq!((code, out.as_str()), (0, "x --canary\n"), "{err}");
 		let (code, out, err) = run(&["-ne", "->", "--regexp", "-z"], input).await;
 		assert_eq!((code, out.as_str()), (0, "2:-> y\n"), "{err}");
+	}
+
+	/// `$` in `-o` / `-z` patterns anchors at the end of the line, as in GNU grep.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn only_matching_anchors_at_end_of_terminated_lines() {
+		let input = "v1.2.3\nx=42\n";
+		for (args, stdin, expected) in [
+			(&["-o", "c$"][..], "abc\n", "c\n"),
+			(&["-o", "c$"], "abc", "c\n"),
+			(&["-oE", "[0-9]+$"], input, "3\n42\n"),
+			(&["-nboE", "[0-9]+$"], input, "1:5:3\n2:9:42\n"),
+			(&["-zoE", "[0-9]+$"], "v1.2.3\0x=42\0", "3\x0042\0"),
+			(&["-zE", "[0-9]+$"], "v1.2.3\0x=42\0", "v1.2.3\0x=42\0"),
+			(&["-ox", "abc"], "abc\nab\n", "abc\n"),
+			(&["-o", "^.*$"], "a\nb\n", "a\nb\n"),
+		] {
+			let (code, out, err) = run(args, stdin).await;
+			assert_eq!((code, out.as_str()), (0, expected), "grep {args:?}: {err}");
+		}
+		let (code, out, err) = run(&["-coE", "[0-9]+$"], input).await;
+		assert_eq!((code, out.as_str()), (0, "2\n"), "{err}");
+		// `$` ends the NUL-terminated record, not a line inside it.
+		let (code, out, err) = run(&["-zo", "b$"], "ab\ncd\0").await;
+		assert_eq!((code, out.as_str()), (1, ""), "{err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
