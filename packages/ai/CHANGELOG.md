@@ -19,6 +19,11 @@
 - Fixed Gemini 4 responses that exceed a single output segment across Google, Vertex AI, Gemini CLI, and Antigravity, ensuring long responses continue generating and are delivered as one complete reply.
 - Fixed Cursor conversations so hook-added prompt content remains in the current user message and conversation context is correctly preserved across turns.
 - Fixed Amazon Bedrock streaming so malformed responses fail promptly and interrupted responses are retried rather than treated as complete.
+- Fixed pooled Claude accounts sharing one device identity: each Anthropic OAuth request now reports the device and account id of the account actually serving it, so rotating between accounts no longer presents them as the same device (#19277)
+- Gemini 4 responses that exceed a single output segment now continue generating and are delivered as one complete reply across Google, Vertex AI, Gemini CLI, and Antigravity.
+- Fixed Cursor conversations so prompt content added by hooks remains part of the current user message and server-recorded context is replayed correctly on subsequent turns.
+- Improved Google Antigravity quota recovery so Gemini 4 Argon access can be restored after quota or plan changes when shared Gemini capacity is available.
+- Fixed Amazon Bedrock streaming so malformed event frames fail promptly and interrupted responses are retried instead of being treated as complete.
 - Fixed Claude account recovery when usage reports contain only one shared usage window.
 - Fixed OpenRouter conversations with Kimi and DeepSeek so reasoning context is preserved when switching models.
 - Fixed Xiaomi MiMo Token Plan authentication to use the correct regional endpoint, including for models loaded from bundled or cached configuration.

@@ -5240,8 +5240,12 @@ function buildParams(
 		tools = [];
 	}
 
-	// Pre-compute metadata.
-	const metadataAccountId = readAnthropicMetadataAccountId(options?.metadata);
+	// Pre-compute metadata. Explicit caller metadata wins; otherwise a first-party
+	// Anthropic OAuth request binds its device identity to the serving account, so
+	// pooled accounts rotated within one session never share a `device_id`.
+	const metadataAccountId =
+		readAnthropicMetadataAccountId(options?.metadata) ??
+		(model.provider === "anthropic" ? options?.oauthIdentity?.accountId : undefined);
 	const metadataUserId = resolveAnthropicMetadataUserId(
 		readAnthropicMetadataString(options?.metadata, "user_id") ??
 			// Deliberately share the normalized affinity identity across Kimi's two transports.

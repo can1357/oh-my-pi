@@ -3,10 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { deriveClaudeDeviceId } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getInstallId } from "@oh-my-pi/pi-utils";
 import { anthropicChunks, captureFetch, type CapturedRequest } from "./helpers/factory-droid";
 
 const MODEL_ID = "claude-mythos-5-2";
@@ -260,5 +262,133 @@ describe("Anthropic OAuth model-not-found credential rotation", () => {
 		expect(await storage.keys.get("anthropic", sessionId, { modelId: OPUS_ID })).toBe(TOKENS[1]);
 		expect(storage.sessions.inherit(sessionId, "copied-failed-pin", (_provider, explicit) => explicit)).toBe(0);
 		expect(await storage.keys.get("anthropic", "other-model-pin", { modelId: OPUS_ID })).toBe(TOKENS[0]);
+	});
+});
+
+describe("Anthropic pooled OAuth metadata identity", () => {
+	const ACCOUNTS = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"] as const;
+	let dir: string;
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+	let requests: CapturedRequest[];
+	let previousApiKey: string | undefined;
+	let previousOAuthToken: string | undefined;
+
+	beforeEach(async () => {
+		previousApiKey = process.env.ANTHROPIC_API_KEY;
+		previousOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+		delete process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-anthropic-device-id-"));
+		store = await SqliteAuthCredentialStore.open(path.join(dir, "auth.db"));
+		storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		requests = [];
+	});
+
+	afterEach(async () => {
+		if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+		else process.env.ANTHROPIC_API_KEY = previousApiKey;
+		if (previousOAuthToken === undefined) delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		else process.env.ANTHROPIC_OAUTH_TOKEN = previousOAuthToken;
+		storage.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	async function seed(accountIds: readonly (string | undefined)[]): Promise<void> {
+		await storage.credentials.set(
+			"anthropic",
+			accountIds.map((accountId, index) => ({
+				type: "oauth" as const,
+				access: TOKENS[index]!,
+				refresh: `test-refresh-${index}`,
+				expires: Date.now() + 3_600_000,
+				...(accountId ? { accountId } : {}),
+				email: `account-${index}@example.test`,
+			})),
+		);
+	}
+
+	async function turn(
+		sessionId: string,
+		respond?: (index: number) => Response | undefined,
+		metadata?: Record<string, unknown>,
+	): Promise<AssistantMessage> {
+		const success = captureFetch(requests, anthropicChunks("ok"));
+		const fetch: FetchImpl = async (input, init) => {
+			const response = await success(input, init);
+			return respond?.(requests.length - 1) ?? response;
+		};
+		return streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: storage.keys.resolver("anthropic", { sessionId, modelId: MODEL_ID }),
+				sessionId,
+				fetch,
+				metadata,
+				maxRetryDelayMs: 1,
+			},
+		).result();
+	}
+
+	function rawUserId(request: CapturedRequest): string {
+		const metadata = request.body.metadata;
+		if (!metadata || typeof metadata !== "object" || !("user_id" in metadata)) {
+			throw new Error("request carried no metadata.user_id");
+		}
+		const userId = metadata.user_id;
+		if (typeof userId !== "string") throw new Error("metadata.user_id is not a string");
+		return userId;
+	}
+
+	it("gives each pooled account its own stable device_id and account_uuid", async () => {
+		await seed(ACCOUNTS);
+		const sessionId = "pooled-device-session";
+		// Account A serves two requests; a model denial then rotates the session to
+		// account B mid-conversation, which serves the retry and one more request.
+		expect((await turn(sessionId)).stopReason).toBe("stop");
+		const rotated = await turn(sessionId, index => (index === 1 ? rejection(modelNotFoundBody()) : undefined));
+		expect(rotated.stopReason).toBe("stop");
+		expect((await turn(sessionId)).stopReason).toBe("stop");
+
+		expect(requests.map(request => request.headers.authorization)).toEqual([
+			`Bearer ${TOKENS[0]}`,
+			`Bearer ${TOKENS[0]}`,
+			`Bearer ${TOKENS[1]}`,
+			`Bearer ${TOKENS[1]}`,
+		]);
+		const [a1, a2, b1, b2]: Record<string, string>[] = requests.map(request => JSON.parse(rawUserId(request)));
+		expect(a1!.device_id).toBe(deriveClaudeDeviceId(getInstallId(), ACCOUNTS[0]));
+		expect(b1!.device_id).toBe(deriveClaudeDeviceId(getInstallId(), ACCOUNTS[1]));
+		expect(a1!.device_id).not.toBe(b1!.device_id);
+		expect(a2!.device_id).toBe(a1!.device_id);
+		expect(b2!.device_id).toBe(b1!.device_id);
+		expect([a1, a2, b1, b2].map(userId => userId!.account_uuid)).toEqual([
+			ACCOUNTS[0],
+			ACCOUNTS[0],
+			ACCOUNTS[1],
+			ACCOUNTS[1],
+		]);
+		expect(new Set([a1, a2, b1, b2].map(userId => userId!.session_id))).toEqual(new Set([sessionId]));
+	});
+
+	it("keeps the install-wide device_id when the serving credential has no account id", async () => {
+		await seed([undefined]);
+		const sessionId = "no-account-session";
+		expect((await turn(sessionId)).stopReason).toBe("stop");
+		expect(rawUserId(requests[0]!)).toBe(
+			JSON.stringify({ device_id: deriveClaudeDeviceId(getInstallId()), session_id: sessionId }),
+		);
+	});
+
+	it("sends caller-supplied metadata.user_id verbatim over the serving account", async () => {
+		await seed(ACCOUNTS);
+		const userId = JSON.stringify({
+			device_id: "a".repeat(64),
+			account_uuid: "33333333-3333-4333-8333-333333333333",
+			session_id: "caller-session",
+		});
+		expect((await turn("caller-metadata-session", undefined, { user_id: userId })).stopReason).toBe("stop");
+		expect(rawUserId(requests[0]!)).toBe(userId);
 	});
 });
