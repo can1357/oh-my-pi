@@ -112,7 +112,10 @@ describe("grep → edit seen-line guard under default settings", () => {
 		await Bun.write(file, "import os\n\ndef connect(host,\n            port):\n    return (host, port)\n");
 
 		const grep = textOutput(
-			await new GrepTool(session).execute("grep", { pattern: "def connect\\(host,\\n\\s+port\\)", path: "conf.py" }),
+			await new GrepTool(session, { contextBefore: 0, contextAfter: 1 }).execute("grep", {
+				pattern: "def connect\\(host,\\n\\s+port\\)",
+				path: "conf.py",
+			}),
 		);
 		expect(grep).toContain("*3:def connect(host,\n 4:            port):\n 5:    return (host, port)");
 
