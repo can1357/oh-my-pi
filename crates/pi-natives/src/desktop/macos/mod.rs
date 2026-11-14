@@ -9,6 +9,7 @@ mod process;
 #[allow(dead_code, reason = "shared with the input-release helper, which uses the rest")]
 mod release;
 mod release_guard;
+mod roster;
 mod route;
 mod session;
 mod skylight;
@@ -21,6 +22,7 @@ pub(super) use capture::{application_windows, has_onscreen_window, window_titles
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;
+pub(super) use roster::window_roster;
 pub(super) use session::screen_state;
 pub(super) use skylight::{FrontApp, front_app, front_pid};
 pub(super) use spaces::window_on_another_space;

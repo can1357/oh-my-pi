@@ -94,6 +94,10 @@ export type WorkerInitPayload =
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
 			insecure?: boolean;
+			/** The browser draws its windows on the user's screen (a visible launch), so a call can raise native ones. */
+			showsWindows?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  }
 	| {
 			mode: "attach";
@@ -130,6 +134,13 @@ export type WorkerInitPayload =
 			userDriven?: boolean;
 			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
 			relay?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen, so a call can raise native ones. Unset for a headless
+			 * browser, whose recycled tabs attach too.
+			 */
+			showsWindows?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */

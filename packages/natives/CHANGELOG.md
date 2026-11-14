@@ -6,6 +6,7 @@
 
 - Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.
 - Improved `grep()` and `glob()` performance for ovnfs checkouts by using the serving daemon when supported, while retaining native fallback behavior and existing streaming, filtering, and link-following options.
+- Added `desktopWindowRoster()` to `@oh-my-pi/pi-natives/desktop`: every on-screen window on macOS, popup menus, pickers and system prompts included, with owner, layer and whether `listWindows` reports it, in one pass and without a desktop session ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

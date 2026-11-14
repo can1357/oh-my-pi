@@ -71,6 +71,7 @@ export const countTokens = nativeBindings.countTokens ?? missingNativeExport("co
 export const decodeSixelToPng = nativeBindings.decodeSixelToPng ?? missingNativeExport("decodeSixelToPng");
 export const decodeSixelToPngAsync = nativeBindings.decodeSixelToPngAsync ?? missingNativeExport("decodeSixelToPngAsync");
 export const desktopEscapeStops = nativeBindings.desktopEscapeStops ?? missingNativeExport("desktopEscapeStops");
+export const desktopWindowRoster = nativeBindings.desktopWindowRoster ?? missingNativeExport("desktopWindowRoster");
 export const detectMacOSAppearance = nativeBindings.detectMacOSAppearance ?? missingNativeExport("detectMacOSAppearance");
 export const deviceCheckGenerateToken = nativeBindings.deviceCheckGenerateToken ?? missingNativeExport("deviceCheckGenerateToken");
 export const diffLineRuns = nativeBindings.diffLineRuns ?? missingNativeExport("diffLineRuns");
