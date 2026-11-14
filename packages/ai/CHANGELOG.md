@@ -5,10 +5,13 @@
 ### Added
 
 - Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added the `google-gemini-cli-transcribe` transcription API: Cloud Code Assist (`google-antigravity`, `google-gemini-cli`) serves no transcribe model, so `transcribeAudio` sends the audio as an inline-data part with a verbatim-transcription instruction to the chat model named by the row's `requestModelId`, over the existing `google-gemini-cli` transport (its OAuth, headers, project and endpoint fallback), and strips wrapper quotes or a code fence from the reply ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
+- Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
 - Updated Vertex AI Gemini requests to use the v1beta1 API, restoring support for long Gemini responses.
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

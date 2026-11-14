@@ -5,7 +5,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
+import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -32,8 +32,12 @@ const formatVoiceList = (): string =>
 type TtsCodec = "mp3" | "wav";
 type TtsBackend = "local-inference" | "xai-tts" | "openai-speech";
 
+/** One tool call may fall through every backend in the chain, so the cap is the
+ *  shared floor, not xAI's own 60,000-character limit. */
+const TTS_TOOL_MAX_TEXT_LENGTH = 15_000;
+
 const ttsSchema = type({
-	text: "1 <= string <= 15000",
+	text: `1 <= string <= ${TTS_TOOL_MAX_TEXT_LENGTH}`,
 	// Optional (no schema default) so an explicit "eve" stays distinguishable
 	// from an omitted voice: xAI applies its own default, DeepInfra forwards
 	// the voice only when the caller actually set one.
@@ -187,7 +191,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 	description: prompt.render(ttsDescription, {
 		localVoices: KOKORO_VOICES.map(v => (v.id === DEFAULT_TTS_VOICE ? `${v.id} (default)` : v.id)).join(", "),
 		xaiVoices: formatVoiceList(),
-		maxLength: XAI_MAX_TEXT_LENGTH.toLocaleString("en-US"),
+		maxLength: TTS_TOOL_MAX_TEXT_LENGTH.toLocaleString("en-US"),
 	}),
 	parameters: ttsSchema,
 	async execute(

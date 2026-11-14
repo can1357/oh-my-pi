@@ -17,6 +17,8 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Dictation with a Google Antigravity or Gemini CLI login: `gemini-3-flash-transcribe` and `gemini-2.5-flash-transcribe` transcribe through a Gemini chat model with the recording attached, since Cloud Code Assist has no transcribe model; Antigravity model-list refreshes keep these rows ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
+- Dictation accepts `xai-stt` models such as `xai-oauth/grok-voice-transcribe-2.0` instead of warning "Unsupported speech-to-text API"; the `tts` tool keeps its 15,000-character cap, the shared floor across its speech backends ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
