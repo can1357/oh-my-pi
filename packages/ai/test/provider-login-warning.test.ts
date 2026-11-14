@@ -6,6 +6,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import * as registry from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthPrompt } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { removeWithRetries } from "../../utils/src/temp";
 
 // The real auth rules give google-antigravity a `login-warning`.
@@ -18,6 +19,8 @@ describe("a provider whose login carries an account risk", () => {
 	let providerLogin: Mock<() => Promise<OAuthCredentials>>;
 
 	beforeEach(async () => {
+		// Antigravity is paused in its auth rules; its login warning stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-login-warning-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		auth = new AuthStorage(store);
