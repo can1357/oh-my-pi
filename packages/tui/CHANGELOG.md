@@ -10,6 +10,7 @@
 - Markdown links handled by registered extension schemes now use a distinct `mdExtensionLink` theme color, with a muted fallback for themes that do not define it.
 - Approval dialogs now distinguish allowed and prompted segments in compound Bash commands, using clear colors and opening at the first segment requiring approval.
 - Added an optional Branch action to chat and a `b` shortcut in the BTW history sheet.
+- In Tern, the Agent Hub on a tall pane (60 rows or more) opens as a card that grows with the pane, with the transcript still visible around it, instead of a fixed-height sheet that leaves the roster scrolling above empty space.
 
 ### Fixed
 
