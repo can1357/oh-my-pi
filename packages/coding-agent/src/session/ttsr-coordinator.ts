@@ -131,7 +131,7 @@ export class TtsrCoordinator {
 		this.#manager?.resetBuffer();
 	}
 
-	/** Advances repeat-after-gap tracking at turn end. */
+	/** Advances repeat-gap tracking at turn end. */
 	onTurnEnd(): void {
 		this.#manager?.incrementMessageCount();
 		this.#emittedTriggerRules.clear();
@@ -452,12 +452,12 @@ export class TtsrCoordinator {
 		if (markInjected && newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
 	}
 
-	#markInjected(ruleNames: string[]): void {
+	#markInjected(ruleNames: string[], deliveryTurn?: number): void {
 		const uniqueRuleNames = Array.from(
 			new Set(ruleNames.map(ruleName => ruleName.trim()).filter(ruleName => ruleName.length > 0)),
 		);
 		if (uniqueRuleNames.length === 0) return;
-		this.#manager?.markInjectedByNames(uniqueRuleNames);
+		this.#manager?.markInjectedByNames(uniqueRuleNames, deliveryTurn);
 		this.#host.sessionManager.appendTtsrInjection(uniqueRuleNames);
 	}
 
@@ -702,6 +702,9 @@ export class TtsrCoordinator {
 		this.#emitTriggerOnce(matchContext, matches);
 		const retryToken = ++this.#retryToken;
 		const generation = this.#host.promptGeneration();
+		// The aborted turn has not ended yet; its reminder lands in the retry, one turn later. Recording that
+		// turn now keeps the retry exempt even when this task runs before the aborted turn's turn_end.
+		const retryTurn = (this.#manager?.getMessageCount() ?? 0) + 1;
 		this.#host.schedulePostPromptTask(
 			async () => {
 				if (this.#retryToken !== retryToken) {
@@ -741,7 +744,7 @@ export class TtsrCoordinator {
 						details,
 						"agent",
 					);
-					this.#markInjected(details.rules);
+					this.#markInjected(details.rules, retryTurn);
 				}
 				this.#host.scheduleAgentContinue({
 					source: "ttsr-interrupt",

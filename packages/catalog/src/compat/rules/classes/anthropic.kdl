@@ -375,7 +375,7 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
-		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" {
+		"google-vertex" "opencode-go" "opencode-zen" "snowflake" "vercel-ai-gateway" {
 		family "haiku" {
 			thinking-mode "budget"
 			// Haiku 5.5 is the first adaptive Haiku: `budget_tokens` is a 400.
@@ -405,7 +405,7 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" \
-		"opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
+		"opencode-go" "opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-mode "anthropic-adaptive"
 		}
@@ -435,8 +435,8 @@ class "anthropic" {
 			}
 		}
 	}
-	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-zen" \
-		"openrouter" "snowflake" "vercel-ai-gateway" "zenmux" {
+	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-go" \
+		"opencode-zen" "openrouter" "snowflake" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 		}
