@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,7 +19,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { buildAnthropicHeaders, mapStainlessArch, mapStainlessOs } from "@oh-my-pi/pi-ai/providers/anthropic-headers";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { getClaudeCodeVersion, resetClaudeCodeVersionForTest } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
@@ -34,7 +34,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { withEnv, withOfficialAnthropicEndpoint, withoutClaudeCodeVersionLookup } from "./helpers";
+import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
@@ -175,7 +175,29 @@ function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionI
 }
 
 withOfficialAnthropicEndpoint();
-withoutClaudeCodeVersionLookup();
+
+/**
+ * Runs `fn` without the preload's PI_AI_CLAUDE_CODE_VERSION pin, which turns off
+ * adopting a server-required version, and with the npm registry unreachable, so
+ * the advertised version starts at the pinned fallback.
+ */
+async function withClaudeCodeVersionAdoption(fn: () => Promise<void>): Promise<void> {
+	const registry = spyOn(globalThis, "fetch").mockImplementation(
+		Object.assign(
+			async (): Promise<Response> => {
+				throw new Error("npm registry disabled in tests");
+			},
+			{ preconnect: fetch.preconnect },
+		),
+	);
+	resetClaudeCodeVersionForTest();
+	try {
+		await withEnv({ PI_AI_CLAUDE_CODE_VERSION: undefined }, fn);
+	} finally {
+		resetClaudeCodeVersionForTest();
+		registry.mockRestore();
+	}
+}
 
 describe("Anthropic request fingerprint alignment", () => {
 	it("maps Stainless OS and arch values from explicit inputs", () => {
@@ -742,92 +764,102 @@ describe("Anthropic request fingerprint alignment", () => {
 	});
 
 	it("retries once with the version a claude_code_version_too_old rejection requires", async () => {
-		const tooOld = JSON.stringify({
-			type: "error",
-			error: {
-				type: "invalid_request_error",
-				message: "Claude Code 2.1.257 does not support this model; version 99.0.0 or newer is required.",
-				details: { error_code: "claude_code_version_too_old" },
-			},
+		await withClaudeCodeVersionAdoption(async () => {
+			const tooOld = JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "Claude Code 2.1.257 does not support this model; version 99.0.0 or newer is required.",
+					details: { error_code: "claude_code_version_too_old" },
+				},
+			});
+			const captured = JSON.stringify({
+				type: "error",
+				error: { type: "invalid_request_error", message: "captured" },
+			});
+			const requests: { userAgent: string; body: string }[] = [];
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				requests.push({
+					userAgent: new Headers(init?.headers).get("User-Agent") ?? "",
+					body: await new Response(init?.body).text(),
+				});
+				return new Response(requests.length === 1 ? tooOld : captured, {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch;
+			const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+			await streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result();
+
+			expect(requests).toHaveLength(2);
+			expect(requests[0].userAgent).not.toBe("claude-cli/99.0.0 (external, cli)");
+			expect(requests[1].userAgent).toBe("claude-cli/99.0.0 (external, cli)");
+			expect(requests[1].body).toContain("cc_version=99.0.0.");
+
+			// Same rejection at the already-adopted version is terminal, not a retry loop.
+			requests.length = 0;
+			const alwaysTooOld = (async (_input: string | URL | Request, init?: RequestInit) => {
+				requests.push({ userAgent: new Headers(init?.headers).get("User-Agent") ?? "", body: "" });
+				return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+			}) as typeof fetch;
+			const result = await streamAnthropic(ANTHROPIC_MODEL, context, {
+				apiKey: "sk-ant-oat-test",
+				fetch: alwaysTooOld,
+			}).result();
+			expect(requests).toHaveLength(1);
+			expect(result.stopReason).toBe("error");
 		});
-		const captured = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } });
-		const requests: { userAgent: string; body: string }[] = [];
-		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-			requests.push({
-				userAgent: new Headers(init?.headers).get("User-Agent") ?? "",
-				body: await new Response(init?.body).text(),
-			});
-			return new Response(requests.length === 1 ? tooOld : captured, {
-				status: 400,
-				headers: { "Content-Type": "application/json" },
-			});
-		}) as typeof fetch;
-		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
-
-		await streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result();
-
-		expect(requests).toHaveLength(2);
-		expect(requests[0].userAgent).not.toBe("claude-cli/99.0.0 (external, cli)");
-		expect(requests[1].userAgent).toBe("claude-cli/99.0.0 (external, cli)");
-		expect(requests[1].body).toContain("cc_version=99.0.0.");
-
-		// Same rejection at the already-adopted version is terminal, not a retry loop.
-		requests.length = 0;
-		const alwaysTooOld = (async (_input: string | URL | Request, init?: RequestInit) => {
-			requests.push({ userAgent: new Headers(init?.headers).get("User-Agent") ?? "", body: "" });
-			return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
-		}) as typeof fetch;
-		const result = await streamAnthropic(ANTHROPIC_MODEL, context, {
-			apiKey: "sk-ant-oat-test",
-			fetch: alwaysTooOld,
-		}).result();
-		expect(requests).toHaveLength(1);
-		expect(result.stopReason).toBe("error");
 	});
 
 	it("retries every concurrent first request rejected as too old, not just the first", async () => {
-		const pinned = getClaudeCodeVersion();
-		const required = "100.0.0";
-		const pinnedUserAgent = `claude-cli/${pinned} (external, cli)`;
-		const requiredUserAgent = `claude-cli/${required} (external, cli)`;
-		const tooOld = JSON.stringify({
-			type: "error",
-			error: {
-				type: "invalid_request_error",
-				message: `Claude Code ${pinned} does not support this model; version ${required} or newer is required.`,
-				details: { error_code: "claude_code_version_too_old" },
-			},
+		await withClaudeCodeVersionAdoption(async () => {
+			const pinned = getClaudeCodeVersion();
+			const required = "100.0.0";
+			const pinnedUserAgent = `claude-cli/${pinned} (external, cli)`;
+			const requiredUserAgent = `claude-cli/${required} (external, cli)`;
+			const tooOld = JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: `Claude Code ${pinned} does not support this model; version ${required} or newer is required.`,
+					details: { error_code: "claude_code_version_too_old" },
+				},
+			});
+			const captured = JSON.stringify({
+				type: "error",
+				error: { type: "invalid_request_error", message: "captured" },
+			});
+			const concurrency = 3;
+			const requests: string[] = [];
+			let firstAttempts = 0;
+			const { promise: allFirstAttemptsSent, resolve: allFirstAttemptsSentResolve } = Promise.withResolvers<void>();
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				const userAgent = new Headers(init?.headers).get("User-Agent") ?? "";
+				requests.push(userAgent);
+				if (userAgent === pinnedUserAgent) {
+					firstAttempts++;
+					if (firstAttempts === concurrency) allFirstAttemptsSentResolve();
+					// Hold every first rejection until all concurrent requests have sent
+					// theirs, so they race on the adoption instead of serializing.
+					await allFirstAttemptsSent;
+					return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+				}
+				return new Response(captured, { status: 400, headers: { "Content-Type": "application/json" } });
+			}) as typeof fetch;
+			const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+			const results = await Promise.all(
+				Array.from({ length: concurrency }, () =>
+					streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result(),
+				),
+			);
+
+			expect(requests).toHaveLength(concurrency * 2);
+			for (const userAgent of requests.slice(0, concurrency)) expect(userAgent).toBe(pinnedUserAgent);
+			for (const userAgent of requests.slice(concurrency)) expect(userAgent).toBe(requiredUserAgent);
+			for (const result of results) expect(result.stopReason).toBe("error");
 		});
-		const captured = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } });
-		const concurrency = 3;
-		const requests: string[] = [];
-		let firstAttempts = 0;
-		const { promise: allFirstAttemptsSent, resolve: allFirstAttemptsSentResolve } = Promise.withResolvers<void>();
-		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-			const userAgent = new Headers(init?.headers).get("User-Agent") ?? "";
-			requests.push(userAgent);
-			if (userAgent === pinnedUserAgent) {
-				firstAttempts++;
-				if (firstAttempts === concurrency) allFirstAttemptsSentResolve();
-				// Hold every first rejection until all concurrent requests have sent
-				// theirs, so they race on the adoption instead of serializing.
-				await allFirstAttemptsSent;
-				return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
-			}
-			return new Response(captured, { status: 400, headers: { "Content-Type": "application/json" } });
-		}) as typeof fetch;
-		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
-
-		const results = await Promise.all(
-			Array.from({ length: concurrency }, () =>
-				streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result(),
-			),
-		);
-
-		expect(requests).toHaveLength(concurrency * 2);
-		for (const userAgent of requests.slice(0, concurrency)) expect(userAgent).toBe(pinnedUserAgent);
-		for (const userAgent of requests.slice(concurrency)) expect(userAgent).toBe(requiredUserAgent);
-		for (const result of results) expect(result.stopReason).toBe("error");
 	});
 
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {

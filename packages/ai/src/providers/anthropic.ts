@@ -2259,9 +2259,10 @@ const streamAnthropicOnce = (
 			};
 			// OAuth requests carry the Claude Code identity (User-Agent, billing
 			// header), whose version gates newer models; resolve the current release
-			// first so a new model doesn't cost a `claude_code_version_too_old` round
-			// trip. The registry is public, so the lookup uses the global fetch rather
-			// than the provider's (possibly proxied or credentialed) fetcher.
+			// so a new model doesn't cost a `claude_code_version_too_old` round trip.
+			// Only a process's first lookup is awaited; later re-checks run in the
+			// background. The registry is public, so the lookup uses the global fetch
+			// rather than the provider's (possibly proxied or credentialed) fetcher.
 			if (!transport && !options?.client && (options?.isOAuth ?? isAnthropicOAuthToken(apiKey))) {
 				await ensureClaudeCodeVersion(fetch, options?.signal);
 			}

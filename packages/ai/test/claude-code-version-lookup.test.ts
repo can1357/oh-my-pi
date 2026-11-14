@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime, spyOn } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
 	adoptRequiredClaudeCodeVersion,
@@ -35,6 +35,36 @@ function tooOld(sent: string, required: string): Error {
 	return new Error(
 		`400 {"type":"error","error":{"type":"invalid_request_error","message":"Claude Code ${sent} does not support this model; version ${required} or newer is required.","details":{"error_code":"claude_code_version_too_old"}}}`,
 	);
+}
+
+const OAUTH_MODEL = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 8_192,
+});
+const OAUTH_CONTEXT: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+/** Provider transport that records each request's User-Agent and answers with a terminal 400. */
+function captureOAuthRequests(): { providerFetch: typeof fetch; userAgents: string[] } {
+	const userAgents: string[] = [];
+	const providerFetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit) => {
+			userAgents.push(new Headers(init?.headers).get("User-Agent") ?? "");
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		},
+		{ preconnect: fetch.preconnect },
+	);
+	return { providerFetch, userAgents };
 }
 
 withOfficialAnthropicEndpoint();
@@ -89,6 +119,12 @@ describe("Claude Code version lookup", () => {
 		expect(getClaudeCodeVersion()).toBe("3.0.5");
 	});
 
+	it("never advertises a version below the pin when npm `latest` is rolled back", async () => {
+		await ensureClaudeCodeVersion(distTagsFetch(latest("2.0.9")).fetcher);
+
+		expect(getClaudeCodeVersion()).toBe(DEFAULT_CLAUDE_CODE_VERSION);
+	});
+
 	it("keeps the pinned version when the registry is unreachable", async () => {
 		const { fetcher, urls } = distTagsFetch(async () => {
 			throw new Error("getaddrinfo ENOTFOUND registry.npmjs.org");
@@ -116,22 +152,9 @@ describe("Claude Code version lookup", () => {
 				{ status: 400, headers: { "Content-Type": "application/json" } },
 			);
 		}) as typeof fetch;
-		const model = buildModel({
-			id: "claude-sonnet-4-5",
-			name: "Claude Sonnet 4.5",
-			api: "anthropic-messages",
-			provider: "anthropic",
-			baseUrl: "https://api.anthropic.com",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 8_192,
-		});
-		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
 
 		try {
-			await streamAnthropic(model, context, { apiKey: "sk-ant-oat-test", fetch: providerFetch }).result();
+			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, { apiKey: "sk-ant-oat-test", fetch: providerFetch }).result();
 			expect(registry.mock.calls.map(([input]) => String(input))).toEqual([DIST_TAGS_URL]);
 		} finally {
 			registry.mockRestore();
@@ -155,22 +178,60 @@ describe("Claude Code version lookup", () => {
 					headers: { "Content-Type": "application/json" },
 				},
 			)) as unknown as typeof fetch;
-		const model = buildModel({
-			id: "claude-sonnet-4-5",
-			name: "Claude Sonnet 4.5",
-			api: "anthropic-messages",
-			provider: "anthropic",
-			baseUrl: "https://api.anthropic.com",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 8_192,
-		});
-		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
 
 		try {
-			await streamAnthropic(model, context, { apiKey: "sk-ant-api03-test", fetch: providerFetch }).result();
+			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, { apiKey: "sk-ant-api03-test", fetch: providerFetch }).result();
+			expect(registry).not.toHaveBeenCalled();
+		} finally {
+			registry.mockRestore();
+		}
+	});
+
+	it("does not hold a request on a stale version's re-check, and adopts the result afterwards", async () => {
+		let respond: () => Promise<Response> = latest("2.1.400");
+		const registry = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(() => respond(), { preconnect: fetch.preconnect }),
+		);
+		const { providerFetch, userAgents } = captureOAuthRequests();
+		const send = () =>
+			streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, { apiKey: "sk-ant-oat-test", fetch: providerFetch }).result();
+
+		try {
+			await send();
+			expect(userAgents).toEqual(["claude-cli/2.1.400 (external, cli)"]);
+
+			// An hour later the registry hangs: the request still goes out at once with the known version.
+			setSystemTime(new Date(Date.now() + 60 * 60_000 + 1));
+			const refresh = Promise.withResolvers<Response>();
+			respond = () => refresh.promise;
+			await send();
+			expect(registry).toHaveBeenCalledTimes(2);
+			expect(userAgents[1]).toBe("claude-cli/2.1.400 (external, cli)");
+
+			refresh.resolve(await latest("2.1.401")());
+			// The background re-check settles on microtasks once the registry answers.
+			for (let i = 0; i < 100 && getClaudeCodeVersion() !== "2.1.401"; i++) await Promise.resolve();
+			await send();
+			expect(registry).toHaveBeenCalledTimes(2);
+			expect(userAgents[2]).toBe("claude-cli/2.1.401 (external, cli)");
+		} finally {
+			setSystemTime();
+			registry.mockRestore();
+		}
+	});
+
+	it("starts no registry lookup for an already-aborted request", async () => {
+		const registry = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(async () => latest("2.1.400")(), { preconnect: fetch.preconnect }),
+		);
+		const { providerFetch } = captureOAuthRequests();
+
+		try {
+			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, {
+				apiKey: "sk-ant-oat-test",
+				fetch: providerFetch,
+				signal: AbortSignal.abort(),
+			}).result();
 			expect(registry).not.toHaveBeenCalled();
 		} finally {
 			registry.mockRestore();

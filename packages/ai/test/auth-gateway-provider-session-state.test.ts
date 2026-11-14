@@ -25,7 +25,7 @@ import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import type { Api, Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { withOfficialAnthropicEndpoint, withoutClaudeCodeVersionLookup } from "./helpers";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 import {
 	anthropicChunks,
 	captureFetch,
@@ -371,7 +371,6 @@ async function priorityChatTurn(
 }
 
 withOfficialAnthropicEndpoint();
-withoutClaudeCodeVersionLookup();
 
 describe("auth-gateway provider session state", () => {
 	it.each([

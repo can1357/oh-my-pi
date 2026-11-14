@@ -29,18 +29,20 @@ const claudeCodeVersionLookup = createVersionLookup({ resolve: npmLatestVersion(
 
 /**
  * Claude Code CLI version represented on the Anthropic wire (User-Agent, billing
- * header): `PI_AI_CLAUDE_CODE_VERSION` → the newer of the npm `latest` release
- * (see {@link ensureClaudeCodeVersion}) and a version adopted from a server
- * rejection (see {@link adoptRequiredClaudeCodeVersion}) → {@link DEFAULT_CLAUDE_CODE_VERSION}.
+ * header): `PI_AI_CLAUDE_CODE_VERSION`, else the newest of the npm `latest`
+ * release (see {@link ensureClaudeCodeVersion}), a version adopted from a server
+ * rejection (see {@link adoptRequiredClaudeCodeVersion}), and
+ * {@link DEFAULT_CLAUDE_CODE_VERSION}. The pin is a floor: a rolled-back npm
+ * `latest` never lowers the advertised version below it.
  */
 export function getClaudeCodeVersion(): string {
 	const override = process.env.PI_AI_CLAUDE_CODE_VERSION;
 	if (override) return override;
-	const npmVersion = claudeCodeVersionLookup.current();
-	if (adoptedClaudeCodeVersion && npmVersion) {
-		return compareSemver(npmVersion, adoptedClaudeCodeVersion) > 0 ? npmVersion : adoptedClaudeCodeVersion;
+	let version = DEFAULT_CLAUDE_CODE_VERSION;
+	for (const candidate of [claudeCodeVersionLookup.current(), adoptedClaudeCodeVersion]) {
+		if (candidate && compareSemver(candidate, version) > 0) version = candidate;
 	}
-	return adoptedClaudeCodeVersion || npmVersion || DEFAULT_CLAUDE_CODE_VERSION;
+	return version;
 }
 
 /**
@@ -48,7 +50,8 @@ export function getClaudeCodeVersion(): string {
  * gated on a newer client works on the first request instead of costing a
  * `claude_code_version_too_old` rejection. Skipped entirely when
  * PI_AI_CLAUDE_CODE_VERSION is set; see {@link createVersionLookup} for
- * caching, back-off, and `signal` semantics.
+ * caching, back-off, and `signal` semantics: only the first lookup in a
+ * process is awaited, later re-checks run in the background.
  */
 export function ensureClaudeCodeVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
 	if (process.env.PI_AI_CLAUDE_CODE_VERSION) return Promise.resolve();
