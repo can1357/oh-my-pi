@@ -150,10 +150,10 @@ export class ToolCallLoopGuard {
 				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
 				this.#lastHash = undefined;
-			this.#count = 0;
-			this.#lastNormalizedHash = undefined;
-			this.#lastAssistantText = undefined;
-			this.#normalizedCount = 0;
+				this.#count = 0;
+				this.#lastNormalizedHash = undefined;
+				this.#lastAssistantText = undefined;
+				this.#normalizedCount = 0;
 			}
 			return null;
 		}
