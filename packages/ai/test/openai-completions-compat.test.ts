@@ -2848,6 +2848,21 @@ describe("mistral prompt_cache_key regression (#15079)", () => {
 	});
 });
 
+describe("Mistral model-specific reasoning efforts", () => {
+	it("sends the selected GLM max and Large 4 medium tiers without remapping", async () => {
+		const glm = getBundledModel<"openai-completions">("mistral", "zai-glm-5-3");
+		const flash = getBundledModel<"openai-completions">("mistral", "zai-glm-5-3-flash");
+		const large = getBundledModel<"openai-completions">("mistral", "mistral-large-4");
+
+		for (const model of [glm, flash]) {
+			const payload = toObject(await captureOpenAICompletionsPayload(model, undefined, { reasoning: "max" }));
+			expect(payload?.reasoning_effort).toBe("max");
+		}
+		const payload = toObject(await captureOpenAICompletionsPayload(large, undefined, { reasoning: "medium" }));
+		expect(payload?.reasoning_effort).toBe("medium");
+	});
+});
+
 describe("Groq Qwen reasoning_effort on the wire", () => {
 	it("sends each Qwen only an effort value Groq accepts", async () => {
 		// Qwen 3.6 takes `default` (thinking) or `none`; Qwen 3.8 takes low/medium/high.

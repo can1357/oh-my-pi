@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { mistralModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -48,6 +50,26 @@ function contract(id: string, models: readonly ContractFields[]) {
 }
 
 describe("mistral discovery", () => {
+	it("offers only the Mistral API's supported efforts for GLM 5.3 and Large 4", () => {
+		const bundled = getBundledModels("mistral");
+		const efforts = (id: string) => {
+			const model = bundled.find(candidate => candidate.id === id);
+			if (!model) throw new Error(`Missing bundled Mistral model: ${id}`);
+			return { model, levels: getSupportedEfforts(model) };
+		};
+		const glm = efforts("zai-glm-5-3");
+		const flash = efforts("zai-glm-5-3-flash");
+		const large = efforts("mistral-large-4");
+		const datedLarge = efforts("mistral-large-4-0");
+
+		expect(glm.levels).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(flash.levels).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(large.levels).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(datedLarge.levels).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(() => requireSupportedEffort(glm.model, Effort.XHigh)).toThrow();
+		expect(() => requireSupportedEffort(large.model, Effort.XHigh)).toThrow();
+	});
+
 	it("keeps only rows Mistral flags as chat-capable", async () => {
 		const models = await discoverMistralModels({
 			object: "list",

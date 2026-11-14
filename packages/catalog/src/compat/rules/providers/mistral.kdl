@@ -37,6 +37,15 @@ provider "mistral" {
 	// (https://docs.mistral.ai/studio/conversations/reasoning) for every
 	// reasoning model the host serves, including GLM and DeepSeek (#17375).
 	mistral-reasoning-content-parts #true
+	// Mistral's zai-prefixed GLM ids use hyphens in the revision, so the
+	// class-level GLM 5.3 selector cannot isolate these deployments.
+	// https://docs.mistral.ai/inference/conversations/reasoning
+	models "zai-glm-5-3" "zai-glm-5-3-flash" {
+		thinking-efforts "low" "high" "max"
+	}
+	models "mistral-large-4*" {
+		thinking-efforts "low" "medium" "high"
+	}
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
