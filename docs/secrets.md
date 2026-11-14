@@ -4,11 +4,11 @@ Redacts sensitive values (API keys, tokens, passwords) in conversation messages 
 
 ## Enabling
 
-Disabled by default. Toggle via `/settings` UI or directly in `config.yml`:
+Enabled by default. Disable it via `/settings` UI or directly in `config.yml`:
 
 ```yaml
 secrets:
-   enabled: true
+   enabled: false
 ```
 
 ## How it works

@@ -45,6 +45,9 @@ describe("concurrent ACP sessions", () => {
 		using launchDir = TempDir.createSync("@pi-acp-effects-launch-");
 		using projectDir = TempDir.createSync("@pi-acp-effects-project-");
 		await Bun.write(projectDir.join(".omp/config.yml"), "secrets:\n  enabled: true\n");
+		// The launch cwd opts out so this test observes per-project isolation rather than the
+		// enabled-by-default baseline.
+		await Bun.write(launchDir.join(".omp/config.yml"), "secrets:\n  enabled: false\n");
 		// What the provider's credential-redaction pass does to a token in each request it builds.
 		const requests: Array<{ context: string; credential: string }> = [];
 		registerCustomApi(API, (_model, context) => {
