@@ -451,13 +451,19 @@ describe("requirement-words conventions line", () => {
 		});
 	});
 
-	it("keeps every bundled prompt under src/ free of both", async () => {
-		const srcDir = path.join(import.meta.dir, "..", "src");
-		const files = await Array.fromAsync(new Bun.Glob("**/*.md").scan(srcDir));
-		expect(files.length).toBeGreaterThan(0);
+	it("keeps every bundled prompt and shipped skill prompt free of both", async () => {
+		const repoRoot = path.join(import.meta.dir, "..", "..", "..");
+		// Both roots hold only checked-in prompts; the gitignored `.omp/plugins/` install tree sits outside them.
+		const files: string[] = [];
+		for (const root of ["packages/coding-agent/src", ".omp/skills"]) {
+			const found = await Array.fromAsync(new Bun.Glob("**/*.md").scan(path.join(repoRoot, root)));
+			// Every root contributes, so the scan always covers more than src/ alone.
+			expect(found.length).toBeGreaterThan(0);
+			files.push(...found.map(file => path.join(root, file)));
+		}
 		const offenders: string[] = [];
 		for (const file of files.sort()) {
-			const prompt = await Bun.file(path.join(srcDir, file)).text();
+			const prompt = await Bun.file(path.join(repoRoot, file)).text();
 			if (RFC2119_CITATION.test(prompt) || CANONICAL_KEYWORD_RUN.test(prompt)) offenders.push(file);
 		}
 		expect(offenders).toEqual([]);
