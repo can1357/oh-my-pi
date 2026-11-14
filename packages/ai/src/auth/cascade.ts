@@ -7,6 +7,7 @@ import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
+import type { ProviderCooldowns } from "./provider-cooldown";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
 import type {
 	AuthApiKeyOptions,
@@ -145,6 +146,8 @@ export interface KeyCascadeDeps {
 	pool: CredentialPool;
 	overrides: KeyOverrides;
 	selector: CredentialSelector;
+	/** Provider-wide pauses checked before a request credential is handed out. */
+	cooldowns: ProviderCooldowns;
 	affinity: SessionAffinity;
 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
 	rotate: LimitsApi["rotate"];
@@ -333,6 +336,7 @@ export class KeyCascade implements KeysApi {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		assertProviderEnabled(provider);
+		this.#deps.cooldowns.assertReady(provider);
 		let credentialId: number | undefined;
 		let oauthIdentity: OAuthRequestIdentity | undefined;
 		let oauthAccess: string | undefined;

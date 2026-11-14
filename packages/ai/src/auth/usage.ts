@@ -24,6 +24,7 @@ import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyOverrides } from "./cascade";
+import type { ProviderCooldowns } from "./provider-cooldown";
 import {
 	buildUsageCredential,
 	oauthUsageRequest,
@@ -100,6 +101,8 @@ export interface UsageServiceDeps {
 	blocks: CredentialBlocks;
 	affinity: SessionAffinity;
 	strategies: RankingStrategyResolver;
+	/** Provider-wide pauses; a paused provider gets no usage probes either. */
+	cooldowns: ProviderCooldowns;
 	usageProviders: (provider: Provider) => UsageProvider | undefined;
 	fetch: typeof fetch;
 	requestTimeoutMs: number;
@@ -235,6 +238,7 @@ export class UsageService implements UsageApi {
 	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
 		const providerImpl = this.providerFor(request.provider);
 		if (!providerImpl) return null;
+		if (this.#deps.cooldowns.isCooling(request.provider)) return null;
 
 		const timeoutSignal =
 			typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0

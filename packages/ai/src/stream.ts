@@ -1353,6 +1353,11 @@ function streamSimpleRequest<TApi extends Api>(
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
+				// A paused provider keeps its typed error so callers can read its deadline.
+				if (error instanceof AIError.ProviderCooldownError) {
+					outer.fail(error);
+					return;
+				}
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
 				outer.fail(

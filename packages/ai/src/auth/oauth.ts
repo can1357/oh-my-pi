@@ -9,6 +9,7 @@ import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
 import type { OAuthRefresher } from "./refresh";
+import type { ProviderCooldowns } from "./provider-cooldown";
 import type { CredentialSelector } from "./select";
 import type {
 	AuthAccountPolicy,
@@ -39,6 +40,8 @@ export interface OAuthAccountsDeps {
 	overrides: KeyOverrides;
 	policies: AccountPolicies;
 	selector: CredentialSelector;
+	/** Provider-wide pauses checked before a request credential is handed out. */
+	cooldowns: ProviderCooldowns;
 	affinity: SessionAffinity;
 	refresher: OAuthRefresher;
 }
@@ -154,6 +157,7 @@ export class OAuthAccounts implements OAuthApi {
 		if (this.#deps.overrides.suppressesOAuth(provider, this.#deps.affinity.isRestricted(provider, sessionId))) {
 			return undefined;
 		}
+		this.#deps.cooldowns.assertReady(provider);
 		const resolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
 		if (!resolved) return undefined;
 		const { credential, credentialId } = resolved;

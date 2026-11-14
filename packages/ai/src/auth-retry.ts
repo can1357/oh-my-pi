@@ -3,7 +3,7 @@ import type { CredentialRotation, LimitsApi, OAuthAccess, OAuthApi, OAuthRequest
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
-import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { isConcurrencyCapExclusion, isUnattributedRejection, isUsageLimitOutcome } from "./error/rate-limit";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -96,6 +96,7 @@ export async function resolveAfterRotation(
 	if (!rotation.switched) {
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		if (isUsageLimit(error) || isUsageLimitOutcome(AIError.status(error), message)) return undefined;
+		if (isUnattributedRejection(error)) return undefined;
 	}
 	const resolved = await resolve();
 	const apiKey = resolvedApiKeyBearer(resolved);
@@ -201,6 +202,7 @@ export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 export const AUTH_RETRY_MAX_ATTEMPTS = 64;
 
 function isDirectCredentialRotationError(error: unknown): boolean {
+	if (isUnattributedRejection(error)) return false;
 	if (isAccountPolicyError(error)) return true;
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
@@ -291,6 +293,14 @@ export async function resolveNextAuthRetryKey(
 ): Promise<string | undefined> {
 	if (signal?.aborted) return undefined;
 	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
+	// An unattributed Antigravity refusal ends the request on this account:
+	// neither a refreshed bearer nor a sibling account may replay it. The
+	// resolver still reports it once, so the rotation layer can pause the
+	// provider; whatever key it answers with is never used.
+	if (isUnattributedRejection(error)) {
+		await resolveRetryKey(resolver, true, error, signal, state.lastKey);
+		return undefined;
+	}
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
@@ -378,8 +388,8 @@ export async function withAuth<T>(
 	try {
 		initialKey = await resolveApiKeyOnce(resolver, signal);
 	} catch (error) {
-		// A resolver that deliberately reports a missing key keeps that type.
-		if (error instanceof AIError.MissingApiKeyError) throw error;
+		// A resolver that deliberately reports a missing key or a paused provider keeps that type.
+		if (error instanceof AIError.MissingApiKeyError || error instanceof AIError.ProviderCooldownError) throw error;
 		// A thrown resolver is a broker/OAuth/network failure, not a missing
 		// key — surface the cause instead of masking it as "No API key".
 		throw new AIError.ConfigurationError(
@@ -491,6 +501,18 @@ export async function withOAuthAccess<T>(
 	while (true) {
 		let next: OAuthAccess | undefined;
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
+		if (isUnattributedRejection(lastError)) {
+			// Report it so the rotation layer pauses the provider; never replay it.
+			await storage.limits
+				.rotate(provider, sessionId, {
+					error: lastError,
+					signal,
+					apiKey: lastAccess.accessToken,
+					credentialId: lastAccess.credentialId,
+				})
+				.catch(() => undefined);
+			break;
+		}
 		const tokenRefreshReplay = lastError instanceof AIError.OAuthError && lastError.kind === "token-refresh";
 		if (tokenRefreshReplay) {
 			if (tokenRefreshReplayUsed) break;

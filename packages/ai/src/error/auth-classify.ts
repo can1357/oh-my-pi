@@ -1,7 +1,7 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import { isAccountPolicyError, isClinePassSurfaceGateMessage, isOAuthExpiry, isUsageLimit } from "./flags";
 import { OAuthError } from "./oauth";
-import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
+import { isConcurrencyCapExclusion, isUnattributedRejection, isUsageLimitOutcome } from "./rate-limit";
 
 /**
  * Whether an OAuth refresh failure is definitive (the credential must be
@@ -38,6 +38,9 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
  */
 export function isAuthRetryableError(error: unknown): boolean {
 	if (error instanceof OAuthError && error.kind === "token-refresh") return true;
+	// An unattributed Antigravity refusal enters the auth-retry driver only so
+	// the rotation layer can pause the provider; the driver never replays it.
+	if (isUnattributedRejection(error)) return true;
 	if (isUsageLimit(error)) return true;
 	if (isAccountPolicyError(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
