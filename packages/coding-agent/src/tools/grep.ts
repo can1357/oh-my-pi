@@ -84,10 +84,10 @@ export type GrepToolInput = typeof searchSchema.infer;
 export const DEFAULT_FILE_LIMIT = 20;
 /** Per-file match cap for multi-file searches — keeps a single hot file
  * from crowding out diverse hits. Applied in JS after grep returns. */
-export const MULTI_FILE_PER_FILE_MATCHES = 20;
+export const MULTI_FILE_PER_FILE_MATCHES = 10;
 /** Per-file match cap for single-file searches — there's no diversity
  * concern when the scope is one file. */
-export const SINGLE_FILE_MATCHES = 200;
+export const SINGLE_FILE_MATCHES = 50;
 /** Hard safety ceiling on how many matches we fetch from native grep
  * before JS-side grouping. Sized to comfortably cover the file window
  * (DEFAULT_FILE_LIMIT files × MULTI_FILE_PER_FILE_MATCHES matches) plus

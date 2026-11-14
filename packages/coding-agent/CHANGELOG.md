@@ -18,9 +18,16 @@
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
 
+### Changed
+
+- `grep` now shows match lines only by default (`grep.contextBefore`/`grep.contextAfter` default to `0`, was `1`/`3`) and keeps the first 10 matches per file when searching several files (was 20) and 50 in a single file (was 200), roughly halving typical grep output
+- `spotlight.thinking` now defaults to `med` instead of `low`: Spotlight reads deeper heads, which ranked needed lines better on the benchmark and on recorded sessions, at a higher cost per request
+- With the Spotlight experiment on, results the agent mostly read back right after a cut are shown whole: a source `read` of at most ~12k characters is no longer outlined, a `pr://` or `issue://` thread stays whole up to ~12k characters, and CUDA, Objective-C, Luau, QML, CSS, shell and CMake files are treated as source (whole up to ~12k characters, outlined past it) instead of being cut by rank
+
 ### Fixed
 
 - The bash tool now reports when `exit` or an armed `set -e` ends a call before its remaining statements ran: the result carries an `endedByExit` flag, a notice says the rest of the call did not run and that options like `set -e` stay set in the session (a call that ran in a copy of a busy session shell gets a notice without the persistence claim), and the same flag crosses the RPC wire for `bash` results; a trailing `exit` at the end of the input is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model

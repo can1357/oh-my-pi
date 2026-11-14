@@ -2136,6 +2136,9 @@ export class SelectorController {
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
+		const recordedCwd = this.ctx.sessionManager.getRecordedCwd();
+		const directoryUnavailable =
+			recordedCwd !== undefined && normalizePathForComparison(recordedCwd) !== normalizePathForComparison(newCwd);
 		this.#refreshSessionTerminalTitle();
 		this.ctx.updateEditorBorderColor();
 
@@ -2149,6 +2152,11 @@ export class SelectorController {
 					? `Resumed session in ${shortenPath(newCwd)}`
 					: "Resumed session",
 		);
+		if (directoryUnavailable) {
+			this.ctx.showWarning(
+				`Session directory ${shortenPath(recordedCwd)} is missing or cannot be entered; continuing in ${shortenPath(newCwd)}`,
+			);
+		}
 		if (continuation) this.ctx.showWarning(formatSessionContinuationNotice(continuation));
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 		return true;

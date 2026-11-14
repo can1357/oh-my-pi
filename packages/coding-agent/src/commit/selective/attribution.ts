@@ -130,7 +130,8 @@ export interface RecordedEdit {
 /**
  * Chain a file's recorded edits into contiguous {@link Step}s from `head` to `work`, filling the
  * stretches no record explains with {@link PRE}, {@link GAP}, and {@link TAIL} steps. A file
- * with no edits becomes one {@link UNRECORDED} step.
+ * with no edits becomes one {@link UNRECORDED} step. Edits up to the latest recorded snapshot
+ * equal to `head` are skipped: HEAD already holds them (they were committed meanwhile).
  */
 export function historySteps(
 	head: readonly string[],
@@ -140,7 +141,8 @@ export function historySteps(
 ): Step[] {
 	const steps: Step[] = [];
 	let current = head;
-	edits.forEach((edit, index) => {
+	for (let index = firstUncommitted(head, edits); index < edits.length; index++) {
+		const edit = edits[index];
 		if (!linesEqual(current, edit.before)) {
 			steps.push(
 				index === 0
@@ -151,11 +153,20 @@ export function historySteps(
 		if (!linesEqual(edit.before, edit.after))
 			steps.push({ actor: edit.actor, before: edit.before, after: edit.after });
 		current = edit.after;
-	});
+	}
 	if (!linesEqual(current, work)) {
 		steps.push({ actor: edits.length === 0 ? UNRECORDED : TAIL, before: current, after: work, hint: tailHint });
 	}
 	return steps;
+}
+
+/** Index of the first edit past the latest recorded snapshot equal to `head`; 0 when none is. */
+function firstUncommitted(head: readonly string[], edits: readonly RecordedEdit[]): number {
+	for (let index = edits.length - 1; index >= 0; index--) {
+		if (linesEqual(edits[index].after, head)) return index + 1;
+		if (linesEqual(edits[index].before, head)) return index;
+	}
+	return 0;
 }
 
 /** Changed regions between two line lists, in order (equal runs omitted). */
@@ -215,16 +226,14 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 				over.add(item.by);
 			}
 			if (region.j2 === region.j1) continue;
-			const added = step.after
-				.slice(region.j1, region.j2)
-				.map((text): Item => ({
-					text,
-					alive: true,
-					by: step.actor,
-					over: [...over],
-					step: stepIndex,
-					hint: step.hint,
-				}));
+			const added = step.after.slice(region.j1, region.j2).map((text): Item => ({
+				text,
+				alive: true,
+				by: step.actor,
+				over: [...over],
+				step: stepIndex,
+				hint: step.hint,
+			}));
 			const at =
 				region.i2 > region.i1
 					? aliveAt[region.i2 - 1] + 1
@@ -245,34 +254,66 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 /**
  * Turn a deleted HEAD line and an identical re-inserted line of the same region back into an
  * unchanged HEAD line. Happens when HEAD moved to include content the recorded history deleted
- * and re-added (e.g. part of the work was committed meanwhile). Run after every step, so a later
- * step that deletes the line again is recorded as that step's deletion of a HEAD line.
+ * and re-added (e.g. part of the work was committed meanwhile, possibly only some of it). Run
+ * after every step, so a later step that deletes the line again is recorded as that step's
+ * deletion of a HEAD line.
  */
 function cancelReinsertions(items: Item[]): Item[] {
-	const dropped = new Set<Item>();
+	const out: Item[] = [];
 	let regionStart = 0;
-	const flush = (end: number) => {
-		const dels: Item[] = [];
-		const ins: Item[] = [];
-		for (let index = regionStart; index < end; index++) {
-			const item = items[index];
-			if (!item.alive && item.head !== undefined) dels.push(item);
-			else if (item.alive && item.head === undefined) ins.push(item);
-		}
-		if (dels.length === 0 || ins.length === 0 || dels.length * ins.length > 250_000) return;
-		for (const [del, add] of longestCommonPairs(dels, ins)) {
-			add.head = del.head;
-			dropped.add(del);
-		}
-	};
 	items.forEach((item, index) => {
 		if (item.alive && item.head !== undefined) {
-			flush(index);
+			settleRegion(items, regionStart, index, out);
+			out.push(item);
 			regionStart = index + 1;
 		}
 	});
-	flush(items.length);
-	return dropped.size === 0 ? items : items.filter(item => !dropped.has(item));
+	settleRegion(items, regionStart, items.length, out);
+	return out;
+}
+
+/**
+ * Append `items[start, end)`, the region between two HEAD anchors, to `out` with each deleted
+ * HEAD line paired to an identical re-inserted line restored as one HEAD anchor. Every other item
+ * moves between the restored anchors it falls between on its own side (HEAD order for deleted
+ * HEAD lines, worktree order for the rest), so an unpaired deletion keeps its HEAD position and a
+ * later step re-adding that line lands in the same region.
+ */
+function settleRegion(items: readonly Item[], start: number, end: number, out: Item[]): void {
+	// Inside a region every item carrying a HEAD index is a deleted HEAD line.
+	const dels: Item[] = [];
+	const ins: Item[] = [];
+	for (let index = start; index < end; index++) {
+		const item = items[index];
+		if (item.head !== undefined) dels.push(item);
+		else if (item.alive) ins.push(item);
+	}
+	const pairs =
+		dels.length > 0 && ins.length > 0 && dels.length * ins.length <= 250_000 ? longestCommonPairs(dels, ins) : [];
+	if (pairs.length === 0) {
+		for (let index = start; index < end; index++) out.push(items[index]);
+		return;
+	}
+	// segments[n] holds the unpaired items before restored anchor n; paired deletions are dropped.
+	const segments: Item[][] = Array.from({ length: pairs.length + 1 }, () => []);
+	let headSide = 0;
+	let workSide = 0;
+	for (let index = start; index < end; index++) {
+		const item = items[index];
+		if (item.head !== undefined) {
+			if (pairs[headSide]?.[0] === item) headSide++;
+			else segments[headSide].push(item);
+		} else if (pairs[workSide]?.[1] === item) workSide++;
+		else segments[workSide].push(item);
+	}
+	pairs.forEach(([del, add], n) => {
+		for (const item of segments[n]) out.push(item);
+		// The line is HEAD's now: editing it later must not count as building on its old inserter's work.
+		add.head = del.head;
+		add.by = HEAD;
+		out.push(add);
+	});
+	for (const item of segments[pairs.length]) out.push(item);
 }
 
 /** Matched pairs of a longest common subsequence of the two lists' texts, in order. */
