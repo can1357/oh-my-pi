@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
+- In a compiled omp with no `bun` on PATH, the command `bun` in an eval cell's `Bun.$`, `Bun.spawn` or `child_process` is now bun (the executable re-entered as bun), where Bun's shell previously resolved it to omp itself and started a headless agent with the cell's words as its prompt. An `omp` started from the bash tool or an eval cell with a positional or piped prompt and no `-p` is now refused with an error; pass `-p` to run one on purpose
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation

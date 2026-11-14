@@ -909,6 +909,11 @@ export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
 }
 
+/** Get the directory holding a compiled omp's `bun` shim (~/.omp/cache/bun-shim). */
+export function getBunShimDir(): string {
+	return dirs.rootSubdir(path.join("cache", "bun-shim"), "cache");
+}
+
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
 export function getFastembedCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "fastembed"), "cache");
