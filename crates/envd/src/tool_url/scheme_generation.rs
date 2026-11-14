@@ -1,4 +1,4 @@
-//! Envd-owned URL-scheme generation for ADR 0050 S2–S4.
+//! Envd-owned URL-scheme generation for ADR 0050 S2–S5.
 //!
 //! One [`SchemeGeneration`] is the unknown-scheme broker (`HostResources`) that
 //! `HostUriResolver` already calls. Publish replaces the envd-owned map (same
@@ -8,7 +8,9 @@
 //!
 //! S3 adds declaration-based [`HostUriJudgment`] and live-only line-selector
 //! peel gating via [`SchemeGeneration::is_live`]. S4 adds [`Self::clear_owner`]
-//! for reload / quarantine (D6: not live while the host is down).
+//! for reload / quarantine (D6: not live while the host is down). S5 exposes
+//! [`Self::listing_payload`] for CONTROL `omp.schemes.live` (model-facing
+//! listing; `omp.urls.schemes` stays built-in-only).
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -167,6 +169,29 @@ impl SchemeGeneration {
 	/// Snapshot of every live scheme, in scheme order.
 	pub fn snapshot(&self) -> Vec<LiveScheme> {
 		self.schemes.read().values().cloned().collect()
+	}
+
+	/// Model-facing CONTROL payload for ADR 0050 S5 (`omp.schemes.live`).
+	///
+	/// Built-in wire names never appear here; they stay on `omp.urls.schemes`.
+	#[must_use]
+	pub fn listing_payload(&self) -> serde_json::Value {
+		let schemes = self
+			.snapshot()
+			.into_iter()
+			.map(|live| {
+				serde_json::json!({
+					"name": live.scheme.as_str(),
+					"description": live.description.as_ref().map(Str::as_str),
+					"immutable": live.immutable,
+					"writable": live.writable,
+					"owner": live.owner.as_str(),
+					"fetch": live.fetch,
+					"credentials": live.credentials,
+				})
+			})
+			.collect::<Vec<_>>();
+		serde_json::json!({ "schemes": schemes })
 	}
 
 	/// Whether a spelling is a built-in wire name of the closed vocabulary.
@@ -559,5 +584,26 @@ mod tests {
 		assert!(!generation.is_live("widget"));
 		assert!(generation.is_live("gadget"));
 		assert_eq!(generation.snapshot().len(), 1);
+	}
+
+	#[test]
+	fn listing_payload_is_builtin_free() {
+		let generation = SchemeGeneration::new();
+		assert_eq!(generation.listing_payload()["schemes"].as_array().unwrap().len(), 0);
+		generation
+			.replace_owner("acme.widgets", None, vec![SchemeClaim {
+				scheme:      Str::new_static("widget"),
+				description: Some(Str::new_static("desc")),
+				writable:    false,
+				immutable:   true,
+				fetch:       false,
+				credentials: false,
+			}])
+			.expect("fold");
+		let row = &generation.listing_payload()["schemes"][0];
+		assert_eq!(row["name"], "widget");
+		assert_eq!(row["owner"], "acme.widgets");
+		assert_eq!(row["description"], "desc");
+		assert_eq!(row["immutable"], true);
 	}
 }

@@ -2392,6 +2392,7 @@ impl ControlDomain {
 			Self::Auxiliary => {
 				operation.starts_with("omp.params.")
 					|| operation.starts_with("omp.urls.")
+					|| operation.starts_with("omp.schemes.")
 					|| operation == "omp.state_dir"
 					|| operation == "omp.direct_filesystem.request"
 					|| operation.starts_with("omp.workers.")

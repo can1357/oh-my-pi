@@ -339,11 +339,12 @@ impl ControlAuthority for UndeclaredControlAuthority {
 }
 
 struct ProductionEnvdControlFactory {
-	state_dir:  PathBuf,
-	session_id: Str,
-	telemetry:  Arc<TelemetryIndex>,
-	intents:    Arc<Mutex<BTreeMap<(Str, Str, Str, Str), serde_json::Value>>>,
-	resources:  Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
+	state_dir:         PathBuf,
+	session_id:        Str,
+	telemetry:         Arc<TelemetryIndex>,
+	intents:           Arc<Mutex<BTreeMap<(Str, Str, Str, Str), serde_json::Value>>>,
+	resources:         Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
+	scheme_generation: Arc<crate::SchemeGeneration>,
 }
 
 impl ControlAuthorityFactory for ProductionEnvdControlFactory {
@@ -358,17 +359,19 @@ impl ControlAuthorityFactory for ProductionEnvdControlFactory {
 			telemetry: Arc::clone(&self.telemetry),
 			intents: Arc::clone(&self.intents),
 			resources: Arc::clone(&self.resources),
+			scheme_generation: Arc::clone(&self.scheme_generation),
 		}))
 	}
 }
 
 struct ProductionEnvdControlAuthority {
-	identity:   Arc<ControlConnectionIdentity>,
-	state_dir:  PathBuf,
-	session_id: Str,
-	telemetry:  Arc<TelemetryIndex>,
-	intents:    Arc<Mutex<BTreeMap<(Str, Str, Str, Str), serde_json::Value>>>,
-	resources:  Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
+	identity:          Arc<ControlConnectionIdentity>,
+	state_dir:         PathBuf,
+	session_id:        Str,
+	telemetry:         Arc<TelemetryIndex>,
+	intents:           Arc<Mutex<BTreeMap<(Str, Str, Str, Str), serde_json::Value>>>,
+	resources:         Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
+	scheme_generation: Arc<crate::SchemeGeneration>,
 }
 
 impl ProductionEnvdControlAuthority {
@@ -390,7 +393,7 @@ impl ProductionEnvdControlAuthority {
 #[async_trait::async_trait]
 impl ControlAuthority for ProductionEnvdControlAuthority {
 	fn handles(&self, operation: &str) -> bool {
-		matches!(operation, "omp.state_dir" | "omp.urls.read")
+		matches!(operation, "omp.state_dir" | "omp.urls.read" | "omp.schemes.live")
 	}
 
 	fn authorize(
@@ -413,6 +416,7 @@ impl ControlAuthority for ProductionEnvdControlAuthority {
 			"omp.state_dir" => {
 				Ok(serde_json::Value::String(self.state_dir.to_string_lossy().into_owned()))
 			},
+			"omp.schemes.live" => Ok(self.scheme_generation.listing_payload()),
 			"omp.urls.read" => {
 				let url = _arguments
 					.get("url")
@@ -900,6 +904,7 @@ pub(in crate::server) fn production_control_authorities(
 	convars: Arc<dyn ControlAuthorityFactory>,
 	quota_runtime: ControlQuotaRuntime,
 	extension_tool_call_timeout: Duration,
+	scheme_generation: Arc<crate::SchemeGeneration>,
 ) -> ProductionControlBindings {
 	let resources = Arc::new(sync::OnceLock::new());
 	let manifests = Arc::new(
@@ -961,11 +966,12 @@ pub(in crate::server) fn production_control_authorities(
 	hooks.bind_mcp_drop_journal(Arc::clone(telemetry), session_id.clone());
 	let hooks_factory: Arc<dyn ControlAuthorityFactory> = hooks.clone();
 	let envd: Arc<dyn ControlAuthorityFactory> = Arc::new(ProductionEnvdControlFactory {
-		state_dir:  state_dir.to_path_buf(),
-		session_id: session_id.clone(),
-		telemetry:  Arc::clone(telemetry),
-		intents:    Arc::new(Mutex::new(BTreeMap::new())),
-		resources:  Arc::clone(&resources),
+		state_dir:         state_dir.to_path_buf(),
+		session_id:        session_id.clone(),
+		telemetry:         Arc::clone(telemetry),
+		intents:           Arc::new(Mutex::new(BTreeMap::new())),
+		resources:         Arc::clone(&resources),
+		scheme_generation: Arc::clone(&scheme_generation),
 	});
 	let registry = RegistryControlAuthorities::new(devices, hooks_factory);
 	let gated = |domain| -> Arc<dyn ControlAuthorityFactory> {
