@@ -86,6 +86,14 @@ pub struct GlobOptions<'env> {
 	pub hidden:               Option<bool>,
 	/// Maximum number of results to return.
 	pub max_results:          Option<u32>,
+	/// Maximum number of entries to inspect before asking for a narrower path.
+	pub max_scan_entries:     Option<u32>,
+	/// Maximum accumulated regular-file size in bytes to inspect.
+	pub max_scan_bytes:       Option<u32>,
+	/// Walk-relative glob patterns whose entries never count toward
+	/// `maxScanEntries` / `maxScanBytes` and are omitted from the result; a
+	/// matched directory is not entered.
+	pub exclude_globs:        Option<Vec<String>>,
 	/// Respect .gitignore files (default: true).
 	pub gitignore:            Option<bool>,
 	/// Reuse unchanged directory listings across calls (default: false).
@@ -155,6 +163,9 @@ pub fn glob<'env>(
 		follow_links,
 		hidden,
 		max_results,
+		max_scan_entries,
+		max_scan_bytes,
+		exclude_globs,
 		gitignore,
 		sort_by_mtime,
 		cache,
@@ -172,6 +183,9 @@ pub fn glob<'env>(
 		max_results: max_results.map(|value| value as usize),
 		sort_by_mtime: sort_by_mtime.unwrap_or(false),
 		include_node_modules,
+		max_scan_entries: max_scan_entries.map(u64::from),
+		max_scan_bytes: max_scan_bytes.map(u64::from),
+		exclude: exclude_globs.unwrap_or_default(),
 		walk: pi_walker::walk::Options {
 			hidden: hidden.unwrap_or(false),
 			gitignore: gitignore.unwrap_or(true),
@@ -191,7 +205,8 @@ pub fn glob<'env>(
 			.await
 			.map_err(|err| match err {
 				pi_walker::glob::GlobError::Walk(err) => task::walk_failure(err),
-				err @ pi_walker::glob::GlobError::Pattern(_) => Error::from_reason(err.to_string()),
+				err @ (pi_walker::glob::GlobError::Pattern(_)
+				| pi_walker::glob::GlobError::ScanLimit { .. }) => Error::from_reason(err.to_string()),
 			})?
 			.into_iter()
 			.map(GlobMatch::from)
