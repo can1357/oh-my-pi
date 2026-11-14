@@ -70,6 +70,8 @@ import {
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
+	type BashApprovalPatternRule,
+	type BashPatternApproval,
 	cfgBashAllowCompoundCommands,
 	cfgBashAutoBackgroundEnabled,
 	cfgBashAutoBackgroundThresholdMs,
@@ -231,13 +233,6 @@ export const CRITICAL_BASH_PATTERNS = [
 	// Network-shell exfil.
 	/\bnc\b[^|;]*\s-[a-zA-Z]*[ec][a-zA-Z]*\s/i, // `nc -e` / `nc -c`.
 ] as const;
-
-type BashPatternApproval = "allow" | "deny" | "prompt";
-
-interface BashApprovalPatternRule {
-	match: string;
-	approval: BashPatternApproval;
-}
 
 function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");

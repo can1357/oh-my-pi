@@ -546,26 +546,55 @@ function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setti
 	}
 }
 
+const PATH_SCOPE_KEYS = ["path", "paths", "pathPrefix", "pathPrefixes"] as const;
+
+function hasPathScopeKey(entry: object): boolean {
+	return PATH_SCOPE_KEYS.some(key => Object.hasOwn(entry, key));
+}
+
+function objectArrayFromUnknown(value: unknown): Record<string, unknown>[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter(
+		(item): item is Record<string, unknown> =>
+			typeof item === "object" && item !== null && !Array.isArray(item) && !hasPathScopeKey(item),
+	);
+}
+
+function stripPathScopeKeys(entry: Record<string, unknown>): Record<string, unknown> {
+	const { path: _path, paths: _paths, pathPrefix: _prefix, pathPrefixes: _prefixes, ...rest } = entry;
+	return rest;
+}
+
 /** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
 function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string): unknown {
 	const value = getByPath(merged, setting.segments);
 	if (value === undefined || value === null) return undefined;
-	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
+	return resolvePathScopedArray(setting, value, cwd) ?? value;
 }
 
-function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
+function resolvePathScopedArray(setting: AnySetting, value: unknown, cwd: string): unknown[] | undefined {
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
 
-	const resolved: string[] = [];
+	const itemType = scope.itemType ?? "string";
+	const extract = itemType === "object" ? objectArrayFromUnknown : stringArrayFromUnknown;
+	const resolved: unknown[] = [];
+	let hasUnscopedEntry = false;
 	for (const entry of value) {
-		if (typeof entry === "string") {
+		if (itemType === "string" && typeof entry === "string") {
+			hasUnscopedEntry = true;
 			resolved.push(entry);
 			continue;
 		}
 		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
 
 		const scoped: Record<string, unknown> = entry;
+		if (itemType === "object" && !hasPathScopeKey(scoped)) {
+			hasUnscopedEntry = true;
+			resolved.push(scoped);
+			continue;
+		}
+
 		const prefixes = [
 			...stringArrayFromUnknown(scoped.path),
 			...stringArrayFromUnknown(scoped.paths),
@@ -574,11 +603,28 @@ function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: 
 		];
 		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
 
-		resolved.push(
-			...stringArrayFromUnknown(scoped.values),
-			...stringArrayFromUnknown(scoped.items),
-			...stringArrayFromUnknown(scoped[scope.valuesKey]),
-		);
+		const extracted = [...extract(scoped.values), ...extract(scoped.items), ...extract(scoped[scope.valuesKey])];
+		if (extracted.length > 0) {
+			resolved.push(...extracted);
+		} else if (
+			itemType === "object" &&
+			!Object.hasOwn(scoped, "values") &&
+			!Object.hasOwn(scoped, "items") &&
+			!Object.hasOwn(scoped, scope.valuesKey)
+		) {
+			const inlineRule = stripPathScopeKeys(scoped);
+			if (Object.keys(inlineRule).length > 0) resolved.push(inlineRule);
+		}
+	}
+
+	if (
+		itemType === "object" &&
+		value.length > 0 &&
+		!hasUnscopedEntry &&
+		setting.definition.type === "array" &&
+		setting.definition.default.length > 0
+	) {
+		resolved.push(...setting.definition.default);
 	}
 
 	return resolved;

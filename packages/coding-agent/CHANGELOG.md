@@ -4,6 +4,7 @@
 
 ### Added
 
+- `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
 - Subagents now preserve @upstream provider pinning on inherited models
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.

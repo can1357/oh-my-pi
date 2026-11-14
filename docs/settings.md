@@ -312,7 +312,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 ## Path-scoped arrays
 
-Three array settings — `enabledModels`, `enabledProviders`, and `disabledProviders` — accept path-scoped entries in addition to bare strings, so a single global config can behave differently per directory:
+Five array settings — `enabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` — accept path-scoped entries in addition to unscoped entries, so a single global config can behave differently per directory without maintaining separate `<repo>/.omp/config.yml` files:
 
 ```yaml
 enabledModels:
@@ -329,18 +329,29 @@ disabledProviders:
      providers:
         - anthropic
         - openai
+
+bash:
+   patterns:
+      - path: ~/work/service-repo
+        patterns:
+           - match: "make lint*"
+             approval: allow
+           - match: "make test*"
+             approval: allow
+      - match: "git status*" # applies everywhere
+        approval: allow
 ```
 
-Bare string entries apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
+Unscoped entries (bare strings for model/provider lists, or direct rule objects for `bash.patterns` and `bashInterceptor.patterns`) apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
 
 Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `pathPrefixes`.
 
 Accepted **value** keys:
 
-- `models` (for `enabledModels`) or `providers` (for `enabledProviders` and `disabledProviders`)
-- `values` or `items` (for any setting)
+- `models` (for `enabledModels`), `providers` (for `enabledProviders` and `disabledProviders`), or `patterns` (for `bash.patterns` and `bashInterceptor.patterns`)
+- `values` or `items` (for any path-scoped setting)
 
-Only string values are kept; malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array.
+For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may either wrap a list under `patterns` / `values` / `items` or attach `path` / `paths` / `pathPrefix` / `pathPrefixes` directly onto a single rule object. When `bashInterceptor.patterns` contains only path-scoped entries and no unscoped rules, `DEFAULT_BASH_INTERCEPTOR_RULES` is retained after any matching scoped rules so built-in interceptors continue to apply outside the scoped directories. Malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array for the active working directory.
 
 ## Provider and source disabling
 
