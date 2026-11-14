@@ -4,6 +4,8 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "../types";
 const LEGACY_INTENT_FIELD = "__intent";
 const RESULT_SUMMARY_LIMIT = 200;
 const ARGUMENT_SUMMARY_LIMIT = 400;
+const PATH_ARGUMENT_KEY =
+	/(?:^|[_-])(?:paths?|files?|filepaths?|filenames?|dirs?|directories?|cwd|urls?|uris?)(?:[_-]|$)/i;
 
 /** Runtime settings for cross-turn tool-call repetition detection. */
 export interface ToolCallLoopGuardOptions {
@@ -47,6 +49,39 @@ function canonicalizeToolCallValue(value: unknown): unknown {
 	return output;
 }
 
+function normalizeToolCallValue(value: unknown, key?: string): unknown {
+	if (Array.isArray(value)) {
+		return value.map(item => normalizeToolCallValue(item, key));
+	}
+	if (typeof value === "string") {
+		const normalizedValue =
+			key !== undefined && PATH_ARGUMENT_KEY.test(key.replace(/([a-z0-9])([A-Z])/g, "$1_$2"))
+				? value
+				: value.replace(/\d+/g, "<n>");
+		return ["string", normalizedValue];
+	}
+	if (typeof value === "number") return ["number"];
+	if (!value || typeof value !== "object") {
+		return value;
+	}
+
+	const input = value as Record<string, unknown>;
+	const output: Record<string, unknown> = {};
+	for (const key of Object.keys(input).sort()) {
+		if (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD) continue;
+		output[key] = normalizeToolCallValue(input[key], key);
+	}
+	return output;
+}
+
+function normalizeAssistantText(message: AssistantMessage): string {
+	const textParts: string[] = [];
+	for (const part of message.content) {
+		if (part.type === "text") textParts.push(part.text);
+	}
+	return textParts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 function summarizeText(text: string, limit: number): string {
 	let summary = text.replace(/\s+/g, " ").trim();
 	if (summary.length > limit) {
@@ -75,6 +110,8 @@ export class ToolCallLoopGuard {
 	#exemptionAlias: ((call: ToolCall) => string | undefined) | undefined;
 	#lastHash: string | undefined;
 	#count = 0;
+	#lastNormalizedHash: string | undefined;
+	#lastAssistantText: string | undefined;
 
 	/** Keeps transport-specific exemption policy outside the shared repetition detector. */
 	constructor(options: ToolCallLoopGuardOptions) {
@@ -96,6 +133,8 @@ export class ToolCallLoopGuard {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
+			this.#lastNormalizedHash = undefined;
+			this.#lastAssistantText = undefined;
 			return null;
 		}
 		if (toolCalls.every(tc => this.#isExempt(tc))) {
@@ -109,7 +148,9 @@ export class ToolCallLoopGuard {
 				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
 				this.#lastHash = undefined;
-				this.#count = 0;
+			this.#count = 0;
+			this.#lastNormalizedHash = undefined;
+			this.#lastAssistantText = undefined;
 			}
 			return null;
 		}
@@ -118,12 +159,28 @@ export class ToolCallLoopGuard {
 			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
 			.sort();
 		const turnHash = JSON.stringify(canonicalCalls);
-		if (turnHash === this.#lastHash) {
+		const normalizedCalls = toolCalls
+			.map(tc => JSON.stringify([tc.name, normalizeToolCallValue(tc.arguments)]))
+			.sort();
+		const normalizedHash = JSON.stringify(normalizedCalls);
+		const assistantText = normalizeAssistantText(turn.message);
+		// The normalized fingerprint only continues the run when the assistant's
+		// own text repeats too, which keeps narration-varying iteration out of
+		// the detector, and argument keys that name paths, files or URLs keep
+		// their values verbatim so a legitimate sweep over distinct files reads
+		// as distinct turns.
+		const normalizedRepeat =
+			assistantText.length > 0 &&
+			normalizedHash === this.#lastNormalizedHash &&
+			assistantText === this.#lastAssistantText;
+		if (turnHash === this.#lastHash || normalizedRepeat) {
 			this.#count++;
 		} else {
-			this.#lastHash = turnHash;
 			this.#count = 1;
 		}
+		this.#lastHash = turnHash;
+		this.#lastNormalizedHash = assistantText.length > 0 ? normalizedHash : undefined;
+		this.#lastAssistantText = assistantText.length > 0 ? assistantText : undefined;
 
 		if (this.#count < this.#threshold) return null;
 		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
