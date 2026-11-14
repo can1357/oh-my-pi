@@ -18,11 +18,9 @@ import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/sett
 import { compileModelPatterns } from "@oh-my-pi/pi-coding-agent/utils/model-patterns";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "./helpers/settings-test-state";
-import liveInstructions from "../src/live/prompts/live-instructions.md" with { type: "text" };
-import advisorSystemPrompt from "../src/prompts/advisor/system.md" with { type: "text" };
-import seancePrompt from "../src/prompts/agents/seance.md" with { type: "text" };
 
-const CONVENTIONS_LINE = "Requirement words: MUST/REQUIRED = mandatory;";
+// The bundled prompt still defines the requirement-word aliases, without pinning the line's wording.
+const NEVER_ALIAS = /`NEVER`\s*=\s*`MUST NOT`/;
 const EMPTY_TREE = {
 	rootPath: "",
 	rendered: "",
@@ -423,7 +421,7 @@ describe("per-model system prompt template", () => {
 							modelSystemPromptTemplates: compile({ claude: templatePath }),
 						}),
 					);
-					expect(result.systemPrompt.join("\n\n")).toContain(CONVENTIONS_LINE);
+					expect(result.systemPrompt.join("\n\n")).toMatch(NEVER_ALIAS);
 					expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
 				} finally {
 					warn.mockRestore();
@@ -436,6 +434,9 @@ describe("per-model system prompt template", () => {
 // Cloud Code Assist answers a request whose prompt cites RFC 2119 next to the
 // canonical keyword list with a bare 429 RESOURCE_EXHAUSTED (upstream #18706),
 // so no bundled prompt cites the RFC or spells out the canonical comma run.
+// Historical wordings both regexes must keep catching:
+//   RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.
+//   RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.
 const RFC2119_CITATION = /RFC[\s-]*2119/i;
 const CANONICAL_KEYWORD_RUN = /MUST,\s*REQUIRED,\s*SHOULD,\s*RECOMMENDED,\s*MAY,\s*OPTIONAL/i;
 
@@ -444,32 +445,22 @@ describe("requirement-words conventions line", () => {
 		await withDiscoveryHome(async ({ cwd }) => {
 			const result = await buildSystemPrompt(options(cwd, { model: "google-antigravity/gemini-3-flash" }));
 			const text = result.systemPrompt.join("\n\n");
-			expect(text.startsWith(CONVENTIONS_LINE)).toBe(true);
+			expect(text).toMatch(NEVER_ALIAS);
 			expect(text).not.toMatch(RFC2119_CITATION);
 			expect(text).not.toMatch(CANONICAL_KEYWORD_RUN);
 		});
 	});
 
-	it("keeps every other bundled prompt with a conventions line free of both", () => {
-		const prompts = { advisorSystemPrompt, liveInstructions, seancePrompt };
-		for (const [name, prompt] of Object.entries(prompts)) {
-			expect({
-				name,
-				conventions: prompt.includes(CONVENTIONS_LINE),
-				citation: RFC2119_CITATION.test(prompt),
-				canonicalRun: CANONICAL_KEYWORD_RUN.test(prompt),
-			}).toEqual({ name, conventions: true, citation: false, canonicalRun: false });
+	it("keeps every bundled prompt under src/ free of both", async () => {
+		const srcDir = path.join(import.meta.dir, "..", "src");
+		const files = await Array.fromAsync(new Bun.Glob("**/*.md").scan(srcDir));
+		expect(files.length).toBeGreaterThan(0);
+		const offenders: string[] = [];
+		for (const file of files.sort()) {
+			const prompt = await Bun.file(path.join(srcDir, file)).text();
+			if (RFC2119_CITATION.test(prompt) || CANONICAL_KEYWORD_RUN.test(prompt)) offenders.push(file);
 		}
-	});
-
-	it("detects both historical fingerprinted wordings", () => {
-		for (const line of [
-			"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
-			"RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
-		]) {
-			expect(RFC2119_CITATION.test(line)).toBe(true);
-			expect(CANONICAL_KEYWORD_RUN.test(line)).toBe(true);
-		}
+		expect(offenders).toEqual([]);
 	});
 });
 
