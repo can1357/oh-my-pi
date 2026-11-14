@@ -193,7 +193,7 @@ ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 
 ## ADR 0050 — extension-declared URL schemes
 
-ADR status: **accepted by the owner 2026-11-11 with conditions**. Placement is ADR 0049 Phase **2S**, after Phase 2 and before Phase 3. Phase 2S does not satisfy a Phase 2 or Phase 3 exit criterion. One PR per slice. S1 may start; S2 to S5 stay gated as the ADR sequences them.
+ADR status: **accepted by the owner 2026-11-11 with conditions**. Placement is ADR 0049 Phase **2S**, after Phase 2 and before Phase 3. Phase 2S does not satisfy a Phase 2 or Phase 3 exit criterion. One PR per slice. S1 and S2 landed; S3 to S5 stay gated as the ADR sequences them.
 
 - **DONE** owner decision (2026-11-11): accept ADR 0050 with conditions.
 - **DONE** owner decision (2026-11-11): D1 one canonical spelling, no aliases in v1.
