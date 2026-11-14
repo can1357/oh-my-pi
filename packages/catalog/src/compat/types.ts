@@ -564,6 +564,11 @@ export type CompiledRefresh =
 			userinfo?: CompiledUserinfo;
 			afterRefresh?: string;
 			headersHook?: string;
+			/**
+			 * Refresh an account only when a request is about to use it: the auth
+			 * broker's background sweep and model discovery leave expiring tokens alone.
+			 */
+			onUseOnly?: boolean;
 	  };
 
 /** One provider's compiled auth policy (`auth/<id>.kdl`). */

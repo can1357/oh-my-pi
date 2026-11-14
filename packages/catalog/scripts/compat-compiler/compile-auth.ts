@@ -664,6 +664,9 @@ function refreshNode(node: KdlNodeView, login: CompiledLogin | undefined): Compi
 				leaf(child, ["hook"]);
 				refresh.afterRefresh = hookName(child, "hook");
 				break;
+			case "on-use-only":
+				refresh.onUseOnly = singleBool(child);
+				break;
 			case "headers-hook":
 				leaf(child, []);
 				refresh.headersHook = singleString(child);

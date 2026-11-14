@@ -24,6 +24,16 @@ export function providerDisabledReason(provider: string): string | undefined {
 	return byId[provider]?.disabled;
 }
 
+/**
+ * Whether `provider` refreshes an OAuth account only when a request is about to
+ * use it (`refresh { on-use-only #true }`): no background sweep and no
+ * discovery-time refresh of the other stored accounts.
+ */
+export function providerRefreshesOnUseOnly(provider: string): boolean {
+	const refresh = byId[provider]?.refresh;
+	return refresh?.kind === "request" && refresh.onUseOnly === true;
+}
+
 /** The account risk a new login must accept first (`login-warning "<text>"`), if declared. */
 export function providerLoginWarning(provider: string): string | undefined {
 	return byId[provider]?.loginWarning;
