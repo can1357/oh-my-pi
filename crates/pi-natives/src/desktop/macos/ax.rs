@@ -12,7 +12,6 @@ use std::{
 	ops::Range,
 	ptr::{self, NonNull},
 	sync::LazyLock,
-	thread,
 	time::{Duration, Instant},
 };
 
@@ -1202,17 +1201,21 @@ impl AxBackend for MacAx {
 			// API has no "unverified" outcome, so refuse before mutating that
 			// surface.
 			ensure_native_text_target(element)?;
+			let current = value_kind(copy_attribute(element, "AXValue"));
 			if !attribute_settable(element, "AXValue") {
+				let number = match &current {
+					ValueKind::Number(number) => Some(&**number),
+					_ => None,
+				};
 				return Err(not_settable(
-					copy_number(element, "AXValue").as_deref(),
+					number,
 					&copy_strings_from_action_names(element).unwrap_or_default(),
 				));
 			}
-			if let Some(current) = copy_date(element, "AXValue") {
-				return set_date_value(element, value, current);
-			}
-			if let Some(current) = copy_number(element, "AXValue") {
-				return set_number_value(element, value, &current);
+			match current {
+				ValueKind::Date(at) => return set_date_value(element, value, at),
+				ValueKind::Number(number) => return set_number_value(element, value, &number),
+				ValueKind::Text => {},
 			}
 			// Apps commit what reaches their field editor; several (Contacts,
 			// Font Book, System Settings search) echo an AXValue write without
@@ -2205,7 +2208,7 @@ fn set_number_value(element: &AXUIElement, text: &str, current: &CFNumber) -> Co
 				copy_number(element, "AXMaxValue").as_deref(),
 			));
 		}
-		thread::sleep(Duration::from_millis(25));
+		control::settle(Duration::from_millis(25));
 	}
 }
 
@@ -2781,6 +2784,26 @@ fn copy_date(element: &AXUIElement, attribute: &str) -> Option<f64> {
 		.downcast::<CFDate>()
 		.ok()?;
 	Some(value.absolute_time())
+}
+
+/// What a value write is written as: the type the element's `AXValue` has
+/// now. A `CFBoolean` is not a number.
+enum ValueKind {
+	Date(f64),
+	Number(CFRetained<CFNumber>),
+	Text,
+}
+
+fn value_kind(value: Option<CFRetained<CFType>>) -> ValueKind {
+	let Some(value) = value else {
+		return ValueKind::Text;
+	};
+	match value.downcast::<CFDate>() {
+		Ok(date) => ValueKind::Date(date.absolute_time()),
+		Err(value) => value
+			.downcast::<CFNumber>()
+			.map_or(ValueKind::Text, ValueKind::Number),
+	}
 }
 
 /// The attribute's value when it is a `CFNumber`; a `CFBoolean` is not one.
@@ -3694,6 +3717,19 @@ mod tests {
 		assert!(number_reached(75.0, &CFNumber::new_i64(75)));
 		assert!(!number_reached(75.5, &CFNumber::new_i64(75)));
 		assert!(!number_reached(150.0, &CFNumber::new_f64(100.0)));
+	}
+
+	#[test]
+	fn a_value_write_takes_the_type_the_value_has_now() {
+		let kind = |value: &CFType| value_kind(Some(CFRetained::from(value)));
+		assert!(matches!(kind(&CFNumber::new_f64(0.0)), ValueKind::Number(_)));
+		assert!(matches!(kind(&CFNumber::new_i32(1)), ValueKind::Number(_)));
+		let at = objc2_core_foundation::CFDate::new(None, 0.0).unwrap();
+		assert!(matches!(kind(&at), ValueKind::Date(_)));
+		// A checkbox that publishes a boolean, and text, take the text path.
+		assert!(matches!(kind(objc2_core_foundation::CFBoolean::new(true)), ValueKind::Text));
+		assert!(matches!(kind(&CFString::from_str("75")), ValueKind::Text));
+		assert!(matches!(value_kind(None), ValueKind::Text));
 	}
 
 	#[test]
