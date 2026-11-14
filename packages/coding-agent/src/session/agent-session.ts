@@ -591,6 +591,7 @@ import {
 } from "../utils/title-settings";
 import {
 	cfgArchiveEnabled,
+	cfgCommitEnabled,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
 	cfgDevAutoqa,
@@ -3126,6 +3127,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgComputerEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("computer.enabled", enabled));
 		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
 		cfgArchiveEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("archive.enabled", enabled));
+		cfgCommitEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("commit.enabled", enabled));
 		cfgBrowserIdleCloseSec.listen(this, seconds => {
 			const ownerId = this.sessionManager.getSessionId() ?? "";
 			// Any change invalidates the armed deadline: cancel first (its
@@ -3186,14 +3188,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` / `archive.enabled` change the live eval preludes; the browser toggle also
+	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` / `archive.enabled` / `commit.enabled` change the live eval preludes; the browser toggle also
 	 * re-filters its MCP tools first. An empty transcript rebuilds the system prompt to advertise
 	 * them; mid-session the cached prompt stays byte-stable and the next user prompt carries a
 	 * hidden prelude notice instead (see {@link SessionTools.takeEvalPreludeNotice}).
 	 * A failed browser switch-on reverts to off.
 	 */
 	async #reconcileEvalPreludeSetting(
-		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled",
+		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled" | "commit.enabled",
 		enabled: boolean,
 	): Promise<void> {
 		try {

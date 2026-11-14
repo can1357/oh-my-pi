@@ -155,6 +155,12 @@ async function resolveConflict(
 
 	await writethroughNoop(absolutePath, bom + newContent, signal);
 	session.bumpFileMutationVersion?.(absolutePath);
+	session.recordFileChange?.({
+		path: absolutePath,
+		tool: "edit",
+		before: bom + originalText,
+		after: bom + newContent,
+	});
 	getEditStore(session).invalidate(absolutePath);
 	const history = session.state?.conflictHistory;
 	history?.invalidate(entry.id);
@@ -373,10 +379,12 @@ async function resolveAllConflicts(
 
 		let bom: string;
 		let text: string;
+		let original: string;
 		const resolvedEntries: ConflictEntry[] = [];
 		let failure: string | undefined;
 		try {
 			({ bom, text } = stripBom(await fs.readFile(absolutePath, "utf8")));
+			original = text;
 		} catch (error) {
 			failedFiles.push({
 				displayPath: sample.displayPath,
@@ -408,6 +416,7 @@ async function resolveAllConflicts(
 
 		await writethroughNoop(absolutePath, bom + text, signal);
 		session.bumpFileMutationVersion?.(absolutePath);
+		session.recordFileChange?.({ path: absolutePath, tool: "edit", before: bom + original, after: bom + text });
 		getEditStore(session).invalidate(absolutePath);
 		for (const entry of resolvedEntries) history.invalidate(entry.id);
 		history.reconcilePath(absolutePath, { blocks: scanConflictLines(text.split("\n"), 1) });

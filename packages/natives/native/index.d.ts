@@ -4243,6 +4243,10 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
+  /** Build the commit from this index file instead of the repository's. */
+  indexPath?: string
+  /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
+  expectedHead?: string
 }
 
 /** Detach copied Git metadata. */

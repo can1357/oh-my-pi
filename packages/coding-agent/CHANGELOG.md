@@ -4,6 +4,7 @@
 
 ### Added
 
+- `/commit` commits only the lines the agent (or one chosen subagent) wrote, preselected from a per-agent edit journal, and never touches other agents' or your staged and unstaged work; agents use the same flow through the eval `commit` namespace (`commit.enabled` turns both off)
 - Pasting styled text (a web page, a document, a copy from Tern's composer) into the composer keeps it as Markdown, and the images it carries attach where they stood; code copied from an editor still pastes as plain code (terminals with paste events: Tern, kitty)
 - Hooks and extensions can listen for `session_clear`, fired after `/clear` resets the context in place, to invalidate cached "already injected" instructions; it is not a `session_switch` and keeps the session id ([#17142](https://github.com/can1357/oh-my-pi/issues/17142), [#17317](https://github.com/can1357/oh-my-pi/pull/17317) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT))
 - `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))

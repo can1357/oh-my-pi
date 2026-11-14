@@ -700,6 +700,19 @@ export const cfgArchiveEnabled = register({
 	},
 });
 
+export const cfgCommitEnabled = register({
+	id: "commit.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Selective commit",
+		description:
+			"Enable the commit eval prelude and /commit: commit only the lines this agent and its subagents wrote",
+	},
+});
+
 export const cfgComputerDisplay = register({
 	id: "computer.display",
 	type: "string",
