@@ -4,7 +4,6 @@ import {
 	findAnthropicCompactionCut,
 	type CompactionPreparation,
 	compact,
-	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	getAnthropicCompactionPayload,
 	NativeCompactionError,
@@ -105,7 +104,7 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		],
 		isSplitTurn: false,
 		tokensBefore: 100_000,
-		fileOps: createFileOps(),
+		fileOps: snapcompact.createFileOps(),
 		settings: { ...DEFAULT_COMPACTION_SETTINGS },
 		...overrides,
 	};
@@ -254,6 +253,7 @@ describe("compact() Anthropic native lane", () => {
 			remoteSystemPrompt: ["You are the live agent."],
 			tools,
 			extraContext: ["Branch: main"],
+			loadExtraContext: async () => ["Fresh memory"],
 		});
 
 		expect(completeSimple).not.toHaveBeenCalled();
@@ -266,7 +266,7 @@ describe("compact() Anthropic native lane", () => {
 		// The first kept message is an assistant turn: metadata due before it closes the range.
 		expect(options.anthropicCompaction).toEqual({ instructions: expect.any(String), filesDueBefore: 2 });
 		const instructions = options.anthropicCompaction?.instructions ?? "";
-		expect(instructions).toContain("<additional-context>\n- Branch: main\n</additional-context>");
+		expect(instructions).toContain("<additional-context>\n- Branch: main\n- Fresh memory\n</additional-context>");
 		expect(instructions).toContain("## Goal");
 		expect(instructions).toContain("The conversation above is the complete history to summarize.");
 		expect(instructions).not.toContain("retained");
@@ -951,7 +951,7 @@ describe("compact() Anthropic native lane", () => {
 				],
 				turnPrefixMessages: [],
 				tokensBefore: 50_000,
-				fileOps: createFileOps(),
+				fileOps: snapcompact.createFileOps(),
 			});
 			expect(archived.summary).toContain("¶think:");
 			return { previousSummary: archived.summary, previousPreserveData: archived.preserveData };

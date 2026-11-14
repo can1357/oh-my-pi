@@ -1801,7 +1801,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("rejects a tool call whose intent field carries the payload instead of a label", async () => {
+	it("runs a tool call with a long intent instead of rejecting it", async () => {
 		const writeSchema = type({ path: "string", content: "string" });
 		const written: Record<string, unknown>[] = [];
 		const writeTool: AgentTool<typeof writeSchema> = {
@@ -1810,75 +1810,37 @@ describe("agentLoop with AgentMessage", () => {
 			description: "Write a file",
 			parameters: writeSchema,
 			async execute(_toolCallId, params) {
-				written.push(params as Record<string, unknown>);
+				written.push(params);
 				return { content: [{ type: "text", text: `wrote ${params.content.length} bytes` }] };
 			},
 		};
-		// A tool that owns `i` as a real parameter: a long value there is not misplaced.
-		const ownedSchema = type({ value: "string", [`${INTENT_FIELD}?`]: "string" });
-		const ownedRuns: string[] = [];
-		const ownedTool: AgentTool<typeof ownedSchema> = {
-			name: "owned",
-			label: "Owned",
-			description: "Owns i",
-			parameters: ownedSchema,
-			async execute(_toolCallId, params) {
-				ownedRuns.push(params.value);
-				return { content: [{ type: "text", text: "ok" }] };
-			},
-		};
-		const body = `# Guide\n\n${"Explains how the query pipeline is reconstructed.\n".repeat(20)}`;
-		const call = (id: string, name: string, args: Record<string, unknown>) => ({
-			type: "toolCall" as const,
-			id,
-			name,
-			arguments: args,
-		});
+		const intent = `Writing reconstruction guide for ${"queries across session boundaries ".repeat(10)}`.trim();
 		const mock = createMockModel({
 			responses: [
 				{
 					content: [
-						call("swapped", "write", {
-							path: "guide.md",
-							[INTENT_FIELD]: body,
-							content: "Writing reconstruction guide",
-						}),
-						call("normal", "write", { path: "notes.md", [INTENT_FIELD]: "Writing notes", content: "hello" }),
-						call("at-limit", "write", { path: "limit.md", [INTENT_FIELD]: "x".repeat(200), content: "a" }),
-						call("over-limit", "write", { path: "over.md", [INTENT_FIELD]: "x".repeat(201), content: "b" }),
-						call("owned", "owned", { value: "kept", [INTENT_FIELD]: body }),
-						call("unknown", "nope", { [INTENT_FIELD]: body }),
+						{
+							type: "toolCall",
+							id: "write-guide",
+							name: "write",
+							arguments: { path: "guide.md", [INTENT_FIELD]: intent, content: "# Guide" },
+						},
 					],
 				},
 				{ content: ["done"] },
 			],
 		});
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [writeTool, ownedTool] };
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [writeTool] };
 
 		const messages = await agentLoop([createUserMessage("run")], context, config, undefined, mock.stream).result();
-		const results = new Map(
-			messages.filter((m): m is ToolResultMessage => m.role === "toolResult").map(r => [r.toolCallId, r]),
-		);
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult");
 		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
-		const atLimitCall = assistant?.content.find(c => c.type === "toolCall" && c.id === "at-limit");
-		const unknownText = (results.get("unknown")?.content ?? [])
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map(c => c.text)
-			.join("\n");
+		const call = assistant?.content.find(c => c.type === "toolCall");
 
-		// The swapped call must not run with the one-line `content`: the model is
-		// told to retry instead of believing the body was written.
-		expect(written).toEqual([
-			{ path: "notes.md", content: "hello" },
-			{ path: "limit.md", content: "a" },
-		]);
-		expect(results.get("swapped")?.isError).toBe(true);
-		expect(results.get("over-limit")?.isError).toBe(true);
-		expect(results.get("normal")?.isError).toBe(false);
-		expect(atLimitCall?.type === "toolCall" && atLimitCall.intent).toBe("x".repeat(200));
-		expect(ownedRuns).toEqual(["kept"]);
-		expect(unknownText).toContain("Tool nope not found");
+		expect(result?.isError).toBe(false);
+		expect(written).toEqual([{ path: "guide.md", content: "# Guide" }]);
+		expect(call?.type === "toolCall" && call.intent).toBe(intent);
 	});
 
 	it("runs shared tools in parallel and records results in call order", async () => {
@@ -2535,6 +2497,131 @@ describe("agentLoop with AgentMessage", () => {
 		// The exclusive call waited for every shared call to finish.
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.slow);
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.fast);
+	});
+
+	it("tells a call when the earlier writing calls running beside it have settled", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec'", exclusive: "boolean?" });
+		const log: string[] = [];
+		// What the loop handed each call, by call id.
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const writeStarted = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			approval: "read",
+			concurrency: args => (args.exclusive === true ? "exclusive" : "shared"),
+			async execute(toolCallId, params) {
+				if (params.value === "write") {
+					writeStarted.resolve();
+					await releaseWrite.promise;
+					// End a few turns after the release, so a call that did not wait logs first.
+					for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+					log.push("write ended");
+				}
+				if (params.value === "read-after") {
+					// Started beside the write, not after it.
+					await writeStarted.promise;
+					releaseWrite.resolve();
+					await settled[toolCallId];
+					log.push("read-after saw effects settled");
+				}
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const call = (value: string, tier: "read" | "exec", exclusive?: true) =>
+			({
+				type: "toolCall",
+				id: `tool-${value}`,
+				name: tier === "exec" ? "write" : "op",
+				arguments: exclusive ? { value, tier, exclusive } : { value, tier },
+			}) as const;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						call("read-before", "read"),
+						call("write", "exec"),
+						call("read-after", "read"),
+						call("barrier", "read", true),
+						call("read-later", "read"),
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = {
+			systemPrompt: [""],
+			messages: [],
+			tools: [tool, { ...tool, name: "write", approval: "exec" }],
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		expect(log).toEqual(["write ended", "read-after saw effects settled"]);
+		// Only the call beside the earlier writing call gets told; nothing that
+		// may write ran before the others in their group.
+		expect(settled["tool-read-after"]).toBeInstanceOf(Promise);
+		expect(settled["tool-read-before"]).toBeUndefined();
+		expect(settled["tool-write"]).toBeUndefined();
+		expect(settled["tool-barrier"]).toBeUndefined();
+		expect(settled["tool-read-later"]).toBeUndefined();
+	});
+
+	it("counts a call as writing by what its approval resolver says for the call's arguments", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec' | 'throw'" });
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			approval: args => {
+				const tier = args && typeof args === "object" && "tier" in args ? args.tier : undefined;
+				if (tier === "throw") throw new Error("cannot classify");
+				return tier === "read" ? "read" : "exec";
+			},
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const call = (value: string, tier: "read" | "exec" | "throw") =>
+			({ type: "toolCall", id: `tool-${value}`, name: "op", arguments: { value, tier } }) as const;
+		const mock = createMockModel({
+			responses: [
+				{ content: [call("read-1", "read"), call("read-2", "read")] },
+				{ content: [call("write", "exec"), call("read-3", "read")] },
+				{ content: [call("unknown", "throw"), call("read-4", "read")] },
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		// A resolver that says "read" for the earlier call's arguments leaves the later call alone;
+		// one that says anything else, or throws, makes it a writer.
+		expect(settled["tool-read-2"]).toBeUndefined();
+		expect(settled["tool-read-3"]).toBeInstanceOf(Promise);
+		expect(settled["tool-read-4"]).toBeInstanceOf(Promise);
 	});
 
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {
@@ -7126,6 +7213,43 @@ describe("agentLoop passive additionalContext", () => {
 		expect(finalMessage.stopReason).toBe("aborted");
 		expect(finalMessage.errorMessage).toBe("Deadline exceeded");
 	});
+
+	it("does not abort the turn when the deadline lies beyond the 32-bit timer range", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createMockModel().model,
+			convertToLlm: identityConverter,
+			// `--max-time 600h`: a single setTimeout of this length overflows and fires in ~1 ms
+			deadline: Date.now() + 600 * 60 * 60 * 1000,
+		};
+		let providerSignalAborted = false;
+		const stream = agentLoop([createUserMessage("Wait")], context, config, undefined, (_model, _context, options) => {
+			options?.signal?.addEventListener("abort", () => {
+				providerSignalAborted = true;
+			});
+			const events = new AssistantMessageEventStream();
+			// Real delay on purpose: the overflowed platform timer must get the chance to fire first.
+			void Bun.sleep(50).then(() => {
+				events.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return events;
+		});
+
+		const messages = await stream.result();
+
+		expect(providerSignalAborted).toBe(false);
+		const finalMessage = messages[messages.length - 1];
+		if (finalMessage.role !== "assistant") throw new Error("Expected assistant message");
+		expect(finalMessage.stopReason).toBe("stop");
+	});
 });
 
 describe("agentLoop streaming snapshots", () => {
@@ -7343,8 +7467,8 @@ describe("agentLoop streaming snapshots", () => {
 		// partial immediately before its push (the mutate-then-push stream
 		// contract). The producer advances in lockstep with the consumer — one
 		// step per observed assistant event — so each snapshot sees exactly the
-		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
-		// free-running timer producer would race ahead during that sleep.
+		// deltas delivered so far; a free-running timer producer could race
+		// ahead of the consumer.
 		const partial = createAssistantMessage([], "stop");
 		let advance = (): void => {};
 		const streamFn = () => {

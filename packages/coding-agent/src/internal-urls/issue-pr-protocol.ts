@@ -19,13 +19,17 @@
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
+ * - `pr://owner/repo/123/diff/2?at=<fetchedAt>` — that cached diff generation,
+ *   not whatever the live row is after a background refresh.
  */
 import issueDoc from "../prompts/internal-urls/issue.md" with { type: "text" };
+import issueReferenceDoc from "../prompts/internal-urls/issue-reference.md" with { type: "text" };
 import {
 	formatRepoRef,
 	getOrFetchIssue,
 	getOrFetchPr,
 	getOrFetchPrDiff,
+	getPinnedPrDiff,
 	githubIssueJsonWithStateReasonFallback,
 	parsePositiveDecimalInt,
 	resolveDefaultRepoMemoized,
@@ -55,6 +59,8 @@ interface ParsedPrDiff {
 	 */
 	mode: "list" | "all" | "slice";
 	index?: number;
+	/** Cache generation (`?at=`). When set, resolution must not read the live row. */
+	fetchedAt?: number;
 }
 
 interface ParsedList {
@@ -200,18 +206,33 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 	}
 
 	// diffParts has already been validated above; scheme is `pr`.
+	const fetchedAt = parsePinnedDiffGeneration(url);
 	if (diffParts.length === 1) {
-		return { kind: "pr-diff", repo, number: num, mode: "list" };
+		return { kind: "pr-diff", repo, number: num, mode: "list", fetchedAt };
 	}
 	const sub = diffParts[1] ?? "";
 	if (sub === "all") {
-		return { kind: "pr-diff", repo, number: num, mode: "all" };
+		return { kind: "pr-diff", repo, number: num, mode: "all", fetchedAt };
 	}
 	const idx = parsePositiveDecimalInt(sub);
 	if (idx === undefined) {
 		throw new Error(`Invalid pr:// diff sub-path '${sub}'. Use 'all' or a 1-indexed file number.`);
 	}
-	return { kind: "pr-diff", repo, number: num, mode: "slice", index: idx };
+	return { kind: "pr-diff", repo, number: num, mode: "slice", index: idx, fetchedAt };
+}
+
+function parsePinnedDiffGeneration(url: InternalUrl): number | undefined {
+	const raw = url.searchParams.get("at");
+	if (raw === null) return undefined;
+	const parsed = parsePositiveDecimalInt(raw);
+	if (parsed === undefined) {
+		throw new Error(`Invalid pr:// diff snapshot '${raw}'. Expected a positive integer cache generation.`);
+	}
+	return parsed;
+}
+
+function diffSnapshotQuery(fetchedAt: number | undefined): string {
+	return fetchedAt === undefined ? "" : `?at=${fetchedAt}`;
 }
 
 async function resolveListRepo(
@@ -370,6 +391,16 @@ function buildSingleResource({
 	};
 }
 
+function loadPinnedPrDiff(repo: string, number: number, fetchedAt: number, settings: ResolveContext["settings"]) {
+	const pinned = getPinnedPrDiff({ repo, number, fetchedAt, settings });
+	if (!pinned) {
+		throw new Error(
+			`pr://${repo}/${number}/diff?at=${fetchedAt} is not available: the pinned snapshot expired, the GitHub cache is disabled, or it was saved under another GitHub account. Run /review again.`,
+		);
+	}
+	return pinned;
+}
+
 async function fetchAndRenderPrDiff(
 	url: InternalUrl,
 	parsed: ParsedPrDiff,
@@ -387,17 +418,21 @@ async function fetchAndRenderPrDiff(
 			);
 		}
 	}
-	const lookup = await getOrFetchPrDiff({
-		cwd,
-		repo,
-		number: parsed.number,
-		signal: context?.signal,
-		settings: context?.settings,
-	});
+	const lookup =
+		parsed.fetchedAt === undefined
+			? await getOrFetchPrDiff({
+					cwd,
+					repo,
+					number: parsed.number,
+					signal: context?.signal,
+					settings: context?.settings,
+				})
+			: loadPinnedPrDiff(repo, parsed.number, parsed.fetchedAt, context?.settings);
 	return renderDiffFamilyResource(url, parsed.mode, parsed.index, lookup, {
 		baseUrl: `pr://${repo}/${parsed.number}`,
 		heading: `Pull Request Diff: ${repo}#${parsed.number}`,
 		noun: "PR",
+		query: diffSnapshotQuery(parsed.fetchedAt),
 	});
 }
 
@@ -411,6 +446,10 @@ export class IssueProtocolHandler implements ProtocolHandler {
 	/** Advertised when `gh` is on PATH; the entry documents `pr://` too. */
 	promptDoc(): string | undefined {
 		return github.available() ? issueDoc.trim() : undefined;
+	}
+
+	promptReference(): string | undefined {
+		return github.available() ? issueReferenceDoc.trim() : undefined;
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {

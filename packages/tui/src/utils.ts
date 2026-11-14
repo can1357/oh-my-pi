@@ -221,6 +221,16 @@ export function replaceTabs(text: string): string {
 	return text.replaceAll("\t", TAB_SPACES);
 }
 
+/** Tabs expanded and line breaks collapsed to spaces, for text confined to one rendered row. */
+export function singleLine(text: string): string {
+	return replaceTabs(text).replace(/[\r\n]+/g, " ");
+}
+
+/** A non-negative integer cell width; non-finite input becomes `fallback`. */
+export function finiteWidth(width: number, fallback = 0): number {
+	return Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : fallback;
+}
+
 /**
  * Returns a string of n spaces. Uses a pre-allocated buffer for efficiency.
  */

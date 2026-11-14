@@ -1,5 +1,6 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
+import { getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
 
@@ -10,8 +11,9 @@ type SkillCommandHost = Pick<
 	| "renderOptimisticSkillMessage"
 	| "clearOptimisticSkillMessage"
 	| "optimisticSkillMessagePending"
+	| "restoreDroppedPrompt"
 > & {
-	session: Pick<InteractiveModeContext["session"], "promptCustomMessage" | "isStreaming">;
+	session: Pick<InteractiveModeContext["session"], "buildUserSkillPrompt" | "promptCustomMessage" | "isStreaming">;
 };
 
 type SkillPromptMessage = Pick<
@@ -41,6 +43,13 @@ interface InvokeSkillCommandOptions {
 	 * does not leave the submission invisible (issue #8895).
 	 */
 	optimistic?: boolean;
+	/** With `queueOnly`: called with the messages the skill prompt pushed onto a queue (see `PromptOptions.onPromptQueued`). */
+	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+	/**
+	 * Without `queueOnly`: prompts that must run after the skill, in order (see `PromptOptions.followUps`).
+	 * If the skill fails before reaching the session, it goes back to the editor with them as one list.
+	 */
+	followUps?: string[];
 }
 
 /** Built custom-message payload and delivery options for a `/skill:` command. */
@@ -68,7 +77,7 @@ export async function buildSkillCommandPrompt(
 	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
 	if (!skill) return undefined;
 
-	const built = await buildSkillPromptMessage(skill, parsed, "user");
+	const built = await ctx.session.buildUserSkillPrompt(skill, parsed);
 	const textBlock: TextContent = { type: "text", text: built.message };
 	const promptContent = images && images.length > 0 ? [textBlock, ...images] : built.message;
 
@@ -92,10 +101,16 @@ export async function invokeSkillCommandFromText(
 	options?: InvokeSkillCommandOptions,
 ): Promise<boolean> {
 	let optimistic = false;
+	let reachedSession = false;
 	try {
 		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images);
-		if (!built) return false;
-		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
+		if (!built) {
+			restoreUndeliveredList(ctx, text, options);
+			return false;
+		}
+		const promptOptions = options?.queueOnly
+			? { ...built.options, queueOnly: true, onPromptQueued: options.onPromptQueued }
+			: { ...built.options, followUps: options?.followUps };
 		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;
 		if (optimistic) {
 			ctx.renderOptimisticSkillMessage(
@@ -103,10 +118,12 @@ export async function invokeSkillCommandFromText(
 				{ imageLinks: options?.imageLinks },
 			);
 		}
+		reachedSession = true;
 		await ctx.session.promptCustomMessage(built.message, promptOptions);
 		return true;
 	} catch (err) {
 		if (optimistic) ctx.clearOptimisticSkillMessage();
+		if (!reachedSession) restoreUndeliveredList(ctx, text, options);
 		if (options?.propagateErrors) {
 			throw err;
 		}
@@ -119,4 +136,14 @@ export async function invokeSkillCommandFromText(
 			ctx.clearOptimisticSkillMessage();
 		}
 	}
+}
+
+/** The session owns follow-ups it received; a list that never reached it goes back to the editor here. */
+function restoreUndeliveredList(
+	ctx: SkillCommandHost,
+	text: string,
+	options: InvokeSkillCommandOptions | undefined,
+): void {
+	if (!options?.followUps?.length) return;
+	ctx.restoreDroppedPrompt({ text, images: options.images, followUps: options.followUps });
 }

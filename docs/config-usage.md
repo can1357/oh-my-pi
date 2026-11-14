@@ -141,9 +141,9 @@ Behavior:
 - Both `.json` and `.jsonc` are parsed as JSONC.
 - Caches load result until `invalidate()`.
 - Returns tri-state result via `tryLoad()`:
-  - `ok`
-  - `not-found`
-  - `error` (`ConfigError` with schema/parse context)
+   - `ok`
+   - `not-found`
+   - `error` (`ConfigError` with schema/parse context)
 
 Legacy migration still supported:
 
@@ -231,6 +231,7 @@ Providers are sorted by numeric priority (higher first). Full set:
 - VS Code: `20`
 - agents-md (`AGENTS.md` files) / claude-md (standalone `CLAUDE.md` files): `10`
 - mcp-json / ssh-json / managed-skills (auto-learn): `5`
+- ssh-config (`~/.ssh/config` host aliases): `3`
 - Built-in default rules (`builtin-defaults`): `1`
 
 ```text
@@ -251,6 +252,7 @@ vscode                  priority  20
 agents-md / claude-md   priority  10
 mcp-json / ssh-json /
   managed-skills        priority   5
+ssh-config              priority   3
 builtin-defaults        priority   1
 ```
 

@@ -20,6 +20,8 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	zai: () => import("./providers/zai").then(m => new m.ZaiProvider()),
 	exa: () => import("./providers/exa").then(m => new m.ExaProvider()),
 	tinyfish: () => import("./providers/tinyfish").then(m => new m.TinyFishProvider()),
+	keenable: () => import("./providers/keenable").then(m => new m.KeenableProvider()),
+	sofya: () => import("./providers/sofya").then(m => new m.SofyaProvider()),
 	jina: () => import("./providers/jina").then(m => new m.JinaProvider()),
 	kagi: () => import("./providers/kagi").then(m => new m.KagiProvider()),
 	tavily: () => import("./providers/tavily").then(m => new m.TavilyProvider()),
@@ -37,6 +39,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	startpage: () => import("./providers/startpage").then(m => new m.StartpageProvider()),
 	mojeek: () => import("./providers/mojeek").then(m => new m.MojeekProvider()),
 	public: () => import("./providers/public").then(m => new m.PublicWebProvider()),
+	hackernews: () => import("./providers/hackernews").then(m => new m.HackerNewsProvider()),
 };
 
 const GROUNDED_PROVIDER_LOADERS: ProviderRegistry<WebSearchGrounding> = {
@@ -59,6 +62,12 @@ function loadProvider(id: string, loader: ProviderLoader): Promise<SearchProvide
 	return instance;
 }
 
+/** One candidate that failed during a search, in attempt order. */
+export interface SearchProviderFailure {
+	provider: { id: string; label: string };
+	error: unknown;
+}
+
 /** Format one provider failure for the user-facing fallback summary. */
 export function formatSearchProviderFailure(error: unknown, provider: { id: string; label: string }): string {
 	if (error instanceof SearchProviderError) {
@@ -78,9 +87,7 @@ export function formatSearchProviderFailure(error: unknown, provider: { id: stri
 }
 
 /** Format the ordered provider fallback failures for terminal/tool output. */
-export function formatSearchProviderFailures(
-	failures: readonly { provider: { id: string; label: string }; error: unknown }[],
-): string {
+export function formatSearchProviderFailures(failures: readonly SearchProviderFailure[]): string {
 	return failures.map(f => `${f.provider.id}: ${formatSearchProviderFailure(f.error, f.provider)}`).join("; ");
 }
 

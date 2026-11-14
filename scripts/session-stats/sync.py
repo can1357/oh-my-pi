@@ -762,6 +762,10 @@ def parse_file(
                 except json.JSONDecodeError:
                     seq += 1
                     continue
+                # A `\uD83D` escape without its pair decodes to a lone surrogate, which
+                # SQLite's UTF-8 encoding rejects; only such lines pay for the scrub.
+                if b"\\ud" in raw or b"\\uD" in raw:
+                    ev = _scrub_surrogates(ev)
 
                 kind = ev.get("type")
                 ts = parse_iso_ms(ev.get("timestamp"))
@@ -795,6 +799,17 @@ def parse_file(
             row[field_idx] = n
         rec.pending_tokens.clear()
     return rec
+
+
+def _scrub_surrogates(value):
+    """`value` with every lone UTF-16 surrogate in its strings replaced by U+FFFD."""
+    if isinstance(value, str):
+        return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    if isinstance(value, list):
+        return [_scrub_surrogates(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _scrub_surrogates(v) for k, v in value.items()}
+    return value
 
 
 def _parse_worker(item: tuple[Path, bool, int, int]) -> SessionRecords | None:

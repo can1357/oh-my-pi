@@ -27,6 +27,7 @@ On Anthropic, the system cache breakpoint lands on the last block before the fir
 | `SYSTEM.md`                             | Discovered config file | Existing plain-text custom route. Used only when no explicit override is supplied.                                                 |
 | `--append-system-prompt <text-or-file>` | CLI                    | Adds plain text to the rendered prompt. Highest append precedence.                                                                 |
 | `APPEND_SYSTEM.md`                      | Discovered config file | Existing plain-text append route; used when the append flag is absent.                                                             |
+| `systemPromptTemplates`                 | `config.yml` setting   | Per-model Handlebars template file. Used only when no custom prompt above applies. See [Per-model templates](#per-model-templates). |
 
 **CLI precedence:** An explicit `--system-prompt` or `--system-prompt-template` flag wins over discovered `SYSTEM_TEMPLATE.md` and `SYSTEM.md`; an explicit `--append-system-prompt` wins over discovered `APPEND_SYSTEM.md`. The two custom-prompt flags are mutually exclusive, and supplying both fails clearly. An explicitly supplied empty `--system-prompt` literal still counts as explicit and suppresses custom-prompt discovery.
 
@@ -90,7 +91,7 @@ Which automatic inputs reach each kind of session. An input applies only when it
 | Task subagent    | Not inherited | Inherited                 | No                                            | Inherited | Inherited               | No            | `none`      |
 | Advisor/watchdog | Inherited     | Inherited                 | No                                            | No        | No                      | Yes           | None        |
 
-1. Task spawning drops inherited context files whose basename is `agents.md` (case-insensitive). Text pulled in through `@` imports is not filtered, and additional workspace roots are discovered separately.
+1. Task subagents drop every context file whose basename is `agents.md` (case-insensitive), whether inherited from the parent or discovered for an additional workspace root, including the user-level `~/.omp/agent/AGENTS.md`. Text pulled in through `@` imports is not filtered.
 2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Foreign user files require `enabledProviders` opt-in. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
 3. A task agent's `tools:` list does not remove MCP tools or server instructions: the tools stay available top-level or under `xd://`. Plan-mode tasks and children of restricted sessions run with `restrictToolNames`, which drops both.
 
@@ -98,9 +99,11 @@ Which automatic inputs reach each kind of session. An input applies only when it
 
 `SYSTEM_TEMPLATE.md` and `--system-prompt-template <path>` select raw Handlebars source from a file. Programmatic callers can instead pass raw Handlebars source through `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`; those programmatic options are the template itself, not a path. Each route is rendered instead of the bundled `system-prompt.md` with the same live data and registered helpers as that bundled template.
 
-Generated blocks that are outside block 0 remain normal: the `<project-context>` footer (including generated context, active nested-repository context, and append material), computer safety, and provider tool schemas are retained. Data-driven sections that normally live inside the bundled template are not appended by magic. `skills`, `rules`, `alwaysApplyRules`, `toolInventory`, `internalUrls` (one rendered line per internal URL scheme available in the session), `xdevTools`, and `xdevDocs` are available to the template, but each is emitted only if the template references it. In particular, omitting `{{toolInventory}}` or `{{xdevDocs}}` omits that in-block catalog. Mount-notice dedupe follows the rendered output: a template whose block 0 contains an `xd://` reference claims the catalog, one that omits it does not.
+Generated blocks that are outside block 0 remain normal: the `<project-context>` footer (including generated context, active nested-repository context, and append material), computer safety, and provider tool schemas are retained. Data-driven sections that normally live inside the bundled template are not appended by magic. `skills`, `rules`, `alwaysApplyRules`, `toolInventory`, `internalUrls` (one rendered line per internal URL scheme available in the session), `internalUrlReference` (the sub-path, query and limit grammar those lines leave out, one line per scheme; the bundled template inlines it only when `read` is absent, since `read xd://read/urls` serves it on demand), `xdevTools`, and `xdevDocs` are available to the template, but each is emitted only if the template references it. In particular, omitting `{{toolInventory}}` or `{{xdevDocs}}` omits that in-block catalog. Mount-notice dedupe follows the rendered output: a template whose block 0 contains an `xd://` reference claims the catalog, one that omits it does not.
 
 The generated project/footer route already renders `contextFiles` and `appendPrompt` once. A template SHOULD NOT render those fields in block 0 unless it intentionally wants duplicate copies.
+
+`/context` shows each context file and skill in its own category when an `{{#each}}` iteration renders it on lines of its own, outside helper blocks such as `{{#list}}`; a template that lists skills on one line or through a helper keeps them in System Prompt. Instruction files come from the project block, so the template does not affect their attribution.
 
 Use effective session settings and live tool data rather than copying today's rendered prose. `subagent` is true when rendering a task subagent's prompt; the bundled templates use it to replace verification duties with a hand-off to the main agent. `eagerTasks` and `eagerTasksAlways` reflect task settings captured when the session starts, while `xdevDocs`, `toolInventory`, and `toolRefs` reflect mounted devices and tool state whenever the prompt rebuilds. `xdevDocs` also reflects the `tools.xdevDocs` / `tools.xdevInlineDevices` settings used for that rebuild.
 
@@ -124,7 +127,7 @@ on
 
 those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is not exposed as a template value — it rides a per-request reminder on the first user turn together with the session cwd.
 
-Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An explicit malformed or empty template fails clearly and is never downgraded to plain text. Discovered empty templates are skipped. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt; CLI-discovered source is forwarded as explicit SDK input and therefore fails on malformed Handlebars.
+Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / `systemPromptTemplates` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An explicit malformed or empty template fails clearly and is never downgraded to plain text. Discovered empty templates are skipped. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt; CLI-discovered source is forwarded as explicit SDK input and therefore fails on malformed Handlebars.
 
 ## Recipes
 
@@ -184,6 +187,34 @@ Write JSON args as `content` to `xd://<tool>` via `{{toolRefs.write}}`.
 
 This is a complete, runnable Handlebars Markdown template. It uses only built-in block helpers and live fields. It deliberately references `eagerTasksAlways`, `eagerTasks`, `toolInventory`, `xdevTools`, `toolRefs`, and `xdevDocs`; omitted fields would not be inserted automatically.
 
+### Per-model templates
+
+`systemPromptTemplates` in `config.yml` maps model-selector substrings to Handlebars template files. A matching template replaces the bundled `system-prompt.md` for that model:
+
+```yaml
+systemPromptTemplates:
+  "openrouter/qwen": ~/.omp/agent/prompts/qwen-openrouter.md
+  "qwen": ~/.omp/agent/prompts/qwen.md
+```
+
+#### Start from the bundled template
+
+Base every per-model template on the bundled default instruction template. Reference copy: [`system-prompt.md` on GitHub](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) (in a checkout: [`packages/coding-agent/src/prompts/system/system-prompt.md`](../packages/coding-agent/src/prompts/system/system-prompt.md)); use the file from the tag matching your installed version. Copy that file, then adapt its prose for the target model. It carries the tool policy, delegation, and workflow guidance a template written from scratch would lose, plus the sections only the template inserts (`{{toolInventory}}`, `{{skills}}`, `{{rules}}`, `{{alwaysApplyRules}}`, `{{internalUrls}}`, `{{xdevDocs}}`, `{{#if subagent}}`); a template that omits one renders without that section. Follow [Migrate the bundled prompt](#migrate-the-bundled-prompt), and diff your copy against the shipped file after each OMP update.
+
+#### Matching
+
+- Keys match the active `provider/model-id` as case-insensitive substrings.
+- When several keys match, the longest wins regardless of config order (the same rule as `edit.modelVariants`): above, `openrouter/qwen/qwen3-coder` uses `qwen-openrouter.md` and every other qwen model uses `qwen.md`.
+- Blank keys are rejected. Use `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, or `APPEND_SYSTEM.md` for a prompt that applies to every model.
+- Paths must be absolute or start with `~/`. Relative paths are rejected because they would resolve to a different file in each project and subagent worktree.
+
+#### Runtime behavior
+
+- Templates also apply to subagent sessions; keep the `{{#if subagent}}` branches from the bundled template.
+- The prompt re-renders when the selected template changes: on `/model` and role switches, retry-fallback hops, and mid-session edits to `systemPromptTemplates`.
+- Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence; the per-model file is not read while one of them applies.
+- The file is read like a discovered `SYSTEM_TEMPLATE.md`: a missing, empty, or malformed file logs a warning and falls back to the bundled prompt.
+
 ### Replace the personality block
 
 The default template renders a personality block chosen by the `personality` setting (`default`, `friendly`, `pragmatic`, `none`). A user-level `PERSONALITY.md` replaces the selected preset's text:
@@ -225,17 +256,18 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 
 ## Quick reference
 
-| Goal                                                                       | Use                                                                                                              |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                   |
-| Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                 |
-| Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                        |
-| Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                |
-| Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                         |
-| Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                |
-| Replace the personality block while keeping the rest of the default prompt | `PERSONALITY.md`                                                                                                 |
-| Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                           |
-| Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}` |
-| Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                       |
+| Goal                                                                       | Use                                                                                                                    |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
+| Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
+| Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
+| Replace the default instruction block for specific models                  | `systemPromptTemplates` setting, starting from a copy of [`system-prompt.md`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) |
+| Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                      |
+| Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                               |
+| Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                      |
+| Replace the personality block while keeping the rest of the default prompt | `PERSONALITY.md`                                                                                                       |
+| Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                                 |
+| Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}`       |
+| Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                             |
 | Per-directory override                                                     | A supported project config base; native `.omp` and `.agent` / `.agents` custom prompts also support ancestor discovery |
-| Global override                                                            | The active native agent directory, or another supported user config base                                         |
+| Global override                                                            | The active native agent directory, or another supported user config base                                               |

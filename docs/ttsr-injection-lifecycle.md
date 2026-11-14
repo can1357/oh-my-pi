@@ -29,18 +29,14 @@ const ttsrSettings = cfgTtsr.get(settings);
 // Live source: enable/repeat/interrupt/context changes apply on the next check.
 const ttsrManager = new TtsrManager(() => cfgTtsr.get(settings));
 const rulesResult =
-  options.rules !== undefined
-    ? { items: options.rules, warnings: undefined }
-    : await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
-const { rulebookRules, alwaysApplyRules } = bucketRules(
-  rulesResult.items,
-  ttsrManager,
-  {
-    builtinRules: ttsrSettings.builtinRules,
-    disabledRules: ttsrSettings.disabledRules,
-    agentName: resolvedAgentName,
-  },
-);
+	options.rules !== undefined
+		? { items: options.rules, warnings: undefined }
+		: await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
+const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+	builtinRules: ttsrSettings.builtinRules,
+	disabledRules: ttsrSettings.disabledRules,
+	agentName: resolvedAgentName,
+});
 ```
 
 `bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
@@ -170,14 +166,14 @@ Non-interrupting matches split by `matchContext.source`:
 
 - **`source === "tool"` (tool-source match).** The rule is bucketed into `TtsrCoordinator.#perToolInjections`, keyed by the matched tool call's `id`, and marked injected in memory immediately. There is **no** deferred follow-up turn and the stream is not aborted. When the tool actually produces a result, the `afterToolCall` hook returns a rendered `ttsr-tool-reminder.md` block as passive `additionalContext`; agent-core emits it in a separate developer message after the tool result, never as part of tool output (calls dispatched outside the agent loop are covered by the next bullet). It also persists a `ttsr_injection` entry with the consumed rule names. The template payload is:
 
-  ```xml
-  <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
-  ...
-  {{content}}
-  </system-reminder>
-  ```
+   ```xml
+   <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
+   ...
+   {{content}}
+   </system-reminder>
+   ```
 
-  The opening line depends on where the rule comes from: a bundled `builtin-defaults` rule says a built-in style rule matched and asks the model to check what it wrote against the rule, exceptions included, and fix only a real violation; every other rule says a user-defined rule matched and must be complied with.
+   The opening line depends on where the rule comes from: a bundled `builtin-defaults` rule says a built-in style rule matched and asks the model to check what it wrote against the rule, exceptions included, and fix only a real violation; every other rule says a user-defined rule matched and must be complied with.
 
 - **Bridged AgentTool calls (Cursor exec handlers, eval).** These dispatches bypass the agent loop, so `afterToolCall` never runs for them. Finalized inner calls are checked at the `ExtensionToolWrapper` boundary, which passes the call's tool context to `TtsrCoordinator.afterBridgedToolCall`. When that context carries an `addAdditionalContext` sink, the reminder is delivered through it as passive context (the Cursor exec bridge installs a sink whenever the session supplies a tool context, and delivers after its buffered results on the next provider request) and the bridged result stays untouched. A bridged call with no sink has no trusted channel, so the reminder is prepended to its result as a leading text block instead; eval-bridged calls take this fallback today. Prelude host calls (`browser.*`, `computer.*`, `tab.run`) are not AgentTool dispatches and stay outside this path.
 
@@ -207,6 +203,18 @@ A rule can re-trigger only when:
 - `messageCount - lastInjectedAt >= repeatGap`
 
 `messageCount` increments on `turn_end`, so gap is measured in completed turns, not stream chunks.
+
+### Per-rule override and `repeatMode: "always"`
+
+A rule's own `repeatMode` frontmatter key (`once`, `after-gap`, or `always`) overrides the global setting for that rule; the gap is still the global `repeatGap`.
+
+`always` is rule-level only and is the gap check with `repeatGap = 1`: the rule fires at most once per turn and is eligible again once the turn its reminder landed in has ended. The record is the turn the reminder lands in, never earlier than the current turn:
+
+- Tool reminders (`afterToolCall`) and bridged blocks land in the triggering turn, so the next turn can fire the rule again.
+- An interrupt's reminder lands in the `ttsr-interrupt` retry. The coordinator captures that turn (current turn + 1) when it aborts, so the retry stays exempt even if the timer-driven retry task records it before the aborted turn's `turn_end` is processed.
+- Deferred reminders and judged warnings are recorded again when their message is delivered, which is after the triggering turn ends; the `ttsr-injection` continuation or aside turn they start is that turn.
+
+A turn spawned by a reminder therefore cannot re-fire the same rule: each firing starts at most one extra turn, and a model that repeats the match while answering the reminder is not interrupted or prompted again.
 
 ## 6. Event emission and extension/hook surfaces
 
@@ -253,7 +261,7 @@ Current runtime wiring:
 - non-interrupting tool-source matches are marked in memory when bucketed, then persisted from `afterToolCall` (or the bridged-call postflight) only when the matched tool's result is produced
 - `createAgentSession()` restores `existingSession.injectedTtsrRules` into the manager
 
-Injected-rule suppression is therefore restored from the current branch path. Persistence stores names, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload.
+Injected-rule suppression is therefore restored from the current branch path. Persistence stores names, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload; a resumed `repeatMode: "always"` rule likewise sits out the first turn after resume and is eligible from the second.
 
 ## 8. Race boundaries and ordering guarantees
 

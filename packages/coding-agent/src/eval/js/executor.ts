@@ -9,6 +9,7 @@ import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-tim
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext } from "./context-manager";
+import { formatCellError } from "./error-text";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -27,6 +28,8 @@ export interface JsExecutorOptions {
 	idleTimeoutMs?: number;
 	onChunk?: (chunk: string) => Promise<void> | void;
 	onStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
@@ -67,13 +70,6 @@ function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "
 		return Math.max(1, options.deadlineMs - Date.now());
 	}
 	return options.timeoutMs;
-}
-
-function isAbortError(error: unknown): boolean {
-	return (
-		(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
 }
 
 function isTimeoutReason(reason: unknown): boolean {
@@ -130,9 +126,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		: options.signal;
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
+	const filename = options.filename ?? `js-cell-${crypto.randomUUID()}.js`;
+	const cwd = options.cwd ?? options.session.cwd;
 
 	try {
-		const cwd = options.cwd ?? options.session.cwd;
 		const installOptions = {
 			cwd,
 			packages,
@@ -172,10 +169,11 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			packageEnvironment: install.environment.description,
 			reset: options.reset,
 			code,
-			filename: options.filename ?? `js-cell-${crypto.randomUUID()}.js`,
+			filename,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
+				onReply: options.onReply,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {
@@ -205,7 +203,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		};
 	} catch (error) {
 		const activeSignal = packageWorkComplete ? signal : packageSignal;
-		if (activeSignal?.aborted || isAbortError(error)) {
+		// Every requested cancellation (the caller's signal, the cell timeout, the
+		// package-install timeout) aborts `activeSignal`. An error that merely has
+		// a cancellation-like name, thrown by the cell's own code, is a failure.
+		if (activeSignal?.aborted) {
 			const timedOut = packageWorkComplete
 				? Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason)
 				: isTimeoutReason(packageSignal?.reason);
@@ -233,7 +234,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		const message =
+			error instanceof Error
+				? formatCellError(error.stack ?? error.message, {
+						filename,
+						cwd,
+						header: Error.prototype.toString.call(error),
+					})
+				: String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

@@ -43,6 +43,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -80,7 +82,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 		await prelude.invoke({ action: "open", name, url }, context);
 		try {
 			// Relative paths name files in the session directory, which is not the process cwd. No paths clears the
-			// input. The change listeners read contents asynchronously, so the cell waits for all five entries.
+			// input. The change listeners read contents asynchronously, so the cell waits for all five entries. `window.log`
+			// lives in the page's main world, which `tab.evaluate` reads; `page.waitForFunction` polls the isolated one.
 			const result = await prelude.invoke(
 				{
 					action: "run",
@@ -91,9 +94,10 @@ for (const [selector, files] of [["#direct", ["alpha.txt"]], ["#styled", ["alpha
 	try { await (await tab.waitFor(selector)).uploadFile(...files); }
 	catch (error) { errors.push(selector + ": " + (error instanceof Error ? error.message : String(error))); }
 }
-await tab.page.waitForFunction(() => window.log.length >= 4, { timeout: 5000 }).catch(() => undefined);
+const logged = count => wait(async () => (await tab.evaluate(() => window.log.length)) >= count, { timeout: 5000 }).catch(() => undefined);
+await logged(4);
 await (await tab.waitFor("#direct")).uploadFile();
-await tab.page.waitForFunction(() => window.log.length >= 5, { timeout: 5000 }).catch(() => undefined);
+await logged(5);
 return { errors, log: await tab.evaluate(() => window.log) };`,
 				},
 				context,

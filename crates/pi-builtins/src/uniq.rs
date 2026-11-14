@@ -4,12 +4,12 @@
 
 use std::{
 	ffi::OsString,
+	fmt::NumBuffer,
 	io::{BufRead, BufReader, BufWriter, Write},
 	num::IntErrorKind,
 	path::PathBuf,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use pi_vfs::File;
 use uucore::{
@@ -19,7 +19,7 @@ use uucore::{
 };
 
 use crate::{
-	host::{Host, StreamWriter, Utility, format_usage, matches_parser, strip_errno, util},
+	host::{Host, StreamWriter, Utility, format_usage, matches_parser, strip_errno},
 	locale::shell_locale,
 };
 
@@ -300,22 +300,8 @@ impl UniqState {
 	// Also remove needless explicit lifetimes to satisfy
 	// clippy::needless-lifetimes.
 	fn build_count_prefix(count: usize, buf: &mut [u8; Self::COUNT_PREFIX_BUF_SIZE]) -> &[u8] {
-		let mut digits_buf = [0u8; 20];
-		let mut value = count;
-		let mut idx = digits_buf.len();
-
-		if value == 0 {
-			idx -= 1;
-			digits_buf[idx] = b'0';
-		} else {
-			while value > 0 {
-				idx -= 1;
-				digits_buf[idx] = b'0' + (value % 10) as u8;
-				value /= 10;
-			}
-		}
-
-		let digits = &digits_buf[idx..];
+		let mut digits_buf = NumBuffer::new();
+		let digits = count.format_into(&mut digits_buf).as_bytes();
 		let width = Self::COUNT_PREFIX_WIDTH;
 
 		if digits.len() <= width {
@@ -787,8 +773,7 @@ fn run_uniq(matches: &ArgMatches, host: &mut Host) -> PortResult<()> {
 	let files = matches.get_many::<OsString>(ARG_FILES);
 	let (in_file_name, out_file_name) = files
 		.map(|fi| fi.map(AsRef::as_ref))
-		.map(|mut fi| (fi.next(), fi.next()))
-		.unwrap_or_default();
+		.map_or_default(|mut fi| (fi.next(), fi.next()));
 
 	let uniq = UniqState {
 		repeats_only:    matches.get_flag(options::REPEATED)
@@ -1005,11 +990,6 @@ fn get_delimiter(matches: &ArgMatches) -> Delimiters {
 	} else {
 		Delimiters::None
 	}
-}
-
-/// Creates the `uniq` builtin registration.
-pub(crate) fn uniq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Uniq, SE>()
 }
 
 

@@ -29,6 +29,12 @@ export interface EvalRunnerHost {
 	appendSessionMessage(message: PythonExecutionMessage): void;
 }
 
+export interface PythonExecuteOptions {
+	excludeFromContext?: boolean;
+	/** Receives the `pythonExecution` message the cell is recorded as, once it is persisted or queued for a mid-turn flush. */
+	onRecorded?: (message: PythonExecutionMessage) => void;
+}
+
 /** Owns user-initiated Python execution and retained eval-kernel lifecycle. */
 export class EvalRunner {
 	readonly #host: EvalRunnerHost;
@@ -50,7 +56,7 @@ export class EvalRunner {
 	async executePython(
 		code: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean },
+		options?: PythonExecuteOptions,
 	): Promise<PythonResult> {
 		const excludeFromContext = options?.excludeFromContext === true;
 		const cwd = this.#host.sessionManager.getCwd();
@@ -110,7 +116,7 @@ export class EvalRunner {
 	}
 
 	/** Records a Python execution result in session history. */
-	recordPythonResult(code: string, result: PythonResult, options?: { excludeFromContext?: boolean }): void {
+	recordPythonResult(code: string, result: PythonResult, options?: PythonExecuteOptions): void {
 		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
 		const message: PythonExecutionMessage = {
 			role: "pythonExecution",
@@ -127,6 +133,11 @@ export class EvalRunner {
 			this.#pendingMessages.push(message);
 		} else {
 			this.#host.appendSessionMessage(message);
+		}
+		try {
+			options?.onRecorded?.(message);
+		} catch (error) {
+			logger.error("python onRecorded callback failed", { error: String(error) });
 		}
 	}
 

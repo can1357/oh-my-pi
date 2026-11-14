@@ -175,8 +175,8 @@ describe("mergeDiscoveredModel", () => {
 		const apiKey = `!${JSON.stringify(process.execPath)} -e "${readScript}" ${JSON.stringify(tokenFile)}`;
 		await Bun.write(tokenFile, "token-A");
 		try {
-			// `discoverOpenAIModelsList` bakes a discovery-time resolved bearer
-			// into `model.headers.Authorization`; with `authHeader: true` + a
+			// A discovered model may still carry a stale snapshot bearer in
+			// `model.headers.Authorization`; with `authHeader: true` + a
 			// command-backed `apiKey` and no explicit `headers:` block the merge
 			// must re-derive Authorization from the live `apiKey` instead.
 			const discovered: Model<"openai-completions"> = {

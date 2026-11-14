@@ -29,10 +29,8 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		cwd: "/tmp",
 		tools: new Map(),
 		getTodoPhases: () => phases,
-		setTodoPhases: next => {
+		commitTodoPhases: next => {
 			phases = next;
-		},
-		persistTodoPhases: next => {
 			entries.push({
 				type: "custom",
 				customType: USER_TODO_EDIT_CUSTOM_TYPE,
@@ -61,6 +59,20 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		},
 	};
 }
+
+describe("todo snapshots saved with the retired blocked status", () => {
+	it("read back as pending, in both user-edit and tool-result entries", () => {
+		const saved = [{ name: "Work", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] }];
+		const userEdit = { type: "custom", customType: USER_TODO_EDIT_CUSTOM_TYPE, data: { phases: saved } };
+		const toolResult = {
+			type: "message",
+			message: { role: "toolResult", toolName: "todo", details: { op: "append", phases: saved } },
+		};
+		const expected: TodoPhase[] = [{ name: "Work", tasks: [{ content: "wait", status: "pending" }] }];
+		expect(getLatestTodoPhasesFromEntries([userEdit as SessionEntry])).toEqual(expected);
+		expect(getLatestTodoPhasesFromEntries([toolResult as SessionEntry])).toEqual(expected);
+	});
+});
 
 describe("cursor todo persistence", () => {
 	// The replay test drives the real todo renderer, which reads theme + settings.
@@ -165,25 +177,6 @@ describe("cursor todo persistence", () => {
 		);
 
 		expect(h.reload()[0].tasks.every(task => task.status === "pending")).toBe(true);
-	});
-
-	it("writes nothing when the session exposes no todo state", () => {
-		const entries: SessionEntry[] = [];
-		const handlers = new CursorExecHandlers({
-			cwd: "/tmp",
-			tools: new Map(),
-			persistTodoPhases: next => {
-				entries.push({
-					type: "custom",
-					customType: USER_TODO_EDIT_CUSTOM_TYPE,
-					data: { phases: next },
-				} as SessionEntry);
-			},
-		});
-
-		handlers.todoSync({ merged: false, todos: [{ content: "a", status: "pending" }] }, "call-1");
-
-		expect(entries).toEqual([]);
 	});
 
 	it("refreshes the interactive todo panel, which only reacts to tool_execution_end", () => {

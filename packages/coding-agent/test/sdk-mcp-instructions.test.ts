@@ -242,7 +242,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			agentDir: tempDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({}),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -255,9 +255,10 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			appendSystemPrompt: USER_APPEND_MARKER,
 		});
 		try {
-			// Without `hasUI`, MCP discovery is not deferred: the fixture connects during
-			// session creation, so the first prompt already carries both the server
-			// instructions and the user's append prompt — nothing to wait for.
+			// Without `hasUI`, MCP discovery is not deferred, and a zero startup window
+			// waits for the fixture to connect during session creation (the default
+			// window can end first on a loaded host), so the first prompt already
+			// carries both the server instructions and the user's append prompt.
 			const prompt = session.systemPrompt.join("\n");
 
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
@@ -370,14 +371,17 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(prompt).toContain("omitted");
 			// Every mounted MCP tool is listed exactly once: routed tools on their
 			// route line with the catalog summary, and the tool the bound omits on
-			// its xd:// catalog line.
-			expect(prompt).toContain("- xd://mcp__instr_row_cm — Bounded guidance fixture tool cm.");
+			// its catalog line.
+			expect(prompt).toContain("- mcp__instr_row_cm — Bounded guidance fixture tool cm.");
 			const mountedRows = session
 				.getXdevToolEntries()
 				.map(entry => entry.name)
 				.filter(name => name.startsWith("mcp__instr_row_"));
 			expect(mountedRows).toHaveLength(BOUNDED_GUIDANCE_TOOL_COUNT);
-			expect(mountedRows.filter(name => prompt.split(`xd://${name}`).length !== 2)).toEqual([]);
+			const listings = (name: string) =>
+				prompt.split("\n").filter(line => line.includes(`\`xd://${name}\``) || line.startsWith(`- ${name} — `))
+					.length;
+			expect(mountedRows.filter(name => listings(name) !== 1)).toEqual([]);
 		} finally {
 			await session.dispose();
 		}
@@ -615,4 +619,43 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		expect(lateAlpha.indexOf("### alpha\n")).toBeLessThan(lateAlpha.indexOf("### zeta\n"));
 		expect(await renderSection(["alpha", "zeta"])).toBe(lateAlpha);
 	}, 30_000);
+
+	// Regression for #16882: ACP sessions run with `enableMCP: false` and keep
+	// client-declared servers in a host-owned manager. Their instructions must
+	// reach the prompt through the host source, and leave it once that manager's
+	// servers are gone.
+	it("renders instructions from a host-owned manager when the session has no MCP of its own", async () => {
+		const manager = new MCPManager(tempDir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: false,
+		});
+		try {
+			session.setMcpServerInstructionsSource(() => manager.getServerInstructions());
+			const config: MCPStdioServerConfig = { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
+			await manager.connectServers({ demo: config }, {}, undefined, 0);
+			await session.refreshMCPTools(manager.getTools());
+			expect(session.systemPrompt.join("\n")).toContain(`## MCP Server Instructions`);
+			expect(session.systemPrompt.join("\n")).toContain(`### demo\n${SERVER_INSTRUCTIONS}`);
+
+			await manager.disconnectAll();
+			await session.refreshMCPTools([]);
+			expect(session.systemPrompt.join("\n")).not.toContain(SERVER_INSTRUCTIONS);
+		} finally {
+			await session.dispose();
+			await manager.disconnectAll();
+		}
+	}, 20_000);
 });

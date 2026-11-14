@@ -67,7 +67,7 @@ interface CliOptions {
 	noCache: boolean;
 }
 
-export function parseSince(raw: string): number {
+function parseSince(raw: string): number {
 	const m = /^(\d+)?\s*(h|d|w|mo|m)$/.exec(raw.trim());
 	if (!m) throw new Error(`invalid --since "${raw}" (use e.g. 12h, 3d, 1w, 1mo)`);
 	const n = m[1] ? Number.parseInt(m[1], 10) : 1;
@@ -244,7 +244,7 @@ const TRUNCATED_RESULT_RE = /\[Output truncated - (\d+) tokens?\]/;
 
 /** Group key for repeated-read detection: keep `scheme://` URLs intact and
  * strip trailing line/raw selectors (`:50-200`, `:raw`, `:2-4:raw`, …). */
-export function normalizeReadPath(p: string): string {
+function normalizeReadPath(p: string): string {
 	let out = p;
 	for (;;) {
 		const next = out.replace(/:(?:raw|conflicts|[0-9][0-9+\-,]*)$/i, "");
@@ -307,7 +307,7 @@ interface PendingCall {
 	requestIndex: number;
 }
 
-export async function scanFile(filePath: string): Promise<FileScan | undefined> {
+async function scanFile(filePath: string): Promise<FileScan | undefined> {
 	let text: string;
 	try {
 		text = await Bun.file(filePath).text();

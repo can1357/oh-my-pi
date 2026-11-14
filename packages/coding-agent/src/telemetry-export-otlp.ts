@@ -21,7 +21,7 @@ import type {
 	CostEstimatorContext,
 	ToolStatus,
 } from "@oh-my-pi/pi-agent-core";
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { $otelEnv, logger, postmortem, untilAborted, withOmpOtelEnv } from "@oh-my-pi/pi-utils";
 import {
 	type Attributes,
 	type AttributeValue,
@@ -49,6 +49,8 @@ import type { TelemetryModelPricingResolver, TelemetrySignalConfig } from "./tel
  * telemetry until a batch window elapses or the process exits.
  */
 const FLUSH_INTERVAL_MS = 30_000;
+/** OTLP delivery is best-effort at process exit; a stalled collector must not hold the terminal open. */
+const SHUTDOWN_EXPORT_BUDGET_MS = 750;
 
 const SERVICE_NAME = "oh-my-pi";
 
@@ -146,47 +148,65 @@ export function createTelemetryExportConfig(
 	};
 }
 
-/** Register global trace/log/meter providers for the enabled signals. */
+/**
+ * Register global trace/log/meter providers for the enabled signals.
+ *
+ * The OpenTelemetry SDK reads its `OTEL_*` configuration (exporter endpoint,
+ * headers, timeouts, resource attributes, sampler, batch limits) from
+ * `process.env` at construction. OMP keeps the values from its own `.env` files
+ * out of the process environment, so everything that constructs SDK objects runs
+ * in one synchronous {@link withOmpOtelEnv} window. Nothing here awaits, and the
+ * SDK reads no `OTEL_*` setting at export time; `test/otel-env-window.test.ts`
+ * guards the latter.
+ */
 export async function registerProviders(signalConfig: TelemetrySignalConfig): Promise<void> {
-	// `envDetector` parses OTEL_RESOURCE_ATTRIBUTES (percent-decoded, per spec) and
-	// OTEL_SERVICE_NAME; merged last so both take precedence over the fallback
-	// service.name — with OTEL_SERVICE_NAME still winning service.name inside the
-	// detector itself.
-	const resource = resourceFromAttributes({ "service.name": SERVICE_NAME }).merge(
-		detectResources({ detectors: [envDetector] }),
-	);
+	withOmpOtelEnv(() => {
+		// `envDetector` parses OTEL_RESOURCE_ATTRIBUTES (percent-decoded, per spec) and
+		// OTEL_SERVICE_NAME; merged last so both take precedence over the fallback
+		// service.name — with OTEL_SERVICE_NAME still winning service.name inside the
+		// detector itself.
+		const resource = resourceFromAttributes({ "service.name": SERVICE_NAME }).merge(
+			detectResources({ detectors: [envDetector] }),
+		);
 
-	if (signalConfig.trace) {
-		const exporter = new OTLPTraceExporter();
-		traceProvider = new NodeTracerProvider({
-			resource,
-			spanProcessors: [new BatchSpanProcessor(exporter)],
-		});
-		traceProvider.register({ contextManager: new AsyncLocalStorageContextManager().enable() });
-	}
+		if (signalConfig.trace) {
+			const exporter = new OTLPTraceExporter();
+			traceProvider = new NodeTracerProvider({
+				resource,
+				spanProcessors: [new BatchSpanProcessor(exporter)],
+			});
+			traceProvider.register({ contextManager: new AsyncLocalStorageContextManager().enable() });
+		}
 
-	if (signalConfig.metric) {
-		const exporter = new OTLPMetricExporter();
-		meterProvider = new MeterProvider({
-			resource,
-			readers: [new PeriodicExportingMetricReader({ exporter })],
-		});
-		metrics.setGlobalMeterProvider(meterProvider);
-		metricRecorder = new AgentMetricRecorder(metrics.getMeter("@oh-my-pi/pi-coding-agent"));
-	}
+		if (signalConfig.metric) {
+			const exporter = new OTLPMetricExporter();
+			meterProvider = new MeterProvider({
+				resource,
+				readers: [new PeriodicExportingMetricReader({ exporter })],
+			});
+			metrics.setGlobalMeterProvider(meterProvider);
+			metricRecorder = new AgentMetricRecorder(metrics.getMeter("@oh-my-pi/pi-coding-agent"));
+		}
 
-	if (signalConfig.log) {
-		const exporter = new OTLPLogExporter();
-		logProvider = new LoggerProvider({
-			resource,
-			processors: [new BatchLogRecordProcessor({ exporter })],
-		});
-		logs.setGlobalLoggerProvider(logProvider);
-		otelLogger = logProvider.getLogger("@oh-my-pi/pi-coding-agent");
-		unregisterLogSink = logger.registerLogSink(event => {
-			emitOtelLog(event.level, event.message, logAttributesFromContext(event.context), "omp.log", event.timestamp);
-		});
-	}
+		if (signalConfig.log) {
+			const exporter = new OTLPLogExporter();
+			logProvider = new LoggerProvider({
+				resource,
+				processors: [new BatchLogRecordProcessor({ exporter })],
+			});
+			logs.setGlobalLoggerProvider(logProvider);
+			otelLogger = logProvider.getLogger("@oh-my-pi/pi-coding-agent");
+			unregisterLogSink = logger.registerLogSink(event => {
+				emitOtelLog(
+					event.level,
+					event.message,
+					logAttributesFromContext(event.context),
+					"omp.log",
+					event.timestamp,
+				);
+			});
+		}
+	});
 
 	const flushTimer = setInterval(() => {
 		flushTelemetryExport().catch(() => {});
@@ -201,7 +221,13 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 		if (traceProvider) shutdowns.push(traceProvider.shutdown());
 		if (logProvider) shutdowns.push(logProvider.shutdown());
 		if (meterProvider) shutdowns.push(meterProvider.shutdown());
-		await Promise.all(shutdowns);
+		const timeout = AbortSignal.timeout(SHUTDOWN_EXPORT_BUDGET_MS);
+		try {
+			await untilAborted(timeout, Promise.all(shutdowns));
+		} catch (error) {
+			if (!timeout.aborted) throw error;
+			logger.warn("OTLP export did not finish before process exit", { timeoutMs: SHUTDOWN_EXPORT_BUDGET_MS });
+		}
 	});
 }
 
@@ -382,7 +408,7 @@ function emitOtelLog(
 	timestamp = new Date(),
 ): void {
 	if (!otelLogger) return;
-	const minLevel = parseOtelLogLevel(process.env.OTEL_LOG_LEVEL);
+	const minLevel = parseOtelLogLevel($otelEnv("OTEL_LOG_LEVEL"));
 	if (minLevel === "none") return;
 	if (LOG_LEVEL_WEIGHT[level] > LOG_LEVEL_WEIGHT[minLevel]) return;
 	otelLogger.emit({

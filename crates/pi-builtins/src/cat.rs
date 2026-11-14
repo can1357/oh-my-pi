@@ -13,10 +13,9 @@ use memchr::memchr2;
 use thiserror::Error;
 use uucore::{display::Quotable, fast_inc::fast_inc_one};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use pi_vfs::BlockingFs;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 const LINE_NUMBER_BUF_SIZE: usize = 32;
 
@@ -597,11 +596,6 @@ fn write_end_of_line<W: Write>(
 		writer.flush()?;
 	}
 	Ok(())
-}
-
-/// Creates the `cat` builtin registration.
-pub(crate) fn cat_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cat, SE>()
 }
 
 #[cfg(test)]

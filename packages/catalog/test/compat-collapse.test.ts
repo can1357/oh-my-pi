@@ -476,6 +476,29 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(deduped).toEqual(once);
 	});
 
+	it("keeps every routed member's Antigravity wire profile on the collapsed row", () => {
+		const profiled = (id: string, modelEnum: string) =>
+			memberSpec(id, { antigravityWireProfiles: { [id]: { modelEnum, thinkingBudget: 1000 } } });
+		const fresh = collapseVariants(
+			[profiled("gemini-3.5-flash-extra-low", "M1"), profiled("gemini-3.5-flash-low", "M2")],
+			{ table: antigravityTable },
+		);
+		expect(fresh[0]?.antigravityWireProfiles).toEqual({
+			"gemini-3.5-flash-extra-low": { modelEnum: "M1", thinkingBudget: 1000 },
+			"gemini-3.5-flash-low": { modelEnum: "M2", thinkingBudget: 1000 },
+		});
+
+		// A collapsed snapshot that predates profiles takes the live members' own.
+		const snapshot = collapseVariants(FLASH_TRIPLET(), { table: antigravityTable });
+		const merged = collapseVariants([...snapshot, profiled("gemini-3-flash-agent", "M3")], {
+			table: antigravityTable,
+		});
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.antigravityWireProfiles).toEqual({
+			"gemini-3-flash-agent": { modelEnum: "M3", thinkingBudget: 1000 },
+		});
+	});
+
 	it("keeps gemini-cli flash on the level transport with the original routing", () => {
 		const out = collapseVariants(FLASH_TRIPLET(), { table: geminiCliTable });
 		const flash = out.find(m => m.id === "gemini-3.5-flash");
@@ -1613,6 +1636,33 @@ describe("antigravity discovery collapsing", () => {
 		});
 	});
 
+	it("sends the Cloud Code Assist project in the discovery body only when known", async () => {
+		const bodies: unknown[] = [];
+		const recordingFetcher = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				if (String(input).includes(":fetchAvailableModels")) bodies.push(JSON.parse(String(init?.body)));
+				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		await fetchAntigravityDiscoveryModels({
+			token: "t",
+			endpoint: "https://cca.test",
+			projectId: "p-1",
+			userAgent: "test",
+			fetcher: recordingFetcher,
+		});
+		await fetchAntigravityDiscoveryModels({
+			token: "t",
+			endpoint: "https://cca.test",
+			userAgent: "test",
+			fetcher: recordingFetcher,
+		});
+
+		expect(bodies).toEqual([{ project: "p-1" }, {}]);
+	});
+
 	it("discovers Gemini models through Antigravity before provisioning Cloud Code Assist", async () => {
 		const requestedUrls: string[] = [];
 		const geminiCliFetcher = Object.assign(
@@ -1699,6 +1749,35 @@ describe("antigravity discovery collapsing", () => {
 
 		expect(models?.some(model => model.id.includes("argon"))).toBe(false);
 		expect(models?.some(model => model.id === "gemini-3.1-flash-lite")).toBe(true);
+	});
+
+	it("folds Gemini 4 Hydrogen's four SKUs into one row that routes xhigh to the -xhigh SKU", async () => {
+		const fetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) =>
+				Promise.resolve(
+					String(input).includes(":fetchAvailableModels")
+						? Response.json({
+								models: Object.fromEntries(
+									["low", "medium", "high", "xhigh"].map(tier => [
+										`gemini-4-hydrogen-${tier}`,
+										{ displayName: `Gemini 4 Hydrogen (${tier})`, supportsThinking: true },
+									]),
+								),
+							})
+						: new Response("version: 2.19.1\n"),
+				),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const models = (await fetchAntigravityDiscoveryModels({ token: "t", fetcher }))?.models;
+
+		expect(models?.filter(model => model.id.includes("hydrogen")).map(model => model.id)).toEqual([
+			"gemini-4-hydrogen",
+		]);
+		const hydrogen = models?.find(model => model.id === "gemini-4-hydrogen");
+		expect(hydrogen?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.XHigh]).toBe("gemini-4-hydrogen-xhigh");
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.Low]).toBe("gemini-4-hydrogen-low");
 	});
 
 	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {

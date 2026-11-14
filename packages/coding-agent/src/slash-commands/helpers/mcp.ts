@@ -1,4 +1,3 @@
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import {
@@ -9,11 +8,17 @@ import {
 	setServerDisabled,
 	updateMCPServer,
 } from "../../mcp/config-writer";
+import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 import { MCPManager } from "../../mcp/manager";
-import { getSmitheryApiKey } from "../../mcp/smithery-auth";
-import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
+import {
+	findMcpServerForAuth,
+	MCPOAuthCancelledError,
+	McpReauthRefusalError,
+	reauthorizeMcpServer,
+} from "../../mcp/oauth-reauth";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { parseCommandArgs } from "../../utils/command-args";
+import { openPath } from "../../utils/open";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseNamedScopeArgs, parseSubcommand, usage } from "./parse";
 
@@ -26,14 +31,6 @@ interface ParsedMcpAddArgs {
 	transport: "http" | "sse";
 	authToken?: string;
 	commandTokens?: string[];
-	error?: string;
-}
-
-interface ParsedMcpSearchArgs {
-	keyword: string;
-	scope: AcpMcpScope;
-	limit: number;
-	semantic: boolean;
 	error?: string;
 }
 
@@ -137,63 +134,6 @@ function parseMcpAddArgs(rest: string): ParsedMcpAddArgs {
 	}
 
 	return validateParsedMcpAddArgs(parsed);
-}
-
-function parseMcpSearchArgs(rest: string): ParsedMcpSearchArgs {
-	const tokens = parseCommandArgs(rest);
-	const missingKeyword: ParsedMcpSearchArgs = {
-		keyword: "",
-		scope: "project",
-		limit: 20,
-		semantic: false,
-		error: "Keyword required. Usage: /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-	};
-	if (tokens.length === 0) return missingKeyword;
-
-	const keywordParts: string[] = [];
-	let scope: AcpMcpScope = "project";
-	let limit = 20;
-	let semantic = false;
-
-	for (let index = 0; index < tokens.length; index++) {
-		const token = tokens[index]!;
-		if (token === "--scope") {
-			const value = tokens[index + 1];
-			if (!value || (value !== "project" && value !== "user")) {
-				return { keyword: "", scope, limit, semantic, error: "Invalid --scope value. Use project or user." };
-			}
-			scope = value;
-			index++;
-			continue;
-		}
-		if (token === "--limit") {
-			const value = tokens[index + 1];
-			if (!value) return { keyword: "", scope, limit, semantic, error: "Missing value for --limit." };
-			const parsed = Number(value);
-			if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
-				return {
-					keyword: "",
-					scope,
-					limit,
-					semantic,
-					error: "Invalid --limit value. Use an integer between 1 and 100.",
-				};
-			}
-			limit = parsed;
-			index++;
-			continue;
-		}
-		if (token === "--semantic") {
-			semantic = true;
-			continue;
-		}
-		if (token.startsWith("--")) return { keyword: "", scope, limit, semantic, error: `Unknown option: ${token}` };
-		keywordParts.push(token);
-	}
-
-	const keyword = keywordParts.join(" ").trim();
-	if (!keyword) return { ...missingKeyword, scope, limit, semantic };
-	return { keyword, scope, limit, semantic };
 }
 
 async function withPreparedMcpConnection<T>(
@@ -326,41 +266,6 @@ async function handleAddCommand(rest: string, runtime: SlashCommandRuntime): Pro
 	}
 }
 
-async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
-	const parsed = parseMcpSearchArgs(rest);
-	if (parsed.error) return usage(parsed.error, runtime);
-	try {
-		const apiKey = await getSmitheryApiKey();
-		const results = await searchSmitheryRegistry(parsed.keyword, {
-			limit: parsed.limit,
-			apiKey: apiKey ?? undefined,
-			includeSemantic: parsed.semantic,
-		});
-		if (results.length === 0) {
-			await runtime.output(`No Smithery results found for "${parsed.keyword}".`);
-			return commandConsumed();
-		}
-		await runtime.output(
-			results
-				.map(
-					result =>
-						`${result.display.displayName} (${result.name})${result.display.description ? ` — ${result.display.description}` : ""}`,
-				)
-				.join("\n"),
-		);
-		return commandConsumed();
-	} catch (err) {
-		const message = errorMessage(err);
-		if (AIError.is(AIError.classify(err), AIError.Flag.AuthFailed)) {
-			return usage(
-				"Smithery authentication required. Run /mcp smithery-login in the TUI client or add an API key to ~/.omp/agent/smithery.json.",
-				runtime,
-			);
-		}
-		return usage(`Smithery search failed: ${message}`, runtime);
-	}
-}
-
 async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	try {
 		const userPath = getMCPConfigPath("user", runtime.cwd);
@@ -467,6 +372,98 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 	}
 }
 
+/**
+ * `/mcp reauth <name>` for ACP/text/RPC mode: the shared engine in
+ * `mcp/oauth-reauth.ts` (same browser flow, client-credential assembly, and
+ * persistence policy as the TUI) presented as plain text.
+ *
+ * omp usually runs on the user's machine when driven over ACP (emacs via
+ * agent-shell, Zed), so opening the browser works like the TUI. No clipboard
+ * copy: OSC 52 escape sequences would corrupt the ACP JSON-RPC stream on
+ * stdout, so the URL is emitted as text for the client to render. No
+ * manual-code input either (ACP has no composer to claim), so the OAuth
+ * redirect must reach this machine's local callback server: the printed URL
+ * helps when the browser fails to open, not when omp runs on a remote host.
+ */
+async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	// `reauth` takes no other flags, so the entire rest is the server name —
+	// `validateServerName` permits spaces, and splitting on whitespace (or
+	// un-quoting) would truncate "MaaS Slack" to "MaaS".
+	const name = rest.trim();
+	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
+	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, {
+		preferManager: true,
+		// `mcp.enableProjectConfig: false` opts the project out of project-scoped
+		// config; the lookup must not resurrect (or write bindings for) an
+		// opted-out entry.
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+	});
+	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
+
+	const emit = (text: string): void => {
+		void Promise.resolve(runtime.output(text)).catch(() => {});
+	};
+	const run = async (): Promise<SlashCommandResult> => {
+		try {
+			await reauthorizeMcpServer(name, found, {
+				authStorage: runtime.session.modelRegistry.authStorage,
+				signal: runtime.signal,
+				cwd: runtime.cwd,
+				onReauthorizing: () => emit(`Reauthorizing "${name}"… opening your browser (5 minute timeout).`),
+				onAuth: info => {
+					openPath(info.url);
+					emit(
+						[
+							"━━━ OAuth Authorization Required ━━━",
+							"Opening your browser to authorize. If it did not open:",
+							info.url,
+							...(info.instructions ? ["", info.instructions] : []),
+						].join("\n"),
+					);
+				},
+				onProgress: message => emit(message),
+			});
+			// Ask the host to pick the fresh credential up now when it keeps a
+			// live manager for this server (the ACP session manager does); RPC
+			// and print mode have none, so the guidance says what to do instead.
+			const state = await runtime.reconnectMcpServer?.(name, found.config);
+			const suffix =
+				state === "connected"
+					? " Server reconnected."
+					: state === "connecting"
+						? " Server reconnecting…"
+						: state === "disconnected"
+							? " Server still disconnected; no background retry is armed for a server that never connected — restart the session (or reconnect it interactively) to use the fresh credential."
+							: " Credentials apply on the next connection; restart the session if the server stays disconnected.";
+			emit(`✓ Reauthorized "${name}" (${found.scope} config).${suffix}`);
+			return commandConsumed();
+		} catch (error) {
+			if (error instanceof McpReauthRefusalError) {
+				return usage(error.message, runtime);
+			}
+			if (error instanceof MCPOAuthCancelledError) {
+				emit(`Reauthorization cancelled for "${name}".`);
+				return commandConsumed();
+			}
+			return usage(`Failed to reauthorize server "${name}": ${errorMessage(error)}`, runtime);
+		}
+	};
+
+	// RPC's prompt API must return immediately and keep its serialized command
+	// queue free for `abort`; a browser wait would otherwise park it for up to
+	// five minutes (same dispatch as /compact and /handoff use).
+	if (runtime.runCommandInBackground) {
+		runtime.runCommandInBackground(() =>
+			run().then(
+				() => undefined,
+				() => undefined,
+			),
+		);
+		return commandConsumed();
+	}
+	return await run();
+}
+
 const MCP_HELP_TEXT = [
 	"MCP server management (ACP mode)",
 	"  /mcp list                                               List configured servers",
@@ -477,13 +474,13 @@ const MCP_HELP_TEXT = [
 	"  /mcp resources                                          List resources from all servers",
 	"  /mcp prompts                                            List prompts from all servers",
 	"  /mcp test <name>                                        Test connection to a server",
+	"  /mcp reauth <name>                                      Reauthorize OAuth for a server (opens browser)",
 	"  /mcp add <name> [--scope project|user] [--url <url>]    Add a server (non-interactive)",
 	"  /mcp add <name> [-- <command...>]                       Add a stdio server",
-	"  /mcp smithery-search <kw> [--scope project|user]        Search Smithery registry",
 	"  /mcp help                                               Show this help",
 ].join("\n");
 
-const TUI_ONLY_MCP_VERBS = new Set(["reauth", "unauth", "smithery-login", "smithery-logout", "reconnect"]);
+const TUI_ONLY_MCP_VERBS = new Set(["unauth", "reconnect"]);
 
 /** ACP/text-mode `/mcp` handler. Shared by both dispatchers via the spec. */
 export async function handleMcpAcp(
@@ -511,10 +508,10 @@ export async function handleMcpAcp(
 			return await handlePromptsCommand(runtime);
 		case "test":
 			return await handleTestCommand(rest, runtime);
+		case "reauth":
+			return await handleReauthCommand(rest, runtime);
 		case "add":
 			return await handleAddCommand(rest, runtime);
-		case "smithery-search":
-			return await handleSmitherySearchCommand(rest, runtime);
 		case "reload":
 			await runtime.refreshCommands();
 			await runtime.output("MCP runtime reload requested.");

@@ -10,6 +10,7 @@ import { type } from "@oh-my-pi/omptype";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	compactionContextTokens,
 	DEFAULT_COMPACTION_SETTINGS,
@@ -17,15 +18,12 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
-	type ContextBreakdown,
 	type NonMessageTokenSource,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
-	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	getToolSchemaMetadataRevision,
 	invalidateToolSchemaMetadata,
-	renderContextUsage,
 } from "../src/status-line/context-usage";
 
 const tokenizer = new Tokenizer();
@@ -98,7 +96,7 @@ describe("estimateToolSchemaTokens", () => {
 		expect(reads).toBe(2);
 	});
 
-	it("separates array, tokenizer, and source-revision cache keys", () => {
+	it("separates array, tokenizer, source-revision, and prune-mode cache keys", () => {
 		let reads = 0;
 		const tool = {
 			name: "dynamic",
@@ -109,73 +107,59 @@ describe("estimateToolSchemaTokens", () => {
 			parameters: {},
 		};
 		const tools = [tool];
-		estimateToolSchemaTokens(tools, tokenizer, 1);
-		estimateToolSchemaTokens(tools, tokenizer, 1);
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 1 });
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 1 });
 		expect(reads).toBe(1);
 
-		estimateToolSchemaTokens(tools, tokenizer, 2);
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2 });
 		expect(reads).toBe(2);
-		estimateToolSchemaTokens([...tools], tokenizer, 2);
+		estimateToolSchemaTokens([...tools], tokenizer, { sourceRevision: 2 });
 		expect(reads).toBe(3);
-		estimateToolSchemaTokens(tools, new Tokenizer(), 2);
+		estimateToolSchemaTokens(tools, new Tokenizer(), { sourceRevision: 2 });
 		expect(reads).toBe(4);
+		const full = estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2 });
+		expect(estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2, pruneDescriptions: true })).toBeLessThan(
+			full,
+		);
 	});
 });
 
-/**
- * Contract: the /context panel surfaces estimated snapcompact wire savings —
- * applied swaps show "saves" figures, inactive states say why.
- */
-describe("renderContextUsage snapcompact section", () => {
-	const themeStub = {
-		fg: (_color: string, text: string) => text,
-		bold: (text: string) => text,
-	} as never;
-
-	function breakdownWith(snapcompact: ContextBreakdown["snapcompact"]): ContextBreakdown {
-		return {
-			model: { id: "test-model", name: "Test Model", contextWindow: 200000 } as never,
-			contextWindow: 200000,
-			categories: [],
-			usedTokens: 27929,
-			autoCompactBufferTokens: 0,
-			freeTokens: 172071,
-			snapcompact,
-		};
-	}
-
-	it("renders savings, skip reasons, and the wire total", () => {
-		const output = renderContextUsage(
-			breakdownWith({
-				visionCapable: true,
-				systemPrompt: {
-					applied: true,
-					scope: "all",
-					textTokens: 9768,
-					frames: 2,
-					imageTokens: 6600,
-					savedTokens: 3168,
-				},
-				toolResults: { total: 3, swapped: 0, textTokens: 0, frames: 0, imageTokens: 0, savedTokens: 0 },
-				savedTokens: 3168,
+describe("pruned tool description accounting", () => {
+	// With the catalog inlined into the system prompt, normalizeTools ships each
+	// tool as its name plus the description-stripped schema. Counting the full
+	// specs again double-counts every description (issue #17329).
+	const tools = [
+		{
+			name: "grep",
+			description: `Search files by regex. ${"Supports globs, context lines, and multiline patterns. ".repeat(20)}`,
+			parameters: type({
+				"pattern /** regular expression to search for */": "string",
+				"path? /** file or directory to search */": "string",
 			}),
-			themeStub,
-		);
-		expect(output).toContain("Snapcompact (estimated wire savings)");
-		expect(output).toContain("System prompt (all): saves ~3.2K (9.8K text → 2 frames ≈ 6.6K)");
-		expect(output).toContain("Tool results: none imaged (3 in history)");
-		// 27929 logical − 3168 saved ≈ 25K on the wire.
-		expect(output).toContain("Next request: ~25K tokens on the wire");
-	});
+			examples: [{ caption: "Find TODOs", call: { pattern: "TODO", path: "src" } }],
+		},
+	];
+	const prunedWireTokens = tokenizer.countTokens(
+		(normalizeTools(tools as never, { injectIntent: false, pruneDescriptions: true }) ?? []).flatMap(tool =>
+			[tool.name, tool.description, JSON.stringify(tool.parameters)].filter(part => part !== ""),
+		),
+	);
 
-	it("reports text-only models as inactive", () => {
-		const output = renderContextUsage(breakdownWith({ visionCapable: false, savedTokens: 0 }), themeStub);
-		expect(output).toContain("Snapcompact: inactive (model has no image input)");
-	});
+	it("counts the pruned wire specs while the agent prunes, and the full specs otherwise", () => {
+		const systemPrompt = ["You are an assistant."];
+		let prune = true;
+		const agent = { state: { tools }, prunesToolDescriptions: () => prune };
+		const session: NonMessageTokenSource = { systemPrompt, agent };
+		const pruned = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
+		expect(pruned).toBe(prunedWireTokens);
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + pruned);
 
-	it("omits the section entirely when no snapcompact setting is on", () => {
-		const output = renderContextUsage(breakdownWith(undefined), themeStub);
-		expect(output).not.toContain("Snapcompact");
+		// A model or dialect switch flips pruning on the live agent without replacing the roster.
+		prune = false;
+		const full = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
+		expect(full).toBe(estimateToolSchemaTokens(tools as never, tokenizer));
+		expect(full).toBeGreaterThan(pruned);
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + full);
 	});
 });
 
@@ -293,82 +277,64 @@ describe("computeNonMessageTokens / computeNonMessageBreakdown memoization", () 
 });
 
 /**
- * Contract: the Skills category counts only skills actually rendered into the
- * system prompt (mirroring `buildSystemPrompt`'s filter) — hidden/explicit-only
- * skills, and every skill when the `read` tool is absent, contribute zero. The
- * System-prompt subtraction must not be inflated by unrendered skill metadata
- * and clamped to 0 (issue #6498).
+ * Contract: Skills and Instruction files count exactly the source ranges the prompt build recorded,
+ * through the same attribution `/context` uses; a source whose block changed after the build is
+ * counted with its block instead.
  */
-describe("computeNonMessageBreakdown skills filtering", () => {
-	const readTool = { name: "read", description: "read files", parameters: {} };
-	const hidden = { name: "hidden-skill", description: "X".repeat(4000), filePath: "/s/h.md", hide: true };
-	const visible = { name: "vis", description: "small visible skill", filePath: "/s/v.md" };
-	// First prompt block as rendered: only the visible skill appears.
-	const renderedPrompt = "You are an agent.\nSkills:\n- vis: small visible skill\n";
+describe("computeNonMessageBreakdown prompt sources", () => {
+	const skillLine = "- vis: small visible skill";
+	const file = '<file path="/r/AGENTS.md">\nRules\n</file>';
+	const blocks = [`You are an agent.\n${skillLine}\nEnd.`, `Context:\n${file}`];
+	const systemPromptSources = {
+		blocks,
+		sources: [
+			{ id: "skill-0", kind: "skills" as const, label: "vis", block: 0, start: 18, end: 18 + skillLine.length },
+			{
+				id: "instruction-0",
+				kind: "instruction-files" as const,
+				label: "/r/AGENTS.md",
+				block: 1,
+				start: 9,
+				end: 9 + file.length,
+			},
+		],
+	};
+	const session = (systemPrompt: string[]) =>
+		({ systemPrompt, agent: { state: { tools: [] } }, systemPromptSources }) as never;
 
-	function session(tools: unknown[], skills: unknown[]) {
-		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills } as never;
-	}
-
-	it("excludes hidden skills and does not clamp System prompt to 0", () => {
-		const b = computeNonMessageBreakdown(session([readTool], [hidden, visible]), tokenizer);
-		// Only the visible skill is counted, not the large hidden one.
-		expect(b.skillsTokens).toBe(computeNonMessageBreakdown(session([readTool], [visible]), tokenizer).skillsTokens);
-		expect(b.skillsTokens).toBeLessThan(100);
-		expect(b.systemPromptTokens).toBeGreaterThan(0);
+	it("counts recorded sources apart from their blocks", () => {
+		const b = computeNonMessageBreakdown(session(blocks), tokenizer);
+		expect(b).toMatchObject({
+			skillsTokens: tokenizer.countTokens(skillLine),
+			instructionFilesTokens: tokenizer.countTokens(file),
+			systemPromptTokens: tokenizer.countTokens("You are an agent.\n\nEnd."),
+			systemContextTokens: tokenizer.countTokens("Context:\n"),
+		});
 	});
 
-	it("counts zero Skills tokens when the read tool is unavailable", () => {
-		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
+	it("counts a source with its block once that block changed after the build", () => {
+		const changed = [`${blocks[0]}\nhook addition`, blocks[1]!];
+		const b = computeNonMessageBreakdown(session(changed), tokenizer);
 		expect(b.skillsTokens).toBe(0);
-		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
-	});
-
-	it("counts frozen rendered descriptions, not full source descriptions", () => {
-		const full = { ...visible, description: "Use this skill for browser tasks. ".repeat(50) };
-		const rendered = { ...visible, description: "Use for interactive browser tasks." };
-		const promptText = `You are an agent.\nSkills:\n- vis: ${rendered.description}\n`;
-		const source = {
-			systemPrompt: [promptText],
-			agent: { state: { tools: [readTool] } },
-			skills: [full],
-			renderedSkills: [rendered],
-		};
-		const b = computeNonMessageBreakdown(source as never, tokenizer);
-		expect(b.skillsTokens).toBe(estimateSkillsTokens([rendered], tokenizer));
-		expect(b.skillsTokens).toBeLessThan(estimateSkillsTokens([full], tokenizer));
-		expect(b.systemPromptTokens + b.skillsTokens).toBe(tokenizer.countTokens(promptText));
+		expect(b.systemPromptTokens).toBe(tokenizer.countTokens(changed[0]!));
+		expect(b.instructionFilesTokens).toBe(tokenizer.countTokens(file));
 	});
 });
 
 /**
- * Contract: a tool, skill, or system-prompt section with a missing
- * (`undefined`) description/text must not crash the token estimate. Extensions
- * can contribute tools whose `description` is absent at runtime (the field is
- * typed `string` but the extension API does not enforce it); before the guard,
- * the `undefined` fragment reached the tokenizer and threw, killing every
- * subagent before its first turn (issue #9331). Each path must instead yield a
- * finite, non-negative estimate.
+ * Contract: a tool or system-prompt section with a missing (`undefined`) description/text must not
+ * crash the token estimate. Extensions can contribute tools whose `description` is absent at runtime
+ * (the field is typed `string` but the extension API does not enforce it); before the guard, the
+ * `undefined` fragment reached the tokenizer and threw, killing every subagent before its first turn
+ * (issue #9331). Each path must instead yield a finite, non-negative estimate.
  */
 describe("non-message estimates tolerate a missing description", () => {
 	const readTool = { name: "read", description: "read files", parameters: {} };
-
-	it("computeNonMessageBreakdown does not throw on an undefined skill description", () => {
-		const session = {
-			systemPrompt: ["You are an agent."],
-			agent: { state: { tools: [readTool] } },
-			skills: [{ name: "lens", description: undefined, filePath: "/s/l.md" }],
-		} as never;
-		const b = computeNonMessageBreakdown(session, tokenizer);
-		expect(Number.isFinite(b.skillsTokens)).toBe(true);
-		expect(b.skillsTokens).toBeGreaterThanOrEqual(0);
-	});
 
 	it("computeNonMessageBreakdown does not throw on an undefined system-context section", () => {
 		const session = {
 			systemPrompt: ["primary prompt", undefined, "trailing context"],
 			agent: { state: { tools: [readTool] } },
-			skills: [],
 		} as never;
 		const b = computeNonMessageBreakdown(session, tokenizer);
 		expect(Number.isFinite(b.systemContextTokens)).toBe(true);

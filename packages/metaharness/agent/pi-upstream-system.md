@@ -22,7 +22,6 @@ In addition to the tools above, you may have access to other custom tools depend
 - Show file paths clearly when working with files
 </rules>
 
-
 <cwd>
 {{CWD}}
 </cwd>

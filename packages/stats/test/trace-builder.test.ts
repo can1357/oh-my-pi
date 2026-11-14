@@ -9,7 +9,14 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { buildSessionTrace, getTraceEntry, listSessionSummaries, TracePathError } from "@oh-my-pi/omp-stats/trace";
+import {
+	buildSessionTrace,
+	buildSessionTraceFromSnapshots,
+	getTraceEntry,
+	listSessionSummaries,
+	TracePathError,
+} from "@oh-my-pi/omp-stats/trace";
+import type { SessionEntry, SessionHeader } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -157,17 +164,14 @@ const ROOT_ENTRIES: unknown[] = [
 		},
 	},
 	{
-		type: "message",
+		type: "custom_message",
 		id: "ar1",
 		parentId: "r3",
 		timestamp: iso(T + 50_000),
-		message: {
-			role: "custom",
-			customType: "async-result",
-			timestamp: T + 50_000,
-			content: "job done",
-			details: { jobs: [{ jobId: "job1", type: "bash", durationMs: 8500 }] },
-		},
+		customType: "async-result",
+		content: "job done",
+		display: true,
+		details: { jobs: [{ jobId: "job1", type: "bash", durationMs: 8500 }] },
 	},
 	{
 		type: "message",
@@ -432,16 +436,13 @@ describe("buildSessionTrace", () => {
 				},
 			},
 			{
-				type: "message",
+				type: "custom_message",
 				id: `ar${index}`,
 				parentId: `r${index}`,
 				timestamp: iso(closeAt),
-				message: {
-					role: "custom",
-					customType: "async-result",
-					timestamp: closeAt,
-					details: { jobs: [{ jobId: "bg_1" }] },
-				},
+				customType: "async-result",
+				display: true,
+				details: { jobs: [{ jobId: "bg_1" }] },
 			},
 		];
 		const entries = [
@@ -464,6 +465,81 @@ describe("buildSessionTrace", () => {
 			{ start: T + 6000, end: T + 8000 },
 		]);
 		expect(backgrounds.every(span => span.unterminated === undefined)).toBe(true);
+	});
+
+	it("closes jobs a wait or a proc cancel hands over, so turns end and idle time shows", async () => {
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		const rootFile = path.join(projectDir, "1700000000002_wait.jsonl");
+		const call = (id: string, parentId: string, at: number, name: string) => ({
+			type: "message",
+			id,
+			parentId,
+			timestamp: iso(at),
+			message: { role: "assistant", content: [{ type: "toolCall", id: `c${id}`, name }] },
+		});
+		const result = (id: string, parentId: string, at: number, toolName: string, details: unknown) => ({
+			type: "message",
+			id,
+			parentId,
+			timestamp: iso(at),
+			message: { role: "toolResult", toolCallId: `c${parentId}`, toolName, timestamp: at, details },
+		});
+		const entries = [
+			{ type: "session", version: 3, id: "wait", timestamp: iso(T), cwd: "/tmp/proj" },
+			{ type: "message", id: "u1", parentId: null, timestamp: iso(T + 1000), message: { role: "user" } },
+			call("a1", "u1", T + 1500, "bash"),
+			result("r1", "a1", T + 2000, "bash", { async: { state: "running", jobId: "bg_1", type: "bash" } }),
+			call("a2", "r1", T + 2200, "bash"),
+			result("r2", "a2", T + 2500, "bash", { async: { state: "running", jobId: "bg_2", type: "bash" } }),
+			// Another tool's own `jobs` list is not a handover, even when an id matches.
+			call("a2x", "r2", T + 2600, "ci_status"),
+			result("r2x", "a2x", T + 2800, "ci_status", { jobs: [{ id: "bg_2", status: "completed" }] }),
+			call("a3", "r2x", T + 3000, "wait"),
+			result("r3", "a3", T + 5000, "wait", {
+				op: "wait",
+				jobs: [
+					// Settled before the wait reported it: the span ends at `settledAtMs`.
+					{ id: "bg_1", type: "bash", status: "completed", settledAtMs: T + 4000 },
+					{ id: "bg_2", type: "bash", status: "running" },
+				],
+			}),
+			call("a4", "r3", T + 5500, "write"),
+			result("r4", "a4", T + 6000, "write", {
+				proc: { op: "cancel", jobs: [{ id: "bg_2", type: "bash", status: "cancelled" }] },
+			}),
+			{
+				type: "message",
+				id: "a5",
+				parentId: "r4",
+				timestamp: iso(T + 6500),
+				message: { role: "assistant", timestamp: T + 6200, completedAt: T + 6500, content: [] },
+			},
+			{ type: "message", id: "u2", parentId: "a5", timestamp: iso(T + 20_000), message: { role: "user" } },
+			{
+				type: "message",
+				id: "a6",
+				parentId: "u2",
+				timestamp: iso(T + 21_000),
+				message: { role: "assistant", timestamp: T + 20_000, completedAt: T + 21_000, content: [] },
+			},
+		];
+		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(rootFile, entries.map(entry => JSON.stringify(entry)).join("\n"));
+
+		const trace = await buildSessionTrace(rootFile);
+		const spans = trace.tracks[0].spans;
+
+		expect(
+			spans.filter(span => span.kind === "background").map(span => [span.start, span.end, span.unterminated]),
+		).toEqual([
+			[T + 2000, T + 4000, undefined],
+			[T + 2500, T + 6000, undefined],
+		]);
+		expect(spans.filter(span => span.kind === "turn").map(span => [span.start, span.end])).toEqual([
+			[T + 1000, T + 6500],
+			[T + 20_000, T + 21_000],
+		]);
+		expect(trace.summary.idleMs).toBe(13_500);
 	});
 
 	it("aggregates summary counts, tool stats, and idle time across tracks", async () => {
@@ -574,6 +650,94 @@ describe("buildSessionTrace", () => {
 		await expect(buildSessionTrace(path.join(getSessionsDir(), "..", "escape.jsonl"))).rejects.toThrow(
 			TracePathError,
 		);
+	});
+});
+
+describe("buildSessionTraceFromSnapshots", () => {
+	it("matches live timing, nested linkage, incomplete spans, and summaries without exposing transcript paths", async () => {
+		const rootFile = await writeFixture();
+		const nestedDir = path.join(rootFile.slice(0, -6), "Scout1");
+		await fs.mkdir(nestedDir, { recursive: true });
+		await Bun.write(
+			path.join(nestedDir, "Nested2.jsonl"),
+			ORPHAN_ENTRIES.map(entry => JSON.stringify(entry)).join("\n"),
+		);
+		await Bun.write(
+			path.join(rootFile.slice(0, -6), "__advisor.reviewer.jsonl.gz"),
+			Bun.gzipSync(ORPHAN_ENTRIES.map(entry => JSON.stringify(entry)).join("\n")),
+		);
+
+		const live = await buildSessionTrace(rootFile);
+		const snapshot = buildSessionTraceFromSnapshots(
+			{ entries: ROOT_ENTRIES as SessionEntry[] },
+			{
+				Scout1: { entries: CHILD_ENTRIES as SessionEntry[], parent: null },
+				"Scout1/Nested2": { entries: ORPHAN_ENTRIES as SessionEntry[], parent: "Scout1" },
+				Orphan7: { entries: ORPHAN_ENTRIES as SessionEntry[], parent: null },
+				"__advisor.reviewer": { entries: ORPHAN_ENTRIES as SessionEntry[], parent: null },
+			},
+		);
+
+		expect(snapshot).toEqual({
+			...live,
+			file: "main",
+			mtimeMs: snapshot.mtimeMs,
+			etag: "snapshot",
+			tracks: live.tracks.map(track => ({ ...track, file: track.id })),
+		});
+		expect(snapshot.tracks.map(track => [track.id, track.parentId])).toEqual([
+			["main", null],
+			["Orphan7", "main"],
+			["Scout1", "main"],
+			["Scout1/Nested2", "Scout1"],
+			["__advisor.reviewer", "main"],
+		]);
+		expect(snapshot.tracks[4].label).toBe("Advisor");
+		expect(JSON.stringify(snapshot)).not.toContain(rootFile);
+	});
+
+	it("preserves separate headers and bounds spanless or missing-timestamp snapshots deterministically", () => {
+		const header: SessionHeader = {
+			type: "session",
+			version: 3,
+			id: "header-only",
+			timestamp: iso(T),
+			cwd: "/tmp/proj",
+			title: "Header title",
+		};
+		const snapshot = buildSessionTraceFromSnapshots({ header, entries: [] });
+		expect(snapshot).toMatchObject({
+			file: "main",
+			title: "Header title",
+			cwd: "/tmp/proj",
+			startedAt: T,
+			endedAt: T,
+			mtimeMs: T,
+			summary: { wallMs: 0, requests: 0, subagents: 0 },
+		});
+		expect(buildSessionTraceFromSnapshots({ entries: [] })).toMatchObject({
+			startedAt: 0,
+			endedAt: 0,
+			mtimeMs: 0,
+		});
+	});
+
+	it("retains partial descendants when their parent transcript was unreadable", () => {
+		const snapshot = buildSessionTraceFromSnapshots(
+			{ entries: [] },
+			{ "Missing/Child": { entries: CHILD_ENTRIES as SessionEntry[], parent: "Missing" } },
+		);
+		expect(snapshot.tracks.map(track => [track.id, track.parentId, track.file])).toEqual([
+			["main", null, "main"],
+			["Missing/Child", "main", "Missing/Child"],
+		]);
+		expect(snapshot.tracks[0].spans[0]).toMatchObject({
+			kind: "subagent",
+			childTrackId: "Missing/Child",
+			start: T + 17_100,
+			end: T + 30_000,
+		});
+		expect(snapshot.summary).toMatchObject({ requests: 1, subagents: 1, totalTokens: 500 });
 	});
 });
 

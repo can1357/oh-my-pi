@@ -7,7 +7,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, agentPauseGate, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -35,6 +35,7 @@ describe("AgentSession computer display hold per turn", () => {
 	});
 
 	afterEach(async () => {
+		agentPauseGate.resume();
 		unregister?.();
 		unregister = undefined;
 		if (session) await session.dispose();
@@ -133,6 +134,7 @@ describe("AgentSession computer display hold per turn", () => {
 			resumeDisplay(from, turn) {
 				resumes.push(`${from}->${turn}`);
 			},
+			async reset() {},
 			async close() {},
 		});
 		return session;
@@ -171,6 +173,41 @@ describe("AgentSession computer display hold per turn", () => {
 		await running;
 		expect(releases).toEqual([1]);
 		expect(computerTurnInFlight(owner)).toBeUndefined();
+	});
+
+	it("releases the display hold once a paused agent parks, and resumes it before the next tool", async () => {
+		const target = createSession([{ ...step, delayMs: 50 }, { content: ["done"] }]);
+		let paused = false;
+		const parked = Promise.withResolvers<void>();
+		const waitUntilResumed = agentPauseGate.waitUntilResumed.bind(agentPauseGate);
+		const wait = spyOn(agentPauseGate, "waitUntilResumed").mockImplementation(signal => {
+			parked.resolve();
+			return waitUntilResumed(signal);
+		});
+		const unsubscribe = target.agent.subscribe(event => {
+			if (event.type === "message_start" && event.message.role === "assistant" && !paused) {
+				paused = agentPauseGate.pause();
+				expect(computerTurnInFlight(owner)).toBe(1);
+			}
+		});
+		const running = target.prompt("go");
+		try {
+			await parked.promise;
+			expect(target.agent.isPaused).toBe(true);
+			expect(steps).toEqual([]);
+			expect(computerTurnInFlight(owner)).toBeUndefined();
+			agentPauseGate.resume();
+			await running;
+			expect(steps).toEqual([{ turn: 2, releases: 1 }]);
+			expect(resumes).toEqual(["1->2"]);
+			expect(releases).toEqual([1, 2]);
+		} finally {
+			agentPauseGate.resume();
+			await target.abort();
+			await running.catch(() => undefined);
+			wait.mockRestore();
+			unsubscribe();
+		}
 	});
 
 	it("releases at an interrupt while the prompt's setup is still unwinding", async () => {

@@ -170,13 +170,10 @@ pub fn copy_to_clipboard(text: JsString) -> Result<()> {
 /// is harmless there.
 #[cfg(target_os = "linux")]
 fn set_clipboard_text(text: &str) -> Result<()> {
-	use std::sync::OnceLock;
-
 	use parking_lot::Mutex;
 
-	static CLIPBOARD: OnceLock<Mutex<Option<Clipboard>>> = OnceLock::new();
-	let cell = CLIPBOARD.get_or_init(|| Mutex::new(None));
-	let mut guard = cell.lock();
+	static CLIPBOARD: Mutex<Option<Clipboard>> = Mutex::new(None);
+	let mut guard = CLIPBOARD.lock();
 	if guard.is_none() {
 		*guard = Some(
 			Clipboard::new()

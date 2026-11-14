@@ -14,6 +14,14 @@
  *   of base64 data URLs when images are supplied, and returns Cloudflare's
  *   `{ result, success, errors }` envelope. The credential is a Cloudflare
  *   API token plus the account id the URL needs.
+ * - `liquid-systemone`: Liquid AI's `POST {baseUrl}/decisions/v1/systemone`.
+ *   Same body, verbatim model, plus a top-level array of base64 data URLs
+ *   when images are supplied.
+ * - `nace-systemone`: Nace's Drex at `POST {baseUrl}/v1/systemone`. The
+ *   `liquid-systemone` body: Drex rejects TypeSafe's `assets` map, so images
+ *   go in a top-level array of base64 data URLs. Drex also rejects any text
+ *   holding a base64 media data URL, so each one in `state`, `instructions` or
+ *   `criteria` is replaced by a description (see {@link describeMediaDataUrls}).
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
@@ -204,4 +212,68 @@ export const workersAiWire: JudgmentWire = {
 		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
 	}),
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
+};
+
+/** The verbatim body plus, when images are supplied, a top-level array of their base64 data URLs. */
+function encodeWithImageDataUrls(request: JudgmentRequest, model: string): Record<string, unknown> {
+	return {
+		state: request.state,
+		model,
+		questions: wireQuestions(request.questions),
+		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+	};
+}
+
+/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
+export const liquidWire: JudgmentWire = {
+	...systemOneWire("/decisions/v1/systemone"),
+	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements. The documented 4.5 MB cap covers the
+	// whole JSON body; 3 MB of images is 4 MB as base64, leaving room for state and questions.
+	images: {
+		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+		maxCount: 8,
+		maxTotalBytes: 3_000_000,
+		maxTotalPatches: 10_000,
+	},
+	encode: encodeWithImageDataUrls,
+};
+
+/**
+ * A base64 data URL of an image, audio, video or PDF type, as Drex finds it in any string of `state`,
+ * `instructions` or `criteria` (case-insensitive, anywhere in the string, even with an empty payload) to
+ * answer 422 `is media (image/png data URL)`. Other types, such as `text/plain`, pass.
+ */
+const MEDIA_DATA_URL =
+	/data:((?:image|audio|video)\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*|application\/pdf)(?:;[^;,\s]*)*;base64,[A-Za-z0-9+/=_-]*/gi;
+
+/** `value` with each media data URL in its strings, never its keys, replaced by `[<type> base64 data URL]`. */
+function describeMediaDataUrls(value: unknown): unknown {
+	if (typeof value === "string") return value.replace(MEDIA_DATA_URL, "[$1 base64 data URL]");
+	if (Array.isArray(value)) return value.map(describeMediaDataUrls);
+	if (!isRecord(value)) return value;
+	// `fromEntries` defines own properties, so a `__proto__` key stays an ordinary key.
+	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, describeMediaDataUrls(item)]));
+}
+
+/** Nace Drex decision models (`drex-max-v1.1`, `drex-max-finance`, `drex-v2.0`). */
+export const naceWire: JudgmentWire = {
+	...systemOneWire("/v1/systemone"),
+	// https://console.nace.ai/docs/drex/api-reference/systemone: at most 8 images of at most 40 megapixels,
+	// with state, questions and images serialized together at most 4 MiB; 3 MB of images is 4 MB as base64,
+	// leaving room for state and questions.
+	images: {
+		mimeTypes: ["image/png", "image/jpeg", "image/webp"],
+		maxCount: 8,
+		maxTotalBytes: 3_000_000,
+		maxPixels: 40_000_000,
+	},
+	encode: (request, model) =>
+		encodeWithImageDataUrls(
+			{
+				...request,
+				state: describeMediaDataUrls(request.state) as JudgmentRequest["state"],
+				questions: describeMediaDataUrls(request.questions) as Questions,
+			},
+			model,
+		),
 };

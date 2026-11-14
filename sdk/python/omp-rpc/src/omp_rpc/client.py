@@ -595,6 +595,11 @@ class RpcClient(WireClient):
         with self._state_lock:
             return self._listener_errors.snapshot()
 
+    @property
+    def ready(self) -> ReadyEvent | None:
+        """The server's startup `ready` frame; `None` before `start()` receives it."""
+        return self._ready_event
+
     def start(self) -> RpcClient:
         if self._process is not None:
             raise RpcError("RPC client is already started")
@@ -1756,13 +1761,10 @@ class RpcClient(WireClient):
         def wire_item(
             content: str,
             status: TodoStatus,
-            blocker: object,
             details: object,
             notes: object,
         ) -> JsonObject:
             item: JsonObject = {"content": content, "status": status}
-            if isinstance(blocker, str):
-                item["blocker"] = blocker
             if isinstance(details, str):
                 item["details"] = details
             if isinstance(notes, str):
@@ -1778,7 +1780,7 @@ class RpcClient(WireClient):
             if isinstance(seed, TodoItem):
                 if seed.status not in _TODO_STATUS_VALUES:
                     raise RpcError(f"Unsupported todo status: {seed.status}")
-                return wire_item(seed.content, seed.status, seed.blocker, seed.details, seed.notes)
+                return wire_item(seed.content, seed.status, seed.details, seed.notes)
 
             content = seed.get("content")
             if not isinstance(content, str) or not content.strip():
@@ -1791,9 +1793,7 @@ class RpcClient(WireClient):
                 status: TodoStatus = cast(TodoStatus, raw_status)
             else:
                 status = "pending"
-            return wire_item(
-                content, status, seed.get("blocker"), seed.get("details"), seed.get("notes")
-            )
+            return wire_item(content, status, seed.get("details"), seed.get("notes"))
 
         def is_phase_seed(seed: TodoSeed | TodoPhaseSeed) -> bool:
             if isinstance(seed, TodoPhase):

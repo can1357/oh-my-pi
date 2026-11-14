@@ -51,6 +51,8 @@ interface HarnessOptions {
 	initialActiveTools?: readonly AgentTool[];
 	rebuildGate?: { fail: boolean; calls?: number };
 	xdev?: XdevState;
+	/** Registers the built-in `write` only once plan mode asks for its transport, as a restricted tool set does. */
+	lazyBuiltInWrite?: boolean;
 }
 
 describe("InteractiveMode plan.defaultOnStartup", () => {
@@ -133,6 +135,12 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 					}
 				: undefined,
 			xdev,
+			ensureWriteRegistered: options.lazyBuiltInWrite
+				? async () => {
+						toolRegistry.set("write", makeTool("write"));
+						return true;
+					}
+				: undefined,
 		});
 		session = createdSession;
 		mode = new InteractiveMode(createdSession, "test");
@@ -234,6 +242,19 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toEqual(["read"]);
 	});
 
+	it("removes a built-in write registered for plan mode when exiting plan mode", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			lazyBuiltInWrite: true,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		expect(session?.getActiveToolNames()).toContain("write");
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+	});
+
 	it("keeps MCP tools discovered after startup when exiting plan mode", async () => {
 		const mcpTool = makeMcpTool();
 		const writeTool = makeTool("write");
@@ -283,6 +304,60 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(false);
 		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
 		expect(session!.getActiveToolNames()).toContain(mcpTool.name);
+	});
+
+	/** Enters startup plan mode, then registers and enables a tool as a startup-deferred extension does. */
+	async function startWithLateExtensionTool(): Promise<{ created: InteractiveMode; xdev: XdevState; name: string }> {
+		const writeTool = makeTool("write");
+		const xdev: XdevState = {
+			tools: new Map(),
+			mountedNames: new Set(),
+			builtInNames: new Set(["read", "write"]),
+			isActive: name => session?.getActiveToolNames().includes(name) === true,
+		};
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			initialActiveTools: [writeTool],
+			xdev,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		const lateTool = makeTool("deferred_extension_tool");
+		xdev.tools.set(lateTool.name, lateTool);
+		await session!.setActiveToolPresentation(
+			[...session!.getEnabledToolNames(), lateTool.name],
+			[...session!.getMountedXdevToolNames(), lateTool.name],
+		);
+		expect(session!.getEnabledToolNames()).toContain(lateTool.name);
+		return { created, xdev, name: lateTool.name };
+	}
+
+	it("keeps extension tools registered after startup when exiting plan mode", async () => {
+		const { created, xdev, name } = await startWithLateExtensionTool();
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session!.getEnabledToolNames()).toContain(name);
+		expect(resolveXdevTool(xdev, name)).toBeDefined();
+	});
+
+	it("keeps extension tools registered after startup when approving the plan", async () => {
+		const planFilePath = "local://PLAN.md";
+		const { created, name } = await startWithLateExtensionTool();
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session!.sessionManager.getArtifactsDir(),
+			getSessionId: () => session!.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nUse the extension tool.");
+		vi.spyOn(session!, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(created, "showPlanReview").mockResolvedValue("Approve and keep context");
+		vi.spyOn(session!, "prompt").mockResolvedValue(undefined as never);
+
+		await created.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session!.getEnabledToolNames()).toContain(name);
 	});
 
 	it("keeps plan mode retryable when prior-tool restoration fails", async () => {
