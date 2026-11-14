@@ -26,7 +26,12 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
 import { raceSignal } from "../auth/abort";
-import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
+import {
+	type AuthBrokerClient,
+	AuthBrokerError,
+	AuthBrokerStreamUnsupportedError,
+	isAuthBrokerMissingRoute,
+} from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
 	CredentialBlockSnapshot,
@@ -275,7 +280,8 @@ export interface RemoteAuthCredentialStoreOptions {
 	initialSnapshot?: SnapshotResponse;
 	/**
 	 * Subscribe to the broker's SSE snapshot stream when available. Falls back
-	 * to long-poll permanently when the broker returns 404. Default `true`.
+	 * to long-poll when the broker identifies the stream route as missing.
+	 * Default `true`.
 	 */
 	streamSnapshots?: boolean;
 	/**
@@ -360,13 +366,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * generation without an extra GET.
 	 */
 	#streamingActive = false;
-	/** Latched once the broker has answered 404 — never try the stream again. */
+	/** Latched only when the broker identifies the stream route as missing. */
 	#streamingUnsupported = false;
 	/** Pending observed usage keyed by `installId\u0000app\u0000provider\u0000model`, merged until flush. */
 	#observedUsage = new Map<string, { client: ClientUsageIdentity; entry: ObservedUsageEntry }>();
 	#observedUsageTimer: Timer | undefined;
 	readonly #observedUsageFlushMs: number;
-	/** Latched once the broker answered 404 — old broker, never report again. */
+	/** Latched only when the broker identifies the observed-usage route as missing. */
 	#observedUsageUnsupported = false;
 	/** Tail of the serialized observed-usage sends; each flush waits for the one before it. */
 	#observedUsageFlush: Promise<void> = Promise.resolve();
@@ -1552,8 +1558,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * Fold locally observed request usage into the pending report and schedule
 	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
 	 * final one when the process exits; on failure the batch is retained and
-	 * retried with the next flush. A 404 (pre-endpoint broker) disables
-	 * reporting for the life of this store.
+	 * retried with the next flush. A broker-confirmed missing route (older broker)
+	 * disables reporting for the life of this store.
 	 *
 	 * `client` overrides the reporting identity — the auth-gateway attributes
 	 * each request to the originating install/app instead of the gateway host.
@@ -1630,9 +1636,15 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				});
 			} catch (error) {
 				const status = error instanceof AuthBrokerError ? error.status : undefined;
-				if (status === 400 || status === 404 || status === 501) {
-					// Broker predates the endpoint or its request schema (or the store
-					// can't persist) — stop trying for the life of this process.
+				if (
+					status === 400 ||
+					status === 501 ||
+					(status === 404 &&
+						error instanceof AuthBrokerError &&
+						isAuthBrokerMissingRoute(error.body, "POST", "/v1/usage/observed"))
+				) {
+					// Reject known unsupported requests, but retry a proxy's 404
+					// when its route returns after the broker restarts.
 					this.#observedUsageUnsupported = true;
 					logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });
 					return;

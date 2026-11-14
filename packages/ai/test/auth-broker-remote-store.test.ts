@@ -40,6 +40,20 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
 	if (!predicate()) throw new Error("waitUntil timeout");
 }
 
+function proxy404Once(pathname: string) {
+	const requests = { count: 0 };
+	const fetchImpl = Object.assign(
+		async (input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(String(input)).pathname === pathname && ++requests.count === 1) {
+				return new Response("Traefik: route missing", { status: 404 });
+			}
+			return fetch(input, init);
+		},
+		{ preconnect: fetch.preconnect },
+	);
+	return { fetchImpl, requests };
+}
+
 describe("RemoteAuthCredentialStore SSE integration", () => {
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
@@ -113,6 +127,15 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(disabled).toBe(true);
 		await waitUntil(() => remote!.snapshot.credentials.length === 1);
 		expect(remote!.snapshot.credentials[0].id).not.toBe(bId);
+	});
+
+	test("reconnects the snapshot stream after a proxy 404 during broker startup", async () => {
+		const { fetchImpl, requests } = proxy404Once("/v1/snapshot/stream");
+		const client = new AuthBrokerClient({ url: handle!.url, token, fetchImpl });
+		remote = new RemoteAuthCredentialStore({ client });
+		await waitUntil(() => requests.count >= 2 && remote!.snapshot.credentials.length === 1);
+		await storage!.credentials.upsert("deepseek", { type: "api_key", key: "sk-after-startup" });
+		await waitUntil(() => remote!.snapshot.credentials.some(entry => entry.provider === "deepseek"));
 	});
 
 	test("pollExternalChanges reports broker-side changes so a wrapping AuthStorage reloads", async () => {
@@ -344,6 +367,34 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 				costUsd: 0.05,
 			},
 		]);
+	});
+
+	test("retries observed usage after a proxy 404 without dropping the batch", async () => {
+		const { fetchImpl, requests } = proxy404Once("/v1/usage/observed");
+		const client = new AuthBrokerClient({ url: handle!.url, token, fetchImpl });
+		remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });
+		remote.recordObservedUsage(
+			[
+				{
+					at: Date.now(),
+					provider: "anthropic",
+					model: "claude-x",
+					requests: 1,
+					inputTokens: 10,
+					outputTokens: 5,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					costUsd: 0.1,
+				},
+			],
+			{ installId: "recovering-client", hostname: "host", app: "omp" },
+		);
+		await waitUntil(() =>
+			storage!.usage
+				.clientSummary(0)
+				.clients.some(client => client.installId === "recovering-client" && client.providers[0]?.requests === 1),
+		);
+		expect(requests.count).toBe(2);
 	});
 
 	test("a process that quits before the flush interval still reports its observed usage", async () => {

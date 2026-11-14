@@ -91,10 +91,14 @@ export class AuthBrokerError extends Error {
 	}
 }
 
+/** Recognizes the broker's missing-route response without mistaking a proxy's 404 for an old broker. */
+export function isAuthBrokerMissingRoute(body: string | undefined, method: string, path: string): boolean {
+	return body === JSON.stringify({ error: `No route: ${method} ${path}` });
+}
+
 /**
- * Thrown when a broker responds 404 to `GET /v1/snapshot/stream` — old
- * brokers that predate the SSE endpoint. Callers (`RemoteAuthCredentialStore`)
- * detect this sentinel to fall back to long-polling permanently.
+ * Thrown when the broker identifies `GET /v1/snapshot/stream` as a missing
+ * route. Callers fall back to long-polling for an older broker.
  */
 export class AuthBrokerStreamUnsupportedError extends AuthBrokerError {
 	constructor(message = "Auth broker does not support /v1/snapshot/stream") {
@@ -180,9 +184,8 @@ export class AuthBrokerClient {
 	 * a full `snapshot`; subsequent frames are `entry` upserts / refreshes or
 	 * `removed` deletes. Caller controls lifecycle via `opts.signal`.
 	 *
-	 * Throws {@link AuthBrokerStreamUnsupportedError} when the broker responds
-	 * 404 — older brokers predate this endpoint and the caller should fall back
-	 * to long-polling for the remainder of its lifetime.
+	 * Throws {@link AuthBrokerStreamUnsupportedError} only when the broker
+	 * identifies the stream as a missing route; proxy 404s remain retryable.
 	 */
 	async *openSnapshotStream(opts: { signal?: AbortSignal } = {}): AsyncGenerator<SnapshotStreamEvent> {
 		const url = `${this.#baseUrl}/v1/snapshot/stream`;
@@ -195,15 +198,14 @@ export class AuthBrokerClient {
 			throw new AuthBrokerError("Auth broker request aborted", { cause: opts.signal.reason });
 		}
 		// No timeout: this connection is intentionally long-lived. Caller's signal
-		// is the only cancel path.
-		const response = await this.#fetch(url, { method: "GET", headers, signal: opts.signal });
-		if (response.status === 404) {
-			// Drain the body so the socket can be reused; tiny payload.
-			await response.text().catch(() => {});
-			throw new AuthBrokerStreamUnsupportedError();
-		}
+		// is the only cancel path. A new connection on every attempt lets DNS recover
+		// after a broker restart even when an old socket still answers via a proxy.
+		const response = await this.#fetch(url, { method: "GET", headers, signal: opts.signal, keepalive: false });
 		if (!response.ok) {
 			const text = await response.text().catch(() => "");
+			if (response.status === 404 && isAuthBrokerMissingRoute(text, "GET", "/v1/snapshot/stream")) {
+				throw new AuthBrokerStreamUnsupportedError();
+			}
 			throw new AuthBrokerError(`Auth broker stream failed: ${response.status} ${response.statusText}`, {
 				status: response.status,
 				body: text,
@@ -482,6 +484,9 @@ export class AuthBrokerClient {
 					headers,
 					body: payload,
 					signal,
+					// Never pin broker requests to a socket whose DNS target may have
+					// changed during a restart; this also applies to successful polls.
+					keepalive: false,
 				});
 				if (!response.ok && response.status !== 304) {
 					let text = "";

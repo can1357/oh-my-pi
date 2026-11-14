@@ -976,16 +976,47 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
-	test("openSnapshotStream throws AuthBrokerStreamUnsupportedError on 404", async () => {
+	test("openSnapshotStream distinguishes a broker's missing route from a proxy 404", async () => {
+		let calls = 0;
 		const dummy = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
-			fetch: () => new Response("Not Found", { status: 404 }),
+			fetch: () =>
+				new Response(
+					++calls === 1
+						? "Traefik: route missing"
+						: JSON.stringify({ error: "No route: GET /v1/snapshot/stream" }),
+					{ status: 404 },
+				),
 		});
 		try {
 			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
-			const iter = client.openSnapshotStream();
-			await expect(iter.next()).rejects.toBeInstanceOf(AuthBrokerStreamUnsupportedError);
+			await expect(client.openSnapshotStream().next()).rejects.toMatchObject({
+				status: 404,
+				body: "Traefik: route missing",
+			});
+			await expect(client.openSnapshotStream().next()).rejects.toBeInstanceOf(AuthBrokerStreamUnsupportedError);
+		} finally {
+			dummy.stop(true);
+		}
+	});
+
+	test("broker health checks open new sockets instead of pinning stale addresses", async () => {
+		const ports: number[] = [];
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: (req, server) => {
+				const port = server.requestIP(req)!.port;
+				ports.push(port);
+				return port === ports[0] ? new Response("stale proxy", { status: 403 }) : Response.json({ ok: true });
+			},
+		});
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			await expect(client.healthz()).rejects.toMatchObject({ status: 403 });
+			expect(await client.healthz()).toMatchObject({ ok: true });
+			expect(ports[0]).not.toBe(ports[1]);
 		} finally {
 			dummy.stop(true);
 		}
