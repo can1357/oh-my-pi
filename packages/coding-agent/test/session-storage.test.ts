@@ -500,7 +500,10 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
 		historyDb.close();
 
-		await storage.deleteSessionWithArtifacts(prettyPath, { historyDbPath });
+		await storage.deleteSessionWithArtifacts(prettyPath, {
+			historyDbPath,
+			statsDbPath: path.join(tempDir, "stats.db"),
+		});
 
 		const check = new Database(historyDbPath);
 		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
@@ -568,7 +571,10 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 			new Database(historyDbPath).close();
 			await fsp.chmod(sessionPath, 0o000);
 
-			await storage.deleteSessionWithArtifacts(sessionPath, { historyDbPath });
+			await storage.deleteSessionWithArtifacts(sessionPath, {
+				historyDbPath,
+				statsDbPath: path.join(tempDir, "stats.db"),
+			});
 
 			expect(fs.existsSync(sessionPath)).toBe(false);
 		},
