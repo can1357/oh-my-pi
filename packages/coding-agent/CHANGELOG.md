@@ -406,6 +406,7 @@
 
 ### Added
 
+- `computer.inlineDocs: false` links the computer prelude's documentation as an `xd://eval/computer` topic instead of inlining ~19k characters into the eval tool description of every request, saving tokens for setups that rarely call computer at the cost of one `read` before the first call ([#18563](https://github.com/can1357/oh-my-pi/pull/18563) by [@im47cn](https://github.com/im47cn))
 - In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
 - `task.eager` (`preferred`/`always`) now shapes only the main agent's system prompt; subagents fall back to their model's own delegation policy instead of being pushed to spawn further subagents
 - `ask` forms can show pictures: `<img src>` from an http(s) URL, a `data:` URI or a local file (relative to the session's working directory), and inline `<svg>` diagrams, drawn in the terminal form and natively in Tern
