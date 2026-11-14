@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/fork` and fork-from-transcript now abort a running response and fork instead of refusing with "Wait for the current response to finish".
+
 ### Added
 
 - Added the `supermemory` memory backend on the Supermemory v5 namespace API: first-turn recall (profile facts with editable ids, inferred facts marked `[inferred]`) and recall in compaction summaries, both bounded by `supermemory.recallTimeoutMs` so a hung server cannot hold a turn for long, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit` (including a dry-run `preview_forget` by meaning), `read memory://<id>` with version history and source document, writes that survive outages, subagents that share the parent's memory, and a `SUPERMEMORY_NAMESPACE` override ([#18755](https://github.com/can1357/oh-my-pi/pull/18755) by [@panosAthDBX](https://github.com/panosAthDBX))
@@ -28,6 +32,9 @@
 - `/browser visible` and `/browser headless` now show and hide the windows of omp's WebKit tabs at once instead of waiting for the next open: where the engine ships its viewer (macOS), each tab gets a window of its own that the user can also click, scroll and type in, and `headed: true` or `browser.headless` off keeps a tab on WebKit with a window instead of sending it to Chromium. Chromium tabs still change mode with the next open
 - In a Tern whose engine reads the DOM natively, browser `observe`, selectors, clicks, typing, element reads and waits no longer run script in the page: the engine finds elements (across frames and closed shadow roots) and every action is trusted input at the point it resolved; `type` then types at the caret its click places, and `text/` selectors ignore case
 - Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.
+- Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
+- Todo tool status line now displays task count for multiple targets
+- Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`. Drafts handle binary and non-UTF-8 files, symlinks, file mode changes, and a repository's first commit; `commit(…, no_verify=True)` skips the `pre-commit` and `commit-msg` hooks, and after each commit the draft holds what remains, so one draft can produce a series of commits.
 - Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
 - Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
 - Added the `session_clear` hook and extension event, emitted after `/clear` resets the current session context without changing its session ID.
@@ -37,9 +44,18 @@
 - Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict auxiliary services to the active model’s provider or disable off-provider services.
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
+- The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+
+### Changed
+
+- `grep` now shows match lines only by default (`grep.contextBefore`/`grep.contextAfter` default to `0`, was `1`/`3`) and keeps the first 10 matches per file when searching several files (was 20) and 50 in a single file (was 200), roughly halving typical grep output
+- `spotlight.thinking` now defaults to `med` instead of `low`: Spotlight reads deeper heads, which ranked needed lines better on the benchmark and on recorded sessions, at a higher cost per request
+- With the Spotlight experiment on, results the agent mostly read back right after a cut are shown whole: a source `read` of at most ~12k characters is no longer outlined, a `pr://` or `issue://` thread stays whole up to ~12k characters, and CUDA, Objective-C, Luau, QML, CSS, shell and CMake files are treated as source (whole up to ~12k characters, outlined past it) instead of being cut by rank
 
 ### Fixed
 
+- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
+- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation

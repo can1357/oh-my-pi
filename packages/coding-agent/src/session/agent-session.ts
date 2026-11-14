@@ -14074,8 +14074,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `retry.modelFallback` on) instead keeps its current model and reports a
 	 * warning. Reloading the current session keeps the current model.
 	 *
-	 * With `onCwdChange`, a target whose recorded directory is missing or cannot be
-	 * entered throws `Cannot resume session: …` and the current session stays active.
+	 * A target whose recorded directory is missing or cannot be entered resumes in the
+	 * current cwd (the session manager keeps it there, runtime-only until relocated);
+	 * callers can detect this by comparing `getRecordedCwd()` with `getCwd()`.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
 	async switchSession(
@@ -14219,12 +14220,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
-					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
-						// setSessionFile kept the current cwd because the recorded one cannot be
-						// entered; resuming here would point tools at the wrong project.
-						throw new Error(
-							`Cannot resume session: its directory ${recordedCwd} is missing or cannot be entered`,
-						);
 					}
 				}
 			}

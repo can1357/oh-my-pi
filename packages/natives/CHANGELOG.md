@@ -2,13 +2,19 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `lsTree()` now returns `{ path, mode }` entries (`mode` as `git ls-tree` prints it, e.g. `100755` or `120000`) instead of bare paths.
+
 ### Added
 
+- Added `noVerify` to `commitCreate()` options to skip the `pre-commit` and `commit-msg` hooks, like `git commit --no-verify`.
 - Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.
 - Improved `grep()` and `glob()` performance for ovnfs checkouts by using the serving daemon when supported, while retaining native fallback behavior and existing streaming, filtering, and link-following options.
 
 ### Fixed
 
+- Fixed patches from `diffText({ binary: true })` and `diffNoIndex(…, true)` failing to apply for text that is not UTF-8 (e.g. Latin-1): such content is now carried as a `GIT binary patch` instead of a text hunk that lost its bytes.
 - Fixed `<text>` elements disappearing from rendered SVGs when a generic font family refers to an unavailable font ([#15181](https://github.com/can1357/oh-my-pi/issues/15181), [#18538](https://github.com/can1357/oh-my-pi/pull/18538)).
 - Fixed `worktree add` with source checkouts containing read-only files or directories, including cleanup and safety issues involving tracked directories replaced by symlinks ([#14190](https://github.com/can1357/oh-my-pi/issues/14190), [#18537](https://github.com/can1357/oh-my-pi/pull/18537)).
 - Fixed cancelled or timed-out `Shell.run` calls so they stop only jobs started by that invocation while preserving the shell session for subsequent runs.

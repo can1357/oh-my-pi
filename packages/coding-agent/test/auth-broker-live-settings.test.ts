@@ -1,14 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { TempDir } from "@oh-my-pi/pi-utils";
-
-import { cfgAuthBrokerUrl } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgAuthBrokerUrl, cfgAuthUnpausedProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 
 const PROVIDER = "live-broker-test";
 const TOKEN = "live-broker-bearer";
@@ -33,6 +34,8 @@ describe("auth broker settings take effect live", () => {
 	const savedEnv: Partial<Record<(typeof BROKER_ENV)[number], string>> = {};
 
 	beforeEach(() => {
+		// A settings instance an earlier file left driving effects would own the pause set.
+		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-auth-broker-live-");
 		for (const key of BROKER_ENV) {
 			const value = process.env[key];
@@ -45,6 +48,8 @@ describe("auth broker settings take effect live", () => {
 
 	afterEach(async () => {
 		for (const cleanup of cleanups.splice(0)) cleanup();
+		vi.restoreAllMocks();
+		setUnpausedProviders([]);
 		for (const broker of brokers.splice(0)) {
 			await broker.handle.close();
 			broker.storage.close();
@@ -81,5 +86,49 @@ describe("auth broker settings take effect live", () => {
 		await sync.settled();
 
 		expect(await authStorage.keys.get(PROVIDER)).toBe("key-from-b");
+	});
+
+	it("loads a paused provider's stored login once auth.unpausedProviders lists it", async () => {
+		const paused = "live-paused-test";
+		vi.spyOn(compatAuth, "providerDisabledReason").mockImplementation(provider =>
+			provider === paused ? "paused for this test" : undefined,
+		);
+		const agentDir = tempDir.join("agent");
+		const settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+		const authStorage = await discoverAuthStorage(agentDir, { settings });
+		cleanups.push(() => authStorage.close());
+		const sync = createAuthStorageSettingsSync(settings, authStorage);
+		cleanups.push(() => sync.stop());
+		await authStorage.credentials.set(paused, { type: "api_key", key: "stored-key" });
+		expect(await authStorage.keys.get(paused)).toBeUndefined();
+
+		cfgAuthUnpausedProviders.set(settings, [paused]);
+		await Promise.resolve();
+		await sync.settled();
+
+		expect(await authStorage.keys.get(paused)).toBe("stored-key");
+	});
+
+	it.each([
+		{ layer: "global config", file: ["agent", "config.yml"], expected: "stored-key" },
+		{ layer: "project config (a repository cannot unpause)", file: [".omp", "config.yml"], expected: undefined },
+	])("discovery with $layer listing a paused provider", async ({ file, expected }) => {
+		const paused = "discovery-paused-test";
+		vi.spyOn(compatAuth, "providerDisabledReason").mockImplementation(provider =>
+			provider === paused ? "paused for this test" : undefined,
+		);
+		const agentDir = tempDir.join("agent");
+		const seed = new AuthStorage(await SqliteAuthCredentialStore.open(path.join(agentDir, "agent.db")));
+		await seed.credentials.set(paused, { type: "api_key", key: "stored-key" });
+		seed.close();
+		await Bun.write(path.join(tempDir.path(), ...file), `auth:\n  unpausedProviders:\n    - ${paused}\n`);
+		const settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+		// Both layers are read: only where the list comes from differs.
+		expect(cfgAuthUnpausedProviders.get(settings)).toEqual([paused]);
+
+		const authStorage = await discoverAuthStorage(agentDir, { settings });
+		cleanups.push(() => authStorage.close());
+
+		expect(await authStorage.keys.get(paused)).toBe(expected);
 	});
 });
