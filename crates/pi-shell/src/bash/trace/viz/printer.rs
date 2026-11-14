@@ -89,7 +89,7 @@ struct Cached {
 	docs:         HashMap<NodeKey, Arc<Vec<Option<Span>>>>,
 	script_utf16: Option<Arc<[u32]>>,
 	/// Parses of uncompiled script byte ranges; the script never changes.
-	ahead:        HashMap<(usize, usize), Option<Arc<Ahead>>>,
+	ahead:        HashMap<(usize, usize, bool), Option<Arc<Ahead>>>,
 }
 #[derive(Clone, Debug)]
 struct UnitStamp {
@@ -626,7 +626,17 @@ impl<S: VizSource> Printer<'_, S> {
 	}
 
 	fn parsed_ahead(&self, lo: usize, hi: usize) -> Option<Arc<Ahead>> {
-		if let Some(cached) = self.source.cache().inner.lock().ahead.get(&(lo, hi)) {
+		// Only a run still going can be streaming in; a finished script's
+		// error is its own and stays literal.
+		let streaming = self.runtime.executing;
+		if let Some(cached) = self
+			.source
+			.cache()
+			.inner
+			.lock()
+			.ahead
+			.get(&(lo, hi, streaming))
+		{
 			return cached.clone();
 		}
 		let script: &[u8] = self.source.script().as_ref();
@@ -637,6 +647,7 @@ impl<S: VizSource> Printer<'_, S> {
 		// Streaming cuts off only the script's end; anywhere else the error
 		// is the script's own.
 		if let Some(error) = error
+			&& streaming
 			&& hi == script.len()
 		{
 			if let Some(repair) = repair_tail(text, error) {
@@ -668,7 +679,7 @@ impl<S: VizSource> Printer<'_, S> {
 			.inner
 			.lock()
 			.ahead
-			.insert((lo, hi), parsed.clone());
+			.insert((lo, hi, streaming), parsed.clone());
 		parsed
 	}
 
@@ -2625,7 +2636,20 @@ fn close_tail(text: &[u8], mut error: ParseErrorKind, mut pristine: bool) -> Opt
 	let mut shown = text.len();
 	for _ in 0..MAX_REPAIRS {
 		match error {
-			ParseErrorKind::Unmatched(close) => repaired.extend_from_slice(close.as_bytes()),
+			ParseErrorKind::Unmatched(close) => {
+				// A streamed `\` would escape the appended quote: hide it
+				// until what it escapes arrives.
+				let backslashes = repaired
+					.iter()
+					.rev()
+					.take_while(|&&byte| byte == b'\\')
+					.count();
+				if pristine && matches!(close, "\"" | "`") && backslashes % 2 == 1 {
+					shown -= 1;
+					repaired.truncate(shown);
+				}
+				repaired.extend_from_slice(close.as_bytes());
+			},
 			ParseErrorKind::UnexpectedEof { from } => {
 				let keyword = from.map(|(keyword, _)| keyword);
 				let cut = if pristine {
@@ -2684,9 +2708,13 @@ fn parsed_head(text: &[u8]) -> Option<Parsed> {
 		matches!(byte, b';' | b'&' | b'|' | b'\n')
 			&& (at == 0 || !matches!(text[at - 1], b';' | b'&' | b'|' | b'<' | b'>'))
 	});
-	for (at, _) in cuts.rev().take(MAX_HEAD_CUTS) {
+	for (at, &byte) in cuts.rev().take(MAX_HEAD_CUTS) {
+		// A lone `&` backgrounds the head and a `;` ends it: both stay with it.
+		let lone =
+			matches!(byte, b';' | b'&') && !matches!(text.get(at + 1), Some(b'&' | b'>' | b';'));
+		let end = if lone { at + 1 } else { at };
 		// A cut inside quotes leaves the head unterminated: it does not parse.
-		let head = parse_commands(&text[..at]);
+		let head = parse_commands(&text[..end]);
 		if head.error.is_none() && !head.commands.is_empty() {
 			return Some(head);
 		}

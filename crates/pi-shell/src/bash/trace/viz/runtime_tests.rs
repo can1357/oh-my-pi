@@ -111,6 +111,9 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		("x=$(cat a |", &["x = ⟨cat \"a\"⟩"]),
 		// Quoted, `|` is text: nothing is dropped.
 		("echo \"a | b", &["print(\"a | b\")"]),
+		// A streamed `\` would escape an appended quote: it waits for its
+		// escapee.
+		("echo \"C:\\", &["print(\"C:\")"]),
 	] {
 		let p = present(&RunTrace::new(script), &Options::default());
 		let shown = rows(&p);
@@ -127,6 +130,41 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 	assert_eq!(texts, ["cwd /tmp", " && for"]);
 	assert_ne!(shown[0].1["role"], "raw", "{p}");
 	assert_eq!(shown[1].1["role"], "raw", "{p}");
+
+	// The `&` backgrounding the head stays with it rather than drawing a
+	// literal row of its own.
+	let p = present(&RunTrace::new("sleep 1 &\nfor f in"), &Options::default());
+	let shown = rows(&p);
+	assert_eq!(shown.len(), 2, "{p}");
+	assert_ne!(shown[0].1["role"], "raw", "{p}");
+	assert_eq!(shown[1].0, "for f in");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_script_keeps_its_syntax_error_literal() {
+	// Only a run still going can be streaming in: once the shell has
+	// rejected the script, its unterminated end is not drawn as valid.
+	let script = "echo a\necho \"b";
+	let trace = Arc::new(RunTrace::new(script));
+	let shell = Shell::new(None);
+	let result = shell
+		.run(
+			ShellRunOptions {
+				command: script.into(),
+				trace: Some(Arc::clone(&trace)),
+				..ShellRunOptions::default()
+			},
+			None,
+			().into(),
+		)
+		.await
+		.unwrap();
+	assert_ne!(result.exit_code, Some(0));
+	let p = present(&trace, &Options::default());
+	let shown = rows(&p);
+	let (text, row) = shown.last().unwrap();
+	assert_eq!(text, "echo \"b");
+	assert_eq!(row["role"], "raw", "{p}");
 }
 
 #[test]
