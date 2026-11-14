@@ -18,6 +18,7 @@
 - Fixed Factory Droid GPT-6 models failing with a 400 on the next turn after you change thinking level mid-session when the turn runs on Bedrock or Snowflake; the new level is now sent with the request there ([#19188](https://github.com/can1357/oh-my-pi/pull/19188) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Gemini 4 Hydrogen missing from the Gemini CLI model picker: its thinking-tier SKUs now collapse into one entry with low, medium, high and xhigh levels ([#19217](https://github.com/can1357/oh-my-pi/pull/19217) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed OpenRouter `/model` listing every public OpenRouter model for keys whose workspace guardrails allow-list only a few: the keyed `/models` roster now replaces the bundled chat catalog instead of being merged into it, and the model cache is kept per key ([#19013](https://github.com/can1357/oh-my-pi/pull/19013) by [@YibaiMeng](https://github.com/YibaiMeng)).
+- Fixed OpenCode Go Muse Spark tool-call turns dropping encrypted reasoning between steps; OpenCode Zen is unchanged ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn))
 
 ## [18.20.0] - 2026-11-12
 
@@ -191,10 +192,6 @@
 
 - GPT-3.5 and GPT-4 (Turbo) resolve the `cl100k` tokenizer, so their context estimates count in cl100k_base rather than the o200k_base default for models without one ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Added Scaleway Generative APIs as a built-in provider with 12 serverless chat models (glm-5.3 default), API-key login, and live model discovery ([#16687](https://github.com/can1357/oh-my-pi/pull/16687) by [@reda-maizate](https://github.com/reda-maizate))
-
-### Fixed
-
-- Fixed OpenCode Go Muse Spark tool-call turns dropping encrypted reasoning between steps; OpenCode Zen is unchanged ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn))
 
 ## [18.15.0] - 2026-11-01
 
