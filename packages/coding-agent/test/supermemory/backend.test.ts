@@ -54,8 +54,6 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		emitNotice: (_level: string, message: string) => notices.push(message),
 		notices,
 		getXdevToolEntries: () => [],
-		/** The live run's messages: a trailing tool result means a steer inside a tool loop. */
-		agent: { state: { isStreaming: false, messages: [] as Array<{ role: string; stopReason?: string }> } },
 		getSupermemorySessionState: () => state,
 		setSupermemorySessionState(next: SupermemorySessionState | undefined) {
 			const previous = state;
@@ -1435,11 +1433,12 @@ describe("supermemoryBackend", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it("bounds automatic recall against a hanging server, while a manual search keeps the request timeout", async () => {
+	it("bounds automatic recall by supermemory.recallTimeoutMs against a hanging server; a manual search keeps the request timeout", async () => {
 		const server = Bun.serve({ port: 0, fetch: () => Promise.withResolvers<Response>().promise });
 		try {
 			Bun.env.SUPERMEMORY_BASE_URL = server.url.origin;
-			const session = makeSession();
+			// Well under the 4 s default, so the elapsed time shows the setting was read.
+			const session = makeSession({ settings: { "supermemory.recallTimeoutMs": 1_000 } });
 			await start(session);
 			const state = session.getSupermemorySessionState();
 			const manual = new AbortController();
@@ -1459,8 +1458,8 @@ describe("supermemoryBackend", () => {
 			const elapsed = Date.now() - started;
 			expect(firstTurn).toBeUndefined();
 			expect(compaction).toBeUndefined();
-			expect(elapsed).toBeGreaterThanOrEqual(3_500);
-			expect(elapsed).toBeLessThan(10_000);
+			expect(elapsed).toBeGreaterThanOrEqual(900);
+			expect(elapsed).toBeLessThan(3_500);
 			expect(session.notices).toEqual(["Memory recall failed: Supermemory request timed out."]);
 			// The failed recall did not commit, so the next turn tries again.
 			expect(state?.hasRecalledForFirstTurn).toBe(false);
@@ -1472,88 +1471,5 @@ describe("supermemoryBackend", () => {
 		} finally {
 			server.stop(true);
 		}
-	}, 15_000);
-
-	describe("recallEveryTurn", () => {
-		const PER_TURN = { "supermemory.recallEveryTurn": true };
-		const recallEntries = (session: ReturnType<typeof makeSession>) =>
-			session.sessionManager.getEntries().filter(entry => entry.type === "custom").length;
-
-		it("recalls on each later user turn, replacing the previous block without persisting it", async () => {
-			const { search } = spyRecall();
-			const session = makeSession({ settings: PER_TURN });
-			await start(session);
-			const first = await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined);
-			expect(first?.replaces).toBeUndefined();
-			expect(first?.commit()).toBe(true);
-			const persisted = recallEntries(session);
-
-			search.mockResolvedValue([{ id: "m2", kind: "memory", content: "uses pnpm now" }]);
-			const second = await supermemoryBackend.beforeAgentStartPrompt!(session as never, "second", undefined);
-			expect(second?.context).toContain("uses pnpm now");
-			expect(second?.replaces).toBe(first?.context);
-			expect(second?.commit()).toBe(true);
-			expect(session.getSupermemorySessionState()?.lastRecallSnippet).toBe(second?.context);
-			expect(recallEntries(session)).toBe(persisted);
-			// The block lives only as its own prompt part, so instructions carry no copy to survive replacement.
-			const instructions = await supermemoryBackend.buildDeveloperInstructions(
-				"/tmp",
-				"/tmp",
-				session.settings,
-				session as never,
-			);
-			expect(instructions).not.toContain("uses pnpm now");
-		});
-
-		it("skips a steer into a live tool loop, recalls after an aborted run, and keeps the block when a turn finds nothing", async () => {
-			const { profile, search } = spyRecall();
-			const session = makeSession({ settings: PER_TURN });
-			await start(session);
-			(await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined))?.commit();
-			const calls = search.mock.calls.length;
-
-			session.agent.state.isStreaming = true;
-			session.agent.state.messages.push({ role: "toolResult" });
-			expect(await supermemoryBackend.beforeAgentStartPrompt!(session as never, "steer", undefined)).toBeUndefined();
-			expect(search.mock.calls.length).toBe(calls);
-
-			// An interrupted run also ends on a (placeholder) tool result; the next prompt starts a new run.
-			session.agent.state.isStreaming = false;
-			profile.mockResolvedValue({ static: [], dynamic: [] });
-			search.mockResolvedValue([]);
-			expect(await supermemoryBackend.beforeAgentStartPrompt!(session as never, "next", undefined)).toBeUndefined();
-			expect(search.mock.calls.length).toBe(calls + 1);
-			expect(session.getSupermemorySessionState()?.lastRecallSnippet).toContain("uses bun");
-		});
-
-		it("never recalls in a subagent or with autoRecall off, and a clear revokes a staged later recall", async () => {
-			const { search } = spyRecall();
-			const off = makeSession({ settings: { ...PER_TURN, "supermemory.autoRecall": false } });
-			await start(off);
-			expect(await supermemoryBackend.beforeAgentStartPrompt!(off as never, "first", undefined)).toBeUndefined();
-			const parent = makeSession({ settings: PER_TURN });
-			await start(parent);
-			const child = makeSession({ settings: PER_TURN });
-			await supermemoryBackend.start({
-				session: child as never,
-				settings: child.settings,
-				modelRegistry: {} as never,
-				agentDir: temp.path(),
-				taskDepth: 1,
-				parentSupermemorySessionState: parent.getSupermemorySessionState(),
-			});
-			expect(await supermemoryBackend.beforeAgentStartPrompt!(child as never, "first", undefined)).toBeUndefined();
-			expect(search).not.toHaveBeenCalled();
-
-			const first = await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "first", undefined);
-			first?.commit();
-			const staged = await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "second", undefined);
-			await supermemoryBackend.clear("/tmp", "/tmp", parent as never);
-			expect(staged?.commit()).toBe(false);
-			expect(parent.getSupermemorySessionState()?.lastRecallSnippet).toBeUndefined();
-			// The next turn still names the delivered block, so a racing prompt rebuild cannot leave two copies.
-			const next = await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "third", undefined);
-			expect(next?.replaces).toBe(first?.context);
-		});
 	});
 });

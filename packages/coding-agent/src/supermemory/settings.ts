@@ -47,20 +47,6 @@ export const cfgSupermemoryAutoRecall = register({
 	},
 });
 
-export const cfgSupermemoryRecallEveryTurn = register({
-	id: "supermemory.recallEveryTurn",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "memory",
-		group: "Supermemory",
-		label: "Supermemory Recall Every Turn",
-		description:
-			"Re-run auto recall on each user turn, replacing the previous block (changes the system prompt each turn)",
-		condition: "supermemoryActive",
-	},
-});
-
 export const cfgSupermemoryAutoRetain = register({
 	id: "supermemory.autoRetain",
 	type: "boolean",
@@ -92,4 +78,14 @@ export const cfgSupermemorySearchMode = register({
 	type: "enum",
 	values: ["hybrid", "memories"] as const,
 	default: "hybrid",
+});
+
+/**
+ * Per-request bound (ms) on automatic first-turn and compaction recall, clamped to 500..60000 by
+ * `loadSupermemoryConfig`; the recall/retain/memory_edit tools keep the client's 15 s timeout.
+ */
+export const cfgSupermemoryRecallTimeoutMs = register({
+	id: "supermemory.recallTimeoutMs",
+	type: "number",
+	default: 4_000,
 });

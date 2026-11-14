@@ -40,11 +40,6 @@ const MAX_RECALL_CHARS = 8_000;
 /** Automatic retention keeps the newest part of a longer window. */
 const MAX_RETAIN_CHARS = 60_000;
 const DISPOSE_FLUSH_TIMEOUT_MS = 2_000;
-/**
- * Bound on automatic recall (first-turn or per-turn profile and search, compaction recall): a hung
- * server must not stall every turn for the full request timeout. Manual tools keep that one.
- */
-const AUTOMATIC_RECALL_TIMEOUT_MS = 4_000;
 /** Custom transcript entry recording how far automatic retention got; see {@link SupermemorySessionState}. */
 const RETENTION_CURSOR_ENTRY_TYPE = "supermemory_retention";
 /** Custom transcript entry recording a `/memory clear`, so a resume does not restore the cleared recall. */
@@ -204,11 +199,6 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 */
 	readonly aliasOf?: SupermemorySessionStateApi;
 	lastRecallSnippet?: string;
-	/**
-	 * The last block delivered into the prompt; `/memory clear` keeps it so a per-turn recall racing
-	 * the clear's prompt rebuild still removes it (removing a block no longer there is a no-op).
-	 */
-	#lastInjectedBlock?: string;
 	hasRecalledForFirstTurn = false;
 	/** User turns already covered by automatic retention documents. */
 	lastRetainedTurn = 0;
@@ -454,6 +444,16 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		if (this.aliasOf) return this.aliasOf.search(query, limit, signal);
+		return this.#search(query, limit, signal);
+	}
+
+	/** `timeoutMs` bounds automatic recall ({@link SupermemoryConfig.recallTimeoutMs}); tools keep the client's. */
+	#search(
+		query: string,
+		limit: number | undefined,
+		signal?: AbortSignal,
+		timeoutMs?: number,
+	): Promise<SupermemorySearchItem[]> {
 		if (this.#disposed) return Promise.reject(closedError("nothing recalled"));
 		const config = this.#config;
 		const resultLimit = Math.max(1, Math.min(limit ?? config.recallLimit, config.recallLimit));
@@ -466,40 +466,32 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				threshold: config.threshold,
 			},
 			signal,
+			timeoutMs,
 		);
 	}
 
-	/**
-	 * Automatic recall for a user turn: the first turn of a transcript, and with `recallEveryTurn` every
-	 * later user turn that starts a new run (a steer delivered inside a tool loop keeps the current block).
-	 * A later turn's block names the one it replaces, so the prompt keeps a single copy; it is not
-	 * persisted (only the first turn's is, so a resume sends the same prompt bytes).
-	 */
 	async beforeAgentStartPrompt(
 		promptText: string,
 		signal?: AbortSignal,
 	): Promise<MemoryPromptPreparation | undefined> {
-		if (!this.automatic || !this.#config.autoRecall) return undefined;
-		const laterTurn = this.hasRecalledForFirstTurn;
-		if (laterTurn && (!this.#config.recallEveryTurn || this.#insideToolLoop())) return undefined;
+		if (!this.automatic || !this.#config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
 		const query = promptText.trim();
 		if (!query) return undefined;
 		const generation = ++this.#recallGeneration;
-		if (!laterTurn) {
-			// Reuse this transcript's recall so a resumed session sends the same prompt bytes.
-			const persisted = findPersistedRecall(this.session.sessionManager, this.#recallScope());
-			if (persisted !== undefined) {
-				return {
-					context: persisted.text || undefined,
-					commit: () => this.#commitRecall(generation, persisted.text, false),
-				};
-			}
+		// Reuse this transcript's recall so a resumed session sends the same prompt bytes.
+		const persisted = findPersistedRecall(this.session.sessionManager, this.#recallScope());
+		if (persisted !== undefined) {
+			return {
+				context: persisted.text || undefined,
+				commit: () => this.#commitRecall(generation, persisted.text, false),
+			};
 		}
 
+		const timeoutMs = this.#config.recallTimeoutMs;
 		const [profile, memories] = await Promise.allSettled([
-			this.#local().client.profile(this.namespace, signal, AUTOMATIC_RECALL_TIMEOUT_MS),
+			this.#local().client.profile(this.namespace, signal, timeoutMs),
 			// Redact before cutting, as for retention: a cut inside a token defeats the redactor.
-			this.#automaticSearch(this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS), signal),
+			this.#search(this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS), undefined, signal, timeoutMs),
 		]);
 		if (signal?.aborted || generation !== this.#recallGeneration) return undefined;
 		if (profile.status === "rejected" && memories.status === "rejected") {
@@ -531,46 +523,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const text = prompt
 			.render(recallTemplate, { profile: renderLines(facts, half), memories: renderLines(found, half) })
 			.trim();
-		// A later turn that finds nothing keeps the previous block rather than leaving none.
-		if (laterTurn && !text) return undefined;
 		return {
 			context: text || undefined,
-			replaces: laterTurn ? this.#lastInjectedBlock : undefined,
-			commit: () => this.#commitRecall(generation, text, !laterTurn),
+			commit: () => this.#commitRecall(generation, text, true),
 		};
-	}
-
-	/**
-	 * A message delivered into a live run before its next model request: a steer, not a new run. A
-	 * run that ended on an abort or error also leaves a tool result last, so the run must be live.
-	 * A follow-up queued behind a finished answer (assistant `stop` last) does start a new run.
-	 */
-	#insideToolLoop(): boolean {
-		const { isStreaming, messages } = this.session.agent.state;
-		const last = messages.at(-1);
-		return (
-			isStreaming &&
-			(last?.role === "toolResult" ||
-				last?.role === "user" ||
-				(last?.role === "assistant" && last.stopReason === "toolUse"))
-		);
-	}
-
-	/** Search for automatic recall: the primary state only, bounded by the short automatic timeout. */
-	#automaticSearch(query: string, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
-		if (this.#disposed) return Promise.reject(closedError("nothing recalled"));
-		const config = this.#config;
-		return this.#local().client.search(
-			this.namespace,
-			{
-				query: this.#redact(query),
-				searchMode: config.searchMode,
-				limit: config.recallLimit,
-				threshold: config.threshold,
-			},
-			signal,
-			AUTOMATIC_RECALL_TIMEOUT_MS,
-		);
 	}
 
 	/**
@@ -578,7 +534,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 * summarized, adding memories relevant to that turn to the summary prompt (the first-turn
 	 * block stays in the system prompt). Only the primary state recalls (an alias or subagent
 	 * never does) and only with `autoRecall` on. Fails open: no match, an abort or an error
-	 * returns `undefined`; compaction waits at most the automatic recall timeout.
+	 * returns `undefined`; compaction waits at most `supermemory.recallTimeoutMs`.
 	 */
 	async recallForCompaction(messages: HindsightMessage[], signal?: AbortSignal): Promise<string | undefined> {
 		if (this.aliasOf || !this.automatic || this.#disposed || !this.#config.autoRecall) return undefined;
@@ -586,7 +542,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!query) return undefined;
 		try {
 			// Redact before cutting, as for first-turn recall.
-			const found = await this.#automaticSearch(this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS), signal);
+			const found = await this.#search(
+				this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS),
+				undefined,
+				signal,
+				this.#config.recallTimeoutMs,
+			);
 			if (signal?.aborted || found.length === 0) return undefined;
 			const memories = renderLines(
 				found.map(item => ({ text: item.content, note: recallNote(item) })),
@@ -604,10 +565,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#commitRecall(generation: number, context: string, persist: boolean): boolean {
 		if (this.#recallGeneration !== generation) return false;
 		this.hasRecalledForFirstTurn = true;
-		if (context) {
-			this.lastRecallSnippet = context;
-			this.#lastInjectedBlock = context;
-		}
+		if (context) this.lastRecallSnippet = context;
 		if (persist) persistRecall(this.session.sessionManager, this.#recallScope(), { text: context, memories: [] });
 		return true;
 	}

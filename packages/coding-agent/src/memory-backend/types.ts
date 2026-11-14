@@ -98,11 +98,6 @@ export interface MemoryBackendStartOptions {
 export interface MemoryPromptPreparation {
 	context?: string;
 	/**
-	 * A block an earlier preparation injected that `context` supersedes: it is removed from the
-	 * prompt so a per-turn recall keeps a single copy instead of stacking.
-	 */
-	replaces?: string;
-	/**
 	 * Model-facing note delivered with this turn's user message, e.g. what changed in the
 	 * memories a reused recall holds. Persisted in the transcript as a hidden custom message
 	 * whose `details` carry the backend's bookkeeping, so both land only once delivered.

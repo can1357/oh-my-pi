@@ -14,9 +14,9 @@ import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import type { Settings } from "../config/settings";
 import {
 	cfgSupermemoryAutoRecall,
-	cfgSupermemoryRecallEveryTurn,
 	cfgSupermemoryAutoRetain,
 	cfgSupermemoryRecallLimit,
+	cfgSupermemoryRecallTimeoutMs,
 	cfgSupermemoryRetainEveryNTurns,
 	cfgSupermemoryScoping,
 	cfgSupermemorySearchMode,
@@ -36,13 +36,13 @@ export interface SupermemoryConfig {
 	namespace: string | null | undefined;
 	scoping: SupermemoryScoping;
 	autoRecall: boolean;
-	/** Re-run automatic recall on every user turn instead of only the first. */
-	recallEveryTurn: boolean;
 	autoRetain: boolean;
 	retainEveryNTurns: number;
 	recallLimit: number;
 	threshold: number;
 	searchMode: SupermemorySearchMode;
+	/** Per-request bound (ms) on automatic first-turn and compaction recall. */
+	recallTimeoutMs: number;
 }
 
 export type ConfiguredSupermemoryConfig = SupermemoryConfig & {
@@ -81,12 +81,12 @@ export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
 		namespace: validateNamespace(Bun.env.SUPERMEMORY_NAMESPACE),
 		scoping: cfgSupermemoryScoping.get(settings),
 		autoRecall: cfgSupermemoryAutoRecall.get(settings),
-		recallEveryTurn: cfgSupermemoryRecallEveryTurn.get(settings),
 		autoRetain: cfgSupermemoryAutoRetain.get(settings),
 		retainEveryNTurns: Math.floor(clamp(cfgSupermemoryRetainEveryNTurns.get(settings), 1, 100)),
 		recallLimit: Math.floor(clamp(cfgSupermemoryRecallLimit.get(settings), 1, 50)),
 		threshold: clamp(cfgSupermemoryThreshold.get(settings), 0, 1),
 		searchMode: cfgSupermemorySearchMode.get(settings),
+		recallTimeoutMs: Math.floor(clamp(cfgSupermemoryRecallTimeoutMs.get(settings), 500, 60_000)),
 	};
 }
 

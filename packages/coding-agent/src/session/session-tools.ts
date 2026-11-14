@@ -2688,9 +2688,7 @@ export class SessionTools {
 			if (!isCurrent()) return { systemPrompt: this.#baseSystemPrompt };
 
 			const preparedBase = refreshed?.systemPrompt ?? this.#baseSystemPrompt;
-			const withoutReplaced = (base: string[]) =>
-				memory.replaces === undefined ? base : base.filter(block => block !== memory.replaces);
-			const stablePrompt = [...withoutReplaced(preparedBase), injected];
+			const stablePrompt = [...preparedBase, injected];
 			return {
 				systemPrompt: stablePrompt,
 				memoryNotice: memory.notice,
@@ -2701,8 +2699,7 @@ export class SessionTools {
 					// that winning base, never replace it with the preparation's snapshot.
 					const currentBase = this.#baseSystemPrompt;
 					this.#host.captureMemoryPromotionSnapshot(currentBase);
-					this.#baseSystemPrompt =
-						currentBase === preparedBase ? stablePrompt : [...withoutReplaced(currentBase), injected];
+					this.#baseSystemPrompt = currentBase === preparedBase ? stablePrompt : [...currentBase, injected];
 					this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 					return true;
 				},
