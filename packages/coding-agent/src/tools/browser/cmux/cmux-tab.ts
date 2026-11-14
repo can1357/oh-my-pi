@@ -31,6 +31,7 @@ import {
 } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
 import {
+	assertUrlPattern,
 	historyBackInPage,
 	historyForwardInPage,
 	locationHrefInPage,
@@ -1189,6 +1190,7 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
+		assertUrlPattern(pattern);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
 		if (typeof pattern === "string") {

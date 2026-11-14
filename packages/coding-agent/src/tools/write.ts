@@ -42,6 +42,7 @@ import {
 	sessionResolveContext,
 	sessionWriteContext,
 } from "../internal-urls";
+import { readSnapshot } from "../commit/selective/journal";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -1165,10 +1166,23 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			emitWriteProgress(onUpdate, writeBytes, displayPath, absolutePath);
 
+			const before = this.session.recordFileChange ? await readSnapshot(absolutePath) : undefined;
+			const journal = (after: string) => {
+				if (!before) return;
+				this.session.recordFileChange?.({
+					path: absolutePath,
+					tool: "write",
+					before: before.text,
+					after,
+					beforeMtimeMs: before.mtimeMs,
+				});
+			};
+
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
 			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
 			if (bridgeWrite) {
+				journal(bridgeWrite.text);
 				// `write` always replaces the whole file, so (unlike hashline's
 				// hunk-scoped diff) there's no size cost to keying the header/
 				// executable-bit check on the verified post-write content —
@@ -1209,6 +1223,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				this.session.bumpFileMutationVersion?.(absolutePath);
 			}
 			const finalContent = diagnostics.finalContent;
+			journal(finalContent);
 
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
 			const finalBytes = finalContent === writeContent ? writeBytes : Buffer.byteLength(finalContent, "utf8");

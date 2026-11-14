@@ -1087,6 +1087,13 @@ export interface OpenAIResponsesHistoryPayload {
 	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
+	/**
+	 * Set on a turn whose request was retried after the server refused replayed
+	 * encrypted reasoning (key rotation, another credential). That retry carried
+	 * no encrypted reasoning from earlier turns, and later requests omit it too,
+	 * so the refused blobs are never sent again.
+	 */
+	encryptedReasoningFloor?: boolean;
 }
 
 /** Anthropic `output_config.effort` level. */

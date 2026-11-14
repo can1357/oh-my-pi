@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +25,7 @@ import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	discoverLiteLLMModels,
 	discoverOpenAIModelsList,
+	discoverProxyModels,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -690,6 +692,8 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Antigravity discovery unions every account's roster and routes each model to an account serving it", async () => {
+		// Antigravity is paused in its auth rules; its discovery stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		// Account A's plan omits Claude 5.5; account B's serves it. Discovery is
 		// authoritative, so reading only one account's roster would prune Claude
 		// 5.5 for both whenever A is the account discovery happens to pick.
@@ -749,6 +753,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Antigravity routing still works for an account whose login stored no email", async () => {
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		// Google's userinfo lookup is optional at login; such a credential keeps
 		// only its project id, which must still tag and select the account.
 		await authStorage.credentials.set("google-antigravity", [
@@ -2885,6 +2890,87 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(maxTokensById["openai-test/nested-output-wins"]).toBe(32_768);
 		expect(maxTokensById["openai-test/output-over-context"]).toBe(8_192);
 		expect(maxTokensById["openai-test/no-limits"]).toBe(32_768);
+	});
+
+	test("openai-models-list skips a model whose id names two vendors instead of dropping the provider (#18770)", async () => {
+		const ctx = {
+			fetch: (async (input: unknown) => {
+				if (String(input) !== "http://127.0.0.1:9993/v3/models") {
+					throw new Error(`Unexpected URL: ${String(input)}`);
+				}
+				// Eden AI's gateway prefixes each id with the hosting vendor. Rows that
+				// advertise reasoning levels are classified while their spec is prepared.
+				const data = ["vertex/gemini-4-carbon@eu", "amazon/openai.gpt-6.1-sol", "mistral/mistral-large-latest"].map(
+					id => ({
+						id,
+						object: "model",
+						owned_by: id.split("/")[0],
+						...(id.startsWith("mistral/") ? {} : { supported_reasoning_levels: ["low", "high"] }),
+					}),
+				);
+				return new Response(JSON.stringify({ object: "list", data }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) satisfies FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		};
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "eden-ai",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9993/v3",
+				discovery: { type: "openai-models-list", injectV1: false },
+			},
+			ctx,
+		);
+		expect(models.map(model => model.id)).toEqual(["vertex/gemini-4-carbon@eu", "mistral/mistral-large-latest"]);
+	});
+
+	test("proxy discovery skips a model whose id names two vendors instead of dropping the provider (#18770)", async () => {
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:9992/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+			return Response.json({
+				data: [
+					{ id: "amazon/openai.gpt-6.1-sol", supported_endpoint_types: ["openai"] },
+					{ id: "mistral/mistral-large-latest", supported_endpoint_types: ["openai"] },
+				],
+			});
+		};
+		const models = await discoverProxyModels(
+			{
+				provider: "proxy-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9992/v1",
+				discovery: { type: "proxy" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		expect(models.map(model => model.id)).toEqual(["mistral/mistral-large-latest"]);
+	});
+
+	test("litellm discovery skips a model group whose name names two vendors instead of dropping the provider (#18770)", async () => {
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:4001/model_group/info") {
+				throw new Error(`Unexpected URL: ${String(input)}`);
+			}
+			return Response.json({
+				data: [
+					{ model_group: "amazon/openai.gpt-6.1-sol", providers: ["bedrock"] },
+					{ model_group: "gpt-big", providers: ["openai"] },
+				],
+			});
+		};
+		const models = await discoverLiteLLMModels(
+			{
+				provider: "litellm-test",
+				baseUrl: "http://127.0.0.1:4001",
+				api: "openai-completions",
+				discovery: { type: "litellm" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		expect(models.map(model => model.id)).toEqual(["gpt-big"]);
 	});
 
 	// Runs one `/v1/models` payload through the real `openai-models-list`

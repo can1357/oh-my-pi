@@ -91,6 +91,262 @@ async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsi
 	assert!(row["state"].is_null(), "{ran}");
 }
 
+/// Options for a command whose arguments are still streaming in.
+fn streaming() -> Options {
+	Options { streaming: true, ..Options::default() }
+}
+
+#[test]
+fn streamed_tail_is_drawn_as_it_will_continue() {
+	// A command still streaming in ends mid-construct. Parsed as is it fails,
+	// and the whole command flipped to literal source until the construct
+	// closed; each case is one way the tail is cut off.
+	for (script, expected) in [
+		// Open quote: the word grows in place.
+		("cd /tmp && rg -n \"va", &["cwd /tmp", "and rg -n ‹va›"][..]),
+		// Pipe awaiting its next stage.
+		("cd /tmp && rg -n x a.cpp |", &["cwd /tmp", "and rg -n ‹x› a.cpp"]),
+		// Redirection awaiting its target: `2` stays an argument until then.
+		("make 2>", &["make 2"]),
+		// A command name that is so far a reserved word (`fi` of `find`).
+		("ls; fi", &["ls", "fi"]),
+		// The start of `done` is not drawn as a command of the loop body.
+		("for f in a b; do echo $f; d", &["for f in [\"a\", \"b\"]:", "print(f)"]),
+		// Nor is `do`, though it is a reserved word of its own.
+		("for f in a b; do echo $f; do", &["for f in [\"a\", \"b\"]:", "print(f)"]),
+		// Nor in a body still empty, where the loop stays drawn.
+		("while true; do\n  d", &["while true:"]),
+		// The start of `esac` is no pattern, wherever a pattern may start.
+		("case $x in e", &["match x:"]),
+		("case $x in a) b;; e", &["match x:", "case \"a\":", "b"]),
+		// A pattern awaiting its `)` grows in place.
+		("case $x in fo", &["match x:", "case \"fo\":"]),
+		// A pattern alternative awaiting its next pattern.
+		("case $x in\n  start) run;;\n  stop|", &[
+			"match x:",
+			"case \"start\":",
+			"run",
+			"case \"stop\":",
+		]),
+		// A pipe dangling inside `$(` reports the unclosed `$(`.
+		("x=$(cat a |", &["x = ⟨cat \"a\"⟩"]),
+		// A backtick body is parsed only once closed: the dangling pipe in
+		// it would empty it.
+		("echo `ls |", &["print(⟨ls⟩)"]),
+		// Quoted, `|` is text: nothing is dropped.
+		("echo \"a | b", &["print(\"a | b\")"]),
+		// Arithmetic awaiting an operand: its operator waits with it, and
+		// `((` stays arithmetic rather than nested subshells.
+		("x=$((a+", &["x = a"]),
+		("(( i <", &["i"]),
+		// A streamed `\` would escape an appended closer, or draw as a word:
+		// it waits for its escapee.
+		("echo \"C:\\", &["print(\"C:\")"]),
+		("x=$(echo \\", &["x = ⟨print()⟩"]),
+		("echo a | \\\n", &["print(\"a\")"]),
+		("docker run \\\n  -v a:b \\", &["docker run -v a:b"]),
+		("docker run --rm \\\n  ", &["docker run --rm"]),
+		// Empty arithmetic draws nothing yet.
+		("echo $((", &["print()"]),
+		// A heredoc open in `$(` ends before the `$(` closes.
+		("git add -A && git commit -m \"$(cat <<'EOF'\nfix: x\n\nBody.", &[
+			"git add -A",
+			"and git commit -m f\"{⟨cat <<'EOF'",
+			"fix: x",
+			"",
+			"Body.",
+			"EOF⟩}\"",
+		]),
+		// A `<<` quoted or commented is no heredoc to end.
+		("echo \"use <<EOF", &["print(\"use <<EOF\")"]),
+		// A compound still opening in `$(` is hidden, not the command.
+		("x=$(if true; then", &["x = ⟨⟩"]),
+		("out=$(for f in *.txt; do\n  if", &["out = ⟨⟩"]),
+		("out=$(for", &["out = ⟨⟩"]),
+		("out=$(for f i", &["out = ⟨⟩"]),
+		("out=$(for f in *.txt; d", &["out = ⟨⟩"]),
+		// A lone `&` is so far the start of `&&`.
+		("cd /repo &", &["cwd /repo"]),
+		// A redirection of the clobber form awaits its target too.
+		("echo hi >|", &["print(\"hi\")"]),
+		// A body still empty keeps its compound drawn.
+		("for f in a; do\n  if grep -q x \"$f\"; then\n    ", &[
+			"for f in [\"a\"]:",
+			"if grep -q ‹x› f\"{f}\":",
+		]),
+		// Escape parity: after `\\` a `|` is a pipe awaiting its next stage
+		// and a `>` a redirection awaiting its target; after `\` each is text.
+		("echo x\\\\|", &["print(\"x\\\\\")"]),
+		("echo x\\|", &["print(\"x|\")"]),
+		("echo x\\\\>", &["print(\"x\\\\\")"]),
+		("echo x\\>", &["print(\"x>\")"]),
+		("x=$(echo a\\", &["x = ⟨print(\"a\")⟩"]),
+		// An empty body: the placeholder it is closed with draws no row.
+		("for f in a b; do", &["for f in [\"a\", \"b\"]:"]),
+		("cd /tmp && (", &["cwd /tmp", "and subshell:"]),
+		// A header still arriving: the start of `then` is not a command.
+		("if true; th", &["if true:"]),
+		// Nor are the starts of `in` and `do`.
+		("for f i", &["for f in args:"]),
+		("for f in a b; d", &["for f in [\"a\", \"b\"]:"]),
+		// A compound keyword with no header yet stays the command name it
+		// read as a byte earlier (`fo`).
+		("cd /tmp && for", &["cwd /tmp", "and for"]),
+		("for f in a; do echo $f; for", &["for f in [\"a\"]:", "print(f)", "for"]),
+		// A loop opening inside a loop on the same line.
+		("for i in 1 2; do for v", &["for i in [\"1\", \"2\"]:", "for v in args:"]),
+		// The fd of a redirection still arriving after a compound.
+		("(cd /tmp) 2>", &["subshell:", "cwd /tmp"]),
+		// A function header: the name stays a command until `()` arrives,
+		// then the definition is drawn before its body.
+		("x; gen(", &["x", "gen"]),
+		("x; gen()", &["x", "def gen():"]),
+		("x; function gen", &["x", "def gen():"]),
+	] {
+		let p = present(&RunTrace::new(script), &streaming());
+		let shown = rows(&p);
+		let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+		assert_eq!(texts, expected, "{script:?}");
+		assert!(shown.iter().all(|(_, row)| row["role"] != "raw"), "{script:?}: {p}");
+	}
+
+	// A tail no completion closes stays literal, but not the commands
+	// before it, nor the compound around it.
+	for (script, drawn, literal) in [
+		("cd /tmp && for (", &["cwd /tmp"][..], " && for ("),
+		("for f in a; do\n  echo $f\n  for (", &["for f in [\"a\"]:", "print(f)"], "  for ("),
+		("f() {\n  local x=1\n  for (", &["def f():", "local x=1"], "  for ("),
+		("ls\nfi x", &["ls"], "fi x"),
+		// An empty brace group has no row of its own to draw it.
+		("ls && {", &["ls"], " && {"),
+		// The `&` backgrounding the head stays with it.
+		("sleep 1 &\nfor (", &["spawn sleep 1"], "for ("),
+	] {
+		let p = present(&RunTrace::new(script), &streaming());
+		let mut shown = rows(&p);
+		let (text, row) = shown.pop().unwrap();
+		assert_eq!((text.as_str(), &row["role"]), (literal, &Value::from("raw")), "{script:?}");
+		let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+		assert_eq!(texts, drawn, "{script:?}");
+		assert!(shown.iter().all(|(_, row)| row["role"] != "raw"), "{script:?}: {p}");
+	}
+
+	// Closers of what is open draw as the command will once they arrive:
+	// parentheses open in arithmetic, a heredoc's delimiter line, a loop in
+	// `$(`.
+	for (prefix, whole) in [
+		("(( x > 3 )", "(( x > 3 ))"),
+		("echo \"big $(( x - 1 )", "echo \"big $(( x - 1 ))\""),
+		(
+			"git commit -m \"$(cat <<'EOF'\nfix: x\nEOF",
+			"git commit -m \"$(cat <<'EOF'\nfix: x\nEOF\n)\"",
+		),
+		("x=$(for f in a; do echo", "x=$(for f in a; do echo\ndone)"),
+		// A commented `<<` is no heredoc to end.
+		("# see <<EOF\nx=\"abc", "# see <<EOF\nx=\"abc\""),
+		// The start of a delimiter or awaited keyword is not drawn.
+		(
+			"git commit -m \"$(cat <<'EOF'\nfix: x\nEO",
+			"git commit -m \"$(cat <<'EOF'\nfix: x\nEOF\n)\"",
+		),
+		("x=$(while read l; do\n  echo $l\n  d", "x=$(while read l; do\n  echo $l\ndone)"),
+		(
+			"out=$(for f in a; do\n  if x; then y; fi\ndo",
+			"out=$(for f in a; do\n  if x; then y; fi\ndone)",
+		),
+		// A case pattern's `)` closes no `$(`.
+		("x=$(case $a in\n  a) echo", "x=$(case $a in\n  a) echo\nesac)"),
+		("x=$(case $a in a) echo;; esac; for", "x=$(case $a in a) echo;; esac; )"),
+		// Nested `$(` close innermost first; a closed one is no longer open.
+		("x=$(echo $(ls", "x=$(echo $(ls))"),
+		("echo \"$(basename $(pwd", "echo \"$(basename $(pwd))\""),
+		("x=$(for f in a; do echo $(ls)", "x=$(for f in a; do echo $(ls)\ndone)"),
+		(
+			"out=$(for f in *.txt; do\n  echo \"$f: $(wc -l < \"$f\"",
+			"out=$(for f in *.txt; do\n  echo \"$f: $(wc -l < \"$f\")\"\ndone)",
+		),
+	] {
+		let texts = |script: &str, options: &Options| -> Vec<String> {
+			rows(&present(&RunTrace::new(script), options))
+				.into_iter()
+				.map(|(text, _)| text)
+				.collect()
+		};
+		assert_eq!(texts(prefix, &streaming()), texts(whole, &Options::default()), "{prefix:?}");
+	}
+}
+
+#[test]
+fn a_case_pattern_in_substitutions_ends_the_repair() {
+	// A case pattern's `)` misleads the search for the `$(` still open: the
+	// repair recursed until the stack overflowed and took the process down,
+	// then emptied the `$(` nested in the arm. Each draws as it will once
+	// closed.
+	let texts = |script: &str, options: &Options| -> Vec<String> {
+		rows(&present(&RunTrace::new(script), options))
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect()
+	};
+	for (prefix, whole) in [
+		("x=$(case a in a) echo $(", "x=$(case a in a) echo $()\nesac)"),
+		("x=$(case a in a) echo $(ls -la", "x=$(case a in a) echo $(ls -la)\nesac)"),
+		("y=$(case $1 in\n  a|b) echo \"$(date", "y=$(case $1 in\n  a|b) echo \"$(date)\"\nesac)"),
+	] {
+		assert_eq!(texts(prefix, &streaming()), texts(whole, &Options::default()), "{prefix:?}");
+	}
+	// Deeper than the repair may recurse, the draft stays literal, on one row.
+	let deep = format!("x=$({}", "echo $(case a in a) ".repeat(20));
+	let p = present(&RunTrace::new(deep.as_str()), &streaming());
+	let shown = rows(&p);
+	assert_eq!(shown.len(), 1, "{p}");
+	assert_eq!((shown[0].0.as_str(), &shown[0].1["role"]), (deep.as_str(), &Value::from("raw")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_streaming_draft_is_drawn_as_it_will_continue() {
+	// Once its arguments are complete, or a run has started, the script is
+	// whole: its unterminated end is not drawn as valid, neither before the
+	// run, nor while earlier lines run, nor after the shell rejected it.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let script = format!("while [ ! -e '{}' ]; do sleep 0.01; done\necho \"b", gate.display());
+	let trace = Arc::new(RunTrace::new(script.as_str()));
+	let last = |trace: &RunTrace, options: &Options| {
+		let p = present(trace, options);
+		let (text, row) = rows(&p).pop().unwrap();
+		(text, row["role"].clone())
+	};
+	let literal = ("echo \"b".to_owned(), serde_json::Value::from("raw"));
+	assert_eq!(last(&trace, &streaming()), ("print(\"b\")".to_owned(), "stmt".into()), "draft");
+	assert_eq!(last(&trace, &Options::default()), literal, "complete");
+	let shell = Shell::new(None);
+	let run = shell.run(
+		ShellRunOptions {
+			command: script.clone(),
+			trace: Some(Arc::clone(&trace)),
+			..ShellRunOptions::default()
+		},
+		None,
+		().into(),
+	);
+	let probe = async {
+		while present(&trace, &Options::default())["running"] != true {
+			tokio::task::yield_now().await;
+		}
+		let running = last(&trace, &streaming());
+		std::fs::write(&gate, []).unwrap();
+		running
+	};
+	let (result, running) =
+		tokio::time::timeout(std::time::Duration::from_secs(10), async { tokio::join!(run, probe) })
+			.await
+			.unwrap();
+	assert_ne!(result.unwrap().exit_code, Some(0));
+	assert_eq!(running, literal, "running");
+	assert_eq!(last(&trace, &streaming()), literal, "finished");
+}
+
 #[test]
 fn bare_test_bracket_without_operands_renders_instead_of_panicking() {
 	// Regression for #18320: a streamed `[` with no operands sliced

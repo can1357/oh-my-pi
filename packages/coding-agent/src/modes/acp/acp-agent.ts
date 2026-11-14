@@ -2174,7 +2174,10 @@ export class AcpAgent implements Agent {
 			await this.#flushMissedFinalAssistantText(record, event);
 			await this.#flushUnreportedTurnError(record, event);
 			await this.#emitEndOfTurnUpdates(record);
-			await this.#waitForAcpPromptIdle(record);
+			await this.#waitForAcpPromptIdle(record, promptTurn);
+			// A follow-up turn's `agent_end` handler can settle the prompt first; this
+			// handler must not then reset or settle the next prompt's state.
+			if (promptTurn.settled) return;
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
 			this.#finishPrompt(record, {
@@ -2267,9 +2270,10 @@ export class AcpAgent implements Agent {
 		});
 	}
 
-	async #waitForAcpPromptIdle(record: ManagedSessionRecord): Promise<void> {
+	async #waitForAcpPromptIdle(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		for (let pass = 0; pass < ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES; pass++) {
 			await record.session.waitForIdle();
+			if (promptTurn.settled) return;
 			const delivered = await record.session.drainAsyncJobDeliveriesForAcp({
 				timeoutMs: ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS,
 			});

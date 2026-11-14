@@ -203,6 +203,7 @@ async function renderGitHubIssue(
 		title: string;
 		number: number;
 		state: string;
+		merged?: boolean;
 		user: { login: string } | null;
 		created_at: string;
 		updated_at: string;
@@ -212,8 +213,9 @@ async function renderGitHubIssue(
 		html_url: string;
 	};
 
+	const state = gh.type === "pull" && issue.merged ? "merged" : issue.state;
 	let md = `# ${issue.title}\n\n`;
-	md += `**#${issue.number}** · ${issue.state} · opened by @${issue.user?.login ?? "ghost"}\n`;
+	md += `**#${issue.number}** · ${state} · opened by @${issue.user?.login ?? "ghost"}\n`;
 	md += `Created: ${issue.created_at} · Updated: ${issue.updated_at}\n`;
 	if (issue.labels.length > 0) {
 		md += `Labels: ${issue.labels.map(l => l.name).join(", ")}\n`;

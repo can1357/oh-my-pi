@@ -44,9 +44,12 @@ export interface NetworkRouteDescription {
 
 /** Byte counts associated with one browser request. */
 export interface NetworkRequestSizes {
-	/** Encoded request body bytes, when present. */
-	requestBody: number;
-	/** Encoded response body bytes, when known. */
+	/** Request body bytes (0 for none); left out where the backend cannot see request bodies (omp's WebKit host). */
+	requestBody?: number;
+	/**
+	 * The response body's declared `Content-Length` (its size on the wire); without one, the size of the body once
+	 * `tab.request()` loaded it, on backends that keep bodies. Left out while neither is known.
+	 */
 	responseBody?: number;
 }
 
@@ -62,7 +65,10 @@ export interface NetworkRequestRecord {
 	method: string;
 	/** Requested URL. */
 	url: string;
-	/** Puppeteer resource type. */
+	/**
+	 * Puppeteer resource type. omp's WebKit host names none and omp derives it from the request: there `fetch` stands
+	 * for `xhr` too, and `document`/`subdocument` only for a frame's navigation.
+	 */
 	resourceType: string;
 	/** HTTP response status, when a response arrived. */
 	status?: number;
@@ -490,7 +496,7 @@ export function buildHarEntry(
 			queryString: queryStringToHar(record.url),
 			cookies: [],
 			headersSize: -1,
-			bodySize: record.sizes.requestBody,
+			bodySize: record.sizes.requestBody ?? -1,
 		},
 		response: {
 			status: record.status ?? 0,

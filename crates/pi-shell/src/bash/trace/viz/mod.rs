@@ -67,6 +67,10 @@ impl VizSource for Inner {
 	fn cache(&self) -> &printer::Cache {
 		&self.viz_cache
 	}
+
+	fn streaming(&self) -> bool {
+		self.status.is_none()
+	}
 }
 
 pub(super) fn live(inner: &Inner, options: &Options) -> Result<String, VizError> {
@@ -268,6 +272,10 @@ impl StoredVisualization {
 	}
 }
 impl VizSource for StoredVisualization {
+	fn streaming(&self) -> bool {
+		false
+	}
+
 	fn script(&self) -> &BStr {
 		BStr::new(&self.trace.script)
 	}

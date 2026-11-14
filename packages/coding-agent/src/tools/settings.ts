@@ -417,6 +417,33 @@ export const cfgTodoRemindersMax = register({
 	},
 });
 
+export const cfgTodoMidRunNudges = register({
+	id: "todo.midRunNudges",
+	type: "enum",
+	values: ["off", "capped", "backoff"] as const,
+	default: "capped",
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Mid-Run Todo Nudges",
+		description: "How often a long turn is reminded to update its todo list while it keeps changing things",
+		options: [
+			{ value: "off", label: "Off", description: "Never nudge mid-run" },
+			{
+				value: "capped",
+				label: "Capped",
+				description:
+					"Nudge after 12 edits or commands, at most twice until the todo list changes or you send a message",
+			},
+			{
+				value: "backoff",
+				label: "Backoff",
+				description: "Keep nudging with a doubling gap: after 12, 24, 48, 96, then every 192 edits or commands",
+			},
+		],
+	},
+});
+
 export const cfgTodoEager = register({
 	id: "todo.eager",
 	type: "enum",
@@ -488,7 +515,7 @@ export const cfgGrepEnabled = register({
 export const cfgGrepContextBefore = register({
 	id: "grep.contextBefore",
 	type: "number",
-	default: 1,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -507,7 +534,7 @@ export const cfgGrepContextBefore = register({
 export const cfgGrepContextAfter = register({
 	id: "grep.contextAfter",
 	type: "number",
-	default: 3,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -697,6 +724,19 @@ export const cfgArchiveEnabled = register({
 		label: "Archive",
 		description:
 			"Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps",
+	},
+});
+
+export const cfgCommitEnabled = register({
+	id: "commit.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Selective commit",
+		description:
+			"Enable the commit eval prelude and /commit: commit only the lines this agent and its subagents wrote",
 	},
 });
 
