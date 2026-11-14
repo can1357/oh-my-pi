@@ -7,7 +7,8 @@ export const DEFAULT_XAI_VOICE_ID = "eve";
 export const DEFAULT_XAI_LANGUAGE = "auto";
 export const DEFAULT_XAI_SAMPLE_RATE = 24_000;
 export const DEFAULT_XAI_BIT_RATE = 128_000;
-export const XAI_MAX_TEXT_LENGTH = 15_000;
+/** docs.x.ai text-to-speech `text` limit (60,000 characters, 2026-11). */
+export const XAI_MAX_TEXT_LENGTH = 60_000;
 
 export async function synthesizeXaiSpeech(
 	model: Model<Api>,
@@ -17,10 +18,9 @@ export async function synthesizeXaiSpeech(
 	if (request.text.length > XAI_MAX_TEXT_LENGTH) {
 		throw new AIError.ValidationError(`xai-tts input exceeds the ${XAI_MAX_TEXT_LENGTH}-character limit`);
 	}
-	if (request.format !== "mp3" && request.format !== "wav") {
-		throw new AIError.ValidationError(`xai-tts does not support ${request.format} output; use mp3 or wav`);
+	if (request.format !== "mp3" && request.format !== "wav" && request.format !== "pcm") {
+		throw new AIError.ValidationError(`xai-tts does not support ${request.format} output; use mp3, wav or pcm`);
 	}
-	if (request.speed !== undefined) throw new AIError.ValidationError("xai-tts does not support speed");
 	if (request.instructions !== undefined) throw new AIError.ValidationError("xai-tts does not support instructions");
 
 	const sampleRate = request.sampleRate ?? DEFAULT_XAI_SAMPLE_RATE;
@@ -30,6 +30,8 @@ export async function synthesizeXaiSpeech(
 		voice_id: request.voice ?? DEFAULT_XAI_VOICE_ID,
 		language: request.language ?? DEFAULT_XAI_LANGUAGE,
 	};
+	// xAI validates the 0.7–1.5 multiplier range itself.
+	if (request.speed !== undefined) payload.speed = request.speed;
 	const codecOverridden = request.format !== "mp3";
 	const sampleRateOverridden = sampleRate !== DEFAULT_XAI_SAMPLE_RATE;
 	const bitRateOverridden = request.format === "mp3" && bitRate !== DEFAULT_XAI_BIT_RATE;

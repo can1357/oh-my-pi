@@ -220,7 +220,7 @@ omp auth-gateway check   [--strict] [--json]
 | `POST` | `/v1/images/generations`   | bearer | Image generation, OpenAI Images JSON wire; `/v1/images` is the OpenRouter alias (`image` models)                                                 |
 | `POST` | `/v1/images/edits`         | bearer | Image edits: OpenAI multipart or OpenRouter JSON input images                                                                                    |
 | `POST` | `/v1/audio/speech`         | bearer | Text-to-speech, OpenAI/OpenRouter JSON wire; answers raw audio bytes (`tts` models: `xai-tts`, `openai-speech`)                                  |
-| `POST` | `/v1/audio/transcriptions` | bearer | Speech-to-text, OpenAI multipart `file` or OpenRouter JSON `input_audio` base64 (`stt` models on `openai-transcriptions`; 25 MiB cap)            |
+| `POST` | `/v1/audio/transcriptions` | bearer | Speech-to-text, OpenAI multipart `file` or OpenRouter JSON `input_audio` base64 (`stt` models on `openai-transcriptions`/`xai-stt`; 25 MiB cap)  |
 | `POST` | `/v1/embeddings`           | bearer | Embeddings, OpenAI wire (`embedding` models on `openai-embeddings`; OpenAI + OpenRouter; 8 MiB cap)                                              |
 | `POST` | `/v1/rerank`               | bearer | Rerank, OpenRouter wire (`rerank` models on `openrouter-rerank`)                                                                                 |
 | `POST` | `/v1/videos`               | bearer | Submit a video generation job, OpenRouter wire (`video` models on `openrouter-video`); answers `202` with gateway-rewritten polling/content URLs |
