@@ -14,9 +14,9 @@ use super::{
 	clipboard::validate_clipboard_sequence,
 	input::{Parsed, Patch, PatchSection},
 	messages::{
-		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
-		stale_unseen_lines_message, unseen_lines_message, unverified_wide_lines_message,
-		wide_unseen_lines_message,
+		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, missing_path_tag_match_message,
+		path_recovered_from_tag_message, stale_unseen_lines_message, unseen_lines_message,
+		unverified_wide_lines_message, wide_unseen_lines_message,
 	},
 	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
 	parser::{ParseFailure, parse_patch},
@@ -489,8 +489,8 @@ fn assert_seen_lines(
 				));
 			}
 			return Err(EditError::rejected(
-				Rejection::UnseenLines,
-				wide_unseen_lines_message(section.path.as_str(), &unseen),
+					Rejection::UnseenLines,
+					wide_unseen_lines_message(section.path.as_str(), &unseen),
 			));
 		}
 	}
@@ -727,6 +727,28 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 	format!("{op} → resolved {span} ({lines} line{}){suffix}", if lines == 1 { "" } else { "s" })
 }
 
+/// The one stored snapshot, other than `initial`, that shares the authored
+/// file name and content tag. `None` when no snapshot or several match.
+fn unique_tag_match(
+	section: &PatchSection,
+	initial: &Resolved,
+	store: &EditStore,
+) -> Option<std::path::PathBuf> {
+	let tag = section.file_hash.as_deref()?;
+	let authored_name = initial.absolute.file_name();
+	let mut candidates = store
+		.paths_with_hash(tag)
+		.into_iter()
+		.filter(|path| path.file_name() == authored_name && *path != initial.absolute)
+		.collect::<Vec<_>>();
+	candidates.sort();
+	candidates.dedup();
+	if candidates.len() != 1 {
+		return None;
+	}
+	candidates.pop()
+}
+
 /// When the authored path does not exist, rebind the section to the one
 /// stored snapshot with the same content tag and file name. `None` keeps
 /// the authored section and target, which callers use by reference.
@@ -739,23 +761,10 @@ pub(crate) fn recover_target(
 	if files.exists(&initial.absolute) {
 		return None;
 	}
-	let tag = section.file_hash.as_deref()?;
-	let authored_name = initial.absolute.file_name();
-	let mut candidates = store
-		.paths_with_hash(tag)
-		.into_iter()
-		.filter(|path| path.file_name() == authored_name && *path != initial.absolute)
-		.collect::<Vec<_>>();
-	candidates.sort();
-	candidates.dedup();
-	if candidates.len() != 1
-		|| !files
-			.policy()
-			.allow_tag_path_recovery(&section.path, &candidates[0])
-	{
+	let path = unique_tag_match(section, initial, store)?;
+	if !files.policy().allow_tag_path_recovery(&section.path, &path) {
 		return None;
 	}
-	let path = candidates.remove(0);
 	let display = path.to_string_lossy().into_owned();
 	Some((section.with_path(&display), Resolved { absolute: path, display }))
 }
@@ -902,6 +911,19 @@ fn stage_section(
 				canonical_paths,
 				&clipboard.fork(),
 			);
+		}
+		// Recovery declined to rebind (the match sits outside the workspace),
+		// but naming the full path lets the next call succeed without a
+		// re-read.
+		if recovered.is_none()
+			&& let Some(path) = unique_tag_match(section, &initial, store)
+			&& let Some(tag) = tag
+		{
+			return Err(EditError::apply(missing_path_tag_match_message(
+				&section.path,
+				&path.to_string_lossy(),
+				tag,
+			)));
 		}
 		return Err(EditError::rejected(
 			Rejection::FileNotFound,
@@ -1261,9 +1283,9 @@ mod lifecycle {
 			.unwrap_err();
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
 		assert!(
-			!err.lines().any(|line| line.starts_with("  20:")),
-			"faithful line leaked into reveal: {err}"
-		);
+				!err.lines().any(|line| line.starts_with("  20:")),
+				"faithful line leaked into reveal: {err}"
+			);
 		assert!(err.contains("  18:let v0016 = 16;"), "stale line missing from reveal: {err}");
 	}
 	/// A file whose old lines 16 and 18 carry identical content, for the
@@ -1359,7 +1381,7 @@ mod lifecycle {
 		let tag1 = ctx.head_tag("case-j.ts");
 		ctx.edit(&format!(
 			"[case-j.ts#{tag1}]\nPUT 16.=19:\n+let v0018 = 18; // a\n+let v0019 = 19;\n+let v0020 = \
-			 20;\n+let v0021 = 21; // b\n"
+				 20;\n+let v0021 = 21; // b\n"
 		))
 		.await
 		.unwrap();
@@ -1501,7 +1523,7 @@ mod lifecycle {
 		let before = (ctx.text("one.ts"), ctx.text("two.ts"));
 		let patch = format!(
 			"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#{two}]\nPUT 25.=25:\n+var v0025 \
-			 = 250;\n"
+				 = 250;\n"
 		);
 		let err = ctx.edit(&patch).await.unwrap_err();
 		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
@@ -1531,7 +1553,7 @@ mod lifecycle {
 		let err = ctx
 			.edit(&format!(
 				"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#BAD0]\nPUT 5.=5:\n+var v0005 \
-				 = 50;\n"
+					 = 50;\n"
 			))
 			.await
 			.unwrap_err();
