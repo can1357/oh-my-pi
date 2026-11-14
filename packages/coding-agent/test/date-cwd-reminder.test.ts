@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Api, AssistantMessage, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { isPerCallContextMessage, markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
@@ -23,7 +26,14 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "@oh-my-pi/pi-coding-agent/utils/prompt-path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { becomesCollectible } from "../../tui/test/gc";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+/** Flatten a turn's text so reminder bytes can be matched regardless of part shape. */
+function reminderText(message: Message): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
+}
 
 describe("date-cwd-reminder", () => {
 	afterEach(() => {
@@ -116,6 +126,360 @@ describe("date-cwd-reminder", () => {
 			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
 
 			expect(replay.messages[0]).toBe(first.messages[0]);
+		});
+
+		it("admits the replay memo on the second identical preparation, not the first", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			// The first preparation is a miss: it builds the wire once and hands
+			// back the array it allocated, snapshotting nothing.
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			// The identical repeat is what admits the layout, so every later
+			// preparation reuses it instead of re-running the per-message work.
+			const second = injector.transform(context, "2026-08-14", "/work/omp");
+			const third = injector.transform(context, "2026-08-14", "/work/omp");
+
+			// Nothing is re-injected: the injected turn is the same object on
+			// every preparation...
+			expect(second.messages[0]).toBe(first.messages[0]);
+			expect(third.messages[0]).toBe(first.messages[0]);
+			// ...while each request still gets an array of its own.
+			expect(second.messages).not.toBe(first.messages);
+			expect(third.messages).not.toBe(second.messages);
+			expect(third.messages).not.toBe(context.messages);
+		});
+
+		it("drops the admitted memo when an ordinary turn grows past it instead of pinning it", async () => {
+			// Contract: once an ordinary turn appends messages, the admitted memo
+			// can never hit again, so the miss must release both O(n) arrays —
+			// not keep the old transcript reachable until an identical rebuild
+			// happens along. The sentinel below sits mid-transcript and is never
+			// injected, so only the memo's `refs` (and the O(1) boundary
+			// signature's endpoints, which it is not) pins it; after the growing
+			// turn plus a full GC it must be collectable.
+			function buildAdmittedSentinel(): {
+				ref: WeakRef<Message>;
+				injector: DateCwdReminderInjector;
+				messages: () => Message[];
+			} {
+				const injector = new DateCwdReminderInjector();
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const sentinel: Message = { role: "user", content: "sentinel-mid", timestamp: 2 };
+				const last: Message = { role: "user", content: "last", timestamp: 3 };
+				const context: Context = { systemPrompt: ["system"], messages: [first, sentinel, last] };
+				injector.transform(context, "2026-08-14", "/work/omp");
+				injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+				return {
+					ref: new WeakRef(sentinel),
+					injector,
+					// The growing turn keeps the endpoints (the builder's closure
+					// holds them) and hands the sentinel to no one: only the memo
+					// could still reach it.
+					messages: () => [first, last, { role: "user", content: "appended", timestamp: 4 }],
+				};
+			}
+			const { ref, injector, messages } = buildAdmittedSentinel();
+			// The next ordinary turn grows the transcript: the memo misses, and
+			// the miss must clear it rather than leave it pinning the old arrays.
+			const grown = injector.transform(
+				{ systemPrompt: ["system"], messages: messages() },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(grown.messages).toHaveLength(3);
+			// Drop the frame's strong hold on the grown wire (its injected root
+			// is a fresh object, but the endpoints ride it) so only the memo —
+			// were it still admitted — could keep the sentinel alive.
+			grown.messages.length = 0;
+			expect(await becomesCollectible(ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the probe
+			// (otherwise the sentinel frees vacuously with its owner), so it is
+			// used again here — and it must still serve fresh transforms after.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 5 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
+		it("stops admitting a memo from a wire whose interior is rebuilt on every preparation", async () => {
+			// Contract: a provider transform that recreates the interior tool
+			// results (snapcompact.toolResults on a vision model) rebuilds the
+			// wire on every preparation while the first and last messages keep
+			// their identity. The boundary signature cannot see that, so the
+			// memo admitted from such a wire is never replayed: the admission
+			// only pays the two O(n) copies it costs, on exactly the long
+			// transcript path this injector exists to keep clean. The injector
+			// must notice the rebuilt interior and stop admitting from it.
+			const injector = new DateCwdReminderInjector();
+			const root: Message = { role: "user", content: "root", timestamp: 1 };
+			const last: Message = { role: "user", content: "last", timestamp: 3 };
+			// The interior is a fresh object on every preparation; the boundary
+			// messages are the same objects throughout.
+			const prepare = (): { ref: WeakRef<Message>; messages: Message[] } => {
+				const interior: Message = {
+					role: "toolResult",
+					toolCallId: "call-rebuilt",
+					toolName: "test_tool",
+					content: [{ type: "text", text: "rebuilt" }],
+					isError: false,
+					timestamp: 2,
+				};
+				return { ref: new WeakRef(interior), messages: [root, interior, last] };
+			};
+			const build = (wire: Message[]): void => {
+				injector.transform({ systemPrompt: ["system"], messages: wire }, "2026-08-14", "/work/omp");
+			};
+			// The first preparation records the boundary signature, the second
+			// admits the memo, the third finds the interior rebuilt.
+			build(prepare().messages);
+			build(prepare().messages);
+			build(prepare().messages);
+			// The fourth preparation must not admit again: the memo it would
+			// admit is never replayable, so it would only pay its copies.
+			const fourth = prepare();
+			const out = injector.transform(
+				{ systemPrompt: ["system"], messages: fourth.messages },
+				"2026-08-14",
+				"/work/omp",
+			);
+			// Drop the frame's strong holds (the wire and the built output) so
+			// only an admitted memo could keep the interior alive.
+			fourth.messages.length = 0;
+			out.messages.length = 0;
+			expect(await becomesCollectible(fourth.ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the probe
+			// (otherwise the interior frees vacuously with its owner), so it is
+			// used again here — and it must still serve fresh transforms after.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 4 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
+		it("releases the admitted memo when the agent commits the turn", async () => {
+			// Contract: a retry prepares the same request twice and admits the
+			// memo, then the turn commits through `Agent.appendMessage()` —
+			// which grows the history without replacing it. The memo can never
+			// be replayed after that, and it pins the whole provider wire, so
+			// the agent must release it when the transcript grows instead of
+			// holding it until the next request.
+			const injector = new DateCwdReminderInjector();
+			const agent = new Agent({ onHistoryChanged: () => injector.release() });
+			// The wire holds one turn that is never injected, so only the memo
+			// can keep it reachable.
+			const buildWire = (): { ref: WeakRef<Message>; messages: Message[] } => {
+				const root: Message = { role: "user", content: "root", timestamp: 1 };
+				const interior: Message = {
+					role: "toolResult",
+					toolCallId: "call-interior",
+					toolName: "test_tool",
+					content: [{ type: "text", text: "interior" }],
+					isError: false,
+					timestamp: 2,
+				};
+				return { ref: new WeakRef(interior), messages: [root, interior] };
+			};
+			const wire = buildWire();
+			// Two identical preparations admit the memo over this wire.
+			injector.transform({ systemPrompt: ["system"], messages: wire.messages }, "2026-08-14", "/work/omp");
+			injector.transform({ systemPrompt: ["system"], messages: [...wire.messages] }, "2026-08-14", "/work/omp");
+			// The turn commits: the assistant message is appended to the
+			// transcript, which grows the history the memo was pinned to.
+			agent.appendMessage(createAssistantMessage("ok"));
+			// The memo is released, so nothing pins the wire any more.
+			wire.messages.length = 0;
+			expect(await becomesCollectible(wire.ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the probe.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 4 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
+		it("does not pin a provider-normalized boundary message after the turn commits", async () => {
+			// Contract: the O(1) admission signature records the boundary messages
+			// of the wire it was handed, and that wire is not the transcript — a
+			// provider transform clones a normalized image/tool turn. Once the
+			// one-shot turn commits, the session transcript holds the
+			// pre-normalization turn and the prepared context is dropped, so that
+			// boundary is reachable only through the injector, where it can never
+			// match again (the transcript has grown). A strong signature keeps the
+			// clone — and every message it transitively owns — alive until the next
+			// request or the session is disposed; for a one-shot session that never
+			// sends again, that is the rest of the process.
+			function prepareCommittedTurn(): { ref: WeakRef<Message>; injector: DateCwdReminderInjector } {
+				const injector = new DateCwdReminderInjector();
+				const root: Message = { role: "user", content: "root", timestamp: 1 };
+				// The wire's last turn is the provider's normalized copy of the sent
+				// one, so the session transcript never holds this object.
+				const normalized: Message = { role: "user", content: "normalized-image", timestamp: 2 };
+				const context: Context = { systemPrompt: ["system"], messages: [root, normalized] };
+				// One preparation for the turn: only the O(1) boundary signature is
+				// recorded, no memo is admitted, so nothing else holds the
+				// normalized turn back.
+				injector.transform(context, "2026-08-14", "/work/omp");
+				return { ref: new WeakRef(normalized), injector };
+			}
+			const { ref, injector } = prepareCommittedTurn();
+			expect(await becomesCollectible(ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must survive the probe above, or the
+			// boundary frees vacuously with its owner. It must also keep injecting
+			// on the next turn.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 3 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
+		it("rebuilds the wire when the caller edits the input array in place", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const secondUser: Message = { role: "user", content: "second", timestamp: 2 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser, secondUser] };
+
+			const first = injector.transform(context, "2026-08-14", "/work/omp");
+			expect(first.messages).toHaveLength(2);
+			expect(first.messages[0]).not.toBe(firstUser);
+			expect(first.messages[1]).toBe(secondUser);
+
+			// A second identical transform admits the replay memo (two-hit
+			// admission: the first only records the O(1) boundary signature),
+			// so the in-place edit below must defeat the memo's
+			// element-identity check — not merely miss an unadmitted one.
+			const admitted = injector.transform(
+				{ ...context, messages: [...context.messages] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(admitted.messages[0]).toBe(first.messages[0]);
+
+			// The caller replaces an element of its own input array in place: the
+			// memo's element-identity check must miss and rebuild, or the replay
+			// serves the stale layout with the replaced turn still on the wire.
+			const replacement: Message = { role: "user", content: "replaced", timestamp: 3 };
+			context.messages[1] = replacement;
+
+			const replay = injector.transform(context, "2026-08-14", "/work/omp");
+
+			expect(replay.messages).toHaveLength(2);
+			expect(replay.messages[0]).toBe(first.messages[0]);
+			expect(replay.messages[1]).toBe(replacement);
+			expect(replay.messages).not.toContain(secondUser);
+		});
+
+		it("hands each request its own array so a retained context is never rewritten", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
+
+			// A provider like `streamMock` records the `Context` it is handed per call, so
+			// array identity is part of what it observed.
+			const first = injector.transform({ ...context }, "2026-08-14", "/work/omp");
+			const replay = injector.transform({ ...context }, "2026-08-14", "/work/omp");
+			expect(replay.messages).not.toBe(first.messages);
+			expect(replay.messages[0]).toBe(first.messages[0]);
+
+			// A second custom provider appends its own marker to the array it was handed.
+			const marker: Message = { role: "developer", content: "provider-only", timestamp: 2 };
+			replay.messages.push(marker);
+			expect(first.messages).toHaveLength(1);
+			expect(first.messages).not.toContain(marker);
+
+			// A late mutation by the first provider must not reach a later request either.
+			first.messages.push({ role: "developer", content: "late", timestamp: 3 });
+			const third = injector.transform({ ...context }, "2026-08-14", "/work/omp");
+			expect(third.messages).toHaveLength(1);
+			expect(third.messages).not.toBe(first.messages);
+			expect(third.messages[0]).toBe(first.messages[0]);
+		});
+
+		it("serves the memo's own layout after a consumer reorders the array it was handed", () => {
+			const injector = new DateCwdReminderInjector();
+			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
+			const anchor = createAssistantMessage("tool turn");
+			const messageSet = () => [firstUser, anchor];
+
+			injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-14", "/old");
+			// The cwd moves mid tool loop: the continuation carries the reminder as
+			// a developer control on the tail.
+			injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
+			// An identical repeat is what admits the memo the reorder below must
+			// survive: the first `/new` build only records the O(1) boundary
+			// signature, so `live` would otherwise own its array outright.
+			const live = injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
+			const control = live.messages.at(-1)!;
+			expect(control.role).toBe("developer");
+			expect(isDateCwdReminderControl(control)).toBe(true);
+
+			// A downstream consumer reorders the tail it was handed: a copy of the
+			// turn the control was appended after lands behind it.
+			live.messages.push(anchor);
+			expect(live.messages.at(-1)).toBe(anchor);
+
+			// A third identical build serves the admitted memo, so it must hand out
+			// a copy of the memo's own array. Admitting by returning that array
+			// instead of a copy would let the splice above rewrite what every later
+			// request is sent.
+			const replay = injector.transform({ systemPrompt: ["system"], messages: messageSet() }, "2026-08-15", "/new");
+
+			// The reordered array is not replayed: the reminder control stays where
+			// it was appended, after the occurrence it belongs to.
+			expect(replay.messages).not.toBe(live.messages);
+			expect(replay.messages).toHaveLength(3);
+			expect(replay.messages[2]).toBe(control);
+		});
+
+		it("frees the discarded transcript on release instead of pinning it in the memo", async () => {
+			// Contract: once the owner reports a wholesale history replacement, the
+			// injector must hold no reference — memo or otherwise — that keeps a
+			// discarded turn alive. The sentinel tail below is never injected, so
+			// only the admitted replay memo pins it; after `release()` plus a full
+			// GC it must be collectable. Collection runs from a fresh timer
+			// callback per the shared `becomesCollectible` probe: JSC scans stale
+			// async frames conservatively, so `Bun.gc(true)` issued from this
+			// resumed async frame can retain the released tail; a timer callback
+			// runs on the event loop's shallow stack, out of reach of those
+			// frames. The 2s deadline sits far inside Bun's 5s per-test default,
+			// leaving timeout margin.
+			function buildPinnedTail(): { ref: WeakRef<Message>; injector: DateCwdReminderInjector } {
+				const injector = new DateCwdReminderInjector();
+				const tail: Message = { role: "user", content: "sentinel-tail", timestamp: 2 };
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const context: Context = { systemPrompt: ["system"], messages: [first, tail] };
+				// Two-hit admission: the first transform only records the O(1)
+				// boundary signature into #pending, so the sentinel must be built
+				// twice to land in the admitted memo this test names.
+				injector.transform(context, "2026-08-14", "/work/omp");
+				injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+				return { ref: new WeakRef(tail), injector };
+			}
+			const { ref, injector } = buildPinnedTail();
+			injector.release();
+			expect(await becomesCollectible(ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the loop above
+			// (otherwise the tail frees vacuously with its owner), so it is used
+			// again here — and it must still serve fresh transforms afterwards.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 3 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
 		});
 
 		it("keeps the reminders of turns a compaction retains when the first user turn changes", () => {
@@ -1134,7 +1498,7 @@ describe("date-cwd-reminder", () => {
 	});
 });
 
-describe("date-cwd reminder on the provider wire", () => {
+describe("date/cwd reminder on the provider wire", () => {
 	const sessions: Array<{ dispose(): Promise<void> }> = [];
 
 	afterEach(async () => {
@@ -1784,4 +2148,5 @@ describe("date-cwd reminder on the provider wire", () => {
 			authStorage.close();
 		}
 	});
+
 });
