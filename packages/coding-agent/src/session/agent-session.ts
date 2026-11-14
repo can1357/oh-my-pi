@@ -119,6 +119,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
+import { readHostPressure } from "../async/host-pressure";
 import { PROCESS_WATCH_MESSAGE_TYPE, ProcessWatch, registerProcessWatchDelivery } from "../async/process-watch";
 import { planParallel } from "../auto-parallel/planner";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
@@ -2822,6 +2823,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						costGate: this.#costGate,
 					}),
 				recent: () => buildTitleDriftTurns(this.agent.state.messages),
+				hostPressure: () => readHostPressure(this.sessionManager.getCwd()),
 				notify: registerProcessWatchDelivery(this.yieldQueue, jobId => manager.getJob(jobId)?.status === "running"),
 			});
 		}

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Judge, type JudgmentRequest, type JudgmentResult, tokenUsage } from "@oh-my-pi/pi-ai";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async";
+import type { HostPressure } from "@oh-my-pi/pi-coding-agent/async/host-pressure";
 import {
 	PROCESS_WATCH_MESSAGE_TYPE,
 	ProcessWatch,
@@ -60,7 +61,7 @@ function job(id: string, command: string, output?: string): AsyncJob {
 
 /** Lets a look's judgment settle and the watch re-arm. */
 async function flush(): Promise<void> {
-	for (let i = 0; i < 10; i++) await Promise.resolve();
+	for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
 async function advance(seconds: number): Promise<void> {
@@ -81,7 +82,7 @@ describe("ProcessWatch", () => {
 	let queue: YieldQueue;
 	let watch: ProcessWatch;
 
-	function start(overrides: Record<string, unknown> = {}): void {
+	function start(overrides: Record<string, unknown> = {}, host?: HostPressure): void {
 		const settings = Settings.isolated({ "async.processWatch.enabled": true, ...overrides });
 		queue = new YieldQueue({
 			isStreaming: () => true,
@@ -93,6 +94,7 @@ describe("ProcessWatch", () => {
 			runningJobs: () => jobs,
 			judge: () => judge,
 			recent: () => [{ role: "user", text: "run the integration suite" }],
+			...(host ? { hostPressure: async () => host } : {}),
 			notify: registerProcessWatchDelivery(queue, jobId => jobs.some(j => j.id === jobId)),
 		});
 		watch.poke();
@@ -169,6 +171,44 @@ describe("ProcessWatch", () => {
 		await advance(30);
 		expect(judge.requests).toHaveLength(1);
 		expect(drain(queue)).toHaveLength(0);
+	});
+
+	it("shows the judge the host snapshot and names host strain in a stall notice", async () => {
+		const gib = 1024 ** 3;
+		jobs = [job("bg1", "cargo build --release", "Compiling serde v1.0")];
+		judge.answer = () => ({ stalled: 0.8, progressing: 0.2 });
+		start(
+			{},
+			{
+				cpu: { some: { avg10: 4, avg60: 3 } },
+				memory: { some: { avg10: 40, avg60: 35 }, full: { avg10: 20, avg60: 15 } },
+				io: { some: { avg10: 1, avg60: 1 } },
+				memTotalBytes: 16 * gib,
+				memAvailableBytes: 0.5 * gib,
+				swapTotalBytes: 0,
+				swapFreeBytes: 0,
+				diskTotalBytes: 200 * gib,
+				diskFreeBytes: 120 * gib,
+			},
+		);
+
+		await advance(30);
+		const state = judge.requests[0]!.state;
+		const host = typeof state === "object" && !Array.isArray(state) && "host" in state ? state.host : undefined;
+		expect(host).toEqual({
+			psi: {
+				cpu: { some10: 4, some60: 3 },
+				memory: { some10: 40, some60: 35, full10: 20, full60: 15 },
+				io: { some10: 1, some60: 1 },
+			},
+			memory_gib: { available: 0.5, total: 16 },
+			swap_gib: { used: 0, total: 0 },
+			disk_gib: { free: 120, total: 200 },
+		});
+		const messages = drain(queue);
+		const text = messages[0]?.role === "custom" ? String(messages[0].content) : "";
+		expect(text).toContain("The host shows memory pressure");
+		expect(text).toContain("moving heavy work off this host");
 	});
 
 	it("honors a configured threshold", async () => {

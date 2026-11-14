@@ -35,6 +35,7 @@ import {
 	cfgAsyncProcessWatchSchedule,
 	cfgAsyncProcessWatchThreshold,
 } from "../tools/settings";
+import { type HostPressure, hostStrain, summarizeHostPressure } from "./host-pressure";
 import type { AsyncJob } from "./job-manager";
 
 /** `customType` of the injected process-watch notice. */
@@ -82,6 +83,8 @@ export interface ProcessWatchFlag {
 /** What one look tells the agent. */
 export interface ProcessWatchNotice {
 	jobs: ProcessWatchFlag[];
+	/** Host strain the look's snapshot showed (see {@link hostStrain}), when a flagged job looks stalled. */
+	hostStrain?: string[];
 }
 
 /** The judge's answer for one job at one look; every look logs them all. */
@@ -103,6 +106,8 @@ export interface ProcessWatchHost {
 	judge(): Judge;
 	/** The session's recent conversation, shown to the judge beside the jobs. */
 	recent(): JsonValue;
+	/** Host resource snapshot shown to the judge as `host`; omitted or `undefined` leaves it out. */
+	hostPressure?(): Promise<HostPressure | undefined>;
 	/**
 	 * Hands the agent-facing notice of one completed look, with no jobs when
 	 * nothing was flagged, so a newer verdict always replaces an older one.
@@ -232,8 +237,14 @@ export class ProcessWatch {
 				quiet: entry.quietMs === undefined ? undefined : formatDuration(entry.quietMs),
 			});
 		}
+		// Read inside the look's deadline; a failed read only leaves `host` out.
+		const pressure = this.#host.hostPressure
+			? await untilAborted(signal, this.#host.hostPressure()).catch(() => undefined)
+			: undefined;
+		if (signal.aborted) return;
 		const state = {
 			recent: this.#host.recent(),
+			...(pressure ? { host: summarizeHostPressure(pressure) } : {}),
 			processes: shown.map(entry => ({
 				id: entry.job.id,
 				command: entry.command,
@@ -276,7 +287,8 @@ export class ProcessWatch {
 			}
 		}
 		logger.info("process-watch: look", { judge: judge.label, threshold, verdicts });
-		this.#host.notify({ jobs: flagged });
+		const strain = pressure && flagged.some(flag => flag.verdict === "stalled") ? hostStrain(pressure) : [];
+		this.#host.notify(strain.length > 0 ? { jobs: flagged, hostStrain: strain } : { jobs: flagged });
 	}
 }
 
@@ -340,7 +352,12 @@ export function registerProcessWatchDelivery(
 		isStale: notice => !notice.jobs.some(job => isRunning(job.jobId)),
 		build: notices => {
 			const latest = notices[notices.length - 1];
-			return latest ? buildMessage(latest.jobs.filter(job => isRunning(job.jobId))) : null;
+			return latest
+				? buildMessage(
+						latest.jobs.filter(job => isRunning(job.jobId)),
+						latest.hostStrain,
+					)
+				: null;
 		},
 	});
 	return notice => {
@@ -349,9 +366,13 @@ export function registerProcessWatchDelivery(
 	};
 }
 
-function buildMessage(jobs: ProcessWatchFlag[]): CustomMessage<ProcessWatchNotice> | null {
+function buildMessage(
+	jobs: ProcessWatchFlag[],
+	strain: string[] | undefined,
+): CustomMessage<ProcessWatchNotice> | null {
 	if (jobs.length === 0) return null;
 	const content = prompt.render(noticeTemplate, {
+		hostStrain: strain && strain.length > 0 ? strain.join(", ") : undefined,
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
 			command: escapeHarnessTags(job.command),
@@ -368,7 +389,7 @@ function buildMessage(jobs: ProcessWatchFlag[]): CustomMessage<ProcessWatchNotic
 		content,
 		display: true,
 		attribution: "agent",
-		details: { jobs },
+		details: strain && strain.length > 0 ? { jobs, hostStrain: strain } : { jobs },
 		timestamp: Date.now(),
 	};
 }

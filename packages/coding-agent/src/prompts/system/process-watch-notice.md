@@ -5,5 +5,8 @@ A check on the background jobs running now found:
   Last output:
   {{this.lastOutput}}{{/if}}
 {{/each}}
+{{#if hostStrain}}
+The host shows {{hostStrain}}, which may be starving the stalled job. Consider moving heavy work off this host or freeing resources (disk space, memory held by other work you started); do not kill jobs to do it.
+{{/if}}
 Check on it now: read its output (`proc://<job id>`), stop it, or carry on if you know it should still run.
 </system-notice>
