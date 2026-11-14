@@ -1,20 +1,24 @@
-//! Envd-owned URL-scheme generation for ADR 0050 S2.
+//! Envd-owned URL-scheme generation for ADR 0050 S2/S3.
 //!
 //! One [`SchemeGeneration`] is the unknown-scheme broker (`HostResources`) that
 //! `HostUriResolver` already calls. Publish replaces the envd-owned map (same
 //! replace semantics as `set_host_uri_schemes`); the RPC stub stays unused on
 //! chat compositions. A declared scheme's body is served by CONTROL
 //! `omp.schemes.read` on the owning extension host.
+//!
+//! S3 adds declaration-based [`HostUriJudgment`] and live-only line-selector
+//! peel gating via [`SchemeGeneration::is_live`].
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use omp_core::{Str, sf};
+use omp_tool::FetchEffects;
 use omp_tools::read::resolver::Scheme;
 use parking_lot::RwLock;
 
 use crate::{
-	HostResourceResult, HostResources,
+	HostResourceResult, HostResources, HostUriJudgment,
 	exthost::{
 		CallbackConcurrency,
 		control::{ControlConnectionIdentity, ControlProtocolError},
@@ -36,6 +40,10 @@ pub struct LiveScheme {
 	pub writable:    bool,
 	/// Whether reads are immutable.
 	pub immutable:   bool,
+	/// Extension has `env.net.fetch` / `env.net` at fold (ADR 0050 D4).
+	pub fetch:       bool,
+	/// Extension has a non-empty `credentials.allow` provider list at fold.
+	pub credentials: bool,
 	/// Extension id or `"rpc-host"`.
 	pub owner:       Str,
 	/// Live CONTROL identity used to invoke `omp.schemes.read`, when known.
@@ -53,6 +61,38 @@ pub struct SchemeClaim {
 	pub writable:    bool,
 	/// Immutable flag from the declaration.
 	pub immutable:   bool,
+	/// Per-extension fetch capability copied onto every claim at fold.
+	pub fetch:       bool,
+	/// Per-extension credentials.allow non-empty flag copied at fold.
+	pub credentials: bool,
+}
+
+impl LiveScheme {
+	/// Declaration-based judgment for this live scheme (ADR 0050 D5).
+	#[must_use]
+	pub const fn judgment(&self) -> HostUriJudgment {
+		judgment_from_flags(self.fetch, self.credentials)
+	}
+}
+
+impl SchemeClaim {
+	/// Declaration-based judgment for this claim (ADR 0050 D5).
+	#[must_use]
+	pub const fn judgment(&self) -> HostUriJudgment {
+		judgment_from_flags(self.fetch, self.credentials)
+	}
+}
+
+/// Maps fold capability flags to a host URI judgment.
+///
+/// `credentials` without `fetch` never becomes [`HostUriJudgment::Fetch`].
+#[must_use]
+pub const fn judgment_from_flags(fetch: bool, credentials: bool) -> HostUriJudgment {
+	if fetch {
+		HostUriJudgment::Fetch(FetchEffects { credentials })
+	} else {
+		HostUriJudgment::Unknown
+	}
 }
 
 /// Refusal while folding claims into the generation.
@@ -134,6 +174,28 @@ impl SchemeGeneration {
 		!matches!(Scheme::parse(spelling), Scheme::Unknown)
 	}
 
+	/// Whether `scheme` is currently live in this generation (ADR 0050 S3).
+	#[must_use]
+	pub fn is_live(&self, scheme: &str) -> bool {
+		let Ok(canonical) = normalize_scheme(scheme) else {
+			return false;
+		};
+		self.schemes.read().contains_key(canonical.as_str())
+	}
+
+	/// Declaration-based judgment for `url` (ADR 0050 D5).
+	#[must_use]
+	pub fn judge(&self, url: &str) -> HostUriJudgment {
+		let Some(scheme) = scheme_of(url) else {
+			return HostUriJudgment::Undeclared;
+		};
+		self
+			.schemes
+			.read()
+			.get(scheme.as_str())
+			.map_or(HostUriJudgment::Undeclared, LiveScheme::judgment)
+	}
+
 	/// Replaces every scheme owned by `owner` with `claims` (union publish).
 	///
 	/// Schemes owned by other owners are preserved. Built-in wire names,
@@ -157,6 +219,8 @@ impl SchemeGeneration {
 				description: claim.description,
 				writable: claim.writable,
 				immutable: claim.immutable,
+				fetch: claim.fetch,
+				credentials: claim.credentials,
 				owner: owner.clone(),
 				identity: identity.clone(),
 			});
@@ -261,6 +325,10 @@ impl HostResources for SchemeGeneration {
 	async fn resolve_write(&self, _url: &str, _content: String) -> Result<HostResourceResult, Str> {
 		Err(Str::new_static(WRITE_NOT_ENABLED))
 	}
+
+	fn judge(&self, url: &str) -> HostUriJudgment {
+		SchemeGeneration::judge(self, url)
+	}
 }
 
 fn normalize_scheme(spelling: &str) -> Result<Str, SchemeFoldError> {
@@ -350,7 +418,13 @@ mod tests {
 			description: None,
 			writable:    false,
 			immutable:   false,
+			fetch:       false,
+			credentials: false,
 		}
+	}
+
+	fn claim_fetch(name: &str, fetch: bool, credentials: bool) -> SchemeClaim {
+		SchemeClaim { fetch, credentials, ..claim(name) }
 	}
 
 	#[test]
@@ -405,5 +479,57 @@ mod tests {
 		assert!(SchemeGeneration::is_builtin_wire_name("https"));
 		assert!(SchemeGeneration::is_builtin_wire_name("pr"));
 		assert!(!SchemeGeneration::is_builtin_wire_name("widget"));
+	}
+
+	#[test]
+	fn omit_fetch_and_credentials_judges_unknown() {
+		let generation = SchemeGeneration::new();
+		generation
+			.replace_owner("acme.widgets", None, vec![claim("widget")])
+			.expect("fold");
+		assert_eq!(generation.judge("widget://id"), HostUriJudgment::Unknown);
+		assert!(generation.is_live("widget"));
+		assert!(!generation.is_live("custom"));
+	}
+
+	#[test]
+	fn fetch_flag_judges_fetch_effects() {
+		let generation = SchemeGeneration::new();
+		generation
+			.replace_owner("acme.widgets", None, vec![
+				claim_fetch("widget", true, false),
+				claim_fetch("secure", true, true),
+			])
+			.expect("fold");
+		assert_eq!(
+			generation.judge("widget://id"),
+			HostUriJudgment::Fetch(FetchEffects { credentials: false })
+		);
+		assert_eq!(
+			generation.judge("secure://id"),
+			HostUriJudgment::Fetch(FetchEffects { credentials: true })
+		);
+	}
+
+	#[test]
+	fn credentials_without_fetch_stays_unknown() {
+		assert_eq!(
+			judgment_from_flags(false, true),
+			HostUriJudgment::Unknown,
+			"credentials alone never becomes Fetch"
+		);
+	}
+
+	#[test]
+	fn undeclared_never_inherits_declared_judgment() {
+		let generation = SchemeGeneration::new();
+		generation
+			.replace_owner("acme.widgets", None, vec![claim_fetch("widget", true, true)])
+			.expect("fold");
+		assert_eq!(generation.judge("custom://pending:raw"), HostUriJudgment::Undeclared);
+		assert_eq!(
+			generation.judge("widget://id"),
+			HostUriJudgment::Fetch(FetchEffects { credentials: true })
+		);
 	}
 }
