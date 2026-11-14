@@ -588,6 +588,14 @@ function getWarpTerminalInfo(platform: NodeJS.Platform, env: NodeJS.ProcessEnv =
 		1,
 	);
 }
+
+/**
+ * Rio with its Windows toast AUMID registered by the MSI. The capability flag
+ * is exported only when the Start Menu shortcut carries `System.AppUserModel.ID`;
+ * without it, OSC 9 would be silently dropped and BEL keeps the D-Bus fallback.
+ */
+const RIO_OSC9 = new TerminalInfo("rio", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9);
+
 const KNOWN_TERMINALS = Object.freeze({
 	// Fallback terminals
 	base: new TerminalInfo("base", null, false, false, NotifyProtocol.Bell),
@@ -619,13 +627,14 @@ const KNOWN_TERMINALS = Object.freeze({
 	// rio 0.5.28/Win11 26100 where an OSC 8 span Alt+click opened the target
 	// URL in the browser, and an OSC 52 clipboard query round-tripped. Kitty
 	// graphics direct placement plus U=1 Unicode placeholders verified by the
-	// reporter (#12205). Notifications stay on BEL: rio parses OSC 9/777 into
+	// reporter (#12205). Notifications default to BEL: rio parses OSC 9/777 into
 	// its own notifier, but its Windows path raises an unpackaged WinRT toast
 	// with AppId "Rio" that Windows silently drops without a registered AUMID
-	// shortcut — observed as a no-op live — so flipping it would only remove
-	// the D-Bus fallback for Linux rio users. DECCARA, screen-to-scrollback,
-	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
-	// the conservative defaults.
+	// shortcut — observed as a no-op live. On Windows, the MSI registers the
+	// AUMID and exports RIO_AUMID_REGISTERED=1; getTerminalInfo then selects
+	// RIO_OSC9. Everywhere else BEL keeps rio's D-Bus fallback. DECCARA,
+	// screen-to-scrollback, OSC 99, and OSC 66 text sizing are outside rio's
+	// supported set and keep the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
 	// Rex (Superlogical's terminal) identifies via TERM_PROGRAM=rex, or
 	// TERM=xterm-rex over SSH. It renders Kitty graphics and OSC 8
@@ -850,7 +859,11 @@ export function getTerminalInfo(
 	platform: NodeJS.Platform = process.platform,
 	env: NodeJS.ProcessEnv = Bun.env,
 ): TerminalInfo {
-	return terminalId === "warp" ? getWarpTerminalInfo(platform, env) : KNOWN_TERMINALS[terminalId];
+	if (terminalId === "warp") return getWarpTerminalInfo(platform, env);
+	if (terminalId === "rio") {
+		return platform === "win32" && env.RIO_AUMID_REGISTERED === "1" ? RIO_OSC9 : KNOWN_TERMINALS.rio;
+	}
+	return KNOWN_TERMINALS[terminalId];
 }
 
 export interface CellDimensions {
