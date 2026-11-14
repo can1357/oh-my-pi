@@ -132,12 +132,12 @@ describe("advisor tool-call loop guard", () => {
 						role: "assistant",
 						content: [
 							advising
-								{
-									type: "toolCall",
-									id: `tc-${turn}`,
-									name: "advise",
-									arguments: adviceArgs,
-								}
+								? {
+										type: "toolCall",
+										id: `tc-${turn}`,
+										name: "advise",
+										arguments: adviceArgs,
+									}
 								: { type: "toolCall", id: `tc-${turn}`, name: "read", arguments: { path: "missing.ts" } },
 						],
 						api: advisorMock.api,
@@ -147,7 +147,7 @@ describe("advisor tool-call loop guard", () => {
 						stopReason: "toolUse",
 						timestamp: Date.now(),
 					}
-					: {
+				: {
 						role: "assistant",
 						content: [{ type: "text", text: "Stopped repeating." }],
 						api: advisorMock.api,
@@ -346,24 +346,24 @@ describe("advisor tool-call loop guard", () => {
 		for (let index = 0; index < 2; index++) {
 			guard.recordTurn(messages, {
 				message: {
-						role: "assistant",
-						content: [
-							{
-								type: "toolCall",
-								id: `call-${index}`,
-								name: "write",
-								arguments: { path: `xd://${device}`, content: "{}" },
-							},
-						],
-						api: "anthropic-messages",
-						provider: "anthropic",
-						model: "test",
-						usage: zeroUsage,
-						stopReason: "toolUse",
-						timestamp: Date.now(),
-					},
-					toolResults: [],
-					willContinue: true,
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: `call-${index}`,
+							name: "write",
+							arguments: { path: `xd://${device}`, content: "{}" },
+						},
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test",
+					usage: zeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				toolResults: [],
+				willContinue: true,
 			});
 		}
 		expect(messages).toHaveLength(redirects);
@@ -393,7 +393,7 @@ describe("advisor tool-call loop guard", () => {
 				usage: zeroUsage,
 				stopReason: "toolUse",
 				timestamp: Date.now(),
-		};
+			};
 			const result: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId: id,
@@ -513,8 +513,8 @@ describe("advisor tool-call loop guard", () => {
 		const messages = session.agent.state.messages;
 		expect(messages.some(message => JSON.stringify(message).includes("hash pin still present"))).toBe(false);
 		expect(
-				messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
-			).toHaveLength(2);
+			messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
+		).toHaveLength(2);
 		expect(completions(reviewStarts.at(-1)!)).toBe(2);
 	});
 
@@ -934,9 +934,9 @@ describe("advisor tool-call loop guard", () => {
 		const live = new AgentSession({
 			agent: new Agent({
 				getApiKey: () => "test-key",
-					initialState: { model: primaryMock, systemPrompt: [], tools: [] },
-					streamFn: primaryMock.stream,
-				}),
+				initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+				streamFn: primaryMock.stream,
+			}),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
