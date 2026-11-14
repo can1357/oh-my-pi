@@ -12,8 +12,6 @@ type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
 >;
 type SpawnCall = { cmd: string[]; options: SpawnOptions };
 
-type SpawnSyncOptions = Bun.SpawnOptions.SpawnSyncOptions<"ignore", "pipe", "ignore">;
-
 const existingLinuxPath = "/mnt/c/Users/example/Downloads/session.html";
 const windowsPath = "C:\\Users\\example\\Downloads\\session.html";
 
@@ -29,11 +27,15 @@ function restorePlatform(): void {
 	if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
 }
 
-function fakeProcess(): Subprocess {
+function fakeProcess(stdout: string): Subprocess {
 	return {
 		pid: 1,
 		exited: Promise.resolve(0),
+		exitCode: 0,
+		killed: false,
 		kill: () => true,
+		stdout: new Response(stdout).body,
+		stderr: new Response("").body,
 	} as unknown as Subprocess;
 }
 
@@ -44,30 +46,25 @@ function spySpawn(calls: SpawnCall[]) {
 		const cmd = Array.isArray(first) ? first : first.cmd;
 		const options = Array.isArray(first) ? (second ?? ({} as SpawnOptions)) : (first as SpawnOptions);
 		calls.push({ cmd, options });
-		return fakeProcess();
+		return fakeProcess("");
 	}
 	return vi.spyOn(Bun, "spawn").mockImplementation(mockSpawn);
 }
 
-function spyWslPath(calls: string[][], output: string, exitCode = 0) {
-	const result = {
-		stdout: Buffer.from(output),
-		stderr: null,
-		exitCode,
-		success: exitCode === 0,
-		resourceUsage: {},
-		pid: 1,
-	} as unknown as Bun.SyncSubprocess<"pipe", "ignore">;
-
-	function mockSpawnSync(opts: SpawnSyncOptions & { cmd: string[] }): Bun.SyncSubprocess<"pipe", "ignore">;
-	function mockSpawnSync(cmd: string[], opts?: SpawnSyncOptions): Bun.SyncSubprocess<"pipe", "ignore">;
-	function mockSpawnSync(
-		first: string[] | (SpawnSyncOptions & { cmd: string[] }),
-	): Bun.SyncSubprocess<"pipe", "ignore"> {
-		calls.push(Array.isArray(first) ? first : first.cmd);
-		return result;
-	}
-	return vi.spyOn(Bun, "spawnSync").mockImplementation(mockSpawnSync);
+/**
+ * Record every spawn, resolving `opened` once the command for `cmdPrefix`
+ * lands. Lets the async-probe test wait on the real signal the code emits (the
+ * opener spawn) instead of a guessed wall-clock delay.
+ */
+function spySpawnAwaiting(calls: string[][], cmdPrefix: string, stdout: string): Promise<void> {
+	const opened = Promise.withResolvers<void>();
+	vi.spyOn(Bun, "spawn").mockImplementation(((first: string[] | (SpawnOptions & { cmd: string[] })) => {
+		const cmd = Array.isArray(first) ? first : first.cmd;
+		calls.push(cmd);
+		if (cmd[0] === cmdPrefix) opened.resolve();
+		return fakeProcess(stdout);
+	}) as never);
+	return opened.promise;
 }
 
 beforeEach(() => {
@@ -89,7 +86,7 @@ afterEach(() => {
 });
 
 describe("openPath", () => {
-	it("opens existing WSL mount files through wslview with a Windows path", () => {
+	it("opens existing WSL mount files through wslview with a Windows path", async () => {
 		setPlatform("linux");
 		process.env.WSL_DISTRO_NAME = "Ubuntu";
 		// Keep the mocked linux platform deterministic on a Windows dev host:
@@ -101,15 +98,16 @@ describe("openPath", () => {
 		vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "wslview" ? "/usr/bin/wslview" : null));
 		vi.spyOn(fs, "existsSync").mockImplementation(candidate => candidate === existingLinuxPath);
 
-		const spawnSyncCalls: string[][] = [];
-		spyWslPath(spawnSyncCalls, windowsPath);
-		const spawnCalls: SpawnCall[] = [];
-		spySpawn(spawnCalls);
+		const calls: string[][] = [];
+		const opened = spySpawnAwaiting(calls, "wslview", windowsPath);
 
 		openPath(existingLinuxPath);
+		await opened;
 
-		expect(spawnSyncCalls).toEqual([["wslpath", "-w", existingLinuxPath]]);
-		expect(spawnCalls.map(call => call.cmd)).toEqual([["wslview", windowsPath]]);
+		expect(calls).toEqual([
+			["wslpath", "-w", existingLinuxPath],
+			["wslview", windowsPath],
+		]);
 	});
 
 	it("keeps WSL URL opening on xdg-open without path conversion", () => {
@@ -122,8 +120,22 @@ describe("openPath", () => {
 
 		openPath("https://example.com");
 
+		// Issue #8402: no code path may go back to a blocking spawn.
 		expect(spawnSyncSpy).not.toHaveBeenCalled();
 		expect(spawnCalls.map(call => call.cmd)).toEqual([["xdg-open", "https://example.com"]]);
+	});
+
+	it("keeps a non-local file URL on xdg-open instead of throwing", () => {
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		vi.spyOn(piUtils, "$which").mockReturnValue("/usr/bin/wslview");
+		const spawnCalls: SpawnCall[] = [];
+		spySpawn(spawnCalls);
+
+		// `file://server/share` has no local path: the URL parse rejects it, so the
+		// best-effort opener falls back to xdg-open instead of throwing.
+		expect(() => openPath("file://server/share")).not.toThrow();
+		expect(spawnCalls.map(call => call.cmd)).toEqual([["xdg-open", "file://server/share"]]);
 	});
 
 	it("falls back to xdg-open when wslview is unavailable", () => {
@@ -136,6 +148,7 @@ describe("openPath", () => {
 
 		openPath(existingLinuxPath);
 
+		// Issue #8402: no code path may go back to a blocking spawn.
 		expect(spawnSyncSpy).not.toHaveBeenCalled();
 		expect(spawnCalls.map(call => call.cmd)).toEqual([["xdg-open", existingLinuxPath]]);
 	});
