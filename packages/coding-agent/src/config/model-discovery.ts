@@ -1439,7 +1439,14 @@ export async function discoverLiteLLMModels(
 	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
-	return richModels.map(spec => buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"));
+	const built: Model<Api>[] = [];
+	for (const spec of richModels) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () =>
+			buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"),
+		);
+		if (model) built.push(model);
+	}
+	return built;
 }
 
 /**
@@ -1554,7 +1561,10 @@ export async function discoverProxyModels(
 						supportsReasoningEffort: false,
 					},
 		} as ModelSpec<Api>;
-		discovered.push(buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)));
+		const model = skipAmbiguousModel(providerConfig.provider, id, () =>
+			buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)),
+		);
+		if (model) discovered.push(model);
 	}
 	return discovered;
 }

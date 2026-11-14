@@ -24,6 +24,7 @@ import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	discoverLiteLLMModels,
 	discoverOpenAIModelsList,
+	discoverProxyModels,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -2920,6 +2921,52 @@ describe("ModelRegistry runtime discovery", () => {
 			ctx,
 		);
 		expect(models.map(model => model.id)).toEqual(["vertex/gemini-4-carbon@eu", "mistral/mistral-large-latest"]);
+	});
+
+	test("proxy discovery skips a model whose id names two vendors instead of dropping the provider (#18770)", async () => {
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:9992/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+			return Response.json({
+				data: [
+					{ id: "amazon/openai.gpt-6.1-sol", supported_endpoint_types: ["openai"] },
+					{ id: "mistral/mistral-large-latest", supported_endpoint_types: ["openai"] },
+				],
+			});
+		};
+		const models = await discoverProxyModels(
+			{
+				provider: "proxy-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9992/v1",
+				discovery: { type: "proxy" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		expect(models.map(model => model.id)).toEqual(["mistral/mistral-large-latest"]);
+	});
+
+	test("litellm discovery skips a model group whose name names two vendors instead of dropping the provider (#18770)", async () => {
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:4001/model_group/info") {
+				throw new Error(`Unexpected URL: ${String(input)}`);
+			}
+			return Response.json({
+				data: [
+					{ model_group: "amazon/openai.gpt-6.1-sol", providers: ["bedrock"] },
+					{ model_group: "gpt-big", providers: ["openai"] },
+				],
+			});
+		};
+		const models = await discoverLiteLLMModels(
+			{
+				provider: "litellm-test",
+				baseUrl: "http://127.0.0.1:4001",
+				api: "openai-completions",
+				discovery: { type: "litellm" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		expect(models.map(model => model.id)).toEqual(["gpt-big"]);
 	});
 
 	// Runs one `/v1/models` payload through the real `openai-models-list`
