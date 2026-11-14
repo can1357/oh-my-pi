@@ -1872,6 +1872,86 @@ fn read_as_values(values: &NodeValues) -> CoreResult<Option<AxReadAs>> {
 	}
 }
 
+/// The nearest table row above an element, stopping at its window or the
+/// bounded ancestry limit. Descendants may be deeper than a cell's text.
+pub(super) fn aimed_row(
+	element: &AXUIElement,
+) -> CoreResult<Option<(CFRetained<AXUIElement>, libc::pid_t)>> {
+	let row = ancestor_row(
+		element.retain(),
+		|current| {
+			Ok(copy_held_attribute(current, "AXRole")?
+				.and_then(|value| value.downcast::<CFString>().ok())
+				.map(|role| role.to_string()))
+		},
+		|current| {
+			Ok(copy_held_attribute(current, "AXParent")?
+				.and_then(|value| value.downcast::<AXUIElement>().ok()))
+		},
+	)?;
+	row.map(|row| element_pid(&row).map(|pid| (row, pid)))
+		.transpose()
+}
+
+fn ancestor_row<E>(
+	mut current: E,
+	role: impl Fn(&E) -> CoreResult<Option<String>>,
+	parent: impl Fn(&E) -> CoreResult<Option<E>>,
+) -> CoreResult<Option<E>> {
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		match role(&current)?.as_deref() {
+			Some("AXRow") => return Ok(Some(current)),
+			Some("AXWindow" | "AXApplication") => return Ok(None),
+			_ => {},
+		}
+		let Some(next) = parent(&current)? else {
+			return Ok(None);
+		};
+		current = next;
+	}
+	Ok(None)
+}
+
+/// Whether a click whose point hit the first element of `ancestry` (then
+/// its parents, each marked when it is a table row) lands in `row`: it does
+/// unless another row comes first on the way up. A point outside any row
+/// lands where it would without the check.
+pub(super) fn lands_in_row<T: PartialEq>(
+	row: &T,
+	ancestry: impl IntoIterator<Item = (T, bool)>,
+) -> bool {
+	for (node, is_row) in ancestry {
+		if node == *row {
+			return true;
+		}
+		if is_row {
+			return false;
+		}
+	}
+	true
+}
+
+/// Whether a click at `(x, y)` lands in `row` of process `pid`, as that
+/// process's own hit test answers right before the press: a background click
+/// goes to the target app however its window is covered. An app that sorts
+/// its rows as it refreshes, as Activity Monitor does, can move another row
+/// into the place the clicked element's frame was read at. A hit test the app
+/// does not answer passes.
+pub(super) fn row_at(row: &AXUIElement, pid: libc::pid_t, x: f64, y: f64) -> bool {
+	let Some(hit) = probe_application(pid).and_then(|app| open_menu::hit_test(&app, x, y)) else {
+		return true;
+	};
+	let mut next = Some(hit);
+	let ancestry = std::iter::from_fn(|| {
+		let node = next.take()?;
+		next = copy_element(&node, "AXParent");
+		let is_row = copy_string(&node, "AXRole").as_deref() == Some("AXRow");
+		Some((node, is_row))
+	})
+	.take(MAX_ANCESTRY_DEPTH);
+	lands_in_row(&row.retain(), ancestry)
+}
+
 fn is_secure(element: &AXUIElement) -> bool {
 	secure_subrole(copy_attribute_result(element, "AXSubrole").map(|value| {
 		match value {
@@ -3533,6 +3613,41 @@ mod tests {
 		assert_eq!(nearest_matching(5, |element: &u32| *element == 9, parent), None);
 		// A parent that answers with the element itself ends at the bound.
 		assert_eq!(nearest_matching(5, |_: &u32| false, |element: &u32| Some(*element)), None);
+	}
+
+	#[test]
+	fn row_action_deep_descendant_finds_its_row() {
+		let roles = ["AXWindow", "AXRow", "AXCell", "AXLink", "AXStaticText"];
+		let row = super::ancestor_row(
+			4_usize,
+			|node| Ok(Some(roles[*node].into())),
+			|node| Ok(node.checked_sub(1)),
+		)
+		.unwrap();
+		assert_eq!(row, Some(1));
+		assert_eq!(
+			super::ancestor_row(
+				0_usize,
+				|node| Ok(Some(roles[*node].into())),
+				|_| panic!("must not walk beyond the window"),
+			)
+			.unwrap(),
+			None
+		);
+		let reads = Cell::new(0);
+		assert_eq!(
+			super::ancestor_row(
+				0,
+				|_| {
+					reads.set(reads.get() + 1);
+					Ok(Some("AXCell".into()))
+				},
+				|node| Ok(Some(*node)),
+			)
+			.unwrap(),
+			None
+		);
+		assert_eq!(reads.get(), super::MAX_ANCESTRY_DEPTH);
 	}
 
 	#[test]
