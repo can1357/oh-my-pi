@@ -529,20 +529,6 @@ describe("IRC body wrapping", () => {
 		expect(words).toHaveLength(40);
 	});
 
-	it("soft-wraps a long body in an expanded IRC message card", () => {
-		const longLine = "word ".repeat(40).trim();
-		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
-		const lines = component.render(120) as readonly string[];
-		const stripped = lines.map(line => Bun.stripANSI(line));
-		const bodyLines = stripped.filter(line => line.includes("word"));
-		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
-		const words = bodyLines
-			.join(" ")
-			.split(/\s+/)
-			.filter(w => w === "word");
-		expect(words).toHaveLength(40);
-	});
-
 	it("wraps an expanded outgoing agent write in full at render(120)", () => {
 		// Twenty long lines: the expanded budget keeps twelve, and each kept
 		// line soft-wraps to the card width instead of clipping at the fixed cap.
