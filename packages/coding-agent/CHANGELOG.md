@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Editing a queued follow-up (`/queue`, `=>`, or the follow-up key) with Alt+Up now restores it as `=> <message>`, so Enter queues it again for when the agent yields instead of sending it into the running turn ([#19304](https://github.com/can1357/oh-my-pi/issues/19304))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
