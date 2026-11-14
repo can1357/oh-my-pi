@@ -10,6 +10,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isReviewedTierVariantWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	ensureAntigravityVersion,
+	ensureGeminiCliVersion,
 	getAntigravityHeaders,
 	getAntigravityModelWireProfile,
 	getGeminiCliHeaders,
@@ -610,6 +611,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			// The backend gates newer models on the client version; a process that
 			// skipped discovery (fresh model cache) must still send the current one.
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
+			else await ensureGeminiCliVersion(options?.fetch ?? fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
 			const requestHeaders = {

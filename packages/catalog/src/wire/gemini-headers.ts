@@ -1,5 +1,36 @@
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import type { AntigravityModelWireProfile } from "../types";
+import { createNpmVersionLookup } from "./npm-client-version";
+
+/**
+ * Offline fallback for the Gemini CLI version, used until
+ * {@link ensureGeminiCliVersion} resolves the current npm release.
+ */
+export const DEFAULT_GEMINI_CLI_VERSION = "0.68.0";
+
+const geminiCliVersionLookup = createNpmVersionLookup("@google/gemini-cli");
+
+/** Version reported as Gemini CLI: env override → npm `latest` → pinned fallback. */
+export function getGeminiCliVersion(): string {
+	return process.env.PI_AI_GEMINI_CLI_VERSION || geminiCliVersionLookup.current() || DEFAULT_GEMINI_CLI_VERSION;
+}
+
+/**
+ * Resolves the latest `@google/gemini-cli` release from npm. The Cloud Code
+ * Assist backend reads the client version from the User-Agent, so a frozen pin
+ * drifts behind every release. Skipped entirely when PI_AI_GEMINI_CLI_VERSION
+ * is set; see {@link createNpmVersionLookup} for caching, back-off, and
+ * `signal` semantics.
+ */
+export function ensureGeminiCliVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
+	if (process.env.PI_AI_GEMINI_CLI_VERSION) return Promise.resolve();
+	return geminiCliVersionLookup.ensure(fetcher, signal);
+}
+
+/** Drops the resolved Gemini CLI version and back-off; tests only. */
+export function resetGeminiCliVersionForTest(): void {
+	geminiCliVersionLookup.resetForTest();
+}
 
 /**
  * Build a User-Agent string that identifies as Gemini CLI to unlock higher rate limits.
@@ -7,7 +38,7 @@ import type { AntigravityModelWireProfile } from "../types";
  * GeminiCLI/VERSION/MODEL (PLATFORM; ARCH; SURFACE)
  */
 export function getGeminiCliUserAgent(modelId = "gemini-3.1-pro-preview"): string {
-	const version = process.env.PI_AI_GEMINI_CLI_VERSION || "0.46.0";
+	const version = getGeminiCliVersion();
 	const platform = process.platform === "win32" ? "win32" : process.platform;
 	const arch = process.arch === "x64" ? "x64" : process.arch;
 	return `GeminiCLI/${version}/${modelId} (${platform}; ${arch}; terminal)`;

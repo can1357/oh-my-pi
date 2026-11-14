@@ -23,6 +23,7 @@
 - Fixed OpenCode Go Muse Spark tool-call turns dropping encrypted reasoning between steps; OpenCode Zen is unchanged ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn))
 - Fixed Vertex AI Gemini 3+ models failing with `400 Function call is missing a thought_signature` when a replayed or cross-model assistant turn's first tool call lacks a thought signature; that call now carries Google's `skip_thought_signature_validator` value ([#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@duck1eee](https://github.com/duck1eee))
 - Fixed Cursor hiding models that AvailableModels serves but GetUsableModels omits (GLM 5.3, Grok 4.7) ([#18248](https://github.com/can1357/oh-my-pi/pull/18248) by [@joseotaviorf](https://github.com/joseotaviorf))
+- Fixed Gemini CLI requests reporting a frozen client version (0.46.0) that fell further behind each Gemini CLI release; the User-Agent now carries the current `@google/gemini-cli` release from npm, re-checked hourly, with 0.68.0 as the offline fallback ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@Xytronix](https://github.com/Xytronix))
 ### Changed
 
 - Paused Google Antigravity (`google-antigravity`): it no longer offers a login and stored credentials are not used until it is re-enabled; use `GEMINI_API_KEY` (AI Studio) or `google-vertex` instead ([#18341](https://github.com/can1357/oh-my-pi/issues/18341))
