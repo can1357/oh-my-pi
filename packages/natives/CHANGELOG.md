@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- macOS `scroll` now goes the same way as on Windows and Linux: a positive `dy` scrolls down and a positive `dx` right, where macOS scrolled up and left ([#19165](https://github.com/can1357/oh-my-pi/pull/19165) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
