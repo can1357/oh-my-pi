@@ -11,6 +11,7 @@ import {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "../src/overlays/session-observer-registry";
 import { initTheme } from "../src/theme";
+import type { TUI } from "../src/tui";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -51,8 +52,10 @@ function createHub(
 	agents: AgentRecordLike[],
 	focused: string[] = [],
 	observers = new SessionObserverRegistry(),
+	ui?: TUI,
 ): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
+		ui,
 		observers,
 		transcript: { fs, parseEntries: () => [] },
 		loadPersisted: async () => {},
@@ -145,6 +148,24 @@ test("the By parent action and the t key both switch the picker to the parent tr
 
 		hub.handleInput("t");
 		expect(pickerProps(hub).layout).toBe("rows");
+	} finally {
+		hub.dispose();
+	}
+});
+
+test("a tall pane floats the hub as a full-height card; shrinking it floats the lg sheet again", () => {
+	const terminal = { rows: 111 };
+	const ui = { terminal, requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+	const hub = createHub([agent("alpha", 1_000)], [], undefined, ui);
+	try {
+		expect(hub.nativeSheet(pickerCx)).toBe(false);
+		expect(hub.nativeOverlay).toEqual({ role: "omp.overlay.agentHub", anchor: "center", size: "lg" });
+		expect(pickerProps(hub).size).toBe("screen");
+
+		terminal.rows = 44;
+		expect(hub.nativeSheet(pickerCx)).toBe(true);
+		expect(hub.nativeOverlay).toBeUndefined();
+		expect(pickerProps(hub).size).toBe("lg");
 	} finally {
 		hub.dispose();
 	}

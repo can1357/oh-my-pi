@@ -156,6 +156,13 @@ const ACTIVITY_HINTS: readonly NativeHint[] = [
 const NATIVE_RECENT_ACTIVITY = 20;
 /** Child ids the native inspector names before summarizing the rest. */
 const NATIVE_CHILD_IDS = 12;
+/**
+ * Pane rows from which the hub floats as a full-height card instead of an `lg`
+ * picker sheet. The terminal caps an `lg` sheet's height (760px in Tern)
+ * whatever the pane's height, so on a tall pane the roster scrolls in a small
+ * box above empty space. 60 rows is over 1,000px at common row heights.
+ */
+const SCREEN_PICKER_MIN_ROWS = 60;
 
 /** Picker tabs: the two top-level projections (keys 1/2). */
 const PICKER_TABS = [
@@ -744,20 +751,38 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	// Native description
 	// ========================================================================
 
-	/** A `picker` is its own sheet: the backend mounts it in `layer` without an `overlay` wrapper. */
+	/** Whether the terminal draws `picker`, as the last {@link nativeSheet} call saw. */
+	#pickerKind = false;
+
+	/**
+	 * A `picker` is its own sheet: the backend mounts it in `layer` without an
+	 * `overlay` wrapper. On a tall pane it is not: {@link nativeOverlay} wraps it.
+	 */
 	nativeSheet(cx: DescribeContext): boolean {
-		return cx.supports("picker");
+		this.#pickerKind = cx.supports("picker");
+		return this.#pickerKind && this.#pickerSize() === "lg";
+	}
+
+	/**
+	 * On a tall pane, a `screen` picker (no chrome of its own) inside an `lg`
+	 * card: the card grows with the pane, the transcript stays visible around
+	 * it. The backend asks {@link nativeSheet} first, which records the kind.
+	 */
+	get nativeOverlay(): { role: string; anchor: "center"; size: "lg" } | undefined {
+		if (!this.#pickerKind || this.#pickerSize() !== "screen") return undefined;
+		return { role: "omp.overlay.agentHub", anchor: "center", size: "lg" };
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
 		const usePicker = cx.supports("picker");
 		const nativeTree = cx.supports("tree");
 		const meter = cx.supports("meter");
-		const variant = usePicker ? `picker:${meter}` : nativeTree ? "tree" : "list";
+		const size = this.#pickerSize();
+		const variant = usePicker ? `picker:${meter}:${size}` : nativeTree ? "tree" : "list";
 		if (this.#native && this.#nativeVariant === variant) return this.#native;
 		this.#nativeVariant = variant;
 		if (usePicker) {
-			this.#native = this.#describePicker(meter);
+			this.#native = this.#describePicker(meter, size);
 			return this.#native;
 		}
 		const tabs = node("tabs", { items: SECTION_TABS, active: this.#section }, undefined, "section");
@@ -912,14 +937,20 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		}
 	}
 
+	/** `screen` on a tall pane, where an `lg` sheet would stop well short of the pane's height. */
+	#pickerSize(): "lg" | "screen" {
+		const rows = this.#ui.terminal?.rows || process.stdout.rows || 0;
+		return rows >= SCREEN_PICKER_MIN_ROWS ? "screen" : "lg";
+	}
+
 	/** The hub as a data-first `picker` (§9.1): roster or activity log, selected agent as preview. */
-	#describePicker(meter: boolean): NativeNode {
+	#describePicker(meter: boolean, size: "lg" | "screen"): NativeNode {
 		const activity = this.#section === "activity";
 		const props: TspPickerProps = {
 			title: "Agents",
 			subtitle: this.#pickerSubtitle(),
 			icon: "users",
-			size: "lg",
+			size,
 			tabs: PICKER_TABS,
 			tab: this.#section,
 			...(activity ? this.#activityPickerProps() : this.#agentPickerProps()),

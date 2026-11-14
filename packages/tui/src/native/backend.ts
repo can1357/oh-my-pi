@@ -323,6 +323,8 @@ export class NativeBackend {
 	#stallTimer: RenderTimer | undefined;
 	#recent: TspFrame[] = [];
 	#sawResize = false;
+	/** Pane rows at the last SIGWINCH. */
+	#rows = 0;
 	#live = false;
 	#overlayNodes = new Map<Component, { key: string; node: NativeNode }>();
 	/** Centered sheets measured tall enough to fill a narrow pane; they keep filling until closed. */
@@ -483,11 +485,17 @@ export class NativeBackend {
 		this.#host.requestRender();
 	}
 
-	/** SIGWINCH: refresh the width used for `rows` fallback until the terminal reports one. */
-	noteTerminalColumns(columns: number): void {
-		if (this.#sawResize || columns === this.#cx.cols) return;
-		this.#cx.cols = columns;
-		this.#host.requestRender();
+	/**
+	 * SIGWINCH. Columns refresh the width used for `rows` fallback until the
+	 * terminal reports one. A height change describes again: a description may
+	 * depend on the pane's rows (a hub that fills a tall pane).
+	 */
+	noteTerminalSize(columns: number, rows: number): void {
+		const heightChanged = rows !== this.#rows;
+		this.#rows = rows;
+		const widthChanged = !this.#sawResize && columns !== this.#cx.cols;
+		if (widthChanged) this.#cx.cols = columns;
+		if (widthChanged || heightChanged) this.#host.requestRender();
 	}
 
 	/** Reconcile and send a frame, unless the target surface is out of credits. */
