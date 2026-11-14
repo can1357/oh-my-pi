@@ -1,0 +1,20 @@
+// Provider-wire compat for "modal".
+
+provider "modal" {
+	// Endpoint ids are deployment-specific (`<workspace>--<app>.<region>.modal.direct`),
+	// so this only ranks the id when the shared gateway happens to serve it.
+	default-model "modal-labs--ep-kimi-k3-1-server.us-west.modal.direct"
+	env "MODAL_PROXY_TOKEN"
+	// A workspace's roster is the endpoints its deployment exposes; ids on other
+	// deployments or regions may carry different limits.
+	skip-cross-provider-reference-fills #true
+	dynamic-models-authoritative #true
+	// Constructs the manager for tokenless users so a dedicated endpoint in
+	// MODAL_BASE_URL can be discovered keyless; `modalModelManagerOptions` still
+	// gates live discovery on a token or configured endpoint, so the shared
+	// gateway never sees an unauthenticated request.
+	allow-unauthenticated #true
+	discovery label="Modal"
+
+	thinking-mode "effort"
+}

@@ -52,6 +52,7 @@ export type KnownProvider =
 	| "minimax-code"
 	| "minimax-code-cn"
 	| "mistral"
+	| "modal"
 	| "modular"
 	| "moonshot"
 	| "muse-code"
