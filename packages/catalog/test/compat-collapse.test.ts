@@ -1636,6 +1636,71 @@ describe("antigravity discovery collapsing", () => {
 		});
 	});
 
+	it("treats an omitted roster capability as unknown but honors an explicit denial", async () => {
+		// Antigravity serves Gemini 3.5 Flash-Lite with no capability keys at all,
+		// while Claude Haiku answers `supportsThinking: false` on purpose.
+		const sparsePayload = {
+			models: {
+				"gemini-3.5-flash-lite": {
+					displayName: "Gemini 3.5 Flash Lite",
+					maxTokens: 1_048_576,
+					maxOutputTokens: 65_535,
+				},
+				"claude-haiku-4-5": { displayName: "Claude Haiku 4.5", supportsThinking: false, supportsImages: true },
+			},
+		};
+		const sparseFetcher = Object.assign(
+			(_input: string | URL | Request, _init?: RequestInit) =>
+				Promise.resolve(new Response(JSON.stringify(sparsePayload), { status: 200 })),
+			{ preconnect: fetch.preconnect },
+		);
+		const models = (
+			await fetchAntigravityDiscoveryModels({
+				token: "t",
+				endpoint: "https://cca.test",
+				userAgent: "test",
+				fetcher: sparseFetcher,
+			})
+		)?.models;
+
+		const lite = models?.find(m => m.id === "gemini-3.5-flash-lite");
+		expect(lite?.reasoning).toBe(true);
+		expect(lite?.input).toContain("image");
+		expect(lite?.cost.input).toBeGreaterThan(0);
+		expect(lite?.cost.output).toBeGreaterThan(0);
+		const builtLite = buildModel(lite!);
+		expect(builtLite.thinking?.mode).toBe("google-level");
+		expect(builtLite.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+
+		const haiku = models?.find(m => m.id === "claude-haiku-4-5");
+		expect(haiku?.reasoning).toBe(false);
+		expect(buildModel(haiku!).thinking).toBeUndefined();
+	});
+
+	it("declares the Flash-Lite dial for unreferenced 3.5+ revisions but leaves 2.5 on budget", () => {
+		const spec = (id: string): ModelSpec<"google-gemini-cli"> => ({
+			id,
+			name: id,
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: "https://cca.test",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_535,
+		});
+
+		const future = buildModel(spec("gemini-3.9-flash-lite"));
+		expect(future.input).toEqual(["text", "image"]);
+		expect(future.thinking?.mode).toBe("google-level");
+		expect(future.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+
+		const legacy = buildModel(spec("gemini-2.5-flash-lite"));
+		expect(legacy.input).toEqual(["text"]);
+		expect(legacy.thinking?.mode).toBe("budget");
+	});
+
 	it("sends the Cloud Code Assist project in the discovery body only when known", async () => {
 		const bodies: unknown[] = [];
 		const recordingFetcher = Object.assign(

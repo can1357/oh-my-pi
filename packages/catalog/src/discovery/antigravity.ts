@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
+import { createBundledReferenceMap, createReferenceResolver } from "../provider-models/bundled-references";
 import type { AntigravityModelWireProfile, ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
 import { ensureAntigravityVersion, getAntigravityHeaders } from "../wire/gemini-headers";
@@ -22,6 +23,17 @@ const ANTIGRAVITY_THINKING_LEVELS: Readonly<Record<number, AntigravityModelWireP
 	// Gemini 4 Hydrogen's `-xhigh` SKU; Google documents this level in lowercase.
 	100: "xhigh",
 };
+
+/**
+ * Antigravity's roster omits capability metadata for some SKUs entirely (Gemini
+ * 3.5 Flash-Lite arrives with no `supportsThinking` at all). An absent field is
+ * unknown, not a denial, so the bundled reference decides instead of a silent
+ * `false` that strips the model's effort dial. Wire routing is provider-specific,
+ * so `thinking` itself is never inherited; the reviewed provider rules own it.
+ */
+const resolveReference = createReferenceResolver<"google-gemini-cli">(() =>
+	createBundledReferenceMap("google-antigravity"),
+);
 
 /**
  * Raw model metadata returned by Antigravity's `fetchAvailableModels` endpoint.
@@ -219,7 +231,11 @@ export async function fetchAntigravityDiscoveryModels(
 				continue;
 			}
 
-			const supportsImages = model.supportsImages === true;
+			// The roster never prices anything, so pricing comes from the bundled
+			// reference when one exists; a zeroed row would read as a free lane in
+			// cost accounting and model choice.
+			const reference = resolveReference(modelId);
+			const supportsImages = model.supportsImages ?? reference?.input.includes("image") ?? false;
 			const wireProfile = antigravityWireProfileOf(model);
 			models.push({
 				id: modelId,
@@ -227,9 +243,9 @@ export async function fetchAntigravityDiscoveryModels(
 				api: "google-gemini-cli",
 				provider: "google-antigravity",
 				baseUrl: discovered.endpoint,
-				reasoning: model.supportsThinking === true,
+				reasoning: model.supportsThinking ?? reference?.reasoning ?? false,
 				input: supportsImages ? ["text", "image"] : ["text"],
-				cost: {
+				cost: reference?.cost ?? {
 					input: 0,
 					output: 0,
 					cacheRead: 0,
