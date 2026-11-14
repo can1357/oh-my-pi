@@ -1009,7 +1009,7 @@ workspace—not an OS window) and returns the reported native ID, plus a `warnin
 the provider started the command but could not show it where requested. RPC, ACP,
 print, and headless contexts do not provide this optional method. The request type and
 supported provider set derive from canonical launch capabilities: tmux, Zellij,
-Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
+Herdr, CMUX, Tern, and Orca are supported; screen and wmux remain recognized by the
 multiplexer taxonomy but are currently unsupported.
 
 Provider-specific session detection is centralized in
@@ -1017,9 +1017,9 @@ Provider-specific session detection is centralized in
 `hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
 `classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
 markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as
-Orca, so a multiplexer running inside Orca wins. `isInsideTerminalMultiplexer(env)` is
-true only when the classified multiplexer owns the screen grid; Orca keeps the
-direct-terminal render path. A classified multiplexer does not prove that a nested
+Tern and Orca, so nested multiplexers win. `isInsideTerminalMultiplexer(env)` is
+true only when the classified multiplexer owns the screen grid; Tern and Orca keep
+the direct-terminal render path. A classified multiplexer does not prove that a nested
 provider session or a native pane ID exists.
 
 The TUI host injects this capability; extensions do not need to import dispatcher
@@ -1063,6 +1063,12 @@ Targets are provider-native IDs/refs, with different meanings by placement:
 - Herdr pane placement targets a pane ID and defaults to `HERDR_PANE_ID`; tab
   placement targets a workspace ID and defaults to `HERDR_WORKSPACE_ID`. The
   destination must be in an active Herdr pane or workspace.
+- Tern pane placement targets a numeric block ID and defaults to `TERN_PANE`;
+  tab placement targets a numeric session ID and defaults to the session containing
+  that pane, even when another session is visible. Detection requires both a valid
+  `TERN_PANE` and `TERN_PANE_SOCKET`. The backend uses `TERN_EXE` when available,
+  passes command argv directly after `--`, and supports right/down splits without
+  a destination-shell confirmation.
 - Orca pane splits resolve `ORCA_PANE_KEY` to the current terminal handle;
   detection requires both `ORCA_PANE_KEY` and `ORCA_WORKTREE_ID`. Tab creation
   defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
