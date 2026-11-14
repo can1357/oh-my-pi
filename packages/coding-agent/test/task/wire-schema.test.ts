@@ -81,14 +81,17 @@ describe("task wire schema", () => {
 		}
 	});
 
-	it("rejects model arrays outside the seance fields", () => {
+	it("accepts model candidate lists while per-call model is enabled", () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
 			effortEnabled: true,
 			perCallModel: true,
 		});
-		expect(schema({ task: "x", solutionSpace: "c", model: ["openai/gpt-5.4"] }) instanceof type.errors).toBe(true);
+		expect(schema({ task: "x", solutionSpace: "c", model: ["openai/gpt-5.4"] })).toMatchObject({
+			model: ["openai/gpt-5.4"],
+		});
+		expect(schema({ task: "x", solutionSpace: "c", model: [42] }) instanceof type.errors).toBe(true);
 	});
 
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {

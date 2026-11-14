@@ -188,10 +188,14 @@ function createTaskSchema(options: {
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
 	// `model` is declared only when the caller may send it: a per-call selector
-	// while `task.perCallModel` allows task calls, or seance's selector list. An
-	// undeclared `model` still reaches preflight (root keys survive lenient
-	// validation; batch items keep it via keepGatedItemKeys) and is refused there.
-	const gatedFields = { ...(options.perCallModel ? { "model?": "string" } : {}), ...options.seanceFields };
+	// (one, or an ordered list) while `task.perCallModel` allows task calls, or
+	// seance's selector list. An undeclared `model` still reaches preflight (root
+	// keys survive lenient validation; batch items keep it via keepGatedItemKeys)
+	// and is refused there.
+	const gatedFields = {
+		...(options.perCallModel ? { "model?": "string | string[]" } : {}),
+		...options.seanceFields,
+	};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -272,7 +276,7 @@ export function getTaskSchema(options: {
 	/** Advertise `steps` instead of `task` (`task.steps`); default off. */
 	steps?: boolean;
 	defaultAgent?: string;
-	/** Advertise the per-call `model` field (`task.perCallModel` allows task calls); default off. */
+	/** Advertise the per-call `model` field (`task.perCallModel` allows task calls) as one selector or an ordered list; default off. */
 	perCallModel?: boolean;
 	/** Advertise historical source/model fields for the bundled seance agent. */
 	seanceFields?: SeanceTaskSchemaFields;

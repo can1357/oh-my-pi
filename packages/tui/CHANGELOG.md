@@ -11,6 +11,10 @@
 - Approval dialogs now distinguish allowed and prompted segments in compound Bash commands, using clear colors and opening at the first segment requiring approval.
 - Added an optional Branch action to chat and a `b` shortcut in the BTW history sheet.
 
+### Changed
+
+- `TaskItem.model` and `TaskParams.model` now document configured `@role` selectors and ordered candidate lists for per-call selection; their `string | string[]` types are unchanged ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed asynchronous Bash commands switching to the raw command line instead of remaining visible in the interpreted shell view.

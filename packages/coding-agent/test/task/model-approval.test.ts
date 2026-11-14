@@ -34,6 +34,7 @@ const target = createMockModel({ id: "target" });
 const other = createMockModel({ id: "other" });
 const bracketed = createMockModel({ id: "glm[1m]" });
 const bracketImposter = createMockModel({ id: "glm1" });
+const wildcardLiteral = createMockModel({ id: "target*" });
 const image = { ...createMockModel({ id: "painter" }), kind: "image" as const };
 const routerModel = (provider: string, id: string, baseUrl: string) =>
 	buildModel({
@@ -59,7 +60,17 @@ const droidFable = buildModel(
 		{ apiProviders: ["anthropic"] },
 	),
 );
-const chat = [target, other, bracketed, bracketImposter, sonnet, codingRouter, codingRouterLow, droidFable];
+const chat = [
+	target,
+	other,
+	bracketed,
+	bracketImposter,
+	wildcardLiteral,
+	sonnet,
+	codingRouter,
+	codingRouterLow,
+	droidFable,
+];
 const registry = {
 	getAll: () => [...chat, image],
 	getAvailable: (kind?: string) => (kind === "chat" ? chat : [...chat, image]),
@@ -106,6 +117,30 @@ const rows: Row[] = [
 	{ name: "a provider glob role value", settings: { modelRoles: { review: "mock/*" } }, approved: false },
 	{ name: "a bare-id glob role value", settings: { modelRoles: { review: "tar?et" } }, approved: false },
 	{ name: "a glob agent frontmatter model", agentSource: "bundled", agentModel: ["mock/*"], approved: false },
+	{
+		name: "a mixed role keeps its concrete grant without broadening through its glob",
+		settings: { modelRoles: { review: "mock/*, mock/other" } },
+		approved: false,
+	},
+	{
+		name: "a mixed frontmatter value keeps its concrete grant",
+		agentSource: "bundled",
+		agentModel: ["mock/*", "mock/target"],
+		approved: true,
+	},
+	{
+		name: "a catalog literal containing a wildcard is never a role grant",
+		settings: { modelRoles: { review: "mock/target*" } },
+		model: wildcardLiteral,
+		approved: false,
+	},
+	{
+		name: "a catalog literal containing a wildcard is never a frontmatter grant",
+		agentSource: "user",
+		agentModel: ["mock/target*"],
+		model: wildcardLiteral,
+		approved: false,
+	},
 	{ name: "non-chat role value", settings: { modelRoles: { image: "mock/target" } }, approved: false },
 	{ name: "role alias is not expanded into defaults", settings: { modelRoles: { review: "@smol" } }, approved: false },
 	{ name: "bare * is @default, not a glob", settings: { modelRoles: { review: "*" } }, approved: false },
@@ -143,8 +178,8 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "the allowlist never expands a glob",
-		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/*"] },
+		name: "a scoped allowlist glob alone grants nothing",
+		settings: { "task.perCallModelAllow": ["mock/*"] },
 		approved: false,
 	},
 	{
@@ -153,6 +188,26 @@ const rows: Row[] = [
 		approved: true,
 	},
 	{ name: "allowlist alone grants nothing", settings: { "task.perCallModelAllow": ["mock/target"] }, approved: false },
+	{
+		name: "allowlist role entry admits what the role grants",
+		settings: { modelRoles: { review: "mock/target", smol: "mock/other" }, "task.perCallModelAllow": ["@review"] },
+		approved: true,
+	},
+	{
+		name: "allowlist role entry excludes another role's model",
+		settings: { modelRoles: { review: "mock/other", smol: "mock/target" }, "task.perCallModelAllow": ["@review"] },
+		approved: false,
+	},
+	{
+		name: "allowlist entry for an unconfigured role admits nothing",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["@smol"] },
+		approved: false,
+	},
+	{
+		name: "allowlist glob entry",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/t*"] },
+		approved: true,
+	},
 	{
 		name: "brackets in a literal id are not a glob",
 		settings: { modelRoles: { review: "mock/glm[1m]" } },
@@ -257,6 +312,21 @@ const rows: Row[] = [
 		overlay: { "task.perCallModelAllow": ["mock/target"] },
 		approved: false,
 	},
+	{
+		name: "a derived allowlisted role expands through operator values, not injected values",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/*"] },
+		overlay: { modelRoles: { review: "mock/other" }, "task.perCallModelAllow": ["@review"] },
+		approved: true,
+	},
+	{
+		name: "operator and derived role allowlists must both admit the model",
+		settings: {
+			modelRoles: { review: "mock/target", smol: "mock/other" },
+			"task.perCallModelAllow": ["@smol"],
+		},
+		overlay: { "task.perCallModelAllow": ["mock/*", "@review"] },
+		approved: false,
+	},
 ];
 
 describe("per-call model advertisement", () => {
@@ -267,6 +337,22 @@ describe("per-call model advertisement", () => {
 			parentModelWithheld: false,
 		});
 	});
+
+	it.each([
+		{ allowlist: [], expected: true },
+		{ allowlist: ["mock/target"], expected: true },
+		{ allowlist: ["mock/other"], expected: false },
+	])(
+		"keeps the configured default value as a grant without advertising its alias for $allowlist",
+		({ allowlist, expected }) => {
+			const settings = Settings.isolated({
+				modelRoles: { default: "mock/target" },
+				"task.perCallModelAllow": allowlist,
+			});
+			expect(approved(target, { settings, agentName: "worker" })).toBe(expected);
+			expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([]);
+		},
+	);
 
 	it("keeps configured role order and selectors while filtering and deduplicating grants", () => {
 		const settings = Settings.isolated({
@@ -382,7 +468,7 @@ describe("per-call model advertisement", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const settings = Settings.isolated({
 			"task.perCallModel": "on",
-			modelRoles: { default: "mock/target", slow: "mock/other" },
+			modelRoles: { review: "mock/target", slow: "mock/other" },
 		});
 		const host: SessionToolsHost = {
 			agent: {
@@ -439,19 +525,19 @@ describe("per-call model advertisement", () => {
 
 		const frozen = surface.advertisedPerCallModel;
 		expect(frozen.roles).toEqual([
-			{ role: "default", patterns: ["mock/target"] },
+			{ role: "review", patterns: ["mock/target"] },
 			{ role: "slow", patterns: ["mock/other"] },
 		]);
 		const taskDescription = taskTool.description;
 		const evalDescription = evalTool.description;
-		expect(taskDescription).toContain("`mock/target` (default)");
-		expect(evalDescription).toContain("`mock/target` (default)");
+		expect(taskDescription).toContain("`@review` → `mock/target`");
+		expect(evalDescription).toContain("`@review` → `mock/target`");
 
 		// A second omp instance rewrites the shared config.yml; this session
 		// reloads it, but the frozen surface must not follow.
-		settings.setModelRole("default", "mock/edited");
+		settings.setModelRole("review", "mock/edited");
 		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
-			{ role: "default", patterns: ["mock/edited"] },
+			{ role: "review", patterns: ["mock/edited"] },
 			{ role: "slow", patterns: ["mock/other"] },
 		]);
 		expect(surface.advertisedPerCallModel).toBe(frozen);
@@ -468,7 +554,7 @@ describe("per-call model advertisement", () => {
 		// A real base-prompt rebuild is what absorbs the edit.
 		await surface.refreshBaseSystemPrompt();
 		expect(surface.advertisedPerCallModel.roles).toEqual([
-			{ role: "default", patterns: ["mock/edited"] },
+			{ role: "review", patterns: ["mock/edited"] },
 			{ role: "slow", patterns: ["mock/other"] },
 		]);
 		expect(taskTool.description).not.toBe(taskDescription);
@@ -494,6 +580,99 @@ describe("per-call model grants", () => {
 		const available = chat.filter(model => model !== row.unavailable);
 		const modelRegistry = { ...registry, getAvailable: () => available };
 		expect(approved(row.model ?? target, grants, modelRegistry)).toBe(row.approved);
+	});
+
+	it.each([
+		["openai/*", true],
+		["openai/*:high", false],
+		["@scope", true],
+	] as const)("keeps the allowlist %s provider-scoped without splitting its suffix", (allow, expectedDirect) => {
+		const direct = createMockModel({ provider: "openai", id: "gpt-5" });
+		const routed = createMockModel({ provider: "openrouter", id: "openai/gpt-5" });
+		const models = [direct, routed];
+		const modelRegistry = { getAll: () => models, getAvailable: () => models };
+		const settings = Settings.isolated({
+			modelRoles: { review: "openrouter/openai/gpt-5", fast: "openai/gpt-5", scope: "openai/gpt-5" },
+			"task.perCallModelAllow": [allow],
+		});
+		const grants = { settings, agentName: "worker" };
+		expect(approved(routed, grants, modelRegistry)).toBe(false);
+		expect(approved(direct, grants, modelRegistry)).toBe(expectedDirect);
+		expect(getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles).not.toContainEqual({
+			role: "review",
+			patterns: ["openrouter/openai/gpt-5"],
+		});
+	});
+
+	it("never expands a glob-valued allowlisted role, even with an independent literal grant", () => {
+		const settings = Settings.isolated({
+			modelRoles: { review: "mock/target", scope: "mock/*" },
+			"task.perCallModelAllow": ["@scope"],
+		});
+		expect(approved(target, { settings, agentName: "worker" })).toBe(false);
+		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([]);
+	});
+
+	it("keeps brackets literal in an exact allowlist", () => {
+		const settings = Settings.isolated({
+			modelRoles: { review: "mock/glm[1m], mock/glm1" },
+			"task.perCallModelAllow": ["mock/glm[1m]"],
+		});
+		const grants = { settings, agentName: "worker" };
+		expect(approved(bracketed, grants)).toBe(true);
+		expect(approved(bracketImposter, grants)).toBe(false);
+	});
+
+	it("retains upstream pins when an allowlist expands a configured role", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				review: "openrouter/anthropic/claude-sonnet-4.5@anthropic:high",
+				unpinned: "openrouter/anthropic/claude-sonnet-4.5",
+			},
+			"task.perCallModelAllow": ["@review"],
+		});
+		const grants = { settings, agentName: "worker" };
+		expect(approved(pinnedSonnet, grants)).toBe(true);
+		expect(approved(sonnet, grants)).toBe(false);
+		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
+			{ role: "review", patterns: ["openrouter/anthropic/claude-sonnet-4.5@anthropic:high"] },
+		]);
+	});
+
+	it("invalidates approval and advertisement caches when role allowlist resolution changes", () => {
+		const first = createMockModel({ id: "worker" });
+		const second = createMockModel({ id: "worker:low" });
+		let catalog = [first];
+		const modelRegistry = { getAll: () => catalog, getAvailable: () => catalog };
+		const settings = Settings.isolated({
+			modelRoles: { review: "mock/worker, mock/worker:low", scope: "mock/worker:low" },
+			"task.perCallModelAllow": ["@scope"],
+		});
+		const grants = { settings, agentName: "worker" };
+		expect(approved(first, grants, modelRegistry)).toBe(true);
+		expect(
+			getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles.find(({ role }) => role === "review")
+				?.patterns,
+		).toEqual(["mock/worker", "mock/worker:low"]);
+
+		// Every value is qualified: only the allowlist's full-catalog literal check adds this dependency.
+		catalog = [second];
+		expect(approved(first, grants, modelRegistry)).toBe(false);
+		expect(approved(second, grants, modelRegistry)).toBe(true);
+		expect(
+			getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles.find(({ role }) => role === "review")
+				?.patterns,
+		).toEqual(["mock/worker:low"]);
+
+		settings.setModelRole("scope", "mock/worker");
+		expect(approved(second, grants, modelRegistry)).toBe(false);
+		expect(getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles).toEqual([]);
+		cfgTaskPerCallModelAllow.override(settings, ["mock/w*"]);
+		expect(approved(second, grants, modelRegistry)).toBe(true);
+		expect(
+			getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles.find(({ role }) => role === "review")
+				?.patterns,
+		).toContain("mock/worker:low");
 	});
 
 	it("a role removed from the operator's settings stops granting even when a child snapshotted it", () => {

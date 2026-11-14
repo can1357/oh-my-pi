@@ -25,6 +25,7 @@ import {
 	resolveExactModelIdentity,
 	resolveModelFromString,
 	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveRoleChain,
@@ -1506,6 +1507,44 @@ describe("resolveModelOverride", () => {
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
+
+describe("resolveModelOverrideWithAuthFallback exact candidates", () => {
+	test.each([
+		{
+			name: "a later credentialed exact model",
+			candidate: "openai/gpt-4o:high",
+			credentialed: true,
+			selectsLater: true,
+		},
+		{ name: "a fuzzy near miss", candidate: "openai/gpt-4", credentialed: true, selectsLater: false },
+		{
+			name: "a later model without credentials",
+			candidate: "openai/gpt-4o:high",
+			credentialed: false,
+			selectsLater: false,
+		},
+	])("walks $name without falling back to the parent", async ({ candidate, credentialed, selectsLater }) => {
+		const [primary, later] = mockModels;
+		const parent = { ...primary, id: "parent" };
+		const getApiKey = vi.fn(async (model: Model, _sessionId?: string) =>
+			model === parent || (model === later && credentialed) ? "test-key" : undefined,
+		);
+		const resolved = await resolveModelOverrideWithAuthFallback(
+			["anthropic/claude-sonnet-4-5", candidate],
+			"anthropic/parent",
+			{ getAvailable: () => [primary, later, parent], getApiKey },
+			undefined,
+			"spawn-id",
+			{ exactOnly: true },
+		);
+		expect(resolved.model).toBe(selectsLater ? later : primary);
+		expect(resolved.authFallbackUsed).toBe(false);
+		expect(resolved.thinkingLevel).toBe(selectsLater ? Effort.High : undefined);
+		expect(getApiKey.mock.calls.every(([model, sessionId]) => model !== parent && sessionId === "spawn-id")).toBe(
+			true,
+		);
 	});
 });
 
