@@ -233,6 +233,26 @@ jobs:
               name: MODULE.bazel.lock
               path: MODULE.bazel.lock
 
+   # pi-mermaid is meant for crates outside this workspace (bat), which build
+   # its default `unicode` backend on stable Rust. Everything else here builds
+   # it with `xutf` on nightly, so a nightly-only API, a broken `unicode` path
+   # or an unpackageable manifest would only surface downstream. Publishing to
+   # crates.io is not automated; the dry run keeps the crate publishable. Runs
+   # on PRs: it is one small crate.
+   pi_mermaid_msrv:
+      name: pi-mermaid on its rust-version
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - name: Test the default backend on the declared rust-version
+           run: |
+              msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' crates/pi-mermaid/Cargo.toml)
+              echo "MSRV=$msrv" >> "$GITHUB_ENV"
+              rustup toolchain install "$msrv" --profile minimal
+              cargo "+$msrv" test --locked -p pi-mermaid
+         - name: Package and verify the crate as crates.io would
+           run: cargo "+$MSRV" publish --dry-run --locked -p pi-mermaid
+
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
@@ -261,11 +281,11 @@ jobs:
          # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
          - name: Clippy (workspace lint policy on opted-in crates)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-mermaid/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
          - name: Clippy (default lints elsewhere)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-mermaid/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy --
          - name: Clippy (manifest allows on ported pi-builtins)
            run: |
@@ -715,8 +735,9 @@ jobs:
          needs.test_coding_agent_runtime.result == 'success' &&
          needs.test_coding_agent_native.result == 'success' &&
          needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
-         needs.install_methods.result == 'success' }}
-      needs: [release_metadata, check, rust_validate, native_addons, native_addons_cross, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+         needs.install_methods.result == 'success' &&
+         needs.pi_mermaid_msrv.result == 'success' }}
+      needs: [release_metadata, check, rust_validate, native_addons, native_addons_cross, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods, pi_mermaid_msrv]
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
