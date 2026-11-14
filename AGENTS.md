@@ -103,13 +103,15 @@ and on macOS a failed Seatbelt probe fails it.
 P8 remains a non-gating recorder: only its metric schema/arithmetic test
 gates. The measured performance baseline is recorded per omp2 push by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
-never in a PR. `Rust workspace and acceptance proofs` is the only macOS job
-that uses the self-hosted Mac in `vars.MACOS_RUNNER` (persistent target dir
-for incremental Rust and embedded CPython). Every other job, including
-`Lint workspace (macOS)`, runs on a GitHub-hosted runner, unless the repository
-variable `CI_LINUX_MODE` is `remote`: then a trusted run's light Linux jobs use the Mac
-too, two of them hand their Cargo work to BuildBuddy, while fork pull requests stay on
-hosted runners (`docs/research/ci-macos-runner-fallback.md`).
+never in a PR. Native CI jobs use standard GitHub-hosted `ubuntu-24.04` or
+`macos-15`, including `Rust workspace and acceptance proofs`, macOS lint and
+manual packaging. Runner variables no longer redirect these native jobs to
+a personal machine. The BuildBuddy-capable `lintx_ratchet`, `runtime_spec`,
+`remote_linux` and `remote_seed` jobs retain their existing variable-based
+launcher routing, fork protections, keys and remote execution; BuildBuddy caches
+and the P8 BuildBuddy job are unchanged. The historical fallback arrangement is
+recorded in `docs/research/ci-macos-runner-fallback.md`; current routing and
+observations are in `docs/research/ci-hosted-runners-restoration.md`.
 Lint runs on BOTH
 platforms deliberately: clippy on one target never sees the other's
 `#[cfg(target_os = ...)]` code, and the Linux-only paths went unlinted until

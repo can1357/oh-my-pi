@@ -1,8 +1,8 @@
 # Gap 19: a VM-backed macOS sandbox beside Seatbelt, and Windows CI
 
 Status: research only. Nothing here is implemented or authorized.
-Date: 2026-11-13
-Baseline: omp2 f4186b783b; upstream c308970263 (pinned checkout).
+Date: 2026-11-13, revised 2026-11-14 (design review rounds 1 and 2: the reopen triggers and the proposed thresholds now live in ADR 0070 D4 to D7; where this note's plan and ADR 0070 differ, the ADR wins)
+Baseline: omp2 f4186b783b; upstream c308970263 (pinned checkout). The 2026-11-14 additions were read at omp2 `9cb6fd6389`.
 
 Evidence keys:
 
@@ -34,7 +34,8 @@ Out of scope: the Linux backends (Bubblewrap, Landlock, gVisor), and the Windows
 - `omp-sandbox` compiles backend-independent capability specifications into confinement plans. Backends: Seatbelt, Bubblewrap, Linux Landlock with seccomp, gVisor, Docker, Docker with runsc, and Windows AppContainer (`crates/sandbox/README.md:3`). Strict specifications fail when the chosen backend cannot enforce every requested capability; caveated plans list their limits, and `Plan::enforced` is authoritative (`crates/sandbox/README.md:7`).
 - `Backend` is a closed enum of those seven (`crates/sandbox/src/capability.rs:22-50`), with a fixed capability set per backend (`crates/sandbox/src/capability.rs:400-408`) and a fixed `Backend::all()` list (`crates/sandbox/src/capability.rs:413-423`).
 - **Candidates on macOS are Seatbelt, then Docker with runsc, then Docker** (`crates/sandbox/src/runner.rs:1113-1116`). On Linux: gVisor, Bubblewrap, then the two Docker forms. On Windows: AppContainer only. The fallback on macOS is Seatbelt (`crates/sandbox/src/runner.rs:1128-1135`).
-- So a VM-backed fallback already exists in one form. Docker Desktop and its relatives run containers inside a Linux VM. The Docker backend needs an image named in `OMP_SANDBOX_DOCKER_IMAGE` and fails as unavailable without one (`crates/sandbox/src/backends/docker.rs:24`, `crates/sandbox/src/backends/docker.rs:72-76`). It runs the command inside that image, with host paths only through declared bind mounts (`crates/sandbox/src/backends/docker.rs:207-208`). The command therefore runs on Linux, not macOS. That is a real limit for macOS-native tools. [INFERENCE: Docker Desktop on macOS runs Linux images, from general knowledge, not read here.]
+- Correction 2026-11-14: that candidate list applies to `Runner::run` admission only. `Runner::native_command()`, used by the environment daemon's exec sandbox and the extension-host spawn, is Seatbelt-only on macOS with `DegradationPolicy::Reject` and no Docker path (`crates/sandbox/src/runner.rs:1136-1142`, `crates/envd/src/exec_sandbox.rs:396`, `:1244`, `crates/envd/src/exthost/spawn.rs:571-573`).
+- So a VM-backed fallback already exists in one form, for `Runner::run` admission. Docker Desktop and its relatives run containers inside a Linux VM. The Docker backend needs an image named in `OMP_SANDBOX_DOCKER_IMAGE` and fails as unavailable without one (`crates/sandbox/src/backends/docker.rs:24`, `crates/sandbox/src/backends/docker.rs:72-76`). It runs the command inside that image, with host paths only through declared bind mounts (`crates/sandbox/src/backends/docker.rs:207-208`). The command therefore runs on Linux, not macOS. That is a real limit for macOS-native tools. [INFERENCE: Docker Desktop on macOS runs Linux images, from general knowledge, not read here.]
 
 ### What Seatbelt does and does not do
 
@@ -59,6 +60,7 @@ Licences were read from the GitHub API on 2026-11-13.
 | Apple `container` (`apple/container`) | Linux containers as lightweight VMs | Linux only | Apache-2.0 | "Needs a Mac with Apple silicon" and "designed to run on macOS 26 or later" (its README). |
 | Colima (`abiosoft/colima`) | Container runtime in a Lima VM | Linux | MIT | Docker-compatible; already usable through omp2's Docker backend. |
 | UTM (`utmapp/UTM`) | GUI VM manager | many | Apache-2.0 | Not scriptable enough for a backend. |
+| Vibemon (`stencil-hq/vibemon`) | Self-hosted microVM platform speaking the E2B API; KVM on Linux, HVF on macOS 15+ | Linux (x86_64 and aarch64 on KVM; aarch64 on HVF) | MIT, Apache-2.0 for E2B-derived parts (README, 2026-11-14) | Linux guests, so a Linux VM boundary like Docker Desktop, not macOS-native. Compat page says Linux/KVM end-to-end testing is "not yet run"; macOS egress filter admits only domains on TCP 80 and 443. No start-latency figure published. E2B documents pause at about 4 s per GiB of RAM and resume at about 1 s. The upstream reference adapter `vmon.ts` uses Vibemon SDK calls (OCI image boot, host gateway) not shown in the E2B pages (`upstream:packages/metaharness/src/tb/vmon.ts:201-224`, `:308-315`). URLs: <https://github.com/stencil-hq/vibemon>, <https://github.com/stencil-hq/vibemon/blob/main/docs/src/reference/e2b-compat.md>, <https://docs.e2b.dev/sandbox/persistence.md>. |
 
 Tart's licence text, read from the repository's `LICENSE`: a "Competing Use" is "making the Software available to others in a commercial product or service that substitutes for the Software; ... or offers the same or substantially similar functionality", and permitted purposes "specifically include ... for your internal use and access".
 
@@ -122,8 +124,9 @@ Nothing below is implemented. Each item is a proposal with its own acceptance te
 
 - Measure, on the self-hosted Mac, the time to start a clean guest and run `true` for Tart, Lima and Apple `container`, the speed of a shared-directory `cargo build` against a native one, and what network filtering is available. Record the numbers in a research note.
 - Acceptance: a table of measured times and a yes or no per tool on "can run a macOS-native command" and "can filter egress". Until measured, every number about VM speed in this document is UNVERIFIED.
+- Revised 2026-11-14: the proposed pass lines for a MicroVM execution backend tested against Vibemon (gates X0 to X9, baselines B0r and B0c) and for a VM subagent view (I1 to I3) are in ADR 0070 D5 and D6, every number a proposal for the owner. The spike runs only after a reopen trigger fires (ADR 0070 D4: Apple signals S1 to S3, owner need H, isolation need I); Windows events WIN1 to WIN4 are in D7. The `sandbox-exec` removal detector that already exists is `seatbelt::probe()` plus proof P12, with limits listed in the ADR. Code: `crates/sandbox/src/backends/seatbelt.rs:436-473`, `crates/e2e/tests/p12_daemon_approvals.rs:13-14`, `:63-72`.
 
-### VM: slice V1, the recipe
+### VM: slice V1, the recipe (deferred by ADR 0070 D3; needs open question 6 answered first)
 
 - Write a short guide: install a guest tool, create a guest with SSH, `ssh add` it with a pinned host key, and run build and test commands through the SSH execution backend.
 - Acceptance: on the self-hosted Mac, a guest runs one workspace test command through exec-ssh and returns its result and exit code; the project `hosts.toml` is untouched in an untrusted workspace (`crates/ssh/src/lib.rs:157-170`).
@@ -132,17 +135,18 @@ Nothing below is implemented. Each item is a proposal with its own acceptance te
 ### VM: slice V2 (only if V0 and V1 justify it)
 
 - A sandbox `Backend::VmGuest` variant, or better an environment target (option 4). Capabilities declared honestly, with caveats for shared directories and egress.
-- Gate: `cap-sandbox-vm` and default-off convar `sv_sandbox_vm`. Adding a variant touches every exhaustive `match` in the runner (`crates/sandbox/src/runner.rs:41`, `crates/sandbox/src/runner.rs:240`, `crates/sandbox/src/runner.rs:318`, `crates/sandbox/src/runner.rs:406`, `crates/sandbox/src/runner.rs:458`) and the serialized backend names, which are additive.
+- Gate: default-off, mechanism chosen by the future record (ADR 0070 D8 does not mint `cap-sandbox-vm` or `sv_sandbox_vm`). Adding a variant touches every exhaustive `match` in the runner (`crates/sandbox/src/runner.rs:41`, `crates/sandbox/src/runner.rs:240`, `crates/sandbox/src/runner.rs:318`, `crates/sandbox/src/runner.rs:406`, `crates/sandbox/src/runner.rs:458`) and the serialized backend names, which are additive.
 - Acceptance: the conformance suite the other backends run (`crates/sandbox/tests`) passes for the supported capabilities, and unsupported ones fail strict specifications.
 
 ### Windows: slice W0, find the closure
 
 - List which workspace crates depend on `omp-py`, directly or not, using the dependency graph for the Windows target. Output: a list of crates that can build on Windows today.
-- Acceptance: the list is committed in the note and matches `cargo tree` output.
+- Done 2026-11-14 as a manifest read (normal and build dependencies in `crates/*/Cargo.toml`): 8 of 62 crates depend on `omp-py` (`omp-app`, `omp-chat`, `omp-driver`, `omp-e2e`, `omp-envd`, `omp-py`, `omp-roster-probe`, `omp-tools`); the other 54, including `omp-sandbox`, `omp-shell`, `omp-shell-builtins`, `omp-tui` and `omp-desktop`, do not. It ignores dev-dependencies and features and does not show that they compile on Windows.
+- Acceptance still open: confirm with `cargo tree --target x86_64-pc-windows-msvc -i omp-py -e normal,build` (not run: no cargo build in this pass).
 
 ### Windows: slice W1, compile check
 
-- A non-required job, run on `workflow_dispatch` and nightly, that checks the W0 crates for a Windows target. Switch it on with a repository variable, `vars.CI_WINDOWS`, default unset, so the job is skipped like the Mac variants (`docs/research/ci-macos-runner-fallback.md:5`).
+- A non-required job, run on demand (a nightly run waits until the cost of one Windows run is measured), that checks the W0 crates for `x86_64-pc-windows-msvc`. Switch it on with a repository variable, default unset, so the job is skipped like the Mac variants (`docs/research/ci-macos-runner-fallback.md:5`). ADR 0070 D8 does not mint the variable's name.
 - Acceptance: the job passes on the baseline, fails on an injected type error in a `cfg(windows)` block, and is not in the required list (`docs/BRANCH_PROTECTION.md:42`).
 
 ### Windows: slice W2, unit tests
@@ -158,10 +162,10 @@ Nothing below is implemented. Each item is a proposal with its own acceptance te
 
 1. **Apple's macOS licence for VMs.** How many macOS guests a Mac may run, and under what terms, was not read. UNVERIFIED. It limits any macOS-guest design.
 2. **Nested virtualization.** GitHub-hosted macOS runners are themselves VMs; whether Virtualization.framework works inside them is UNVERIFIED. A VM backend could be tested only on the self-hosted Mac.
-3. **Entitlements and signing.** Virtualization.framework use requires a signed binary with an entitlement. UNVERIFIED. The `package-macos.yml` workflow exists but its signing was not read.
+3. **Entitlements and signing.** Virtualization.framework use requires a signed binary with an entitlement. UNVERIFIED. `package-macos.yml` is manual, "publishes nothing" and has no signing step (`.github/workflows/package-macos.yml:3-14`), so omp has no signing story to reuse.
 4. **Tart's licence.** FSL-1.1-ALv2 with a Competing Use clause, copyright line naming OpenAI as read. The owner should decide whether even a documented recipe that points at Tart is acceptable, or whether to name only Apache-2.0 tools (Lima, Apple `container`).
-5. **Seatbelt's future.** The man page says deprecated. No removal date was found. The owner decides the trigger for V2.
-6. **General tool execution over SSH.** Whether read, write and shell tools can target an SSH host, not only build runs, decides whether V1 works for agent sessions.
+5. **Seatbelt's future.** The man page says deprecated. No removal date was found. Apple DTS said in September 2020 that the deprecation exists because the profile language is undocumented for third parties (<https://developer.apple.com/forums/thread/661939>), and the binary is still present in 2026. The triggers for V2 are now defined in ADR 0070 D4; the owner ratifies them.
+6. **General tool execution over SSH.** Whether read, write and shell tools can target an SSH host, not only build runs, decides whether V1 works for agent sessions. Partial finding 2026-11-14: envd's `ssh://` support is reads (`crates/ssh/README.md:5-8`); no write or shell path over SSH was found (not exhaustively searched).
 7. **Windows release.** Does the owner want a Windows binary? That decides W3 and the `omp-py` work.
 8. **Cost.** Hosted Windows minute rates and per-run cost were not checked. NOT MEASURED.
 9. **Locked ADRs.** ADR 0006 is the guide for the VM question. ADR 0036 (Python-only extensions and eval) is why embedded Python cannot simply be made optional. ADR 0024 (latched roster) is untouched: no new roster family. The additive-only rule holds: new CI jobs, a new backend variant and new convars change nothing existing.
@@ -172,3 +176,15 @@ Nothing from upstream is proposed for reuse for the VM question: it has no VM sa
 
 Third-party VM tools were checked only for their licence: Tart FSL-1.1-ALv2, Lima, Apple `container`, Apple `containerization` and UTM Apache-2.0, Colima MIT (GitHub API, 2026-11-13). None is proposed for bundling.
 
+
+## 8. MicroVM route facts (read 2026-11-14)
+
+Moved here from ADR 0070 Context. Pages were read from `main` on 2026-11-14; no commit hash could be read (the GitHub API was blocked for the session), so nothing is pinned.
+
+**Vibemon** (<https://github.com/stencil-hq/vibemon>): a self-hosted microVM platform that speaks the E2B API; the E2B SDKs and CLI work unmodified. Sandboxes are copy-on-write forks of a template snapshot with no kernel boot. Pause writes a memory delta and a disk overlay; with an S3-compatible store configured it can be resumed on another node. Platforms: Linux/KVM (guests x86_64 and aarch64; VMM, node and driver roles); macOS 15+/HVF (guest aarch64; same roles); Windows/WHP (guest x86_64; VMM only). macOS binaries need an ad-hoc signature with `hvf.entitlements`; Linux nodes need `/dev/kvm`, and TAP networking needs root or `CAP_NET_ADMIN`. MIT licence, Apache-2.0 for E2B-derived parts. The README gives no start-latency figure and no benchmark.
+
+**Vibemon's E2B compatibility page** (<https://github.com/stencil-hq/vibemon/blob/main/docs/src/reference/e2b-compat.md>): sandbox create, list, kill, timeout, connect, pause, fork, snapshot-as-template and template operations are routed; the envd process service (Start, Connect, SendInput, SendSignal) and filesystem service and file upload and download are implemented over Connect v1; paused sandboxes auto-resume on connect. Limits: egress header rules are Linux-only and "currently failing in the macOS test run"; on macOS the egress filter admits only domains on TCP 80 and 443; "Not yet run: Linux/KVM end-to-end testing"; GPU sandboxes lose memory on resume. Test status as recorded there: Python SDK 1444 passed, 8 failed, 34 skipped; JS SDK 1007 passed, 1 failed, 36 skipped. Guests are Linux (the init list names Debian, Ubuntu, RHEL, Arch and Alpine), so on a Mac this is a Linux VM boundary like Docker Desktop, not a macOS-native sandbox.
+
+**E2B** (<https://docs.e2b.dev/sandbox/persistence.md>, <https://docs.e2b.dev/sandbox.md>): `Sandbox.create()` with a timeout; `commands.run`; pause saves filesystem and memory, "pausing takes about 4 seconds per 1 GiB of RAM" and "resuming takes about 1 second"; `Sandbox.connect()` resumes a paused sandbox; paused sandboxes are kept until killed; network connections drop on pause. The documentation does not state a cold-start time.
+
+**Gap between the reference adapter and the E2B API.** `upstream:packages/metaharness/src/tb/vmon.ts` boots from an OCI `image` with `allow_host_gateway: true` (`:201-224`) and calls `sandbox.hostGateway(localUrl)` (`:308-315`). The Vibemon README and compatibility page do not mention a host gateway, and the E2B pages read show none. So an adapter limited to the E2B API cannot assume the inference gateway that ADR 0052 D8 and ADR 0039 K2 rely on: either the guest reaches inference through an allowed egress route with no key in the guest, or the adapter uses a Vibemon-specific call. UNVERIFIED which Vibemon supports; ADR 0070 gate X8 tests it.

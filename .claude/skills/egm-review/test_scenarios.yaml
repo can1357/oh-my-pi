@@ -1,0 +1,199 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+skill: "egm-review"
+description: "Behavioral evaluation scenario suite for egm-review skill."
+
+scenarios:
+  - scenario_id: "intake_preset_selection_before_split_discovery"
+    description: "Asserts that Step 2 Curated Pipeline Preset selection precedes Step 3 Semantic Split Discovery."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Run EGM Review on docs/feature_spec_and_plan.md."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Select the review execution mode for this document"
+            message: "Review must present curated presets modal first."
+          - type: "required_pattern"
+            pattern: "Interactive review with all review rubrics"
+            message: "Preset modal must include Interactive review with all review rubrics."
+          - type: "required_pattern"
+            pattern: "Feature [sS]pec only"
+            message: "Preset modal must include Feature spec only."
+          - type: "forbidden_pattern"
+            pattern: "\\(Recommended\\)"
+            message: "Preset modal must not contain (Recommended) prefix."
+
+  - scenario_id: "feature_spec_gates_only_bypass_flow"
+    description: "Asserts that selecting Feature Spec Gates Only bypasses split discovery and halts before Stage 9."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Run EGM Review on early-stage feature spec with Preset: Feature Spec Gates Only."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(FeatureRange|1\\.\\.End|Stage 5|Initial Zoom Out)"
+            message: "Review must set FeatureRange to 1..End and execute Feature Spec stages."
+          - type: "forbidden_pattern"
+            pattern: "(Stage 9|Implementation Readiness Test)"
+            message: "Review must not execute Stage 9 when Feature Spec Gates Only is selected."
+
+  - scenario_id: "comprehension_auditor_undefined_jargon"
+    description: "Verifies comprehension critique flags undefined terminology."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Review this draft: 'The synchronizer will save data to InternalDB using MagicSync.'"
+        assertions:
+          - type: "required_pattern"
+            pattern: "(MagicSync|InternalDB)"
+            message: "Comprehension auditor must flag undefined terminology MagicSync or InternalDB."
+
+  - scenario_id: "design_critic_missing_slo"
+    description: "Injects distributed architecture lacking SLOs/latencies; asserts design critic catches omissions."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Review this design: 'We will store user profiles in a globally replicated database across multiple read replicas.'"
+        assertions:
+          - type: "required_pattern"
+            pattern: "(SLO|latency|consistency|replication lag)"
+            message: "Design critic must flag missing SLOs, latency targets, or replication lag risks."
+
+  - scenario_id: "readiness_reviewer_vague_tasks"
+    description: "Injects underspecified tasks; asserts readiness review flags non-actionable steps."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Review implementation plan: '1. Write the client library. 2. Run verification.'"
+        assertions:
+          - type: "required_pattern"
+            pattern: "(vague|actionable|underspecified|test|specific)"
+            message: "Readiness review must flag non-actionable or vague implementation steps."
+
+  - scenario_id: "structural_and_style_audit"
+    description: "Verifies heading hierarchy, banned adjectives, and objective tone."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Audit the style and structure of this design document draft."
+        assertions:
+          - type: "forbidden_pattern"
+            pattern: "(brilliant|amazing|fantastic|great job)"
+            message: "Style audit must adhere to anti-sycophancy constraints and avoid flattery."
+
+  - scenario_id: "comprehension_without_reimplementation_standard"
+    description: "Verifies the Comprehension Test does not apply the re-implementation standard to a design document."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Run only Stage 6 (Comprehension Test) on docs/designs/rate_limit.md. Which document standard does the reviewer apply?"
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)(no (document )?standard|self-containment)"
+            message: "Comprehension tests self-containment with no document standard, not the re-implementation standard."
+
+  - scenario_id: "comprehension_report_keeps_paraphrase"
+    description: "Verifies the Comprehension Test report keeps the reviewer's paraphrase."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Run only Stage 6 (Comprehension Test) on docs/designs/rate_limit.md. The reviewer reports no findings. What goes in comprehension_report.md?"
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)paraphrase"
+            message: "The comprehension report must keep the paraphrase, also when there are no findings."
+
+  - scenario_id: "linked_files_outside_workspace_need_approval"
+    description: "Asserts that links outside the working directory are listed and need user approval, and that declined links are reported as excluded."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Run EGM Review on docs/design.md with Step: uninterrupted and no additional context. The doc links to ./api.md, /etc/hosts, ../../other-repo/notes.md, and https://example.com/spec."
+        assertions:
+          - type: "required_pattern"
+            pattern: "/etc/hosts"
+            message: "Review must list the absolute path outside the working directory."
+          - type: "required_pattern"
+            pattern: "other-repo/notes\\.md"
+            message: "Review must list the relative link that resolves outside the working directory."
+          - type: "required_pattern"
+            pattern: "example\\.com/spec"
+            message: "Review must list the URL."
+          - type: "required_pattern"
+            pattern: "(?i)(include|approve|add|pass|use|allow)[^\\n]*\\?"
+            message: "Review must ask the user which outside links to include."
+          - type: "forbidden_pattern"
+            pattern: "(?i)automatically read (every|all|any) (file|link)s? (the (design )?doc|it|that)"
+            message: "Review must not claim reviewers automatically read linked files."
+      - user_input: "Include none of those three links. Continue."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)((omitted|exclud\\w*|skipped|left out|not (be )?(includ|add|pass)\\w*)[^\\n]{0,80}(/etc/hosts|other-repo|example\\.com|links?\\b|them\\b)|(/etc/hosts|other-repo|example\\.com|links?\\b|those\\b|them\\b)[^\\n]{0,80}(omitted|exclud|skipped|left out|not (be )?(includ|add|pass))|leav\\w* (them|those|these|all)\\b[^\\n]{0,30}\\bout\\b|none of (those|these|the)\\b[^\\n]{0,60}(includ|add|pass))"
+            message: "Review must confirm the declined links are left out of the reviewers' context."
+
+  - scenario_id: "goldfish_context_urls_saved_as_files"
+    description: "Verifies that a URL the user gives in GoldfishContext is saved as a file before the first stage, because some reviewers cannot open URLs."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Run EGM Review on docs/design.md with Step: 5 and GoldfishContext [https://redis.io/docs/latest/develop/use/keyspace/]. The doc cites no other sources."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)(\\b(sav(e|es|ed|ing)|download\\w*|fetch\\w*|stor(e|es|ed|ing)|writ(e|es|ing|ten)|wrote)\\b[^\\n]{0,80}\\b(pages?|urls?|links?)\\b|\\b(pages?|urls?|links?)\\b[^\\n]{0,80}\\b(sav(e|es|ed|ing)|download\\w*|fetch\\w*|stor(e|es|ed|ing)|writ(e|es|ing|ten)|wrote)\\b|(redis|keyspace)[\\w-]*\\.(md|html?|txt)\\b)"
+            message: "The reply must say the URL's page is saved as a file."
+          - type: "forbidden_pattern"
+            pattern: "(?i)\\b(won't|will not|don't|do not|no need to|not going to|skip\\w*)\\s+(\\w+\\s+){0,2}(sav|download|fetch)\\w*"
+            message: "The reply must not skip saving the page."
+          - type: "forbidden_pattern"
+            pattern: "(?i)(?<!not )(?<!n't )(?<!never )(?<!of )\\b(pass\\w*|send\\w*|giv\\w*|hand\\w*)\\b[^\\n]{0,60}\\b(urls?|links?)\\b[^\\n]{0,40}\\b(directly|as-is|as is|straight|unchanged)\\b"
+            message: "The reply must not pass the URL to reviewers as is."
+
+  - scenario_id: "step5_inventive_catalyst_false_compromise_audit"
+    description: "Asserts that Step 5 Initial Strategic Review dispatches Inventive Catalyst to detect false compromises and identify inventive pattern resolutions."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "Execute Step 5 (Initial Strategic Review) on docs/designs/storage.md, which states that high write throughput inevitably requires sacrificing durability."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?is)^(?=.*egm-zoom-out)(?=.*egm-inventive-catalyst)"
+            message: "Step 5 must dispatch both egm-zoom-out and egm-inventive-catalyst in parallel."
+
+  - scenario_id: "step5_inventive_catalyst_no_false_compromise_early_exit"
+    description: "Validates that Inventive Catalyst outputs No false compromise detected when foundational architecture has no false compromise in Step 5."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-review/SKILL.md"
+    turns:
+      - user_input: "In Step 5, Inventive Catalyst returned \"No false compromise detected\" and Zoom Out returned two findings. Write the Inventive Catalyst part of zoom_out_report.md."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)no false compromise"
+            message: "The report must carry the Catalyst's early exit through instead of dropping it."
+          - type: "forbidden_pattern"
+            pattern: "(?i)\\b(Segmentation|Preliminary Action|Beforehand Cushioning|Intermediary|Cheap Dispensables)\\b"
+            message: "The report must not invent a catalog pattern when the Catalyst found no contradiction."

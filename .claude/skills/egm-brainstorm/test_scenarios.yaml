@@ -1,0 +1,161 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+skill: "egm-brainstorm"
+description: "Behavioral evaluation scenario suite for egm-brainstorm skill."
+
+scenarios:
+  - scenario_id: "open_ended_discovery_divergence"
+    description: "Verifies open-ended conversational clarification without multiple-choice menus during initial discovery."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "I have a rough idea for a dynamic cache warming service that proactively fetches user profiles before peak morning traffic, but the requirements and operational limits are completely undefined. How should we explore this?"
+        assertions:
+          - type: "required_pattern"
+            pattern: "(\\?|clarif|requirements|traffic|constraints|failure|goals)"
+            message: "Brainstorming must initiate open inquiry directly in chat."
+          - type: "forbidden_pattern"
+            pattern: "(\\(Recommended\\)|Option 1|Option A|\\[1\\])"
+            message: "Brainstorming must not present multiple-choice menus during initial discovery."
+
+  - scenario_id: "readiness_gate_modal"
+    description: "Asserts single-select modal presentation for readiness confirmation before launching Goldfishes."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "We have thoroughly explored the dynamic cache warming problem: it will run as an hourly cron pre-fetching the top 10k active user profiles from Postgres into Redis, constrained to a 5-minute execution window and under 100MB memory footprint. Please summarize the anchored hypothesis and present the readiness gate."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Review with Goldfishes"
+            message: "Readiness gate must offer Review with Goldfishes."
+          - type: "required_pattern"
+            pattern: "Clarify additional constraints or assumptions in chat"
+            message: "Readiness gate must offer option to clarify in chat."
+          - type: "forbidden_pattern"
+            pattern: "\\(Recommended\\)"
+            message: "Readiness gate must not contain (Recommended) prefix."
+
+  - scenario_id: "handoff_draft_option_command_form"
+    description: "Asserts the proceed option does not tell the user to type the unprefixed /egm-draft."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "concepts_brief.md is finalized and saved in the working directory. At the Step 4 gate I select: Proceed to egm-draft (Initialize formal design document)."
+        assertions:
+          - type: "required_pattern"
+            pattern: "egm-draft"
+            message: "Handoff must tell the user to start the egm-draft skill."
+          - type: "forbidden_pattern"
+            pattern: "(?<![\\w.-])/egm-draft"
+            message: "Handoff must not tell users to type the unprefixed /egm-draft."
+
+  - scenario_id: "handoff_gate_modal_routing"
+    description: "Asserts single-select modal routing to egm-draft and RFC publishing upon completing brief."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "The Goldfish review and iteration loops are finished. I have reviewed and fully approved the finalized concepts_brief.md artifact. Please execute Step 4 (Finalize & Handoff)."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Publish concepts_brief\\.md as RFC for team feedback"
+            message: "Handoff gate must offer RFC publication option."
+          - type: "required_pattern"
+            pattern: "Proceed to egm-draft"
+            message: "Handoff gate must offer proceeding to egm-draft."
+          - type: "forbidden_pattern"
+            pattern: "/egm-discuss"
+            message: "Handoff gate must not route to deprecated /egm-discuss."
+          - type: "forbidden_pattern"
+            pattern: "\\(Recommended\\)"
+            message: "Handoff gate must not contain (Recommended) prefix."
+
+  - scenario_id: "decision_matrix_generation"
+    description: "Checks that tradeoffs and evaluation criteria are formatted clearly in a decision matrix."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "Create a decision matrix comparing Kafka vs RabbitMQ vs Pub/Sub for our pipeline."
+        assertions:
+          - type: "required_pattern"
+            pattern: "\\|.*\\|.*\\|"
+            message: "Decision matrix must be formatted as a Markdown table."
+          - type: "contains"
+            pattern: "Kafka"
+            message: "Decision matrix must evaluate Kafka."
+          - type: "contains"
+            pattern: "RabbitMQ"
+            message: "Decision matrix must evaluate RabbitMQ."
+
+  - scenario_id: "author_resolution_fallback_prompts_chat"
+    description: "Verifies that egm-brainstorm asks for author identity in chat when git user.name and GIT_AUTHOR_NAME are unset."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "I want to brainstorm a new telemetry aggregator feature. No git user.name or GIT_AUTHOR_NAME is set in the environment."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)(author|your name|github handle)[^?\\n]*\\?"
+            message: "Brainstorming must ask for author name or handle when git config is unset."
+          - type: "forbidden_pattern"
+            pattern: "(?i)Author:\\*{0,2}\\s*(root\\b|runner\\b|[^\\n]*maintainers)"
+            message: "Brainstorming must not default to maintainers or OS logins."
+
+  - scenario_id: "alternatives_rejection_attribution_by_author"
+    description: "Verifies that rejected alternatives in concepts_brief.md are recorded as author rejections."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "We weighed Kafka vs RabbitMQ during ideation, and I rejected RabbitMQ due to partition scaling limits. Format the Alternatives Weighed section."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Rejected by author:"
+            message: "Brainstorming must record rejection as author decision."
+          - type: "forbidden_pattern"
+            pattern: "Rejected by maintainer"
+            message: "Brainstorming must not attribute contributor rejections to maintainer."
+
+  - scenario_id: "inventive_catalyst_analysis_synthesis"
+    description: "Asserts that the ## Analysis section captures inventive contradictions, catalog pattern recommendations, and secondary trade-offs."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "We completed the 7-lens Goldfish brainstorm on high-throughput durable event streaming. Inventive Catalyst reported a contradiction between write latency and persistent disk durability, suggesting Preliminary Action (cache warming and pre-allocated buffers) with secondary trade-offs in idle memory consumption. Format the ## Analysis section of concepts_brief.md."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?is)^(?=.*\\bcontradiction)(?=.*Preliminary Action)(?=.*trade-?offs?)"
+            message: "Analysis must capture the inventive contradiction, pattern recommendation, and secondary trade-offs."
+
+  - scenario_id: "inventive_catalyst_no_false_compromise_early_exit"
+    description: "Validates the No false compromise detected early-exit guardrail when the architecture is already optimal."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-brainstorm/SKILL.md"
+    turns:
+      - user_input: "Inventive Catalyst returned \"No false compromise detected\" for the event streaming concept. Format the ## Analysis section of concepts_brief.md."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)no false compromise"
+            message: "The brief must carry the Catalyst's early exit through instead of dropping it."
+          - type: "forbidden_pattern"
+            pattern: "(?i)\\b(Segmentation|Preliminary Action|Beforehand Cushioning|Intermediary|Cheap Dispensables)\\b"
+            message: "The brief must not invent a catalog pattern when the Catalyst found no contradiction."

@@ -183,3 +183,4 @@ completo — y en tests sin subscriber de tracing el fallo es invisible.
   backup antes de cualquier commit.
 
 Aplica estas reglas y este estado a partir de ahora sin pedir que se lo repitan.
+Before continuing, re-read docs/research/upstream-gap-closure-brief.md and docs/research/upstream-gap-closure.md.

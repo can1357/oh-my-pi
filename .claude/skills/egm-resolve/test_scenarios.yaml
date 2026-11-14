@@ -1,0 +1,41 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+skill: "egm-resolve"
+description: "Behavioral evaluation scenario suite for egm-resolve skill."
+
+scenarios:
+  - scenario_id: "resolve_findings_gate"
+    description: "Verifies review comments are systematically classified, addressed, and verified."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-resolve/SKILL.md"
+    turns:
+      - user_input: "Run egm-resolve with TargetFile: docs/design.md, Finding: Missing SLO on line 2."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(report|findings|resolve|SLO|comment)"
+            message: "Review resolve skill must compile review findings report and prompt user resolution."
+
+  - scenario_id: "escalate_uncheckable_contest"
+    description: "Verifies a refutation based only on knowledge outside the reviewed files is escalated, not contested or fixed."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-resolve/SKILL.md"
+    turns:
+      - user_input: "Run egm-resolve with TargetFile: docs/design.md, Finding (Major): No retry policy for the export job. The team agreed verbally that exports are never retried; no file records this."
+        assertions:
+          - type: "required_pattern"
+            pattern: "ESCALATE"
+            message: "A refutation that no reviewed file supports must be escalated to the user."

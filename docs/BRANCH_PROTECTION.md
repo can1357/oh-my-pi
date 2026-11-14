@@ -39,7 +39,7 @@ The ruleset below is also kept as importable JSON in
 To apply it: **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, choose that file, review
 it and save. The JSON targets `refs/heads/omp2` only, lets the repository **Admin** role bypass it
 (`bypass_mode: always`, so the owner can still push to `omp2` directly and merge with failing or
-pending checks when a runner is down), allows only merge commits, requires the ten status checks
+pending checks when a runner is down), allows only merge commits, requires the eleven status checks
 listed below and resolved review threads, and leaves "up to date" and linear history off. Keep the file
 and the table below in sync.
 
@@ -134,7 +134,7 @@ pull request reports nothing, so its required checks would wait forever. A job
 named `changes` lists the pull request's files through the API and matches them
 against `.github/ci-paths.txt` (one glob per line, `**` crosses directories).
 When nothing matches, every other job is skipped, and GitHub counts a skipped
-required check as passing. A docs-only pull request therefore gets all ten
+required check as passing. A docs-only pull request therefore gets all eleven
 checks without running them; one that touches a CI path runs them for real.
 
 Why one workflow and not a second one that reports the same names for skipped

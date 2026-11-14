@@ -50,19 +50,12 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  # vars.CI_LINUX_MODE: unset (or anything but `remote`), every Linux job below
-  # runs on GitHub-hosted ubuntu-24.04, as before. `remote` moves a trusted
-  # run's light Linux jobs to the self-hosted Mac (vars.CI_LINUX_RUNNER, else
-  # vars.MACOS_RUNNER; with neither set they stay on ubuntu-24.04). Most run
-  # there as they are; lintx_ratchet and runtime_spec skip their github-hosted
-  # steps and run their `just ci-*` recipe on BuildBuddy instead
-  # (docs/research/ci-macos-runner-fallback.md). lint_linux, p9_p10_linux and
-  # p7_linux stay on ubuntu-24.04 in either mode until their `just ci-*`
-  # recipes are proven on BuildBuddy. Each runs-on that can name the Mac starts with
-  # the `rust` job's fork test, so a pull request from another repository runs
-  # on ubuntu-24.04 in either mode and never reaches the Mac or the BuildBuddy
-  # key; `just check-ci-paths` fails a runs-on that could name a self-hosted
-  # runner without that test in front.
+  # Native CI jobs use standard GitHub-hosted runners regardless of repository
+  # runner variables. CI_LINUX_MODE/CI_LINUX_RUNNER/MACOS_RUNNER retain their
+  # existing behavior only for the BuildBuddy-capable lintx_ratchet, runtime_spec,
+  # remote_linux and remote_seed jobs; their trust and remote execution stay
+  # unchanged. Each remaining self-hosted-capable runs-on routes fork pull
+  # requests to hosted first, checked by `just check-ci-paths`.
   #
   # Decides whether a pull request touches anything CI proves. Every required
   # check is a job of this workflow; when no CI path changed, they are all
@@ -70,7 +63,7 @@ jobs:
   # if this job errors, `ci` is empty and the jobs run.
   changes:
     name: Detect CI-relevant changes
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -147,7 +140,7 @@ jobs:
     name: Rust format
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -159,6 +152,8 @@ jobs:
         run: python3 scripts/check-ci-paths.py
       - name: Test the CI gate script
         run: python3 scripts/test_check_ci_paths.py
+      - name: Test hosted runner policy
+        run: python3 scripts/test_hosted_runners.py
       - name: Test the affected-crates script
         run: python3 scripts/test_affected_crates.py
       - name: Check the editing discipline of repo text
@@ -171,7 +166,7 @@ jobs:
     name: Protobuf format and lint
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -179,7 +174,7 @@ jobs:
         env:
           BUF_VERSION: 1.73.0
           BUF_SHA256: 8f2986298ad08f0cc1bf999b9797b7c383adf32d7edf0f73d6f1e1a701baeac1
-          # buf-Darwin-arm64 of the same release: the self-hosted Mac (vars.CI_LINUX_MODE=remote).
+          # Retain the pinned Darwin asset for an explicit manual invocation.
           BUF_SHA256_DARWIN_ARM64: 6e6df0fef4522e4e43dfe7c341873c3f2c29ceb45a9dfa5e0bad5580b8b2022f
         run: |
           set -euo pipefail
@@ -308,7 +303,7 @@ jobs:
     name: First-party extension conformance
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -319,7 +314,7 @@ jobs:
     name: License policy and release notices
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -343,9 +338,8 @@ jobs:
           cargo install --locked --version 1.58.0 just
           cargo install --locked --version 0.20.2 cargo-deny
           cargo install --locked --version 0.8.2 cargo-about
-      # The self-hosted Mac (vars.CI_LINUX_MODE=remote) builds nothing into its
-      # user's ~/.cargo/bin: it fetches the pinned cargo-deny release into this
-      # job's temp dir, and brings its own just.
+      # Retain the non-hosted provisioning path for explicit manual reuse;
+      # this job itself always selects a standard GitHub-hosted runner.
       - name: Install pinned cargo-deny release
         if: runner.environment != 'github-hosted'
         env:
@@ -383,7 +377,7 @@ jobs:
   push_verified:
     name: Pushed tree already verified
     if: github.event_name == 'push'
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -441,20 +435,10 @@ jobs:
     # format still reports, and fails, its own required check.
     needs: [changes, push_verified, affected]
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    # This is the job that keeps a persistent target dir (incremental Rust +
-    # embedded CPython) on the self-hosted Mac registered on THIS repository
-    # (`vars.MACOS_RUNNER`, e.g. ["self-hosted","macOS","ARM64"]). Every other
-    # CI job stays on GitHub-hosted runners so that Mac is not occupied by
-    # work that does not reuse that cache, unless vars.CI_LINUX_MODE is
-    # `remote` (top of `jobs`). Unset MACOS_RUNNER → macos-15.
-    # A pull request whose head is a different repository (not a branch of
-    # this one) is ROUTED to hosted here. Read that as routing, not a trust
-    # boundary: `pull_request` evaluates this workflow from the PR's own merge
-    # ref, so a fork can edit this line. What actually keeps fork code off the
-    # Mac is the repository's fork-PR approval policy. Do not use
-    # head.repo.fork here: this repository can itself be a GitHub fork and
-    # still own the runner, so `fork` would be true for trusted branches.
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"macos-15"' || vars.MACOS_RUNNER || '"macos-15"') }}
+    # Run workspace tests and host-specific acceptance proofs on GitHub's
+    # standard macOS runner. MACOS_RUNNER no longer redirects this native job
+    # to a personal machine; BuildBuddy-capable jobs retain their own routing.
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -639,8 +623,7 @@ jobs:
   # a required check (docs/research/ci-test-acceleration.md, Phase 3): moving
   # it out of `rust` took ~12 min (553.5 s median, n=10) off the critical
   # path. No target/ cache: a warm clippy (394-459 s) was no faster than a
-  # cold one (371-912 s). It does not use the self-hosted target dir, so it
-  # stays on GitHub-hosted macos-15 and leaves the Mac free for `rust`.
+  # cold one (371-912 s). It remains a separate GitHub-hosted macos-15 job.
   # Linux clippy still cannot see #[cfg(target_os = "macos")].
   lint_macos:
     name: Lint workspace (macOS)

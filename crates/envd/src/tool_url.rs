@@ -8,6 +8,7 @@ pub mod host;
 pub(super) mod local;
 pub(crate) mod mcp;
 mod memory;
+pub mod scheme_generation;
 #[cfg(feature = "cap-ssh")]
 pub(super) mod ssh;
 pub(super) mod vault;

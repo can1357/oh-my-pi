@@ -1,0 +1,95 @@
+{
+  "experiment": "synthetic cache-key sensitivity, not defect detection or OMP2 performance",
+  "source_commit": "9cb6fd638918de77913a3e6c8fc42f9d5b3365bc",
+  "python": "3.12.14",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "available": {
+    "just": false,
+    "cargo": false,
+    "rustc": false,
+    "bun": false
+  },
+  "baseline": {
+    "schema": 1,
+    "source_closure": {
+      "changed.rs": "function-v1",
+      "callee.rs": "contract-v1"
+    },
+    "dependencies": "Cargo.lock-v1",
+    "policy": "standard-v1",
+    "compiler": "nightly-2026-08-08",
+    "test_inputs": "fixtures-v1",
+    "environment": {
+      "os": "linux",
+      "arch": "x86_64",
+      "features": []
+    },
+    "verifier": "check-adapter-v1"
+  },
+  "baseline_sha256": "82c6982ef3af04e1761b9c07831e35a2f808d249db44326560847e305241886a",
+  "cases": [
+    {
+      "field": "source_closure",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "source_closure",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "dependencies",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "policy",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "compiler",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "test_inputs",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "environment",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "environment",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "verifier",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "schema",
+      "expected": "miss",
+      "observed": "miss"
+    },
+    {
+      "field": "map_order",
+      "expected": "hit",
+      "observed": "hit"
+    },
+    {
+      "field": "identical_inputs",
+      "expected": "hit",
+      "observed": "hit"
+    }
+  ],
+  "passed": 12,
+  "total": 12,
+  "single_run_elapsed_ns": 357839
+}

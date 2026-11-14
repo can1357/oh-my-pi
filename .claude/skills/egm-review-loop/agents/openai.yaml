@@ -1,0 +1,6 @@
+interface:
+  display_name: "EGM Review loop"
+  short_description: "Repeat design reviews and resolve findings"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+  brand_color: "#E86E00"

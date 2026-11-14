@@ -103,6 +103,13 @@ omp2 has the same crate shape (`omp-desktop`: session facade, actor thread, per-
 
 Verdict: implement Part A; Part B after owner agreement; the rest research only.
 
+Superseded on 2026-11-14 by ADR 0063 after EGM round 2:
+
+- Part A proceeds.
+- A release-on-abort fix (Part C) is added. After round 3 it covers macOS only.
+- Part B is deferred to its own record. Round 2 found that its omp2 call sites, pid source, tap lifecycle and CI coverage were all undesigned.
+- One correction to section 2 below: omp2's libei backend drops its event stream after discovery (`crates/desktop/src/linux/wayland/libei.rs:84-91`). So reading the keymap once is not enough; the stream has to be drained before each input.
+
 ## 4. Options
 
 ### Part A: typing on a non-US Wayland layout
@@ -122,6 +129,18 @@ Choice: option 2. [INFERENCE]
 Choice: option 2, behind a default-off convar, once the owner accepts the new error code. Option 3 is acceptable if that code is refused. [INFERENCE]
 
 ## 5. Plan
+
+ADR 0063 supersedes this first-draft plan. It was revised 2026-11-14 after three EGM rounds; it is machine-reviewed and not owner-approved.
+
+- Slices: A1, A2 and C1.
+  - A1: layout-aware planning on Wayland, with the keymap read at discovery. Gated by `sv_computer_xkb_layout`.
+  - A2: the libei event stream is kept and drained before each input, and a device model follows the active group. Same convar.
+  - C1: macOS drag release on abort, plus validating every chord key before pressing. Gated by `sv_computer_release_on_abort`.
+- Two parts are deferred:
+  - The macOS intervention guard (Part B below), to its own future record.
+  - libei release on abort. Round 3 found that cancellation never reaches the Linux desktop actor thread.
+
+The plan below is kept as the original research record.
 
 ### Slice A1: layout parser (no behaviour change)
 
@@ -159,10 +178,15 @@ Choice: option 2, behind a default-off convar, once the owner accepts the new er
 3. Should omp2 grow a takeover mode at all? The X11 guard and the Escape stops depend on it. That is a product decision larger than this gap.
 4. Privacy. The tap sees every key and click system-wide. Upstream stores only a pid and a time. Do the same and never log key codes. [INFERENCE]
 5. False positives. A dictation tool or a remote desktop posts under another pid and counts as the user. That matches upstream's intent (`upstream:crates/pi-natives/src/desktop/control/macos.rs:413`) but will make the agent wait.
-6. Wait cost. `admit` can block up to the run deadline. omp2's `OperationState` has a deadline but no wait primitive (`crates/desktop/src/lib.rs:62`).
+6. Wait cost. `admit` can block up to the run deadline. omp2's `OperationState` has a deadline but no wait primitive (`crates/desktop/src/lib.rs:62`). ADR 0063 defers the guard. It records this as a requirement for the guard's own record: a lost-wakeup-free condvar wait that cancel wakes.
 7. UNVERIFIED: the X11 map's group handling upstream (`linux/x11/keymap.rs`), and whether omp2's X11 path behaves on a non-US layout. Neither was run.
 8. Conflicts with locked ADRs: none found. ADR 0006 (sandbox policy) is about sandboxing, not desktop input.
 
 ## 7. Upstream origin and license
 
-A port would draw from `upstream:crates/pi-natives/src/desktop/control/intervention.rs`, `control/macos.rs`, `linux/wayland/xkb.rs`, `linux/wayland/libei.rs` and the two `testdata/*.xkb` files. The upstream `LICENSE` is MIT, with copyright lines for Mario Zechner, Can Bölük and Stencil Labs, Inc. (`upstream:LICENSE:1-5`). A port keeps that notice. The `.xkb` testdata are dumps of the xkeyboard-config layouts, which carry their own (permissive, MIT-style) terms; check `crates/desktop/NOTICE`-style handling and `THIRD-PARTY-NOTICES.txt` before copying them. UNVERIFIED: the licence text of the `.xkb` files was not read.
+A port would draw from `upstream:crates/pi-natives/src/desktop/control/intervention.rs`, `control/macos.rs`, `linux/wayland/xkb.rs`, `linux/wayland/libei.rs` and the two `testdata/*.xkb` files. The upstream `LICENSE` is MIT, with copyright lines for Mario Zechner, Can Bölük and Stencil Labs, Inc. (`upstream:LICENSE:1-5`). A port keeps that notice. The `.xkb` testdata are compiled keymaps derived from xkeyboard-config.
+
+- OBSERVED: they carry no copyright or licence header. The only "copyright" in `fr.xkb` is a keysym (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1472`).
+- OBSERVED: xkeyboard-config's terms are X11/MIT-style permission notices that require the notice in all copies, with no copyleft clause. This was read from the Debian `xkb-data` 2.41 `copyright` file.
+- OBSERVED: xkeyboard-config's own `COPYING` at tag `xkeyboard-config-2.41` agrees: 190 lines, twelve copyright lines, no copyleft clause.
+- ADR 0063 D5 generates omp2's own fixtures with `xkbcli compile-keymap` and records the command and the versions in a new `crates/desktop/NOTICE`. Upstream's fixtures are not copied.
