@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed X11 takeover keys for a window going to another application that held the keyboard, such as its open menu or a screen locker's password prompt, while the call reported them typed into the window; they now wait up to half a second for such a grab to end and otherwise fail with nothing sent. A menu of the window's own application still gets the keys unless another application's popup is above it ([#19066](https://github.com/can1357/oh-my-pi/pull/19066) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes

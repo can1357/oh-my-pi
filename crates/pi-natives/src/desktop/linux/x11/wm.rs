@@ -541,18 +541,7 @@ impl Wm<'_> {
 	}
 
 	fn is_grab_popup_of(&self, child: Window, pid: u32) -> bool {
-		let Some(attributes) = self
-			.conn
-			.get_window_attributes(child)
-			.ok()
-			.and_then(|cookie| cookie.reply().ok())
-		else {
-			return false;
-		};
-		attributes.override_redirect
-			&& attributes.map_state == MapState::VIEWABLE
-			&& self.root_child_pid(child) == Some(pid)
-			&& !self.is_passive_popup(child)
+		self.is_grab_popup(child) && self.root_child_pid(child) == Some(pid)
 	}
 
 	/// Whether screen point (`x`, `y`) lies inside `window`; `false` when its
@@ -577,6 +566,31 @@ impl Wm<'_> {
 			&& py >= top
 			&& px < left + i32::from(geometry.width)
 			&& py < top + i32::from(geometry.height)
+	}
+
+	/// Allows core keys through an existing grab only when the topmost
+	/// viewable, non-passive override-redirect root child belongs to `pid`.
+	/// A foreign popup above the target's own popup must keep keys refused.
+	pub(super) fn topmost_grab_popup_of(&self, pid: u32) -> Option<Window> {
+		self
+			.children(self.root)
+			.into_iter()
+			.rev()
+			.find(|&child| self.is_grab_popup(child))
+			.filter(|&child| self.root_child_pid(child) == Some(pid))
+	}
+
+	fn is_grab_popup(&self, window: Window) -> bool {
+		self
+			.conn
+			.get_window_attributes(window)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.is_some_and(|attributes| {
+				attributes.override_redirect
+					&& attributes.map_state == MapState::VIEWABLE
+					&& !self.is_passive_popup(window)
+			})
 	}
 
 	fn is_passive_popup(&self, window: Window) -> bool {
