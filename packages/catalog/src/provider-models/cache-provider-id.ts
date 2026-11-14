@@ -126,10 +126,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// from the KDL rate card; v4 keys the scope on the token's stable
 			// account subject instead of the rotating JWT; v5 drops rows that still
 			// mark the account default `isProviderDefault`, which startup now honors.
+			// v6 refetches rosters written while rich variants were gated on GetUsableModels slugs, which hid models Cursor serves (GLM 5.3, Grok 4.7).
 			const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
 			const apiKey = options.apiKey ?? "";
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
-			return `cursor:rich-models-v5:${Bun.hash(scope).toString(36)}`;
+			return `cursor:rich-models-v6:${Bun.hash(scope).toString(36)}`;
 		}
 		case "charm-hyper": {
 			// Discovery is authoritative for this gateway, so a warm cache is served
