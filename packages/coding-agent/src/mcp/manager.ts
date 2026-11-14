@@ -46,6 +46,7 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
+import { isTransientMCPInitialFailure } from "./errors";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
@@ -1045,7 +1046,7 @@ export class MCPManager implements MCPManagerApi {
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
-					if (error instanceof MCPConnectionTimeoutError) {
+					if (error instanceof MCPConnectionTimeoutError || isTransientMCPInitialFailure(error)) {
 						notify({ type: "reconnecting", serverName: name });
 						const stopForwarding = onStatus
 							? this.addConnectionStatusListener(event => {

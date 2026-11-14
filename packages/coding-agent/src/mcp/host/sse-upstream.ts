@@ -10,6 +10,7 @@ import {
 	MCPTransportError,
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
+	parseMCPRetryAfterMs,
 } from "../errors";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { RequestIdAllocator } from "../request-id";
@@ -283,8 +284,9 @@ export class SseUpstream implements MCPTransport {
 					stage: "receive",
 					failure: "http_status",
 					message: `HTTP ${status}: ${await response.text()}`,
-					retryable: status === 404 || status === 502 || status === 503,
+					retryable: status === 404 || status === 429 || status === 502 || status === 503,
 					code: status,
+					retryAfterMs: parseMCPRetryAfterMs(response.headers.get("Retry-After")),
 				});
 			}
 			posted = true;

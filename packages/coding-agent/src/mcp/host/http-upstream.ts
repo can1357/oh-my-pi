@@ -21,6 +21,7 @@ import {
 	mcpTraceIdFromHeaders,
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
+	parseMCPRetryAfterMs,
 } from "../errors";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { MCP_PROTOCOL_VERSION, MCPMeta } from "../protocol";
@@ -556,9 +557,9 @@ export class HttpUpstream implements MCPTransport {
 			stage: "receive",
 			failure: "http_status",
 			message: `HTTP ${status}: ${text}${suffix}`,
-			retryable: status === 404 || status === 502 || status === 503,
+			retryable: status === 404 || status === 429 || status === 502 || status === 503,
 			code: status,
-			traceId,
+			retryAfterMs: parseMCPRetryAfterMs(response.headers.get("Retry-After")),
 		});
 		if (this.#mode === "legacy" || status === 401 || status === 403) return statusError;
 		let parsed: unknown;
@@ -579,7 +580,7 @@ export class HttpUpstream implements MCPTransport {
 			code: rpcError.code,
 			data: rpcError.data,
 			traceId: rpcError.traceId,
-			rpc,
+			retryAfterMs: statusError.retryAfterMs,
 			cause: statusError,
 		});
 	}
@@ -813,9 +814,9 @@ export class HttpUpstream implements MCPTransport {
 					stage,
 					failure: "http_status",
 					message: `HTTP ${response.status}: ${text}`,
-					retryable: response.status === 404 || response.status === 502 || response.status === 503,
+					retryable: response.status === 404 || response.status === 429 || response.status === 502 || response.status === 503,
 					code: response.status,
-					traceId,
+					retryAfterMs: parseMCPRetryAfterMs(response.headers.get("Retry-After")),
 				});
 			}
 

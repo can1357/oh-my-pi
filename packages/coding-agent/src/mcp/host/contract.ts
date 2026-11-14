@@ -273,6 +273,7 @@ const HostErrorData = type({
 	"code?": "string | number",
 	"data?": "string",
 	"traceId?": "string",
+	"retryAfterMs?": "number",
 	"exit?": { "code?": "number", "signal?": "number", stderr: "string" },
 });
 
@@ -293,6 +294,7 @@ export function encodeHostError(error: MCPTransportError, exit?: McpUpstreamExit
 		code: error.code,
 		data: error.data,
 		traceId: error.traceId,
+		retryAfterMs: error.retryAfterMs,
 		exit,
 	};
 	return { code: MCP_HOST_ERROR_CODE, message: error.message, data };
@@ -312,6 +314,7 @@ export function decodeHostError(error: JsonRpcError): MCPTransportError | undefi
 		code: data.code,
 		data: data.data,
 		traceId: data.traceId,
+		retryAfterMs: data.retryAfterMs,
 	});
 }
 
