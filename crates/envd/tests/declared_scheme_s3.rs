@@ -1,7 +1,7 @@
 //! ADR 0050 S3 exit: core line-selector peel for live schemes, D5 host
 //! judgment (no blanket Host Fetch), undeclared + mcp opacity.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use omp_core::Str;
@@ -17,6 +17,7 @@ use omp_tools::read::{
 	resolver::{Resolve, Scheme},
 	selector::{ParsedSelector, parse_uri},
 };
+use parking_lot::Mutex;
 
 fn claim(name: &str) -> SchemeClaim {
 	SchemeClaim {
@@ -41,7 +42,7 @@ struct CapturingReader {
 #[async_trait]
 impl SchemeTestReader for CapturingReader {
 	async fn read(&self, _scheme: &str, url: &str) -> Result<HostResourceResult, Str> {
-		self.seen.lock().expect("seen").push(url.to_owned());
+		self.seen.lock().push(url.to_owned());
 		Ok(HostResourceResult { content: Some(self.body.clone()), notes: Vec::new() })
 	}
 }
@@ -94,7 +95,7 @@ async fn live_scheme_peels_line_selector() {
 		.await
 		.expect("live peel read");
 	assert_eq!(std::str::from_utf8(&bytes).expect("utf8"), "line2\nline3\n");
-	assert_eq!(seen.lock().expect("seen").as_slice(), ["widget://id"]);
+	assert_eq!(seen.lock().as_slice(), ["widget://id"]);
 }
 
 #[tokio::test]
