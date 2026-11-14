@@ -23,7 +23,8 @@ import {
 	type Questions,
 	renderQuestion,
 } from "@oh-my-pi/pi-ai";
-import { logger, pathIsWithin, prompt } from "@oh-my-pi/pi-utils";
+import { logger, pathIsWithin, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { type HostPressure, hostStrain, readHostPressure, summarizeHostPressure } from "../async/host-pressure";
 import type { Settings } from "../config/settings";
 import questionFile from "../prompts/judge/tool-guard.json" with { type: "json" };
 import refusedTemplate from "../prompts/tools/tool-guard-refused.md" with { type: "text" };
@@ -141,6 +142,8 @@ export interface GuardVerdict {
 	riskProbability: number;
 	/** P(the user asked for it). */
 	askedProbability: number;
+	/** For `overloads_host`: the strain the host snapshot showed (`memory pressure`, `CPU saturation`, ...). */
+	hostStrain?: string[];
 }
 
 export interface GuardThresholds {
@@ -161,6 +164,11 @@ export interface ToolGuardHost {
 	judge(): GuardJudge;
 	/** Stops the run after too many refusals; `reason` names them. */
 	stop(reason: string): void;
+	/**
+	 * The machine's resource pressure, read only for calls that reach the judge; undefined when unknown.
+	 * Defaults to {@link readHostPressure} for the working directory.
+	 */
+	hostPressure?(): Promise<HostPressure | undefined>;
 }
 
 function stringArg(args: unknown, key: string): string | undefined {
@@ -600,6 +608,8 @@ export class ToolGuard {
 			reason: verdict.reason,
 			riskProbability: verdict.riskProbability.toFixed(2),
 			askedProbability: verdict.askedProbability.toFixed(2),
+			overloadsHost: verdict.risk === "overloads_host",
+			hostStrain: verdict.hostStrain?.join(", "),
 		});
 	}
 
@@ -612,6 +622,8 @@ export class ToolGuard {
 	): Promise<GuardVerdict | undefined> {
 		if (this.#breakerOpenUntil !== undefined && Date.now() < this.#breakerOpenUntil) return undefined;
 		try {
+			const timeout = AbortSignal.timeout(JUDGE_TIMEOUT_MS);
+			const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
 			const authority = this.#host.settings.grantAuthority?.() ?? this.#host.settings;
 			const allowances = cfgToolGuardAllowances.get(authority)?.trim();
 			const command = call.toolName === "bash" ? stringArg(call.args, "command") : undefined;
@@ -633,7 +645,11 @@ export class ToolGuard {
 				},
 				...(shown.length > 0 ? { scripts: shown } : {}),
 			};
-			const timeout = AbortSignal.timeout(JUDGE_TIMEOUT_MS);
+			const pressure = await untilAborted(
+				deadline,
+				this.#host.hostPressure ? this.#host.hostPressure() : readHostPressure(cwd),
+			).catch(() => undefined);
+			if (pressure) state.host = summarizeHostPressure(pressure);
 			const { answers } = await this.#host.judge().judge(
 				{
 					state,
@@ -642,12 +658,13 @@ export class ToolGuard {
 						asked: renderQuestion(QUESTIONS.asked, { allowances: Boolean(allowances) }),
 					},
 				},
-				{ signal: signal ? AbortSignal.any([signal, timeout]) : timeout },
+				{ signal: deadline },
 			);
 			const verdict = guardVerdict(answers, {
 				risk: cfgToolGuardRiskThreshold.get(authority),
 				asked: cfgToolGuardAskedThreshold.get(authority),
 			});
+			if (verdict?.risk === "overloads_host" && pressure) verdict.hostStrain = hostStrain(pressure);
 			this.#judgeFailures = 0;
 			if (this.#breakerOpenUntil !== undefined) {
 				this.#breakerOpenUntil = undefined;

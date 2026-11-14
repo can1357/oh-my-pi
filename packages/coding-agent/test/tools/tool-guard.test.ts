@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime, spyOn, vi }
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { JudgmentRequest, Questions } from "@oh-my-pi/pi-ai";
+import type { HostPressure } from "@oh-my-pi/pi-coding-agent/async/host-pressure";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -80,12 +81,15 @@ describe("tool guard", () => {
 	let cwd: string;
 	let messages: AgentMessage[];
 	let stops: string[];
+	/** What the host pressure reader returns; undefined means unknown (off Linux, unreadable). */
+	let hostPressure: HostPressure | undefined;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-tool-guard-");
 		cwd = tempDir.path();
 		messages = [userMessage("Tidy up the README.")];
 		stops = [];
+		hostPressure = undefined;
 	});
 
 	afterEach(() => {
@@ -106,6 +110,7 @@ describe("tool guard", () => {
 			stop: reason => {
 				stops.push(reason);
 			},
+			hostPressure: async () => hostPressure,
 		};
 		return { guard: new ToolGuard(host), settings };
 	}
@@ -248,6 +253,53 @@ describe("tool guard", () => {
 			{ path: path.join(cwd, "sync.py"), content: expect.stringContaining("id_rsa") },
 			{ path: path.join(cwd, "missing.sh"), content: "(no file there to read)" },
 		]);
+	});
+
+	/** A host short of memory: tasks stalled on memory, 3% of memory left, swap mostly used. */
+	const strainedHost: HostPressure = {
+		cpu: { some: { avg10: 20, avg60: 15 } },
+		memory: { some: { avg10: 40, avg60: 30 }, full: { avg10: 12, avg60: 8 } },
+		io: { some: { avg10: 5, avg60: 4 }, full: { avg10: 1, avg60: 1 } },
+		memTotalBytes: 16 * 1024 ** 3,
+		memAvailableBytes: 0.5 * 1024 ** 3,
+		swapTotalBytes: 4 * 1024 ** 3,
+		swapFreeBytes: 0.5 * 1024 ** 3,
+		diskTotalBytes: 100 * 1024 ** 3,
+		diskFreeBytes: 40 * 1024 ** 3,
+	};
+
+	it("shows the judge the host's pressure only when it is known", async () => {
+		const judge = fakeJudge({ routine: 1 }, 0);
+		const { guard } = guardWith(judge);
+
+		await guard.check(bash, { command: "rm -rf /srv/db" }, "exec");
+		expect(judge.requests[0].state).not.toHaveProperty("host");
+
+		hostPressure = strainedHost;
+		await guard.check(bash, { command: "rm -rf /srv/db" }, "exec");
+		expect(judge.requests[1].state).toHaveProperty("host", {
+			psi: {
+				cpu: { some10: 20, some60: 15 },
+				memory: { some10: 40, some60: 30, full10: 12, full60: 8 },
+				io: { some10: 5, some60: 4, full10: 1, full60: 1 },
+			},
+			memory_gib: { available: 0.5, total: 16 },
+			swap_gib: { used: 3.5, total: 4 },
+			disk_gib: { free: 40, total: 100 },
+		});
+	});
+
+	it("refuses heavy work on a strained host, naming the strain and pointing elsewhere", async () => {
+		hostPressure = strainedHost;
+		const { guard } = guardWith(fakeJudge({ overloads_host: 0.9 }, 0.1));
+		messages.push(userMessage("Run the full test suite."));
+
+		const refusal = await guard.check(bash, { command: "bun test" }, "exec");
+
+		expect(refusal).toContain("`overloads_host`");
+		expect(refusal).toContain("The host shows memory pressure, heavy swapping.");
+		expect(refusal).toContain("Move the heavy work to another host, or wait");
+		expect(refusal).not.toContain("Find a safer way");
 	});
 
 	it("never shows the judge a file the command sources", async () => {
