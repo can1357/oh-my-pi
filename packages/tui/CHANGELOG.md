@@ -4,6 +4,7 @@
 
 ### Added
 
+- The composer's image tokens name their image's blob in native rendering (`decor` `blob`), so copying a draft in Tern copies its pasted images
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 - Approval dialogs style covered (`✓ … (allowed: …)`) and prompted (`? … (…)`) compound bash command segments with distinct colours and native spans, opening scrolled to the first prompted segment ([#18749](https://github.com/can1357/oh-my-pi/pull/18749) by [@asuffield](https://github.com/asuffield))
