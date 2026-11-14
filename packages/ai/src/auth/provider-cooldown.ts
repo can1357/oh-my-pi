@@ -17,8 +17,9 @@ interface CooldownEntry {
  * Antigravity 429), every account of that provider is held back until the
  * cooldown expires, so retries, subagents, and new turns do not fan the
  * refusal out across the pool. Entries live in memory and in the credential
- * store's cache table, so processes sharing the store observe the same latch;
- * both expire on their own deadline.
+ * store's cache table; every check re-reads the store and honors the later
+ * deadline, so processes sharing the store see each other's trips and
+ * extensions at once.
  */
 export class ProviderCooldowns {
 	readonly #store: CredentialCacheStore;
@@ -52,12 +53,14 @@ export class ProviderCooldowns {
 	#active(provider: string): CooldownEntry | undefined {
 		const now = Date.now();
 		const memory = this.#entries.get(provider);
-		if (memory && memory.untilMs > now) return memory;
-		if (memory) this.#entries.delete(provider);
 		const persisted = parseEntry(this.#store.getCache(`${CACHE_KEY_PREFIX}${provider}`));
-		if (!persisted || persisted.untilMs <= now) return undefined;
-		this.#entries.set(provider, persisted);
-		return persisted;
+		const latest = !persisted || (memory && memory.untilMs >= persisted.untilMs) ? memory : persisted;
+		if (!latest || latest.untilMs <= now) {
+			this.#entries.delete(provider);
+			return undefined;
+		}
+		this.#entries.set(provider, latest);
+		return latest;
 	}
 }
 

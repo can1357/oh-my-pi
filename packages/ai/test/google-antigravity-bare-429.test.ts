@@ -270,6 +270,34 @@ describe("Cloud Code Assist bare 429", () => {
 		expect(new ProviderCooldowns(store).isCooling("google-antigravity")).toBe(false);
 	});
 
+	it("reports another instance's later deadline at once and admits only after it", () => {
+		if (!store) throw new Error("test setup failed");
+		const startedAt = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(startedAt);
+		const a = new ProviderCooldowns(store, 60_000);
+		const b = new ProviderCooldowns(store, 120_000);
+		a.trip("google-antigravity", "first refusal");
+		expect(b.isCooling("google-antigravity")).toBe(true);
+		b.trip("google-antigravity", "second refusal");
+
+		const untilMs = (cooldowns: ProviderCooldowns) => {
+			try {
+				cooldowns.assertReady("google-antigravity");
+			} catch (error) {
+				if (error instanceof AIError.ProviderCooldownError) return error.untilMs;
+				throw error;
+			}
+			return undefined;
+		};
+		expect(untilMs(a)).toBe(startedAt + 120_000);
+
+		vi.spyOn(Date, "now").mockReturnValue(startedAt + 60_001);
+		expect(untilMs(a)).toBe(startedAt + 120_000);
+		vi.spyOn(Date, "now").mockReturnValue(startedAt + 120_001);
+		expect(untilMs(a)).toBeUndefined();
+		expect(b.isCooling("google-antigravity")).toBe(false);
+	});
+
 	it("still rotates an Antigravity 429 that carries Retry-After", async () => {
 		const { attempts } = await runPooledRequest("google-antigravity", {
 			body: BARE_429_BODY,
