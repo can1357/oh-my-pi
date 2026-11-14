@@ -60,6 +60,7 @@ import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
+import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { AgentRegistry } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
@@ -3472,7 +3473,12 @@ export class AcpAgent implements Agent {
 			};
 		}
 
-		const result = await manager.connectServers(configs, sources);
+		const result = await manager.connectServers(
+			configs,
+			sources,
+			undefined,
+			cfgMcpStartupTimeoutMs.get(record.session.settings),
+		);
 		// A client-declared server whose initial connect fails (e.g. an expired
 		// client-owned bearer answering 401 inside the startup window) must not
 		// abort session creation: the record keeps the manager with the failed

@@ -21,6 +21,7 @@ import {
 	AcpAgent,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
+import { cfgMcpStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type {
@@ -4522,6 +4523,23 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 		} finally {
 			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("binds a slow client-declared tool before the first prompt when startup window is zero", async () => {
+		const harness = await createHarness();
+		cfgMcpStartupTimeoutMs.set(Settings.instance, 0);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+			expect(refreshSpy.mock.calls.at(-1)?.[0]).toMatchObject([{ name: `mcp__delayed_${DELAYED_MCP_TOOL_NAME}` }]);
+		} finally {
+			refreshSpy.mockRestore();
+			await harness.agent.dispose();
 		}
 	}, 15_000);
 

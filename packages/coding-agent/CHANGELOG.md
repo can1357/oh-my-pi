@@ -20,6 +20,8 @@
 
 ### Fixed
 
+- ACP sessions now honor `mcp.startupTimeoutMs` when connecting client-declared MCP servers, so setting it to `0` makes their tools available before the first prompt ([#19253](https://github.com/can1357/oh-my-pi/issues/19253)).
+
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
