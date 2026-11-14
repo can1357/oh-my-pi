@@ -89,6 +89,7 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+- The `read`, `grep`, and `web_search` tool descriptions no longer advertise web-URL reads while `fetch.enabled` is off, including after turning it off mid-session and in a handoff request issued right after the toggle ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
@@ -198,7 +199,6 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
-- The `read`, `grep`, and `web_search` tool descriptions no longer advertise web-URL reads while `fetch.enabled` is off, including after turning it off mid-session and in a handoff request issued right after the toggle ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 
 ## [18.19.0] - 2026-11-12
