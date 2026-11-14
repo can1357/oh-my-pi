@@ -1411,6 +1411,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
+	/** Advances when a fresh transcript starts: `/clear` or `/new`. Resuming or reloading an
+	 *  existing session keeps it: that conversation may still have a warm provider cache, so
+	 *  prompt content snapshotted from disk (the workspace tree) must stay byte-stable for it. */
+	#transcriptEpoch = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
@@ -7150,6 +7154,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendResetBoundary();
 
 		resetCapabilities();
+		this.#transcriptEpoch++;
 		await this.refreshBaseSystemPrompt();
 
 		return { droppedCount };
@@ -7326,6 +7331,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+	}
+
+	/** Transcript epoch: advances on `/clear` and `/new`, never when resuming an existing session. */
+	get transcriptEpoch(): number {
+		return this.#transcriptEpoch;
 	}
 
 	/**
@@ -12416,6 +12426,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// directory set, not the previous session's — refresh before the next
 			// turn goes out.
 			resetCapabilities();
+			this.#transcriptEpoch++;
 			await this.refreshBaseSystemPrompt();
 
 			this.#reseedCostGate();

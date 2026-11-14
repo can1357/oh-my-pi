@@ -395,6 +395,9 @@
 ### Fixed
 
 - A provider error that only reads like a context overflow, such as oMLX's prefill memory guard, now switches to the next `retry.fallbackChains` model when the context fits, instead of failing the turn ([#18889](https://github.com/can1357/oh-my-pi/pull/18889) by [@dagurval](https://github.com/dagurval))
+### Fixed
+
+- With `includeWorkspaceTree` enabled, the workspace tree and nested `AGENTS.md` list in the system prompt now reflect the current directory after `/move` and the files on disk after `/clear` or `/new`, instead of the scan taken at startup ([#18866](https://github.com/can1357/oh-my-pi/pull/18866) by [@bigHippoZz](https://github.com/bigHippoZz))
 
 ## [18.18.8] - 2026-11-11
 

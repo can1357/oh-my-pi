@@ -2070,9 +2070,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		totalLines: 0,
 		agentsMdFiles: [],
 	};
-	const scanWorkspaceTree = (): Promise<WorkspaceTree> => {
+	const scanWorkspaceTree = (root: string): Promise<WorkspaceTree> => {
 		const scan = logger.time("buildWorkspaceTree", () =>
-			buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
+			buildWorkspaceTree(root, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
 		);
 		scan.catch(() => {});
 		return scan;
@@ -2082,8 +2082,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let workspaceTreePromise: Promise<WorkspaceTree> | undefined = options.workspaceTree
 		? Promise.resolve(options.workspaceTree)
 		: cfgIncludeWorkspaceTree.get(settings)
-			? scanWorkspaceTree()
+			? scanWorkspaceTree(cwd)
 			: undefined;
+	// Conversation, directory, and transcript epoch the current tree describes.
+	// A rebuild after the conversation's cwd changes (`/move`, resuming a
+	// session from another project) or a fresh transcript starts (`/clear`,
+	// `/new`) rescans so the prompt reflects the tree on disk (e.g. after a
+	// branch checkout). Every other rebuild keeps the conversation's own tree,
+	// so its cached prompt prefix stays byte-stable: `workspaceTrees` hands a
+	// resumed conversation back the scan it was last sent with, even when
+	// another conversation rescanned in between. A tree the caller supplied is
+	// theirs: it is never replaced by a scan.
+	let workspaceTreeConversation: string | undefined;
+	let workspaceTreeRoot = path.resolve(cwd);
+	let workspaceTreeEpoch = 0;
+	const workspaceTrees = new Map<string, { root: string; scan: Promise<WorkspaceTree> }>();
 	// Tree from a mid-session scan; supersedes the startup value handed to subagents.
 	let lateWorkspaceTree: WorkspaceTree | undefined;
 
@@ -4407,15 +4420,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
 			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings);
-			if (includeWorkspaceTree && !workspaceTreePromise) {
-				const scan = scanWorkspaceTree();
-				workspaceTreePromise = scan;
-				scan.then(
-					tree => {
-						lateWorkspaceTree = tree;
-					},
-					() => {},
-				);
+			if (includeWorkspaceTree && !options.workspaceTree) {
+				const treeRoot = path.resolve(promptCwd);
+				const treeEpoch = hasSession ? session.transcriptEpoch : 0;
+				const conversation = sessionManager.getSessionId();
+				const held = workspaceTrees.get(conversation);
+				const stale =
+					treeEpoch !== workspaceTreeEpoch ||
+					((workspaceTreeConversation ?? conversation) === conversation && treeRoot !== workspaceTreeRoot);
+				// Not stale: a conversation seen before gets its own scan back; one first
+				// seen here shares the current scan when it describes the same directory.
+				const kept = stale
+					? undefined
+					: held?.root === treeRoot
+						? held.scan
+						: treeRoot === workspaceTreeRoot
+							? workspaceTreePromise
+							: undefined;
+				const scan = kept ?? scanWorkspaceTree(treeRoot);
+				workspaceTrees.set(conversation, { root: treeRoot, scan });
+				workspaceTreeConversation = conversation;
+				workspaceTreeRoot = treeRoot;
+				workspaceTreeEpoch = treeEpoch;
+				if (scan !== workspaceTreePromise) {
+					workspaceTreePromise = scan;
+					scan.then(
+						tree => {
+							if (workspaceTreePromise === scan) lateWorkspaceTree = tree;
+						},
+						() => {},
+					);
+				}
 			}
 			// Mounted xd:// readers stay out of the direct inventory, but their skill
 			// capability still drives catalog/URI guidance: project them into the
