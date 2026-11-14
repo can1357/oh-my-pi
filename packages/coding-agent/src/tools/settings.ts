@@ -515,7 +515,7 @@ export const cfgGrepEnabled = register({
 export const cfgGrepContextBefore = register({
 	id: "grep.contextBefore",
 	type: "number",
-	default: 1,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -534,7 +534,7 @@ export const cfgGrepContextBefore = register({
 export const cfgGrepContextAfter = register({
 	id: "grep.contextAfter",
 	type: "number",
-	default: 3,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",

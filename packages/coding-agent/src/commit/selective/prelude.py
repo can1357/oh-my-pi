@@ -61,14 +61,26 @@ def _make_commit():
             text, _ = await self._run("diff", {}, silent)
             return text
 
-        async def commit(self, subject, body=None, *, fixes=None, amend=False, silent=False):
+        async def commit(
+            self, subject, body=None, *, fixes=None, amend=False, no_verify=False, silent=False
+        ):
             if isinstance(fixes, (int, str)):
                 fixes = [fixes]
-            _, details = await self._run(
+            text, details = await self._run(
                 "commit",
-                {"subject": subject, "body": body, "fixes": fixes, "amend": amend or None},
+                {
+                    "subject": subject,
+                    "body": body,
+                    "fixes": fixes,
+                    "amend": amend or None,
+                    "noVerify": no_verify or None,
+                },
                 silent,
             )
+            # The committed draft is gone; continue with what remains.
+            self.id = details["remaining"]["id"]
+            self.details = details["remaining"]
+            self._text = text
             return details
 
     class _Commit:

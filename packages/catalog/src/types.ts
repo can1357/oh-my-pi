@@ -23,6 +23,7 @@ export type KnownApi =
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
+	| "antigravity-acp"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
