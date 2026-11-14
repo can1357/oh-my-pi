@@ -15,8 +15,8 @@ use omp_core::sf;
 use omp_env::EnvClient;
 use omp_proto::{inference::v1, thread::v1::Blob};
 use omp_tool::{
-	Claims, Ev, ExecutionMode, IncomingParams, Presentation, Registry, Rev, Tool, ToolSpec,
-	ToolTerminal,
+	Claims, Ev, ExecutionMode, FetchEffects, IncomingParams, Presentation, Registry, Rev, Tool,
+	ToolSpec, ToolTerminal,
 };
 use omp_tools::{
 	goal,
@@ -421,6 +421,24 @@ pub struct HostResourceResult {
 	pub notes:   Vec<String>,
 }
 
+/// Declaration-based judgment for a host URI (ADR 0050 D5 / S3).
+///
+/// [`Self::Unknown`] names the omit-fetch+credentials case as
+/// `Effects::unknown()` **facts** at this API. Live `read@3` Foreign admission
+/// stays subset-safe: only [`Self::Fetch`] contributes fetch effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostUriJudgment {
+	/// Spelling is not in the live generation.
+	Undeclared,
+	/// Reserved; not constructed in S3 (not the omit-fetch case).
+	Local,
+	/// Declared scheme whose extension has fetch capability.
+	Fetch(FetchEffects),
+	/// Declared scheme whose fold carried no fetch (and no credentials-alone
+	/// Fetch). Maps to `Effects::unknown()` facts for the D5 regression.
+	Unknown,
+}
+
 /// Broker resolving composition-owned internal resources.
 #[async_trait::async_trait]
 pub trait HostResources: Send + Sync + 'static {
@@ -429,6 +447,14 @@ pub trait HostResources: Send + Sync + 'static {
 
 	/// Writes one host-owned resource.
 	async fn resolve_write(&self, url: &str, content: String) -> Result<HostResourceResult, Str>;
+
+	/// Declaration-based effect judgment for `url` (ADR 0050 D5).
+	///
+	/// Default: [`HostUriJudgment::Undeclared`].
+	fn judge(&self, url: &str) -> HostUriJudgment {
+		let _ = url;
+		HostUriJudgment::Undeclared
+	}
 }
 
 /// Starts background telemetry delivery once the credential bridge exists.

@@ -447,10 +447,14 @@ impl Resolve for UrlResolver {
 	/// vault `_`, an unconfigured vault's discovery): that is an
 	/// environment-ambient host program, run only while `sv_vault_enabled`
 	/// resolves it and governed by that setting, not by the call, as the
-	/// environment's language and debug adapter servers are by theirs. A
-	/// scheme outside the built-in vocabulary (`Host`) is read from the
-	/// resources the attached RPC host declared and serves itself; the
-	/// environment fetches nothing for it.
+	/// environment's language and debug adapter servers are by theirs.
+	///
+	/// A scheme outside the built-in vocabulary (`Host`) is judged from the
+	/// live declared-scheme generation ([`HostResources::judge`]): only a
+	/// declared scheme whose fold carried fetch capability returns
+	/// [`FetchEffects`]; undeclared foreign schemes and declared schemes that
+	/// omit fetch return `None` (ADR 0050 D5 / S3). This is not a blanket
+	/// anonymous fetch.
 	fn read_fetch(&self, resource: &str, query: Option<&str>) -> Option<FetchEffects> {
 		match self {
 			#[cfg(feature = "cap-ssh")]
@@ -460,7 +464,7 @@ impl Resolve for UrlResolver {
 			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Some(FetchEffects { credentials: true }),
 			Self::Mcp(resolver) => resolver.read_fetch(resource, query),
-			Self::Host(_) => Some(FetchEffects { credentials: false }),
+			Self::Host(resolver) => resolver.read_fetch(resource, query),
 			Self::Artifact(_)
 			| Self::Attachment(_)
 			| Self::Agent(_)
