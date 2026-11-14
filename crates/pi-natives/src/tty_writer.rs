@@ -20,6 +20,8 @@
 //! [`TtyWriter::dead`] and drops all queued output; the JS side maps that to
 //! its terminal-disconnected teardown.
 
+#[cfg(unix)]
+use std::os::fd::{BorrowedFd, IntoRawFd};
 use std::{
 	sync::{
 		Arc,
@@ -165,9 +167,13 @@ fn pump_loop(fd: i32, inner: &Inner) {
 
 /// Dedicated writer thread for one terminal fd.
 ///
-/// `dup(2)`'d at construction and closed on drop. The duplicate keeps the
-/// pump's fd alive if the original is closed or replaced; file-status flags
-/// such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
+/// Duplicated (close-on-exec) at construction and closed on drop. The
+/// duplicate keeps the pump's fd alive if the original is closed or replaced;
+/// file-status flags such as `O_NONBLOCK` are shared and handled by polling for
+/// `POLLOUT`. Close-on-exec keeps the terminal out of every child the process
+/// spawns without explicit fd handling (`std::process::Command`, gitoxide
+/// filter drivers), which could otherwise read the user's keystrokes and
+/// terminal replies through it.
 #[napi]
 pub struct TtyWriter {
 	inner:  Arc<Inner>,
@@ -184,14 +190,12 @@ impl TtyWriter {
 	pub fn new(fd: i32) -> Result<Self> {
 		#[cfg(unix)]
 		{
-			// SAFETY: dup on a caller-provided fd; a negative result is handled.
-			let owned = unsafe { libc::dup(fd) };
-			if owned < 0 {
-				return Err(Error::from_reason(format!(
-					"dup({fd}) failed: {}",
-					std::io::Error::last_os_error()
-				)));
-			}
+			// SAFETY: the caller's fd stays open for this call; the borrow only
+			// lives long enough to duplicate it.
+			let owned = unsafe { BorrowedFd::borrow_raw(fd) }
+				.try_clone_to_owned()
+				.map_err(|err| Error::from_reason(format!("duplicating fd {fd} failed: {err}")))?
+				.into_raw_fd();
 			let inner = Arc::new(Inner {
 				back:    Mutex::new(Vec::new()),
 				pending: AtomicUsize::new(0),
@@ -366,6 +370,29 @@ mod tests {
 		// SAFETY: fds is a valid out-array for pipe(2).
 		assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
 		(fds[0], fds[1])
+	}
+
+	#[test]
+	fn spawned_children_do_not_inherit_the_writer_fd() {
+		let (read_fd, write_fd) = pipe_pair();
+		let mut writer = TtyWriter::new(write_fd).unwrap();
+		let open_in_child = |fd: i32| {
+			std::process::Command::new("/bin/sh")
+				.arg("-c")
+				.arg(format!("test -e /dev/fd/{fd}"))
+				.status()
+				.unwrap()
+				.success()
+		};
+		// The caller's pipe end lacks close-on-exec, so the probe sees it.
+		assert!(open_in_child(write_fd));
+		assert!(!open_in_child(writer.fd));
+		writer.stop(1_000);
+		// SAFETY: closing test-owned fds.
+		unsafe {
+			libc::close(read_fd);
+			libc::close(write_fd);
+		}
 	}
 
 	#[test]

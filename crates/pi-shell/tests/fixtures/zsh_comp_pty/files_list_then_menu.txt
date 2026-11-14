@@ -1,0 +1,12 @@
+### ": f\t"
+% : f
+file1  file2  foo.c  foo.h
+@ 0,5
+### "\t"
+% : file1
+file1  file2  foo.c  foo.h
+@ 0,9
+### "\t"
+% : file2
+file1  file2  foo.c  foo.h
+@ 0,9

@@ -48,6 +48,20 @@ provider "web" {
 			limits
 			supports-tools #false
 		}
+		model "keenable" name="Keenable" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "sofya" name="Sofya" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "jina" name="Jina" {
 			reasoning #false
 			input "text"
@@ -154,6 +168,15 @@ provider "web" {
 			supports-tools #false
 		}
 		model "public" name="Public Web" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		// Vertical engine: searches Hacker News only, so it stays out of the
+		// `web` role defaults and runs when a query is scoped to news.ycombinator.com.
+		model "hackernews" name="Hacker News" {
 			reasoning #false
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0

@@ -325,7 +325,7 @@ impl Cache {
 		self.entries.insert(key, Entry {
 			source: Arc::from(code),
 			tree: tree.clone(),
-			bindings: path.map_or_else(Vec::new, |path| {
+			bindings: path.map_or_default(|path| {
 				vec![Binding { path: Box::from(path), current: true, since: ticket }]
 			}),
 			cost,
@@ -461,14 +461,13 @@ fn advance(start: Point, text: &[u8]) -> Point {
 /// prefix and common suffix.
 fn input_edit(old: &str, new: &str) -> InputEdit {
 	let (old_bytes, new_bytes) = (old.as_bytes(), new.as_bytes());
-	let mut prefix = old_bytes
-		.iter()
-		.zip(new_bytes)
-		.take_while(|(a, b)| a == b)
-		.count();
-	while !old.is_char_boundary(prefix) {
-		prefix -= 1;
-	}
+	let prefix = old.floor_char_boundary(
+		old_bytes
+			.iter()
+			.zip(new_bytes)
+			.take_while(|(a, b)| a == b)
+			.count(),
+	);
 	let mut suffix = old_bytes[prefix..]
 		.iter()
 		.rev()

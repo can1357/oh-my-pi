@@ -56,6 +56,20 @@ fn maps_drop_synthetic(maps: &str) -> bool {
 		.any(|library| maps.contains(library))
 }
 
+/// Whether process `pid` takes keyboard input only as core events, which the
+/// XI2-MPX virtual keyboard never sends: Qt 5/6's xcb platform plugin reads
+/// `XInput2` for the pointer only. Chromium's Qt theme shim loads that plugin
+/// into a browser that reads its keys through `XInput2`.
+pub(super) fn process_reads_core_keyboard(pid: u32) -> bool {
+	fs::read_to_string(format!("/proc/{pid}/maps")).is_ok_and(|maps| maps_read_core_keyboard(&maps))
+}
+
+fn maps_read_core_keyboard(maps: &str) -> bool {
+	(maps.contains("/libQt5XcbQpa.so") || maps.contains("/libQt6XcbQpa.so"))
+		&& !maps.contains("/libqt5_shim.so")
+		&& !maps.contains("/libqt6_shim.so")
+}
+
 /// Chromium and Electron statically link their toolkit, so maps alone miss
 /// them; their fingerprint is `--type=<renderer|zygote|gpu-process>` helper
 /// processes forked by the embedder (or the switch on a single-process
@@ -169,5 +183,17 @@ mod tests {
 		assert!(!unsafe_for(None, Some("KDE"), None, Some(":0"), Some("wayland-0")));
 		assert!(!unsafe_for(Some("x11"), Some("GNOME"), None, Some(":0"), None));
 		assert!(!unsafe_for(None, Some("KDE"), None, None, None));
+	}
+
+	#[test]
+	fn qt_xcb_clients_read_core_keyboard_events() {
+		let maps =
+			|library: &str| format!("7f2c1a000000-7f2c1a100000 r-xp 00000000 08:01 42 {library}\n");
+		assert!(maps_read_core_keyboard(&maps("/usr/lib/x86_64-linux-gnu/libQt5XcbQpa.so.5.15.13")));
+		assert!(maps_read_core_keyboard(&maps("/usr/lib/x86_64-linux-gnu/libQt6XcbQpa.so.6.4.2")));
+		assert!(!maps_read_core_keyboard(&maps("/usr/lib/x86_64-linux-gnu/libgtk-3.so.0.2409.32")));
+		let chrome_qt_theme = maps("/opt/google/chrome/libqt5_shim.so")
+			+ &maps("/usr/lib/x86_64-linux-gnu/libQt5XcbQpa.so.5.15.13");
+		assert!(!maps_read_core_keyboard(&chrome_qt_theme));
 	}
 }

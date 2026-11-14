@@ -6,12 +6,19 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import {
+	buildTransformedCodexRequestBody,
+	convertCodexResponsesMessages,
+	convertOpenAICodexResponsesTools,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { createCodexModel } from "./helpers";
+import capturedCodex0154Tools from "./fixtures/codex-0154-additional-tools.json" with { type: "json" };
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -175,6 +182,28 @@ describe("openai-responses parseRequest", () => {
 		// `store` and `previous_response_id` are accepted by the schema but not
 		// plumbed through pi-ai — they no longer leak into options.extra.
 		expect(parsed.options.extra).toBeUndefined();
+	});
+
+	it("treats documented null controls as omitted, keeping a requested effort", () => {
+		const parsed = parseRequest({
+			model: "m",
+			input: "hi",
+			temperature: null,
+			top_p: null,
+			max_output_tokens: null,
+			reasoning: { effort: "low", summary: null },
+		});
+		expect(parsed.options).not.toHaveProperty("temperature");
+		expect(parsed.options).not.toHaveProperty("topP");
+		expect(parsed.options).not.toHaveProperty("maxOutputTokens");
+		expect(parsed.options).not.toHaveProperty("hideThinkingSummary");
+		expect(parsed.options.reasoning).toBe(Effort.Low);
+		expect(parseRequest({ model: "m", input: "hi", reasoning: null }).options).not.toHaveProperty("reasoning");
+	});
+
+	it("still rejects null in non-nullable fields and malformed non-null controls", () => {
+		expect(() => parseRequest({ model: "m", input: "hi", prompt_cache_key: null })).toThrow(/prompt_cache_key/);
+		expect(() => parseRequest({ model: "m", input: "hi", temperature: "0.5" })).toThrow(/temperature/);
 	});
 
 	it("coerces a message item with content:null to an empty content array (Codex #10956)", () => {
@@ -740,6 +769,167 @@ describe("openai-responses parseRequest", () => {
 			nativeHistory: { replay: true, filterReasoning: false },
 		});
 		expect(systemReplay).toEqual([nativeSystemItem]);
+	});
+
+	it("replays Codex 0.154 additional_tools in original input order without top-level tools", () => {
+		const additionalToolsItem = capturedCodex0154Tools.additional_tools[0]!;
+		const parsed = parseRequest({
+			model: capturedCodex0154Tools.model,
+			input: [additionalToolsItem, { type: "message", role: "user", content: "create add.sh" }],
+			tool_choice: capturedCodex0154Tools.tool_choice,
+			parallel_tool_calls: capturedCodex0154Tools.parallel_tool_calls,
+		});
+
+		const codexModel = createCodexModel("gpt-6-astra", { applyPatchToolType: "freeform" });
+		expect(convertOpenAICodexResponsesTools(parsed.context.tools ?? [], codexModel)).toEqual([]);
+		const replayed = convertCodexResponsesMessages(codexModel, parsed.context);
+		const additionalTools = replayed.filter(item => item.type === "additional_tools");
+		expect(additionalTools).toHaveLength(1);
+		// JSON import widens literals (`role: string`); compare values, not the wire union.
+		expect(additionalTools[0] as unknown).toEqual(additionalToolsItem);
+		expect(replayed[0] as unknown).toEqual(additionalToolsItem);
+	});
+
+	it.each(["none", "required"] as const)(
+		"keeps tool_choice %s when tools arrive only as additional_tools",
+		async toolChoice => {
+			const additionalToolsItem = capturedCodex0154Tools.additional_tools[0]!;
+			const parsed = parseRequest({
+				model: capturedCodex0154Tools.model,
+				input: [additionalToolsItem, { type: "message", role: "user", content: "create add.sh" }],
+				tool_choice: toolChoice,
+			});
+			expect(parsed.context.tools).toBeUndefined();
+			expect(parsed.options.toolChoice).toBe(toolChoice);
+
+			const body = await buildTransformedCodexRequestBody(
+				createCodexModel("gpt-6-astra", { applyPatchToolType: "freeform" }),
+				parsed.context,
+				{ toolChoice },
+			);
+			expect(body.tool_choice).toBe(toolChoice);
+			expect(body.input?.some(item => item.type === "additional_tools")).toBe(true);
+		},
+	);
+
+	it("keeps repeated additional_tools declarations in input order", () => {
+		const first = {
+			type: "additional_tools" as const,
+			role: "developer" as const,
+			tools: [{ type: "namespace" as const, name: "functions", description: "", tools: [] }],
+		};
+		const second = {
+			type: "additional_tools" as const,
+			id: "at_later",
+			role: "developer" as const,
+			tools: [{ type: "namespace" as const, name: "clock", description: "time", tools: [] }],
+		};
+		const parsed = parseRequest({
+			model: "gpt-6-astra",
+			input: [first, { type: "message", role: "user", content: "hi" }, second],
+		});
+		const replayed = convertCodexResponsesMessages(
+			createCodexModel("gpt-6-astra", { applyPatchToolType: "freeform" }),
+			parsed.context,
+		);
+		expect(replayed).toMatchObject([first, { role: "user" }, second]);
+	});
+
+	it("round-trips captured namespaced exec calls through streamed output and history", async () => {
+		const roundtrip = capturedCodex0154Tools.roundtrip.input;
+		const parsed = parseRequest({
+			model: capturedCodex0154Tools.model,
+			input: roundtrip,
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		if (assistant?.role !== "assistant") throw new Error("expected assistant tool call");
+
+		expect(encodeResponse(assistant, capturedCodex0154Tools.model).output).toEqual([
+			{
+				type: "custom_tool_call",
+				id: "ctc_wire_probe",
+				call_id: "call_wire_probe",
+				name: "exec",
+				namespace: "functions",
+				input: roundtrip[0]!.input,
+				status: "completed",
+			},
+		]);
+
+		const call = assistant.content[0];
+		if (call?.type !== "toolCall") throw new Error("expected executable tool call");
+		const stream = new AssistantMessageEventStream();
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: { ...assistant, content: [] } });
+			stream.push({ type: "toolcall_start", contentIndex: 0, partial: assistant });
+			stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: assistant });
+			stream.push({ type: "done", reason: "toolUse", message: assistant });
+		});
+		const frames = parseSse(await collectStream(encodeStream(stream, capturedCodex0154Tools.model)));
+		for (const event of ["response.output_item.added", "response.output_item.done"]) {
+			expect(frames.find(frame => frame.event === event)?.data).toMatchObject({
+				item: { type: "custom_tool_call", name: "exec", namespace: "functions", call_id: "call_wire_probe" },
+			});
+		}
+
+		const replayed = convertCodexResponsesMessages(
+			createCodexModel("gpt-6-astra", { applyPatchToolType: "freeform" }),
+			parsed.context,
+		);
+		expect(replayed).toMatchObject([
+			{
+				type: "custom_tool_call",
+				call_id: "call_wire_probe",
+				name: "exec",
+				namespace: "functions",
+				input: roundtrip[0]!.input,
+			},
+			{
+				type: "custom_tool_call_output",
+				call_id: "call_wire_probe",
+				output: roundtrip[1]!.output!.map(block => block.text).join("\n"),
+			},
+		]);
+	});
+
+	it("round-trips namespaced function_call history", () => {
+		const parsed = parseRequest({
+			model: "gpt-6-astra",
+			input: [
+				{
+					type: "function_call",
+					id: "fc_wait",
+					call_id: "call_wait",
+					name: "wait",
+					namespace: "functions",
+					arguments: '{"cell_id":"cell_1"}',
+				},
+				{ type: "function_call_output", call_id: "call_wait", output: "done" },
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		if (assistant?.role !== "assistant") throw new Error("expected assistant function call");
+		expect(encodeResponse(assistant, "gpt-6-astra").output).toEqual([
+			{
+				type: "function_call",
+				id: "fc_wait",
+				call_id: "call_wait",
+				name: "wait",
+				namespace: "functions",
+				arguments: '{"cell_id":"cell_1"}',
+				status: "completed",
+			},
+		]);
+		expect(
+			convertCodexResponsesMessages(createCodexModel("gpt-6-astra"), parsed.context).find(
+				item => item.type === "function_call",
+			),
+		).toMatchObject({
+			type: "function_call",
+			call_id: "call_wait",
+			name: "wait",
+			namespace: "functions",
+		});
 	});
 
 	it("rejects malformed known computer items instead of accepting them as opaque hosted items", () => {

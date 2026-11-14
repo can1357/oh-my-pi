@@ -150,6 +150,14 @@ async function run(args: string[], cwd: string): Promise<{ stdout: string; stder
 async function capture(testCase: NativeCase, workdir: string): Promise<NativeRequest[] | string> {
 	current = testCase;
 	requests = [];
+	// droid serves its disk-cached flags stale-while-revalidate, so without this a
+	// case's first request would route by the previous case's pinned upstream.
+	await fs.rm(
+		path.join(process.env.FACTORY_HOME_OVERRIDE || os.homedir(), ".factory", "cache", "feature-flags.json"),
+		{
+			force: true,
+		},
+	);
 	projectHistory = false;
 	if (!testCase.prime) {
 		const { stdout, stderr } = await run(["-m", testCase.model, "-r", testCase.effort, PROMPT], workdir);

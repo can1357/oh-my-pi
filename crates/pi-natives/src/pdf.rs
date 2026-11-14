@@ -106,7 +106,7 @@ mod tests {
 		for offset in offsets {
 			pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
 		}
-		let info = info_id.map_or_else(String::new, |id| format!(" /Info {id} 0 R"));
+		let info = info_id.map_or_default(|id| format!(" /Info {id} 0 R"));
 		pdf.extend_from_slice(
 			format!(
 				"trailer\n<< /Size {} /Root 1 0 R{info} >>\nstartxref\n{xref_offset}\n%%EOF\n",

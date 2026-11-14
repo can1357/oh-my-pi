@@ -11,7 +11,6 @@ use std::{
 	path::{Path, PathBuf, is_separator},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{TypedValueParser, ValueParserFactory},
@@ -24,7 +23,7 @@ use rand::{
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, forward_slash_display, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, forward_slash_display, format_usage, matches_parser, os_bytes};
 
 static DEFAULT_TEMPLATE: &str = "tmp.XXXXXXXXXX";
 
@@ -224,8 +223,7 @@ impl Params {
 		// Combine a suffix embedded in the template with `--suffix`.
 		let suffix_from_option = options
 			.suffix
-			.map(|s| s.to_string_lossy().into_owned())
-			.unwrap_or_default();
+			.map_or_default(|s| s.to_string_lossy().into_owned());
 		let suffix_from_template = &template_str[j..];
 		let suffix = format!("{suffix_from_template}{suffix_from_option}");
 		if suffix.contains(is_separator) {
@@ -449,7 +447,7 @@ fn dry_exec(tmpdir: &Path, prefix: &str, rand: usize, suffix: &str) -> PathBuf {
 
 	let bytes = &mut buf[prefix.len()..prefix.len() + rand];
 	SmallRng::try_from_rng(&mut rngs::SysRng)
-		.unwrap_or_else(|_| SmallRng::seed_from_u64(bytes.as_ptr() as usize as u64))
+		.unwrap_or_else(|_| SmallRng::seed_from_u64(bytes.as_ptr().addr() as u64))
 		.fill(bytes);
 	for byte in bytes {
 		*byte = match *byte % 62 {
@@ -538,11 +536,6 @@ fn get_tmpdir_env_or_default(host: &Host) -> PathBuf {
 		Some(value) => PathBuf::from(value),
 		None => env::temp_dir(),
 	}
-}
-
-/// Creates the `mktemp` builtin registration.
-pub(crate) fn mktemp_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Mktemp, SE>()
 }
 
 #[cfg(test)]

@@ -33,7 +33,6 @@ import {
 	isNumber,
 	type NumberCell,
 	parseCell,
-	plainCell,
 	type Status,
 	type TableAnalysis,
 	type TableColumn,
@@ -463,6 +462,12 @@ export type ChartAnnotation =
 const BEFORE =
 	/\b(?:before|old|baseline|base|main|master|prev|previous|original|orig|cold|was|from|v1|stock|default|unpatched|without)\b/i;
 const AFTER = /\b(?:after|new|patched|optimi[sz]ed|fixed|warm|now|to|v2|with|proposed|branch|pr|ours)\b/i;
+/** {@link BEFORE} and {@link AFTER} words that only name a condition, never join words inside a name. */
+const STRONG_BEFORE =
+	/\b(?:before|old|baseline|base|main|master|prev|previous|original|orig|cold|v1|stock|default|unpatched)\b/i;
+const STRONG_AFTER = /\b(?:after|new|patched|optimi[sz]ed|fixed|warm|now|v2|proposed|branch|pr|ours)\b/i;
+/** Condition words that also join words inside a name (`Runs with ≥10`, `p50 to p99`). */
+const WEAK_CONDITION = /^(?:was|from|without|to|with)$/i;
 const DELTA = /(?:Δ|delta|change|diff|improvement|speedup|reduction|savings|saved|gain|regression|% chg)/i;
 /** Aggregate columns that restate the others; dropped when enough same-unit series remain. */
 const AGGREGATE = /^(?:total|sum|cumulative|cum\.?|running total|avg|average|mean)\b/i;
@@ -475,9 +480,9 @@ const MONTH = /^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
 /** Distinct series colors (`c1`…`c6`): the most segments a stacked bar tells apart. */
 const SERIES_COLORS = 6;
 /** Most panels a small-multiples grid stays legible with. */
-const MAX_PANELS = 6;
+export const MAX_PANELS = 6;
 /** Most lines one line chart keeps apart. */
-const MAX_LINES = 6;
+export const MAX_LINES = 6;
 /** Fewest rows a line joins: three points draw a bend, not a trend. */
 const MIN_LINE_ROWS = 4;
 /** Fewest points a scatter needs before their cloud can show a relationship. */
@@ -536,20 +541,6 @@ const NEST_SEPARATORS = [" — ", " – ", ": ", " · ", ", ", " ", "/", "-", "_
 /** Where a long row name's description starts (`Payroll (10 people…)`, `@watzon — #19, #53`). */
 const DESCRIPTION = / [—–] | - |: | \(/;
 
-/**
- * Measures that improve upward, by header: pass and success rates, retrieval
- * scores, throughput, speedups and savings.
- */
-const HIGHER_BETTER =
-	/(?:^|[^\w])(?:pass(?:ed|es|ing)?|pass ?%|pass ?rate|success(?:es|ful)?|succeeded|accuracy|acc|recall|precision|prec|f1|em|exact[_ ]?match|scores?|wins?|win ?rate|hit ?rate|throughput|qps|rps|ops\/s|req\/s|tok\/s|tokens\/s|speedup|faster|improvement|savings?|saved|gain|coverage|quality|relevance|correct|solved|ok|renders|completion ?rate|uptime|performance|profits?|roi|pnl|growth|per \$|\/\$)(?![\w])/i;
-/** Measures that improve downward, by header: cost, time, failures. */
-const LOWER_BETTER =
-	/(?:^|[^\w])(?:cost|costs|price|bill|spend|usd|latency|time|duration|wall(?: ?clock)?|elapsed|errors?|err|fail(?:s|ed|ures?)?|timeouts?|miss(?:es)?|crash(?:es)?|regressions?|bugs?|warnings?|retries|turns|p\d{2}|blockers|violations|leaks?|stalls?|load|\$\/\w+)(?![\w])/i;
-/** Resources a before/after change aims to shrink: lower is better only beside a baseline. */
-const LOWER_IN_CHANGE =
-	/(?:^|[^\w])(?:tokens?|tok|rss|memory|mem|heap|allocs?|allocations?|clones|size|bytes|cpu|gc|input|output)(?![\w])/i;
-/** Names of shares and counts that describe rather than score: no polarity whatever else they say. */
-const NEUTRAL = /(?:^|[^\w])(?:share|shares|% of|portion|fraction|distribution|breakdown)(?![\w])/i;
 /** Label headers naming rival options a table compares (models, configs, arms). */
 const RIVALS =
 	/(?:^|[^\w])(?:models?|config(?:uration)?s?|arms?|variants?|approach(?:es)?|options?|plans?|polic(?:y|ies)|providers?|modes?|strateg(?:y|ies)|candidates?|settings?|shapes?|backends?|engines?|librar(?:y|ies)|implementations?|vendors?|tools?|methods?|algorithms?|setups?|runs?)(?![\w])/i;
@@ -606,13 +597,16 @@ export function planChart(table: TableAnalysis): ChartPlan | undefined {
 
 /**
  * Whether a model should pick `table`'s chart (`tui.autoGraph: smart`):
- * multi-series tables, and tables whose rows may be named by a number the
- * `guess` plots (`Thread | State`, `Finding | Current`), where only meaning
- * tells a name from a measure.
+ * multi-series tables, tables whose rows may be named by a number the
+ * `guess` plots (`Thread | State`, `Finding | Current`), and any other chart
+ * the guess would draw — only meaning tells a measure from page references,
+ * step numbers or figures quoted in prose, which the judge charts as none.
  */
 export function shouldJudge(table: TableAnalysis, guess: ChartPlan | undefined): boolean {
 	if (!guess || table.rows.length < 3) return false;
-	return table.measures.length >= 2 || leadingMeasures(table, guess).length > 0;
+	if (table.measures.length >= 2 || leadingMeasures(table, guess).length > 0) return true;
+	const spec = buildChart(table, guess);
+	return spec !== undefined && worthCharting(spec);
 }
 
 /** Measure columns before `guess`'s text label column: numbers that may only name their rows. */
@@ -696,38 +690,33 @@ export function drawnNames(spec: ChartSpec): Set<string> {
 }
 
 /**
- * The local guess at what `plan`'s rows and measures mean: header keywords
- * for each measure's {@link Polarity} (resources like tokens or memory only
- * beside a baseline), rivals from the label's header, focus from bolded or
- * `(current)` row names, and a status column whose cells vary.
+ * The local guess at what `plan`'s rows and measures mean: each measure's
+ * {@link Polarity} as far as its unit says ({@link dimPolarity}; what a name
+ * means — `Memory` as a capacity or a cost — is the judge's call), rivals from
+ * the label's header, focus from bolded or `(current)` row names, and a status
+ * column whose cells vary.
  */
 export function guessMeaning(
 	table: TableAnalysis,
 	plan: ChartPlan,
 ): Pick<ChartPlan, "polarity" | "rowPolarity" | "rivals" | "focus" | "status"> {
 	const label = plan.label === undefined ? undefined : table.columns[plan.label];
-	// A comparison of two conditions reads resources (tokens, memory) the way a change does.
+	// A comparison of two conditions reads money and sizes the way a change does: as what it cuts.
 	const change =
 		plan.kind === "change" || plan.kind === "stat" || table.columns.some(column => BEFORE.test(column.header));
 	const polarity: Record<number, Polarity> = {};
 	for (const column of table.columns) {
-		if (column === label) continue;
 		// A signed delta's sign convention (saved vs. spent) is not in its unit.
-		const delta = DELTA.test(column.header) || column.signedShare >= 0.5;
-		const guessed =
-			headerPolarity(column.header, change) ??
-			(column.role === "measure" && !delta
-				? dimPolarity(column.dim, column.unit, change, column.scores)
-				: undefined);
+		if (column === label || column.role !== "measure" || DELTA.test(column.header) || column.signedShare >= 0.5)
+			continue;
+		const guessed = dimPolarity(column.dim, column.unit, change, column.scores);
 		if (guessed) polarity[column.index] = guessed;
 	}
 	const rowPolarity: Record<number, Polarity> = {};
 	if (label && rowsAreMetrics(table, plan))
 		for (const row of [...table.rows, ...table.totals]) {
 			const first = plan.series.map(index => table.columns[index]!.cells[row]).find(isNumber);
-			const guessed =
-				headerPolarity(label.cells[row]!.text, true) ??
-				(first ? dimPolarity(first.dim, first.unit, true, false) : undefined);
+			const guessed = first && dimPolarity(first.dim, first.unit, change, false);
 			if (guessed) rowPolarity[row] = guessed;
 		}
 	return {
@@ -745,23 +734,10 @@ export function rowsAreMetrics(table: TableAnalysis, plan: ChartPlan): boolean {
 }
 
 /**
- * A measure's {@link Polarity} from its name (`undefined` when it names
- * none); `change` admits resources a change aims to shrink.
- */
-function headerPolarity(name: string, change: boolean): Polarity | undefined {
-	// `gtTagRelevance`: camelCase words read apart.
-	const plain = plainCell(name).text.replace(/([a-z])([A-Z])/g, "$1 $2");
-	if (NEUTRAL.test(plain)) return undefined;
-	if (HIGHER_BETTER.test(plain)) return "higher";
-	if (LOWER_BETTER.test(plain)) return "lower";
-	if (change && LOWER_IN_CHANGE.test(plain)) return "lower";
-	return undefined;
-}
-
-/**
- * A measure's {@link Polarity} from its unit when its name gives none:
+ * A measure's {@link Polarity} from the unit its values are written in:
  * scores out of a total and rates per second climb, durations shrink, and
- * money and sizes shrink beside a baseline.
+ * money and sizes shrink beside a baseline (`change`). Elsewhere a size may
+ * be a capacity (`L2 cache`, `Memory`) and money a budget: no polarity.
  */
 function dimPolarity(dim: Dimension | undefined, unit: string, change: boolean, scores: boolean): Polarity | undefined {
 	if (scores) return "higher";
@@ -1553,10 +1529,6 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 	// its rows are in different units.
 	if (arrows.length === 1 && plan.kind !== "paired" && plan.kind !== "range" && !plan.transpose)
 		return buildChart(table, { ...plan, kind: arrows[0]!.mixed ? "change" : "paired", series: [arrows[0]!.index] });
-	// A dumbbell of two measures beside their ratio (`pi-walker | Go | Speedup`): the ratio restates the gap the
-	// dumbbell draws (on a log axis its length), so the pair draws alone.
-	const pair = plan.kind === "paired" && !plan.transpose ? ratioPair(table, columns) : undefined;
-	if (pair) return buildChart(table, { ...plan, series: pair.map(column => column.index) });
 	// Unitless before/after values spanning decades are rows of different quantities, and rows of very different
 	// sizes beside a baseline column share no readable axis; their factors do (`3.95M → 190k` is 21× less).
 	// Intervals keep their values: a range chart prints the factor between a pair's midpoints beside both.
@@ -1569,10 +1541,7 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 					? againstBaseline(table, plan, columns)
 					: undefined;
 	const factors = factored && changeChart(table, plan, namers, group, factored);
-	// Measured against a rival rather than a before state ({@link leadingColumn}): gaps, not moves.
-	const [reference, ...others] = factored ?? [];
-	const rival = reference !== undefined && !others.every(other => isTransition(reference.header, other.header));
-	if (factors) return rival ? { ...factors, rival } : factors;
+	if (factors) return factors;
 	// Signed changes rank from the largest gain to the largest loss unless the rows run in an order of their own.
 	const signed =
 		plan.kind === "diverging" &&
@@ -2840,31 +2809,6 @@ function againstBaseline(
 	return [baseline, ...columns.filter(column => column !== baseline)];
 }
 
-/** Relative slack within which a ratio column restates the ratio of two others (`4.1×` for 75.3 / 18.2). */
-const RATIO_SLACK = 0.05;
-
-/**
- * Of three plotted columns, the two same-unit measures when the third is their ratio (`Speedup`
- * `4.1×`, a `ratio` column) matching `a ÷ b` or `b ÷ a` within {@link RATIO_SLACK}
- * in every row holding all three, two rows at least; else `undefined`.
- */
-function ratioPair(table: TableAnalysis, columns: readonly TableColumn[]): [TableColumn, TableColumn] | undefined {
-	if (columns.length !== 3) return undefined;
-	const ratio = columns.find(column => column.dim === "ratio");
-	const rest = columns.filter(column => column !== ratio);
-	const [a, b] = rest;
-	if (!ratio || !a || !b || a.dim !== b.dim || a.unit !== b.unit || a.dim === "ratio") return undefined;
-	const near = (value: number, target: number) => Math.abs(value - target) <= RATIO_SLACK * target;
-	let matched = 0;
-	for (const row of table.rows) {
-		const [x, y, r] = [a.cells[row], b.cells[row], ratio.cells[row]];
-		if (!isNumber(x) || !isNumber(y) || !isNumber(r) || x.value <= 0 || y.value <= 0) continue;
-		if (!near(r.value, x.value / y.value) && !near(r.value, y.value / x.value)) return undefined;
-		matched++;
-	}
-	return matched >= 2 ? [a, b] : undefined;
-}
-
 /**
  * Measure columns pairing a before condition with another over the same
  * metric (`Baseline Turns` → `Iter1 Turns`, `Baseline Tokens In` → `Iter1
@@ -2926,7 +2870,19 @@ export function isConditionPair(first: string, second: string): boolean {
  * without such words (`xutf | std`, `Q5_K_M | Q4_K_M`) has no direction: peers.
  */
 export function isTransition(first: string, second: string): boolean {
-	return (BEFORE.test(first) && !BEFORE.test(second)) || (AFTER.test(second) && !AFTER.test(first));
+	const before = BEFORE.test(first) && !BEFORE.test(second);
+	const after = AFTER.test(second) && !AFTER.test(first);
+	if (!before && !after) return false;
+	if ((before && STRONG_BEFORE.test(first)) || (after && STRONG_AFTER.test(second))) return true;
+	// `with`, `to`, `from` also join words inside a name (`Runs with ≥10`): they mark a condition only
+	// between headers naming one subject (`build without cache | build with cache`).
+	const subject = (header: string) =>
+		header
+			.toLowerCase()
+			.split(/[^a-z0-9.]+/)
+			.filter(word => word && !WEAK_CONDITION.test(word));
+	const words = subject(second);
+	return subject(first).some(word => words.includes(word));
 }
 
 /** Most stages a slope chart runs through; more read as a line over the columns. */
@@ -4523,6 +4479,7 @@ function changeChart(
 		plan.polarity?.[column.index] ?? plan.polarity?.[before.index];
 	let pairs: { name: string; polarity?: Polarity; at: (row: number) => ChartPoint | undefined }[];
 	let against: string;
+	let rival = false;
 	if (baselines) {
 		// Metric pairs: each series against its own before column, the legend naming the before condition.
 		pairs = columns.map((column, at) => ({
@@ -4546,6 +4503,8 @@ function changeChart(
 			at: row => changePoint(baseline.cells[row], column.cells[row]),
 		}));
 		against = baseline.header;
+		// Measured against a rival rather than a before state ({@link leadingColumn}): gaps, not moves.
+		rival = !compared.every(column => isTransition(baseline.header, column.header));
 	} else {
 		pairs = [{ name: to, polarity: improves(baseline), at: row => arrowChange(baseline.cells[row]) }];
 		against = from;
@@ -4575,6 +4534,7 @@ function changeChart(
 		caption: skipped.length ? `Not plotted: ${skipped.join(", ")}` : undefined,
 		axis: naming.axis,
 		baseline: against,
+		rival: rival || undefined,
 		categoryPolarity: kept.map(row => plan.rowPolarity?.[row]),
 	};
 	return withMeaning(table, plan, spec, kept);
@@ -4681,8 +4641,12 @@ function nestNames(names: readonly string[]): ChartGroup[] | undefined {
 		let valid = true;
 		for (const name of names) {
 			const at = name.indexOf(separator);
-			const head = at >= MIN_NEST_HEAD ? name.slice(0, at) : undefined;
-			const member = head === undefined ? "" : name.slice(at + separator.length).trim();
+			const split = at >= MIN_NEST_HEAD ? name.slice(at + separator.length).trim() : "";
+			// A head ending in punctuation splits better at it (`Jev, 15 answers`), and a leading number
+			// belongs to the name before it (`EmbeddingGemma 2 embedding`, `Jev 15 + layer 14`).
+			const torn = /[,;:(]$/.test(name.slice(0, at)) || /^\d/.test(split);
+			const head = split && !torn ? name.slice(0, at) : undefined;
+			const member = head === undefined ? "" : split;
 			const last = runs.at(-1);
 			if (head !== undefined && member && last?.head === head) {
 				last.members.push(member);

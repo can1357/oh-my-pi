@@ -1,0 +1,56 @@
+<a class="skip-link" href="#content">Skip to transcript</a>
+<header class="topbar">
+  <button id="hamburger" title="Open sidebar" aria-label="Open sidebar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+  <a class="brand" href="#" id="home-link"><span class="brand-mark">omp</span><span class="brand-divider"></span><span>Session</span></a>
+  <span class="export-label">Session export</span>
+  <div class="topbar-actions">
+    <nav class="view-switch" aria-label="Session view">
+      <button type="button" id="transcript-tab" aria-pressed="true">Transcript</button>
+      <button type="button" id="trace-tab" aria-pressed="false" hidden>Trace</button>
+    </nav>
+    <select class="theme-select" id="theme-select" title="Color theme" aria-label="Color theme">
+      <option value="auto">Auto</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
+  </div>
+</header>
+<div id="sidebar-overlay"></div>
+<div id="app">
+  <aside id="sidebar" aria-label="Session navigation">
+    <div class="sidebar-section-heading">Sessions <span id="session-count"></span><button class="sidebar-close" id="sidebar-close" title="Close" aria-label="Close sidebar">&times;</button></div>
+    <nav id="session-list" aria-label="Sessions and subagents"></nav>
+    <div class="sidebar-header">
+      <div class="sidebar-section-heading">Conversation</div>
+      <div class="sidebar-controls">
+        <input type="search" class="sidebar-search" id="tree-search" aria-label="Search entries" placeholder="Search entries…" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="sidebar-filters">
+        <button class="filter-btn active" data-filter="default" title="Hide settings entries">Default</button>
+        <button class="filter-btn" data-filter="no-tools" title="Default minus tool results">No tools</button>
+        <button class="filter-btn" data-filter="user-only" title="Only user messages">User</button>
+        <button class="filter-btn" data-filter="labeled-only" title="Only labeled entries">Labeled</button>
+        <button class="filter-btn" data-filter="all" title="Show everything">All</button>
+      </div>
+    </div>
+    <div class="tree-container" id="tree-container"></div>
+    <div class="tree-status" id="tree-status"></div>
+  </aside>
+  <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize session tree sidebar"></div>
+  <section id="workspace" aria-label="Session workspace">
+    <main id="content" tabindex="-1">
+      <div id="header-container"></div>
+      <div id="messages"></div>
+    </main>
+    <section id="trace-panel" aria-label="Session trace" hidden>
+      <div class="trace-panel-bar">
+        <button type="button" id="timeline-toggle" aria-expanded="false" aria-controls="trace-body"><span class="timeline-chevron" aria-hidden="true">⌃</span> Timeline <span id="trace-summary"></span></button>
+        <button type="button" id="trace-expand" class="chrome-button">Open trace view</button>
+      </div>
+      <div id="trace-body" hidden><omp-session-trace view="timeline"></omp-session-trace></div>
+    </section>
+  </section>
+  <div id="image-modal" class="image-modal">
+    <img id="modal-image" src="" alt="Expanded attachment">
+  </div>
+</div>

@@ -13,7 +13,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../../goals/settings";
 import { type GoalModeState, goalContinuationActivity, goalFromModeData } from "../../goals/state";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
-import { nextActionableTask } from "../../tools/todo";
 
 /** `goal.continuationModes` value that enables automatic continuation for RPC hosts. */
 export const RPC_GOAL_CONTINUATION_MODE = "rpc";
@@ -409,10 +408,7 @@ export class RpcGoalController {
 		if (session.getPlanModeState()?.enabled) return false;
 		const state = session.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") return false;
-		const phases = session.getTodoPhases();
-		return !(
-			!nextActionableTask(phases) && phases.some(phase => phase.tasks.some(task => task.status === "blocked"))
-		);
+		return true;
 	}
 
 	/**

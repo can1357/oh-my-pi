@@ -24,15 +24,12 @@ import {
 import branchSummaryPrompt from "./prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "./prompts/branch-summary-preamble.md" with { type: "text" };
 import {
-	computeFileLists,
-	createFileOps,
 	extractFileOpsFromMessage,
-	type FileOperations,
+	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
 	truncateToolResultForSummary,
-	upsertFileOperations,
 } from "./utils";
 
 // ============================================================================
@@ -53,13 +50,11 @@ export interface BranchSummaryDetails {
 	modifiedFiles: string[];
 }
 
-export type { FileOperations } from "./utils";
-
 export interface BranchPreparation {
 	/** Messages extracted for summarization, in chronological order */
 	messages: AgentMessage[];
 	/** File operations extracted from tool calls */
-	fileOps: FileOperations;
+	fileOps: snapcompact.FileOperations;
 	/** Total estimated tokens in messages */
 	totalTokens: number;
 }
@@ -251,7 +246,7 @@ export function prepareBranchEntries(
 	tokenBudget: number = 0,
 ): BranchPreparation {
 	const messages: AgentMessage[] = [];
-	const fileOps = createFileOps();
+	const fileOps = snapcompact.createFileOps();
 	let totalTokens = 0;
 
 	// First pass: collect file ops from ALL entries (even if they don't fit in token budget)
@@ -386,6 +381,9 @@ export async function generateBranchSummary(
 	if (response.stopReason === "error") {
 		return { error: response.errorMessage || "Summarization failed" };
 	}
+	if (response.stopReason === "length") {
+		return { error: incompleteOutputError("Summarization failed") };
+	}
 
 	let summary = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -396,8 +394,8 @@ export async function generateBranchSummary(
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;
 
 	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
+	summary = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 
 	return {
 		summary: summary || "No summary generated",

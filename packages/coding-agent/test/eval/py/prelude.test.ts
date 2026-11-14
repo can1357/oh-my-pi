@@ -77,6 +77,35 @@ describe("python prelude", () => {
 		expect(lines[1]).toBe("True []");
 	});
 
+	it("infers tool schemas on Pythons without types.UnionType", async () => {
+		// Python 3.9 has no types.UnionType. Hide it from the prelude's own `types`
+		// name (typing itself still needs it on 3.10+), so any interpreter runs this case.
+		const result = await runPrelude(
+			[
+				"from types import SimpleNamespace",
+				"types = SimpleNamespace(**{k: v for k, v in vars(types).items() if k != 'UnionType'})",
+				"from typing import Optional",
+				"@tool",
+				"def lookup(name: str, limit: Optional[int] = None) -> dict:",
+				"    return {}",
+				"print(json.dumps(__omp_tools__['lookup'].describe()['parameters'], sort_keys=True))",
+			].join("\n"),
+			{},
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			type: "object",
+			properties: {
+				name: { type: "string" },
+				limit: { anyOf: [{ type: "integer" }, { type: "null" }], default: null },
+			},
+			required: ["name"],
+			additionalProperties: false,
+		});
+	});
+
 	it("appends line selectors to delegated URI paths", async () => {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
@@ -284,6 +313,40 @@ describe("python prelude", () => {
 		} finally {
 			bridge.stop(true);
 			proxy.stop(true);
+		}
+	});
+});
+
+describe("python workpool model selection", () => {
+	it("forwards an exact model selector and preserves omission through the real Python bridge", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({ ok: true, value: { name: "chosen", agent: "scout", limit: 2 } });
+			},
+		});
+		try {
+			const result = await runPrelude('workpool("scout", model="p/chosen:high")\nworkpool("scout")', {
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
+			expect(result.stderr).toBe("");
+			expect(result.exitCode).toBe(0);
+			expect(requests).toEqual([
+				{
+					session: "test-session",
+					run: null,
+					name: "__workpool__",
+					args: { op: "create", agent: "scout", model: "p/chosen:high" },
+				},
+				{ session: "test-session", run: null, name: "__workpool__", args: { op: "create", agent: "scout" } },
+			]);
+		} finally {
+			server.stop(true);
 		}
 	});
 });

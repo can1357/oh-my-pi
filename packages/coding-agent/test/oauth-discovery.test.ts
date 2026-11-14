@@ -509,6 +509,44 @@ describe("resource_metadata chain", () => {
 		});
 	});
 
+	it("prefers the RFC 9728 resource over the auth server's own resource field", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth") {
+				return Response.json({
+					resource: "https://mcp.firecrawl.dev/v2/mcp-oauth",
+					authorization_servers: ["https://www.firecrawl.dev"],
+				});
+			}
+
+			if (url === "https://www.firecrawl.dev/.well-known/oauth-authorization-server") {
+				return Response.json({
+					issuer: "https://www.firecrawl.dev",
+					// The issuer's default audience (its REST API), not this MCP server.
+					resource: "https://api.firecrawl.dev/",
+					authorization_endpoint: "https://www.firecrawl.dev/api/oauth/authorize",
+					token_endpoint: "https://www.firecrawl.dev/api/oauth/token",
+				});
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		for (const resourceMetadataUrl of [
+			"https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth",
+			undefined,
+		]) {
+			const oauth = await discoverOAuthEndpoints(
+				"https://mcp.firecrawl.dev/v2/mcp-oauth",
+				undefined,
+				resourceMetadataUrl,
+				{ fetch: fetchImpl },
+			);
+			expect(oauth?.resource).toBe("https://mcp.firecrawl.dev/v2/mcp-oauth");
+		}
+	});
+
 	it("threads challenge-derived scopes into endpoints discovered via resource metadata", async () => {
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);

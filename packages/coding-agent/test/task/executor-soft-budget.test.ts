@@ -15,7 +15,12 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { buildBudgetNotice, resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	attachIrcWakeTurnMonitor,
+	buildBudgetNotice,
+	resolveSoftRequestBudget,
+	runSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/executor";
 import { cfgTaskAgentSoftRequestBudget } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -46,6 +51,11 @@ interface MockSessionHandle {
 	}>;
 	abortCalls: () => number;
 	disposeCalls: () => number;
+	emit: (event: AgentSessionEvent) => void;
+	pushMessage: (message: unknown) => void;
+	wakeObserver: () =>
+		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
+		| undefined;
 }
 
 function assistantText(text: string, stopReason: "stop" | "aborted" = "stop") {
@@ -162,6 +172,9 @@ function createMockSession(
 		sentUserMessages,
 		abortCalls: () => abortCount,
 		disposeCalls: () => disposeCount,
+		emit,
+		pushMessage: message => messages.push(message),
+		wakeObserver: () => ircWakeTurnObserver,
 	};
 }
 
@@ -189,6 +202,7 @@ describe("runSubprocess soft request budget", () => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		AsyncJobManager.resetForTests();
+		IrcBus.resetGlobalForTests();
 		tempDir = TempDir.createSync("@pi-soft-budget-");
 	});
 	afterEach(() => {
@@ -196,6 +210,7 @@ describe("runSubprocess soft request budget", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 		AsyncJobManager.resetForTests();
+		IrcBus.resetGlobalForTests();
 		tempDir[Symbol.dispose]();
 	});
 
@@ -662,6 +677,85 @@ describe("runSubprocess soft request budget", () => {
 
 		const receipt = await new IrcBus().send({ from: "Main", to: id, body: "resume" });
 		expect(receipt.outcome).toBe("woken");
+	});
+
+	it("attachIrcWakeTurnMonitor steers at budget and aborts wake turn at 1.5x budget", async () => {
+		const id = "WakeBudgetScout";
+		const eventBus = new EventBus();
+		const lifecycleFrames: Array<{ status?: string }> = [];
+		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, frame => {
+			lifecycleFrames.push(frame as { status?: string });
+		});
+
+		const handle = createMockSession(() => {});
+		AgentRegistry.global().register({
+			id: "PeerAgent",
+			displayName: "PeerAgent",
+			kind: "sub",
+			session: null,
+			status: "idle",
+		});
+		registerRunning(id, handle.session);
+		attachIrcWakeTurnMonitor(handle.session, {
+			id,
+			agent: baseAgent,
+			softRequestBudget: 2,
+			softRequestBudgetNotice: true,
+			eventBus,
+		});
+
+		const observer = handle.wakeObserver();
+		expect(observer).toBeDefined();
+
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "wake up and work",
+			display: true,
+			details: { id: "msg-1", from: "PeerAgent", message: "wake up and work" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+
+		const finishTurn = observer!([record]);
+		expect(finishTurn).toBeDefined();
+
+		// Request 1: should not steer or abort
+		const msg1 = assistantText("first request");
+		handle.pushMessage(msg1);
+		handle.emit({ type: "message_end", message: msg1 } as unknown as AgentSessionEvent);
+		expect(handle.sentUserMessages).toHaveLength(0);
+		expect(handle.abortCalls()).toBe(0);
+
+		// Request 2 (budget = 2 reached): should steer with budget notice
+		const msg2 = assistantText("second request");
+		handle.pushMessage(msg2);
+		handle.emit({ type: "message_end", message: msg2 } as unknown as AgentSessionEvent);
+		await Promise.resolve();
+		expect(handle.sentUserMessages).toContainEqual({
+			content: buildBudgetNotice(2, 2),
+			options: { deliverAs: "steer", attribution: "agent" },
+		});
+		expect(handle.abortCalls()).toBe(0);
+
+		// Request 3 (stop threshold = 2 * 1.5 = 3 reached): should abort turn
+		const msg3 = assistantText("third request");
+		handle.pushMessage(msg3);
+		handle.emit({ type: "message_end", message: msg3 } as unknown as AgentSessionEvent);
+		expect(handle.abortCalls()).toBe(1);
+
+		// Finish turn
+		const relay = IrcBus.global().wait("PeerAgent", { from: id }, 1000);
+		await finishTurn!(undefined);
+
+		// Verify relay message sent to peer on IrcBus carries soft request budget abort reason
+		const relayMsg = await relay;
+		expect(relayMsg).toBeDefined();
+		expect(relayMsg?.body).toMatch(/Soft request budget exceeded \(3 requests; budget 2\)/);
+
+		// Verify lifecycle ended as aborted
+		const lastFrame = lifecycleFrames.at(-1);
+		expect(lastFrame?.status).toBe("aborted");
 	});
 });
 

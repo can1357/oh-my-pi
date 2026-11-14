@@ -11,12 +11,11 @@ use std::{
 	slice::Iter,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::File;
 use uucore::{display::Quotable, i18n::charmap::mb_char_len};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, strip_errno, util};
+use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, strip_errno};
 
 mod options {
 	pub const DELIMITER: &str = "delimiters";
@@ -119,7 +118,7 @@ fn paste(
 			prepared.push(PreparedSource::StandardInput);
 		} else {
 			let file = host.fs().open(host.resolve(&filename)).map_err(|err| {
-				format!("{}: {}", filename.to_string_lossy(), strip_errno(&err))
+				format!("{}: {}", filename.display(), strip_errno(&err))
 			})?;
 			prepared.push(PreparedSource::File(BufReader::new(file)));
 		}
@@ -232,7 +231,7 @@ fn parse_delimiters(delimiters: &OsString) -> Result<Box<[Box<[u8]>]>, String> {
 			if i >= bytes.len() {
 				return Err(format!(
 					"delimiter list ends with an unescaped backslash: {}",
-					delimiters.to_string_lossy()
+					delimiters.display()
 				));
 			}
 			match bytes[i] {
@@ -262,9 +261,7 @@ fn parse_delimiters(delimiters: &OsString) -> Result<Box<[Box<[u8]>]>, String> {
 }
 
 fn remove_trailing_line_ending(line_ending: u8, output: &mut Vec<u8>) {
-	if output.last() == Some(&line_ending) {
-		output.pop();
-	}
+	output.pop_if(|byte| *byte == line_ending);
 }
 
 enum DelimiterState<'a> {
@@ -362,11 +359,6 @@ impl BufRead for InputSource<'_> {
 			Self::StandardInput(stdin) => stdin.borrow_mut().read_until(byte, buf),
 		}
 	}
-}
-
-/// Creates the `paste` builtin registration.
-pub(crate) fn paste_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Paste, SE>()
 }
 
 #[cfg(test)]

@@ -175,7 +175,7 @@ Handled by `AgentProtocolHandler` over registered active session artifact direct
 
 - `agent://<id>` returns markdown text; nested subagent outputs use the dotted id (`agent://Parent.Child` reads `Parent.Child.md`)
 - resolution refreshes persisted agent-roster references when a calling session file is available and searches that root session's artifact directory before process-global registry directories
-- `write agent://<id>` sends a peer message when IRC is available; `agent://all` is write-only broadcast, not an output file
+- `write agent://<id>` sends a peer message when IRC is available; `agent://all` is a write-only broadcast for the main agent (refused from subagents), not an output file
 - a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
 - extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
 - an id with no `<id>.md` yet that is registered in the agent registry (the registry `write agent://<id>` delivers to) resolves to a progress document instead of an error: the agent's status, every accepted `yield` payload so far (non-terminal sections included), and its latest assistant text, read from the live session or else its retained session file. Once `<id>.md` exists it wins. JSON-path extraction on such an id throws `Output <id> is not published yet`
@@ -225,19 +225,19 @@ When the destination artifact directory already exists — for example, a sessio
 
 ## Failure handling and fallback paths
 
-| Case                                                      | Behavior                                                                               |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Blob file missing during image-block rehydration          | Warn and keep `blob:sha256:` ref string in memory                                      |
-| Blob file missing during provider `image_url` rehydration | Warn and keep `blob:sha256:` ref string in memory                                      |
-| Blob read ENOENT via `BlobStore.get`                      | Returns `null`                                                                         |
-| Artifact directory missing (`ArtifactManager.listFiles`)  | Returns empty list (allocation can start fresh)                                        |
-| No registered artifact dirs (`artifact://`)               | Throws `No session - artifacts unavailable`                                            |
-| No registered artifact dirs (`agent://`)                  | Throws `No session - agent outputs unavailable`                                        |
-| Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                                         |
-| Artifact ID not found                                     | Throws with available IDs listing                                                      |
-| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; `locate`-based reads and search remain available       |
-| OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                                           |
-| Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data                   |
+| Case                                                      | Behavior                                                                                                 |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Blob file missing during image-block rehydration          | Warn and keep `blob:sha256:` ref string in memory                                                        |
+| Blob file missing during provider `image_url` rehydration | Warn and keep `blob:sha256:` ref string in memory                                                        |
+| Blob read ENOENT via `BlobStore.get`                      | Returns `null`                                                                                           |
+| Artifact directory missing (`ArtifactManager.listFiles`)  | Returns empty list (allocation can start fresh)                                                          |
+| No registered artifact dirs (`artifact://`)               | Throws `No session - artifacts unavailable`                                                              |
+| No registered artifact dirs (`agent://`)                  | Throws `No session - agent outputs unavailable`                                                          |
+| Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                                                           |
+| Artifact ID not found                                     | Throws with available IDs listing                                                                        |
+| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; `locate`-based reads and search remain available                         |
+| OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                                                             |
+| Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data                                     |
 | Artifact directory already exists at the move destination | Directories merged; an entry whose name or artifact id is taken stays at the source and is logged (warn) |
 
 ## Binary blob externalization vs text-output artifacts

@@ -198,7 +198,7 @@ export class FooterComponent implements Component {
 		for (const [key, glyph, amount] of counters) {
 			if (amount) seg(key, { side: "left", priority: 1, spans: [span(`${glyph}${formatNumber(amount)}`, "dim")] });
 		}
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		const billing = formatBillingSummary({ cost, usingSubscription, premiumRequests, fractionDigits: 3 }, theme);
 		if (billing) seg("cost", { side: "left", priority: 3, spans: [span(billing, "dim")] });
 		const contextUsage = this.session.getContextUsage();
@@ -302,7 +302,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Show billing summary with subscription and premium-request indicators
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		const { auto: autoIcon } = theme.icon;
 		const billing = formatBillingSummary(
 			{ cost: totalCost, usingSubscription, premiumRequests: totalPremiumRequests, fractionDigits: 3 },

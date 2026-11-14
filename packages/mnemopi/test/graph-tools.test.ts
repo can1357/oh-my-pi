@@ -50,6 +50,59 @@ describe("EpisodicGraph CRUD", () => {
 	});
 });
 
+describe("EpisodicGraph heuristic fact extraction", () => {
+	function triples(graph: EpisodicGraph, text: string): string[][] {
+		return graph.extractFacts(text, "mem_fact").map(fact => [fact.subject, fact.predicate, fact.object]);
+	}
+
+	it("keeps whole words and multiword objects instead of treating word prefixes as articles (#17511)", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Drafting is active.")).toEqual([["Drafting", "is", "active"]]);
+			expect(triples(graph, "Isolation is historically required.")).toEqual([
+				["Isolation", "is", "historically required"],
+			]);
+			expect(triples(graph, "The runtime has an independent reviewer.")).toEqual([
+				["The runtime", "has", "independent reviewer"],
+			]);
+			expect(triples(graph, "Sam works at Example Corp now.")).toEqual([["Sam", "works_at", "Example Corp"]]);
+		});
+	});
+
+	it("preserves demonstratives at the start of objects without swallowing later clauses", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice has that permission.")).toEqual([["Alice", "has", "that permission"]]);
+			expect(triples(graph, "Alice uses that tool.")).toEqual([["Alice", "uses", "that tool"]]);
+			expect(triples(graph, "Alice has that permission and can approve it.")).toEqual([
+				["Alice", "has", "that permission"],
+			]);
+		});
+	});
+
+	it("ends an object at a clause connector so the next clause still yields its own fact", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Bob is active and Alice is idle.")).toEqual([
+				["Bob", "is", "active"],
+				["Alice", "is", "idle"],
+			]);
+		});
+	});
+
+	it("leaves the next clause's whole subject for its own fact even after an unlisted connector", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice is active plus Bob Jones is idle.")).toEqual([
+				["Alice", "is", "active plus"],
+				["Bob Jones", "is", "idle"],
+			]);
+		});
+	});
+
+	it("abstains rather than storing a word fragment", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice uses Python3 daily.")).toEqual([]);
+		});
+	});
+});
+
 describe("EpisodicGraph gist location extraction", () => {
 	it("captures capitalized proper-noun places and ignores lowercase prose", () => {
 		withGraph(graph => {

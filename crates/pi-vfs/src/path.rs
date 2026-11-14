@@ -16,14 +16,15 @@ use std::{
 /// Length in bytes of the `scheme://` root of `path`, if it is a URL.
 pub(crate) fn url_root_len(path: &Path) -> Option<usize> {
 	let bytes = path.as_os_str().as_encoded_bytes();
-	let colon = bytes.iter().position(|&b| b == b':')?;
-	if colon < 2 || !bytes[0].is_ascii_alphabetic() {
+	if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
 		return None;
 	}
-	if !bytes[1..colon]
+	// The scheme ends at its first byte that no scheme may contain, which
+	// must start the `://`.
+	let colon = bytes
 		.iter()
-		.all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-	{
+		.position(|&b| !(b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')))?;
+	if colon < 2 {
 		return None;
 	}
 	bytes[colon..].starts_with(b"://").then_some(colon + 3)
@@ -39,6 +40,23 @@ pub fn url_scheme(path: &Path) -> Option<&str> {
 /// Whether `path` is spelled as a `scheme://` URL.
 pub fn is_virtual_path(path: &Path) -> bool {
 	url_root_len(path).is_some()
+}
+
+/// The drive letter (uppercased) and drive-relative rest of an MSYS drive
+/// alias that shells on Windows accept: `/c/x/y` and `/mnt/c/x/y` give
+/// `(b'C', b"x/y")`, `/c` gives `(b'C', b"")`. Any other path is `None`.
+pub fn msys_drive(path: &[u8]) -> Option<(u8, &[u8])> {
+	let rest = path.strip_prefix(b"/")?;
+	let rest = match rest.get(..4) {
+		Some(prefix) if prefix.eq_ignore_ascii_case(b"mnt/") => &rest[4..],
+		_ => rest,
+	};
+	let (&letter, tail) = rest.split_first()?;
+	if !letter.is_ascii_alphabetic() || !(tail.is_empty() || tail.starts_with(b"/")) {
+		return None;
+	}
+	let start = tail.iter().position(|&b| b != b'/').unwrap_or(tail.len());
+	Some((letter.to_ascii_uppercase(), &tail[start..]))
 }
 
 /// Borrows `path[start..end]` as a path.
@@ -155,10 +173,7 @@ fn os_from_bytes(bytes: Vec<u8>) -> OsString {
 	}
 	#[cfg(not(unix))]
 	{
-		match String::from_utf8(bytes) {
-			Ok(text) => text.into(),
-			Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned().into(),
-		}
+		String::from_utf8_lossy_owned(bytes).into()
 	}
 }
 
@@ -253,7 +268,7 @@ pub fn join_path(base: &Path, rel: &Path) -> PathBuf {
 	if rel.has_root() || matches!(rel.components().next(), Some(Component::Prefix(_))) {
 		return rel.to_path_buf();
 	}
-	if rel.as_os_str().is_empty() {
+	if rel.is_empty() {
 		// `Path::join("")` appends a separator; keep that directory spelling.
 		let mut out = OsString::from(base.as_os_str());
 		if !base.as_os_str().as_encoded_bytes().ends_with(b"/") {
@@ -306,7 +321,7 @@ fn join_drive_relative(base: &Path, rel: &Path) -> Option<PathBuf> {
 		PathBuf::from(root)
 	};
 	let rest = components.as_path();
-	if !rest.as_os_str().is_empty() {
+	if !rest.is_empty() {
 		out.push(rest);
 	}
 	Some(out)
@@ -488,7 +503,7 @@ pub fn normalize_lexically(path: &Path) -> PathBuf {
 			},
 		}
 	}
-	if out.as_os_str().is_empty() {
+	if out.is_empty() {
 		out.push(".");
 	}
 	out
@@ -522,9 +537,7 @@ pub(crate) fn parts(path: &Path) -> Vec<Part> {
 	for component in path.components() {
 		match component {
 			Component::Prefix(_) | Component::RootDir => {
-				root
-					.get_or_insert_with(PathBuf::new)
-					.push(component.as_os_str());
+				root.get_or_insert_default().push(component.as_os_str());
 				continue;
 			},
 			_ => {},

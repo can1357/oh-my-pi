@@ -1,0 +1,7 @@
+### "ls fi\t"
+% ls file
+@ 0,9
+### "\t"
+% ls file
+file1  file2
+@ 0,9

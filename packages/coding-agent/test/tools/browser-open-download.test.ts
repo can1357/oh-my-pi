@@ -30,6 +30,8 @@ function createBrowserHost() {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -64,7 +66,12 @@ describe("browser open during first-use Chromium download", () => {
 				hasUI: false,
 				getSessionFile: () => null,
 				getSessionSpawns: () => null,
-				settings: Settings.isolated({ "async.enabled": false, "browser.cmux": false, "browser.tern": false }),
+				settings: Settings.isolated({
+					"browser.webkit": false,
+					"async.enabled": false,
+					"browser.cmux": false,
+					"browser.tern": false,
+				}),
 				getEvalSessionId: () => "browser-download-regression",
 				getEvalPreludes: () => [prelude],
 			};

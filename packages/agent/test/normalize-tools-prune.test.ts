@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -42,6 +44,22 @@ function fieldDescription(parameters: unknown, field: string): unknown {
 	if (value && typeof value === "object" && "description" in value) return value.description;
 	return undefined;
 }
+
+describe("Agent.prunesToolDescriptions", () => {
+	// Context accounting reads this; owned dialects render full definitions
+	// in-band, so counting pruned specs would undercount their prompt.
+	it("reports pruning only when the requested model uses native tool calling", () => {
+		const model = getBundledModel("google", "gemini-2.5-pro");
+		let dialect: "glm" | undefined;
+		const agent = new Agent({ pruneToolDescriptions: true, dialectResolver: () => dialect });
+		expect(agent.prunesToolDescriptions(model)).toBe(true);
+		dialect = "glm";
+		expect(agent.prunesToolDescriptions(model)).toBe(false);
+		dialect = undefined;
+		agent.pruneToolDescriptions = false;
+		expect(agent.prunesToolDescriptions(model)).toBe(false);
+	});
+});
 
 describe("normalizeTools — pruneDescriptions", () => {
 	it("keeps the top-level description when pruning is off", () => {
@@ -107,9 +125,25 @@ describe("normalizeTools — pruneDescriptions", () => {
 		expect(JSON.stringify(params)).not.toContain("description");
 	});
 
-	it("keeps the intent field description when not pruning", () => {
-		const tools = normalizeTools([makeTool()], { injectIntent: true });
-		expect(typeof fieldDescription(tools?.[0]?.parameters, INTENT_FIELD)).toBe("string");
+	it("describes the intent field per caller over a shared schema, PI_INTENT_DESC overriding", () => {
+		const tool = makeTool();
+		const described = (intentDescription: string) =>
+			fieldDescription(
+				normalizeTools([tool], { injectIntent: true, intentDescription })?.[0]?.parameters,
+				INTENT_FIELD,
+			);
+		const saved = Bun.env.PI_INTENT_DESC;
+		try {
+			delete Bun.env.PI_INTENT_DESC;
+			// Agents in one process share tool schemas: each must get its own description, not the first one memoized.
+			expect(described("what you want from the output")).toBe("what you want from the output");
+			expect(described("Reading settings")).toBe("Reading settings");
+			Bun.env.PI_INTENT_DESC = "from env";
+			expect(described("what you want from the output")).toBe("from env");
+		} finally {
+			if (saved === undefined) delete Bun.env.PI_INTENT_DESC;
+			else Bun.env.PI_INTENT_DESC = saved;
+		}
 	});
 });
 

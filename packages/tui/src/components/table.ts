@@ -3,7 +3,7 @@ import { compactText, styleSpans } from "../native/spans";
 import { node } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
-import { Ellipsis, getWidthConfigEpoch, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
+import { Ellipsis, finiteWidth, getWidthConfigEpoch, singleLine, truncateToWidth, visibleWidth } from "../utils";
 
 /** One table cell. Styling is applied after alignment so padding shares the cell style. */
 export interface TableCell {
@@ -27,14 +27,6 @@ export interface TableOptions {
 	readonly gap?: string;
 	readonly indent?: string;
 	readonly fit?: boolean;
-}
-
-function finiteWidth(width: number, fallback = 0): number {
-	return Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : fallback;
-}
-
-function singleLine(text: string): string {
-	return replaceTabs(text).replace(/[\r\n]+/g, " ");
 }
 
 function fitWidths(columns: readonly TableColumn[], maxWidth: number, gapWidth: number): number[] {

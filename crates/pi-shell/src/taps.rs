@@ -4,13 +4,16 @@
 //! `cargo build 2>&1 | tail -5` shows nothing until `cargo` exits: `tail`
 //! holds its input back. With [`PipeTaps`] on a run (see
 //! [`ShellRunOptions::pipe_taps`](crate::ShellRunOptions)), every `|` the run
-//! spawns is relayed through brush's pipe tap, and the bytes `cargo` has
+//! spawns is mirrored through the engine's pipe tap
+//! ([`crate::bash::Host::pipe_tap`]), and the bytes `cargo` has
 //! written so far stay readable here as stream 1.
 
 use std::{collections::VecDeque, sync::Arc};
 
-use brush_core::{PipeMirror, PipeTap};
+use bstr::BStr;
 use parking_lot::Mutex;
+
+use crate::bash::{PipeMirror, PipeTap};
 
 /// Bytes kept per stream: its most recent output.
 const RETAINED_BYTES: usize = 1 << 20;
@@ -126,7 +129,7 @@ impl PipeTaps {
 }
 
 impl PipeTap for PipeTaps {
-	fn open(&self, producer: &str, consumer: &str) -> Option<Arc<dyn PipeMirror>> {
+	fn open(&self, producer: &BStr, consumer: &BStr) -> Option<Arc<dyn PipeMirror>> {
 		let mut inner = self.inner.lock();
 		let mut finished = inner
 			.streams
@@ -151,8 +154,8 @@ impl PipeTap for PipeTaps {
 		inner.opened += 1;
 		let stream = Arc::new(PipeStream {
 			id:       inner.opened,
-			producer: producer.to_owned(),
-			consumer: consumer.to_owned(),
+			producer: producer.to_string(),
+			consumer: consumer.to_string(),
 			state:    Mutex::new(StreamState { tail: VecDeque::new(), total: 0, open: true }),
 		});
 		inner.streams.push(Arc::clone(&stream));
@@ -188,7 +191,9 @@ mod tests {
 	use super::*;
 
 	fn finish(taps: &PipeTaps, bytes: &[u8]) -> u32 {
-		let mirror = taps.open("producer", "consumer").expect("a free slot");
+		let mirror = taps
+			.open(BStr::new("producer"), BStr::new("consumer"))
+			.expect("a free slot");
 		mirror.write(bytes);
 		mirror.close();
 		taps.list().last().expect("the stream just opened").id
@@ -199,7 +204,9 @@ mod tests {
 	#[test]
 	fn keeps_the_newest_bytes_and_resumes_from_an_offset() {
 		let taps = PipeTaps::new();
-		let mirror = taps.open("yes", "head").expect("a free slot");
+		let mirror = taps
+			.open(BStr::new("yes"), BStr::new("head"))
+			.expect("a free slot");
 		mirror.write(&vec![b'a'; RETAINED_BYTES]);
 		mirror.write(b"tail");
 
@@ -233,11 +240,15 @@ mod tests {
 	fn leaves_pipes_untapped_once_every_slot_is_open() {
 		let taps = PipeTaps::new();
 		let open: Vec<_> = (0..MAX_STREAMS)
-			.map(|_| taps.open("a", "b").expect("a free slot"))
+			.map(|_| {
+				taps
+					.open(BStr::new("a"), BStr::new("b"))
+					.expect("a free slot")
+			})
 			.collect();
-		assert!(taps.open("a", "b").is_none());
+		assert!(taps.open(BStr::new("a"), BStr::new("b")).is_none());
 		open[0].close();
-		assert!(taps.open("a", "b").is_some());
+		assert!(taps.open(BStr::new("a"), BStr::new("b")).is_some());
 		assert_eq!(taps.list().len(), MAX_STREAMS);
 	}
 }

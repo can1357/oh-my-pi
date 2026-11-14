@@ -14,11 +14,16 @@ import { defaultEditorTheme } from "./test-themes";
 // Records as the Windows console host emits them: CSI Vk;Sc;Uc;Kd;Cs;Rc _
 const SHIFT_ENTER = "\x1b[13;28;13;1;16;1_";
 const CTRL_ENTER = "\x1b[13;28;10;1;8;1_";
+const CTRL_J = "\x1b[74;36;10;1;8;1_";
 const ENTER = "\x1b[13;28;13;1;0;1_";
 const ENTER_UP = "\x1b[13;28;13;0;0;1_";
 
 function pasteRecords(text: string): string {
 	return [...text].map(char => `\x1b[231;0;${char.charCodeAt(0)};1;0;1_`).join("");
+}
+
+function relayRecords(text: string): string[] {
+	return [...text].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
 }
 
 function decodeOne(data: string): string {
@@ -33,6 +38,12 @@ describe("Win32InputModeDecoder", () => {
 		expect(matchesKey(decodeOne(SHIFT_ENTER), "shift+enter")).toBe(true);
 		expect(matchesKey(decodeOne(CTRL_ENTER), "ctrl+enter")).toBe(true);
 		expect(matchesKey(decodeOne(CTRL_ENTER), "enter")).toBe(false);
+	});
+
+	it("keeps Ctrl+J with Uc=LF as ctrl+j", () => {
+		const ctrlJ = decodeOne(CTRL_J);
+		expect(matchesKey(ctrlJ, "ctrl+j")).toBe(true);
+		expect(matchesKey(ctrlJ, "enter")).toBe(false);
 	});
 
 	it("drops key releases and bare modifier presses", () => {
@@ -139,6 +150,29 @@ describe("Win32InputModeDecoder", () => {
 		expect(matchesKey(split[1]!, "alt+d")).toBe(true);
 		expect(decoder.hasPendingSequence).toBe(false);
 	});
+
+	it("reports a held OSC/DCS/APC string so the caller can wait for its terminator", () => {
+		const relay = (text: string) => [...text].map(ch => `\x1b[0;0;${ch.charCodeAt(0)};1;0;1_`);
+		const decoder = new Win32InputModeDecoder();
+		for (const record of relay("\x1b]877;tsp;e;")) expect(decoder.decode(record)).toEqual([]);
+		expect(decoder.hasPendingSequence).toBe(true);
+		expect(decoder.hasPendingString).toBe(true);
+		expect(relay('{"a":1}\x07').flatMap(record => decoder.decode(record)!)).toEqual(['\x1b]877;tsp;e;{"a":1}\x07']);
+		expect(decoder.hasPendingString).toBe(false);
+
+		// A bare introducer may still be an Alt chord (Alt+], Alt+P, Alt+_).
+		for (const record of relay("\x1b]")) decoder.decode(record);
+		expect(decoder.hasPendingSequence).toBe(true);
+		expect(decoder.hasPendingString).toBe(false);
+		decoder.flushPendingSequence();
+
+		// A lone ESC or a CSI prefix is not a string: it keeps the short Escape timeout.
+		decoder.decode(relay("\x1b")[0]!);
+		expect(decoder.hasPendingString).toBe(false);
+		decoder.flushPendingSequence();
+		for (const record of relay("\x1b[1;")) decoder.decode(record);
+		expect(decoder.hasPendingString).toBe(false);
+	});
 });
 
 class InputRecorder implements Component {
@@ -163,7 +197,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 	});
 
 	afterEach(() => {
-		vi.useRealTimers();
 		harness?.dispose();
 		harness = undefined;
 		for (const [key, value] of originalSshEnv) {
@@ -247,6 +280,109 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(recorder.received).toEqual(["a", "b"]);
 	});
 
+	it("keeps a relayed TSP event out of the composer when its tail arrives after the Escape timeout", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// ConPTY relays an OSC 877 TSP event as one text record per byte. An event-loop stall
+		// longer than the 75 ms Escape wait must not release the head and then type the tail.
+		const relay = (text: string) => [...text].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		const event = relay('\x1b]877;tsp;ack;{"sf":"s:1","s":12}\x07');
+		await harness.feed(...event.slice(0, 20));
+		vi.advanceTimersByTime(150);
+		await harness.feed(...event.slice(20));
+		await harness.feed("\x1b[65;30;97;1;0;1_");
+
+		expect(recorder.received).toEqual(["a"]);
+	});
+
+	it.each([
+		["Escape", 1, () => vi.advanceTimersToNextTimer()],
+		["string", 9, () => vi.advanceTimersByTime(5000)],
+	])(
+		"keeps a relayed TSP event intact when a stalled %s timer fires before its queued tail",
+		async (_, split, stall) => {
+			const delivered: string[] = [];
+			harness = createProcessTerminalRenderHarness(
+				100,
+				30,
+				{ conpty: true, nativeWindowsConsole: false },
+				undefined,
+				data => delivered.push(data),
+			);
+			const recorder = new InputRecorder();
+			harness.tui.addChild(recorder);
+			harness.tui.setFocus(recorder);
+			await harness.settle();
+			await harness.feed("\x1b[?1;0c");
+
+			const event = relayRecords('\x1b]877;tsp;e;{"ev":"ack","sf":"s:1","s":12}\x07');
+			process.stdin.emit("data", event.slice(0, split).join(""));
+			// The flush timer comes due during the stall, before stdin delivers the rest of the record.
+			stall();
+			process.stdin.emit("data", event.slice(split).join(""));
+			await harness.settle();
+			await harness.feed("\x1b[65;30;97;1;0;1_");
+
+			expect(recorder.received).toEqual(["a"]);
+			expect(delivered).toEqual(['\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":12}\x1b\\', "a"]);
+		},
+	);
+
+	it("keeps a relayed TSP event out of the composer when a stdin read splits one of its records", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// The paste-marker normalizer holds the torn record for its own 75 ms window, then
+		// hands it to StdinBuffer; its expiry must not release the held string head.
+		// `feed` itself elapses 67 ms, so the extra 20 ms lands between the two expiries.
+		const relay = (text: string) => [...text].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		const event = relay('\x1b]877;tsp;ack;{"sf":"s:1","s":12}\x07');
+		const torn = event[20]!;
+		await harness.feed(...event.slice(0, 20), torn.slice(0, 6));
+		vi.advanceTimersByTime(20);
+		await harness.feed(torn.slice(6), ...event.slice(21));
+		await harness.feed("\x1b[65;30;97;1;0;1_");
+
+		expect(recorder.received).toEqual(["a"]);
+	});
+
+	it("keeps the short Escape wait for a relayed two-byte Alt chord head", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// `ESC ]` alone is also Alt+]; it must not wait the multi-second string timeout.
+		await harness.feed("\x1b[0;0;27;1;0;1_", "\x1b[0;0;93;1;0;1_");
+		expect(recorder.received).toEqual([]);
+		vi.advanceTimersByTime(100);
+		expect(recorder.received).toEqual(["\x1b]"]);
+	});
+
+	it("delivers a lone relayed Escape after the flush window when no tail arrives", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
+		vi.advanceTimersByTime(100);
+		expect(recorder.received).toEqual(["\x1b"]);
+	});
+
 	it("prefers a late kitty reply and turns win32-input-mode back off", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
 		await harness.settle();
@@ -258,40 +394,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
 		expect(out.indexOf("\x1b[?9001l")).toBeGreaterThan(out.indexOf("\x1b[?9001h"));
 		expect(out).toContain("\x1b[>1u");
-	});
-
-	it("releases a relayed lone Escape after a single wait window", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
-
-		// The paste-marker normalizer and the decoder both hold a relayed ESC; their
-		// 75 ms waits must not stack into ~150 ms.
-		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
-		vi.advanceTimersByTime(74);
-		expect(recorder.received).toEqual([]);
-		vi.advanceTimersByTime(1);
-		expect(recorder.received).toEqual(["\x1b"]);
-	});
-
-	it("delivers a held relayed Escape when a late kitty reply turns the mode off", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
-
-		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
-		process.stdin.emit("data", "\x1b[?0u");
-		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		vi.runAllTimers();
-		expect(recorder.received).toEqual(["\x1b"]);
 	});
 
 	it("pastes line breaks the console host sent as key records, then submits on a later Enter (#14065)", async () => {

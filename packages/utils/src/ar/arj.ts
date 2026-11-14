@@ -1,7 +1,8 @@
+import { readUInt16LE, readUInt32LE } from "./bytes";
 import { crc32 } from "./checksums";
 import { ArchiveError } from "./error";
 import { assertArchiveMemberSize, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
-import { decompressLhStatic } from "./lzh";
+import { decompressLhStatic, dosTimeToMs } from "./lzh";
 import { assertArchivePathBytes, assertArchivePathString, normalizeArchiveEntryPath } from "./paths";
 import { type ByteSource, readAllBytes } from "./source";
 import type { ArchiveIndexEntry, FormatReader, FormatReadOptions, MemberSource } from "./types";
@@ -10,14 +11,6 @@ const ARJ_SIGNATURE_0 = 0x60;
 const ARJ_SIGNATURE_1 = 0xea;
 const ARJ_MAX_BASIC_HEADER = 2600;
 const LEGACY_DECODER = new TextDecoder("windows-1252");
-
-function u16(bytes: Uint8Array, offset: number): number {
-	return bytes[offset]! | (bytes[offset + 1]! << 8);
-}
-
-function u32(bytes: Uint8Array, offset: number): number {
-	return (bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16) | (bytes[offset + 3]! << 24)) >>> 0;
-}
 
 function assertRange(bytes: Uint8Array, start: number, end: number, what: string): void {
 	if (
@@ -29,18 +22,6 @@ function assertRange(bytes: Uint8Array, start: number, end: number, what: string
 	) {
 		throw new ArchiveError(`Invalid ARJ archive: truncated ${what}`);
 	}
-}
-
-function dosTimeToMs(value: number): number | undefined {
-	if (value === 0) return undefined;
-	const year = 1980 + ((value >>> 25) & 0x7f);
-	const month = (value >>> 21) & 0x0f;
-	const day = (value >>> 16) & 0x1f;
-	const hour = (value >>> 11) & 0x1f;
-	const minute = (value >>> 5) & 0x3f;
-	const second = (value & 0x1f) * 2;
-	if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return undefined;
-	return Date.UTC(year, month - 1, day, hour, minute, second);
 }
 
 function readCString(bytes: Uint8Array, start: number, end: number, field: string): { value: string; next: number } {
@@ -63,26 +44,26 @@ function parseArjBlock(bytes: Uint8Array, offset: number, options: FormatReadOpt
 	if (bytes[offset] !== ARJ_SIGNATURE_0 || bytes[offset + 1] !== ARJ_SIGNATURE_1) {
 		throw new ArchiveError("Invalid ARJ header signature");
 	}
-	const bodySize = u16(bytes, offset + 2);
+	const bodySize = readUInt16LE(bytes, offset + 2);
 	if (bodySize === 0)
 		return { bodyStart: offset + 4, bodySize: 0, nextOffset: offset + 4, metadataSize: 4, isEnd: true };
 	if (bodySize < 30 || bodySize > ARJ_MAX_BASIC_HEADER) throw new ArchiveError("Invalid ARJ basic header size");
 	const bodyStart = offset + 4;
 	const bodyEnd = bodyStart + bodySize;
 	assertRange(bytes, bodyStart, bodyEnd + 4, "basic header");
-	if (crc32(bytes.subarray(bodyStart, bodyEnd)) !== u32(bytes, bodyEnd)) {
+	if (crc32(bytes.subarray(bodyStart, bodyEnd)) !== readUInt32LE(bytes, bodyEnd)) {
 		throw new ArchiveError("Invalid ARJ basic header CRC32");
 	}
 	let cursor = bodyEnd + 4;
 	let extensionCount = 0;
 	for (;;) {
 		assertRange(bytes, cursor, cursor + 2, "extended header size");
-		const extensionSize = u16(bytes, cursor);
+		const extensionSize = readUInt16LE(bytes, cursor);
 		cursor += 2;
 		if (extensionSize === 0) break;
 		if (++extensionCount > 65_535) throw new ArchiveError("Invalid ARJ archive: too many extended headers");
 		assertRange(bytes, cursor, cursor + extensionSize + 4, "extended header");
-		if (crc32(bytes.subarray(cursor, cursor + extensionSize)) !== u32(bytes, cursor + extensionSize)) {
+		if (crc32(bytes.subarray(cursor, cursor + extensionSize)) !== readUInt32LE(bytes, cursor + extensionSize)) {
 			throw new ArchiveError("Invalid ARJ extended header CRC32");
 		}
 		cursor += extensionSize + 4;
@@ -216,10 +197,10 @@ function normalizeHostPath(rawPath: string, hostOs: number): string {
 /** Probe whether bytes begin with a CRC-framed ARJ main header. */
 export function sniffArj(bytes: Uint8Array): boolean {
 	if (bytes.byteLength < 34 || bytes[0] !== ARJ_SIGNATURE_0 || bytes[1] !== ARJ_SIGNATURE_1) return false;
-	const size = u16(bytes, 2);
+	const size = readUInt16LE(bytes, 2);
 	if (size < 30 || size > ARJ_MAX_BASIC_HEADER || bytes.byteLength < size + 8) return false;
 	const body = bytes.subarray(4, 4 + size);
-	return body[0]! >= 30 && body[0]! <= size && body[6] === 2 && crc32(body) === u32(bytes, 4 + size);
+	return body[0]! >= 30 && body[0]! <= size && body[6] === 2 && crc32(body) === readUInt32LE(bytes, 4 + size);
 }
 
 /** Index an ARJ archive and lazily decode stored, static-Huffman, and fast-LZSS members. */
@@ -266,10 +247,10 @@ export const readArj: FormatReader = async (
 		const fileType = bytes[block.bodyStart + 6]!;
 		if ((flags & 0x01) !== 0) throw new ArchiveError("Encrypted ARJ members are unsupported");
 		if ((flags & 0x0c) !== 0) throw new ArchiveError("Multi-volume ARJ members are unsupported");
-		const packedSize = u32(bytes, block.bodyStart + 12);
-		const size = u32(bytes, block.bodyStart + 16);
-		const fileCrc = u32(bytes, block.bodyStart + 20);
-		const accessMode = u16(bytes, block.bodyStart + 26);
+		const packedSize = readUInt32LE(bytes, block.bodyStart + 12);
+		const size = readUInt32LE(bytes, block.bodyStart + 16);
+		const fileCrc = readUInt32LE(bytes, block.bodyStart + 20);
+		const accessMode = readUInt16LE(bytes, block.bodyStart + 26);
 		const filename = readCString(
 			bytes,
 			block.bodyStart + firstHeaderSize,
@@ -295,7 +276,7 @@ export const readArj: FormatReader = async (
 		if ((hostOs === 2 || hostOs === 8) && accessMode !== 0) {
 			mode = (isDirectory ? 0x4000 : 0x8000) | (accessMode & 0x0fff);
 		}
-		const rawMtime = u32(bytes, block.bodyStart + 8);
+		const rawMtime = readUInt32LE(bytes, block.bodyStart + 8);
 		const mtimeMs =
 			hostOs === 2 || hostOs === 8 ? (rawMtime === 0 ? undefined : rawMtime * 1000) : dosTimeToMs(rawMtime);
 		entries.push({

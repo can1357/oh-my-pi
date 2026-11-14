@@ -1,3 +1,4 @@
+import { type Type, type } from "@oh-my-pi/omptype";
 import type {
 	ForkSessionResponse,
 	LoadSessionResponse,
@@ -8,7 +9,7 @@ import type {
 
 /** Validation failure compatible with the used Zod error surface. */
 export interface ValidationError {
-	issues: Array<{ path: Array<string | number>; message: string }>;
+	issues: Array<{ path: PropertyKey[]; message: string }>;
 }
 /** Successful validation result. */
 export interface ValidationSuccess<T> {
@@ -26,129 +27,74 @@ export interface Validator<T> {
 	parse(value: unknown): T;
 }
 
-function validator<T>(check: (value: unknown) => boolean, label: string): Validator<T> {
+/**
+ * Wraps a structural schema in the Zod call shape. Schemas check the fields
+ * ACP consumers read and keep every other key, so the result is the full
+ * protocol value.
+ */
+function validator<T>(schema: Type, label: string): Validator<T> {
 	return {
 		safeParse(value) {
-			return check(value)
-				? { success: true, data: value as T }
-				: { success: false, error: { issues: [{ path: [], message: `Invalid ${label}` }] } };
+			const result = schema(value);
+			if (!(result instanceof type.errors)) return { success: true, data: result as T };
+			return {
+				success: false,
+				error: { issues: result.map(issue => ({ path: [...issue.path], message: issue.message })) },
+			};
 		},
 		parse(value) {
-			if (!check(value)) throw new Error(`Invalid ${label}`);
-			return value as T;
+			const result = schema(value);
+			if (result instanceof type.errors) throw new Error(`Invalid ${label}: ${result.summary}`);
+			return result as T;
 		},
 	};
 }
 
-function objectWithString(value: unknown, key: string): boolean {
-	return typeof value === "object" && value !== null && typeof (value as Record<string, unknown>)[key] === "string";
-}
+const Modes = type({
+	currentModeId: "string",
+	availableModes: type({ id: "string", name: "string" }).array(),
+}).or("null | undefined");
 
-function validModes(value: unknown): boolean {
-	if (value === undefined || value === null) return true;
-	if (typeof value !== "object" || value === null) return false;
-	const modes = value as Record<string, unknown>;
-	return (
-		typeof modes.currentModeId === "string" &&
-		Array.isArray(modes.availableModes) &&
-		modes.availableModes.every(mode => objectWithString(mode, "id") && objectWithString(mode, "name"))
-	);
-}
+// Responses and notifications are also checked in-process, where absent optionals may be explicit `undefined`.
+const sessionResponseFields = { "modes?": Modes, "configOptions?": "unknown[] | null | undefined" } as const;
+const notArray = (value: object): boolean => !Array.isArray(value);
+const SessionResponse = type(sessionResponseFields).narrow(notArray);
+const IdentifiedSessionResponse = type({ sessionId: "string", ...sessionResponseFields }).narrow(notArray);
 
-function sessionResponse(value: unknown, needsId: boolean): boolean {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const response = value as Record<string, unknown>;
-	if (needsId && typeof response.sessionId !== "string") return false;
-	if (!validModes(response.modes)) return false;
-	return (
-		response.configOptions === undefined || response.configOptions === null || Array.isArray(response.configOptions)
-	);
-}
+const ContentBlock = type({ type: "'text'", text: "string" })
+	.or({ type: "'image' | 'audio'", data: "string", mimeType: "string" })
+	.or({ type: "'resource_link'", uri: "string", name: "string" })
+	.or({ type: "'resource'", resource: "object" });
 
-function contentBlock(value: unknown): boolean {
-	if (typeof value !== "object" || value === null) return false;
-	const block = value as Record<string, unknown>;
-	switch (block.type) {
-		case "text":
-			return typeof block.text === "string";
-		case "image":
-		case "audio":
-			return typeof block.data === "string" && typeof block.mimeType === "string";
-		case "resource_link":
-			return typeof block.uri === "string" && typeof block.name === "string";
-		case "resource":
-			return typeof block.resource === "object" && block.resource !== null;
-		default:
-			return false;
-	}
-}
-
-function sessionNotification(value: unknown): boolean {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const notification = value as Record<string, unknown>;
-	if (
-		typeof notification.sessionId !== "string" ||
-		typeof notification.update !== "object" ||
-		notification.update === null
-	)
-		return false;
-	const update = notification.update as Record<string, unknown>;
-	if (typeof update.sessionUpdate !== "string") return false;
-	switch (update.sessionUpdate) {
-		case "agent_message_chunk":
-		case "agent_thought_chunk":
-		case "user_message_chunk":
-			return contentBlock(update.content);
-		case "tool_call":
-			return typeof update.toolCallId === "string" && typeof update.title === "string";
-		case "tool_call_update":
-			return typeof update.toolCallId === "string";
-		case "plan":
-			return Array.isArray(update.entries);
-		case "current_mode_update":
-			return typeof update.currentModeId === "string";
-		case "available_commands_update":
-			return Array.isArray(update.availableCommands);
-		case "config_option_update":
-			return Array.isArray(update.configOptions);
-		case "session_info_update":
-			return update.title === undefined || update.title === null || typeof update.title === "string";
-		case "usage_update":
-			return typeof update.size === "number" && typeof update.used === "number";
-		default:
-			return false;
-	}
-}
+const SessionUpdate = type({
+	sessionUpdate: "'agent_message_chunk' | 'agent_thought_chunk' | 'user_message_chunk'",
+	content: ContentBlock,
+})
+	.or({ sessionUpdate: "'tool_call'", toolCallId: "string", title: "string" })
+	.or({ sessionUpdate: "'tool_call_update'", toolCallId: "string" })
+	.or({ sessionUpdate: "'plan'", entries: "unknown[]" })
+	.or({ sessionUpdate: "'current_mode_update'", currentModeId: "string" })
+	.or({ sessionUpdate: "'available_commands_update'", availableCommands: "unknown[]" })
+	.or({ sessionUpdate: "'config_option_update'", configOptions: "unknown[]" })
+	.or({ sessionUpdate: "'session_info_update'", "title?": "string | null | undefined" })
+	.or({ sessionUpdate: "'usage_update'", size: "number", used: "number" });
 
 /** Validator for new-session responses. */
-export const zNewSessionResponse = validator<NewSessionResponse>(
-	value => sessionResponse(value, true),
-	"new session response",
-);
+export const zNewSessionResponse = validator<NewSessionResponse>(IdentifiedSessionResponse, "new session response");
 /** Validator for load-session responses. */
-export const zLoadSessionResponse = validator<LoadSessionResponse>(
-	value => sessionResponse(value, false),
-	"load session response",
-);
+export const zLoadSessionResponse = validator<LoadSessionResponse>(SessionResponse, "load session response");
 /** Validator for fork-session responses. */
-export const zForkSessionResponse = validator<ForkSessionResponse>(
-	value => sessionResponse(value, true),
-	"fork session response",
-);
+export const zForkSessionResponse = validator<ForkSessionResponse>(IdentifiedSessionResponse, "fork session response");
 /** Validator for prompt responses. */
-export const zPromptResponse = validator<PromptResponse>(value => {
-	if (typeof value !== "object" || value === null) return false;
-	const stopReason = (value as Record<string, unknown>).stopReason;
-	return (
-		stopReason === "end_turn" ||
-		stopReason === "max_tokens" ||
-		stopReason === "max_turn_requests" ||
-		stopReason === "refusal" ||
-		stopReason === "cancelled"
-	);
-}, "prompt response");
+export const zPromptResponse = validator<PromptResponse>(
+	type({ stopReason: "'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled'" }),
+	"prompt response",
+);
 /** Validator for session notifications. */
-export const zSessionNotification = validator<SessionNotification>(sessionNotification, "session notification");
+export const zSessionNotification = validator<SessionNotification>(
+	type({ sessionId: "string", update: SessionUpdate }).narrow(notArray),
+	"session notification",
+);
 
 /** ACP runtime validators. */
 export const schema = {

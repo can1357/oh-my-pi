@@ -9,7 +9,6 @@ import {
 	isExecutable,
 	isFullyQualifiedPath,
 	logger,
-	openCloexecSync,
 	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
 	WhichCachePolicy,
@@ -91,6 +90,12 @@ export interface SpawnedSubprocess<Outbound> {
 	 * wall-clock timers.
 	 */
 	stderrDrained: Promise<void>;
+	/**
+	 * Resolves once the IPC channel closed (the child exited, a SIGKILL included, or either side
+	 * disconnected). Bun hands every message the child sent before that to `inbound` first, so a
+	 * caller that awaits it after a kill has seen the child's last message.
+	 */
+	disconnected: Promise<void>;
 }
 
 /**
@@ -259,6 +264,7 @@ export function createWorkerSubprocess<Outbound>(options: {
 	const intentionalExit = { value: false };
 	const stderrTail = new StderrTail(STDERR_TAIL_LIMIT_BYTES);
 	const stderrDrained = Promise.withResolvers<void>();
+	const disconnected = Promise.withResolvers<void>();
 	const stderrCapture = createStderrCapture(options.exitLabel);
 	let stderrDrainStarted = false;
 	// Reassigned once the worker IPC fault handler is registered (after spawn);
@@ -281,6 +287,9 @@ export function createWorkerSubprocess<Outbound>(options: {
 		windowsHide: true,
 		ipc(message) {
 			for (const handler of inbound) handler(message as Outbound);
+		},
+		onDisconnect() {
+			disconnected.resolve();
 		},
 		onExit(_proc, exitCode, signalCode) {
 			unregisterFault();
@@ -326,7 +335,14 @@ export function createWorkerSubprocess<Outbound>(options: {
 	// path calls `terminate()` explicitly. Bun's test runner starves IPC for
 	// unref'd subprocesses, so keep it referenced only under tests.
 	if (!isBunTestRuntime() && options.unref !== false) proc.unref();
-	return { proc, inbound, errors, intentionalExit, stderrDrained: stderrDrained.promise };
+	return {
+		proc,
+		inbound,
+		errors,
+		intentionalExit,
+		stderrDrained: stderrDrained.promise,
+		disconnected: disconnected.promise,
+	};
 }
 
 /**
@@ -382,7 +398,7 @@ interface StderrCapture {
 function createStderrCapture(exitLabel: string): StderrCapture {
 	try {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-worker-stderr-"));
-		const fd = openCloexecSync(
+		const fd = fs.openSync(
 			path.join(dir, "stderr.log"),
 			fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_TRUNC,
 		);

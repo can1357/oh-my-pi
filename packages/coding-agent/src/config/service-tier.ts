@@ -116,7 +116,7 @@ export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 	{
 		value: "ultrafast",
 		label: "Ultrafast",
-		description: "Lowest-latency serving; OpenAI API preview access, or Codex models that advertise it",
+		description: "Lowest-latency serving; OpenAI API preview access, or Codex and relay models that advertise it",
 	},
 ];
 

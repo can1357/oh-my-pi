@@ -16,7 +16,7 @@
  * the item id and `action` with an action id (plus `value` for
  * `scope`/`tab`/`strip`). {@link pickerEvent} folds them into one shape.
  */
-import type { TspPickerAction, TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import type { TspPickerAction, TspPickerItem, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { KeyName } from "../key-hint-format";
 import { getKeybindings, type Keybinding } from "../keybindings";
 import type { Input } from "../components/input";
@@ -25,7 +25,7 @@ import { col, node } from "./describe";
 import type { NativeChild, NativeNode, NativeUiEvent } from "./node";
 
 /** The picker sheet; `preview` children fill its preview pane. */
-export function picker(p: TspPickerProps, preview?: readonly NativeChild[]): NativeNode {
+export function picker(p: TspProps<"picker">, preview?: readonly NativeChild[]): NativeNode {
 	return node("picker", p, preview);
 }
 
@@ -46,7 +46,7 @@ export const PICKER_KEY = "picker";
  * the picker as child {@link PICKER_KEY}, which the reconciler hoists into
  * `layer`. Route its events with `pickerEvent(event, PICKER_KEY)`.
  */
-export function dockedPicker(p: TspPickerProps, preview?: readonly NativeChild[]): NativeNode {
+export function dockedPicker(p: TspProps<"picker">, preview?: readonly NativeChild[]): NativeNode {
 	return col([node("picker", p, preview, PICKER_KEY)]);
 }
 

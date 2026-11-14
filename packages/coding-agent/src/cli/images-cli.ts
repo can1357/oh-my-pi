@@ -27,6 +27,7 @@ import type {
 } from "../blob-broker/protocol";
 import {
 	hashProviderFileCredential,
+	parsePersistedProviderFileEntry,
 	ProviderFileCache,
 	type ProviderFileCacheEntry,
 	type ProviderFileCacheStatus,
@@ -44,6 +45,7 @@ import {
 import { providerFileCachePath, resolveBlobBrokerConfigs } from "../blob-broker/service";
 import { createConfiguredUploader } from "../blob-broker/uploaders";
 import { Settings } from "../config/settings";
+import { applyUnpausedProviders, resolveEffectiveSettings } from "../session/auth-broker-config";
 
 import { cfgImagesUrlsBackends, cfgImagesUrlsEnabled } from "../blob-broker/settings";
 
@@ -234,33 +236,11 @@ function defaultCreateProviderFileClient(
 }
 
 async function defaultOpenAuthStorage(): Promise<AuthStorage> {
+	applyUnpausedProviders(await resolveEffectiveSettings());
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
 	await storage.credentials.reload();
 	return storage;
-}
-
-function persistedProviderFileEntry(value: unknown): ProviderFileCacheEntry | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-	const entry = value as Partial<ProviderFileCacheEntry>;
-	const handle = entry.handle;
-	if (
-		(entry.provider !== "openai" && entry.provider !== "anthropic" && entry.provider !== "google") ||
-		typeof entry.credentialHash !== "string" ||
-		!/^[0-9a-f]{64}$/.test(entry.credentialHash) ||
-		typeof entry.contentHash !== "string" ||
-		!/^[0-9a-f]{64}$/.test(entry.contentHash) ||
-		!handle ||
-		handle.provider !== entry.provider ||
-		typeof handle.mimeType !== "string" ||
-		typeof handle.bytes !== "number" ||
-		!Number.isSafeInteger(handle.bytes) ||
-		handle.bytes < 0 ||
-		(handle.expiresAt !== undefined && typeof handle.expiresAt !== "number")
-	) {
-		return undefined;
-	}
-	return entry as ProviderFileCacheEntry;
 }
 
 async function defaultReadProviderFileSnapshot(indexPath: string): Promise<ImagesProviderFileSnapshot> {
@@ -280,7 +260,7 @@ async function defaultReadProviderFileSnapshot(indexPath: string): Promise<Image
 		if (candidate.version !== 1 || !Array.isArray(candidate.entries)) {
 			return { entries: [], lastError: "Unsupported provider file cache index" };
 		}
-		return { entries: candidate.entries.flatMap(value => persistedProviderFileEntry(value) ?? []) };
+		return { entries: candidate.entries.flatMap(value => parsePersistedProviderFileEntry(value) ?? []) };
 	} catch {
 		return { entries: [], lastError: "Malformed provider file cache index" };
 	}

@@ -112,7 +112,7 @@ pub trait FileSystem: Send + Sync + fmt::Debug + 'static {
 			Err(err) => return existing_dir_or(self, path, err).await,
 		}
 		match parent_path(path) {
-			Some(parent) if !parent.as_os_str().is_empty() => {
+			Some(parent) if !parent.is_empty() => {
 				self.create_dir_all(parent, mode).await?;
 			},
 			_ => return Err(io::Error::new(io::ErrorKind::NotFound, "failed to create whole tree")),
@@ -310,10 +310,11 @@ impl<P: FileSystem + ?Sized> Resolver for ProviderResolver<'_, P> {
 	}
 
 	async fn require_dir(&self, path: &Path) -> io::Result<()> {
-		if self.0.metadata(path).await?.is_dir() {
-			Ok(())
-		} else {
-			Err(not_a_directory())
-		}
+		self
+			.0
+			.metadata(path)
+			.await?
+			.is_dir()
+			.ok_or_else(not_a_directory)
 	}
 }

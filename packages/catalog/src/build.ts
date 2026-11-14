@@ -7,6 +7,7 @@
  * compat per request.
  */
 
+import RULES from "./compat/rules.json" with { type: "json" };
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
@@ -19,7 +20,16 @@ import {
 	NO_RECURRING_TARIFF,
 	parseDatedCostCards,
 } from "./pricing";
-import { type Api, type EffectiveTokenCost, MODEL_KINDS, type Model, type ModelCost, type ModelSpec } from "./types";
+import {
+	type AntigravityModelWireProfile,
+	type Api,
+	type EffectiveTokenCost,
+	MODEL_KINDS,
+	type Model,
+	type ModelAccountAccess,
+	type ModelCost,
+	type ModelSpec,
+} from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -354,6 +364,42 @@ export function applyCatalogCorrections(
 }
 
 /**
+ * Lower discovered Antigravity per-SKU output caps to the host's
+ * `max-tokens-ceiling`. The transport sends a profile's `maxOutputTokens`
+ * verbatim, so a roster value above the ceiling (Claude 4.x advertises 65,536;
+ * Cloud Code Assist 400s past 64,000, #3067) must be corrected here as the
+ * row's `maxTokens` is.
+ */
+function capAntigravityWireProfiles(
+	model: Pick<Model<Api>, "antigravityWireProfiles" | "accountAccess">,
+	ceiling: unknown,
+): void {
+	if (typeof ceiling !== "number") return;
+	const cap = (
+		profiles: Readonly<Record<string, AntigravityModelWireProfile>> | undefined,
+	): Readonly<Record<string, AntigravityModelWireProfile>> | undefined => {
+		if (profiles === undefined) return undefined;
+		let capped: Record<string, AntigravityModelWireProfile> | undefined;
+		for (const [wireId, profile] of Object.entries(profiles)) {
+			if (profile.maxOutputTokens === undefined || profile.maxOutputTokens <= ceiling) continue;
+			capped ??= { ...profiles };
+			capped[wireId] = { ...profile, maxOutputTokens: ceiling };
+		}
+		return capped ?? profiles;
+	};
+	model.antigravityWireProfiles = cap(model.antigravityWireProfiles);
+	if (model.accountAccess === undefined) return;
+	let accountAccess: Record<string, ModelAccountAccess> | undefined;
+	for (const [accountKey, access] of Object.entries(model.accountAccess)) {
+		const profiles = cap(access.antigravityWireProfiles);
+		if (profiles === access.antigravityWireProfiles) continue;
+		accountAccess ??= { ...model.accountAccess };
+		accountAccess[accountKey] = { ...access, antigravityWireProfiles: profiles };
+	}
+	if (accountAccess !== undefined) model.accountAccess = accountAccess;
+}
+
+/**
  * Direct first-party OpenAI Responses endpoints (api.openai.com, Azure OpenAI
  * deployments). Gates GA computer-use detection; identity supplies the model
  * generation.
@@ -418,10 +464,56 @@ export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string)
 	return buildModel({ ...spec, api, providerType });
 }
 
+/** Every dated card instant in the compiled rules, ascending; collected on first use. */
+let ruleCardInstants: number[] | undefined;
+
+function collectRuleCardInstants(value: unknown, out: number[]): void {
+	if (Array.isArray(value)) {
+		for (const item of value) collectRuleCardInstants(item, out);
+		return;
+	}
+	if (typeof value !== "object" || value === null) return;
+	for (const key in value) {
+		const child: unknown = Reflect.get(value, key);
+		if (key === "effectiveFrom" && typeof child === "string") {
+			const instant = Date.parse(child);
+			if (Number.isFinite(instant)) out.push(instant);
+		} else {
+			collectRuleCardInstants(child, out);
+		}
+	}
+}
+
 /**
- * Build one model from an authored spec. Bundled models.json rows are fully
- * materialized by the generator and consumed directly (see `models.ts`), so
- * this only runs for discovered/custom/override specs.
+ * The first instant after `now` at which {@link buildModel} could select a
+ * different dated price card for a spec carrying `cost`: the next
+ * `effectiveFrom` of the spec's own rate schedule or of any dated card in the
+ * compiled rules. A build of an unchanged spec made at or after `now` is
+ * identical to a fresh one until then. `Infinity` when no change is pending.
+ */
+export function nextBuildPriceChange(cost: ModelCost, now: number): number {
+	if (ruleCardInstants === undefined) {
+		const instants: number[] = [];
+		collectRuleCardInstants(RULES, instants);
+		ruleCardInstants = instants.sort((a, b) => a - b);
+	}
+	let next = Number.POSITIVE_INFINITY;
+	for (const instant of ruleCardInstants) {
+		if (instant > now) {
+			next = instant;
+			break;
+		}
+	}
+	for (const rate of cost.timeBased?.effectiveRates ?? []) {
+		if (rate.effectiveFrom > now && rate.effectiveFrom < next) next = rate.effectiveFrom;
+	}
+	return next;
+}
+
+/**
+ * Build one model from an authored spec. Bundled models are prebuilt by the
+ * generator and decoded by `models.ts`, so this only runs for discovered,
+ * custom, and override specs.
  */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);
@@ -445,6 +537,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	capAntigravityWireProfiles(model, policy.catalog.maxTokensCeiling);
 	// Configured kinds and lifetimes replace catalog values rather than merging with them.
 	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;
 	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };

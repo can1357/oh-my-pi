@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -207,6 +208,40 @@ describe("persisted agent model attribution", () => {
 		expect(history?.metrics?.requests).toBe(2);
 	});
 
+	it("reports occupied context tokens, not summed continuation billing, in restored metrics", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-context-");
+		// A segmented Gemini response sums `totalTokens` across continuation
+		// requests (275) while `contextTokens` (165) is the occupied window the
+		// provider reported. Restored-agent metrics must show the occupied
+		// figure or the Hub's context gauge hits its ceiling early.
+		const segmented = JSON.stringify({
+			type: "message",
+			id: "a1",
+			parentId: "si",
+			timestamp: "2026-08-07T11:00:00.000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				provider: SONNET.provider,
+				model: SONNET.model,
+				stopReason: "stop",
+				usage: {
+					input: 120,
+					output: 155,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 275,
+					contextTokens: 165,
+					cost: { total: 0.5 },
+				},
+			},
+		});
+		const registry = await historyFor(tempDir.path(), "Segmented", [...transcriptHead(), segmented]);
+
+		const history = registry.get("Segmented")?.history;
+		expect(history?.metrics?.contextTokens).toBe(165);
+	});
+
 	it("labels the row with the newest role a transition assigned, skipping ephemeral ones", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-role-");
 		// Two real role transitions plus an ephemeral fallback on top: the label
@@ -355,5 +390,34 @@ describe("persisted agent model attribution", () => {
 		const history = registry.get("Branching")?.history;
 		expect(history?.metrics?.requests).toBe(1);
 		expect(history?.metrics?.cost).toBeCloseTo(0.3);
+	});
+});
+
+describe("persisted history rescans", () => {
+	it("reads a transcript again only after it changed", async () => {
+		using tempDir = TempDir.createSync("@omp-history-rescan-");
+		const rootFile = path.join(tempDir.path(), "main.jsonl");
+		const transcriptFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		const registry = await historyFor(tempDir.path(), "Worker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "done" }], 0.5),
+		]);
+		const ref = registry.get("Worker")!;
+		expect(ref.history?.directCost).toBeCloseTo(0.5);
+		const changed: string[] = [];
+		registry.onChange(event => {
+			if (event.type === "metadata_changed") changed.push(event.ref.id);
+		});
+
+		await registerPersistedSubagents(registry, rootFile);
+		expect(changed).toEqual([]);
+
+		await fs.appendFile(
+			transcriptFile,
+			`${assistant("a2", "a1", SONNET, "stop", [{ type: "text", text: "more" }], 0.25)}\n`,
+		);
+		await registerPersistedSubagents(registry, rootFile);
+		expect(changed).toEqual(["Worker"]);
+		expect(ref.history?.directCost).toBeCloseTo(0.75);
 	});
 });

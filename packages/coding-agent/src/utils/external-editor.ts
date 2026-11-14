@@ -24,6 +24,23 @@ export function getEditorCommand(): string | undefined {
 	return undefined;
 }
 
+/**
+ * Names the editor {@link getEditorCommand} launches for UI labels ("Edit in
+ * Notepad", "Edit in nvim"): the command's program without its directory,
+ * quotes or Windows executable extension. `undefined` when none is resolved.
+ */
+export function getEditorName(command = getEditorCommand()): string | undefined {
+	if (!command) return undefined;
+	const quote = command[0] === '"' || command[0] === "'" ? command[0] : undefined;
+	const program = quote ? command.slice(1).split(quote)[0] : command.split(/\s+/)[0];
+	const name = path.win32
+		.basename(program ?? "")
+		.replace(/\.(exe|cmd|bat|com)$/i, "")
+		.trim();
+	if (!name) return undefined;
+	return name.toLowerCase() === "notepad" ? "Notepad" : name;
+}
+
 export interface OpenInEditorOptions {
 	/** File extension for the temp file (default: ".md"). */
 	extension?: string;

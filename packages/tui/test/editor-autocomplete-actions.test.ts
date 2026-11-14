@@ -9,6 +9,7 @@ import {
 	findLeadingSlashCommandStart,
 } from "@oh-my-pi/pi-tui/autocomplete";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
+import { applyEmojiCompletion, getEmojiSuggestions } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
 import { defaultEditorTheme } from "./test-themes";
 
 function onceAutocompleteUpdate(editor: Editor): Promise<void> {
@@ -252,6 +253,62 @@ describe("Editor async autocomplete scheduling", () => {
 	});
 });
 
+describe("Editor autocomplete after the cursor leaves the trigger token", () => {
+	const emojiProvider: AutocompleteProvider = {
+		async getSuggestions(lines, cursorLine, cursorCol) {
+			return getEmojiSuggestions((lines[cursorLine] ?? "").slice(0, cursorCol));
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return applyEmojiCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+	};
+
+	async function editorWithEmojiPopup(): Promise<{ editor: Editor; submitted: string[]; label: string }> {
+		const editor = new Editor(defaultEditorTheme);
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		editor.setAutocompleteProvider(emojiProvider);
+		for (const char of "nice :D") editor.handleInput(char);
+		await untilAutocompleteShown(editor);
+		// A row of the `:D` emoji list; the first row's label is reflowed by the list renderer.
+		const label = ":dagger:";
+		expect(editor.render(80).join("\n")).toContain(label);
+		return { editor, submitted, label };
+	}
+
+	it.each([
+		["Shift+Enter (kitty)", "\x1b[13;2u"],
+		["Ctrl+Enter (kitty)", "\x1b[13;5u"],
+		["Shift+Enter (legacy)", "\x1b[13;2~"],
+		["Alt+Enter", "\x1b\r"],
+	])("closes the popup on %s so Enter then submits without a stale list", async (_name, key) => {
+		const { editor, submitted, label } = await editorWithEmojiPopup();
+
+		editor.handleInput(key);
+		expect(editor.getText()).toBe("nice :D\n");
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(editor.render(80).join("\n")).not.toContain(label);
+
+		editor.handleInput("\r");
+		expect(submitted).toEqual(["nice :D"]);
+	});
+
+	it.each([
+		["Left", "\x1b[D"],
+		["Home", "\x1b[H"],
+		["Ctrl+A", "\x01"],
+	])("closes the popup when %s moves the cursor off the token", async (_name, key) => {
+		const { editor, label } = await editorWithEmojiPopup();
+
+		editor.handleInput(key);
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(editor.render(80).join("\n")).not.toContain(label);
+		expect(editor.getText()).toBe("nice :D");
+	});
+});
+
 class ModelMentionProvider implements AutocompleteProvider {
 	readonly requests: string[] = [];
 
@@ -382,6 +439,23 @@ describe("Editor model mention autocomplete", () => {
 		deleteEditor.handleInput("\x1b[3~"); // Delete
 		await untilAutocompleteShown(deleteEditor);
 		expect(deleteEditor.getText()).toBe("^a");
+	});
+
+	it("reopens on a colon inside a mention so its effort levels can be listed", async () => {
+		const provider = new ModelMentionProvider(["^a:"]);
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(provider);
+		const rejectedChecked = onceAutocompleteUpdate(editor);
+		editor.handleInput("^a");
+		await rejectedChecked;
+		expect(editor.isShowingAutocomplete()).toBe(false);
+
+		editor.handleInput(":");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("^a/x ");
+		expect(editor.isShowingAutocomplete()).toBe(false);
 	});
 
 	it("accepts a stale popup while the live text is still a mention", async () => {

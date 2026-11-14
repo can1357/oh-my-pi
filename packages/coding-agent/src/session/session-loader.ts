@@ -27,6 +27,7 @@ import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import { enotdir } from "./session-storage-errors";
+import { SESSION_HEADER_READ_LIMIT, sessionHeaderIdFromPrefix } from "./session-header-id";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -39,6 +40,8 @@ const LF = new Uint8Array([0x0a]);
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
+/** Initial parse window after a malformed record; see the recovery note in visitEntriesFromFileStream. */
+const RECOVERY_PARSE_WINDOW = 64 * 1024;
 const BLOB_READ_CONCURRENCY = 8;
 
 /**
@@ -178,33 +181,32 @@ export function parseSessionContent(content: string): SessionLoadResult {
 	};
 }
 
-/** Upper bound on the bytes read to find a header: real headers (and the title slot before them) are far smaller. */
-const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
+/** First read; holds the title slot and any real header, so the full limit is read only for outliers. */
+const SESSION_HEADER_FIRST_READ = 16 * 1024;
+
+/** {@link sessionHeaderIdFromPrefix} result when the window ends inside the first record. */
+const HEADER_INCOMPLETE = Symbol("header-incomplete");
 
 /**
  * The session id in `filePath`'s header, or `undefined` when there is no file
- * there or it does not start with a valid session header. One positioned read
- * of at most {@link SESSION_HEADER_READ_LIMIT} bytes, parsed to its first record.
+ * there or it does not start with a valid session header. Reads
+ * {@link SESSION_HEADER_FIRST_READ} bytes, and up to
+ * {@link SESSION_HEADER_READ_LIMIT} only when the first record runs past them.
  */
 export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
 	try {
-		return await peekFile(filePath, SESSION_HEADER_READ_LIMIT, sessionHeaderIdFromPrefix);
+		const id = await peekFile(filePath, SESSION_HEADER_FIRST_READ, prefix =>
+			prefix.length < SESSION_HEADER_FIRST_READ
+				? sessionHeaderIdFromPrefix(prefix)
+				: (sessionHeaderIdFromPrefix(prefix) ?? HEADER_INCOMPLETE),
+		);
+		if (id !== HEADER_INCOMPLETE) return id;
+		const full = await peekFile(filePath, SESSION_HEADER_READ_LIMIT, prefix => sessionHeaderIdFromPrefix(prefix));
+		return full ?? undefined;
 	} catch (err) {
 		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
 		throw err;
 	}
-}
-
-/** The header id from a file's leading bytes, past the optional title slot line. */
-function sessionHeaderIdFromPrefix(prefix: Uint8Array): string | undefined {
-	let records = prefix;
-	const newline = prefix.indexOf(0x0a);
-	if (newline !== -1) {
-		const firstLine = new TextDecoder().decode(prefix.subarray(0, newline)).trim();
-		if (firstLine && parseTitleSlotLine(firstLine)) records = prefix.subarray(newline + 1);
-	}
-	const entry = Bun.JSONL.parseChunk(records).values[0] as FileEntry | undefined;
-	return isValidSessionHeader(entry) ? entry.id : undefined;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
@@ -266,12 +268,23 @@ export async function visitEntriesFromFileStream(
 			consumed += count;
 			buffer = buffer.subarray(count);
 		};
+		// parseChunk costs time proportional to its whole input even when it stops at
+		// the first bad line, so recovering line by line over the full buffer is
+		// quadratic. After a malformed record, parse a newline-cut window that grows
+		// while the input keeps parsing and resets on the next error.
+		let window = Number.POSITIVE_INFINITY;
 		while (buffer.length > 0 && !stopped) {
 			if (recordsSeen >= maxRecords) {
 				stopped = true;
 				break;
 			}
-			const { values, error, read, done } = Bun.JSONL.parseChunk(buffer);
+			let input = buffer;
+			if (window < buffer.length) {
+				const cut = buffer.indexOf(0x0a, window - 1);
+				if (cut !== -1) input = buffer.subarray(0, cut + 1);
+			}
+			const partial = input.length < buffer.length;
+			const { values, error, read, done } = Bun.JSONL.parseChunk(input);
 			for (const value of values) {
 				if (recordsSeen >= maxRecords) {
 					stopped = true;
@@ -311,6 +324,7 @@ export async function visitEntriesFromFileStream(
 				if (hasPayload(buffer, read, nextNewline)) options.onMalformedRecord?.();
 				recordsSeen++;
 				advance(nextNewline + 1);
+				window = RECOVERY_PARSE_WINDOW;
 				if (recordsSeen >= maxRecords) {
 					stopped = true;
 					break;
@@ -318,6 +332,11 @@ export async function visitEntriesFromFileStream(
 				continue;
 			}
 			if (read === 0) {
+				if (partial) {
+					// The record runs past the window, not past the buffered input.
+					window *= 2;
+					continue;
+				}
 				// Incomplete value awaiting more bytes. Once the input has ended nothing more
 				// is coming, so it is a truncated record (parseJsonlLenient counts it too).
 				if (endOfInput) {
@@ -329,9 +348,11 @@ export async function visitEntriesFromFileStream(
 			}
 			advance(read);
 			if (done) {
-				advance(buffer.length);
-				break;
+				// The parser reached the end of its input; whatever trails the last value is whitespace.
+				advance(input.length - read);
+				if (!partial) break;
 			}
+			if (partial) window *= 2;
 		}
 		sink.consume(consumed);
 	};

@@ -126,6 +126,7 @@ const PRELUDE_GLOBAL_KEYS = [
 	"read",
 	"write",
 	"env",
+	"sh",
 ];
 
 /**
@@ -568,11 +569,22 @@ export class JsRuntime {
 						const finalValue = context.finalExpressionValue;
 						context.finalExpressionSet = false;
 						context.finalExpressionValue = undefined;
-						return await awaitMaybePromise(finalValue);
+						const settled = await awaitMaybePromise(finalValue);
+						return wrapped.finalExpressionSuppressed ? undefined : settled;
 					}
 					return awaited;
 				}
-				return await awaitMaybePromise(value);
+				// Classification is best-effort; keep the engine's completion for valid syntax
+				// the parser does not understand rather than silently dropping its result.
+				if (wrapped.finalExpressionReturned === null) return await awaitMaybePromise(value);
+				// The async wrapper's value is an explicit top-level `return`. A plain script's completion
+				// value is whatever statement ran last (an `if` body, the expression before a trailing
+				// `const`); as in Python, that is not the cell's result.
+				if (wrapped.asyncWrapped) return await awaitMaybePromise(value);
+				// Discard the displayed value, not its failure: assigned promises must still
+				// settle inside this run instead of rejecting unhandled in a persistent worker.
+				await awaitMaybePromise(value);
+				return undefined;
 			});
 		} finally {
 			this.#recordGlobals();
@@ -918,8 +930,11 @@ function chunkToString(chunk: unknown, encoding?: BufferEncoding): string {
 	return String(chunk);
 }
 
-/** Inspect text longer than this (or spanning lines) also gets a JSON tree view. */
+/** Inspect text or JSON text longer than this (or spanning lines) also gets a JSON tree view. */
 const JSON_VIEW_MIN_CHARS = 80;
+/** The host drops views whose JSON exceeds 32 KiB; longer JSON text is not parsed for one. */
+const JSON_TEXT_VIEW_MAX_CHARS = 32 * 1024;
+const JSON_TEXT_START = /^\s*[[{]/;
 
 /** One console argument's contribution to the printed line, plus the output it carries. */
 interface ConsolePiece {
@@ -943,8 +958,22 @@ function toJsonValue(value: unknown): unknown {
 	}
 }
 
+/** A JSON view of a printed string holding a JSON object or array, when long or multi-line. */
+function jsonTextView(text: string): EvalDisplayOutput | undefined {
+	if (text.length <= JSON_VIEW_MIN_CHARS && !text.includes("\n")) return undefined;
+	if (text.length > JSON_TEXT_VIEW_MAX_CHARS || !JSON_TEXT_START.test(text)) return undefined;
+	try {
+		return { type: "view", text, view: { kind: "json", value: JSON.parse(text) } };
+	} catch {
+		return undefined;
+	}
+}
+
 function formatConsoleArg(arg: unknown): ConsolePiece {
-	if (typeof arg === "string") return { text: arg };
+	if (typeof arg === "string") {
+		const output = jsonTextView(arg);
+		return output ? { text: arg, output } : { text: arg };
+	}
 	if (isRecord(arg) && arg.type === "image" && typeof arg.mimeType === "string") {
 		const data = coerceImageBase64(arg.data);
 		if (data !== null) {

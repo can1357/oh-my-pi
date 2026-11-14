@@ -1864,9 +1864,15 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(blocks[0][kCursorExecResolved]).toBeUndefined();
 	});
 
-	it.each(["shellArgs", "shellStreamArgs", "miniSweAgentBashArgs"] as const)(
-		"records a %s display block's millisecond hard timeout in bash-tool seconds",
-		async frameCase => {
+	it.each([
+		["shellArgs", 15_000, 15],
+		["shellStreamArgs", 15_000, 15],
+		["miniSweAgentBashArgs", 15_000, 15],
+		// Cursor's native Shell sends 24 h; the bash tool would clamp it and annotate every result.
+		["shellArgs", 86_400_000, 3600],
+	] as const)(
+		"records a %s display block's %i ms hard timeout as %i bash-tool seconds",
+		async (frameCase, hardTimeout, seconds) => {
 			// Cursor states shell budgets in milliseconds; the bridge converts them
 			// before running bash, and the transcript block must match what ran
 			// rather than showing a 15 s budget as 15000. `timeout` is the
@@ -1888,7 +1894,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 									command: "sleep 1",
 									workingDirectory: "/tmp",
 									timeout: 5000,
-									hardTimeout: 15000,
+									hardTimeout,
 									toolCallId: `call-${frameCase}`,
 								}),
 							},
@@ -1909,7 +1915,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
 			expect(blocks).toHaveLength(1);
 			expect(blocks[0]).toMatchObject({ id: `call-${frameCase}`, name: "bash" });
-			expect(blocks[0].arguments.timeout).toBe(15);
+			expect(blocks[0].arguments.timeout).toBe(seconds);
 		},
 	);
 

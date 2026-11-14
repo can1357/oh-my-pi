@@ -24,6 +24,9 @@ pub(super) struct KeyStep {
 	pub press:   bool,
 }
 
+/// Name Xorg gives the core keyboard's `XTest` slave (`Xi/xtest.c`).
+const XTEST_KEYBOARD: &[u8] = b"Virtual core XTEST keyboard";
+
 pub(super) struct Keymap {
 	min_keycode:         u8,
 	keysyms_per_keycode: u8,
@@ -87,6 +90,30 @@ impl Keymap {
 			.reply()
 			.map_err(keymap_failed)?;
 		Ok(Self::new(min_keycode, mapping.keysyms_per_keycode, mapping.keysyms, Vec::new()))
+	}
+
+	/// The core keyboard's `XTest` device map, plus the core modifier map.
+	/// Xorg reads an `XTest` key in that device's keymap, while the core map
+	/// follows whichever keyboard typed last, so after the user types on a
+	/// keyboard with another layout the core map would plan the wrong keys.
+	/// Falls back to the core map when the server lists no such device.
+	pub(super) fn xtest(conn: &RustConnection) -> CoreResult<Self> {
+		let core = Self::core(conn)?;
+		let devices = conn
+			.xinput_list_input_devices()
+			.map_err(keymap_failed)?
+			.reply()
+			.map_err(keymap_failed)?;
+		let Some(device) = devices
+			.devices
+			.iter()
+			.zip(&devices.names)
+			.find(|(_, name)| name.name == XTEST_KEYBOARD)
+			.map(|(device, _)| device.device_id)
+		else {
+			return Ok(core);
+		};
+		Ok(Self { modifier_masks: core.modifier_masks, ..Self::device(conn, device.into())? })
 	}
 
 	const fn new(

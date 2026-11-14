@@ -1,4 +1,4 @@
-import { withLoopPhase } from "@oh-my-pi/pi-utils";
+import { isRecord, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getDiagnostics, safeForLog } from "./extraction/diagnostics";
 import { callHostLlm, getHostLlmBackend } from "./llm-backends";
 import {
@@ -12,29 +12,14 @@ import {
 } from "./local-llm";
 import { getMnemopiRuntimeOptions } from "./runtime-options";
 import { clipToWindow, DEFAULT_INPUT_CHARS } from "./text-window";
-
-const TRUE_VALUES: Record<string, true> = { "1": true, true: true, yes: true, on: true };
-
-function env(name: string): string {
-	return process.env[name] ?? "";
-}
-
-function envBool(name: string, defaultValue: boolean): boolean {
-	const value = env(name).trim().toLowerCase();
-	return value === "" ? defaultValue : TRUE_VALUES[value] === true;
-}
-
-function envInt(name: string, defaultValue: number): number {
-	const parsed = Number.parseInt(env(name), 10);
-	return Number.isFinite(parsed) ? parsed : defaultValue;
-}
+import { envFlag, envInt, envString } from "../util/env";
 
 function llmEnabled(): boolean {
-	return envBool("MNEMOPI_LLM_ENABLED", true);
+	return envFlag("MNEMOPI_LLM_ENABLED", true);
 }
 
 function hostLlmEnabled(): boolean {
-	return envBool("MNEMOPI_HOST_LLM_ENABLED", false);
+	return envFlag("MNEMOPI_HOST_LLM_ENABLED", false);
 }
 
 function llmMaxTokens(): number {
@@ -42,7 +27,7 @@ function llmMaxTokens(): number {
 }
 
 export const EXTRACTION_PROMPT_TEMPLATE =
-	env("MNEMOPI_EXTRACTION_PROMPT") ||
+	envString("MNEMOPI_EXTRACTION_PROMPT") ||
 	`You are an expert structured memory extractor for Mnemopi v3.0+ MEMORIA tables.
 The user message below may be in English, German, Russian, or another language.
 First detect the language, then extract ONLY high-signal, long-term relevant items.
@@ -157,10 +142,6 @@ function normalizeFactArray(items: unknown, options: FactArrayOptions): string[]
 		}
 	}
 	return out;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function triplePart(value: unknown): string {
@@ -341,8 +322,8 @@ async function tryHostExtraction(prompt: string): Promise<[boolean, string | nul
 		maxTokens: llmMaxTokens(),
 		temperature: 0,
 		timeout: 15,
-		provider: env("MNEMOPI_HOST_LLM_PROVIDER").trim() || null,
-		model: env("MNEMOPI_HOST_LLM_MODEL").trim() || null,
+		provider: envString("MNEMOPI_HOST_LLM_PROVIDER").trim() || null,
+		model: envString("MNEMOPI_HOST_LLM_MODEL").trim() || null,
 	});
 	const text = typeof raw === "string" ? raw.trim() : "";
 	return [true, text === "" ? null : text];

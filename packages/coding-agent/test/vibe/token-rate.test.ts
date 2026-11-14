@@ -19,7 +19,7 @@ const OWNER = "test-owner";
 
 /** Minimal fake AgentSession: just the messages + isStreaming the aggregator reads. */
 function fakeSession(messages: unknown[], isStreaming: boolean): AgentSession {
-	return { state: { messages }, isStreaming } as unknown as AgentSession;
+	return { messages, isStreaming } as unknown as AgentSession;
 }
 
 /** A finalized assistant message with a known duration → deterministic tok/s. */

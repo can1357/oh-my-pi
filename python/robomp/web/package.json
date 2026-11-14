@@ -11,7 +11,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check:types": "tsc --noEmit",
+    "check:types": "bun check --no-script",
     "test": "bun test"
   },
   "dependencies": {
@@ -21,7 +21,6 @@
     "@tailwindcss/vite": "catalog:",
     "@types/bun": "catalog:",
     "tailwindcss": "catalog:",
-    "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plugin-solid": "catalog:"
   }

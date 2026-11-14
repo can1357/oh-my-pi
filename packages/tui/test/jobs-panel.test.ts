@@ -118,6 +118,29 @@ describe("JobsSheet", () => {
 		expect(source.cancel).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps the selected settled job and its output after the session evicts it, until another is selected", () => {
+		let jobs: JobsPanelSnapshot = JOBS;
+		const details: Record<string, JobsPanelDetail | undefined> = { ...DETAILS };
+		const sheet = new JobsSheet({ load: () => jobs, inspect: id => details[id], close: vi.fn() });
+		sheet.handleInput(DOWN);
+		sheet.handleInput(DOWN);
+		expect(prop(list(sheet.describe(CX)), "selected")).toBe("bash-2");
+
+		jobs = { running: JOBS.running, recent: [] };
+		details["bash-2"] = undefined;
+		const root = sheet.describe(CX);
+		expect(prop(list(root), "selected")).toBe("bash-2");
+		expect(prop(byRole(root, "omp.jobs.output")[0], "text")).toBe("1 error\n");
+		expect(sheet.render(100).join("\n")).toContain("1 error");
+
+		sheet.handleInput(UP);
+		sheet.handleInput(DOWN);
+		expect(list(sheet.describe(CX))?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
+			"task-1",
+			"bash-1",
+		]);
+	});
+
 	it("routes clicks: a row selects, Cancel job cancels, Close and Esc close", () => {
 		const { sheet, source } = setup();
 		const events: NativeUiEvent[] = [
@@ -201,6 +224,30 @@ describe("JobsSheet", () => {
 		expect(text).not.toContain("\x1b[2J");
 	});
 
+	it("renders a job's intent as one clean row and its caption without the home directory in the terminal fallback", async () => {
+		await initTheme();
+		const job: JobsPanelJob = {
+			id: "bash-i",
+			type: "bash",
+			status: "running",
+			label: "sleep 60",
+			intent: `Watch\x1b]0;pwned\x07\tthe\nlog in ${os.homedir()}/logs`,
+			caption: `Tails ${os.homedir()}/logs/app.log until cancelled`,
+			startTime: NOW,
+		};
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => ({ pids: [] }),
+			close: vi.fn(),
+		});
+		const lines = sheet.render(160);
+		const row = lines.find(line => line.includes("Watch"));
+		expect(row).toContain("Watch the log in ~/logs");
+		expect(row).not.toContain("\x1b]0;");
+		expect(row).not.toContain("\t");
+		expect(lines.map(line => Bun.stripANSI(line))).toContain("   Tails ~/logs/app.log until cancelled");
+	});
+
 	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {
 		// A focused subagent view only watches that agent's jobs (#14814).
 		const source: JobsSheetSource = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
@@ -234,6 +281,66 @@ describe("JobsSheet", () => {
 		expect(head).toBeGreaterThan(0);
 		expect(lines[head + 2]).toMatch(/^ {5}opus-4\.5 +█+░* +26\/30$/);
 		expect(lines.findIndex(line => line.includes("running 12 tests"))).toBeGreaterThan(head);
+	});
+
+	it("leads a job with its intent and caption over the command, and drops a widget with nothing beyond its title", async () => {
+		await initTheme();
+		const intent = "Waiting for stock watch to finish";
+		const command = "ssh pc-worker 'while systemctl --user is-active -q watch; do sleep 60; done'";
+		const caption = "Checks pc-worker every 60s until the watch service stops";
+		const job: JobsPanelJob = {
+			id: "bg_27",
+			type: "bash",
+			status: "running",
+			label: command,
+			intent,
+			caption,
+			startTime: NOW,
+		};
+		const detail: JobsPanelDetail = {
+			command,
+			cwd: "/work",
+			pids: [41],
+			widget: { title: intent, blocks: [], state: "fallback", updatedAt: NOW },
+		};
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => detail,
+			close: vi.fn(),
+		});
+		const root = sheet.describe(CX);
+		expect(texts(list(root)!)).toContain(intent);
+		expect(texts(list(root)!)).not.toContain("systemctl");
+		expect(prop(byRole(root, "omp.jobs.title")[0], "text")).toBe(intent);
+		expect(texts(byRole(root, "omp.jobs.caption")[0]!)).toContain(caption);
+		expect(prop(byRole(root, "omp.jobs.command")[0], "text")).toBe(command);
+		expect(byRole(root, "omp.jobs.widget")).toHaveLength(0);
+
+		const lines = sheet.render(160).map(line => Bun.stripANSI(line));
+		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(intent);
+		expect(lines.filter(line => line.includes(intent))).toHaveLength(1);
+		expect(lines.some(line => line.includes(caption))).toBe(true);
+	});
+
+	it("shows a caption that lands after its job settled", async () => {
+		await initTheme();
+		const settled: JobsPanelJob = {
+			id: "bg_28",
+			type: "bash",
+			status: "completed",
+			label: "for i in $(seq 40); do sleep 3; done",
+			startTime: NOW,
+			endTime: NOW + 120_000,
+		};
+		let job = settled;
+		const sheet = new JobsSheet({
+			load: () => ({ running: [], recent: [job] }),
+			inspect: () => ({ command: settled.label, pids: [], exitCode: 0, output: "done" }),
+			close: vi.fn(),
+		});
+		expect(byRole(sheet.describe(CX), "omp.jobs.caption")).toHaveLength(0);
+		job = { ...settled, caption: "Waits about 2 min, printing nothing" };
+		expect(texts(byRole(sheet.describe(CX), "omp.jobs.caption")[0]!)).toContain("Waits about 2 min");
 	});
 
 	describe("as a tree of subagents", () => {
@@ -297,6 +404,30 @@ describe("JobsSheet", () => {
 				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}lone-bash$/),
 				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
 				expect.stringMatching(/^ {2}completed {2}bash \S+ {2}main-done$/),
+			]);
+		});
+
+		it("keeps an evicted subagent job under its subagent after the session drops both", () => {
+			const mainBash = job("main-bash", "Main");
+			let snapshot: JobsPanelSnapshot = {
+				rootId: "Main",
+				agents: [{ id: "Gone", parentId: "Main" }],
+				running: [mainBash],
+				recent: [job("gone-done", "Gone", { status: "completed", endTime: NOW })],
+			};
+			const sheet = new JobsSheet({ load: () => snapshot, inspect: () => undefined, close: vi.fn() });
+			sheet.handleNativeEvent({ type: "select", key: "jobs", item: "gone-done" });
+			sheet.render(120);
+
+			snapshot = { rootId: "Main", agents: [], running: [mainBash], recent: [] };
+			const rows = sheet
+				.render(120)
+				.slice(1, 4)
+				.map(line => line.trimEnd());
+			expect(rows).toEqual([
+				"  Gone",
+				expect.stringMatching(/^> └─ completed {2}bash \S+ {2}gone-done$/),
+				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
 			]);
 		});
 

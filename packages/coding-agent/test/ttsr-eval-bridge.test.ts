@@ -101,7 +101,7 @@ describe("TTSR eval bridge enforcement", () => {
 			getActiveModel: () => mock.model,
 			getEvalSessionId: () => `ttsr-${kind}-bridge`,
 			getEvalKernelOwnerId: () => `ttsr-${kind}-bridge`,
-			getEvalBridgeToolNames: () => sessionRef.current?.getEvalBridgeToolNames() ?? [],
+			getAdvertisedEvalToolNames: () => sessionRef.current?.getAdvertisedEvalToolNames() ?? [],
 			getToolForEvalBridge: name => sessionRef.current?.getToolForEvalBridge(name),
 			getToolContext: () => ({ settings, autoApprove: true }) as never,
 		};

@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { type CSSProperties, type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 export interface DrawerProps {
@@ -50,7 +50,7 @@ export function Drawer({ open, onClose, title, subtitle, actions, width, childre
 				role="dialog"
 				aria-modal="true"
 				tabIndex={-1}
-				style={width !== undefined ? ({ "--drawer-w": `${width}px` } as CSSProperties) : undefined}
+				style={width !== undefined ? { "--drawer-w": `${width}px` } : undefined}
 			>
 				<header className="drawer-header">
 					<div className="drawer-titles">

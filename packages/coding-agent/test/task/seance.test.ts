@@ -134,7 +134,7 @@ describe("seance source resolution", () => {
 		});
 	});
 
-	it("fails closed for missing paths and IDs, ambiguous prefixes, and files without a session header", async () => {
+	it("fails closed for missing paths, ambiguous prefixes, and files without a session header", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-source-invalid-");
 		const cwd = path.join(tempDir.path(), "project");
 		const sessionDir = path.join(tempDir.path(), "sessions");
@@ -147,7 +147,6 @@ describe("seance source resolution", () => {
 		await expect(resolveSeanceSource(path.join(sessionDir, "missing.jsonl"), options)).rejects.toThrow(
 			"The selected session file was not found or could not be accessed.",
 		);
-		await expect(resolveSeanceSource("not-present", options)).rejects.toThrow('Session "not-present" was not found.');
 		await expect(resolveSeanceSource("ambiguous", options)).rejects.toThrow(
 			'Session selector "ambiguous" is ambiguous.',
 		);
@@ -201,20 +200,20 @@ describe("seance source resolution", () => {
 		});
 	});
 
-	it("finds an id stored only in another project only when global lookup is requested", async () => {
+	it("resolves a short id stored only in another project", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-global-lookup-");
 		await withAgentDir(path.join(tempDir.path(), "agent"), async () => {
 			const cwd = path.join(tempDir.path(), "project");
 			const otherCwd = path.join(tempDir.path(), "other-project");
-			const foreignFile = path.join(sessionDirForCwd(otherCwd), "foreign.jsonl");
-			await writeSession(foreignFile, "foreign-project-id", otherCwd);
-
-			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow(
-				'Session "foreign-project-id" was not found.',
+			const foreignFile = path.join(
+				sessionDirForCwd(otherCwd),
+				"2026-01-01T00-00-00-000Z_01a18607-07f9-74a2-b035-4de032cd34b7.jsonl",
 			);
-			await expect(resolveSeanceSource("foreign-project-id", { cwd, includeGlobal: true })).resolves.toMatchObject({
+			await writeSession(foreignFile, "01a18607-07f9-74a2-b035-4de032cd34b7", otherCwd);
+
+			await expect(resolveSeanceSource("01a18607-07f9", { cwd })).resolves.toMatchObject({
 				file: foreignFile,
-				id: "foreign-project-id",
+				id: "01a18607-07f9-74a2-b035-4de032cd34b7",
 			});
 		});
 	});
@@ -259,9 +258,9 @@ describe("seance source resolution", () => {
 			const emptyCwd = path.join(tempDir.path(), "empty-project");
 			const emptySessionDir = sessionDirForCwd(emptyCwd);
 			await expect(fs.stat(emptySessionDir)).rejects.toThrow();
-			await expect(
-				resolveSeanceSource("missing-unhinted-source", { cwd: emptyCwd, includeGlobal: true }),
-			).rejects.toThrow('Session "missing-unhinted-source" was not found.');
+			await expect(resolveSeanceSource("missing-unhinted-source", { cwd: emptyCwd })).rejects.toThrow(
+				'Session "missing-unhinted-source" was not found.',
+			);
 			await expect(fs.stat(emptySessionDir)).rejects.toThrow();
 			expect(await fs.readFile(backupFile)).toEqual(originalBackup);
 			expect((await fs.stat(legacyDir)).isDirectory()).toBe(true);

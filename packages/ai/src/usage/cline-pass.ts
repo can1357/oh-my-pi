@@ -114,6 +114,12 @@ async function fetchClinePassUsage(params: UsageFetchParams, ctx: UsageFetchCont
 					response.status,
 				);
 			}
+			// An account that never subscribed to ClinePass (free models and credit only)
+			// answers 404 "no plan history found for user": nothing to meter, not a failure.
+			if (response.status === 404 && /no plan history/i.test(await response.text())) {
+				ctx.logger?.debug("ClinePass account has no plan to meter");
+				return null;
+			}
 			ctx.logger?.warn("ClinePass usage fetch failed", {
 				status: response.status,
 				statusText: response.statusText,

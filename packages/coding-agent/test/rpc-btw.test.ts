@@ -166,6 +166,18 @@ describe("RPC /btw", () => {
 		expect(history.map(record => [record.id, record.status])).toEqual([[slow.id, "cancelled"]]);
 	}, 30_000);
 
+	test("a refused tree navigation leaves the running question alone", async () => {
+		const { rpc, deltas, until, settled } = await start();
+		const slow = await rpc.btw("slow while navigating");
+		await until(() => deltas[0]);
+
+		expect(await rejectionOf(rpc.navigateTree("no-such-entry"))).toMatchObject({ code: "entry_not_found" });
+		expect((await rpc.getBtwHistory())[0]).toMatchObject({ id: slow.id, status: "running" });
+
+		expect(await rpc.cancelBtw(slow.id)).toBe(true);
+		expect(await settled(slow.id)).toMatchObject({ status: "cancelled" });
+	}, 30_000);
+
 	test("runs beside a streaming main turn", async () => {
 		const { rpc, settled } = await start();
 		await rpc.prompt("slow main turn");

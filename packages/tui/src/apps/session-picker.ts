@@ -1,8 +1,9 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import {
 	SessionSelectorComponent,
-	type SessionSelectorEntry,
 	type SessionHistoryMatcher,
+	type SessionListing,
+	type SessionSelectorEntry,
 } from "../overlays/session-selector";
 import { runStandaloneTui } from "./standalone-picker";
 
@@ -11,16 +12,23 @@ export interface SessionPickerHost<T extends SessionSelectorEntry = SessionSelec
 	loadPinnedIds?(): Promise<ReadonlySet<string>>;
 	loadHistoryMatcher?(): SessionHistoryMatcher;
 	deleteSession?(session: T): Promise<boolean>;
-	loadAllSessions?(): Promise<T[]>;
+	/** Rename the session and resolve with the title as stored, or null when it did not happen. */
+	renameSession?(session: T, title: string): Promise<string | null>;
+	setSessionPinned?(session: T, pinned: boolean): Promise<void>;
+	loadAllSessions?(): Promise<SessionListing<T>>;
 }
 
 /** Presentation and capability controls for the standalone session picker. */
 export interface SessionPickerOptions<T extends SessionSelectorEntry = SessionSelectorEntry> {
-	allSessions?: T[];
+	/** Complete listing replacing the preliminary `sessions` once it settles. */
+	completeSessions?: Promise<T[]>;
+	allSessions?: SessionListing<T>;
 	title?: string;
 	scopeLabel?: string | false;
 	showCwd?: boolean;
 	allowDelete?: boolean;
+	/** Rename the selected session; resolve with the title as stored, or null when it did not happen. */
+	onRename?: (session: T, title: string) => Promise<string | null>;
 	allowGlobalScope?: boolean;
 	historySearch?: boolean;
 	pinnedIds?: ReadonlySet<string>;
@@ -63,7 +71,10 @@ export async function selectSession<T extends SessionSelectorEntry>(
 				},
 				{
 					onDelete: options.allowDelete === false ? undefined : host.deleteSession,
+					onRename: options.onRename ?? host.renameSession,
+					onSetPinned: host.setSessionPinned,
 					historyMatcher,
+					completeSessions: options.completeSessions,
 					loadAllSessions: options.allowGlobalScope === false ? undefined : host.loadAllSessions,
 					allSessions: options.allSessions,
 					getTerminalRows: () => ui.terminal.rows,

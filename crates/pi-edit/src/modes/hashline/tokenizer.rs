@@ -527,11 +527,11 @@ fn parse_hunk_header(line: &str) -> Option<(BlockTarget, bool)> {
 }
 
 fn unquote_path(raw: &str) -> Option<String> {
-	if raw.len() >= 2
-		&& ((raw.starts_with('"') && raw.ends_with('"'))
-			|| (raw.starts_with('\'') && raw.ends_with('\'')))
+	if let Some(inner) = raw
+		.strip_circumfix('"', '"')
+		.or_else(|| raw.strip_circumfix('\'', '\''))
 	{
-		return Some(raw[1..raw.len() - 1].to_string());
+		return Some(inner.to_string());
 	}
 	if raw.starts_with('"') || raw.starts_with('\'') {
 		None
@@ -567,9 +567,7 @@ pub fn header_path_has_orphan_bracket(path: &str) -> bool {
 /// untagged path may not: `[a.ts#1A2G]` is a malformed tag, not a file name.
 fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	let line = line.trim_end();
-	let body = line
-		.strip_prefix(HL_FILE_PREFIX)?
-		.strip_suffix(HL_FILE_SUFFIX)?;
+	let body = line.strip_circumfix(HL_FILE_PREFIX, HL_FILE_SUFFIX)?;
 	if body.is_empty() {
 		return None;
 	}

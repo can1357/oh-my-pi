@@ -1,0 +1,26 @@
+### ": \t"
+% :
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,4
+### "\t"
+% : dir1/
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{16}"
+% :
+interactive: []
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,4
+### "fi"
+% : fi
+interactive: file[]
+file1  file2
+@ 0,6
+### "\t"
+% : file
+interactive: file[]
+file1  file2
+@ 0,8
+### "\r"
+% : file1
+@ 0,10

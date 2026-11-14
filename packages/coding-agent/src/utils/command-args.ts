@@ -1,4 +1,11 @@
-/** Split command arguments, optionally enforcing complete quotes and shell-style escapes. */
+/**
+ * Split command arguments on spaces/tabs.
+ *
+ * Default mode treats prose apostrophes literally: a `'`/`"` only delimits when it starts an
+ * argument or follows an option `=`, and a matching quote ends one (`--model="model selector"`
+ * stays one argument; `don't stop` splits into `don't`, `stop`). `strict` applies shell-style
+ * quoting and escapes instead and throws on an unterminated quote or trailing backslash.
+ */
 export function parseCommandArgs(argsString: string, options?: { strict?: boolean }): string[] {
 	const args: string[] = [];
 	let current = "";
@@ -23,15 +30,20 @@ export function parseCommandArgs(argsString: string, options?: { strict?: boolea
 			} else {
 				current += char;
 			}
-		} else if (char === '"' || char === "'") {
+		} else if ((char === '"' || char === "'") && options?.strict) {
 			inQuote = char;
 			started = true;
+		} else if ((char === '"' || char === "'") && (!started || current.endsWith("="))) {
+			const close = findClosingQuote(argsString, i);
+			current += close === -1 ? char : argsString.slice(i + 1, close);
+			started = true;
+			if (close !== -1) i = close;
 		} else if (char === " " || char === "\t") {
 			if (current || (options?.strict && started)) {
 				args.push(current);
-				current = "";
-				started = false;
 			}
+			current = "";
+			started = false;
 		} else {
 			current += char;
 			started = true;
@@ -44,6 +56,16 @@ export function parseCommandArgs(argsString: string, options?: { strict?: boolea
 	}
 
 	return args;
+}
+
+/** Index of the quote matching `argsString[open]` that ends an argument, or -1 when none does. */
+function findClosingQuote(argsString: string, open: number): number {
+	const quote = argsString[open];
+	for (let i = open + 1; i < argsString.length; i++) {
+		const next = argsString[i + 1];
+		if (argsString[i] === quote && (next === undefined || next === " " || next === "\t")) return i;
+	}
+	return -1;
 }
 
 /**

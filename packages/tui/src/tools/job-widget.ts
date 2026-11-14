@@ -126,7 +126,7 @@ export type JobWidgetBlock =
  * a session reload.
  */
 export interface JobWidgetView {
-	/** Short name of what is being watched (`verb-bench · 3 models`). */
+	/** Short name of what is being watched (`loadtest · 3 models`). */
 	title: string;
 	headline?: JobWidgetHeadline;
 	/** What the job is doing now: a subagent's stage, or the last line of output. */
@@ -190,10 +190,22 @@ function headlineGlance(view: JobWidgetView): JobWidgetGlance | undefined {
 	};
 }
 
+/** The meter's `140/190` when the headline only restates its numerator (`140`). */
+function meterWhole(headline: JobWidgetGlance, view: JobWidgetView): string | undefined {
+	const meter = view.blocks.find((block): block is JobWidgetMeterBlock => block.kind === "meter");
+	const whole = meter ? plainLine(meter.text) : "";
+	return /^\s*\/\s*\S/.test(whole.slice(headline.text.trim().length)) && whole.startsWith(headline.text.trim())
+		? whole
+		: undefined;
+}
+
 /** What one glance at the widget reads: the headline, else the latest figure of its first spark or meter. */
 export function jobWidgetGlance(view: JobWidgetView): JobWidgetGlance | undefined {
 	const headline = headlineGlance(view);
-	if (headline) return headline;
+	if (headline) {
+		const whole = meterWhole(headline, view);
+		return whole ? { ...headline, text: whole } : headline;
+	}
 	for (const block of view.blocks) {
 		if (block.kind === "spark" && block.values.length > 0 && plainLine(block.last)) {
 			return { text: plainLine(block.last), label: plainLine(block.label) };
@@ -227,7 +239,7 @@ export function latestJobWidget<T extends JobWidgetEntry>(entries: readonly T[])
 	return latest;
 }
 
-/** The widget as one plain line for tooltips: `verb-bench · 3 models — decode 186 tok/s ▲ 15%`. */
+/** The widget as one plain line for tooltips: `loadtest · 3 models — decode 186 tok/s ▲ 15%`. */
 export function jobWidgetSummary(view: JobWidgetView): string {
 	const glance = jobWidgetGlance(view);
 	const title = plainLine(view.title);

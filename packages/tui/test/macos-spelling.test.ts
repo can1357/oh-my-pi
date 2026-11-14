@@ -99,6 +99,60 @@ describe("macOS spelling feature gates", () => {
 		expect(rendered.replace(/\x1b\[[0-9;:]*m/g, "")).toBe(text);
 	});
 
+	it("checks full words across cursor seams and clips typo marks to each render segment", async () => {
+		const line = "hello world speling teh ";
+		const checkSpelling = mock(async (text: string) =>
+			[...text.matchAll(/\b(?:wor|speling|teh)\b/g)].map(match => ({
+				start: match.index,
+				length: match[0].length,
+			})),
+		);
+		const provider = new MacOSSpellingProvider(backend({ checkSpelling }));
+		provider.setFeatures({ typoDetection: true, autocorrect: false });
+		const updated = Promise.withResolvers<void>();
+		provider.onUpdate = updated.resolve;
+		const segment = (text: string, startCol: number) =>
+			provider.typoRanges(text, decorationContext(line, 0, startCol));
+
+		segment("hello wor", 0);
+		await updated.promise;
+		expect(checkSpelling).toHaveBeenCalledTimes(1);
+		expect(checkSpelling).toHaveBeenCalledWith(line);
+		expect(segment("hello wor", 0)).toEqual([]);
+		expect(segment("ld speling teh ", 9)).toEqual([
+			{ start: 3, length: 7 },
+			{ start: 11, length: 3 },
+		]);
+		expect(segment("hello world spe", 0)).toEqual([{ start: 12, length: 3 }]);
+		expect(segment("ling teh ", 15)).toEqual([
+			{ start: 0, length: 4 },
+			{ start: 5, length: 3 },
+		]);
+		const typing = { line: 0, start: 12, end: 19 };
+		expect(provider.typoRanges("hello world spe", { ...decorationContext(line), typing })).toEqual([]);
+		expect(provider.typoRanges("ling teh ", { ...decorationContext(line, 0, 15), typing })).toEqual([
+			{ start: 5, length: 3 },
+		]);
+	});
+
+	it("applies prose filtering to the unsplit source token", async () => {
+		const line = "src/recieved /recieved teh";
+		const checkSpelling = mock(async (text: string) =>
+			[...text.matchAll(/recieved|teh/g)].map(match => ({ start: match.index, length: match[0].length })),
+		);
+		const provider = new MacOSSpellingProvider(backend({ checkSpelling }));
+		provider.setFeatures({ typoDetection: true, autocorrect: false });
+		const updated = Promise.withResolvers<void>();
+		provider.onUpdate = updated.resolve;
+
+		provider.typoRanges("recieved", decorationContext(line, 0, 4));
+		await updated.promise;
+		expect(checkSpelling).toHaveBeenCalledWith(line);
+		expect(provider.typoRanges("recieved", decorationContext(line, 0, 4))).toEqual([]);
+		expect(provider.typoRanges("recieved", decorationContext(line, 0, 14))).toEqual([]);
+		expect(provider.typoRanges("teh", decorationContext(line, 0, 23))).toEqual([{ start: 0, length: 3 }]);
+	});
+
 	it("holds off the typo mark of the word being typed, keeping the others", async () => {
 		const text = "wrld helo";
 		const checkSpelling = mock(async () => [
@@ -114,7 +168,6 @@ describe("macOS spelling feature gates", () => {
 
 		const typing = { line: 0, start: 5, end: 9 };
 		expect(provider.typoRanges(text, { ...decorationContext(text), typing })).toEqual([{ start: 0, length: 4 }]);
-		// Segments are offset into the line: "helo" alone, starting at column 5.
 		expect(provider.typoRanges("helo", { ...decorationContext(text, 0, 5), typing })).toEqual([]);
 		// The word on another line, or no word being typed, holds nothing back.
 		expect(provider.typoRanges(text, { ...decorationContext(text), typing: { ...typing, line: 1 } })).toHaveLength(2);

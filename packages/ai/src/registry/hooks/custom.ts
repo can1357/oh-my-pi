@@ -2,6 +2,7 @@
  * Whole-flow hooks: `login "custom" hook=…` and `refresh hook=…` for providers
  * whose flow is not expressible in the declarative grammar.
  */
+import { loginMistralVibeSignIn } from "../oauth/mistral-vibe";
 import type { Lazy, LoginHook, RefreshHook } from "./types";
 
 export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
@@ -9,6 +10,9 @@ export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	cursor: () => import("../oauth/cursor").then(module => module.loginCursorHook),
 	perplexity: () => import("../oauth/perplexity").then(module => module.loginPerplexity),
 	snowflake: () => import("../oauth/snowflake").then(module => module.loginSnowflake),
+	"mistral-vibe-sign-in": async () => loginMistralVibeSignIn,
+	"devin-cli": () => import("../oauth/devin-cli").then(module => module.loginDevinCliHook),
+	"devin-windsurf": () => import("../oauth/devin-windsurf").then(module => module.loginDevinWindsurfHook),
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.refreshGitHubCopilotHook),

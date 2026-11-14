@@ -414,7 +414,7 @@ export interface UpdateNotesDetails {
 /** Render update-notes tool calls and results. */
 export const updateNotesToolRenderer = {
 	renderCall(args, _options, theme): Text {
-		const preview = args.append_idea ?? args.body.slice(0, 100);
+		const preview = args.append_idea ?? args.body?.slice(0, 100) ?? "";
 		return new Text(
 			`${theme.fg("toolTitle", theme.bold("update_notes"))} ${theme.fg("muted", truncateToWidth(replaceTabs(preview), 100))}`,
 			0,
@@ -432,4 +432,4 @@ export const updateNotesToolRenderer = {
 	describeResult(result): NativeToolView | undefined {
 		return describeTextResult("update_notes", result, "muted");
 	},
-} satisfies ToolRenderer<{ body: string; append_idea?: string }, UpdateNotesDetails>;
+} satisfies ToolRenderer<{ body?: string; append_idea?: string }, UpdateNotesDetails>;

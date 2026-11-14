@@ -1,6 +1,7 @@
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
+import type { EffectiveExtensionRoots } from "../../../capability/types";
 import type { Settings } from "../../../config/settings";
 import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
@@ -19,12 +20,14 @@ import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
 export function createExtensionDashboardRuntime(options: {
 	cwd: string;
 	settings: Settings;
+	/** Session extension-package lanes, so plugin and configured-package modules are listed. */
+	extensionRoots?: () => EffectiveExtensionRoots;
 	mcpManager?: MCPManager;
 	eventBus?: EventBus;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
 	browserMcpFilterEnabled?: () => boolean;
 }): ExtensionDashboardRuntime {
-	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
+	const { cwd, settings, extensionRoots, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
 	return {
 		getDisabledExtensions: () => cfgDisabledExtensions.get(settings),
 		setDisabledExtensions: ids => cfgDisabledExtensions.set(settings, ids),
@@ -34,7 +37,7 @@ export function createExtensionDashboardRuntime(options: {
 				userSourceEnabled: isUserSourceEnabled(provider.id),
 				foreignUserSource: isForeignUserProvider(provider.id),
 			})),
-		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds),
+		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.()),
 		toggleProvider,
 		toggleUserSource,
 		async persistMcpToggle(name, enabled, sourcePath) {

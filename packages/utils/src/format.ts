@@ -33,10 +33,14 @@ export function formatDuration(ms: number): string {
 /**
  * Format a number with K/M/B suffix for compact display.
  * Uses 1 decimal for small leading digits when non-zero, rounded otherwise.
+ * Values below 1,000 print as-is unless `maxFractionDigits` caps their decimals.
  * Examples: "999", "1K", "1.5K", "25K", "1M", "1.5M", "25M", "1.5B"
  */
-export function formatNumber(n: number): string {
-	if (n < 1_000) return n.toString();
+export function formatNumber(n: number, maxFractionDigits?: number): string {
+	if (n < 1_000) {
+		if (maxFractionDigits === undefined || Number.isInteger(n)) return n.toString();
+		return Number(n.toFixed(maxFractionDigits)).toString();
+	}
 	if (n < 10_000) return `${trim1(n / 1_000)}K`;
 	if (n < 1_000_000) return `${Math.round(n / 1_000)}K`;
 	if (n < 10_000_000) return `${trim1(n / 1_000_000)}M`;

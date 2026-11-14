@@ -10,11 +10,10 @@ use std::{
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 mod options {
 	pub const IGNORE_FAIL_NON_EMPTY: &str = "ignore-fail-on-non-empty";
@@ -59,10 +58,6 @@ impl Utility for Rmdir {
 		}
 		host.exit_code()
 	}
-}
-
-pub(crate) fn rmdir_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Rmdir, SE>()
 }
 
 fn app() -> Command {
@@ -140,7 +135,40 @@ fn verbose(host: &mut Host, dir: &OsStr) {
 fn rmdir(host: &Host, dir: &OsStr) -> io::Result<()> {
 	#[cfg(windows)]
 	reject_dot_component(host, dir)?;
-	host.fs().remove_dir(host.resolve(dir))
+	let resolved = host.resolve(dir);
+	#[cfg(windows)]
+	reject_trimmed_component(dir, &resolved)?;
+	host.fs().remove_dir(resolved)
+}
+
+/// Win32 strips trailing dots and spaces from a component, so `rmdir e.` can
+/// remove `e` or a child reached through a trimmed component. Refuse an operand
+/// whose own spelling would trim, and a resolved path Win32 would still
+/// normalize; a verbatim path is accessed literally, so its components are not
+/// re-checked.
+#[cfg(windows)]
+fn reject_trimmed_component(dir: &OsStr, resolved: &Path) -> io::Result<()> {
+	let operand = dir.as_encoded_bytes();
+	if operand.starts_with(br"\\?\") || operand.starts_with(br"\??\") {
+		return Ok(());
+	}
+	if pi_vfs::is_virtual_path(resolved) {
+		return Ok(());
+	}
+	let joined = resolved.as_os_str().as_encoded_bytes();
+	let verbatim = joined.starts_with(br"\\?\") || joined.starts_with(br"\??\");
+	if !trimmable(operand) && (verbatim || !trimmable(joined)) {
+		return Ok(());
+	}
+	Err(pi_vfs::invalid_argument())
+}
+
+/// Whether a component of `path` would lose a trailing dot or space to Win32
+/// normalization (`.` and `..` name their own directories).
+#[cfg(windows)]
+fn trimmable(path: &[u8]) -> bool {
+	path.split(|&byte| byte == b'/' || byte == b'\\')
+		.any(|part| part != b"." && part != b".." && matches!(part.last(), Some(b'.' | b' ')))
 }
 
 /// POSIX `rmdir(2)` refuses a final `.` (EINVAL) or `..` (ENOTEMPTY) once the
@@ -408,5 +436,49 @@ mod tests {
 		);
 		assert_eq!(run(&root, &["--ignore-fail-on-non-empty", "e/.."]), (0, String::new(), String::new()));
 		assert!(root.join("e").exists());
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn normalized_operands_do_not_remove_another_directory() {
+		for operand in ["e.", "e ", "e./child"] {
+			let (dir, root) = tempdir();
+			fs::create_dir(root.join("e")).unwrap();
+			if operand == "e./child" {
+				fs::create_dir(root.join("e/child")).unwrap();
+			}
+			fs::create_dir(root.join("victim")).unwrap();
+			for cwd in [root.as_path(), dir.path()] {
+				assert_eq!(run(cwd, &[operand]).0, 1, "{operand}");
+				assert!(root.join("e").is_dir(), "{operand}");
+				if operand == "e./child" {
+					assert!(root.join("e/child").is_dir(), "{operand}");
+				}
+				assert!(root.join("victim").is_dir(), "{operand}");
+			}
+		}
+	}
+
+	/// A verbatim cwd is accessed literally, so its trailing-dot components
+	/// must not make every relative operand unremovable.
+	#[cfg(windows)]
+	#[test]
+	fn verbatim_cwd_components_are_not_scanned() {
+		let (_dir, root) = tempdir();
+		let literal = root.join("literal.");
+		fs::create_dir(&literal).unwrap();
+		fs::create_dir(literal.join("child")).unwrap();
+		assert_eq!(run(&literal, &["child"]), (0, String::new(), String::new()));
+		assert!(!literal.join("child").exists());
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn explicit_verbatim_operands_keep_literal_trailing_dots() {
+		let (_dir, root) = tempdir();
+		let literal = root.join("literal.");
+		fs::create_dir(&literal).unwrap();
+		assert_eq!(run(&root, &[literal.to_str().unwrap()]).0, 0);
+		assert!(!literal.exists());
 	}
 }

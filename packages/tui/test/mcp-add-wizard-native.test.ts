@@ -139,6 +139,17 @@ describe("MCP add wizard under a native surface", () => {
 		expect(title(wizard)).toBe("Command");
 	});
 
+	it("pastes the server URL into the connection test instead of leaving the field empty", () => {
+		const onTest = vi.fn(async (_config: MCPAddWizardConfig) => {});
+		const wizard = new MCPAddWizard(deps, vi.fn(), vi.fn(), undefined, onTest, undefined, "linear");
+		wizard.handleInput(DOWN);
+		wizard.handleInput(ENTER);
+		wizard.pasteText("https://mcp.linear.app/mcp");
+		wizard.handleInput(ENTER);
+
+		expect(onTest).toHaveBeenCalledWith(expect.objectContaining({ type: "http", url: "https://mcp.linear.app/mcp" }));
+	});
+
 	it("shows the connection test while it runs and ignores its result once the user stepped back", async () => {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const wizard = new MCPAddWizard(deps, vi.fn(), vi.fn(), undefined, () => promise, undefined, "linear");

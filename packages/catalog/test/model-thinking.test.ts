@@ -531,7 +531,8 @@ describe("model thinking derivation", () => {
 		});
 		expect(mapEffortToGoogleThinkingLevel(Effort.Low)).toBe("LOW");
 		expect(mapEffortToGoogleThinkingLevel(Effort.High)).toBe("HIGH");
-		expect(mapEffortToGoogleThinkingLevel(Effort.XHigh)).toBe("HIGH");
+		// The ladder, not the wire mapper, keeps `xhigh` off models that reject it.
+		expect(() => requireSupportedEffort(model, Effort.XHigh)).toThrow(/not supported/);
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
@@ -598,25 +599,41 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(resellerFlash37)).toContain(Effort.Minimal);
 	});
 
-	it("drives Gemini 4 with thinkingLevel low/medium/high on the direct Google transports", () => {
-		// Google documents LOW/MEDIUM/HIGH for Argon and Argon Cyber Permissive:
+	it("drives Gemini 4 with its thinkingLevel ladder on the direct Google transports", () => {
+		// Google documents LOW/MEDIUM/HIGH for Gemini 4:
 		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
-		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
-		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive"]) {
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
+		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive", "gemini-4-carbon", "gemini-4-hydrogen"]) {
 			for (const [provider, api] of [
 				["google-vertex", "google-vertex"],
 				["google", "google-generative-ai"],
 			] as const) {
 				// `reasoning: false` mirrors Gemini API discovery, which has no bundled
-				// Argon reference and infers non-reasoning from the id.
+				// Gemini 4 reference and infers non-reasoning from the id.
 				for (const reasoning of [true, false]) {
-					const argon = createModel({ id, api, provider, reasoning });
-					expect(argon.reasoning).toBe(true);
-					expect(argon.thinking?.mode).toBe("google-level");
-					expect(getSupportedEfforts(argon)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
-					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, argon)).toBe("MEDIUM");
+					const gemini4 = createModel({ id, api, provider, reasoning });
+					expect(gemini4.reasoning).toBe(true);
+					expect(gemini4.thinking?.mode).toBe("google-level");
+					const efforts = [Effort.Low, Effort.Medium, Effort.High];
+					if (id === "gemini-4-hydrogen") efforts.push(Effort.XHigh);
+					expect(getSupportedEfforts(gemini4)).toEqual(efforts);
+					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, gemini4)).toBe("MEDIUM");
 				}
 			}
+		}
+
+		// Command Code's model list carries no reasoning metadata and skips
+		// cross-provider backfill, so Gemini 4 relies on its KDL effort list.
+		for (const id of ["google/gemini-4-argon", "google/gemini-4-carbon"]) {
+			const commandCode = createModel({
+				id,
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: "https://api.commandcode.ai/provider/v1",
+				reasoning: false,
+			});
+			expect(commandCode.reasoning).toBe(true);
+			expect(getSupportedEfforts(commandCode)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		}
 
 		// The Argon ladder must not leak onto other Gemini 4 lines. No Gemini 4 Pro
@@ -1723,5 +1740,31 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		});
 		expect(ollama.compat.qwenTemplateReasoningEffort).toBe(false);
 		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+	});
+});
+
+describe("effortMap aliases in clampThinkingLevelForModel", () => {
+	const gateway = (efforts: Effort[], effortMap: Record<string, string>) =>
+		createModel({
+			id: "example-route",
+			api: "openai-completions",
+			provider: "example-gateway",
+			thinking: { mode: "effort", efforts, effortMap },
+		});
+
+	it("follows an alias to a served tier instead of climbing down", () => {
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
+	});
+
+	it("climbs down when the alias names an unserved tier", () => {
+		const model = gateway([Effort.Low, Effort.High], { medium: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
+	});
+
+	it("climbs down when the map remaps the alias target again", () => {
+		// Honouring `medium → high` would serialize `max` because the map sends `high` on.
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high", high: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
 	});
 });

@@ -60,7 +60,7 @@ function makeComponent(
 		getAsyncJobSnapshot: () => ({ running }),
 		getRunningJobWidgets: widgets,
 		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionName: () => undefined,
 			getUsageStatistics: () => ({
@@ -102,7 +102,7 @@ describe("status-line background-job badge", () => {
 
 	it("appends the freshest widget's headline and spark, and redraws when its data moves", () => {
 		const spark = (values: number[], last: string): JobWidgetView => ({
-			title: "verb-bench",
+			title: "loadtest",
 			headline: { text: last, trend: { text: "▲ 15%", tone: "success" } },
 			blocks: [{ kind: "spark", label: "tok/s", values, min: 0, max: 200, last }],
 			state: "live",

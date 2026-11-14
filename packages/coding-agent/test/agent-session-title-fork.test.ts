@@ -55,6 +55,9 @@ async function createSession(
 		"compaction.enabled": false,
 		"retry.enabled": false,
 		modelRoles: { tiny: `${model.provider}/${model.id}` },
+		// The default `nf+emoji` follows the global theme's symbol preset, which an
+		// earlier file in the suite can leave on nerd glyphs; the card under test is emoji.
+		"title.icons": "emoji",
 		...settings,
 	});
 	const tools: AgentTool[] = [];

@@ -55,9 +55,11 @@ function trackSixelRaster(term: VirtualTerminal): { stale: number; paints: numbe
 				if (screen[row]?.slice(cursor.col, cursor.col + columns).includes(RASTER)) state.stale++;
 			}
 			state.paints++;
-			let paint = "\x1b7";
+			// Restore by address, not DECSC/DECRC: the image line's own `ESC 7`
+			// must survive for its closing `ESC 8`, as on a real terminal.
+			let paint = "";
 			for (let row = 0; row < rows; row++) paint += `${RASTER.repeat(columns)}\x1b[${columns}D\x1b[B`;
-			realWrite(`${paint}\x1b8`);
+			realWrite(`${paint}\x1b[${cursor.row + 1};${cursor.col + 1}H`);
 		}
 		realWrite(data.slice(offset));
 	});
@@ -194,6 +196,55 @@ describe("SIXEL block repaint", () => {
 			}
 		});
 	}
+
+	it("keeps a top-clipped block's raster out of the history rows written above it", async () => {
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		const term = new VirtualTerminal(40, 8);
+		const raster = trackSixelRaster(term);
+		const tui = new TUI(term);
+		const graphic = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey: "below-history" },
+			{ widthPx: 40, heightPx: 80 },
+		);
+		const settled = ["table row", "table border"];
+		let retired = false;
+		let accepted = false;
+		tui.setFrameProvider({
+			// A streaming block taller than the viewport: its settled rows retire
+			// to history while the viewport window starts inside the image block.
+			renderFrame: size => {
+				const block = graphic.render(size.columns);
+				if (!retired) return { viewport: [...settled, ...block, "following text"] };
+				return {
+					history: accepted ? undefined : { id: 1, rows: settled },
+					viewport: [...block.slice(2), "following text"],
+				};
+			},
+			acknowledgeHistory() {
+				accepted = true;
+			},
+		});
+		try {
+			tui.start();
+			await settle(term);
+			await encodeSixel.mock.results[0]?.value;
+			await settle(term);
+			expect(raster.paints).toBeGreaterThan(0);
+
+			retired = true;
+			tui.requestRender();
+			await settle(term);
+			const viewport = term.getViewport().map(line => line.trimEnd());
+			expect(viewport.slice(0, 2)).toEqual(settled);
+			expect(viewport.flatMap((line, row) => (line.includes(RASTER) ? [row] : []))).toEqual([2, 3]);
+			expect(viewport[4]).toBe("following text");
+		} finally {
+			tui.stop();
+		}
+	});
 
 	it("drops a top-clipped SIXEL the cropper cannot parse instead of failing the frame", async () => {
 		const term = new VirtualTerminal(40, 8);

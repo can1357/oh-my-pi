@@ -1,0 +1,9 @@
+### "echo fi\t"
+% echo file
+@ 0,11
+### "\t"
+% echo file1
+@ 0,12
+### "\t"
+% echo file2
+@ 0,12

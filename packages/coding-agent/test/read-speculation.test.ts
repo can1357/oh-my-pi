@@ -125,9 +125,9 @@ describe("read speculation assessment", () => {
 		const context = { toolCall, args, effect: assessment.effect };
 
 		await tool.speculation.finalized?.execute(context, new AbortController().signal);
-		expect(session.editStore).toBeUndefined();
+		expect(session.state?.editStore).toBeUndefined();
 		await tool.speculation.finalized?.discard?.({ ...context, reason: "candidate discarded" });
-		expect(session.editStore).toBeUndefined();
+		expect(session.state?.editStore).toBeUndefined();
 	});
 
 	it("does not retain provenance when discard wins the read race", async () => {
@@ -145,7 +145,7 @@ describe("read speculation assessment", () => {
 		const outcome = await outcomePromise;
 		await tool.speculation.finalized?.commit?.({ ...context, physicalOutcome: outcome }, outcome);
 
-		expect(session.editStore).toBeUndefined();
+		expect(session.state?.editStore).toBeUndefined();
 	});
 
 	it("merges speculative read provenance only when the candidate commits", async () => {
@@ -159,7 +159,7 @@ describe("read speculation assessment", () => {
 		const outcome = await tool.speculation.finalized?.execute(context, new AbortController().signal);
 		if (!outcome) throw new Error("expected speculative read outcome");
 
-		expect(session.editStore).toBeUndefined();
+		expect(session.state?.editStore).toBeUndefined();
 		await tool.speculation.finalized?.commit?.({ ...context, physicalOutcome: outcome }, outcome);
 		const absolutePath = fs.realpathSync(path.join(testDir, "plain.txt"));
 		const store = getEditStore(session);
@@ -356,9 +356,12 @@ describe("read speculation assessment", () => {
 		);
 		expect(history.get(existing.id)?.oursLines).toEqual(["old ours"]);
 
+		// The live block no longer matches #1, so the authoritative read retires
+		// that id and registers the changed block under a fresh one.
 		const result = await tool.execute("ordinary-conflict-read", args);
-		expect(result.content?.find(entry => entry.type === "text")?.text).toContain("──── #1");
-		expect(history.get(existing.id)?.oursLines).toEqual(["new ours"]);
+		expect(result.content?.find(entry => entry.type === "text")?.text).toContain("──── #2");
+		expect(history.get(existing.id)).toBeUndefined();
+		expect(history.get(2)?.oursLines).toEqual(["new ours"]);
 	});
 
 	it("tracks repeat reads only when speculative results commit", async () => {

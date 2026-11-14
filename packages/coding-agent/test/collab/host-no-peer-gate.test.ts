@@ -124,8 +124,12 @@ describe("collab host with no joined guest", () => {
 	it("mirrors no events or entries until a guest joins, then delivers the first frame after its welcome", async () => {
 		const fixture = makeFixture();
 		const transport = await startHost(fixture);
-		const send = spyOn(transport, "send").mockImplementation(() => {});
-		spyOn(transport, "sendBatch").mockImplementation(() => {});
+		const send = spyOn(transport, "send").mockImplementation(() => true);
+		spyOn(transport, "broadcastAdvisory").mockImplementation(frame => transport.send(frame));
+		spyOn(transport, "sendBatch").mockImplementation((frames, peer) => {
+			for (const frame of frames) transport.send(frame, peer);
+			return true;
+		});
 
 		fixture.emit({ type: "agent_start" });
 		fixture.append(textEntry("before-join"));
@@ -144,8 +148,12 @@ describe("collab host with no joined guest", () => {
 	it("re-sends a state that matches the last one sent before the room emptied", async () => {
 		const fixture = makeFixture();
 		const transport = await startHost(fixture);
-		const send = spyOn(transport, "send").mockImplementation(() => {});
-		spyOn(transport, "sendBatch").mockImplementation(() => {});
+		const send = spyOn(transport, "send").mockImplementation(() => true);
+		spyOn(transport, "broadcastAdvisory").mockImplementation(frame => transport.send(frame));
+		spyOn(transport, "sendBatch").mockImplementation((frames, peer) => {
+			for (const frame of frames) transport.send(frame, peer);
+			return true;
+		});
 		vi.useFakeTimers();
 		const stateFrames = () => send.mock.calls.filter(([frame]) => frameType(frame) === "state");
 

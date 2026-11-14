@@ -1,9 +1,10 @@
+import { type } from "@oh-my-pi/omptype";
 import { getProjectDir, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
-import { setSharedLspEnabled } from "../lsp/client";
+import { holdSharedLsp } from "../lsp/client";
 import { cfgLspShared } from "../lsp/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
@@ -21,27 +22,17 @@ import type { CleanseAgentOutcome, CleanseAssignment, CleanseDiagnostic, Cleanse
 
 const MAX_DIAGNOSTIC_MESSAGE = 4_000;
 
+/** One checker the discovery agent proposes. */
+const DiscoveredChecker = type({
+	label: "string",
+	"language?": "string",
+	"cwd?": "string",
+	command: type("string").array().atLeastLength(1),
+	"parser?": type.enumerated(...CLEANSE_PARSER_KINDS),
+});
+
 /** Structured output contract for the prompted checker-discovery agent. */
-const DISCOVERY_SCHEMA = {
-	type: "object",
-	required: ["checkers"],
-	properties: {
-		checkers: {
-			type: "array",
-			items: {
-				type: "object",
-				required: ["label", "command"],
-				properties: {
-					label: { type: "string" },
-					language: { type: "string" },
-					cwd: { type: "string" },
-					command: { type: "array", items: { type: "string" }, minItems: 1 },
-					parser: { type: "string", enum: [...CLEANSE_PARSER_KINDS] },
-				},
-			},
-		},
-	},
-};
+const DISCOVERY_SCHEMA = type({ checkers: DiscoveredChecker.array() }).toJsonSchema();
 
 /** Hooks used by the standalone command to render subagent lifecycle progress. */
 export interface CleanseAgentHooks {
@@ -80,9 +71,6 @@ export async function createCleanseAgentRuntime(options: {
 }): Promise<CleanseAgentRuntime> {
 	const cwd = options.cwd ?? getProjectDir();
 	const settings = await Settings.init({ cwd });
-	// Cleanse workers are all subagents, and only a session that binds process state
-	// sets the process-wide shared-LSP flag, so the runtime sets it for them.
-	setSharedLspEnabled(cfgLspShared.get(settings));
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
@@ -128,6 +116,9 @@ export async function createCleanseAgentRuntime(options: {
 	let closed = false;
 	/** Live worker number → reserved registry agent id, for follow-up steering. */
 	const workerAgentIds = new Map<number, string>();
+	// Cleanse workers are all subagents, and only a session that binds process state
+	// holds the process-wide shared-LSP mode, so the runtime holds it for them until closed.
+	const sharedLsp = holdSharedLsp(cfgLspShared.get(settings));
 
 	return {
 		model: modelDisplay,
@@ -218,6 +209,7 @@ export async function createCleanseAgentRuntime(options: {
 		async close(result?: CleanseLoopResult): Promise<void> {
 			if (closed) return;
 			closed = true;
+			sharedLsp.release();
 			sessionManager.appendCustomEntry("cleanse", {
 				status: result?.status ?? "interrupted",
 				workers: result?.workers ?? 0,
@@ -228,23 +220,17 @@ export async function createCleanseAgentRuntime(options: {
 	};
 }
 
-/** Defensively validate discovery-agent output into runnable checker specs. */
+/** Defensively validate discovery-agent output into runnable checker specs, skipping invalid entries. */
 function parseDiscoverySpecs(data: unknown): CustomCleanseCheckerSpec[] {
 	if (!isRecord(data) || !Array.isArray(data.checkers)) return [];
 	const specs: CustomCleanseCheckerSpec[] = [];
 	for (const value of data.checkers) {
-		if (!isRecord(value)) continue;
-		const command = Array.isArray(value.command)
-			? value.command.filter((part): part is string => typeof part === "string" && part.length > 0)
-			: [];
-		if (typeof value.label !== "string" || !value.label.trim() || command.length === 0) continue;
-		specs.push({
-			label: value.label.trim(),
-			language: typeof value.language === "string" ? value.language : undefined,
-			cwd: typeof value.cwd === "string" ? value.cwd : undefined,
-			command,
-			parser: typeof value.parser === "string" ? value.parser : undefined,
-		});
+		const checker = DiscoveredChecker(value);
+		if (checker instanceof type.errors) continue;
+		const label = checker.label.trim();
+		const command = checker.command.filter(part => part.length > 0);
+		if (!label || command.length === 0) continue;
+		specs.push({ ...checker, label, command });
 	}
 	return specs;
 }

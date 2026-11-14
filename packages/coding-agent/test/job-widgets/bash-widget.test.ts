@@ -73,8 +73,8 @@ describe("bash job widgets", () => {
 			});
 			// Every pipe line is data the spark already shows, so there is no stage line to repeat it.
 			expect(view?.stage).toBeUndefined();
-			// The author saw the command, the call's intent, and the pipe's lines; `out` is still empty.
-			expect(requests[0]?.brief).toEqual({
+			// The author saw the command, its timeout, the call's intent, and the pipe's lines; `out` is still empty.
+			expect(requests[0]?.brief).toMatchObject({
 				kind: "bash",
 				command: "{ printf 'req 1 rps=40\\nreq 2 rps=48\\nreq 3 rps=56\\n'; sleep 30; } | tail -n 1",
 				intent: "measure req/s under load, goal 60 req/s",

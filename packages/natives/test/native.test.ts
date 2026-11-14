@@ -18,7 +18,6 @@ import {
 	HighlightStream,
 	highlightCode,
 	htmlToMarkdown,
-	invalidateFsScanCache,
 	listWorkspace,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
@@ -256,6 +255,27 @@ describe("pi-natives", () => {
 			expect(out).toContain("<k>function");
 			expect(out).toContain("<n>1");
 			expect(out).toContain("<c> add");
+		});
+
+		it("highlights Zig via the vendored syntax", () => {
+			expect(getSupportedLanguages()).toContain("Zig");
+			expect(supportsLanguage("zig")).toBe(true);
+			expect(supportsLanguage("zon")).toBe(true);
+
+			const out = highlightCode('const std = @import("std");\n// greet\n', "zig", {
+				comment: "<c>",
+				keyword: "<k>",
+				function: "<f>",
+				variable: "<v>",
+				string: "<s>",
+				number: "<n>",
+				type: "<t>",
+				operator: "<o>",
+				punctuation: "<p>",
+			});
+			expect(out).toContain("<k>const");
+			expect(out).toContain('<s>"std"');
+			expect(out).toContain("<c>// greet");
 		});
 	});
 
@@ -717,18 +737,6 @@ try {
 			expect(result.totalMatches).toBe(4);
 		});
 
-		it("should invalidate scan cache when invalidateFsScanCache receives a relative path", async () => {
-			await glob({ pattern: "*.ts", path: testDir, cache: true });
-			const newFile = path.join(testDir, "newly-added.ts");
-			await fs.writeFile(newFile, "export const newer = true;\n");
-
-			const relativePath = path.relative(process.cwd(), newFile);
-			invalidateFsScanCache(relativePath);
-
-			const result = await glob({ pattern: "newly-added.ts", path: testDir, cache: true });
-			expect(result.matches.some(match => match.path === "newly-added.ts")).toBe(true);
-		});
-
 		it("should avoid scan work when maxResults is zero", async () => {
 			const result = await glob({
 				pattern: "**/*",
@@ -788,19 +796,6 @@ try {
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
-		});
-
-		it("should fast-recheck empty cached results when threshold is reached", async () => {
-			const fileName = "cache-empty-recheck-target.txt";
-			const filePath = path.join(testDir, fileName);
-			await fs.rm(filePath, { force: true });
-			invalidateFsScanCache();
-			const first = await glob({ pattern: fileName, path: testDir, hidden: true, gitignore: true, cache: true });
-			expect(first.totalMatches).toBe(0);
-			await fs.writeFile(filePath, "created after empty cached query\n");
-			await Bun.sleep(250);
-			const second = await glob({ pattern: fileName, path: testDir, hidden: true, gitignore: true, cache: true });
-			expect(second.totalMatches).toBe(1);
 		});
 	});
 

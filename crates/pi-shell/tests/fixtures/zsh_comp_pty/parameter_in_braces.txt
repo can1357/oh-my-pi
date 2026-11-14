@@ -1,0 +1,7 @@
+### "echo ${PA\t"
+% echo ${PATH}
+@ 0,15
+### "\t"
+% echo ${PATH}
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,15

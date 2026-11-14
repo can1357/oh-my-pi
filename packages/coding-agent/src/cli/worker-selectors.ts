@@ -5,6 +5,8 @@
  * recognize a worker before importing protocol/runtime graphs whose top-level
  * evaluation is unnecessary in an ordinary interactive process.
  */
+/** Background self-update selector shared by the CLI dispatcher and `cli/auto-update.ts`. */
+export const AUTO_UPDATE_WORKER_ARG = "__omp_worker_auto_update";
 /** Blob-broker selector shared by the CLI dispatcher and worker launcher. */
 export const BLOB_BROKER_WORKER_ARG = "__omp_worker_blob_broker";
 /** Computer-worker selector shared by the CLI dispatcher and worker launcher. */
@@ -19,6 +21,8 @@ export const MNEMOPI_EMBED_SERVER_WORKER_ARG = "__omp_worker_mnemopi_embed_serve
 export const LSP_MUX_WORKER_ARG = "__omp_worker_lsp_mux";
 /** Parent-death watchdog thread selector shared by the CLI dispatcher and `startParentWatchdog`. */
 export const PARENT_WATCHDOG_WORKER_ARG = "__omp_worker_parent_watchdog";
+/** Subagent host worker selector shared by the CLI dispatcher and `SubagentWorker`. */
+export const SUBAGENT_WORKER_ARG = "__omp_worker_subagent";
 /** Activity-worker selector shared by the CLI dispatcher and worker launcher. */
 export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 /** Text-prediction daemon selector shared by the CLI dispatcher and the broker daemon spec. */

@@ -36,7 +36,7 @@ function makeSession() {
 		isFastModeEnabled: () => false,
 		getGoalModeState: () => null,
 		getAsyncJobSnapshot: () => ({ running: [] }),
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionName: () => "transparent test",
 			getUsageStatistics: () => ({

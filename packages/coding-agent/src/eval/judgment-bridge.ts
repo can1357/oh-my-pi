@@ -247,10 +247,12 @@ export function sessionJudge(
 	return resolveJudge({
 		settings: session.settings,
 		registry,
+		sessionModel: session.getActiveModel?.(),
 		sessionId: session.getSessionId?.() ?? undefined,
 		purpose,
 		telemetry: session.getTelemetry?.(),
 		cache: sharedJudgmentCache(),
+		costGate: session.costGate,
 		onUsage:
 			onUsage && journal
 				? usage => {

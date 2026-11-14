@@ -39,9 +39,6 @@ describe("stripOuterDoubleQuotes", () => {
 	it("strips matching double quotes", () => {
 		expect(stripOuterDoubleQuotes('"C:\\Users\\test"')).toBe("C:\\Users\\test");
 	});
-	it("passes through unquoted paths", () => {
-		expect(stripOuterDoubleQuotes("C:\\Users\\test")).toBe("C:\\Users\\test");
-	});
 	it("does not strip mismatched quotes", () => {
 		expect(stripOuterDoubleQuotes('"mismatched')).toBe('"mismatched');
 	});

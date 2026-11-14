@@ -3,6 +3,7 @@ import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import {
 	__awaitAutoQaRecordPipelineForTests,
@@ -114,13 +115,17 @@ describe("flushGrievances", () => {
 	it("lets PI_AUTO_QA=false disable auto QA when the setting is enabled", () => {
 		Bun.env.PI_AUTO_QA = "0";
 
-		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": true }))).toBe(false);
+		const settings = Settings.isolated();
+		cfgDevAutoqa.set(settings, true);
+		expect(isAutoQaEnabled(settings)).toBe(false);
 	});
 
 	it("lets PI_AUTO_QA=true enable auto QA when the setting is disabled", () => {
 		Bun.env.PI_AUTO_QA = "1";
 
-		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": false }))).toBe(true);
+		const settings = Settings.isolated();
+		cfgDevAutoqa.set(settings, false);
+		expect(isAutoQaEnabled(settings)).toBe(true);
 	});
 
 	it("enables auto QA by default with consent still unset", () => {

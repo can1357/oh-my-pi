@@ -84,6 +84,7 @@ function createHarness(): Harness {
 		emit: async () => undefined,
 		getMessageRenderer: () => undefined,
 		getAssistantThinkingRenderers: () => undefined,
+		getAssistantTextRenderers: () => [],
 		getComposerShapes: () => [],
 	};
 
@@ -120,6 +121,7 @@ function createHarness(): Harness {
 
 	const ctx = {
 		chatContainer: new Container(),
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
@@ -136,7 +138,7 @@ function createHarness(): Harness {
 		session: sessionMock,
 		viewSession: {
 			buildTranscriptSessionContext: () => buildSessionContext(entries),
-			sessionManager: { getEntries: () => entries },
+			sessionManager: { getEntries: () => entries, getConversationTip: () => undefined },
 		},
 		focusedAgentId: undefined,
 		sessionManager: {
@@ -149,6 +151,7 @@ function createHarness(): Harness {
 		setToolsExpanded: vi.fn(),
 		toolOutputExpanded: false,
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 		hideThinkingBlock: false,
 		showError: vi.fn(),
 		editor: {

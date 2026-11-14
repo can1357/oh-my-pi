@@ -78,7 +78,13 @@ export function sessionMessagePersistenceKey(message: AgentMessage): string | un
  */
 export function sameMessageContent(left: AgentMessage, right: AgentMessage): boolean {
 	if (left === right) return true;
-	if (left.role !== right.role) return false;
+	// `hookMessage` is the legacy spelling of `custom` (renamed in the v2→v3
+	// session migration): a live hook message and its persisted custom entry,
+	// rebuilt as `custom`, are the same logical message.
+	const bothCustom =
+		(left.role === "custom" || left.role === "hookMessage") &&
+		(right.role === "custom" || right.role === "hookMessage");
+	if (left.role !== right.role && !bothCustom) return false;
 	// `JSON.stringify` is the slow-path serializer here on purpose: nothing on
 	// the hot persistence-check path reaches it (key lookup short-circuits
 	// first), so a stable lexicographic compare beats hand-rolling structural

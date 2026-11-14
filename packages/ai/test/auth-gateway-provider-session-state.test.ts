@@ -20,13 +20,19 @@ import {
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle, AuthGatewaySessionStateRequest } from "@oh-my-pi/pi-ai/auth-gateway";
-import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import type { Api, Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
-import { captureFetch, type CapturedRequest, completionsChunks, kimiK3 } from "./helpers/factory-droid";
+import {
+	anthropicChunks,
+	captureFetch,
+	type CapturedRequest,
+	completionsChunks,
+	kimiK3,
+} from "./helpers/factory-droid";
 
 function makeAnthropicModel(baseUrl: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -367,6 +373,184 @@ async function priorityChatTurn(
 withOfficialAnthropicEndpoint();
 
 describe("auth-gateway provider session state", () => {
+	it.each([
+		{
+			name: "serves a model 404 on a sibling without invalidating the denied OAuth credential",
+			retryAfterMs: undefined,
+		},
+		{
+			name: "retries a model 404 on a previously tried sibling after its short usage block expires",
+			retryAfterMs: 1_000,
+		},
+	])("$name", async ({ retryAfterMs }) => {
+		const previousApiKey = process.env.ANTHROPIC_API_KEY;
+		const previousOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+		delete process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-anthropic-model-404-"));
+		const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(path.join(dir, "auth.db"));
+		if (!store.listCredentialBlocks) throw new Error("test setup lacks persisted credential blocks");
+		store.markCredentialSuspect = async () => {
+			throw new Error("A model 404 must not mark an OAuth credential suspect");
+		};
+		const suspect = spyOn(store, "markCredentialSuspect");
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		const invalidate = spyOn(storage.limits, "invalidateMatching");
+		const usageLimit = spyOn(storage.limits, "markReached");
+		await storage.credentials.set(
+			"anthropic",
+			["A", "B"].map(suffix => ({
+				type: "oauth" as const,
+				access: `sk-ant-oat01-gateway-${suffix}`,
+				refresh: `test-refresh-${suffix}`,
+				expires: Date.now() + 3_600_000,
+				accountId: `test-account-${suffix}`,
+				orgId: `test-org-${suffix}`,
+				email: `${suffix}@example.test`,
+			})),
+		);
+		const rows = store.listAuthCredentials("anthropic");
+		const model = buildModel({
+			id: "claude-mythos-5-2",
+			name: "claude-mythos-5-2",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "http://127.0.0.1:1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64,
+		});
+		const captured: CapturedRequest[] = [];
+		let usageLimitedAt = 0;
+		const success = captureFetch(captured, anthropicChunks("ok"));
+		const realFetch = globalThis.fetch;
+		const unexpectedRequests: string[] = [];
+		const network = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | URL | Request, init?: RequestInit) => {
+					const url = new URL(input instanceof Request ? input.url : input);
+					if (url.hostname !== "127.0.0.1") {
+						unexpectedRequests.push(url.toString());
+						throw new Error("OAuth refresh and non-loopback network requests are forbidden");
+					}
+					return realFetch(input, init);
+				},
+				{ preconnect: realFetch.preconnect },
+			),
+		);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			fetch: async (input, init) => {
+				const response = await success(input, init);
+				if (retryAfterMs !== undefined && captured.length === 1) {
+					usageLimitedAt = Date.now();
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: {
+								type: "rate_limit_error",
+								message:
+									"This request would exceed your account's monthly spend limit. Please try again later.",
+							},
+						}),
+						{
+							status: 429,
+							headers: { "Content-Type": "application/json", "retry-after-ms": String(retryAfterMs) },
+						},
+					);
+				}
+				if (captured.length !== (retryAfterMs === undefined ? 1 : 2)) return response;
+				if (retryAfterMs !== undefined) {
+					const blocks = storage.blocks.list([rows[0]!.id]);
+					expect(blocks).toEqual([
+						expect.objectContaining({
+							providerKey: "anthropic:oauth",
+							blockScope: "tier:mythos",
+						}),
+					]);
+					expect(blocks[0]!.blockedUntilMs).toBeGreaterThanOrEqual(usageLimitedAt + retryAfterMs);
+					expect(blocks[0]!.blockedUntilMs).toBeLessThanOrEqual(Date.now() + retryAfterMs);
+				}
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "not_found_error", message: `model: ${model.id}` },
+						request_id: "req_test",
+					}),
+					{ status: 404, headers: { "Content-Type": "application/json" } },
+				);
+			},
+			version: "test",
+		});
+		try {
+			const response = await fetch(`${gateway.url}/v1/messages`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: model.id,
+					max_tokens: 64,
+					messages: [{ role: "user", content: "hello" }],
+					stream: false,
+				}),
+			});
+			const body = await response.json();
+			expect(response.status).toBe(200);
+			expect(body).toMatchObject({ content: [{ type: "text", text: "ok" }] });
+			expect(captured.map(request => [request.headers.authorization, request.body.model])).toEqual(
+				(retryAfterMs === undefined ? ["A", "B"] : ["A", "B", "A"]).map(suffix => [
+					`Bearer sk-ant-oat01-gateway-${suffix}`,
+					model.id,
+				]),
+			);
+			if (retryAfterMs !== undefined) {
+				expect(usageLimit).toHaveBeenCalledTimes(1);
+				expect(usageLimit.mock.calls[0]?.[2]).toMatchObject({
+					retryAfterMs,
+					providerTimed: true,
+					modelId: model.id,
+					apiKey: "sk-ant-oat01-gateway-A",
+				});
+			} else {
+				expect(usageLimit).not.toHaveBeenCalled();
+			}
+			const deniedRow = rows[retryAfterMs === undefined ? 0 : 1]!;
+			const checkedRows = retryAfterMs === undefined ? rows : [deniedRow];
+			expect(
+				store.listCredentialBlocks(checkedRows.map(row => row.id)).map(block => ({
+					credentialId: block.credentialId,
+					providerKey: block.providerKey,
+					blockScope: block.blockScope,
+				})),
+			).toEqual([
+				{
+					credentialId: deniedRow.id,
+					providerKey: "anthropic:oauth",
+					blockScope: `model-policy:${model.id}`,
+				},
+			]);
+			expect(invalidate).not.toHaveBeenCalled();
+			expect(suspect).not.toHaveBeenCalled();
+			expect(unexpectedRequests).toEqual([]);
+		} finally {
+			await gateway.close();
+			network.mockRestore();
+			suspect.mockRestore();
+			invalidate.mockRestore();
+			usageLimit.mockRestore();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = previousApiKey;
+			if (previousOAuthToken === undefined) delete process.env.ANTHROPIC_OAUTH_TOKEN;
+			else process.env.ANTHROPIC_OAUTH_TOKEN = previousOAuthToken;
+		}
+	});
+
 	it("carries a session's learned fast-mode fallback into its next request", async () => {
 		const upstream = startUpstream();
 		const model = makeAnthropicModel(upstream.url);

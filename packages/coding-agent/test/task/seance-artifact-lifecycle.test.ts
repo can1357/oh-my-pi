@@ -23,6 +23,7 @@ import type { PreparedSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seanc
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { localSession } from "../helpers/local-session";
 
 const MOCK_API_SOURCE = "seance-artifact-lifecycle-test";
 const AGENT_ID = "SeanceArtifactLifecycle";
@@ -197,8 +198,7 @@ describe("seance artifact lifecycle", () => {
 			expect(AgentRegistry.global().get(AGENT_ID)?.history?.outputPath).toBe(publishedPath);
 			expect(await Bun.file(publishedPath).text()).toContain("initial answer");
 
-			const liveSession = AgentRegistry.global().get(AGENT_ID)?.session;
-			if (!liveSession) throw new Error("Expected the initial seance session to stay alive");
+			const liveSession = localSession(AgentRegistry.global().get(AGENT_ID)?.session);
 			await waitForWake(liveSession, eventBus, AGENT_ID, "warm-follow-up");
 			expect(await Bun.file(publishedPath).text()).toContain("warm answer");
 
@@ -214,7 +214,7 @@ describe("seance artifact lifecycle", () => {
 			});
 			lifecycle = AgentLifecycleManager.global();
 			lifecycle.setPersistedSubagentReviverFactory(reviveFactory, () => 0);
-			const coldSession = await lifecycle.ensureLive(AGENT_ID);
+			const coldSession = localSession(await lifecycle.ensureLive(AGENT_ID));
 			await waitForWake(coldSession, eventBus, AGENT_ID, "cold-follow-up");
 
 			expect(await Bun.file(publishedPath).text()).toContain("cold answer");
@@ -320,8 +320,7 @@ describe("seance artifact lifecycle", () => {
 			expect(persisted?.init?.tools).not.toContain("yield");
 			expect(await Bun.file(publishedPath).text()).toContain("Initial unstructured answer");
 
-			const liveSession = AgentRegistry.global().get(UNSTRUCTURED_AGENT_ID)?.session;
-			if (!liveSession) throw new Error("Expected the initial seance session to stay alive");
+			const liveSession = localSession(AgentRegistry.global().get(UNSTRUCTURED_AGENT_ID)?.session);
 			expect(liveSession.getActiveToolNames()).not.toContain("yield");
 			mock.push({ content: ["Warm unstructured answer"] });
 			await waitForWake(liveSession, eventBus, UNSTRUCTURED_AGENT_ID, "warm-unstructured-follow-up");
@@ -339,7 +338,7 @@ describe("seance artifact lifecycle", () => {
 			});
 			lifecycle = AgentLifecycleManager.global();
 			lifecycle.setPersistedSubagentReviverFactory(reviveFactory, () => 0);
-			const coldSession = await lifecycle.ensureLive(UNSTRUCTURED_AGENT_ID);
+			const coldSession = localSession(await lifecycle.ensureLive(UNSTRUCTURED_AGENT_ID));
 			expect(coldSession.getActiveToolNames()).not.toContain("yield");
 			mock.push({ content: ["Cold unstructured answer"] });
 			await waitForWake(coldSession, eventBus, UNSTRUCTURED_AGENT_ID, "cold-unstructured-follow-up");

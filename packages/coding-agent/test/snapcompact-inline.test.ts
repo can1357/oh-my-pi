@@ -119,7 +119,7 @@ describe("SnapcompactInlineTransformer", () => {
 	it("is a no-op for models whose wire strips image input", async () => {
 		// Declares image input, but the Chat Completions guard replaces every
 		// image with a placeholder, so imaged tool results would reach it empty.
-		const model = getBundledModel("venice", "deepseek-v4-1-flash");
+		const model = getBundledModel("deepseek", "deepseek-v4-flash");
 		const options = withTestShape({ renderSystemPrompt: "all", renderToolResults: true });
 		const context = makeContext();
 		expect(await new SnapcompactInlineTransformer(options).transform(context, model)).toBe(context);

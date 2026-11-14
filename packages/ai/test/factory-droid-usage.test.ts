@@ -237,6 +237,7 @@ describe("factoryDroidUsageProvider.fetchUsage", () => {
 		expect(seenUrl).toBe("https://api.eu.factory.ai/api/billing/limits");
 		expect(seenHeaders.authorization).toBe("Bearer workos-token");
 		expect(seenHeaders["x-factory-client"]).toBe("cli");
+		expect(seenHeaders["x-factory-request-surface"]).toBe("cli_tui");
 		expect(seenHeaders["x-factory-org-id"]).toBe("canonical-org");
 	});
 

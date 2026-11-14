@@ -13,6 +13,7 @@ import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const active = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-6.1-sol");
 // Same encoding, another model: it gets the turns re-encoded without their reasoning.
@@ -58,9 +59,14 @@ const codexTurn = (text: string, timestamp: number) => responsesTurn(active, tex
  */
 function maintenance(
 	messages: AgentMessage[],
-	options: { usageTokens?: number; providerSessionState?: Map<string, ProviderSessionState> } = {},
+	options: {
+		usageTokens?: number;
+		providerSessionState?: Map<string, ProviderSessionState>;
+		sessionManager?: SessionManager;
+	} = {},
 ): SessionMaintenance {
 	const agent = new Agent({ initialState: { model: active, systemPrompt: [], tools: [], messages } });
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const host = {
 		agent,
 		settings: Settings.isolated({ "compaction.reserveTokens": 200 }),
@@ -68,6 +74,8 @@ function maintenance(
 		messages: () => agent.state.messages,
 		nonMessageTokenSource: () => ({}),
 		providerSessionState: options.providerSessionState,
+		sessionManager,
+		buildDisplaySessionContext: (model: Model = active) => sessionManager.buildSessionContext({ model }),
 		getContextUsage: ({ contextWindow }: { contextWindow: number }) =>
 			options.usageTokens === undefined
 				? undefined
@@ -136,5 +144,48 @@ describe("SessionMaintenance.contextFitsModel", () => {
 		const retained: AgentMessage = { role: "user", content: "x".repeat(7_600), timestamp: 0 };
 		const failed = codexTurn("Partial answer.", 1);
 		expect(maintenance([retained, failed]).contextFitsModel(candidate, failed)).toBe(false);
+	});
+
+	it("judges a candidate that cannot replay a remote compaction on the history behind it", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "x".repeat(16_000), timestamp: 0 });
+		const keptId = sessionManager.appendMessage(codexTurn("Compacted answer.", 1));
+		const compactionItem = { type: "compaction", encrypted_content: "native-state" };
+		sessionManager.appendCompaction("Remote compaction placeholder", undefined, keptId, 4_000, {
+			preserveData: {
+				openaiRemoteCompaction: { provider: active.provider, replacementHistory: [compactionItem], compactionItem },
+			},
+		});
+		sessionManager.appendMessage({ role: "user", content: "After compaction.", timestamp: 2 });
+		const live = sessionManager.buildSessionContext({ model: active }).messages;
+		const claude = { ...getBundledModel("anthropic", "claude-sonnet-4-5"), contextWindow: 2_000 };
+
+		// The codex candidate replays the payload: the small live context fits.
+		expect(maintenance(live, { sessionManager }).contextFitsModel(candidate)).toBe(true);
+		// Claude reads the ~4,000-token history behind it, which its window cannot hold.
+		expect(maintenance(live, { sessionManager }).contextFitsModel(claude)).toBe(false);
+	});
+
+	it("drops only the failed turn from a candidate's rebuilt history, not an earlier reply sharing its millisecond", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "Question?", timestamp: 0 });
+		// ~4,000 tokens of earlier reply behind the remote compaction, stamped the same millisecond as the failed turn.
+		sessionManager.appendMessage(responsesTurn(active, "x".repeat(16_000), 5));
+		const keptId = sessionManager.appendMessage({ role: "user", content: "And then?", timestamp: 6 });
+		const compactionItem = { type: "compaction", encrypted_content: "native-state" };
+		sessionManager.appendCompaction("Remote compaction placeholder", undefined, keptId, 4_000, {
+			preserveData: {
+				openaiRemoteCompaction: { provider: active.provider, replacementHistory: [compactionItem], compactionItem },
+			},
+		});
+		const failed: AssistantMessage = { ...responsesTurn(active, "Partial answer.", 5), stopReason: "error" };
+		sessionManager.appendMessage(failed);
+		// The failed turn is live in the agent; the rebuilt context leaves a trailing error turn out.
+		const live = [...sessionManager.buildSessionContext({ model: active }).messages, failed];
+		const claude = { ...getBundledModel("anthropic", "claude-sonnet-4-5"), contextWindow: 2_000 };
+
+		expect(maintenance(live, { sessionManager }).contextFitsModel(claude)).toBe(false);
+		// Leaving the failed turn out still counts the earlier reply Claude would be sent.
+		expect(maintenance(live, { sessionManager }).contextFitsModel(claude, failed)).toBe(false);
 	});
 });

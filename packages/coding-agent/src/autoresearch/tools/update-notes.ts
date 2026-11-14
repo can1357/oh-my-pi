@@ -10,7 +10,7 @@ import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
 
 const updateNotesSchema = type({
-	body: type("string").describe("replacement notes body"),
+	"body?": type("string").describe("replacement notes body"),
 	"append_idea?": type("string").describe("append as bullet under Ideas instead of replacing body"),
 });
 
@@ -40,10 +40,18 @@ export function createUpdateNotesTool(
 				};
 			}
 
-			const nextNotes =
-				params.append_idea !== undefined && params.append_idea.trim().length > 0
-					? appendIdea(session.notes, params.append_idea.trim())
-					: params.body;
+			const trimmedIdea = params.append_idea?.trim() ?? "";
+			const nextNotes = trimmedIdea.length > 0 ? appendIdea(session.notes, trimmedIdea) : params.body;
+			if (nextNotes === undefined) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: pass `body` to replace notes or `append_idea` to add an idea.",
+						},
+					],
+				};
+			}
 
 			storage.updateSession(session.id, { notes: nextNotes });
 			const refreshed = storage.getSessionById(session.id);
@@ -59,7 +67,7 @@ export function createUpdateNotesTool(
 					{
 						type: "text",
 						text:
-							params.append_idea !== undefined
+							trimmedIdea.length > 0
 								? `Appended idea (${nextNotes.length} chars total).`
 								: `Notes updated (${nextNotes.length} chars).`,
 					},
@@ -77,9 +85,9 @@ function appendIdea(currentNotes: string, idea: string): string {
 	if (trimmed.length === 0) {
 		return `${IDEAS_HEADING}\n- ${idea}\n`;
 	}
-	if (trimmed.includes(IDEAS_HEADING)) {
-		const lines = trimmed.split("\n");
-		const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	const lines = trimmed.split("\n");
+	const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	if (ideasIndex >= 0) {
 		// find end of ideas section (next heading or end of file)
 		let insertAt = lines.length;
 		for (let i = ideasIndex + 1; i < lines.length; i += 1) {

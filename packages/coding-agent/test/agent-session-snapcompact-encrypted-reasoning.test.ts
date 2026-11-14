@@ -114,7 +114,7 @@ describe("AgentSession snapcompact no-reduction guard: opaque reasoning", () => 
 		// 3 frames ≈ 15k tokens >> the handful of tokens of real archived text,
 		// so this result grows reliable local content and must be rejected.
 		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
-			"snapcompact would not reduce context locally.",
+			"snapcompact would not reduce context",
 		);
 		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
 	});

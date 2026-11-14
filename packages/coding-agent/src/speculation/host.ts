@@ -21,7 +21,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
-import { resolveApproval } from "../tools/approval";
+import { approvalRestrictions, resolveApproval } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import {
@@ -228,6 +228,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			cfgToolsApprovalMode.get(this.settings),
 			cfgToolsApproval.get(this.settings),
 			getApprovalGrants(this.settings.getAgentDir(), this.toolSession.sessionManager?.getSessionId?.()),
+			approvalRestrictions(this.settings, this.toolSession.cwd),
 		);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
 		return { allowed: true };

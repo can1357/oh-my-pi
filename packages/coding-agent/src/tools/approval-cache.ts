@@ -161,24 +161,6 @@ export function approvalDirectoryKey(directory: string): string {
 	return withTrailingSeparator(approvalCacheKeyForPath(directory));
 }
 
-/**
- * Deepest directory key containing every entry of `directories`; `undefined` when they share no
- * root (two drives). The folder a multi-path call's directory answer would grant.
- */
-export function commonApprovalDirectoryKey(directories: readonly string[]): string | undefined {
-	if (directories.length === 0) return undefined;
-	let common = approvalDirectoryKey(directories[0]!);
-	for (const directory of directories.slice(1)) {
-		const key = approvalDirectoryKey(directory);
-		while (!key.startsWith(common)) {
-			const parent = withTrailingSeparator(path.dirname(common));
-			if (parent === common) return undefined;
-			common = parent;
-		}
-	}
-	return common;
-}
-
 /** Path-resolved agent directory, case-folded on Windows: one store per directory. */
 function agentDirKey(agentDir: string): string {
 	const resolved = path.resolve(agentDir);

@@ -1,0 +1,31 @@
+bindkey -R -M viins "^A"-"^C" self-insert
+bindkey -M viins "^D" list-choices
+bindkey -R -M viins "^E"-"^F" self-insert
+bindkey -M viins "^G" list-expand
+bindkey -M viins "^H" vi-backward-delete-char
+bindkey -M viins "^I" expand-or-complete
+bindkey -M viins "^J" accept-line
+bindkey -M viins "^K" self-insert
+bindkey -M viins "^L" clear-screen
+bindkey -M viins "^M" accept-line
+bindkey -R -M viins "^N"-"^P" self-insert
+bindkey -M viins "^Q" vi-quoted-insert
+bindkey -M viins "^R" redisplay
+bindkey -R -M viins "^S"-"^T" self-insert
+bindkey -M viins "^U" vi-kill-line
+bindkey -M viins "^V" vi-quoted-insert
+bindkey -M viins "^W" vi-backward-kill-word
+bindkey -R -M viins "^Y"-"^Z" self-insert
+bindkey -M viins "^[" vi-cmd-mode
+bindkey -M viins "^[OA" up-line-or-history
+bindkey -M viins "^[OB" down-line-or-history
+bindkey -M viins "^[OC" vi-forward-char
+bindkey -M viins "^[OD" vi-backward-char
+bindkey -M viins "^[[200~" bracketed-paste
+bindkey -M viins "^[[A" up-line-or-history
+bindkey -M viins "^[[B" down-line-or-history
+bindkey -M viins "^[[C" vi-forward-char
+bindkey -M viins "^[[D" vi-backward-char
+bindkey -R -M viins "^\\\\"-"~" self-insert
+bindkey -M viins "^?" vi-backward-delete-char
+bindkey -R -M viins "\M-^@"-"\M-^?" self-insert

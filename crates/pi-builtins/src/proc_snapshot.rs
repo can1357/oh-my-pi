@@ -5,13 +5,15 @@
 //! builtins above stay platform-agnostic. The platform queries themselves —
 //! procfs parsing, pidfds, libproc, Toolhelp, process handles — live in
 //! [`sys`], which `pi-shell`'s identity-pinned process references
-//! (`pi_shell::process`) are built on too, so each query has one
+//! (`pi_shell::proctree`) are built on too, so each query has one
 //! implementation and a platform fix lands once.
 
 // Consumers (`ps`, `top`, `pgrep`, `pkill`, `pidwait`, `kill`) are each
 // feature-gated, so a build with only some of them enabled legitimately uses
 // only part of this API.
 #![allow(dead_code, reason = "consumed by the feature-gated process builtins")]
+
+use std::time::Duration;
 
 /// Whether a process reference is still live.
 ///
@@ -23,6 +25,20 @@ pub enum ProcessStatus {
 	Running,
 	/// The referenced process has exited or is no longer observable.
 	Exited,
+}
+
+/// A process's accumulated CPU time, split the way the kernel accounts it.
+#[derive(Clone, Copy, Debug)]
+pub struct CpuTimes {
+	pub user:   Duration,
+	pub system: Duration,
+}
+
+impl CpuTimes {
+	/// User plus system time: `ps`'s TIME column and `top`'s CPU share.
+	pub fn total(self) -> Duration {
+		self.user.saturating_add(self.system)
+	}
 }
 
 /// One thread of a process, as `ps -M` lists it.
@@ -40,8 +56,8 @@ pub struct ThreadInfo {
 	/// Policy letter Apple `ps -M` appends to the priority: `T` timesharing,
 	/// `R` round-robin, `F` FIFO.
 	pub policy:      Option<char>,
-	pub user_time:   Option<std::time::Duration>,
-	pub system_time: Option<std::time::Duration>,
+	pub user_time:   Option<Duration>,
+	pub system_time: Option<Duration>,
 	/// Kernel-decayed recent CPU share on macOS; lifetime average elsewhere.
 	pub cpu_percent: Option<f64>,
 }
@@ -185,7 +201,7 @@ pub mod sys {
 mod proc_snapshot {
 	use std::{collections::HashMap, fs, os::fd::AsFd, time::Duration};
 
-	use super::{ProcessStatus, ThreadInfo, sys};
+	use super::{CpuTimes, ProcessStatus, ThreadInfo, sys};
 
 	#[derive(Clone)]
 	pub struct ProcInfo {
@@ -365,9 +381,10 @@ mod proc_snapshot {
 			sys::pidfd_send_signal(pidfd.as_fd(), signal)
 		}
 
-		pub fn cpu_time(&self) -> Option<Duration> {
-			let ticks = clock_ticks()?;
-			Some(Duration::from_secs_f64((self.stat.utime + self.stat.stime) as f64 / ticks as f64))
+		pub fn cpu_times(&self) -> Option<CpuTimes> {
+			let ticks = clock_ticks()? as f64;
+			let seconds = |value: u64| Duration::from_secs_f64(value as f64 / ticks);
+			Some(CpuTimes { user: seconds(self.stat.utime), system: seconds(self.stat.stime) })
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -499,9 +516,12 @@ mod proc_snapshot {
 /// macOS process primitives: libproc and `KERN_PROCARGS2`.
 #[cfg(target_os = "macos")]
 pub mod sys {
-	use std::{mem::size_of, ptr};
+	use std::ptr;
 
 	const KERN_PROCARGS2: libc::c_int = 49;
+	// proc_pidinfo flavors missing from libc. Short BSD info is readable for
+	// other users; the unique identifier pins those records against PID reuse.
+	const PROC_PIDUNIQIDENTIFIERINFO: libc::c_int = 17;
 
 	/// Capacity `proc_pidpath` needs (`PROC_PIDPATHINFO_MAXSIZE`).
 	pub const PATH_CAPACITY: usize = 4096;
@@ -531,9 +551,57 @@ pub mod sys {
 		pids
 	}
 
-	/// The kernel's BSD record for `pid`. Its start time identifies the process
-	/// across pid reuse.
+	/// A BSD record available even when the full BSD flavor is denied for
+	/// another user's process. Zombies require `arg = 1`.
+	pub fn short_bsdinfo(pid: i32) -> Option<libc::proc_bsdshortinfo> {
+		if pid <= 0 {
+			return None;
+		}
+		// SAFETY: proc_bsdshortinfo is a C integer record valid when zeroed.
+		let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdshortinfo>() };
+		// SAFETY: info is writable for the exact supplied size.
+		let actual = unsafe {
+			libc::proc_pidinfo(
+				pid,
+				libc::PROC_PIDT_SHORTBSDINFO,
+				1,
+				(&raw mut info).cast(),
+				size_of::<libc::proc_bsdshortinfo>() as i32,
+			)
+		};
+		(actual >= size_of::<libc::proc_bsdshortinfo>() as i32).then_some(info)
+	}
+
+	/// Kernel-unique identity for a process, including an unreaped zombie.
+	/// `proc_uniqidentifierinfo` is 56 bytes; its unique ID follows the
+	/// 16-byte executable UUID (XNU's proc_info_private.h ABI).
+	pub fn unique_id(pid: i32) -> Option<u64> {
+		let mut info = [0u64; 7];
+		// SAFETY: info is a 56-byte aligned writable buffer for this flavor.
+		let actual = unsafe {
+			libc::proc_pidinfo(
+				pid,
+				PROC_PIDUNIQIDENTIFIERINFO,
+				1,
+				info.as_mut_ptr().cast(),
+				size_of::<[u64; 7]>() as i32,
+			)
+		};
+		(actual >= size_of::<[u64; 7]>() as i32).then_some(info[2])
+	}
+
+	/// The kernel's BSD record for a live `pid`. Its start time identifies the
+	/// process across pid reuse. Shell process handles consider zombies exited.
 	pub fn bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
+		bsdinfo_with_zombies(pid, false)
+	}
+
+	/// BSD info for snapshots, including children awaiting reaping.
+	pub fn bsdinfo_including_zombies(pid: i32) -> Option<libc::proc_bsdinfo> {
+		bsdinfo_with_zombies(pid, true)
+	}
+
+	fn bsdinfo_with_zombies(pid: i32, include_zombies: bool) -> Option<libc::proc_bsdinfo> {
 		if pid <= 0 {
 			return None;
 		}
@@ -544,7 +612,7 @@ pub mod sys {
 			libc::proc_pidinfo(
 				pid,
 				libc::PROC_PIDTBSDINFO,
-				0,
+				u64::from(include_zombies),
 				(&raw mut info).cast(),
 				size_of::<libc::proc_bsdinfo>() as i32,
 			)
@@ -597,22 +665,34 @@ mod proc_snapshot {
 	use std::{
 		collections::HashMap,
 		ffi::CStr,
-		mem::size_of,
 		path::Path,
+		sync::LazyLock,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
 
-	use super::{ProcessStatus, ThreadInfo, sys};
+	use super::{CpuTimes, ProcessStatus, ThreadInfo, sys};
+
+	#[allow(deprecated)]
+	static TIMEBASE: LazyLock<Option<(u32, u32)>> = LazyLock::new(|| {
+		let mut info = libc::mach_timebase_info_data_t { numer: 0, denom: 0 };
+		// SAFETY: info points to a writable Mach timebase record.
+		let status = unsafe { libc::mach_timebase_info(&raw mut info) };
+		(status == libc::KERN_SUCCESS && info.numer != 0 && info.denom != 0)
+			.then_some((info.numer, info.denom))
+	});
 
 	/// `proc_pidinfo` flavor listing a task's thread handles; absent from `libc`.
 	const PROC_PIDLISTTHREADS: libc::c_int = 6;
 
 	#[derive(Clone)]
 	pub struct ProcInfo {
-		pid:  i32,
-		info: libc::proc_bsdinfo,
-		task: Option<libc::proc_taskinfo>,
-		args: Vec<String>,
+		pid:      i32,
+		info:     libc::proc_bsdinfo,
+		// Short records have no start time. Pin them with the unique process
+		// ID instead; zero means the ID was unavailable (display only).
+		short_id: Option<u64>,
+		task:     Option<libc::proc_taskinfo>,
+		args:     Vec<String>,
 	}
 
 	#[allow(
@@ -625,12 +705,38 @@ mod proc_snapshot {
 		}
 
 		fn from_pid(pid: i32) -> Option<Self> {
-			let info = sys::bsdinfo(pid)?;
-			Some(Self { pid, info, task: read_taskinfo(pid), args: sys::args(pid) })
+			if let Some(info) = sys::bsdinfo_including_zombies(pid) {
+				return Some(Self {
+					pid,
+					info,
+					short_id: None,
+					task: read_taskinfo(pid),
+					args: sys::args(pid),
+				});
+			}
+			// Full BSD info is restricted to the same user; short BSD info
+			// exposes the identity, owner and state of other users' processes.
+			// No start time in a short record: bracket its read with unique
+			// IDs so a PID recycled mid-snapshot cannot be signalled later.
+			let before = sys::unique_id(pid);
+			let short = sys::short_bsdinfo(pid)?;
+			let short_id = if before == sys::unique_id(pid) { before.unwrap_or(0) } else { 0 };
+			Some(Self {
+				pid,
+				info: bsdinfo_from_short(&short),
+				short_id: Some(short_id),
+				task: None,
+				args: Vec::new(),
+			})
 		}
 
 		fn live_info(&self) -> Option<libc::proc_bsdinfo> {
-			let info = sys::bsdinfo(self.pid())?;
+			if let Some(id) = self.short_id {
+				let short = sys::short_bsdinfo(self.pid())?;
+				return (id != 0 && sys::unique_id(self.pid()) == Some(id))
+					.then(|| bsdinfo_from_short(&short));
+			}
+			let info = sys::bsdinfo_including_zombies(self.pid())?;
 			(info.pbi_start_tvsec == self.info.pbi_start_tvsec
 				&& info.pbi_start_tvusec == self.info.pbi_start_tvusec)
 				.then_some(info)
@@ -671,10 +777,14 @@ mod proc_snapshot {
 		}
 
 		pub fn terminal_id(&self) -> Option<u64> {
-			(!matches!(self.info.e_tdev, 0 | u32::MAX)).then_some(self.info.e_tdev as u64)
+			(self.short_id.is_none() && !matches!(self.info.e_tdev, 0 | u32::MAX))
+				.then_some(self.info.e_tdev as u64)
 		}
 
 		pub fn terminal_group_id(&self) -> Option<i32> {
+			if self.short_id.is_some() {
+				return None;
+			}
 			i32::try_from(self.info.e_tpgid)
 				.ok()
 				.filter(|tpgid| *tpgid > 0)
@@ -727,6 +837,11 @@ mod proc_snapshot {
 		}
 
 		pub const fn start_time(&self) -> u64 {
+			if self.short_id.is_some() {
+				// No start time in short BSD info. Never infer ancestry from a
+				// recycled parent PID without comparable start timestamps.
+				return u64::MAX;
+			}
 			self
 				.info
 				.pbi_start_tvsec
@@ -735,6 +850,9 @@ mod proc_snapshot {
 		}
 
 		pub fn age(&self) -> Option<Duration> {
+			if self.short_id.is_some() {
+				return None;
+			}
 			let start = UNIX_EPOCH
 				+ Duration::from_secs(self.info.pbi_start_tvsec)
 				+ Duration::from_micros(self.info.pbi_start_tvusec);
@@ -773,9 +891,21 @@ mod proc_snapshot {
 			unsafe { libc::kill(self.pid(), signal) == 0 }
 		}
 
-		pub fn cpu_time(&self) -> Option<Duration> {
+		pub fn cpu_times(&self) -> Option<CpuTimes> {
 			let task = self.task.as_ref()?;
-			Some(Duration::from_nanos(task.pti_total_user.saturating_add(task.pti_total_system)))
+			let (numer, denom) = (*TIMEBASE)?;
+			// PROC_PIDTASKINFO CPU counters are Mach absolute-time ticks, not nanoseconds.
+			let duration = |ticks: u64| {
+				let nanos = u128::from(ticks) * u128::from(numer) / u128::from(denom);
+				Some(Duration::new(
+					u64::try_from(nanos / 1_000_000_000).ok()?,
+					(nanos % 1_000_000_000) as u32,
+				))
+			};
+			Some(CpuTimes {
+				user:   duration(task.pti_total_user)?,
+				system: duration(task.pti_total_system)?,
+			})
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -791,8 +921,31 @@ mod proc_snapshot {
 		}
 
 		pub const fn nice(&self) -> Option<i32> {
+			if self.short_id.is_some() {
+				return None;
+			}
 			Some(self.info.pbi_nice)
 		}
+	}
+
+	/// Convert the fields actually present in the unrestricted short BSD
+	/// record; unavailable fields stay unset, not invented from pid 0.
+	fn bsdinfo_from_short(short: &libc::proc_bsdshortinfo) -> libc::proc_bsdinfo {
+		// SAFETY: proc_bsdinfo consists of C integer fields and fixed arrays.
+		let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+		info.pbi_pid = short.pbsi_pid;
+		info.pbi_ppid = short.pbsi_ppid;
+		info.pbi_pgid = short.pbsi_pgid;
+		info.pbi_status = short.pbsi_status;
+		info.pbi_comm = short.pbsi_comm;
+		info.pbi_flags = short.pbsi_flags;
+		info.pbi_uid = short.pbsi_uid;
+		info.pbi_gid = short.pbsi_gid;
+		info.pbi_ruid = short.pbsi_ruid;
+		info.pbi_rgid = short.pbsi_rgid;
+		info.pbi_svuid = short.pbsi_svuid;
+		info.pbi_svgid = short.pbsi_svgid;
+		info
 	}
 
 	/// Lists every thread of each process in the kernel's creation order.
@@ -911,6 +1064,47 @@ mod proc_snapshot {
 		};
 		(actual >= size_of::<libc::proc_taskinfo>() as i32).then_some(info)
 	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::time::{Duration, Instant};
+
+		use super::{CpuTimes, ProcInfo};
+
+		fn process_cpu() -> Duration {
+			ProcInfo::from_pid(std::process::id() as i32)
+				.and_then(|process| process.cpu_times())
+				.map(CpuTimes::total)
+				.expect("process CPU time")
+		}
+
+		fn usage_cpu() -> Duration {
+			// SAFETY: rusage is an integer record that may be zero-initialized.
+			let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+			// SAFETY: usage is a valid writable rusage record.
+			assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) }, 0);
+			let micros = (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64 * 1_000_000
+				+ (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64;
+			Duration::from_micros(micros)
+		}
+
+		#[test]
+		fn process_cpu_time_matches_system_usage_after_work() {
+			let before = process_cpu();
+			let usage_before = usage_cpu();
+			let start = Instant::now();
+			while start.elapsed() < Duration::from_millis(150) {
+				std::hint::spin_loop();
+			}
+			let usage_delta = usage_cpu() - usage_before;
+			let delta = process_cpu() - before;
+			assert!(usage_delta > Duration::from_millis(20), "insufficient CPU time: {usage_delta:?}");
+			assert!(
+				delta.abs_diff(usage_delta) < Duration::from_millis(40).max(usage_delta / 4),
+				"process CPU time {delta:?} differs from getrusage {usage_delta:?}"
+			);
+		}
+	}
 }
 
 /// Windows process primitives: Toolhelp snapshots and process handles.
@@ -918,7 +1112,6 @@ mod proc_snapshot {
 pub mod sys {
 	use std::{
 		ffi::c_void,
-		mem::size_of,
 		os::windows::io::{AsRawHandle, HandleOrInvalid, HandleOrNull, OwnedHandle, RawHandle},
 		sync::Arc,
 	};
@@ -1271,12 +1464,12 @@ pub mod sys {
 		// SAFETY: a successful query initializes a UnicodeString at the buffer head.
 		let command = unsafe { &*storage.as_ptr().cast::<UnicodeString>() };
 		let length = usize::from(command.length);
-		if length == 0 || length % size_of::<u16>() != 0 {
+		if length == 0 || !length.is_multiple_of(size_of::<u16>()) {
 			return None;
 		}
-		let base = storage.as_ptr() as usize;
+		let base = storage.as_ptr().addr();
 		let end = base.checked_add(storage.len().checked_mul(size_of::<usize>())?)?;
-		let command_start = command.buffer as usize;
+		let command_start = command.buffer.addr();
 		let command_end = command_start.checked_add(length)?;
 		if command_start < base || command_end > end {
 			return None;
@@ -1334,14 +1527,13 @@ pub mod sys {
 mod proc_snapshot {
 	use std::{
 		collections::HashMap,
-		mem::size_of,
 		os::windows::io::{AsRawHandle, HandleOrNull, OwnedHandle, RawHandle},
 		sync::Arc,
 		time::Duration,
 	};
 
 	use super::{
-		ProcessStatus, ThreadInfo,
+		CpuTimes, ProcessStatus, ThreadInfo,
 		sys::{self, FileTime, ProcessEntry},
 	};
 
@@ -1563,9 +1755,9 @@ mod proc_snapshot {
 				&& sys::terminate(&handle)
 		}
 
-		pub fn cpu_time(&self) -> Option<Duration> {
+		pub fn cpu_times(&self) -> Option<CpuTimes> {
 			let (_, kernel, user) = sys::process_times(&self.handle)?;
-			Some(ticks_duration(kernel.saturating_add(user)))
+			Some(CpuTimes { user: ticks_duration(user), system: ticks_duration(kernel) })
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -1709,7 +1901,7 @@ pub use proc_snapshot::{ProcInfo, threads_by_pid};
 /// Listing is unaffected: `pgrep` still reports ancestors and `ps` still shows
 /// them. Only signalling consults this.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) struct HostProcesses {
+pub struct HostProcesses {
 	/// This process and its ancestors, nearest first.
 	pub pids:  smallvec::SmallVec<[i32; 16]>,
 	/// The process groups those processes belong to.
@@ -1733,16 +1925,31 @@ struct ChainNode {
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl HostProcesses {
-	/// Walks the parent chain from the current process, taking one process-table
-	/// snapshot.
-	pub fn resolve() -> Self {
-		Self::resolve_in(&ProcInfo::all())
+	/// Whether signalling `target` would reach this process or one of its
+	/// ancestors.
+	///
+	/// `target` follows `kill(2)`: a positive value is a pid, `0` is the caller's
+	/// own process group, `-1` is every process the caller may signal, and any
+	/// other negative value is the process group `-target`. The caller's own
+	/// group needs no special case — it is in [`Self::pgids`] by construction.
+	///
+	/// Reads the already-resolved chain, so a loop over operands walks the
+	/// process table once, not once per operand.
+	#[must_use]
+	pub fn blocks(&self, target: i32) -> bool {
+		if target == -1 || target == 0 {
+			return true;
+		}
+		match target.checked_neg() {
+			Some(pgid) if pgid > 0 => self.pgids.contains(&pgid),
+			_ => self.pids.contains(&target),
+		}
 	}
 
-	/// [`Self::resolve`] against a snapshot the caller already holds.
-	///
-	/// `pkill` snapshots the table to select its targets; this spares it a second.
-	pub fn resolve_in(all: &[ProcInfo]) -> Self {
+	/// Walks the parent chain from the current process through `all`, a
+	/// process-table snapshot the caller already holds (`pkill` snapshots the
+	/// table to select its targets; this spares it a second).
+	pub(crate) fn resolve_in(all: &[ProcInfo]) -> Self {
 		let Ok(self_pid) = i32::try_from(std::process::id()) else {
 			return Self { pids: smallvec::SmallVec::new(), pgids: smallvec::SmallVec::new() };
 		};
@@ -1831,6 +2038,53 @@ mod tests {
 		assert!(parse_procargs2(&[1, 0]).is_empty(), "a truncated header has no arguments");
 	}
 
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn macos_snapshot_includes_other_users_processes() {
+		let init = ProcInfo::all()
+			.into_iter()
+			.find(|process| process.pid() == 1)
+			.expect("launchd must be visible even without root privileges");
+		assert_eq!(init.effective_user_id(), Some(0));
+		assert!(!init.command_name().is_empty());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn macos_snapshot_includes_unreaped_zombie() {
+		use std::{
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let mut child = Command::new("/usr/bin/true").spawn().expect("spawn child");
+		let pid = i32::try_from(child.id()).expect("child pid fits i32");
+		let deadline = Instant::now() + Duration::from_secs(3);
+		let zombie = loop {
+			if let Some(info) = super::sys::short_bsdinfo(pid)
+				&& info.pbsi_status == 5
+			{
+				break true;
+			}
+			if Instant::now() >= deadline {
+				break false;
+			}
+			thread::sleep(Duration::from_millis(10));
+		};
+		let observed = if zombie {
+			ProcInfo::all()
+				.into_iter()
+				.find(|process| process.pid() == pid)
+				.map(|process| (process.state(), process.ppid()))
+		} else {
+			None
+		};
+		child.wait().expect("reap child");
+		assert!(zombie, "child did not reach zombie state before timeout");
+		assert_eq!(observed, Some(('Z', Some(std::process::id() as i32))));
+	}
+
 	/// Builds a lookup over a synthetic `(pid, ppid, pgid, start)` tree.
 	fn tree(nodes: &[(i32, Option<i32>, Option<i32>, u64)]) -> impl Fn(i32) -> Option<ChainNode> + '_ {
 		|pid| {
@@ -1915,8 +2169,7 @@ mod tests {
 		let self_pid = i32::try_from(std::process::id()).expect("pid fits in i32");
 
 		assert_eq!(host.pids.first(), Some(&self_pid), "the chain must start at us");
-		for pair in host.pids.windows(2) {
-			let [child, parent] = [pair[0], pair[1]];
+		for &[child, parent] in host.pids.array_windows() {
 			let entry = all
 				.iter()
 				.find(|process| process.pid() == child)
@@ -1964,7 +2217,7 @@ mod tests {
 	/// Guards against over-broad protection (a whole session, say).
 	#[test]
 	fn leaves_unrelated_processes_out_of_the_chain() {
-		let host = HostProcesses::resolve();
+		let host = HostProcesses::resolve_in(&ProcInfo::all());
 		assert!(
 			ProcInfo::all()
 				.iter()
@@ -2005,7 +2258,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn records_our_own_process_group() {
-		let host = HostProcesses::resolve();
+		let host = HostProcesses::resolve_in(&ProcInfo::all());
 		// SAFETY: getpgrp takes no arguments and touches no memory.
 		let pgid = unsafe { libc::getpgrp() };
 		assert!(host.pgids.contains(&pgid), "own process group {pgid} missing");
@@ -2015,7 +2268,7 @@ mod tests {
 	/// reason this is not a hashed set.
 	#[test]
 	fn chain_stays_in_inline_storage() {
-		let host = HostProcesses::resolve();
+		let host = HostProcesses::resolve_in(&ProcInfo::all());
 		assert!(
 			!host.pids.spilled() && !host.pgids.spilled(),
 			"chain spilled to the heap: {} pids, {} pgids",

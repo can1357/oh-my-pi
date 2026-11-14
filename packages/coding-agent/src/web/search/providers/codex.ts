@@ -302,7 +302,6 @@ function buildCodexHeaders(
 		headers.delete(OPENAI_HEADERS.ACCOUNT_ID);
 	}
 	applyCodexResidencyHeader(headers, accessToken);
-	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, CODEX_CLIENT_VERSION);
 	headers.set("User-Agent", USER_AGENT);

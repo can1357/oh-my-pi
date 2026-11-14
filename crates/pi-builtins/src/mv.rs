@@ -9,7 +9,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pi_vfs::{
@@ -30,7 +29,7 @@ use uucore::{
 use crate::{
 	cp::{CpError, MoveCopier},
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser},
 	progress::stderr_draw_target,
 };
 
@@ -546,7 +545,7 @@ fn assert_not_same_file(
 		// `mv source target_dir/target` => target_dir/target
 		// we canonicalize target_dir and join /target
 		match parent_path(&target_abs) {
-			Some(parent) if !parent.as_os_str().is_empty() => child_path(
+			Some(parent) if !parent.is_empty() => child_path(
 				&filesystem.canonicalize_with(parent, &logical)?,
 				&file_name(target).unwrap_or_default(),
 			),
@@ -669,22 +668,20 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 
 	let display_manager = progress_manager(host, options.progress_bar);
 
-	let count_progress = if let Some(display_manager) = &display_manager {
-		if files.len() > 1 {
-			Some(
-				display_manager.add(
-					ProgressBar::new(files.len().try_into().unwrap()).with_style(
-						ProgressStyle::with_template(&format!(
-							"{} {{msg}} {{wide_bar}} {{pos}}/{{len}}",
-							"moving"
-						))
-						.unwrap(),
-					),
+	let count_progress = if let Some(display_manager) = &display_manager
+		&& files.len() > 1
+	{
+		Some(
+			display_manager.add(
+				ProgressBar::new(files.len().try_into().unwrap()).with_style(
+					ProgressStyle::with_template(&format!(
+						"{} {{msg}} {{wide_bar}} {{pos}}/{{len}}",
+						"moving"
+					))
+					.unwrap(),
 				),
-			)
-		} else {
-			None
-		}
+			),
+		)
 	} else {
 		None
 	};
@@ -696,7 +693,7 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 		}
 
 		if let Some(pb) = &count_progress {
-			let msg = format!("{} (scanning hardlinks)", sourcepath.to_string_lossy());
+			let msg = format!("{} (scanning hardlinks)", sourcepath.display());
 			pb.set_message(msg);
 		}
 
@@ -843,14 +840,7 @@ fn rename(
 /// Whether a failed rename crossed devices or filesystem providers, so the
 /// move may be completed by copying and removing.
 fn crosses_devices(error: &io::Error) -> bool {
-	#[cfg(windows)]
-	const EXDEV: i32 = windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE as _;
-	#[cfg(unix)]
-	const EXDEV: i32 = libc::EXDEV as _;
-	#[cfg(target_os = "wasi")]
-	const EXDEV: i32 = 18; // POSIX EXDEV value
-
-	error.kind() == io::ErrorKind::CrossesDevices || error.raw_os_error() == Some(EXDEV)
+	error.kind() == io::ErrorKind::CrossesDevices
 }
 
 /// A wrapper around `rename`, so that if it fails, we try falling back on
@@ -1084,11 +1074,6 @@ fn can_delete_file(_host: &Host, _: &Path) -> bool {
 	// rename failing with errors other than EXDEV means the operation cannot
 	// succeed even with a copy+delete approach (e.g. permission errors).
 	false
-}
-
-/// Creates the `mv` builtin registration.
-pub(crate) fn mv_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Mv, SE>()
 }
 
 #[cfg(test)]

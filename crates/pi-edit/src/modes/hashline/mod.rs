@@ -83,7 +83,7 @@ impl ModeEngine for HashlineEngine {
 			});
 			return Err(match path {
 				Some(path) => patcher::header_only_error(&path, files),
-				None => EditError::apply("No hashline sections found in input."),
+				None => EditError::parse("No hashline sections found in input."),
 			});
 		}
 		patcher::stage_patch(&patch, input, self.enforce_seen_lines, self.max_columns, files, store)

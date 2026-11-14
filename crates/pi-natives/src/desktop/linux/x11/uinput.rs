@@ -26,6 +26,11 @@ pub(super) struct UInputDevice {
 }
 
 impl UInputDevice {
+	#[cfg(test)]
+	pub(super) fn test_sink() -> Self {
+		Self { file: OpenOptions::new().write(true).open("/dev/null").unwrap(), created: false }
+	}
+
 	/// Relative pointer with the three standard buttons and both wheels.
 	pub(super) fn pointer(name: &str) -> CoreResult<Self> {
 		let file = open_uinput()?;
@@ -136,7 +141,7 @@ impl UInputDevice {
 		// the slice is bounded to its exact size.
 		let bytes = unsafe {
 			std::slice::from_raw_parts(
-				(&event as *const InputEvent).cast::<u8>(),
+				(&raw const event).cast::<u8>(),
 				std::mem::size_of::<InputEvent>(),
 			)
 		};

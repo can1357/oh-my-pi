@@ -8,7 +8,7 @@
  * tests to spy on.
  */
 
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, truncate, tryParseJson } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
@@ -20,6 +20,8 @@ const DEFAULT_RECALL_TIMEOUT_MS = 30_000;
 const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
 /** Server-side maximum `limit` on the mental-model list endpoint; keeps typical banks to one request. */
 const MENTAL_MODEL_PAGE_SIZE = 1000;
+/** Cap on server-supplied error text copied into `HindsightError.message` (logged unconditionally). */
+const MAX_ERROR_DETAIL_CHARS = 2000;
 
 export type Budget = "low" | "mid" | "high" | string;
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
@@ -243,7 +245,36 @@ interface RequestOptions {
 	timeoutMs?: number;
 }
 
-export class HindsightApi {
+/** Public surface of {@link HindsightApi}; a subagent worker holds a remote implementation of main's client. */
+export interface HindsightClientApi {
+	retain(bankId: string, content: string, options?: RetainOptions): Promise<RetainResponse>;
+	retainBatch(bankId: string, items: MemoryItemInput[], options?: RetainBatchOptions): Promise<RetainResponse>;
+	recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResponse>;
+	reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResponse>;
+	createBank(bankId: string, options?: CreateBankOptions): Promise<BankProfileResponse>;
+	listMemories(bankId: string, options?: ListMemoriesOptions): Promise<ListMemoriesResponse>;
+	listDocuments(bankId: string, options?: ListDocumentsOptions): Promise<ListDocumentsResponse>;
+	getDocument(bankId: string, documentId: string): Promise<DocumentResponse | null>;
+	updateDocument(bankId: string, documentId: string, options: UpdateDocumentOptions): Promise<DocumentResponse>;
+	deleteDocument(bankId: string, documentId: string): Promise<boolean>;
+	listMentalModels(bankId: string, options?: ListMentalModelsOptions): Promise<MentalModelListResponse>;
+	getMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: GetMentalModelOptions,
+	): Promise<MentalModelSummary | null>;
+	createMentalModel(
+		bankId: string,
+		name: string,
+		sourceQuery: string,
+		options?: CreateMentalModelOptions,
+	): Promise<CreateMentalModelResponse>;
+	refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse>;
+	deleteMentalModel(bankId: string, mentalModelId: string): Promise<boolean>;
+	getMentalModelHistory(bankId: string, mentalModelId: string): Promise<MentalModelHistoryEntry[]>;
+}
+
+export class HindsightApi implements HindsightClientApi {
 	#baseUrl: string;
 	#headers: Record<string, string>;
 	#reflectTimeoutMs: number;
@@ -579,7 +610,7 @@ export class HindsightApi {
 		}
 
 		const text = await response.text();
-		const parsed = text ? safeJsonParse(text) : null;
+		const parsed = text ? tryParseJson(text) : null;
 
 		if (!response.ok) {
 			const details =
@@ -589,8 +620,9 @@ export class HindsightApi {
 					: undefined) ??
 				parsed ??
 				text;
+			const detailText = typeof details === "string" ? details : JSON.stringify(details);
 			throw new HindsightError(
-				`${operation} failed: ${typeof details === "string" ? details : JSON.stringify(details)}`,
+				`${operation} failed: ${truncate(detailText, MAX_ERROR_DETAIL_CHARS)}`,
 				response.status,
 				details,
 			);
@@ -676,13 +708,6 @@ function pruneUndefined(obj: Record<string, unknown>): Record<string, unknown> {
 	return out;
 }
 
-function safeJsonParse(text: string): unknown {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return null;
-	}
-}
 export function createHindsightClient(config: HindsightConfig & { hindsightApiUrl: string }): HindsightApi {
 	return new HindsightApi({
 		baseUrl: config.hindsightApiUrl,

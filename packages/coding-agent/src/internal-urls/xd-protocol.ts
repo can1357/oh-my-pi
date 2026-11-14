@@ -45,8 +45,10 @@ function deviceWriteTier(
 		if (!isRecord(parsed)) return "exec";
 		// The policyKey makes the outer gate consult `tools.approval.<device>` for
 		// this dispatch before falling back to `tools.approval.write`, so users can
-		// scope allow/deny/prompt to a single device (issue #7923).
-		return { tier: resolveToolTier(inst, parsed), policyKey: name };
+		// scope allow/deny/prompt to a single device (issue #7923). It names the
+		// resolved canonical tool, so a wire alias (`xd://apply_patch` for `edit`)
+		// follows the same policy as the canonical spelling and a direct call.
+		return { tier: resolveToolTier(inst, parsed), policyKey: inst.name };
 	} catch {
 		return "exec";
 	}
@@ -94,6 +96,11 @@ export class XdProtocolHandler implements ProtocolHandler {
 		if (!name) throw new ToolError(`Cannot write to xd:// itself — pick a device:\n${xdevListing(xdev)}`);
 		const toolCall = context.toolCall;
 		if (!toolCall) throw new ToolError(`xd://${name} can only be written by the write tool.`);
+		// The write tool's gate already resolved approval at this device's tier and
+		// under its canonical tool's `tools.approval` key (see `deviceWriteTier`) —
+		// record that key so a wrapped inner tool does not ask the same question
+		// again, whichever spelling the URL used.
+		const xdevPolicyKey = resolveXdevTool(xdev, name)?.name ?? name;
 		const { result, xdev: dispatch } = await dispatchXdevTool(
 			xdev,
 			name,
@@ -101,10 +108,7 @@ export class XdProtocolHandler implements ProtocolHandler {
 			toolCall.id,
 			context.signal,
 			toolCall.onUpdate,
-			// The write tool's gate already resolved approval at this device's tier
-			// (see `deviceWriteTier`) — mark it so a wrapped inner tool does not
-			// prompt a second time.
-			toolCall.context ? { ...toolCall.context, xdevApproved: true } : undefined,
+			toolCall.context ? { ...toolCall.context, xdevPolicyKey } : undefined,
 		);
 		return {
 			content: result.content,

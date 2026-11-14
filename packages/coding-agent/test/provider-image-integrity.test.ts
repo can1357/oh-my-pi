@@ -143,6 +143,24 @@ describe("dropUnreadableContextImages", () => {
 		expect(guarded.messages[0]).toBe(context.messages[0]);
 	});
 
+	test("degrades a JPEG truncated before its EOI marker", async () => {
+		// The incident: a download cut mid-scan. Bun.Image pads the missing rows
+		// and decodes it, while the provider's strict decoder rejects the bytes
+		// and fails the whole request — the guard must degrade it instead.
+		const intact = Buffer.from(await new Bun.Image(Buffer.from(ODD_FRAMED_PNG, "base64")).jpeg().bytes());
+		const truncated: ImageContent = {
+			type: "image",
+			data: intact.subarray(0, intact.length - 8).toString("base64"),
+			mimeType: "image/jpeg",
+		};
+		const context: Context = { messages: [userMessage([truncated])] };
+
+		const guarded = await dropUnreadableContextImages(context, OPENAI_RESPONSES_MODEL);
+		const message = guarded.messages[0];
+		if (message?.role !== "user" || !Array.isArray(message.content)) throw new Error("expected user content");
+		expect(textOf(message.content[0])).toContain("truncated JPEG data");
+	});
+
 	test("returns the original context when every image decodes", async () => {
 		const context: Context = { messages: [userMessage([{ type: "text", text: "look" }, INTACT_IMAGE])] };
 

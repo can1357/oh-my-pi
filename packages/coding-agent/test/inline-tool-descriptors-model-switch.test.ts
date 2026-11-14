@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -111,4 +112,58 @@ describe("inline tool descriptors across model switches", () => {
 			expect((await providerView(session)).readDescription).toBe("");
 		});
 	}
+
+	// A retry fallback keeps the rendered prompt to protect the prompt cache, but a hop off Gemini
+	// must still turn pruning off, or the fallback provider receives empty descriptions and rejects
+	// the recovery request (#14200).
+	it("sends the fallback model required tool descriptions after a retry fallback off Gemini", async () => {
+		const settings = Settings.isolated({
+			inlineToolDescriptors: "auto",
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${glm.provider}/${glm.id}`] },
+			// Same edit mode on both models, so the edit-mode re-sync (#11983) does not rebuild for us.
+			"edit.modelVariants": { [gemini.id]: "replace", [glm.id]: "replace" },
+		});
+		settings.setModelRole("default", `${gemini.provider}/${gemini.id}`);
+		const { session } = await createAgentSession({
+			cwd: dir,
+			agentDir: dir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			model: gemini,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read"],
+		});
+		sessions.push(session);
+
+		const mock = createMockModel();
+		const sentReadDescriptions: Array<[string, string | undefined]> = [];
+		session.agent.streamFn = (model, context, options) => {
+			sentReadDescriptions.push([model.id, context.tools?.find(tool => tool.name === "read")?.description]);
+			mock.push(
+				model.id === gemini.id
+					? { throw: "overloaded_error: provider returned error 503" }
+					: { content: ["Recovered on the fallback"] },
+			);
+			return mock.stream(model, context, options);
+		};
+
+		await session.prompt("Force a fallback off Gemini");
+		await session.waitForIdle();
+
+		expect(session.model?.id).toBe(glm.id);
+		expect(sentReadDescriptions[0]).toEqual([gemini.id, ""]);
+		const [fallbackModelId, fallbackDescription] = sentReadDescriptions.at(-1)!;
+		expect(fallbackModelId).toBe(glm.id);
+		expect(fallbackDescription).not.toBe("");
+	});
 });

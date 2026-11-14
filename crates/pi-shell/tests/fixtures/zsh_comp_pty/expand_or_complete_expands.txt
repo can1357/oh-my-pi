@@ -1,0 +1,12 @@
+### "echo $x\t"
+% echo fixed
+@ 0,12
+### "\u{15}echo *.txt\t"
+% echo a.txt b.txt
+@ 0,19
+### "\u{15}echo $(echo hi)\t"
+% echo hi
+@ 0,9
+### "\u{15}echo ~nd\t"
+% echo ~nd/
+@ 0,11

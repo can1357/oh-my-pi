@@ -1,4 +1,5 @@
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import type { AntigravityModelWireProfile } from "../types";
 
 /**
  * Build a User-Agent string that identifies as Gemini CLI to unlock higher rate limits.
@@ -23,16 +24,19 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * (and its @google/genai → google-auth-library dependency chain) into the startup
  * parse graph.
  *
- * Format captured from the real 2.8.0 `antigravity/hub` client:
- * `antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)`.
+ * Format captured from the real 2.26.0 `antigravity/hub` client:
+ * `antigravity/hub/2.26.0 (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)`.
  * The backend gates newer models (e.g. gemini-3.7-flash) on the client version,
  * so the version tracks the latest Antigravity release via the update manifest
  * (see {@link ensureAntigravityVersion}) with `DEFAULT_ANTIGRAVITY_VERSION` as
- * the offline fallback. os_type/arch are pinned to the darwin/arm64 reference
- * client the version and manifest are captured from, independent of the host
- * platform. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
+ * the offline fallback. os_type/arch name the native build for the host OS:
+ * each 2.26.0 installer ships one language-server build whose Go target is
+ * stamped into the header (macOS darwin/arm64, Linux linux/amd64, Windows
+ * windows/amd64; no other OS/arch builds exist); see
+ * {@link getAntigravityPlatform}. The changelist is identical across those
+ * builds. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.19.1";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.26.0";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
@@ -107,35 +111,62 @@ export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: Ab
 	return Promise.race([lookup, aborted]).finally(() => signal.removeEventListener("abort", onAbort));
 }
 
+/**
+ * Native Antigravity builds, keyed by host OS, as their language server reports
+ * itself (`GOOS`/`GOARCH`). The macOS installer ships arm64 only and the Linux
+ * and Windows installers x64 only, so the reported arch is the build's, not
+ * the host's: advertising e.g. darwin/amd64 would name a client that does not
+ * exist.
+ */
+const ANTIGRAVITY_BUILDS: Partial<Record<NodeJS.Platform, { os: string; arch: string }>> = {
+	darwin: { os: "darwin", arch: "arm64" },
+	linux: { os: "linux", arch: "amd64" },
+	win32: { os: "windows", arch: "amd64" },
+};
+
+/**
+ * Native build the host would run. OSes without a native build report the
+ * Linux build, the closest client that exists.
+ */
+export function getAntigravityPlatform(platform: NodeJS.Platform = process.platform): { os: string; arch: string } {
+	return ANTIGRAVITY_BUILDS[platform] ?? { os: "linux", arch: "amd64" };
+}
+
 /** Antigravity `User-Agent` header value; rebuilt when the discovered version changes. */
 export function getAntigravityUserAgent(): string {
 	const version = getAntigravityVersion();
 	// The backend does not validate `cl` (verified live: stale, zero, and absent
 	// cl all pass model gating on daily-cloudcode-pa; only the version gates).
 	// The update manifest carries no changelist, so the captured value stays.
-	const cl = process.env.PI_AI_ANTIGRAVITY_CL || "963137146";
-	const os = process.env.PI_AI_ANTIGRAVITY_OS || "darwin";
-	const arch = process.env.PI_AI_ANTIGRAVITY_ARCH || "arm64";
+	const cl = process.env.PI_AI_ANTIGRAVITY_CL || "1005016104";
+	const host = getAntigravityPlatform();
+	const os = process.env.PI_AI_ANTIGRAVITY_OS || host.os;
+	const arch = process.env.PI_AI_ANTIGRAVITY_ARCH || host.arch;
 	return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`;
 }
 
 /**
- * Per-wire-id Antigravity Cloud Code Assist request constants, captured from the
- * real `antigravity/hub` client against `daily-cloudcode-pa`. `modelEnum` is the
- * opaque `labels.model_enum` token the client tags each request with — optional
- * because Anthropic-backed wire ids (e.g. `claude-sonnet-4-6`,
- * `claude-opus-4-6-thinking`) are accepted without one; the label is purely
- * telemetry. `maxOutputTokens` is the fixed `generationConfig.maxOutputTokens`
- * the backend enforces regardless of the thinking budget (Claude caps at
- * 64000, Gemini accepts the discovered cap). Keyed by the routed upstream wire
- * id (post effort-routing), not the collapsed logical id. Checkpoint-only ids
- * (e.g. `gemini-3.1-flash-lite`) are intentionally absent — this provider only
- * emits agent requests.
+ * Client headers for every Antigravity Cloud Code Assist request. The native
+ * client is Go `net/http`, which offers `Accept-Encoding: gzip` and no `Accept`;
+ * pinning the encoding replaces the runtime's `gzip, deflate, br, zstd` (Bun
+ * still decompresses the gzip body). Bun always adds `Accept: *\/*` itself, so
+ * callers must not set a more specific `Accept`.
  */
-export interface AntigravityModelWireProfile {
-	modelEnum?: string;
-	maxOutputTokens: number;
+export function getAntigravityHeaders(userAgent: string = getAntigravityUserAgent()): {
+	"User-Agent": string;
+	"Accept-Encoding": string;
+} {
+	return { "User-Agent": userAgent, "Accept-Encoding": "gzip" };
 }
+
+/**
+ * Offline fallback for {@link Model.antigravityWireProfiles}: per-SKU request
+ * constants for rows that carry no discovered profile. Keyed by the routed
+ * upstream wire id (post effort-routing), not the collapsed logical id.
+ * `modelEnum` is the opaque `labels.model_enum` token; the backend accepts
+ * requests without it. Discovery (and the bundled snapshot baked from it)
+ * owns current SKUs; do not extend this table.
+ */
 export const ANTIGRAVITY_MODEL_WIRE_PROFILES: Readonly<Record<string, AntigravityModelWireProfile>> = {
 	"gemini-3.5-flash-extra-low": { modelEnum: "MODEL_PLACEHOLDER_M187", maxOutputTokens: 65536 },
 	"gemini-3.5-flash-low": { modelEnum: "MODEL_PLACEHOLDER_M20", maxOutputTokens: 65536 },
@@ -148,6 +179,19 @@ export const ANTIGRAVITY_MODEL_WIRE_PROFILES: Readonly<Record<string, Antigravit
 	"claude-sonnet-4-6": { maxOutputTokens: 64000 },
 	"claude-opus-4-6-thinking": { maxOutputTokens: 64000 },
 };
-export function getAntigravityModelWireProfile(wireModelId: string): AntigravityModelWireProfile | undefined {
+
+/**
+ * Request constants for `wireModelId`: the first discovered profile map that
+ * lists it (callers pass the serving account's before the row's), else the
+ * offline fallback table.
+ */
+export function getAntigravityModelWireProfile(
+	wireModelId: string,
+	...discovered: (Readonly<Record<string, AntigravityModelWireProfile>> | undefined)[]
+): AntigravityModelWireProfile | undefined {
+	for (const profiles of discovered) {
+		const profile = profiles?.[wireModelId];
+		if (profile !== undefined) return profile;
+	}
 	return ANTIGRAVITY_MODEL_WIRE_PROFILES[wireModelId];
 }

@@ -580,9 +580,7 @@ fn draw_staircase_line<'a>(
 		draw_at(point.0, point.1, chars.h_line);
 		return;
 	}
-	for index in 0..points.len().saturating_sub(1) {
-		let first = points[index];
-		let second = points[index + 1];
+	for (index, &[first, second]) in points.array_windows().enumerate() {
 		if first.1 == second.1 {
 			for column in first.0..=second.0 {
 				draw_at(column, first.1, chars.h_line);
@@ -667,9 +665,7 @@ fn draw_horizontal_staircase_line<'a>(
 		draw_at(point.0, point.1, chars.v_line);
 		return;
 	}
-	for index in 0..points.len().saturating_sub(1) {
-		let first = points[index];
-		let second = points[index + 1];
+	for &[first, second] in points.array_windows() {
 		if first.1 == second.1 {
 			for row in first.0..=second.0 {
 				draw_at(row, first.1, chars.v_line);

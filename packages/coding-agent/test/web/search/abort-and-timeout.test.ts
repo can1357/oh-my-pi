@@ -312,6 +312,8 @@ describe("executeSearch abort propagation", () => {
 		expect(context.getProvider).toHaveBeenCalledTimes(1);
 		expect(context.getProvider).toHaveBeenCalledWith("exa");
 		expect(fallbackSearch).not.toHaveBeenCalled();
+		expect(result.content[0]?.text).not.toContain("Note: answered by");
+		expect(Object.hasOwn(result.details, "failures")).toBe(false);
 	});
 
 	it("advances through retry.fallbackChains.web after the preferred candidate fails", async () => {
@@ -331,6 +333,53 @@ describe("executeSearch abort propagation", () => {
 		expect(result.details.response.provider).toBe("brave");
 		expect(context.getProvider).toHaveBeenCalledTimes(2);
 		expect(fallbackSearch).toHaveBeenCalledTimes(1);
+		expect(result.content[0]?.text).toStartWith(
+			"Note: answered by brave after exa failed (Preferred provider failed)\n",
+		);
+		expect(result.details.failures).toEqual([
+			{ provider: "exa", label: "exa", reason: "Preferred provider failed", status: 500 },
+		]);
+	});
+
+	it("records every provider in details.failures when all of them fail", async () => {
+		const context = await configureProviderChain([
+			fakeProvider("exa", async () => {
+				throw new SearchProviderError("exa", "Exa refused.", 204);
+			}),
+			fakeProvider("brave", async () => {
+				throw new Error("upstream 500");
+			}),
+		]);
+
+		const result = await runSearchQuery({ query: "anything" }, context);
+
+		expect(result.details.error).toContain("All web search providers failed");
+		expect(result.details.failures).toEqual([
+			{ provider: "exa", label: "exa", reason: "Exa refused", status: 204 },
+			{ provider: "brave", label: "brave", reason: "upstream 500" },
+		]);
+	});
+
+	it("flattens and caps a long multi-line failure reason in the fallback note", async () => {
+		const htmlPage = `<html>\n<head><title>502 Bad Gateway</title></head>\n<body>${"x".repeat(2_000)}</body>\n</html>`;
+		const context = await configureProviderChain([
+			fakeProvider("searxng", async () => {
+				throw new SearchProviderError("searxng", `SearXNG API error (502): ${htmlPage}`, 502);
+			}),
+			fakeProvider("brave", async () => ({
+				provider: "brave",
+				sources: [{ title: "Fallback result", url: "https://example.com/fallback" }],
+			})),
+		]);
+
+		const result = await runSearchQuery({ query: "anything" }, context);
+
+		const [note = ""] = (result.content[0]?.text ?? "").split("\n");
+		expect(note).toStartWith(
+			"Note: answered by brave after searxng failed (SearXNG API error (502): <html> <head><title>502 Bad Gateway",
+		);
+		expect(note).toEndWith("…)");
+		expect(note.length).toBeLessThan(320);
 	});
 
 	it("treats a request model override as a single explicit candidate", async () => {

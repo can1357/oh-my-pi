@@ -1,6 +1,7 @@
 import { expect, it } from "bun:test";
 import {
 	enforceStrictSchema,
+	normalizeSchemaForMCP,
 	schemaNeedsDraft202012Upgrade,
 	stripSchemaDescriptions,
 	toolWireSchema,
@@ -107,4 +108,22 @@ it("keeps traversal state off caller graphs that are deep-frozen after a first v
 	deepFreeze(schema);
 	expect(schemaNeedsDraft202012Upgrade(schema)).toBe(false);
 	expect(enforceStrictSchema(schema)).toEqual(expected);
+});
+
+it("does not fold a const into the caller's own enum array", () => {
+	const parameters: Record<string, unknown> = {
+		type: "object",
+		properties: { path: { type: "string" } },
+		enum: [{ a: 1 }],
+		const: { b: 2 },
+	};
+
+	const normalized: unknown = normalizeSchemaForMCP(parameters);
+
+	// The caller keeps its own enum: folding `const` in must not append to the
+	// array the caller handed over.
+	expect(parameters["enum"]).toEqual([{ a: 1 }]);
+	expect(
+		normalized !== null && typeof normalized === "object" && "enum" in normalized ? normalized.enum : undefined,
+	).toEqual([{ a: 1 }, { b: 2 }]);
 });

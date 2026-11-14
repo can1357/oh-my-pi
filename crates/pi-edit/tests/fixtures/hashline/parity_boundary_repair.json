@@ -77,7 +77,7 @@
 			]
 		},
 		{
-			"name": "drops a duplicated multi-line closing block (the Root.tsx incident)",
+			"name": "rejects a duplicated multi-line closing block whose body cannot fill the range (the Root.tsx incident)",
 			"parse": [
 				{
 					"input": "PUT 7-16:\n+\treturn (\n+\t\t<>\n+\t\t\t<Composition\n+\t\t\t\tid=\"Sizzle\"\n+\t\t\t\tcomponent={Sizzle}\n+\t\t\t\tdurationInFrames={durationInFrames}\n+\t\t\t\twidth={1920}\n+\t\t\t\tdefaultProps={{ layout: \"landscape\" } satisfies SizzleProps}\n+\t\t\t/>\n+\t\t</>\n+\t);",
@@ -92,13 +92,7 @@
 					"text": "import type React from \"react\";\nimport { Composition } from \"remotion\";\nimport { Sizzle, type SizzleProps } from \"./compositions/Sizzle\";\nimport { FPS, totalDurationInFrames } from \"./lib/scenes\";\n\nexport const RemotionRoot: React.FC = () => {\n\tconst durationInFrames = totalDurationInFrames();\n\treturn (\n\t\t<>\n\t\t\t<Composition\n\t\t\t\tid=\"Sizzle\"\n\t\t\t\tcomponent={Sizzle}\n\t\t\t\tdurationInFrames={durationInFrames}\n\t\t\t\twidth={1920}\n\t\t\t\tdefaultProps={{ layout: \"landscape\" }}\n\t\t\t/>\n\t\t</>\n\t);\n};",
 					"input": "PUT 7-16:\n+\treturn (\n+\t\t<>\n+\t\t\t<Composition\n+\t\t\t\tid=\"Sizzle\"\n+\t\t\t\tcomponent={Sizzle}\n+\t\t\t\tdurationInFrames={durationInFrames}\n+\t\t\t\twidth={1920}\n+\t\t\t\tdefaultProps={{ layout: \"landscape\" } satisfies SizzleProps}\n+\t\t\t/>\n+\t\t</>\n+\t);",
 					"path": "fixture.tsx",
-					"expect": {
-						"text": "import type React from \"react\";\nimport { Composition } from \"remotion\";\nimport { Sizzle, type SizzleProps } from \"./compositions/Sizzle\";\nimport { FPS, totalDurationInFrames } from \"./lib/scenes\";\n\nexport const RemotionRoot: React.FC = () => {\n\treturn (\n\t\t<>\n\t\t\t<Composition\n\t\t\t\tid=\"Sizzle\"\n\t\t\t\tcomponent={Sizzle}\n\t\t\t\tdurationInFrames={durationInFrames}\n\t\t\t\twidth={1920}\n\t\t\t\tdefaultProps={{ layout: \"landscape\" } satisfies SizzleProps}\n\t\t\t/>\n\t\t</>\n\t);\n};",
-						"firstChangedLine": 7,
-						"warnings": [
-							"Auto-repaired replacement boundaries at line 7: dropped 2 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
-						]
-					}
+					"error": "Error: `PUT 7.=16:` rejected: the body ends by restating the 2 line(s) just below the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out line 7, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				}
 			]
 		},
@@ -585,7 +579,7 @@
 					"text": "{\n    auto* handle = payloadFor<PyThreadHandle>(self);\n    if (!handle)\n        return threadError(globalObject, \"thread not started\");\n    handle.setDone();\n}",
 					"input": "PUT 3-4:\n+    auto* handle = payloadFor<PyThreadHandle>(self);\n+    if (!handle || !handle.isStarted())",
 					"path": "fixture.ts",
-					"error": "Error: `PUT 3.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+					"error": "Error: `PUT 3.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out line 4, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				}
 			]
 		},
@@ -605,7 +599,7 @@
 					"text": "a();\nb();\nc();\nkeep();",
 					"input": "PUT 2-3:\n+B();\n+keep();",
 					"path": "fixture.ts",
-					"error": "Error: `PUT 2.=3:` rejected: the body ends by restating the 1 line(s) just below the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+					"error": "Error: `PUT 2.=3:` rejected: the body ends by restating the 1 line(s) just below the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out line 2, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				}
 			]
 		},
@@ -1393,19 +1387,19 @@
 				{
 					"text": "alpha\nbeta\ngamma\ndelta\neps",
 					"input": "PUT 2-4:\n+alpha\n+fresh1",
-					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out lines 3-4, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				},
 				{
 					"text": "alpha\nbeta\ngamma\ndelta\neps",
 					"input": "PUT 2-4:\n+alpha\n+fresh1",
 					"path": "fixture.unknownlang",
-					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out lines 3-4, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				},
 				{
 					"text": "alpha\nbeta\ngamma\ndelta\neps",
 					"input": "PUT 2-4:\n+alpha\n+fresh1",
 					"path": "fixture.ts",
-					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out lines 3-4, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				}
 			]
 		},
@@ -1731,7 +1725,7 @@
 					"text": "/// Old doc.\n#[napi]\npub fn f() {}",
 					"input": "PUT 1.=1:\n+#[napi]",
 					"path": "fixture.rs",
-					"error": "Error: `PUT 1.=1:` rejected: the body ends by restating the 1 line(s) just below the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+					"error": "Error: `PUT 1.=1:` rejected: the body ends by restating the 1 line(s) just below the range, but is too short to be the full final content of the selected range. If the range is off by those line(s), the body leaves out line 1, which this edit would delete. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
 				}
 			]
 		},

@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { postmortem } from "@oh-my-pi/pi-utils";
 
 interface FlushHarness {
 	session: AgentSession;
@@ -25,7 +26,7 @@ interface FlushHarness {
 	disposed: () => boolean;
 }
 
-function createFlushHarness(): FlushHarness {
+function createFlushHarness(dispose: () => Promise<void> = async () => {}): FlushHarness {
 	const { promise: promptStarted, resolve: markPromptStarted } = Promise.withResolvers<void>();
 	const { promise: promptReleased, resolve: resolvePrompt } = Promise.withResolvers<void>();
 	let subscriber: ((event: AgentSessionEvent) => void) | undefined;
@@ -60,8 +61,9 @@ function createFlushHarness(): FlushHarness {
 		waitForAdvisorCatchup: async () => {
 			if (!advisorDrainPrepared) throw new Error("advisor catch-up started before headless delivery was armed");
 		},
-		dispose: async () => {
+		dispose: () => {
 			disposed = true;
+			return dispose();
 		},
 	} as unknown as AgentSession;
 
@@ -89,32 +91,57 @@ function makeLargeAgentEnd(payload: string): AgentSessionEvent {
 	} as unknown as AgentSessionEvent;
 }
 
+interface HeldAgentEndWrite {
+	writes: string[];
+	/** Resolves once the agent_end record's write has been issued (callback still held). */
+	issued: Promise<void>;
+	/** Fires the held write's completion callback. */
+	release: () => void;
+}
+
+/** Mock stdout so the agent_end record's completion callback is held, emulating a backpressured pipe. */
+function holdAgentEndWrite(): HeldAgentEndWrite {
+	const writes: string[] = [];
+	let releaseHeld: (() => void) | undefined;
+	const issued = Promise.withResolvers<void>();
+	vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+		const chunk = args[0];
+		const text = typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString();
+		writes.push(text);
+		const cb = args[args.length - 1];
+		const invoke = typeof cb === "function" ? (cb as (err?: Error | null) => void) : undefined;
+		if (text.includes('"type":"agent_end"')) {
+			releaseHeld = () => invoke?.(null);
+			issued.resolve();
+		} else {
+			invoke?.(null);
+		}
+		return true;
+	});
+	return {
+		writes,
+		issued: issued.promise,
+		release: () => {
+			if (!releaseHeld) throw new Error("agent_end write was never issued");
+			releaseHeld();
+		},
+	};
+}
+
+/** One macrotask boundary: every microtask-driven step that does not need the held write completes first. */
+async function nextMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	await promise;
+}
+
 describe("print-mode JSON flush (#7635)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
 	it("blocks exit until the final agent_end write drains, then delivers it in full", async () => {
-		const writes: string[] = [];
-		let releaseAgentEnd: (() => void) | undefined;
-		const { promise: agentEndWriteIssued, resolve: markAgentEndWriteIssued } = Promise.withResolvers<void>();
-		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
-			const chunk = args[0];
-			const text = typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString();
-			writes.push(text);
-			const cb = args[args.length - 1];
-			const invoke = typeof cb === "function" ? (cb as (err?: Error | null) => void) : undefined;
-			// Defer the large agent_end record's completion callback to emulate a
-			// backpressured pipe; every other write completes synchronously.
-			if (text.includes('"type":"agent_end"')) {
-				releaseAgentEnd = () => invoke?.(null);
-				markAgentEndWriteIssued();
-			} else {
-				invoke?.(null);
-			}
-			return true;
-		});
-
+		const held = holdAgentEndWrite();
 		const payload = "x".repeat(1_500_000);
 		const harness = createFlushHarness();
 
@@ -128,29 +155,92 @@ describe("print-mode JSON flush (#7635)", () => {
 		harness.emit(makeLargeAgentEnd(payload));
 		harness.resolvePrompt();
 
-		// Drain to quiescence: every step runPrintMode can complete without the
-		// deferred write is microtask-driven, so one macrotask boundary flushes
-		// them all. The pre-fix fire-and-forget path settles and disposes here;
-		// the fix must still be blocked on the undrained agent_end write.
-		await agentEndWriteIssued;
-		const { promise: nextTask, resolve: resolveNextTask } = Promise.withResolvers<void>();
-		setImmediate(resolveNextTask);
-		await nextTask;
-		expect(releaseAgentEnd).toBeDefined();
+		// The pre-fix fire-and-forget path settles and disposes here; the fix
+		// must still be blocked on the undrained agent_end write.
+		await held.issued;
+		await nextMacrotask();
 		expect(settled).toBe(false);
 		expect(harness.disposed()).toBe(false);
 
-		releaseAgentEnd?.();
+		held.release();
 		expect(await run).toBe(0);
 
 		expect(settled).toBe(true);
 		expect(harness.disposed()).toBe(true);
 
-		const agentEndLine = writes.find(line => line.includes('"type":"agent_end"'));
+		const agentEndLine = held.writes.find(line => line.includes('"type":"agent_end"'));
 		expect(agentEndLine).toBeDefined();
 		expect(agentEndLine?.endsWith("\n")).toBe(true);
 		// The complete payload survives — not a pipe-buffer-sized prefix.
 		expect(agentEndLine).toContain(payload);
 		expect(JSON.parse(agentEndLine as string)).toMatchObject({ type: "agent_end" });
+	});
+});
+
+// Regression (#18450): postmortem exits as soon as the `print-mode-session`
+// signal callback settles, so that callback must join the serialized stdout
+// tail — not just session disposal — or SIGTERM truncates the last record.
+describe("print-mode JSON signal teardown (#18450)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	async function signalWithHeldAgentEnd(dispose?: () => Promise<void>) {
+		const held = holdAgentEndWrite();
+		let signalCallback: ((reason: postmortem.Reason) => void | Promise<void>) | undefined;
+		vi.spyOn(postmortem, "register").mockImplementation((id, callback) => {
+			if (id === "print-mode-session") signalCallback = callback;
+			return () => {};
+		});
+		const harness = createFlushHarness(dispose);
+		const run = runPrintMode(harness.session, { mode: "json", initialMessage: "hello" });
+		await harness.promptStarted;
+		harness.emit(makeLargeAgentEnd("y".repeat(200_000)));
+		await held.issued;
+		if (!signalCallback) throw new Error("print-mode-session cleanup was not registered");
+
+		const teardown = Promise.resolve(signalCallback(postmortem.Reason.SIGTERM));
+		let teardownSettled = false;
+		void teardown.then(
+			() => {
+				teardownSettled = true;
+			},
+			() => {
+				teardownSettled = true;
+			},
+		);
+		await nextMacrotask();
+		return { held, harness, run, teardown, teardownSettled: () => teardownSettled };
+	}
+
+	it("stays pending until the held agent_end write drains", async () => {
+		const { held, harness, run, teardown, teardownSettled } = await signalWithHeldAgentEnd();
+
+		expect(harness.disposed()).toBe(true);
+		expect(teardownSettled()).toBe(false);
+
+		held.release();
+		await teardown;
+
+		harness.resolvePrompt();
+		await run;
+		const agentEndLine = held.writes.find(line => line.includes('"type":"agent_end"'));
+		expect(JSON.parse(agentEndLine as string)).toMatchObject({ type: "agent_end" });
+	});
+
+	it("joins stdout when disposal rejects and keeps the disposal error primary", async () => {
+		const disposeError = new Error("dispose failed");
+		const { held, harness, run, teardown, teardownSettled } = await signalWithHeldAgentEnd(async () => {
+			throw disposeError;
+		});
+
+		expect(harness.disposed()).toBe(true);
+		expect(teardownSettled()).toBe(false);
+
+		held.release();
+		await expect(teardown).rejects.toBe(disposeError);
+
+		harness.resolvePrompt();
+		await run.catch(() => {});
 	});
 });

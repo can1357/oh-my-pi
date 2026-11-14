@@ -28,6 +28,9 @@ import type {
 	RpcBtwHistoryRecord,
 	RpcBtwRecordFrame,
 	RpcCommand,
+	RpcDictationEndFrame,
+	RpcDictationStateFrame,
+	RpcDictationTranscriptFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHostToolCallRequest,
@@ -211,6 +214,9 @@ export type Frames = Assert<
 		liveLevels: Outbound<RpcLiveLevelsFrame, Wire.LiveLevelsEvent>;
 		liveTranscript: Outbound<RpcLiveTranscriptFrame, Wire.LiveTranscriptEvent>;
 		liveEnd: Outbound<RpcLiveEndFrame, Wire.LiveEndEvent>;
+		dictationState: Outbound<RpcDictationStateFrame, Wire.DictationStateEvent>;
+		dictationTranscript: Outbound<RpcDictationTranscriptFrame, Wire.DictationTranscriptEvent>;
+		dictationEnd: Outbound<RpcDictationEndFrame, Wire.DictationEndEvent>;
 		btwDelta: Outbound<RpcBtwDeltaFrame, Wire.BtwDeltaEvent>;
 		btwRecord: Outbound<RpcBtwRecordFrame, Wire.BtwRecordEvent>;
 		hostToolCall: Outbound<RpcHostToolCallRequest, Wire.HostToolCallRequest>;

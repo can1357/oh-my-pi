@@ -7,16 +7,20 @@ import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
 import { CONFIG_DIR_NAME, TempDir } from "@oh-my-pi/pi-utils";
 
 type SystemPromptOption = string | string[] | ((defaultPrompt: string[]) => string | string[]);
-type ExplicitSystemPromptOptions = Pick<CreateAgentSessionOptions, "systemPromptTemplate" | "customSystemPrompt">;
+type SessionOverrides = Pick<
+	CreateAgentSessionOptions,
+	"systemPromptTemplate" | "customSystemPrompt" | "settings" | "taskDepth" | "contextFiles"
+>;
 
 async function withSession<T>(
 	nativeTemplate: string,
 	systemPrompt: SystemPromptOption,
 	fn: (session: AgentSession) => Promise<T>,
-	explicitSystemPromptOptions: ExplicitSystemPromptOptions = {},
+	overrides: SessionOverrides = {},
 ): Promise<T> {
 	using tempDir = TempDir.createSync("@omp-sdk-system-prompt-template-");
 	const cwd = tempDir.join("project");
@@ -43,7 +47,7 @@ async function withSession<T>(
 			enableLsp: false,
 			skipPythonPreflight: true,
 			systemPrompt,
-			...explicitSystemPromptOptions,
+			...overrides,
 		});
 		session = result.session;
 		return await fn(session);
@@ -93,12 +97,41 @@ describe("SDK systemPrompt replacements", () => {
 		await withSession(
 			"{{#if eagerTasks}}",
 			defaultPrompt => {
-				expect(defaultPrompt.join("\n\n")).toContain("§ Tool Policy");
+				expect(defaultPrompt.join("\n\n")).toContain("⁂ Tool Policy");
 				return "callback replacement";
 			},
 			async session => {
 				expect(session.systemPrompt).toEqual(["callback replacement"]);
 			},
+		);
+	});
+
+	it("applies task.eager to the main agent prompt only, never to subagents", async () => {
+		const render = (taskDepth: number) =>
+			withSession(
+				"{{#if eagerTasks}}EAGER{{else}}MODEL_POLICY{{/if}}",
+				defaultPrompt => defaultPrompt,
+				async session => session.systemPrompt.join("\n\n"),
+				{ settings: Settings.isolated({ "task.eager": "always" }), taskDepth },
+			);
+		expect(await render(0)).toContain("EAGER");
+		const subagentPrompt = await render(1);
+		expect(subagentPrompt).toContain("MODEL_POLICY");
+		expect(subagentPrompt).not.toContain("EAGER");
+	});
+
+	it("attributes instruction files a prompt callback keeps while appending a block", async () => {
+		await withSession(
+			"Fixture policy.",
+			defaultPrompt => [...defaultPrompt, "Additional policy."],
+			async session => {
+				const data = buildSessionContextView(session);
+				expect(data.categories.find(category => category.id === "instruction-files")?.entries).toEqual([
+					expect.objectContaining({ text: expect.stringContaining("Retained instruction") }),
+				]);
+				expect(data.notices).toEqual([]);
+			},
+			{ contextFiles: [{ path: "/fixture/instructions.md", content: "Retained instruction" }] },
 		);
 	});
 });

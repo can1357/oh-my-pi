@@ -611,16 +611,13 @@ describe("read tool URL handling", () => {
 		});
 
 		const pagedResult = await tool.execute("fetch-offset-page", {
-			path: `${pageUrl}:7-8`,
+			path: `${pageUrl}:2-3`,
 		});
 		const pagedText = pagedResult.content.find(content => content.type === "text");
 		expect(pagedText?.type).toBe("text");
-		// `:7-8` selects 2 lines starting at offset 7 of the wrapped URL
-		// output. Read tool widens the window by ±3 unanchored context lines
-		// so anchors at the boundary stay fresh, so adjacent content lines are
-		// also visible.
-		expect(pagedText?.text).toContain("Line 1");
+		// URL selectors address response body lines, like grep's URL matches.
 		expect(pagedText?.text).toContain("Line 2");
+		expect(pagedText?.text).toContain("Line 3");
 		expect(fs.readdirSync(path.join(testDir, "session")).some(file => file.endsWith(".read.log"))).toBe(true);
 	});
 });

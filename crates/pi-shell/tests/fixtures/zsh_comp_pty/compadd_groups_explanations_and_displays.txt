@@ -1,0 +1,36 @@
+### ": a\u{14}"
+% : a
+first group
+alpha                  alpine
+second  group
+alto
+aardvark -- an animal  ant -- an insect
+@ 0,5
+--- sgr
+:: a^G
+first group
+alpha                  alpine
+second  group
+alto
+aardvark -- an animal  ant -- an insect{0}{27}{24}: a
+### "\u{15}: z\u{14}"
+% : zeta
+@ 0,9
+--- sgr
+
+   :: z^Geta{1} {0}
+### "\u{15}: \u{14}"
+% :
+first group
+alpha                  alpine
+second  group
+zeta                   alto
+aardvark -- an animal  ant -- an insect
+@ 0,4
+--- sgr
+      {0} :: ^G
+first group
+alpha                  alpine
+second  group
+zeta                   alto
+aardvark -- an animal  ant -- an insect{0}{27}{24}:

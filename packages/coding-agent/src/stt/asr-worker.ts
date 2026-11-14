@@ -1,28 +1,21 @@
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import type {
 	AutomaticSpeechRecognitionOutput,
 	AutomaticSpeechRecognitionPipeline,
 	ProgressInfo,
-} from "@huggingface/transformers";
-import {
-	ensureRuntimeInstalled,
-	getTinyModelsCacheDir,
-	isCompiledBinary,
-	resolveRuntimeModule,
-} from "@oh-my-pi/pi-utils";
-import packageJson from "../../package.json" with { type: "json" };
+} from "../subprocess/transformers-types";
 import {
 	errorMessage,
 	errorText,
-	getTransformersVersionSpec,
 	loadTransformersRuntime,
 	MemoizedRuntime,
 	replayCachedReady,
 	sendLog,
 	sendProgress,
+	TRANSFORMERS_VERSION,
 } from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
@@ -36,7 +29,9 @@ import {
 	type TransformersSttModelSpec,
 } from "./models";
 import {
-	loadSourceSherpaRuntime,
+	loadSherpaRuntime,
+	SHERPA_PACKAGE,
+	SHERPA_VERSION,
 	type SherpaOfflineRecognizer,
 	type SherpaOnlineRecognizer,
 	type SherpaOnlineStream,
@@ -44,7 +39,6 @@ import {
 } from "./sherpa-runtime";
 
 const ASR_TASK = "automatic-speech-recognition";
-const SHERPA_PACKAGE = "sherpa-onnx-node";
 // Whisper long-form decoding: split into 30s windows with 5s overlap so audio of
 // any length transcribes without exceeding the 30s receptive field.
 const CHUNK_LENGTH_S = 30;
@@ -119,59 +113,9 @@ function runOnModel<T>(work: () => Promise<T>): Promise<T> {
 const transformersRuntime = new MemoizedRuntime<TransformersRuntime>();
 const sherpaRuntime = new MemoizedRuntime<SherpaRuntime>();
 
-let cachedSherpaVersionSpec: string | undefined;
-function resolveSherpaVersionSpec(): string {
-	const manifest = packageJson as {
-		optionalDependencies?: Record<string, string>;
-		dependencies?: Record<string, string>;
-	};
-	const versionSpec = manifest.optionalDependencies?.[SHERPA_PACKAGE] ?? manifest.dependencies?.[SHERPA_PACKAGE];
-	if (!versionSpec) throw new Error(`${SHERPA_PACKAGE} is missing from package.json optionalDependencies`);
-	return versionSpec;
-}
-
-function getSherpaVersionSpec(): string {
-	cachedSherpaVersionSpec ??= resolveSherpaVersionSpec();
-	return cachedSherpaVersionSpec;
-}
-
 function getSttRuntimeDir(): string {
-	const key = getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
+	const key = TRANSFORMERS_VERSION.replace(/[^A-Za-z0-9._-]/g, "_");
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `transformers-${key}`);
-}
-
-function getSherpaRuntimeDir(): string {
-	const key = getSherpaVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
-	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `sherpa-${key}`);
-}
-
-/**
- * Resolve the native `sherpa-onnx-node` module. In a compiled binary the addon
- * (plus its per-platform prebuilt `sherpa-onnx.node` + bundled onnxruntime
- * dylibs) is installed into a side runtime dir; the addon resolves its native
- * library relative to its own location, so a plain `createRequire` of the entry
- * is enough — no module-resolver patch or bare-require stubbing is needed.
- * Memoized so the runtime loads once per process.
- */
-function loadSherpaRuntime(transport: SttTransport, requestId: string, modelKey: SttModelKey): Promise<SherpaRuntime> {
-	return sherpaRuntime.load(async () => {
-		if (!isCompiledBinary()) return loadSourceSherpaRuntime(import.meta.url);
-		const runtimeDir = await ensureRuntimeInstalled({
-			runtimeDir: getSherpaRuntimeDir(),
-			install: { dependencies: { [SHERPA_PACKAGE]: getSherpaVersionSpec() } },
-			probePackage: SHERPA_PACKAGE,
-			onPhase: phase =>
-				transport.send({
-					type: "progress",
-					id: requestId,
-					event: { modelKey, status: phase, name: `${SHERPA_PACKAGE}@${getSherpaVersionSpec()}` },
-				}),
-		});
-		const nodeModules = path.join(runtimeDir, "node_modules");
-		const entry = resolveRuntimeModule(nodeModules, SHERPA_PACKAGE);
-		if (!entry) throw new Error(`Unable to resolve ${SHERPA_PACKAGE} in compiled runtime at ${nodeModules}`);
-		return createRequire(entry)(entry) as SherpaRuntime;
-	});
 }
 
 async function loadPipelineOnDevice(
@@ -351,7 +295,15 @@ async function loadSherpaModel(
 	transport: SttTransport,
 	requestId: string,
 ): Promise<LoadedModel> {
-	const runtime = await loadSherpaRuntime(transport, requestId, modelKey);
+	const runtime = await sherpaRuntime.load(() =>
+		loadSherpaRuntime(phase =>
+			transport.send({
+				type: "progress",
+				id: requestId,
+				event: { modelKey, status: phase, name: `${SHERPA_PACKAGE}@${SHERPA_VERSION}` },
+			}),
+		),
+	);
 	const files = await ensureSherpaModelFiles(spec, modelKey, transport, requestId);
 	const startedAt = performance.now();
 	const numThreads = Math.max(1, Math.min(4, os.availableParallelism()));
@@ -641,8 +593,11 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 			if (session.pendingPartial) {
 				const audio = session.pendingPartial;
 				session.pendingPartial = null;
+				const startedAt = performance.now();
 				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
 				if (session.cancelled) return;
+				session.endpointer.notePartialDecode(performance.now() - startedAt);
+				if (!session.endpointer.partialsEnabled) session.pendingPartial = null;
 				// Skip a now-stale preview if a segment finalized mid-decode.
 				if (text.length > 0 && session.segmentQueue.length === 0) {
 					transport.send({ type: "partial", id: session.id, text });

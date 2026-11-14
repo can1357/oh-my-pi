@@ -105,6 +105,22 @@ describe("plugin extension discovery", () => {
 				export default function(pi) {
 					const onAny = pi.on;
 					onAny("auto_compaction_start", () => {});
+					const onEvent = pi.events.on;
+					const emitEvent = pi.events.emit;
+					const clearEvents = pi.events.clear;
+					let received;
+					onEvent("pi:model-adapter/register", payload => {
+						received = payload;
+					});
+					emitEvent("pi:model-adapter/register", { id: "gemini-acp" });
+					if (received?.id !== "gemini-acp") {
+						throw new Error("detached pi.events.emit/on did not deliver payload");
+					}
+					clearEvents();
+					emitEvent("pi:model-adapter/register", { id: "after-clear" });
+					if (received?.id !== "gemini-acp") {
+						throw new Error("detached pi.events.clear did not clear listeners");
+					}
 				}
 			`,
 		);

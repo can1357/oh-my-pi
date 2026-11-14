@@ -4,7 +4,10 @@ import { assertSelectorString, PLAYWRIGHT_ONLY_SELECTOR_RE, parseAriaRefSelector
 /** Semantic selector engines resolved in-page by the exported Chromium query handlers. */
 export type TernSemanticEngine = "label" | "placeholder" | "testid" | "alt" | "title" | "role";
 
-/** Parsed selector, JSON-safe, resolved in-page by the Tern page kit. */
+/**
+ * Parsed selector, JSON-safe: resolved in-page by the Tern page kit, or by the
+ * engine's native reads (`dom.ts`) on a Tern that answers them.
+ */
 export type TernSelector =
 	| { engine: "css"; query: string }
 	/** Puppeteer text engine: deepest elements whose text content includes the query. */
@@ -20,7 +23,9 @@ export type TernSelector =
 	/** Numeric id from the last `observe()` in this document. */
 	| { engine: "id"; id: number }
 	/** Element marked by the kit's `mark()`. */
-	| { engine: "handle"; token: string };
+	| { engine: "handle"; token: string }
+	/** Engine node ref of the native reads; the kit cannot resolve it. */
+	| { engine: "ref"; ref: string };
 
 const SEMANTIC_ENGINES: readonly TernSemanticEngine[] = ["label", "placeholder", "testid", "alt", "title", "role"];
 

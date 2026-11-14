@@ -5,10 +5,10 @@
 use std::{
 	error::Error,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	io::{BufWriter, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
@@ -18,7 +18,7 @@ use uucore::{
 	format::{Format, num_format, num_format::FloatVariant},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 mod number {
 use num_traits::Zero;
@@ -754,12 +754,12 @@ fn fast_print_seq(
 	start = start.min(num_end - padding);
 
 	// Prepare the number to increment with as a string
-	let inc_str = increment.to_string();
-	let inc_str = inc_str.as_bytes();
+	let mut inc_buf = NumBuffer::new();
+	let inc_str = increment.format_into(&mut inc_buf).as_bytes();
 
 	for i in 0..loop_cnt {
 		// Poll periodically so shell abort/timeout is observed.
-		if i % CANCEL_POLL_INTERVAL == 0 && host.is_cancelled() {
+		if i.is_multiple_of(CANCEL_POLL_INTERVAL) && host.is_cancelled() {
 			return Ok(());
 		}
 		stdout.write_all(&buf[start..])?;
@@ -837,10 +837,6 @@ fn print_seq(
 	}
 	stdout.flush()?;
 	Ok(())
-}
-/// Creates the `seq` builtin registration.
-pub(crate) fn seq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Seq, SE>()
 }
 
 #[cfg(test)]

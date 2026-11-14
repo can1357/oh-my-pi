@@ -37,6 +37,7 @@ import {
 	resolveAdvisorDeliveryChannel,
 } from "../../src/advisor";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
@@ -335,13 +336,7 @@ describe("advisor", () => {
 					id: "ask-1",
 					name: "ask",
 					arguments: {
-						questions: [
-							{
-								id: "deploy",
-								question: "Authorize deployment?",
-								options: [{ label: "Yes" }, { label: "No" }],
-							},
-						],
+						html: '<form><p>Authorize deployment?</p><label><input type="radio" name="deploy" value="yes"> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
 					},
 				},
 			],
@@ -351,8 +346,8 @@ describe("advisor", () => {
 			role: "toolResult",
 			toolCallId: "ask-1",
 			toolName: "ask",
-			content: [{ type: "text", text: "User selected: Yes" }],
-			details: { selectedOptions: ["Yes"] },
+			content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+			details: { answers: [{ name: "deploy", question: "Authorize deployment?", answer: "Yes" }] },
 			isError: false,
 			timestamp: 2,
 		} as unknown as AgentMessage;
@@ -364,28 +359,22 @@ describe("advisor", () => {
 				expandToolIO: true,
 			});
 
-			expect(compact).not.toContain("User selected: Yes");
-			expect(expanded).toContain('"question": "Authorize deployment?"');
-			expect(expanded).toContain('"label": "Yes"');
-			expect(expanded).toContain("User selected: Yes");
+			expect(compact).not.toContain('"deploy": "yes"');
+			expect(expanded).toContain("<p>Authorize deployment?</p>");
+			expect(expanded).toContain('value="no"> No</label>');
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
-		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+		it("bounds long ask forms and answers with visible head and tail context", () => {
 			const questionEnd = "question-at-end";
 			const answerEnd = "answer-at-end";
 			const longQuestion = {
-				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				...(askCall as unknown as Record<string, unknown>),
 				content: [
 					{
 						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
 						arguments: {
-							questions: [
-								{
-									id: "deploy",
-									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
-									options: [{ label: "Custom" }],
-								},
-							],
+							html: `<form><p>question-start ${"context\n".repeat(1200)}${questionEnd}</p><textarea name="answer"></textarea></form>`,
 						},
 					},
 				],
@@ -410,18 +399,8 @@ describe("advisor", () => {
 				role: "toolResult",
 				toolCallId: "ask-orphan",
 				toolName: "ask",
-				content: [{ type: "text", text: "deploy: Yes" }],
-				details: {
-					results: [
-						{
-							id: "deploy",
-							question: "Authorize production deployment?",
-							options: ["Yes", "No"],
-							multi: false,
-							selectedOptions: ["Yes"],
-						},
-					],
-				},
+				content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+				details: { answers: [{ name: "deploy", question: "Authorize production deployment?", answer: "Yes" }] },
 				isError: false,
 				timestamp: 2,
 			} as unknown as AgentMessage;
@@ -429,7 +408,7 @@ describe("advisor", () => {
 			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
 
 			expect(expanded).toContain("Authorize production deployment?");
-			expect(expanded).toContain("deploy: Yes");
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
 		it("bounds expanded tool results with visible head and tail context", () => {
@@ -1127,6 +1106,19 @@ describe("advisor", () => {
 			expect(delivered).toEqual(["Queued but never flushed."]);
 		});
 
+		it("emits nothing from a cancelled review", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note));
+			const cancelled = new AbortController();
+			cancelled.abort();
+			tool.beginUpdate(false);
+			await tool.execute("x-0", { note: "Stale finding.", severity: "blocker" }, cancelled.signal);
+			expect(delivered).toEqual([]);
+			// Nothing was admitted either: a later review may raise it.
+			await tool.execute("x-1", { note: "Stale finding.", severity: "blocker" });
+			expect(delivered).toEqual(["Stale finding."]);
+		});
+
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -1700,6 +1692,52 @@ describe("advisor", () => {
 			expect(review).toContain("inspect the retry config");
 			expect(review).toContain("now raise the limit");
 		});
+		it("omits primary thinking blocks when includeReasoning is false, including across model switches", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			let currentModelIdentity = "anthropic/claude-opus-5-5";
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "verify the patch", timestamp: 1 } as AgentMessage,
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "Internal hypothesis that might anchor the reviewer." },
+						{ type: "text", text: "Observable answer with file:line evidence." },
+					],
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				includeReasoning: false,
+				getModelIdentity: () => currentModelIdentity,
+			});
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(1);
+			const firstReview = promptText(promptInputs[0]);
+			expect(firstReview).toContain("Observable answer with file:line evidence.");
+			expect(firstReview).not.toContain("Internal hypothesis that might anchor the reviewer.");
+			expect(firstReview).not.toContain("_thinking:_");
+
+			// Switch advisor model identity and verify includeReasoning: false stays enforced
+			currentModelIdentity = "google-antigravity/gemini-4-argon";
+			messages.push({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "Second turn private reasoning." },
+					{ type: "text", text: "Second turn observable output." },
+				],
+				timestamp: 3,
+			} as unknown as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(2);
+			const secondReview = promptText(promptInputs[1]);
+			expect(secondReview).toContain("Second turn observable output.");
+			expect(secondReview).not.toContain("Second turn private reasoning.");
+		});
 
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -2065,6 +2103,43 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).toContain("### Session update\n");
 			expect(promptText(promptInputs[0])).not.toContain("[in progress");
 			expect(updateStates).toEqual([false]);
+		});
+
+		it("supersede cancels the review in flight and holds its update for the next dispatch", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const firstStarted = Promise.withResolvers<void>();
+			const firstRelease = Promise.withResolvers<void>();
+			const secondStarted = Promise.withResolvers<void>();
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (promptInputs.length === 1) {
+						firstStarted.resolve();
+						await firstRelease.promise;
+					} else {
+						secondStarted.resolve();
+					}
+				},
+				abort: () => firstRelease.resolve(),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "handoff", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages });
+
+			runtime.onTurnEnd(messages);
+			await firstStarted.promise;
+			expect(runtime.supersede()).toBe(true);
+			// The cancelled review no longer counts as backlog.
+			expect(await runtime.waitForCatchup(1_000, 1)).toBe(true);
+			expect(promptInputs).toHaveLength(1);
+
+			messages.push({ role: "user", content: "fix", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await secondStarted.promise;
+			const second = promptText(promptInputs[1]!);
+			expect(second).toContain("handoff");
+			expect(second).toContain("fix");
 		});
 
 		it("sends the batch when context maintenance fails", async () => {
@@ -5315,6 +5390,60 @@ describe("advisor", () => {
 			expect(failures).toEqual([]);
 		});
 
+		it("goes straight to the model fallback when the refused batch carried no reasoning", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const failures: unknown[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let modelRefuses = true;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					state.error = modelRefuses ? "Refusal (bio): blocked under Anthropic's Usage Policy" : undefined;
+					state.messages.push({
+						role: "assistant",
+						content: [],
+						stopReason: modelRefuses ? "error" : "stop",
+						stopDetails: modelRefuses ? { type: "refusal", category: "bio" } : undefined,
+						errorMessage: state.error,
+						timestamp: promptInputs.length + 1,
+					} as unknown as AgentMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				rollbackTo: count => {
+					state.messages.length = count;
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages = [
+				{ role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 1 } as AgentMessage,
+			];
+			let fallbackCalls = 0;
+			const runtime = new AdvisorRuntime(
+				agent,
+				{
+					snapshotMessages: () => messages,
+					notifyFailure: error => failures.push(error),
+					onTurnError: async () => {
+						fallbackCalls++;
+						modelRefuses = false;
+						return true;
+					},
+				},
+				0,
+			);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => runtime.backlog === 0);
+
+			// Stripping reasoning cannot change this batch, so the refused request is
+			// not resent byte-for-byte: refuse, switch models, the fallback answers.
+			expect(fallbackCalls).toBe(1);
+			expect(promptInputs).toHaveLength(2);
+			expect(failures).toEqual([]);
+		});
+
 		it("starts a fresh fallback cascade after the host declines to switch models", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const failures: unknown[] = [];
@@ -5616,6 +5745,38 @@ describe("advisor", () => {
 			expect(error.message).toBe("provider failed");
 			expect(events).toEqual(["prompt:1", "hook:provider failed", "prompt:2"]);
 			expect(runtime.backlog).toBe(0);
+		});
+
+		it("backs off between consecutive failures and honors a provider retry hint", async () => {
+			const promptTimes: number[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptTimes.push(performance.now());
+					// The 1st failure carries a 150 ms hint (above the 40 ms base); the 2nd has none.
+					state.error = promptTimes.length === 1 ? "429 rate limited retry-after-ms=150" : "provider failed";
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const failures: unknown[] = [];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyFailure: error => failures.push(error),
+			};
+			const runtime = new AdvisorRuntime(agent, host, 40);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length >= 1 && runtime.backlog === 0);
+
+			expect(promptTimes).toHaveLength(3);
+			// Hint wins over the 40 ms jittered base; the second wait is 80 ms doubled, minus at most 25% jitter.
+			expect(promptTimes[1] - promptTimes[0]).toBeGreaterThanOrEqual(145);
+			expect(promptTimes[2] - promptTimes[1]).toBeGreaterThanOrEqual(58);
 		});
 
 		it("calls onTurnError for each consecutive failure including the dropped third turn", async () => {
@@ -6828,6 +6989,24 @@ describe("advisor", () => {
 			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => false, uiTheme);
 			const text = strip(card.render(30));
 			expect(text).toContain("truncated.");
+		});
+
+		it("caps collapsed note rows at advisorCollapsedLines and shows every row when expanded", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			const note =
+				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
+			const details = { notes: [{ note, severity: "concern" as const }] };
+			try {
+				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 1 });
+				const rows = createAdvisorMessageCard(details, () => false, uiTheme).render(30);
+				expect(rows.length).toBe(2);
+				expect(strip(rows)).not.toContain("truncated.");
+				const expanded = createAdvisorMessageCard(details, () => true, uiTheme);
+				expect(strip(expanded.render(30))).toContain("truncated.");
+			} finally {
+				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 0 });
+			}
 		});
 	});
 

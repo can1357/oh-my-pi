@@ -2,10 +2,12 @@
 
 use std::{
 	collections::{HashMap, VecDeque},
+	path::Path,
 	sync::{LazyLock, Mutex},
 };
 
 use pi_ast::{
+	SupportLang,
 	block::{
 		BlockRangeOptions, EnclosingBoundaryOptions, LineRange, NodeSpan, enclosing_block_boundaries,
 		node_chain_at,
@@ -95,7 +97,9 @@ pub fn enclosing_boundaries(lines: &[&str], path: &str, start: u32, end: u32) ->
 
 /// Whether text parses cleanly for the supplied path language.
 pub fn parses_cleanly(path: Option<&str>, text: &str) -> bool {
-	let Some(path) = path else { return false };
+	let Some(path) = path.filter(|path| has_syntax_oracle(path)) else {
+		return false;
+	};
 	let cache_key = key(text, path, 0, 0);
 	if let Ok(cache) = CACHE.lock()
 		&& let Some(cached) = cache.parses.get(&cache_key)
@@ -108,4 +112,13 @@ pub fn parses_cleanly(path: Option<&str>, text: &str) -> bool {
 		insert_fifo(parses, parse_order, cache_key, parsed);
 	}
 	parsed
+}
+
+/// Whether a parse of `path` says anything about the file being valid.
+///
+/// Not for Markdown: every character sequence is a CommonMark document, so an
+/// `ERROR` node in tree-sitter-md's tree (a GFM table row with an empty `||`
+/// cell) is a grammar gap, not a broken file.
+pub(crate) fn has_syntax_oracle(path: &str) -> bool {
+	SupportLang::from_path(Path::new(path)) != Some(SupportLang::Markdown)
 }

@@ -37,7 +37,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 				command:    ctx.command,
 				config:     ctx.config,
 			};
-			return git::filter(&git_ctx, input, exit_code);
+			return git::filter_for(&git_ctx, ctx.program, input, exit_code);
 		},
 		_ => cleaned,
 	};

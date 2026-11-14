@@ -39,12 +39,14 @@ import {
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
 import { getStatsByModel, getTimeSeries } from "./rollup";
+import { buildSpotlightDashboardJson, getSpotlightSessionContext } from "./spotlight-aggregator";
 import {
 	buildSessionTrace,
 	getTraceEntry,
 	listSessionSummaries,
 	TRACE_ETAG_VERSION,
 	type TraceFingerprint,
+	traceEtagForFingerprint,
 	traceFingerprintForEtag,
 	TracePathError,
 } from "./trace";
@@ -163,6 +165,55 @@ const ensureClientBuild = async () => {
  */
 const STATS_ACTION_HEADER = "X-Omp-Stats-Action";
 
+/** What the page's Close calls; unset, the page offers none. */
+let closeHandler: (() => void) | undefined;
+
+/** Longest a Spotlight build serves later requests of its data version: its time range moves with the clock. */
+const SPOTLIGHT_VIEW_TTL_MS = 60_000;
+
+/** Spotlight payloads (JSON) of one live data version by `range\0agent`, with when each was requested. */
+let spotlightViews: { version: number; views: Map<string, { at: number; json: Promise<string> }> } | null = null;
+
+/** Aborted when the last dashboard of this process stops, ending the Spotlight builds still running for it. */
+let spotlightBuilds = new AbortController();
+
+/** Settles when the last queued Spotlight build does: builds run one at a time, as they did on the server's thread. */
+let spotlightQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * The Spotlight dashboard as JSON, built once per data version and view. Every open page refetches on each version
+ * bump and a build takes seconds of a worker's CPU and memory, so pages showing the same view share one build and
+ * different views wait their turn.
+ */
+function spotlightView(range: string | null, agent: string | null): Promise<string> {
+	const version = statsLive().status().version;
+	if (spotlightViews?.version !== version) spotlightViews = { version, views: new Map() };
+	const views = spotlightViews.views;
+	const key = `${range ?? ""}\0${agent ?? ""}`;
+	const cached = views.get(key);
+	if (cached && Date.now() - cached.at < SPOTLIGHT_VIEW_TTL_MS) return cached.json;
+	const { signal } = spotlightBuilds;
+	const json = spotlightQueue.then(() => buildSpotlightDashboardJson(range, agent, signal));
+	spotlightQueue = json.catch(() => {});
+	const entry = { at: Date.now(), json };
+	views.set(key, entry);
+	// A failed build is not reused.
+	json.catch(() => {
+		if (views.get(key) === entry) views.delete(key);
+	});
+	return json;
+}
+
+/**
+ * Let the page close the dashboard: while `close` is set, it shows a Close
+ * button (and takes Esc and Ctrl+C) that calls it. `omp stats` sets it while
+ * Tern shows the page in place of the block it runs in, where the page has no
+ * way out of its own; `undefined` takes Close away again.
+ */
+export function setStatsCloseHandler(close: (() => void) | undefined): void {
+	closeHandler = close;
+}
+
 /**
  * Handle API requests.
  */
@@ -268,6 +319,17 @@ export async function handleApi(req: Request): Promise<Response> {
 		return Response.json(details);
 	}
 
+	if (path === "/api/close") {
+		if (req.method === "GET") return Response.json({ closable: closeHandler !== undefined });
+		if (req.method !== "POST") return Response.json({ error: "GET or POST required" }, { status: 405 });
+		if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
+			return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
+		}
+		if (!closeHandler) return Response.json({ error: "this dashboard is not closed from its page" }, { status: 404 });
+		closeHandler();
+		return new Response(null, { status: 202 });
+	}
+
 	if (path === "/api/sync") {
 		if (req.method !== "POST") return Response.json({ error: "POST required" }, { status: 405 });
 		statsLive().requestSync();
@@ -279,6 +341,20 @@ export async function handleApi(req: Request): Promise<Response> {
 		const stats = await getGainDashboardStats(range, project);
 		return Response.json(stats);
 	}
+	if (path === "/api/stats/spotlight") {
+		return new Response(await spotlightView(range, url.searchParams.get("agent")), {
+			headers: { "content-type": "application/json;charset=utf-8" },
+		});
+	}
+
+	if (path === "/api/stats/spotlight/session") {
+		const file = url.searchParams.get("file");
+		if (!file) return Response.json({ error: "file required" }, { status: 400 });
+		const context = await getSpotlightSessionContext(file);
+		if (!context) return Response.json({ error: "not a Spotlight experiment session" }, { status: 404 });
+		return Response.json(context);
+	}
+
 	if (path === "/api/sessions") {
 		const limitParam = Number(url.searchParams.get("limit") ?? "100");
 		const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.floor(limitParam) : 100;
@@ -302,7 +378,7 @@ export async function handleApi(req: Request): Promise<Response> {
 			if (clientEtag) {
 				fingerprint = await traceFingerprintForEtag(file);
 				if (fingerprint !== undefined) {
-					const etag = `"${TRACE_ETAG_VERSION}:${fingerprint.rootMtimeMs}:${fingerprint.childFingerprint}"`;
+					const etag = `"${TRACE_ETAG_VERSION}:${traceEtagForFingerprint(fingerprint)}"`;
 					if (clientEtag === etag) return new Response(null, { status: 304 });
 				}
 			}
@@ -391,6 +467,8 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 				server.timeout(req, 0);
 				return liveEventStream(dashboardHeaders, req.signal);
 			}
+			// A Spotlight build runs on a worker and can outlast the idle timeout, which counts a pending handler.
+			if (path === "/api/stats/spotlight") server.timeout(req, 0);
 
 			try {
 				let response: Response;
@@ -474,19 +552,20 @@ function liveEventStream(headers: Record<string, string>, signal: AbortSignal): 
 	});
 }
 
-/**
- * Start the HTTP server, reusing a live dashboard or reclaiming a stale omp listener.
- */
+/** A dashboard this process started or found; `reused` distinguishes another process's server from one we own. */
 export interface StatsServerHandle {
 	hostname: string;
 	port: number;
+	/** True when the dashboard belongs to another process and this process has no server to keep alive. */
+	reused: boolean;
 	stop: () => void;
 }
 
-// Dashboards this process already bound, keyed by requested `hostname:port`.
-// A second in-process start (e.g. `/trace` twice in one session) must return
-// the live handle: probing our own port can time out under load and would
-// then dead-end in the reclaim path's self-PID guard.
+// Dashboards this process already bound, keyed by requested and bound
+// `hostname:port`. A second in-process start (e.g. `/trace` twice in one
+// session, or a caller passing back a fallback port) must return the live
+// handle: probing our own port can time out under load and would then start
+// yet another dashboard on a fallback port.
 const activeServers = new Map<string, StatsServerHandle>();
 /** Dashboards bound by this process (any port); background ingest stops when the last one does. */
 let liveServers = 0;
@@ -496,57 +575,71 @@ export interface StartServerOptions {
 	judge?: StatsJudgeProvider;
 }
 
+/**
+ * Start the dashboard on `port`, or reuse the current dashboard already serving it.
+ * An older dashboard there is stopped and replaced; any other holder (a foreign
+ * program, or a dashboard too busy to answer the identity probe) is left running
+ * and the dashboard binds an ephemeral port instead.
+ */
 export async function startServer(
 	port = 3847,
 	hostname = STATS_DASHBOARD_HOSTNAME,
 	options: StartServerOptions = {},
 ): Promise<StatsServerHandle> {
 	if (options.judge) setStatsJudgeProvider(options.judge);
-	const activeKey = `${hostname}:${port}`;
+	const requestedKey = `${hostname}:${port}`;
 	if (port !== 0) {
-		const active = activeServers.get(activeKey);
+		const active = activeServers.get(requestedKey);
 		if (active) return active;
 	}
 	await ensureClientBuild();
-	const preparation = await prepareStatsPort(port, hostname);
-	if (preparation === "reuse") {
-		return { hostname, port, stop: () => {} };
-	}
 	const register = (server: Server<undefined>): StatsServerHandle => {
 		liveServers++;
 		let stopped = false;
+		const boundPort = server.port ?? port;
+		const keys = port === 0 ? [`${hostname}:${boundPort}`] : [requestedKey, `${hostname}:${boundPort}`];
 		const handle: StatsServerHandle = {
 			hostname,
-			port: server.port ?? port,
+			port: boundPort,
+			reused: false,
 			stop: () => {
-				activeServers.delete(activeKey);
+				for (const key of keys) activeServers.delete(key);
 				server.stop(true);
 				if (stopped) return;
 				stopped = true;
-				// The last dashboard in this process takes background ingest down with it.
-				if (--liveServers === 0) statsLive().stop();
+				// The last dashboard in this process takes background ingest and Spotlight builds down with it.
+				if (--liveServers === 0) {
+					statsLive().stop();
+					spotlightBuilds.abort(new Error("Stats dashboard stopped"));
+					spotlightBuilds = new AbortController();
+				}
 			},
 		};
-		if (port !== 0) activeServers.set(activeKey, handle);
+		for (const key of keys) activeServers.set(key, handle);
 		return handle;
 	};
 
+	let claim = await prepareStatsPort(port, hostname);
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+		claim = await recoverStatsPort(port, hostname);
+	}
+	if (claim === "reuse") return { hostname, port, reused: true, stop: () => {} };
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+	}
+	logger.warn("Stats dashboard port is held by another process; serving on an ephemeral port", { hostname, port });
+	return register(createDashboardServer(0, hostname));
+}
+
+/** {@link createDashboardServer}, or null when the port is already in use. */
+function bindDashboardServer(port: number, hostname: string): Server<undefined> | null {
 	try {
-		return register(createDashboardServer(port, hostname));
+		return createDashboardServer(port, hostname);
 	} catch (error) {
-		if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE")) throw error;
-
-		const recovery = await recoverStatsPort(port, hostname);
-		if (recovery === "reuse") {
-			return { hostname, port, stop: () => {} };
-		}
-
-		try {
-			return register(createDashboardServer(port, hostname));
-		} catch (retryError) {
-			throw new Error(`Failed to start stats dashboard on ${hostname}:${port} after reclaiming it.`, {
-				cause: retryError,
-			});
-		}
+		if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
+		throw error;
 	}
 }

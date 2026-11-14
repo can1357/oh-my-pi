@@ -2,7 +2,6 @@ The conversation above is the complete history to summarize. The API replaces ev
 
 {{#if extraContext}}
 {{extraContext}}
-
 {{/if}}
 {{basePrompt}}
 {{#if customInstructions}}

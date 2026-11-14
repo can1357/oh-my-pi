@@ -74,6 +74,12 @@ export const cfgSkillsIgnoredSkills = register({
 	default: EMPTY_STRING_ARRAY,
 });
 
+export const cfgSkillsManualSkills = register({
+	id: "skills.manualSkills",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+});
+
 export const cfgSkillsIncludeSkills = register({
 	id: "skills.includeSkills",
 	type: "array",
@@ -93,6 +99,7 @@ export const cfgSkills = combine({
 	enableAgentsProject: cfgSkillsEnableAgentsProject,
 	customDirectories: cfgSkillsCustomDirectories,
 	ignoredSkills: cfgSkillsIgnoredSkills,
+	manualSkills: cfgSkillsManualSkills,
 	includeSkills: cfgSkillsIncludeSkills,
 });
 
@@ -158,5 +165,44 @@ export const cfgExtensionHandlersToolCallTimeoutMs = register({
 		label: "Tool Call Handler Timeout (ms)",
 		description:
 			"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
+	},
+});
+
+export const cfgExtensionHandlersModeControl = register({
+	id: "extensionHandlers.modeControl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Extension Mode Control",
+		description:
+			"Let extensions enter and exit plan, vibe, goal, and loop modes via ctx.sessionModes.set(); reading mode state stays available",
+	},
+});
+
+export const cfgExtensionAssistantTextRenderers = register({
+	id: "extensionRenderers.assistantText",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Extension Reply Renderers",
+		description:
+			"Let extensions change how assistant replies are drawn, redraw a reply in place, and receive clicks on their own links; the session, exports and model context keep the reply as written",
+	},
+});
+
+export const cfgExtensionTranscriptPresenters = register({
+	id: "extensionRenderers.transcriptPresenters",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Extension Transcript Presenters",
+		description:
+			"Let extensions draw transcript blocks such as tool calls in full, as one compact row, or hidden; the session, exports and model context are unchanged",
 	},
 });

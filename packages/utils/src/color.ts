@@ -61,6 +61,17 @@ export function rgbToHex(rgb: RGB): string {
 	return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
 }
 
+/** Linear sRGB blend of two hex colors: `t` = 0 gives `a`, 1 gives `b`. */
+export function mixHex(a: string, b: string, t: number): string {
+	const ca = hexToRgb(a);
+	const cb = hexToRgb(b);
+	return rgbToHex({
+		r: ca.r + (cb.r - ca.r) * t,
+		g: ca.g + (cb.g - ca.g) * t,
+		b: ca.b + (cb.b - ca.b) * t,
+	});
+}
+
 /**
  * Convert RGB to HSV.
  */
@@ -311,6 +322,12 @@ function oklabToLinearRgb(L: number, a: number, b: number): { r: number; g: numb
 	};
 }
 
+/** Convert a hex color to OKLab. */
+function hexToOklab(hex: string): { L: number; a: number; b: number } {
+	const rgb = hexToRgb(hex);
+	return linearRgbToOklab(linearizeChannel(rgb.r), linearizeChannel(rgb.g), linearizeChannel(rgb.b));
+}
+
 /**
  * Convert a hex color to OKLCH (perceptual lightness/chroma/hue).
  *
@@ -318,12 +335,18 @@ function oklabToLinearRgb(L: number, a: number, b: number): { r: number; g: numb
  * hues, so carrying them between colors preserves the palette's "weight".
  */
 export function hexToOklch(hex: string): OKLCH {
-	const rgb = hexToRgb(hex);
-	const lab = linearRgbToOklab(linearizeChannel(rgb.r), linearizeChannel(rgb.g), linearizeChannel(rgb.b));
+	const lab = hexToOklab(hex);
 	const c = Math.hypot(lab.a, lab.b);
 	let h = (Math.atan2(lab.b, lab.a) * 180) / Math.PI;
 	if (h < 0) h += 360;
 	return { l: lab.L, c, h };
+}
+
+/** Perceptual distance between two hex colors: Euclidean OKLab, 0 when identical, 1 from black to white. */
+export function oklabDistance(a: string, b: string): number {
+	const x = hexToOklab(a);
+	const y = hexToOklab(b);
+	return Math.hypot(x.L - y.L, x.a - y.a, x.b - y.b);
 }
 
 /**

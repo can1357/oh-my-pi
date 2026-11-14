@@ -106,7 +106,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#field: FormField;
 	#onSubmitCallback: (value: string, images?: ImageContent[]) => void;
-	#onCancelCallback: () => void;
+	#onCancelCallback: (draft: string, images?: ImageContent[]) => void;
 	#tui: TUI;
 	#promptStyle: boolean;
 	#acceptImages: boolean;
@@ -128,7 +128,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		title: string,
 		prefill: string | undefined,
 		onSubmit: (value: string, images?: ImageContent[]) => void,
-		onCancel: () => void,
+		/** Receives the text and images left in the editor, so a host can offer them again. */
+		onCancel: (draft: string, images?: ImageContent[]) => void,
 		options?: HookEditorOptions,
 	) {
 		// First title line insets into the panel border; remaining lines (e.g. the
@@ -328,22 +329,20 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#submitQueued = true;
 			return;
 		}
-		let text = this.#editor.getExpandedText();
+		const { text, images } = this.#currentValue();
 		if (requireText && text.trim().length === 0) return;
-		let images: ImageContent[] | undefined;
-		if (this.#images.length > 0) {
-			// Path pastes attach as they finish loading; submit numbers images in text order.
-			const compacted = compactImageMarkers(text, this.#images.length, { byAppearance: true });
-			if (compacted) {
-				text = compacted.text;
-				images = compacted.keep.map(index => this.#images[index]);
-			} else {
-				images = this.#images;
-			}
-		}
 		this.dispose();
 		if (images?.length) this.#onSubmitCallback(text, images);
 		else this.#onSubmitCallback(text);
+	}
+
+	/** Expanded editor text, with attached images renumbered in text order (path pastes attach as they load). */
+	#currentValue(): { text: string; images: ImageContent[] | undefined } {
+		const text = this.#editor.getExpandedText();
+		if (this.#images.length === 0) return { text, images: undefined };
+		const compacted = compactImageMarkers(text, this.#images.length, { byAppearance: true });
+		if (!compacted) return { text, images: this.#images };
+		return { text: compacted.text, images: compacted.keep.map(index => this.#images[index]) };
 	}
 
 	/** Whether this prompt opted into clipboard image attachments. */
@@ -393,8 +392,10 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	}
 
 	#cancel(): void {
+		const { text, images } = this.#currentValue();
 		this.dispose();
-		this.#onCancelCallback();
+		if (images?.length) this.#onCancelCallback(text, images);
+		else this.#onCancelCallback(text);
 	}
 
 	/** Route non-bracketed paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
@@ -405,6 +406,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		if (this.#disposed) return;
 		if (this.#pendingPastes.length > 0) this.beginPaste()(text);
 		else this.#editor.pasteText(text);
+	}
+
+	/** Replace the draft, as Ctrl+R history search does for the main composer. */
+	setText(text: string): void {
+		if (this.#disposed) return;
+		this.#editor.setText(text);
 	}
 
 	/**

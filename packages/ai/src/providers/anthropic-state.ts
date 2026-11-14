@@ -75,6 +75,21 @@ export function clearAnthropicFastModeFallback(
 	}
 }
 
+/**
+ * Forget every Anthropic message thread in `providerSessionState`: a thread
+ * belongs to the credential that created it, so another account's continue
+ * would only earn a `thread_not_found` 404. Also re-arms chains a refusal
+ * disabled, since that refusal may have been the old account's organization
+ * setting.
+ */
+export function resetAnthropicThreads(providerSessionState: Map<string, ProviderSessionState>): void {
+	const prefix = `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:`;
+	for (const [key, value] of providerSessionState) {
+		if (!key.startsWith(prefix)) continue;
+		if ("threads" in value && value.threads instanceof Map) value.threads.clear();
+	}
+}
+
 /** Inspect the direct model's fast-mode fallback without materializing state. */
 export function isAnthropicFastModeFallbackDisabled(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,

@@ -10,7 +10,7 @@ use std::{
 	io::{self, Write},
 };
 
-use brush_core::openfiles::OpenFile;
+use crate::openfile::OpenFile;
 use indicatif::{ProgressDrawTarget, TermLike};
 use parking_lot::Mutex;
 

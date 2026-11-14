@@ -121,13 +121,5 @@ export function encodeResponse(result: JudgmentResult): SystemOneResponseBody {
 	return { model: result.model, answers: result.answers, usage };
 }
 
-/** TypeSafe answers errors with a status code and a JSON body; the envelope mirrors the other gateway routes. */
-export function formatError(status: number, type: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { type, message } }), {
-		status,
-		headers: {
-			"Content-Type": "application/json; charset=utf-8",
-			"Cache-Control": "no-store",
-		},
-	});
-}
+/** @deprecated Use `noStoreErrorResponse` from `auth-gateway/http`. */
+export { noStoreErrorResponse as formatError } from "../auth-gateway/http";

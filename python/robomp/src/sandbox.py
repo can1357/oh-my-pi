@@ -76,7 +76,7 @@ from robomp.git_ops import (
 from robomp.git_ops import (
     push_release as git_push_release,
 )
-from robomp.natives_cache import CacheHit, NativesCache
+from robomp.natives_cache import NativesCache
 from robomp.natives_cache import compute_key as natives_compute_key
 
 log = logging.getLogger(__name__)
@@ -239,7 +239,16 @@ class GitTransport(Protocol):
         """Best-effort `git fetch origin <ref>` to ensure the base branch is local."""
         ...
 
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         """Fetch `refs/pull/<n>/head` into FETCH_HEAD for detached PR review checkouts."""
         ...
 
@@ -296,9 +305,20 @@ class LocalGitTransport:
         del repo
         git_fetch_ref(pool_dir, ref, token=self._token)
 
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         del repo
-        git_fetch_pr_head(pool_dir, pr_number, token=self._token)
+        git_fetch_pr_head(
+            pool_dir, pr_number, token=self._token, head_ref=head_ref, head_sha=head_sha, same_repo=same_repo
+        )
 
     def push_branch(
         self,
@@ -885,6 +905,9 @@ class SandboxManager:
         default_branch: str,
         existing_branch: str | None = None,
         pr_head: int | None = None,
+        pr_head_ref: str | None = None,
+        pr_head_sha: str | None = None,
+        pr_head_same_repo: bool = False,
         author_name: str,
         author_email: str,
         slot_uid: int | None = None,
@@ -928,7 +951,14 @@ class SandboxManager:
                 workspace_prepared = True
             if not repo_exists:
                 if pr_head is not None:
-                    self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+                    self.transport.fetch_pr_head(
+                        repo=repo,
+                        pool_dir=pool,
+                        pr_number=pr_head,
+                        head_ref=pr_head_ref,
+                        head_sha=pr_head_sha,
+                        same_repo=pr_head_same_repo,
+                    )
                     _worktree_add(
                         ["git", "worktree", "add", "--detach", str(repo_dir), "FETCH_HEAD"],
                         pool=pool,
@@ -1014,11 +1044,7 @@ class SandboxManager:
                 repo_full_name=repo,
                 issue_number=number,
             )
-            # Best-effort: hardlink pre-built natives in if we've cached this
-            # source state before. Runs AFTER the slot chown so the cache inode
-            # keeps its `root:omp` ownership (the slot reads through group `omp`);
-            # write-temp + rename in the napi build replaces with a new inode if
-            # the agent rebuilds, so the cached file is never mutated.
+            # Populate independent native artifact copies after workspace ownership is set.
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
 
@@ -1101,20 +1127,7 @@ class SandboxManager:
             return workspace
 
     def _populate_natives_cache(self, workspace: Workspace, *, slot_uid: int | None = None) -> None:
-        """Try to hardlink cached pi-natives artifacts into the worktree.
-
-        Best-effort: any failure (no cache configured, non-git worktree,
-        cache miss, link error) is logged at debug and swallowed. The agent
-        falls back to a fresh napi build, exactly as it would without the
-        cache.
-
-        Post-populate, the populated `packages/natives/native/` directory
-        and the COPIED companion files are chowned to the slot so the slot
-        can rebuild via temp + rename in that directory. The hardlinked
-        `.node` files are LEFT at `root:omp` ownership — chowning them
-        would chown the cache file too (shared inode), breaking the
-        cross-slot sharing model. The slot reads them via group `omp`.
-        """
+        """Copy cached native artifacts into the worktree on a cache hit."""
         cache = self.natives_cache
         if cache is None:
             return
@@ -1133,16 +1146,14 @@ class SandboxManager:
             )
             return
         try:
-            hit = cache.populate_workspace(workspace.repo_full_name, key, native_dir)
+            owner = (slot_uid, slot_uid) if _slot_permissions_active(slot_uid) and slot_uid is not None else None
+            hit = cache.populate_workspace(workspace.repo_full_name, key, native_dir, owner=owner)
         except OSError as exc:
             log.warning(
                 "natives_cache populate failed",
                 extra={"workspace": workspace.workspace_key, "key": key, "err": str(exc)},
             )
             return
-        if hit is not None and _slot_permissions_active(slot_uid):
-            assert slot_uid is not None
-            self._chown_natives_for_slot(native_dir, hit, slot_uid=slot_uid)
         log.info(
             "natives_cache",
             extra={
@@ -1153,34 +1164,6 @@ class SandboxManager:
                 "files": [str(p.name) for p in hit.files] if hit is not None else [],
             },
         )
-
-    @staticmethod
-    def _chown_natives_for_slot(native_dir: Path, hit: CacheHit, *, slot_uid: int) -> None:
-        """Hand the populated native dir to the slot WITHOUT touching the
-        hardlinked `.node` inodes (those are shared with the cache).
-
-        Files whose names match a cached `.node` are skipped — they are
-        hardlinks back into the root:omp cache and the slot reads them via
-        group `omp`. Everything else (the directory itself, copied
-        companions) is chowned to the slot so the slot can rebuild via
-        temp + rename.
-        """
-        try:
-            os.chown(native_dir, slot_uid, slot_uid)
-        except OSError as exc:
-            log.warning("natives_cache chown dir failed", extra={"err": str(exc)})
-            return
-        node_basenames = {p.name for p in hit.files if p.name.endswith(".node")}
-        for child in native_dir.iterdir():
-            if child.name in node_basenames:
-                continue  # hardlink to cache — must not chown
-            try:
-                os.chown(child, slot_uid, slot_uid, follow_symlinks=False)
-            except OSError as exc:
-                log.warning(
-                    "natives_cache chown companion failed",
-                    extra={"file": str(child), "err": str(exc)},
-                )
 
     def remove_workspace(self, *, repo: str, number: int | str) -> None:
         with self._repo_lock(repo):

@@ -28,6 +28,8 @@ provider "sambanova" {
 	// (https://docs.sambanova.ai/docs/api-reference/chat-completions/create-chat-based-completion).
 	thinking-mode "effort"
 	thinking-format "openai"
+	// Replay the streamed `reasoning` field so turn-N prompts hit the gateway's prefix cache.
+	replay-reasoning-content #true
 	class "gpt-oss" {
 		thinking-efforts "low" "medium" "high"
 		thinking-upgrade-neutral #true

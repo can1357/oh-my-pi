@@ -6,7 +6,7 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { type } from "@oh-my-pi/omptype";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 
@@ -21,7 +21,6 @@ import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types"
 import { getLatestCompactionEntry } from "./session-context";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { cfgSkillful } from "./settings";
 
 /** Non-message accounting recorded with a provider prompt. */
 interface NonMessageSnapshot {
@@ -111,12 +110,10 @@ export class SessionStatsTracker {
 	/** Tool-schema tokens the active model carries in its prompt. */
 	#currentToolSchemaTokens(): number {
 		const session = this.#host.session;
-		return estimateContextToolSchemaTokens(
-			session.agent?.state?.tools ?? [],
-			this.#tokenizer,
-			session.model,
-			session.settings?.revision,
-		);
+		return estimateContextToolSchemaTokens(session.agent?.state?.tools ?? [], this.#tokenizer, session.model, {
+			sourceRevision: session.settings?.revision,
+			pruneDescriptions: session.agent?.prunesToolDescriptions?.(session.model),
+		});
 	}
 
 	/**
@@ -200,6 +197,7 @@ export class SessionStatsTracker {
 		let committedAcuCost = 0;
 		let hasCredits = false;
 		const routedModels: Record<string, number> = {};
+		const editRejections: Record<string, number> = {};
 		const addUsage = (usage: Usage): void => {
 			totalInput += usage.input;
 			totalOutput += usage.output;
@@ -225,6 +223,12 @@ export class SessionStatsTracker {
 				if (message.toolName === "task") {
 					const usage = taskToolUsage(message.details);
 					if (usage) addUsage(usage);
+				} else if (message.toolName === "edit" && message.isError) {
+					const { details } = message;
+					if (details && typeof details === "object" && "errorKind" in details) {
+						const kind = details.errorKind;
+						if (typeof kind === "string") editRejections[kind] = (editRejections[kind] ?? 0) + 1;
+					}
 				}
 			} else if (message.role === "assistant") {
 				assistantMessages++;
@@ -269,6 +273,7 @@ export class SessionStatsTracker {
 					}
 				: undefined),
 			...(Object.keys(routedModels).length > 0 ? { routedModels } : undefined),
+			...(Object.keys(editRejections).length > 0 ? { editRejections } : undefined),
 			contextUsage: this.getContextUsage(),
 		};
 	}
@@ -281,13 +286,10 @@ export class SessionStatsTracker {
 		const rawContextWindow = options?.contextWindow ?? this.#host.model()?.contextWindow ?? 0;
 		const contextWindow = Number.isFinite(rawContextWindow) && rawContextWindow > 0 ? rawContextWindow : 0;
 		const settings = this.#host.session.settings;
-		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(
-			this.#host.session,
-			this.#tokenizer,
-			settings?.revision,
-			settings ? cfgSkillful.get(settings) : undefined,
-		);
-		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
+		const { skillsTokens, instructionFilesTokens, toolsTokens, systemContextTokens, systemPromptTokens } =
+			computeNonMessageBreakdown(this.#host.session, this.#tokenizer, settings?.revision);
+		const categoryNonMessageTokens =
+			skillsTokens + instructionFilesTokens + toolsTokens + systemContextTokens + systemPromptTokens;
 		const current = {
 			nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer, settings?.revision),
 			toolSchemaTokens: toolsTokens,
@@ -374,6 +376,7 @@ export class SessionStatsTracker {
 			systemPromptTokens,
 			systemToolsTokens: toolsTokens,
 			systemContextTokens,
+			instructionFilesTokens,
 			skillsTokens,
 			messagesTokens: Math.max(0, usedTokens - categoryNonMessageTokens),
 		};
@@ -502,14 +505,15 @@ function taskToolUsage(details: unknown): Usage | undefined {
 	return isUsage(usage) ? usage : undefined;
 }
 
+const UsageShape = type({
+	input: "number",
+	output: "number",
+	cacheRead: "number",
+	cacheWrite: "number",
+	totalTokens: "number",
+	cost: { total: "number" },
+});
+
 function isUsage(value: unknown): value is Usage {
-	if (!isRecord(value) || !isRecord(value.cost)) return false;
-	return (
-		typeof value.input === "number" &&
-		typeof value.output === "number" &&
-		typeof value.cacheRead === "number" &&
-		typeof value.cacheWrite === "number" &&
-		typeof value.totalTokens === "number" &&
-		typeof value.cost.total === "number"
-	);
+	return UsageShape.allows(value);
 }

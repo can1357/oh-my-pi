@@ -53,11 +53,7 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 fn cvt(ok: i32) -> io::Result<()> {
-	if ok == 0 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
-	}
+	(ok != 0).ok_or_else(io::Error::last_os_error)
 }
 
 fn handle_info(file: &fs::File) -> io::Result<HandleInfo> {

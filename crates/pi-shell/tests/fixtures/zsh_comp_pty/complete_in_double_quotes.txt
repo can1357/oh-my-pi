@@ -1,0 +1,7 @@
+### "echo \"fo\t"
+% echo "foo.
+@ 0,12
+### "\t"
+% echo "foo.
+foo.c  foo.h
+@ 0,12

@@ -82,20 +82,20 @@ export function collapseSkillTokens(
 
 /**
  * Replaces mentionable model selectors with their display chips and registers
- * each chip's canonical selector as its atomic editor expansion.
+ * each chip's canonical `^selector` as its atomic editor expansion.
  */
 export function collapseModelMentions(
 	text: string,
-	labelFor: (selector: string) => string | undefined,
+	chipFor: (selector: string) => { label: string; selector: string } | undefined,
 	register: (label: string, expansion: string) => void,
 ): string {
 	if (!text.includes("^") || !allowsModelMentions(text)) return text;
 	MODEL_MENTION_RE.lastIndex = 0;
 	return text.replace(MODEL_MENTION_RE, (match, delimiter: string, selector: string) => {
-		const label = labelFor(selector);
-		if (label === undefined) return match;
-		register(label, modelMentionToken(selector));
-		return `${delimiter}${label}`;
+		const chip = chipFor(selector);
+		if (chip === undefined) return match;
+		register(chip.label, modelMentionToken(chip.selector));
+		return `${delimiter}${chip.label}`;
 	});
 }
 

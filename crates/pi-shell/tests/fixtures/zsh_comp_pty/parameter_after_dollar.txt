@@ -1,0 +1,8 @@
+### "echo $HO\t"
+% echo $HO
+HOME  HOST
+@ 0,10
+### "\t"
+% echo $HOME/
+HOME  HOST
+@ 0,13

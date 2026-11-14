@@ -52,6 +52,13 @@ provider "google-antigravity" {
 		prompt-cache {
 			short 300
 		}
+		// Cloud Code Assist rejects Claude 4.x requests over 64,000 output
+		// tokens with a 400 (`Request contains an invalid argument`) even when
+		// the roster advertises 65,536 (#3067). The ceiling also lowers the
+		// discovered per-SKU wire caps the transport sends verbatim.
+		revision "<5" {
+			max-tokens-ceiling 64000
+		}
 		family "opus" {
 			thinking-mode "budget"
 		}

@@ -10,7 +10,6 @@ use std::{
 	collections::{HashMap, HashSet},
 	ffi::{OsStr, OsString},
 	fs, io,
-	mem::size_of,
 	os::windows::{
 		ffi::{OsStrExt, OsStringExt},
 		fs::MetadataExt,
@@ -358,10 +357,7 @@ fn shortcuts(
 
 fn registered_path(value: &str) -> Option<&Path> {
 	let value = value.trim();
-	let value = value
-		.strip_prefix('"')
-		.and_then(|value| value.strip_suffix('"'))
-		.unwrap_or(value);
+	let value = value.strip_circumfix('"', '"').unwrap_or(value);
 	if value.contains(['"', '\0']) {
 		return None;
 	}
@@ -419,17 +415,11 @@ fn registered_applications(apps: &mut Vec<Application>) -> CoreResult<()> {
 						return Err(io_error(&format!("read registered path for {entry}"), error));
 					},
 				};
-				if !matches!(value.vtype, REG_SZ | REG_EXPAND_SZ) || value.bytes.len() % 2 != 0 {
+				if !matches!(value.vtype, REG_SZ | REG_EXPAND_SZ) {
 					continue;
 				}
-				let wide: Vec<u16> = value
-					.bytes
-					.as_chunks::<2>()
-					.0
-					.iter()
-					.map(|pair| u16::from_le_bytes(*pair))
-					.collect();
-				let Ok(value_text) = String::from_utf16(&wide) else {
+				// Odd-length data is rejected by `from_utf16le` as well.
+				let Ok(value_text) = String::from_utf16le(&value.bytes) else {
 					continue;
 				};
 				let text = value_text.trim_end_matches('\0');

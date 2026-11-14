@@ -1,0 +1,9 @@
+{
+	"fits": {
+		"instructions": "The state holds a coding-agent session's `title` and its `recent` conversation, oldest first, ending with the latest turn. Decide whether the title still names what the recent conversation is working on. The title fits when the recent work is the titled task, a step of it, a follow-up serving the same goal, or reviewing, testing, fixing, or shipping that work. It no longer fits when the recent requests moved to a different task, subject, or goal that the title does not name.",
+		"criteria": {
+			"true": "Still fits:\n- title \"Fix parser crash on empty input\", recent: adding a regression test for the empty-input crash\n- title \"Migrate auth to OAuth\", recent: fixing CI failures on the OAuth branch, then opening the PR\n- title \"Investigate node outage\", recent: confirming power and Ethernet recovery on that node",
+			"false": "No longer fits:\n- title \"Fix parser crash on empty input\", recent: designing the settings page layout\n- title \"Migrate auth to OAuth\", recent: benchmarking database query latency\n- title \"Review PR 412\", recent: drafting a reply email to a customer"
+		}
+	}
+}

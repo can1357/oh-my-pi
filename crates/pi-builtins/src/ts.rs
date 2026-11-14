@@ -15,11 +15,10 @@ use std::{
 	time::Instant,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_RELATIVE: &str = "relative";
 const OPT_INCREMENTAL: &str = "incremental";
@@ -277,11 +276,10 @@ fn parse_leading_timestamp(line: &[u8], year: i16, tz: &TimeZone) -> Option<(usi
 		}
 	}
 
-	if line.len() < SYSLOG_LEN || (line.len() > SYSLOG_LEN && !line[SYSLOG_LEN].is_ascii_whitespace())
-	{
+	let (&(mut prefix), rest) = line.split_first_chunk::<SYSLOG_LEN>()?;
+	if rest.first().is_some_and(|byte| !byte.is_ascii_whitespace()) {
 		return None;
 	}
-	let mut prefix: [u8; SYSLOG_LEN] = line[..SYSLOG_LEN].try_into().ok()?;
 	if prefix[4] == b' ' {
 		prefix[4] = b'0';
 	}
@@ -325,11 +323,6 @@ fn render_relative(then: Timestamp, now: Timestamp) -> String {
 	} else {
 		format!("in {count}{unit}")
 	}
-}
-
-/// Creates the `ts` builtin registration.
-pub(crate) fn ts_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ts, SE>()
 }
 
 #[cfg(test)]

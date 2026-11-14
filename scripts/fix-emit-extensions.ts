@@ -4,7 +4,7 @@
  * `moduleResolution: "node16" | "nodenext"`.
  *
  * The workspace type-checks under `moduleResolution: "Bundler"`
- * (`tsconfig.base.json`), which permits extensionless relative imports. `tsgo`
+ * (`tsconfig.base.json`), which permits extensionless relative imports. TypeScript
  * therefore emits `export * from "./sdk"` / `import … from "./modes/components"`
  * into `dist/types` (declarations) and `dist/js` (transpiled runtime). A
  * downstream consumer on `nodenext` then can't resolve the barrel — every
@@ -19,7 +19,7 @@
  * Bare (`@scope/pkg`, `zod/v4`) and already-suffixed (`.js`, `.json`)
  * specifiers are left untouched.
  *
- * Applied by `ci-release-publish.ts` after each `tsgo -p tsconfig.publish*.json`.
+ * Applied by `ci-release-publish.ts` after each `tsc -p tsconfig.publish*.json`.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";

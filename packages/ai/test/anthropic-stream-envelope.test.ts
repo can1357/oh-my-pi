@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
 	AnthropicMessages,
@@ -148,6 +149,17 @@ function sseRawFrame(event: string, data: string): string {
 
 function createTextSuccessSseFrames(text: string, preamble: string[] = []): string[] {
 	return [...preamble, ...createTextSuccessEvents(text).map(event => sseFrame(String(event.type), event))];
+}
+
+/**
+ * A success stream cut before either terminal signal: the content blocks finished
+ * streaming, but no `message_delta` stop_reason and no `message_stop` arrived, so
+ * the envelope is still open when the wire dies.
+ */
+function createOpenMessageSseFrames(text: string): string[] {
+	return createTextSuccessEvents(text)
+		.slice(0, 4)
+		.map(event => sseFrame(String(event.type), event));
 }
 
 function createRejectedMockRequest(error: Error): MockAnthropicRequest {
@@ -1621,6 +1633,159 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "partial" }]);
+	});
+
+	it("reports a transient in-band error frame inside an open message as a stream truncation", async () => {
+		// A gateway or proxy that cuts the upstream stream has no way to send a
+		// terminal frame, so it substitutes an in-band `error` event after the
+		// message already started. The message can never complete: the failure is
+		// stream health, not a completed-turn provider rejection.
+		for (const { error, expectedFields } of [
+			{
+				error: {
+					type: "server_error",
+					code: "upstream_stream_truncated",
+					message: "upstream stream truncated (no completion event)",
+				},
+				expectedFields: "type=server_error code=upstream_stream_truncated",
+			},
+			{
+				error: { type: "overloaded_error", message: "Overloaded" },
+				expectedFields: "type=overloaded_error",
+			},
+		]) {
+			const frames = createOpenMessageSseFrames("Here is the first half");
+			frames.push(sseFrame("error", { type: "error", error }));
+			let created = 0;
+			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+				created += 1;
+				return createRawSseRequest(frames) as never;
+			});
+
+			const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) {
+				events.push(event);
+			}
+			const result = await stream.result();
+
+			expect(countEvents(events, "done")).toBe(0);
+			expect(countEvents(events, "error")).toBe(1);
+			expect(created).toBe(1);
+			expect(result.stopReason).toBe("error");
+			const errorMessage = result.errorMessage ?? "";
+			expect(errorMessage).toContain("error frame received before message_stop");
+			expect(errorMessage).toContain(expectedFields);
+			expect(AIError.isStreamEnvelopeErrorText(errorMessage)).toBe(true);
+			expect(AIError.isStreamEnvelopeTruncationText(errorMessage)).toBe(true);
+			// No replay of committed text through the provider retry, but the turn
+			// stays continuable instead of ending on an unclassified provider error.
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+			expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "Here is the first half" }]);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("keeps a deterministic in-band rejection terminal inside an open message", async () => {
+		// The envelope being open says the wire was cut, not that the provider
+		// accepted the request. With nothing streamed yet the provider retry gate is
+		// the only thing standing between a malformed frame and ten backed-off
+		// replays of a request that can never succeed, so a documented rejection must
+		// keep its terminal verdict — and, with text committed, must not be continued.
+		const rejections = [
+			["invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum"],
+			["authentication_error", "invalid x-api-key"],
+			["billing_error", "Your credit balance is too low to access the Anthropic API"],
+			["permission_error", "You don't have permission to use this model"],
+		] as const;
+		for (const [type, message] of rejections) {
+			const frames = [sseFrame("message_start", createTextSuccessEvents("unused")[0])];
+			frames.push(sseFrame("error", { type: "error", error: { type, message } }));
+			let created = 0;
+			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+				created += 1;
+				return createRawSseRequest(frames) as never;
+			});
+
+			const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) {
+				events.push(event);
+			}
+			const result = await stream.result();
+
+			expect(countEvents(events, "done")).toBe(0);
+			expect(countEvents(events, "error")).toBe(1);
+			expect(created).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe(`Anthropic stream error (${type}): ${message}`);
+			expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
+			expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("does not treat an error frame after a message_delta stop_reason as a truncation", async () => {
+		// `message_delta` carrying a stop_reason is the consumer's terminal signal;
+		// only the trailing `message_stop` is missing. An error frame after that is a
+		// completed-turn report, so continuing the turn would duplicate an answer
+		// that already ended.
+		const frames = createTextSuccessSseFrames("complete answer").filter(
+			frame => !frame.includes("event: message_stop"),
+		);
+		frames.push(
+			sseFrame("error", {
+				type: "error",
+				error: { type: "server_error", message: "An unexpected error occurred" },
+			}),
+		);
+		let created = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			created += 1;
+			return createRawSseRequest(frames) as never;
+		});
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(created).toBe(1);
+		expect(countEvents(events, "done")).toBe(0);
+		expect(countEvents(events, "error")).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream error (server_error): An unexpected error occurred");
+		expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
+		expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "complete answer" }]);
+	});
+
+	it("keeps an error frame before message_start a terminal provider rejection", async () => {
+		// Nothing streamed yet, so the frame is the provider declining the request
+		// rather than a truncated envelope: it must stay a plain provider error.
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createRawSseRequest([
+					sseFrame("error", { type: "error", error: { type: "api_error", message: "invalid response" } }),
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "done")).toBe(0);
+		expect(countEvents(events, "error")).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream error (api_error): invalid response");
+		expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
 	});
 
 	it("retries a stream cut before any stop_reason when no content streamed", async () => {

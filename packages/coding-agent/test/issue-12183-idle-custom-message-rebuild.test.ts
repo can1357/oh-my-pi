@@ -119,6 +119,7 @@ async function createHarness() {
 		initialChatRendered: false,
 		setToolUIContext: vi.fn(),
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 	});
 	const helpers = new UiHelpers(ctx);
 	ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);

@@ -6,6 +6,7 @@ import {
 	resolveFactoryDroidRotation,
 } from "../compat/factory-droid";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
+import { serverSideFallbackModels } from "../compat/server-side-fallback";
 import type { RequestPolicy } from "../compat/types";
 import { getBundledModel, isGeneratedProvider } from "../models";
 import type { FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "../types";
@@ -73,6 +74,28 @@ function readModelPolicy(body: unknown): FactoryModelPolicy | null {
 }
 
 /**
+ * Org image-generation settings from `/api/organization/managed-settings`.
+ * The CLI gates `generate_image` on these, not on the model policy lists
+ * alone: `imageGenerationEnabled: false` withdraws every image model, and an
+ * `imageGenerationAllowedModelIds` list (empty allows none) narrows them.
+ */
+interface FactoryImageSettings {
+	enabled: boolean;
+	allowedModelIds?: readonly string[];
+}
+
+function readImageSettings(body: unknown): FactoryImageSettings | null {
+	if (!isRecord(body) || !isRecord(body.settings)) return null;
+	const { imageGenerationEnabled, imageGenerationAllowedModelIds } = body.settings;
+	return {
+		enabled: imageGenerationEnabled !== false,
+		...(Array.isArray(imageGenerationAllowedModelIds) && {
+			allowedModelIds: imageGenerationAllowedModelIds.filter((id): id is string => typeof id === "string"),
+		}),
+	};
+}
+
+/**
  * Live `provider_routing` dynamic config from the flags payload: per-model
  * upstream rotations that override the registry's static order.
  */
@@ -102,15 +125,22 @@ function readProviderRouting(body: Record<string, unknown>): FactoryProviderRout
 	};
 }
 
-/** Mirrors the client-side model gating: feature flags first, then org model policy. */
+/**
+ * Mirrors the client-side model gating: feature flags first, then org model
+ * policy; image models also need the org's image-generation settings, so they
+ * stay hidden until a managed-settings payload proves them enabled.
+ */
 function isModelAvailable(
 	{ spec, policy: registry }: FactoryDroidRegistryModel,
 	flags: Record<string, boolean>,
 	policy: FactoryModelPolicy | null,
 	region: string | undefined,
+	images: FactoryImageSettings | null,
 ): boolean {
 	const gates = registry.entitlement;
 	if (resolveFactoryDroidRotation(registry, region).length === 0) return false;
+	if (registry.image && (!images?.enabled || (images.allowedModelIds && !images.allowedModelIds.includes(spec.id))))
+		return false;
 	if (gates.featureFlag !== undefined && flags[gates.featureFlag] !== true) return false;
 	if (gates.deprecationFlag !== undefined && flags[gates.deprecationFlag] === true) return false;
 	// Fast tiers are withdrawn as a class, not by id: `base-variant` is what
@@ -137,16 +167,35 @@ export interface FactoryDroidModelDiscoveryOptions extends AccountScope {
  */
 export function factoryDroidSeedModels(scope: AccountScope): ModelSpec<"factory-droid-agent">[] {
 	const inferenceRegion = resolveFactoryDroidInferenceRegion(scope);
-	return factoryDroidRegistry()
-		.filter(model => isModelAvailable(model, {}, null, inferenceRegion))
-		.map(model =>
-			buildFactoryDroidModel(model, {
-				region: scope.region,
-				inferenceRegion,
-				orgId: scope.orgId,
-				apiProviders: resolveFactoryDroidRotation(model.policy, inferenceRegion),
-			}),
-		);
+	return withAvailableRefusalFallbacks(
+		factoryDroidRegistry()
+			.filter(model => isModelAvailable(model, {}, null, inferenceRegion, null))
+			.map(model =>
+				buildFactoryDroidModel(model, {
+					region: scope.region,
+					inferenceRegion,
+					orgId: scope.orgId,
+					apiProviders: resolveFactoryDroidRotation(model.policy, inferenceRegion),
+				}),
+			),
+	);
+}
+
+/**
+ * Native offers a server-side refusal fallback only when the account can run
+ * that model, so each model keeps the fallbacks its upstreams name that are
+ * themselves in the account's roster.
+ */
+function withAvailableRefusalFallbacks(models: ModelSpec<"factory-droid-agent">[]): ModelSpec<"factory-droid-agent">[] {
+	const available = new Set(models.map(model => model.id));
+	for (const model of models) {
+		const named = new Set<string>();
+		for (const upstream of model.factoryDroidApiProviders ?? []) {
+			for (const id of serverSideFallbackModels(model, { upstream })) named.add(id);
+		}
+		if (named.size > 0) model.factoryDroidRefusalFallbacks = [...named].filter(id => available.has(id));
+	}
+	return models;
 }
 
 /**
@@ -168,6 +217,7 @@ export async function fetchFactoryDroidModels(
 	let flags: Record<string, boolean>;
 	let policy: FactoryModelPolicy | null = null;
 	let routing: FactoryProviderRouting | null = null;
+	let images: FactoryImageSettings | null = null;
 	const servingRegion = resolveFactoryDroidInferenceRegion(options);
 	try {
 		const [flagsResponse, settingsResponse] = await Promise.all([
@@ -180,19 +230,18 @@ export async function fetchFactoryDroidModels(
 		const raw = body.flags;
 		if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
 		flags = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, value === true]));
-		if (settingsResponse?.ok) {
-			policy = readModelPolicy(await settingsResponse.json());
-		}
+		// An unreadable settings body leaves policy and image settings unknown, so
+		// gated rows fail closed instead of the whole refresh keeping stale ones.
+		const settings: unknown = settingsResponse?.ok ? await settingsResponse.json().catch(() => null) : null;
+		policy = readModelPolicy(settings);
+		images = readImageSettings(settings);
 		routing = readProviderRouting(body as Record<string, unknown>);
 	} catch {
 		return null;
 	}
-	return factoryDroidRegistry().flatMap(model => {
-		if (!isModelAvailable(model, flags, policy, servingRegion)) return [];
-		const { id } = model.spec;
-		const family = model.policy.routingFamily;
-		const routed = routing?.models?.[id] ?? (family === undefined ? undefined : routing?.defaults?.[family]);
-		const rotation = resolveRotation(model, routed, servingRegion, routing?.blockedProviders?.[id]);
+	const models = factoryDroidRegistry().flatMap(model => {
+		if (!isModelAvailable(model, flags, policy, servingRegion, images)) return [];
+		const { rotation, configured } = resolveRotation(model, routing, servingRegion);
 		if (rotation.length === 0) return [];
 		const spec = buildFactoryDroidModel(model, {
 			region: options.region,
@@ -201,25 +250,40 @@ export async function fetchFactoryDroidModels(
 			apiProviders: rotation,
 		});
 		// Native reports configured ordering only when live routing chose the rotation.
-		if (routed !== undefined) spec.factoryDroidRoutingSource = "configured_order";
+		if (configured) spec.factoryDroidRoutingSource = "configured_order";
 		return [spec];
 	});
+	return withAvailableRefusalFallbacks(models);
 }
 
 /**
  * Intersect live rotations with registry eligibility and explicit blocks.
- * An explicitly configured empty/disallowed rotation never widens to defaults.
+ * An explicitly configured empty/disallowed model rotation never widens.
+ * Without a model route, a family default that leaves no eligible upstream
+ * (empty, naming none of the model's upstreams, or none serving the account's
+ * region) falls back to the registry rotation: droid 1.1.0 then sends the
+ * first eligible registry upstream, which is the upstream omp pins. Live
+ * routing did not choose it, so it is not reported as configured order.
  */
 function resolveRotation(
 	model: FactoryDroidRegistryModel,
-	routed: readonly string[] | undefined,
+	routing: FactoryProviderRouting | null,
 	region: string | undefined,
-	blocked: readonly string[] = [],
-): readonly string[] {
+): { rotation: readonly string[]; configured: boolean } {
+	const { id } = model.spec;
+	const blocked = routing?.blockedProviders?.[id] ?? [];
 	const eligible = resolveFactoryDroidRotation(model.policy, region).filter(provider => !blocked.includes(provider));
-	return routed === undefined
-		? eligible
-		: routed.filter(provider => eligible.some(candidate => candidate === provider));
+	const modelRoute = routing?.models?.[id];
+	if (modelRoute !== undefined) {
+		return { rotation: modelRoute.filter(provider => eligible.includes(provider)), configured: true };
+	}
+	const family = model.policy.routingFamily;
+	const familyRoute = ((family === undefined ? undefined : routing?.defaults?.[family]) ?? []).filter(provider =>
+		eligible.includes(provider),
+	);
+	return familyRoute.length > 0
+		? { rotation: familyRoute, configured: true }
+		: { rotation: eligible, configured: false };
 }
 
 /** Account scope plus the upstream rotation resolved for that account. */
@@ -250,6 +314,9 @@ export function buildFactoryDroidModel(
 		...factoryDroidRegionalLimits(policy, resolveFactoryDroidInferenceRegion(options)),
 		...(options.orgId ? { factoryDroidOrgId: options.orgId } : {}),
 		...(policy.creditRates ? { factoryDroidCredits: policy.creditRates.input } : {}),
+		...(policy.creditRates?.effectiveRates
+			? { factoryDroidCreditCards: policy.creditRates.effectiveRates.map(card => ({ ...card })) }
+			: {}),
 		...(options.apiProviders?.length ? { factoryDroidApiProviders: [...options.apiProviders] } : {}),
 	};
 	const resolved = resolveModelPolicy(model);

@@ -124,9 +124,9 @@ describe("totalTokens field", () => {
 
 	describe("Anthropic (OAuth)", () => {
 		it.skipIf(!anthropicOAuthToken)(
-			"claude-sonnet-4 - should return totalTokens equal to sum of components",
+			"claude-sonnet-4-5 - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+				const llm = getBundledModel("anthropic", "claude-sonnet-4-5-20250929");
 
 				console.log(`\nAnthropic OAuth / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: anthropicOAuthToken });

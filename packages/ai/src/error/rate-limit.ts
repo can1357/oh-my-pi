@@ -130,6 +130,8 @@ const TPM_RPM_THROTTLE_PATTERN =
 	/\b(?:tpm|rpm)\b[^\n]{0,40}\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b|\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b[^\n]{0,40}\b(?:tpm|rpm)\b|\bRateLimitExceeded\.(?:Endpoint)?(?:TPM|RPM)\w*/i;
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const GOOGLE_RPC_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure";
+const GOOGLE_RPC_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
@@ -139,7 +141,8 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
+/** Parse an embedded JSON object from an error message. */
+export function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
 	const start = errorMessage.indexOf("{");
 	const end = errorMessage.lastIndexOf("}");
 	if (start < 0 || end < start) return undefined;
@@ -164,11 +167,18 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	}
 	if (!Array.isArray(error.details)) return undefined;
 
+	// 1. ErrorInfo details take first precedence for terminal quota/capacity reasons,
+	// while a generic RATE_LIMIT_EXCEEDED is held until QuotaFailure is checked so a
+	// co-reported daily cap or zero-entitlement violation still rotates credentials.
+	let sawGenericRateLimitInfo = false;
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_ERROR_INFO_TYPE || typeof detail.reason !== "string") continue;
 		const reason = detail.reason.trim().toUpperCase();
 		switch (reason) {
+			case "MODEL_CAPACITY_EXHAUSTED":
+			case "MODEL_CAPACITY_EXCEEDED":
+				return "MODEL_CAPACITY_EXHAUSTED";
 			case "QUOTA_EXHAUSTED":
 				return "QUOTA_EXHAUSTED";
 			case "INSUFFICIENT_G1_CREDITS_BALANCE":
@@ -178,16 +188,69 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 			case "RATE_LIMIT_EXCEEDED": {
 				// Cloud Code Assist also uses this reason for an account's
 				// per-model quota, even when that quota resets within seconds.
-				if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
+				if (
+					(typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) ||
+					ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(errorMessage)
+				) {
 					return "QUOTA_EXHAUSTED";
 				}
-				const retryDelayMs = extractRetryHint(undefined, errorMessage);
-				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
-					? "QUOTA_EXHAUSTED"
-					: "RATE_LIMIT_EXCEEDED";
+				sawGenericRateLimitInfo = true;
+				break;
 			}
 		}
 	}
+
+	// 2. QuotaFailure details take second precedence.
+	// Inspect all violations before returning a short-window transient verdict so
+	// any daily cap or zero-entitlement quotaValue ("0") dominates.
+	let sawShortWindowViolation = false;
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_QUOTA_FAILURE_TYPE || !Array.isArray(detail.violations)) continue;
+		for (const v of detail.violations) {
+			const violation = asRecord(v);
+			const quotaValue = violation?.quotaValue;
+			if (
+				(typeof quotaValue === "string" || typeof quotaValue === "number") &&
+				/^\s*0+(?:\.0+)?\s*$/.test(String(quotaValue))
+			) {
+				return "QUOTA_EXHAUSTED";
+			}
+			const quotaId = typeof violation?.quotaId === "string" ? violation.quotaId.toLowerCase() : "";
+			const quotaMetric = typeof violation?.quotaMetric === "string" ? violation.quotaMetric.toLowerCase() : "";
+			const combined = `${quotaId} ${quotaMetric}`;
+			if (combined.includes("perday") || combined.includes("daily") || combined.includes("per_day")) {
+				return "QUOTA_EXHAUSTED";
+			}
+			if (
+				combined.includes("perminute") ||
+				combined.includes("per_minute") ||
+				combined.includes("persecond") ||
+				combined.includes("per_second") ||
+				combined.includes("per100seconds") ||
+				combined.includes("per_100_seconds")
+			) {
+				sawShortWindowViolation = true;
+			}
+		}
+	}
+	if (sawShortWindowViolation || sawGenericRateLimitInfo) {
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
+			? "QUOTA_EXHAUSTED"
+			: "RATE_LIMIT_EXCEEDED";
+	}
+
+	// 3. Standalone RetryInfo when neither ErrorInfo nor QuotaFailure returned a verdict
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_RETRY_INFO_TYPE) continue;
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		if (retryDelayMs !== undefined) {
+			return retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS ? "QUOTA_EXHAUSTED" : "RATE_LIMIT_EXCEEDED";
+		}
+	}
+
 	return undefined;
 }
 
@@ -358,6 +421,42 @@ export function is402BillingCapBody(message: string | undefined): boolean {
 	if (STATUS_402_QUOTA_PATTERN.test(message)) return true;
 	const reason = parseRateLimitReason(message);
 	return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";
+}
+
+// Billing-cap wording: the account is out of money the user must add, as
+// opposed to a quota window that reopens on a clock. LithosAI answers
+// `402 the organization is out of credit, add more to continue
+// (type=insufficient_quota …)`; the rest are the same state on other
+// providers (DeepSeek "Insufficient Balance", OpenRouter credits, spend
+// ceilings, ChatGPT-style "out of credits").
+const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\b/i;
+
+/**
+ * Whether a usage-limit failure is a *billing* cap rather than a window that
+ * reopens on a clock: an out-of-credit balance (402), a spent prepaid
+ * balance, a credits wall, or a spend ceiling. Topping the account up clears
+ * it; waiting never does, so the retry loop must surface the error instead of
+ * sleeping the QUOTA_EXHAUSTED heuristic (30 min) — a `retry.maxDelayMs` at
+ * or above that heuristic would otherwise hold the session through the whole
+ * sleep while the user has no way to retry by hand.
+ *
+ * A DashScope/Bailian per-minute token throttle and a concurrency cap wear
+ * quota wording but are transient slots, so both stay out.
+ */
+export function isBillingCapUsageLimit(status: number | undefined, message: string | undefined): boolean {
+	if (message === undefined) return false;
+	if (isConcurrencyCapExclusion(status, message)) return false;
+	if (isDashScopeTokenLimitText(message)) return false;
+	if (status === 402) return is402BillingCapBody(message);
+	return (
+		OUT_OF_CREDIT_PATTERN.test(message) ||
+		INSUFFICIENT_BALANCE_PATTERN.test(message) ||
+		CREDITS_EXHAUSTED_PATTERN.test(message) ||
+		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(message) ||
+		SPEND_LIMIT_PATTERN.test(message) ||
+		ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(message) ||
+		/\binsufficient_quota\b/i.test(message)
+	);
 }
 
 /**

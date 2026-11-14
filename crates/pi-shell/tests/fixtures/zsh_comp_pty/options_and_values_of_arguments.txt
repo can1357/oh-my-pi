@@ -1,0 +1,20 @@
+### "fxtool -\t"
+% fxtool -
+--color  -- colourize
+-a       -- show all
+-l       -- long listing
+@ 0,10
+### "-\t"
+% fxtool --color=
+--color  -- colourize
+-a       -- show all
+-l       -- long listing
+@ 0,17
+### "\u{15}fxtool --color=\t"
+% fxtool --color=
+always  auto    never
+@ 0,17
+### "\t"
+% fxtool --color=always
+always  auto    never
+@ 0,23

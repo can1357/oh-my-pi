@@ -8,7 +8,7 @@
 //!   file. Binary entries surface as `diff: None`.
 //! - **Plain mode.** No `.git`; we walk both trees in parallel, short-circuit
 //!   on `(size, mtime-truncated-to-seconds)` equality, and emit a unified diff
-//!   for each surviving pair via `similar`. NUL within the first 8 KiB
+//!   for each surviving pair via `pi-diff`. NUL within the first 8 KiB
 //!   classifies the file as binary → `diff: None`.
 //!
 //! Per the PAL contract: for binary files we don't materialize the bytes
@@ -453,12 +453,56 @@ fn render_unified(
 }
 
 fn push_unified_body(out: &mut String, old: &str, new: &str, from_label: &str, to_label: &str) {
-	let body = similar::TextDiff::from_lines(old, new)
-		.unified_diff()
-		.context_radius(3)
-		.header(from_label, to_label)
-		.to_string();
-	out.push_str(&body);
+	use std::fmt::Write;
+
+	use pi_diff::{HunkLine, diff_line_tokens, line_tokens_str, structured_patch_hunk_rows};
+
+	let old_tokens = line_tokens_str(old);
+	let new_tokens = line_tokens_str(new);
+	let runs = diff_line_tokens(&old_tokens, &new_tokens);
+	let hunks = structured_patch_hunk_rows(Some(3), &old_tokens, &new_tokens, &runs);
+	if hunks.is_empty() {
+		return;
+	}
+	let _ = writeln!(out, "--- {from_label}\n+++ {to_label}");
+	for hunk in hunks {
+		let _ = write!(out, "@@ -");
+		push_hunk_range(out, hunk.old_start, hunk.old_lines);
+		out.push_str(" +");
+		push_hunk_range(out, hunk.new_start, hunk.new_lines);
+		out.push_str(" @@\n");
+		for row in hunk.lines {
+			let (sign, text) = match row {
+				HunkLine::Context(text) => (' ', text),
+				HunkLine::Removed(text) => ('-', text),
+				HunkLine::Added(text) => ('+', text),
+				HunkLine::NoNewlineAtEof => {
+					out.push_str("\\ No newline at end of file\n");
+					continue;
+				},
+			};
+			out.push(sign);
+			out.push_str(text);
+			out.push('\n');
+		}
+	}
+}
+
+/// Unified ranges omit a count of one; empty sides name the preceding line.
+fn push_hunk_range(out: &mut String, start: u32, count: u32) {
+	use std::fmt::Write;
+
+	match count {
+		0 => {
+			let _ = write!(out, "{},0", start - 1);
+		},
+		1 => {
+			let _ = write!(out, "{start}");
+		},
+		_ => {
+			let _ = write!(out, "{start},{count}");
+		},
+	}
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {
@@ -617,6 +661,30 @@ mod tests {
 		assert!(
 			fs::symlink_metadata(root.join(name)).is_err(),
 			"{name} should have been removed by the patch"
+		);
+	}
+
+	#[test]
+	fn unicode_eof_and_separated_hunks_apply() {
+		let before = "古\n1\n2\n3\n4\n5\n6\n7\nfin\n";
+		let after = "新\n1\n2\n3\n4\n5\n6\n7\n終";
+		let (target, patch) =
+			apply_plain_diff(&[("text", Entry::File(before))], &[("text", Entry::File(after))]);
+		assert_entry_matches(target.path(), "text", &Entry::File(after));
+		assert_eq!(patch.matches("@@ -").count(), 2);
+		assert!(patch.ends_with("+終\n\\ No newline at end of file\n"), "{patch}");
+	}
+
+	#[test]
+	fn empty_sides_use_zero_length_unified_ranges() {
+		let mut out = String::new();
+		super::push_unified_body(&mut out, "", "é\n", "/dev/null", "b/text");
+		assert_eq!(out, "--- /dev/null\n+++ b/text\n@@ -0,0 +1 @@\n+é\n");
+		out.clear();
+		super::push_unified_body(&mut out, "é", "", "a/text", "/dev/null");
+		assert_eq!(
+			out,
+			"--- a/text\n+++ /dev/null\n@@ -1 +0,0 @@\n-é\n\\ No newline at end of file\n"
 		);
 	}
 

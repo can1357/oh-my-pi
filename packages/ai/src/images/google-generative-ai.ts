@@ -9,9 +9,48 @@ interface GeminiPart {
 	inlineData?: { data?: string; mimeType?: string };
 }
 
-interface GeminiResponse {
-	candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
+/** One `generateContent` response, or one chunk of its SSE stream. */
+export interface GeminiImageResponse {
+	candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
 	usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+}
+
+/** The user turn of a Gemini image request: reference images first, then the prompt. */
+export function geminiImageContents(request: ImageGenerationRequest): Array<{ role: "user"; parts: GeminiPart[] }> {
+	const inputImages = request.inputImages ?? [];
+	for (const image of inputImages) validateImageInput(image);
+	const parts: GeminiPart[] = inputImages.map(image => ({ inlineData: image }));
+	parts.push({ text: request.prompt });
+	return [{ role: "user", parts }];
+}
+
+/**
+ * Collect images, text and usage from a response or its stream chunks: parts
+ * within a response are separate paragraphs, chunks continue the same text,
+ * and the last usage report stands.
+ */
+export function geminiImageResult(responses: Iterable<GeminiImageResponse>): ImageGenerationResult {
+	const images: GeneratedImage[] = [];
+	let text = "";
+	let wireUsage: GeminiImageResponse["usageMetadata"];
+	for (const response of responses) {
+		const textParts: string[] = [];
+		for (const part of response.candidates?.flatMap(candidate => candidate.content?.parts ?? []) ?? []) {
+			if (part.text) textParts.push(part.text);
+			if (part.inlineData?.data && part.inlineData.mimeType) {
+				images.push({ data: part.inlineData.data, mimeType: part.inlineData.mimeType });
+			}
+		}
+		text += textParts.join("\n");
+		wireUsage = response.usageMetadata ?? wireUsage;
+	}
+	text = text.trim();
+	const usage = usageFromWire(
+		wireUsage
+			? { input_tokens: wireUsage.promptTokenCount, output_tokens: wireUsage.candidatesTokenCount }
+			: undefined,
+	);
+	return { images, ...(text ? { text } : {}), usage };
 }
 
 export async function generateGoogleImage(
@@ -19,19 +58,13 @@ export async function generateGoogleImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
-	const fetchImpl = options.fetch ?? fetch;
-	const inputImages = request.inputImages ?? [];
-	for (const image of inputImages) validateImageInput(image);
-	const parts: Array<{ text?: string; inlineData?: GeneratedImage }> = inputImages.map(image => ({
-		inlineData: image,
-	}));
-	parts.push({ text: request.prompt });
 	const imageConfig =
 		request.aspectRatio || request.imageSize
 			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
 			: undefined;
+	const fetchImpl = options.fetch ?? fetch;
 	const body = {
-		contents: [{ role: "user", parts }],
+		contents: geminiImageContents(request),
 		generationConfig: {
 			responseModalities: ["IMAGE"],
 			...(imageConfig ? { imageConfig } : {}),
@@ -63,7 +96,7 @@ export async function generateGoogleImage(
 				);
 			}
 			try {
-				return JSON.parse(text) as GeminiResponse;
+				return JSON.parse(text) as GeminiImageResponse;
 			} catch (cause) {
 				throw new AIError.ProviderResponseError("Gemini image API returned malformed JSON", {
 					provider: model.provider,
@@ -74,21 +107,5 @@ export async function generateGoogleImage(
 		},
 		{ signal: options.signal },
 	);
-	const responseParts = response.candidates?.flatMap(candidate => candidate.content?.parts ?? []) ?? [];
-	const images: GeneratedImage[] = [];
-	const textParts: string[] = [];
-	for (const part of responseParts) {
-		if (part.text) textParts.push(part.text);
-		if (part.inlineData?.data && part.inlineData.mimeType) {
-			images.push({ data: part.inlineData.data, mimeType: part.inlineData.mimeType });
-		}
-	}
-	const text = textParts.join("\n").trim();
-	const wireUsage = response.usageMetadata;
-	const usage = usageFromWire(
-		wireUsage
-			? { input_tokens: wireUsage.promptTokenCount, output_tokens: wireUsage.candidatesTokenCount }
-			: undefined,
-	);
-	return { images, ...(text ? { text } : {}), usage };
+	return geminiImageResult([response]);
 }

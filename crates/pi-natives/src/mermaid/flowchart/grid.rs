@@ -261,13 +261,10 @@ fn ensure_subgraph_spacing(graph: &mut AsciiGraph) {
 	let minimum_spacing = 1;
 	for (position, &left_id) in roots.iter().enumerate() {
 		for &right_id in &roots[position + 1..] {
-			let (left, right) = if left_id < right_id {
-				let (before_right, from_right) = graph.subgraphs.split_at_mut(right_id);
-				(&mut before_right[left_id], &mut from_right[0])
-			} else {
-				let (before_left, from_left) = graph.subgraphs.split_at_mut(left_id);
-				(&mut from_left[0], &mut before_left[right_id])
-			};
+			let [left, right] = graph
+				.subgraphs
+				.get_disjoint_mut([left_id, right_id])
+				.expect("root subgraph ids are distinct and in bounds");
 
 			if left.min_x < right.max_x && left.max_x > right.min_x {
 				if left.max_y >= right.min_y - minimum_spacing && left.min_y < right.min_y {
@@ -340,10 +337,27 @@ pub fn offset_drawing_for_subgraphs(graph: &mut AsciiGraph) {
 /// subgraph sizing.
 pub fn create_mapping(graph: &mut AsciiGraph) {
 	let direction = graph.config.direction;
+	// An edge repeating an earlier edge's node pair is rerouted around every
+	// other route (`routing::determine_path`), so it is routed after all of
+	// them; declaration order must not decide what it can avoid.
+	let repeats: Vec<bool> = (0..graph.edges.len())
+		.map(|id| {
+			let edge = &graph.edges[id];
+			edge.from != edge.to
+				&& graph.edges[..id]
+					.iter()
+					.any(|other| edge.joins_same_pair(other))
+		})
+		.collect();
+	// A rerouted repeat may need to pass outside the first row (LR) or column
+	// (TD) of nodes to reach a free port; leave a corridor there, and drop it
+	// again below when no route uses it.
+	let corridor = if repeats.contains(&true) { 4 } else { 0 };
 	let layering = layering::layer(graph);
 	for row in &layering.order {
 		for &node in row {
-			let (level, position) = (layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4);
+			let (level, position) =
+				(layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4 + corridor);
 			let requested = match direction {
 				LayoutDirection::LR => GridCoord::new(level, position),
 				LayoutDirection::TD => GridCoord::new(position, level),
@@ -357,12 +371,35 @@ pub fn create_mapping(graph: &mut AsciiGraph) {
 	}
 	bundling::analyze_edge_bundles(graph);
 	bundling::process_bundles(graph);
-	for edge in 0..graph.edges.len() {
+	let first_pass = (0..graph.edges.len()).filter(|&edge| !repeats[edge]);
+	let second_pass = (0..graph.edges.len()).filter(|&edge| repeats[edge]);
+	for edge in first_pass.chain(second_pass) {
 		let already_routed_bundle =
 			graph.edges[edge].bundle.is_some() && !graph.edges[edge].path.is_empty();
 		if !already_routed_bundle {
 			routing::determine_path(graph, edge);
 		}
+	}
+	if corridor > 0 {
+		let cross = |coord: &GridCoord| match direction {
+			LayoutDirection::LR => coord.y,
+			LayoutDirection::TD => coord.x,
+		};
+		let corridor_used = graph
+			.edges
+			.iter()
+			.flat_map(|edge| &edge.path)
+			.chain(graph.bundles.iter().flat_map(|bundle| &bundle.shared_path))
+			.any(|coord| cross(coord) < corridor);
+		if !corridor_used {
+			match direction {
+				LayoutDirection::LR => graph.row_height.retain(|&y, _| y >= corridor),
+				LayoutDirection::TD => graph.column_width.retain(|&x, _| x >= corridor),
+			}
+		}
+	}
+	// Label placement widens columns, so it keeps declaration order.
+	for edge in 0..graph.edges.len() {
 		let path = graph.edges[edge].path.clone();
 		increase_grid_size_for_path(graph, &path);
 		routing::determine_label_line(graph, edge);

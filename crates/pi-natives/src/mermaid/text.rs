@@ -152,10 +152,7 @@ pub fn wrap_label(label: &str, width: usize) -> String {
 /// standalone zero-width clusters are omitted, because neither occupies the
 /// canvas cell that the renderer would reserve for it.
 pub fn normalize_label(label: &str) -> String {
-	let unquoted = label
-		.strip_prefix('"')
-		.and_then(|rest| rest.strip_suffix('"'))
-		.unwrap_or(label);
+	let unquoted = label.strip_circumfix('"', '"').unwrap_or(label);
 	let text = replace_tags(unquoted, &["br"], true, "\n");
 	let text = text.replace("\\n", "\n");
 	let text = replace_tags(&text, &["sub", "sup", "small", "mark"], false, "");

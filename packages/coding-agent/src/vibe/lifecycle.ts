@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * Vibe session lifecycle vocabulary: the persisted `vibe-session-lifecycle`
@@ -57,52 +58,34 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
+const lifecycleBase = {
+	"+": "delete",
+	version: type.unit(VIBE_LIFECYCLE_VERSION),
+	id: "string > 0",
+	ownerId: "string > 0",
+	parentSessionId: "string > 0",
+} as const;
+
+const LifecycleEvent = type({
+	...lifecycleBase,
+	action: "'spawn'",
+	cli: "'fast' | 'good'",
+	agent: "string",
+	childSessionFile: "string",
+	createdAt: "number",
+})
+	.or({ ...lifecycleBase, action: "'turn-started' | 'turn-settled'", turn: "number.integer >= 1" })
+	.or({
+		...lifecycleBase,
+		action: "'tombstone'",
+		reason: "'explicit-kill' | 'mode-exit' | 'spawn-failed' | 'unrecoverable'",
+	})
+	.or({ ...lifecycleBase, action: "'tombstone-revoked'", reason: "'mode-exit'" });
+
 /** Parse one persisted lifecycle payload; `undefined` for foreign/malformed data. */
 export function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
-	const data = objectRecord(value);
-	if (!data || data.version !== VIBE_LIFECYCLE_VERSION) return undefined;
-	if (typeof data.id !== "string" || !data.id) return undefined;
-	if (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
-	if (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
-	const base: VibeLifecycleBase = {
-		version: VIBE_LIFECYCLE_VERSION,
-		id: data.id,
-		ownerId: data.ownerId,
-		parentSessionId: data.parentSessionId,
-	};
-	if (data.action === "spawn") {
-		const cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
-		if (!cli || typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
-		if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
-		return {
-			...base,
-			action: "spawn",
-			cli,
-			agent: data.agent,
-			childSessionFile: data.childSessionFile,
-			createdAt: data.createdAt,
-		};
-	}
-	if (data.action === "turn-started" || data.action === "turn-settled") {
-		if (typeof data.turn !== "number" || !Number.isInteger(data.turn) || data.turn < 1) return undefined;
-		return { ...base, action: data.action, turn: data.turn };
-	}
-	if (data.action === "tombstone") {
-		const reason = data.reason;
-		if (
-			reason !== "explicit-kill" &&
-			reason !== "mode-exit" &&
-			reason !== "spawn-failed" &&
-			reason !== "unrecoverable"
-		) {
-			return undefined;
-		}
-		return { ...base, action: "tombstone", reason };
-	}
-	if (data.action === "tombstone-revoked" && data.reason === "mode-exit") {
-		return { ...base, action: "tombstone-revoked", reason: "mode-exit" };
-	}
-	return undefined;
+	const event = LifecycleEvent(value);
+	return event instanceof type.errors ? undefined : event;
 }
 
 /** Child ids claimed by valid Vibe spawn records from untrusted persisted JSON. */

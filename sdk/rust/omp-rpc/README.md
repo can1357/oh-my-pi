@@ -4,15 +4,15 @@ Rust client for the omp RPC protocol: JSON lines over the stdio of `omp --mode r
 
 - `src/wire.rs` is **generated** from the wire schema (`packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json`). It contains serde types for every frame and the `RpcNotification`, `RpcServerFrame`, and `RpcInbound` unions; a frame of an unrecognized type decodes to `Unknown(Value)`. Each command gets a `<Name>Command` struct that implements `Command`. Do not edit the file by hand; regenerate it from the repository root with `bun run gen:rpc`.
 - `src/client.rs` is a blocking transport over any reader/writer pair (`Client::spawn` for a process, `Client::from_io` for pipes). It can:
-  - run commands with `call`
-  - wait for a prompt with `prompt_and_wait`
-  - fetch the whole transcript with `get_messages`
-  - run host tools
-  - serve host URI schemes
-  - write extension UI responses with `send`
-  - shut down with `close` (or by dropping the client)
+   - run commands with `call`
+   - wait for a prompt with `prompt_and_wait`
+   - fetch the whole transcript with `get_messages`
+   - run host tools
+   - serve host URI schemes
+   - write extension UI responses with `send`
+   - shut down with `close` (or by dropping the client)
 
-  Every other frame reaches you through the event receiver as an `Event`.
+   Every other frame reaches you through the event receiver as an `Event`.
 
 ```rust
 use std::process::Command as Process;
@@ -43,12 +43,14 @@ On v2, the server splits large frames into `rpc_chunk` sequences, and the client
 A writer thread owns the server's stdin. `call` queues its frame and then waits for the response, so the deadline covers the write too: a server that stops reading cannot block a caller past its timeout. `send` returns once its frame is queued.
 
 The client closes on any of these: a fatal transport error, the server closing stdout, a failed write, `close()`, or drop. After that:
+
 - pending and later calls and sends fail with the closing error
 - no further server frame is dispatched
 - queued frames are discarded
 - the server sees EOF on stdin
 
 `Client::spawn` starts the server as the leader of its own process group (on Unix). `close()` and drop then tear the whole group down:
+
 1. cancel host tool and URI work
 2. close stdin
 3. send SIGTERM to the group
@@ -65,12 +67,14 @@ With `from_io`, the reader thread cannot be interrupted. It stops dispatching on
 `prompt_and_wait` registers a collector before it sends the prompt. It then waits for the `prompt_result` carrying its own request id. A stale `agent_end` or another prompt's result does not end the wait.
 
 It returns a `PromptTurn` with these fields:
+
 - `events`: the session events received during the wait.
 - `messages`: the messages of the final `agent_end`. When the server compacted that frame, the leading messages are restored from the streamed `message_end` events.
 - `assistant_message` and `assistant_text`: the last assistant message and its visible text.
 - `result`: the `prompt_result`, or `None` when the server answered `agentInvoked: false`.
 
 Waits end with these errors:
+
 - `Error::Command`: the server sent an error response for the prompt after acknowledging it.
 - `Error::Closed`: the process exited.
 - `Error::Timeout`: the deadline passed.
@@ -97,6 +101,7 @@ The client answers `host_uri_request` frames itself and never delivers host URI 
 - A write handler receives the URL and the new content; it gets an empty string when the frame carries no content.
 
 These requests are answered with `isError: true`:
+
 - an unknown scheme
 - a `write` to a scheme without a write handler
 - an operation other than `read` or `write`

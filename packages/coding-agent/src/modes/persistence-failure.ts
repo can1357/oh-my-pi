@@ -1,5 +1,6 @@
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import type { SessionContinuation } from "../session/session-listing";
 import type { SessionPersistenceNotice } from "../session/session-manager";
 
 /**
@@ -43,6 +44,28 @@ export function formatPersistenceNotice(notice: SessionPersistenceNotice): strin
 		case "contested":
 			message = `Another program kept writing to session ${from}; it is left to that writer and this session now saves to ${to}.`;
 			break;
+	}
+	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
+}
+
+/**
+ * Resume of a session file whose conversation went on in another file (see
+ * {@link SessionContinuation}). Names both files, so the user sees that the
+ * file they asked for was not the one opened.
+ */
+export function formatSessionContinuationNotice(continuation: SessionContinuation): string {
+	const from = shortenPath(continuation.from);
+	const to = shortenPath(continuation.session.path);
+	// A session moves off its file for every SessionPersistenceNotice reason, not only another process's hold.
+	let message: string;
+	if (continuation.relation === "earlier") {
+		message = `Session ${to}, which ${from} continues, has the newest turn of their conversation; resuming ${to}.`;
+	} else if (continuation.relation === "other") {
+		message = `Session ${to}, another copy of the conversation in ${from}, has its newest turn; resuming ${to}.`;
+	} else if (continuation.copies > 2) {
+		message = `Session ${from} went on in ${continuation.copies - 1} other files; resuming the one with the newest turn, ${to}.`;
+	} else {
+		message = `Session ${from} went on in ${to}; resuming ${to}.`;
 	}
 	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
 }

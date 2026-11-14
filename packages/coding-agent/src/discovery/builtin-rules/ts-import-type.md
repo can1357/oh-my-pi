@@ -2,7 +2,9 @@
 description: "Use `import type`, not `import('pkg').Type` in type positions"
 condition:
   - "\\btypeof\\s+import\\("
-  - "\\bimport\\((?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:\"[^\"\\n]*\"|'[^'\\n]*'|\\x60[^\\x60]*\\x60)(?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:,[^()]*)?\\)\\s*(?:\\[\\s*[\"']|\\.\\s*(?!(?:then|catch|finally)(?![\\w$\\u0080-\\uffff]))[A-Za-z_$\\u0080-\\uffff][\\w$\\u0080-\\uffff]*(?=[^\\w$\\u0080-\\uffff]))"
+  # A member name is ASCII identifier characters or any non-ASCII character but Unicode whitespace:
+  # conditions compile without the `u` flag, so `\p{ID_Start}` is unavailable.
+  - "\\bimport\\((?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:\"[^\"\\n]*\"|'[^'\\n]*'|\\x60[^\\x60]*\\x60)(?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:,[^()]*)?\\)\\s*(?:\\[\\s*[\"']|\\.\\s*(?!(?:then|catch|finally)(?![\\w$\\u00AA-\\u167F\\u1681-\\u1FFF\\u200B-\\u2027\\u202A-\\u202E\\u2030-\\u205E\\u2060-\\u2FFF\\u3001-\\uFEFE\\uFF00-\\uFFFF]))[A-Za-z_$\\u00AA-\\u167F\\u1681-\\u1FFF\\u200B-\\u2027\\u202A-\\u202E\\u2030-\\u205E\\u2060-\\u2FFF\\u3001-\\uFEFE\\uFF00-\\uFFFF][\\w$\\u00AA-\\u167F\\u1681-\\u1FFF\\u200B-\\u2027\\u202A-\\u202E\\u2030-\\u205E\\u2060-\\u2FFF\\u3001-\\uFEFE\\uFF00-\\uFFFF]*(?=[^\\w$\\u00AA-\\u167F\\u1681-\\u1FFF\\u200B-\\u2027\\u202A-\\u202E\\u2030-\\u205E\\u2060-\\u2FFF\\u3001-\\uFEFE\\uFF00-\\uFFFF]))"
 scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---

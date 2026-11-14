@@ -155,6 +155,7 @@ export function streamGitLabDuo(
 								minP: options.minP,
 								presencePenalty: options.presencePenalty,
 								repetitionPenalty: options.repetitionPenalty,
+								stopSequences: options.stopSequences,
 								maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
 								signal: options.signal,
 								cacheRetention: options.cacheRetention,
@@ -175,6 +176,7 @@ export function streamGitLabDuo(
 									: undefined,
 								reasoning: anthropicReasoningEffort,
 								toolChoice: mapAnthropicToolChoice(options.toolChoice),
+								waitForTerminalDrain: options.waitForTerminalDrain,
 							},
 						)
 					: route.api === "openai-responses"
@@ -232,6 +234,8 @@ export function streamGitLabDuo(
 									minP: options.minP,
 									presencePenalty: options.presencePenalty,
 									repetitionPenalty: options.repetitionPenalty,
+									stopSequences: options.stopSequences,
+									frequencyPenalty: options.frequencyPenalty,
 									maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
 									signal: options.signal,
 									cacheRetention: options.cacheRetention,

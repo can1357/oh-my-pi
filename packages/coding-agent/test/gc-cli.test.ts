@@ -5,12 +5,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
+import {
+	GC_AUTO_COMPRESS_INTERVAL_MS,
+	GC_AUTO_COMPRESS_LOG,
+	scheduleGcAutoCompress,
+} from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
-import { compressMethod } from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as sessionContext from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
@@ -2534,10 +2540,30 @@ describe("runGcCommand stale state", () => {
 	});
 });
 
-// Test roots live under the temp dir, so its filesystem decides which compression tests run.
-const method = await compressMethod(os.tmpdir());
+// Test roots live under the temp dir, so its filesystem decides which backend tests run. The volume type alone
+// does not prove the tool stores files compressed (macOS 27 `ditto --hfsCompression` writes plain copies, #16244),
+// so tests that need a file to end up compressed on disk require the same probe `gc --compress --apply` runs.
+const method = await gcCompress.compressMethod(os.tmpdir());
 const supported = method !== undefined;
-const onApfs = method === "apfs";
+const compresses = method !== undefined && (await gcCompress.compressionWorks(os.tmpdir(), method));
+const apfsCompresses = compresses && method === "apfs";
+
+/**
+ * Replace the filesystem backend so gc's selection, lease, and accounting
+ * contracts hold on every host: the volume reports `volume`, the probe
+ * passes, and each batch "compresses" every candidate it is handed.
+ * Returns the paths of every batch, in order.
+ */
+function fakeCompressionBackend(volume: gcCompress.CompressMethod = "ntfs"): string[][] {
+	const batches: string[][] = [];
+	spyOn(gcCompress, "compressMethod").mockResolvedValue(volume);
+	spyOn(gcCompress, "compressionWorks").mockResolvedValue(true);
+	spyOn(gcCompress, "compressFilesInPlace").mockImplementation(async candidates => {
+		batches.push(candidates.map(candidate => candidate.path));
+		return { compressed: candidates.length, allocatedAfter: 0, errors: [] };
+	});
+	return batches;
+}
 
 describe("runGcCommand session compression", () => {
 	const filler =
@@ -2585,7 +2611,7 @@ describe("runGcCommand session compression", () => {
 		expect(await snapshot(file)).toEqual(before);
 	});
 
-	test.skipIf(!supported)("--apply stores an idle session compressed with identical bytes and mtimes", async () => {
+	test.skipIf(!compresses)("--apply stores an idle session compressed with identical bytes and mtimes", async () => {
 		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
 		const before = await Promise.all([snapshot(file), snapshot(artifact)]);
 
@@ -2612,17 +2638,20 @@ describe("runGcCommand session compression", () => {
 		expect(rerun.compress).toMatchObject({ wouldCompress: 0, compressed: 0 });
 	});
 
-	test.skipIf(!supported)("a dry run reports candidates without rewriting them", async () => {
+	test("a dry run reports candidates without rewriting them", async () => {
+		const batches = fakeCompressionBackend();
 		const { file } = await writeIdleSession(Bun.randomUUIDv7());
 		const before = await snapshot(file);
 
 		const result = await runGcCommand({ flags: { agentDir: root, compress: true } });
 
 		expect(result.compress).toMatchObject({ sessions: 1, wouldCompress: 2, compressed: 0 });
+		expect(batches).toEqual([]);
 		expect(await snapshot(file)).toEqual(before);
 	});
 
-	test.skipIf(!supported)("a session whose artifact tree cannot be read does not stop the run", async () => {
+	test("a session whose artifact tree cannot be read does not stop the run", async () => {
+		fakeCompressionBackend();
 		const broken = await writeIdleSession(Bun.randomUUIDv7());
 		// A file where the artifact directory belongs makes the tree scan fail with ENOTDIR.
 		await fs.rm(path.dirname(broken.artifact), { recursive: true });
@@ -2636,7 +2665,9 @@ describe("runGcCommand session compression", () => {
 		expect(result.wal).toBeDefined();
 	});
 
-	test.skipIf(!onApfs)("--apply removes only the scratch dirs a killed run left behind", async () => {
+	test("--apply removes only the scratch dirs a killed run left behind", async () => {
+		// Only the APFS copy-and-swap uses scratch directories.
+		fakeCompressionBackend("apfs");
 		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
 		const inSessions = path.join(path.dirname(file), ".omp-gc-compress-a1b2c3");
 		const inArchive = path.join(root, "archive", "sessions", "project", "x", ".omp-gc-compress-d4e5f6");
@@ -2660,7 +2691,7 @@ describe("runGcCommand session compression", () => {
 		expect(await Bun.file(userArtifact).text()).toBe("keep");
 	});
 
-	test.skipIf(!onApfs)("a failed batch still counts its files as allocated afterwards", async () => {
+	test.skipIf(!apfsCompresses)("a failed batch still counts its files as allocated afterwards", async () => {
 		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
 		const artifactBefore = await snapshot(artifact);
 		// A read-only artifact dir cannot hold the scratch copy, so only the transcript compresses.
@@ -2679,7 +2710,8 @@ describe("runGcCommand session compression", () => {
 		expect(await snapshot(artifact)).toEqual(artifactBefore);
 	});
 
-	test.skipIf(!supported)("leaves recent and leased sessions uncompressed", async () => {
+	test("leaves recent and leased sessions uncompressed", async () => {
+		const batches = fakeCompressionBackend();
 		const recent = await writeIdleSession(Bun.randomUUIDv7(), "complete", 1);
 		// Unique per run: the lease is machine-wide.
 		const heldId = Bun.randomUUIDv7();
@@ -2696,10 +2728,12 @@ describe("runGcCommand session compression", () => {
 		}
 
 		expect(result.compress).toMatchObject({ scanned: 2, skippedLive: 1, wouldCompress: 0, compressed: 0 });
+		expect(batches).toEqual([]);
 		expect(await Promise.all(targets.map(snapshot))).toEqual(before);
 	});
 
-	test.skipIf(!supported)("leaves a session uncompressed while a nested transcript is live", async () => {
+	test("leaves a session uncompressed while a nested transcript is live", async () => {
+		const batches = fakeCompressionBackend();
 		const parent = await writeIdleSession(Bun.randomUUIDv7());
 		const nestedId = Bun.randomUUIDv7();
 		// `--session` opens any path, so the transcript is found by its header, not its name.
@@ -2725,20 +2759,22 @@ describe("runGcCommand session compression", () => {
 		}
 
 		expect(result.compress).toMatchObject({ skippedLive: 1, wouldCompress: 0, compressed: 0 });
+		expect(batches).toEqual([]);
 		expect(await Promise.all(targets.map(snapshot))).toEqual(before);
 	});
 
-	test.skipIf(!supported)("compresses an idle session whose last turn was interrupted", async () => {
+	test("compresses an idle session whose last turn was interrupted", async () => {
+		const batches = fakeCompressionBackend();
 		const interrupted = await writeIdleSession(Bun.randomUUIDv7(), "pending");
-		const bytes = await fs.readFile(interrupted.file);
 
 		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
 
 		expect(result.compress).toMatchObject({ skippedLive: 0, compressed: 2 });
-		expect(await fs.readFile(interrupted.file)).toEqual(bytes);
+		expect(batches.flat().sort()).toEqual([interrupted.file, interrupted.artifact].sort());
 	});
 
-	test.skipIf(!supported)("compresses a session whose artifact tree holds a copy of its transcript", async () => {
+	test("compresses a session whose artifact tree holds a copy of its transcript", async () => {
+		fakeCompressionBackend();
 		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
 		// A plain copy keeps the parent's session id; leasing that id twice must not read as live.
 		const copy = path.join(path.dirname(artifact), "backup.jsonl");
@@ -2750,7 +2786,8 @@ describe("runGcCommand session compression", () => {
 		expect(result.compress).toMatchObject({ skippedLive: 0, compressed: 3 });
 	});
 
-	test.skipIf(!supported)("a dry run reads past a large JSON artifact with no session header", async () => {
+	test("a dry run reads past a large JSON artifact with no session header", async () => {
+		fakeCompressionBackend();
 		const { artifact } = await writeIdleSession(Bun.randomUUIDv7());
 		// Pretty-printed JSON opens like a record but completes none within the header
 		// read cap, and the file continues well past it.
@@ -2763,7 +2800,8 @@ describe("runGcCommand session compression", () => {
 		expect(result.compress).toMatchObject({ skippedLive: 0, sessions: 1, wouldCompress: 3, errors: [] });
 	});
 
-	test.skipIf(!supported)("--compress-after-days overrides gc.compressAfterDays", async () => {
+	test("--compress-after-days overrides gc.compressAfterDays", async () => {
+		fakeCompressionBackend();
 		await writeConfig(root, ["gc:", "  compressAfterDays: 60", ""].join("\n"));
 		await writeIdleSession(Bun.randomUUIDv7(), "complete", 30);
 
@@ -2772,5 +2810,519 @@ describe("runGcCommand session compression", () => {
 
 		expect(configured.compress?.wouldCompress).toBe(0);
 		expect(overridden.compress?.wouldCompress).toBe(2);
+	});
+
+	test.skipIf(!compresses)(
+		"the background run compresses idle sessions, then waits a day before running again",
+		async () => {
+			const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+
+			const child = await scheduleGcAutoCompress(root);
+			expect(await child?.exited).toBe(0);
+			for (const target of [file, artifact]) {
+				const after = await snapshot(target);
+				expect(after.allocated).toBeLessThan(after.size);
+			}
+			expect(await Bun.file(logPath).text()).toContain("compress: 2/2 files in 1 sessions");
+
+			expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await fs.utimes(logPath, lastRun, lastRun);
+			const next = await scheduleGcAutoCompress(root);
+			expect(await next?.exited).toBe(0);
+			expect(await Bun.file(logPath).text()).toContain("compress: 0/0 files in 0 sessions");
+		},
+		60_000,
+	);
+
+	test.skipIf(!compresses)(
+		"simultaneous launches start one background run and keep its summary",
+		async () => {
+			await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await Bun.write(logPath, "previous run\n");
+			await fs.utimes(logPath, lastRun, lastRun);
+
+			const launched = (await Promise.all([1, 2, 3].map(() => scheduleGcAutoCompress(root)))).filter(
+				child => child !== undefined,
+			);
+
+			expect(launched).toHaveLength(1);
+			expect(await launched[0].exited).toBe(0);
+			const log = await Bun.file(logPath).text();
+			expect(log).toContain("compress: 2/2 files in 1 sessions");
+			expect(log).not.toContain("GC already running");
+		},
+		60_000,
+	);
+
+	test("--apply on a volume whose compression shrinks nothing leaves sessions alone", async () => {
+		const batches = fakeCompressionBackend();
+		spyOn(gcCompress, "compressionWorks").mockResolvedValue(false);
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+
+		expect(result.compress).toMatchObject({ supported: true, scanned: 0, wouldCompress: 0, compressed: 0 });
+		expect(batches).toEqual([]);
+		expect(result.compress?.probeFailure).toContain("stored a compressible probe file uncompressed");
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test("omp gc --compress --apply fails when the compression probe cannot run", async () => {
+		// A supported volume, but no sessions directory to hold the probe's scratch dir.
+		const volume = spyOn(gcCompress, "compressMethod").mockResolvedValue("ntfs");
+		try {
+			await runCli(["gc", "--agent-dir", root, "--compress", "--apply"]);
+		} finally {
+			volume.mockRestore();
+		}
+
+		const stderr = stderrWrites.join("");
+		expect(process.exitCode).toBe(1);
+		expect(stderr).toContain("GC completed with 1 error:");
+		expect(stderr).toContain("compress: compression probe: ENOENT");
+		expect(writes.join("")).not.toContain("compress skipped");
+	});
+
+	test("the compression probe throws when the compression tool fails instead of reporting no compression", async () => {
+		// The other platform's tool is absent here, so its batch reports a command failure.
+		const absentTool = process.platform === "win32" ? "apfs" : "ntfs";
+
+		await expect(gcCompress.compressionWorks(root, absentTool)).rejects.toThrow(
+			absentTool === "apfs" ? "ditto exited" : "compact exited",
+		);
+	});
+
+	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
+		expect(await snapshot(file)).toEqual(before);
+	});
+});
+
+describe("runGcCommand replay data stripping", () => {
+	const header = (id: string) =>
+		JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" });
+	const assistant = (content: unknown[], extra: Record<string, unknown> = {}) =>
+		JSON.stringify({
+			type: "message",
+			message: {
+				role: "assistant",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-4-5",
+				stopReason: "stop",
+				content,
+				...extra,
+			},
+		});
+	const toolResult = (toolCallId: string, content: unknown[] = [{ type: "text", text: "ok" }]) =>
+		JSON.stringify({
+			type: "message",
+			message: { role: "toolResult", toolCallId, toolName: "read", isError: false, content },
+		});
+	const prompt = (text: string) =>
+		JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
+
+	/**
+	 * Two turns carrying replay data. The first is eligible. The second is the
+	 * issue's latest turn — two signed tool-call responses joined by their tool
+	 * results, which a provider replays as one assistant message and validates as
+	 * a unit — followed by an aborted thinking-only response no replay sends.
+	 */
+	function replayLines(id: string): string[] {
+		return [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "earlier", thinkingSignature: "EqQBearly", itemId: "rs_0" },
+					{ type: "toolCall", id: "call_0", name: "read", arguments: { path: "p" }, thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			),
+			toolResult("call_0", [
+				{
+					type: "image",
+					data: "",
+					mimeType: "application/octet-stream",
+					providerFile: { provider: "openai", id: "file_ref" },
+				},
+			]),
+			// Replay state with no copy elsewhere: a reasoning source field, a text phase, a snapshot history.
+			assistant(
+				[
+					{ type: "thinking", thinking: "field", thinkingSignature: "reasoning_content" },
+					{ type: "text", text: "noted", textSignature: '{"v":1,"id":"msg_1","phase":"commentary"}' },
+				],
+				{ providerPayload: { type: "openaiResponsesHistory", provider: "openai-codex", items: [] } },
+			),
+			prompt("keep going"),
+			assistant(
+				[
+					{ type: "thinking", thinking: "plan", thinkingSignature: "EqQBsigned", itemId: "rs_1" },
+					{ type: "redactedThinking", data: "EmwKencrypted" },
+					{
+						type: "toolCall",
+						id: "call_1",
+						name: "read",
+						arguments: { path: "a" },
+						thoughtSignature: "c2ln",
+						partialArgs: '{"path":"a"}',
+						streamIndex: 0,
+					},
+				],
+				{
+					stopReason: "toolUse",
+					requestControls: { messageIndex: 1 },
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai-codex",
+						dt: true,
+						items: [{ type: "reasoning", encrypted_content: "gAAAA" }],
+					},
+				},
+			),
+			toolResult("call_1", [
+				{
+					type: "image",
+					data: "aGk=",
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_1" },
+				},
+			]),
+			assistant(
+				[
+					{ type: "thinking", thinking: "second", thinkingSignature: "EqQBsecond", itemId: "rs_2" },
+					{ type: "toolCall", id: "call_2", name: "read", arguments: { path: "b" }, thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			),
+			toolResult("call_2"),
+			assistant([{ type: "thinking", thinking: "", thinkingSignature: "EqQBcut" }], { stopReason: "aborted" }),
+		];
+	}
+
+	async function writeTranscript(file: string, lines: string[], ageDays: number): Promise<void> {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await Bun.write(file, `${lines.join("\n")}\n`);
+		await agePath(file, ageDays);
+	}
+
+	async function writeReplaySession(id: string, ageDays = 40): Promise<string> {
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		await writeTranscript(file, replayLines(id), ageDays);
+		return file;
+	}
+
+	function expectStripped(lines: string[], original: string[]): void {
+		expect(lines).toHaveLength(original.length);
+		expect(lines[0]).toBe(original[0]);
+		// The earlier turn loses every piece of replay data it carried.
+		expect(JSON.parse(lines[1]).message.content).toEqual([
+			{ type: "thinking", thinking: "earlier" },
+			{ type: "toolCall", id: "call_0", name: "read", arguments: { path: "p" } },
+		]);
+		// Reference-only images and state with no copy elsewhere stay intact outside the kept turn.
+		expect(lines[2]).toBe(original[2]);
+		expect(lines[3]).toBe(original[3]);
+		expect(lines[4]).toBe(original[4]);
+		// The latest turn replays natively, so both of its signed responses keep
+		// their blocks, its tool result keeps its uploaded-file reference, and its
+		// request controls and cached history stay as they were.
+		for (const index of [5, 6, 7, 8]) expect(lines[index]).toBe(original[index]);
+		// The aborted response after it never reaches a replay, so it is not kept.
+		expect(JSON.parse(lines[9]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
+	}
+
+	test("a trailing turn dropped on resume leaves the earlier turn latest", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const lines = [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "step 1", thinkingSignature: "EqQBstep1" },
+					{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" }, thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			),
+			toolResult("call_1"),
+			assistant([
+				{ type: "thinking", thinking: "kept", thinkingSignature: "EqQBkept" },
+				{ type: "text", text: "answer" },
+			]),
+			prompt("one more"),
+			// Failed with partial text: session-context drops it on resume, so it
+			// must neither keep its signature nor displace the earlier turn.
+			assistant(
+				[
+					{ type: "thinking", thinking: "failed", thinkingSignature: "EqQBfail" },
+					{ type: "text", text: "partial output" },
+				],
+				{ stopReason: "error" },
+			),
+			// Cut off before any content: dropped on replay too.
+			assistant([{ type: "thinking", thinking: "", thinkingSignature: "EqQBcut" }], { stopReason: "aborted" }),
+		];
+		await writeTranscript(file, lines, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ wouldStrip: 1, stripped: 1, records: 2 });
+		const after = (await Bun.file(file).text()).split("\n").slice(0, -1);
+		expect(after[1]).toBe(lines[1]);
+		expect(after[2]).toBe(lines[2]);
+		expect(after[3]).toBe(lines[3]);
+		expect(JSON.parse(after[5]).message.content).toEqual([
+			{ type: "thinking", thinking: "failed" },
+			{ type: "text", text: "partial output" },
+		]);
+		expect(JSON.parse(after[6]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
+	});
+
+	test("resume rules keep the latest turn across excluded commands, mid-loop compaction, branching, and key order", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const lines = [
+			header(id),
+			// Summarized away before firstKeptEntryId: stripped.
+			JSON.stringify({
+				type: "message",
+				id: "pre_compact",
+				parentId: null,
+				message: {
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+					content: [
+						{ type: "thinking", thinking: "old", thinkingSignature: "EqQBold" },
+						{ type: "text", text: "old answer" },
+					],
+				},
+			}),
+			// Retained by compaction (firstKeptEntryId = "turn_a"), with `message`
+			// before `type` and `content` before `role`.
+			JSON.stringify({
+				id: "turn_a",
+				parentId: "pre_compact",
+				message: {
+					content: [
+						{ type: "thinking", thinking: "step A", thinkingSignature: "EqQBsignedA" },
+						{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a" }, thoughtSignature: "c2lnA" },
+					],
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "toolUse",
+				},
+				type: "message",
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "tr_a",
+				parentId: "turn_a",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "ok" }],
+				},
+			}),
+			// Hidden `!!` command excluded from provider input: does not split the turn.
+			JSON.stringify({
+				type: "message",
+				id: "hidden_bash",
+				parentId: "tr_a",
+				message: {
+					role: "bashExecution",
+					command: "pwd",
+					output: "/tmp",
+					cancelled: false,
+					excludeFromContext: true,
+				},
+			}),
+			// Mid-loop compaction retaining `turn_a`: summary is placed before `turn_a` on resume.
+			JSON.stringify({
+				type: "compaction",
+				id: "compact_1",
+				parentId: "hidden_bash",
+				summary: "compacted prefix",
+				firstKeptEntryId: "turn_a",
+				tokensBefore: 1000,
+			}),
+			// Abandoned user prompt on a sibling branch in file order: not on the active path.
+			JSON.stringify({
+				type: "message",
+				id: "abandoned_user",
+				parentId: "pre_compact",
+				message: { role: "user", content: [{ type: "text", text: "abandoned branch" }] },
+			}),
+			// Continues from `compact_1`, with `content` before `role`.
+			JSON.stringify({
+				id: "turn_b",
+				parentId: "compact_1",
+				message: {
+					content: [
+						{ type: "thinking", thinking: "step B", thinkingSignature: "EqQBsignedB" },
+						{ type: "text", text: "final answer" },
+					],
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+				},
+				type: "message",
+			}),
+			// Off-branch response at the tail that preserves `activeLeafId: "turn_b"`: stripped.
+			JSON.stringify({
+				type: "message",
+				id: "off_branch",
+				parentId: "abandoned_user",
+				activeLeafId: "turn_b",
+				message: {
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+					content: [
+						{ type: "thinking", thinking: "abandoned", thinkingSignature: "EqQBabandoned" },
+						{ type: "text", text: "unused" },
+					],
+				},
+			}),
+		];
+		await writeTranscript(file, lines, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ wouldStrip: 1, stripped: 1, records: 2 });
+		const after = (await Bun.file(file).text()).split("\n").slice(0, -1);
+		expect(JSON.parse(after[1]).message.content).toEqual([
+			{ type: "thinking", thinking: "old" },
+			{ type: "text", text: "old answer" },
+		]);
+		expect(after[2]).toBe(lines[2]);
+		expect(after[3]).toBe(lines[3]);
+		expect(after[7]).toBe(lines[7]);
+		expect(JSON.parse(after[8]).message.content).toEqual([
+			{ type: "thinking", thinking: "abandoned" },
+			{ type: "text", text: "unused" },
+		]);
+	});
+
+	test("skips a transcript when a protected message loses its line index", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = await writeReplaySession(id);
+		const before = await Bun.file(file).text();
+		const realBuild = sessionContext.buildSessionContext;
+		const spy = spyOn(sessionContext, "buildSessionContext").mockImplementation((...args) => {
+			const built = realBuild(...args);
+			return { ...built, messages: built.messages.map(message => structuredClone(message)) };
+		});
+		try {
+			const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+			expect(result.strip).toMatchObject({ scanned: 1, wouldStrip: 0, stripped: 0, records: 0, errors: [] });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await Bun.file(file).text()).toBe(before);
+	});
+
+	test("--apply strips idle transcripts except their latest replay turn, keeping mtimes and permissions", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = await writeReplaySession(id);
+		const subagentId = Bun.randomUUIDv7();
+		const subagent = path.join(file.slice(0, -".jsonl".length), "0-Explore.jsonl");
+		const subagentLines = [
+			header(subagentId),
+			assistant([{ type: "thinking", thinking: "look", thinkingSignature: "EqQBsub" }], { stopReason: "toolUse" }),
+			toolResult("call_9"),
+			prompt("and?"),
+			assistant([{ type: "text", text: "found" }], { requestControls: { messageIndex: 3 } }),
+		];
+		await writeTranscript(subagent, subagentLines, 40);
+		await fs.chmod(file, 0o600);
+		await fs.chmod(subagent, 0o600);
+		// Windows maps 0o600 to its own read/write bits; the contract is "unchanged by the rewrite".
+		const before = await Promise.all([file, subagent].map(target => fs.stat(target)));
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 1, skippedLive: 0, wouldStrip: 2, stripped: 2, records: 3 });
+		expect(result.strip?.errors).toEqual([]);
+		expectStripped((await Bun.file(file).text()).split("\n").slice(0, -1), replayLines(id));
+		const subagentAfter = (await Bun.file(subagent).text()).split("\n");
+		expect(JSON.parse(subagentAfter[1]).message.content).toEqual([{ type: "thinking", thinking: "look" }]);
+		// The subagent's own latest turn replays natively too.
+		expect(subagentAfter[4]).toBe(subagentLines[4]);
+		for (const [index, target] of [file, subagent].entries()) {
+			const stat = await fs.stat(target);
+			expect(stat.mtimeMs).toBeCloseTo(before[index].mtimeMs, 0);
+			expect(stat.mode).toBe(before[index].mode);
+		}
+
+		const rerun = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+		expect(rerun.strip).toMatchObject({ wouldStrip: 0, stripped: 0 });
+	});
+
+	test("a dry run rewrites nothing, and recent or leased sessions are never stripped", async () => {
+		const idle = await writeReplaySession(Bun.randomUUIDv7());
+		const recent = await writeReplaySession(Bun.randomUUIDv7(), 10);
+		// Unique per run: the lease is machine-wide.
+		const heldId = Bun.randomUUIDv7();
+		const held = await writeReplaySession(heldId);
+		const release = new FileSessionStorage().claimSession(heldId, held);
+		if (!release) throw new Error("Expected to claim the session lease");
+		const targets = [idle, recent, held];
+		const before = await Promise.all(targets.map(target => Bun.file(target).text()));
+		let dryRun: GcResult;
+		let applied: GcResult;
+		try {
+			dryRun = await runGcCommand({ flags: { agentDir: root, strip: true } });
+			expect(await Promise.all(targets.map(target => Bun.file(target).text()))).toEqual(before);
+			applied = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+		} finally {
+			release();
+		}
+
+		expect(dryRun.strip).toMatchObject({ scanned: 3, skippedLive: 1, wouldStrip: 1, stripped: 0, records: 2 });
+		expect(dryRun.strip?.bytes).toBeGreaterThan(0);
+		expect(applied.strip).toMatchObject({ skippedLive: 1, wouldStrip: 1, stripped: 1 });
+		expect(await Bun.file(recent).text()).toBe(before[1]);
+		expect(await Bun.file(held).text()).toBe(before[2]);
+	});
+
+	test("archived sessions are stripped inside their gzip archive", async () => {
+		const id = Bun.randomUUIDv7();
+		const archive = path.join(root, "archive", "sessions", "project", `${id}.jsonl.gz`);
+		await fs.mkdir(path.dirname(archive), { recursive: true });
+		await Bun.write(archive, gzipSync(`${replayLines(id).join("\n")}\n`));
+		await fs.chmod(archive, 0o600);
+		await agePath(archive, 40);
+		const { mode } = await fs.stat(archive);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 0, wouldStrip: 1, stripped: 1, errors: [] });
+		expect((await fs.stat(archive)).mode).toBe(mode);
+		const lines = gunzipSync(await Bun.file(archive).bytes())
+			.toString()
+			.split("\n")
+			.slice(0, -1);
+		expectStripped(lines, replayLines(id));
 	});
 });

@@ -3,8 +3,10 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
+import { Container, getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
 import type {
 	ExtensionCustomOptions,
 	ExtensionUIContext,
@@ -13,7 +15,10 @@ import type {
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
-import type { SessionPick } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
+import {
+	selectSessionTextReviewSource,
+	type SessionPick,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
 import {
 	AnnotateCommand,
 	runAnnotateCommand,
@@ -23,11 +28,14 @@ import {
 	showCodeReviewOverlay,
 	showTextReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/fullscreen";
+import { loadAnnotationDrafts } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/draft-store";
 import * as externalEditor from "@oh-my-pi/pi-coding-agent/utils/external-editor";
 import type {
 	CustomCommandAPI,
 	CustomCommandContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ReviewPrRef } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import {
 	createResolvedReviewTarget,
@@ -44,6 +52,9 @@ import type {
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
+import { Editor } from "@oh-my-pi/pi-tui/components/editor";
+import { defaultEditorTheme } from "../../../../tui/test/test-themes";
+import { TspHarness } from "../../../../tui/test/native/tsp-harness";
 
 const ENTER = "\r";
 const UP = "\x1b[A";
@@ -118,6 +129,7 @@ function createContext(options: ContextOptions = {}) {
 			getBranch: () => branch,
 			getCwd: () => options.cwd ?? "/workspace",
 			getSessionId: () => "session-1",
+			getArtifactsDir: () => null,
 		},
 		ui: { select, input, editor, custom, pasteToEditor, notify, setStatus },
 	} as unknown as CustomCommandContext;
@@ -192,13 +204,19 @@ async function driveEditorOverlay<T>(
 	cwd: string,
 	keys: readonly string[],
 	show: (ctx: CustomCommandContext) => Promise<T | undefined>,
+	artifactsDir: string | null = null,
 ): Promise<T | undefined> {
 	const previous = getKeybindings();
 	setKeybindings(KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }));
 	const tui = { terminal: { rows: 40 }, requestRender() {}, stop() {}, start() {} } as unknown as TUI;
 	const ctx = {
 		cwd,
-		sessionManager: { getCwd: () => cwd },
+		sessionManager: {
+			getCwd: () => cwd,
+			getSessionId: () => "session-1",
+			getArtifactsDir: () => artifactsDir,
+			ensureOnDisk: async () => {},
+		},
 		ui: {
 			notify: vi.fn(),
 			custom: async (factory: Parameters<ExtensionUIContext["custom"]>[0]) => {
@@ -245,11 +263,38 @@ afterEach(() => {
 });
 
 describe("/annotate contracts", () => {
+	it("saves notes from an overlay closed with Escape, restores them on reopen, and drops them on discard", async () => {
+		await withTempDir(async artifactsDir => {
+			const source = { id: "p", kind: "prompt", label: "Prompt", text: "alpha\nbeta" } as const;
+			const session = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-1",
+				ensureOnDisk: async () => {},
+			};
+			const show = (ctx: CustomCommandContext) => showTextReviewOverlay(ctx, source);
+			await driveEditorOverlay("/w", ["A", "kept", ENTER, "a", "half", "\x1b"], show, artifactsDir);
+			const [saved] = await loadAnnotationDrafts(session);
+			expect(saved?.state).toMatchObject({
+				annotations: [{ annotation: { note: "kept" } }],
+				editor: { text: "half" },
+			});
+
+			// Reopened, the unfinished note is back in the editor; Enter commits it, then paste keeps the draft.
+			const result = await driveEditorOverlay("/w", [ENTER, "\t", ENTER], show, artifactsDir);
+			expect(result?.annotations.map(annotation => annotation.note)).toEqual(["kept", "half"]);
+
+			// Discard needs a second Enter; the draft is gone once it closes.
+			await driveEditorOverlay("/w", ["\t", "\x1b[B", ENTER, ENTER], show, artifactsDir);
+			expect(await loadAnnotationDrafts(session)).toEqual([]);
+		});
+	});
+
 	it("resolves the selected local target in the live session cwd and pastes code notes without submitting", async () => {
 		const { ctx, select, pasteToEditor } = createContext({
 			selectResults: ["Code review", "2. Review uncommitted changes"],
 			cwd: "/live-worktree",
 		});
+		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
 		const target = localTarget();
 		const resolveLocalReviewTarget = vi.fn(
 			async (kind: "base-branch" | "uncommitted" | "commit", cwd: string, _ui: ReviewTargetUI) => {
@@ -278,7 +323,7 @@ describe("/annotate contracts", () => {
 		expect(select).toHaveBeenCalledTimes(2);
 		expect(resolveLocalReviewTarget).toHaveBeenCalledTimes(1);
 		expect(showCodeReviewOverlay).toHaveBeenCalledTimes(1);
-		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, undefined, undefined);
 		expect(pasteToEditor).toHaveBeenCalledTimes(1);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(annotation.note);
 	});
@@ -288,6 +333,7 @@ describe("/annotate contracts", () => {
 			selectResults: ["Code review", "4. Review a specific PR/MR", "#42  Fix login  @octocat"],
 			cwd: "/live-worktree",
 		});
+		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
 		const repoSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("acme/project");
 		spyOn(github, "json").mockResolvedValue([{ number: 42, title: "Fix login", author: { login: "octocat" } }]);
 		const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff");
@@ -305,7 +351,7 @@ describe("/annotate contracts", () => {
 		expect(resolvePrReviewTarget).toHaveBeenCalledTimes(1);
 		expect(resolvePrReviewTarget.mock.calls[0]?.[0]).toBe("/live-worktree");
 		expect(resolvePrReviewTarget.mock.calls[0]?.[2]).toMatchObject({ repo: "acme/project", number: 42 });
-		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, undefined, undefined);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain("picked PR note");
 	});
 
@@ -348,7 +394,7 @@ describe("/annotate contracts", () => {
 		expect(prompt).toBeDefined();
 		expect(resolvePrReviewTarget).toHaveBeenCalledTimes(1);
 		expect(showCodeReviewOverlay).toHaveBeenCalledTimes(1);
-		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, "focus on this line", undefined);
 		expect(prompt).toContain(contextInstruction);
 		expect(prompt).not.toContain("MAY read full file context as needed via `read`");
 		expect(countOccurrences(prompt!, "focus on this line")).toBe(1);
@@ -374,6 +420,68 @@ describe("/annotate contracts", () => {
 		expect(pasteToEditor).toHaveBeenCalledTimes(1);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(note);
 		expect(pasteToEditor.mock.calls[0]?.[0]).not.toContain(latestText);
+	});
+
+	it.each([true, false])("selects an older reply and restores the draft (native=%s)", async native => {
+		const older = makeAssistantEntry("older", "Older answer");
+		const { ctx } = createContext({
+			branch: [
+				makeUserEntry("user", "First question"),
+				older,
+				makeAssistantEntry("latest", "Latest answer", "older"),
+			],
+		});
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("Unsent draft");
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const h = await TspHarness.start(
+			tui => {
+				tui.addChild(editorContainer);
+				tui.setFocus(editor);
+			},
+			{ reply: native },
+		);
+		const controller = new ExtensionUiController({
+			ui: h.tui,
+			editor,
+			editorContainer,
+			closeLinkBrowser: vi.fn(),
+		} as unknown as InteractiveModeContext);
+		ctx.ui.custom = controller.showHookCustom.bind(controller);
+		try {
+			const pending = selectSessionTextReviewSource(ctx);
+			await h.until(() => {
+				// Advance the manual clock for the classic renderer's throttled paints.
+				h.flush(100);
+				return native ? h.region("layer")?.c?.[0]?.k === "picker" : h.terminal.rowBytes.includes("\x1b[?1049h");
+			});
+			expect(editorContainer.children).toEqual([editor]);
+			if (native) {
+				const picker = h.region("layer")?.c?.[0];
+				expect(picker?.k).toBe("picker");
+				if (!picker) throw new Error("Native annotation picker was not mounted");
+				h.event({ ev: "activate", sf: h.terminal.surface!, id: picker.id, item: "older" });
+			} else {
+				h.terminal.send(UP);
+				h.flush();
+				h.terminal.send(ENTER);
+				h.flush();
+			}
+			expect(await pending).toMatchObject({ text: "Older answer", kind: "message" });
+			h.flush(100);
+			if (native) {
+				expect(h.region("layer")?.c ?? []).toEqual([]);
+				expect(h.terminal.rowBytes).not.toContain("\x1b[?1049h");
+				expect(h.terminal.rowBytes).not.toContain("\x1b[?1049l");
+			} else {
+				expect(h.terminal.rowBytes).toContain("\x1b[?1049l");
+			}
+			expect(h.tui.getFocused()).toBe(editor);
+			expect(editor.getText()).toBe("Unsent draft");
+		} finally {
+			h.stop();
+		}
 	});
 
 	it("uses the native selector for a whole session message and preserves its entry without a block", async () => {

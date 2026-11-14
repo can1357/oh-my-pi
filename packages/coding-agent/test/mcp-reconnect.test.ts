@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
-import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import {
+	createMCPJsonRpcError,
+	MCPTransportError,
+	normalizeMCPTransportError,
+} from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
 	createLegacyMCPToolName,
@@ -10,6 +14,8 @@ import {
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse";
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -171,6 +177,19 @@ describe("isRetriableConnectionError", () => {
 		});
 	}
 
+	it("retries pre-dispatch DNS and socket-open failures identified by code or message", () => {
+		const failures = [
+			Object.assign(new TypeError("Unable to connect"), { code: "EAI_AGAIN" }),
+			Object.assign(new TypeError("Unable to connect"), { code: "FailedToOpenSocket" }),
+			new TypeError("getaddrinfo ENOTFOUND example.invalid"),
+		];
+		for (const failure of failures) {
+			const error = normalizeMCPTransportError(failure, { transport: "http", stage: "send" });
+			expect(error).toMatchObject({ failure: "connect", retryable: true });
+			expect(isRetriableConnectionError(error)).toBe(true);
+		}
+	});
+
 	it("uses typed transport metadata without retrying ambiguous timeouts", () => {
 		expect(
 			isRetriableConnectionError(
@@ -211,6 +230,66 @@ describe("isRetriableConnectionError", () => {
 describe("MCPTool.execute retry on connection error", () => {
 	const noop = () => {};
 	const noCtx = {} as Parameters<MCPTool["execute"]>[3];
+
+	for (const type of ["http", "sse"] as const) {
+		it(`reconnects after a pre-dispatch ${type} DNS failure and sends the tool call only once`, async () => {
+			let calls = 0;
+			let reconnects = 0;
+			let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+			const encoder = new TextEncoder();
+			const server = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				async fetch(request) {
+					if (request.method === "GET") {
+						return new Response(
+							new ReadableStream<Uint8Array>({
+								start(controller) {
+									stream = controller;
+									controller.enqueue(encoder.encode("event: endpoint\ndata: /messages\n\n"));
+								},
+							}),
+							{ headers: { "Content-Type": "text/event-stream" } },
+						);
+					}
+					calls++;
+					const body = (await request.json()) as { id: string | number };
+					const response = { jsonrpc: "2.0", id: body.id, result: toolCallResult("recovered") };
+					if (type === "http") return Response.json(response);
+					stream?.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(response)}\n\n`));
+					return new Response(null, { status: 202 });
+				},
+			});
+			const config = { url: `http://127.0.0.1:${server.port}/mcp`, timeout: 1_000 };
+			const transport =
+				type === "http" ? new HttpTransport({ type, ...config }) : new LegacySseTransport({ type, ...config });
+			const connection = { ...makeConnection(transport), config: { type, ...config } };
+			const tool = new MCPTool(connection, TOOL_DEF, async () => {
+				reconnects++;
+				return connection;
+			});
+			let fetchSpy: { mockRestore(): void } | undefined;
+
+			try {
+				await transport.connect();
+				// Captured from a real Bun fetch; avoid a live DNS lookup in the test suite.
+				fetchSpy = vi
+					.spyOn(globalThis, "fetch")
+					.mockRejectedValueOnce(
+						Object.assign(new TypeError("getaddrinfo ENOTFOUND omp-mcp-test.invalid"), { code: "ENOTFOUND" }),
+					);
+				const result = await tool.execute("dns", {}, noop, noCtx);
+				expect(result.details?.isError).toBeFalsy();
+				expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+				expect(reconnects).toBe(1);
+				expect(calls).toBe(1);
+			} finally {
+				fetchSpy?.mockRestore();
+				await transport.close();
+				await server.stop(true);
+			}
+		});
+	}
 
 	it("preserves image blocks returned by MCP tools", async () => {
 		const image: MCPImageContent = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };

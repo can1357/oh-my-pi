@@ -1,0 +1,5 @@
+bindkey -R -M .safe "^@"-"^I" .self-insert
+bindkey -M .safe "^J" .accept-line
+bindkey -R -M .safe "^K"-"^L" .self-insert
+bindkey -M .safe "^M" .accept-line
+bindkey -R -M .safe "^N"-"\M-^?" .self-insert

@@ -163,6 +163,36 @@ if "__omp_prelude_loaded__" not in globals():
         _emit_status("write", path=str(p), chars=len(content))
         return p
 
+    class ShellError(RuntimeError):
+        """An ``sh(...)`` command that exited non-zero (``exit_code``) or timed out (``exit_code`` None)."""
+
+        def __init__(self, message: str, output: str, exit_code: int | None):
+            super().__init__(message)
+            self.output = output
+            self.exit_code = exit_code
+
+    def sh(command: str, cwd: str | Path | None = None, timeout: float | None = None) -> str:
+        """Run ``command`` on the embedded bash engine and return its output.
+
+        The host side lives in ``eval/shell-bridge.ts``. Raises ShellError on a
+        non-zero exit or timeout.
+        """
+        if not isinstance(command, str):
+            raise TypeError(f"sh() expects a command string (got {type(command).__name__})")
+        args = {"command": command}
+        if cwd is not None:
+            args["cwd"] = str(cwd)
+        if timeout is not None:
+            args["timeout"] = timeout
+        result = _bridge_call("__shell__", args)
+        output = result.get("output", "")
+        exit_code = result.get("exitCode")
+        if exit_code == 0:
+            return output
+        status = f"timed out after {timeout}s" if result.get("timedOut") else f"exited with code {exit_code}"
+        detail = f"\n{output.rstrip()}" if output else ""
+        raise ShellError(f"$ {command}: {status}{detail}", output, exit_code)
+
     def output(
         *ids: str,
         format: str = "raw",
@@ -539,7 +569,8 @@ if "__omp_prelude_loaded__" not in globals():
             return schema
         if origin is typing.Literal:
             return {"enum": list(args)}
-        if origin in (typing.Union, types.UnionType):
+        # `X | Y` unions (types.UnionType) exist from Python 3.10 only.
+        if origin in (typing.Union, getattr(types, "UnionType", typing.Union)):
             non_null = [item for item in args if item is not type(None)]
             if len(non_null) == 1 and len(non_null) != len(args):
                 return {
@@ -782,6 +813,14 @@ if "__omp_prelude_loaded__" not in globals():
 
         __slots__ = ()
         kind = "completion"
+
+        @property
+        def attempts(self):
+            snapshot = _bridge_call(
+                "__status__",
+                {"item": {"kind": self.kind, "id": self.id}},
+            )
+            return snapshot.get("attempts", []) if isinstance(snapshot, dict) else []
 
         def __repr__(self):
             return f"<completion {self.id}>"
@@ -1030,6 +1069,7 @@ if "__omp_prelude_loaded__" not in globals():
         apply=None,
         merge=None,
         tools=None,
+        model=None,
     ):
         """Start a background subagent and return its handle."""
         args = {"prompt": prompt}
@@ -1049,6 +1089,8 @@ if "__omp_prelude_loaded__" not in globals():
             args["merge"] = bool(merge)
         if tools is not None:
             args["tools"] = list(tools)
+        if model is not None:
+            args["model"] = model
         result = _bridge_call("__agent__", args)
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
             raise RuntimeError("agent() did not return a handle")
@@ -1094,7 +1136,7 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<workpool {self.name} ({self.agent}) {self.limit} agents>"
 
-    def workpool(agent=None, *, name=None, context=None, tools=None):
+    def workpool(agent=None, *, name=None, context=None, tools=None, model=None):
         """Create a pool of keep-alive subagents."""
         args = {"op": "create"}
         if agent is not None:
@@ -1105,6 +1147,8 @@ if "__omp_prelude_loaded__" not in globals():
             args["context"] = context
         if tools is not None:
             args["tools"] = list(tools)
+        if model is not None:
+            args["model"] = model
         result = _bridge_call("__workpool__", args)
         if not isinstance(result, dict) or not isinstance(result.get("name"), str):
             raise RuntimeError("workpool() did not return a pool")

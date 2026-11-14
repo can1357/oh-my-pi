@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	type DaemonState,
 	type DaemonRestartPolicy,
@@ -118,10 +119,6 @@ export interface DaemonCompletionNotification {
 }
 
 export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error(`${label} must be an object`);

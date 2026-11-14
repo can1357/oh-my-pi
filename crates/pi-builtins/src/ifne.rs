@@ -13,10 +13,12 @@ use std::{
 	sync::atomic::{AtomicBool, Ordering},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand, builder::ValueParser};
 
-use crate::host::{Host, ShellCommand, Utility, matches_parser, util};
+use crate::{
+	host::{Host, ShellCommand, Utility, matches_parser},
+	openfile::Fd,
+};
 
 const USAGE: &str = "usage: ifne [-n] command [args...]";
 const CHUNK: usize = 64 * 1024;
@@ -138,7 +140,7 @@ fn run_with_input(host: &mut Host, command: Vec<OsString>, first: Option<u8>) ->
 			result => result,
 		}
 	});
-	let status = host.run_command(ShellCommand::new(command).stdin(OpenFile::from(reader)));
+	let status = host.run_command(ShellCommand::new(command).stdin(Fd::from(reader)));
 	let pumped = pump.join().unwrap_or(Ok(()));
 
 	let status = match status {
@@ -193,22 +195,13 @@ fn copy_cancellable(
 	}
 }
 
-
-/// Creates the `ifne` builtin registration.
-pub(crate) fn ifne_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ifne, SE>()
-}
-
 #[cfg(test)]
 mod tests {
-	/// Runs `ifne ARGS` in a real shell with `stdin` on fd 0.
+	/// Runs `ifne ARGS` with `stdin` on fd 0, its commands served by the test
+	/// runner.
 	async fn run_in(stdin: &str, args: &[&str]) -> (i32, String, String) {
-		let script = std::iter::once("ifne")
-			.chain(args.iter().copied())
-			.map(crate::host::quote_arg)
-			.collect::<Vec<_>>()
-			.join(" ");
-		crate::host::run_script(&script, stdin, &std::env::temp_dir()).await
+		let argv: Vec<&str> = std::iter::once("ifne").chain(args.iter().copied()).collect();
+		crate::host::run_extra(&argv, stdin, &std::env::temp_dir(), &[]).await
 	}
 
 	#[cfg(unix)]

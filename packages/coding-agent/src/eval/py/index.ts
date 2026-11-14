@@ -1,5 +1,6 @@
 import type { ToolSession } from "../../tools";
 import {
+	type BackendAvailability,
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
@@ -42,9 +43,8 @@ export default {
 	label: "Python",
 	highlightLang: "python",
 
-	async isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean> {
-		const availability = await checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session), opts);
-		return availability.ok;
+	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability> {
+		return checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session), opts);
 	},
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
@@ -65,6 +65,7 @@ export default {
 			reset: opts.reset,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
+			onReply: opts.onReply,
 			toolSession: opts.session,
 		};
 		const result = await executePython(code, executorOptions);

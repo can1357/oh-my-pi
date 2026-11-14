@@ -456,6 +456,21 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("linked.ts");
 	});
 
+	it("loads a symlinked extension file once when its target is also configured", async () => {
+		// An extensions/ symlink plus the same file passed with --extension must
+		// not bind two copies: each would run every handler, doubling side effects.
+		const realFile = path.join(tempDir.path(), "external", "shared.ts");
+		fs.mkdirSync(path.dirname(realFile), { recursive: true });
+		fs.writeFileSync(realFile, extensionCodeWithTool("shared-tool"));
+		fs.symlinkSync(realFile, path.join(extensionsDir, "linked.ts"), "file");
+
+		const result = await discoverForTest([realFile]);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].path).toContain("linked.ts");
+	});
+
 	it("does not crash on a dangling symlinked extension directory", async () => {
 		// A profile symlink pointing at a since-deleted shared extension. The fallback
 		// reads the (missing) target, gets [], and must yield no extension and no

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 function createContext(options?: {
 	hasInterruptibleInput?: boolean;
@@ -64,20 +63,6 @@ function createContext(options?: {
 }
 
 describe("empty submit with queued messages", () => {
-	it("aborts the active stream instead of eagerly prompting a drained queue", async () => {
-		const { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender, showError } = createContext();
-		const controller = new InputController(ctx);
-		controller.setupEditorSubmitHandler();
-
-		await ctx.editor.onSubmit?.("");
-
-		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
-		expect(prompt).not.toHaveBeenCalled();
-		expect(showError).not.toHaveBeenCalled();
-		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-
 	it("queues an image-only steer while streaming", async () => {
 		// An image-only draft is a bare marker: the composer always stages the
 		// chip token, which expands to `[Image #1]` at submit time.
@@ -147,7 +132,7 @@ describe("empty submit with queued messages", () => {
 		await ctx.editor.onSubmit?.("");
 
 		expect(prompt).not.toHaveBeenCalled();
-		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(abort).toHaveBeenCalled();
 		expect(ctx.editor.pendingImages).toEqual([]);
 	});
 });

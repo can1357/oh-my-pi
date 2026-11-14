@@ -141,6 +141,40 @@ describe("Chat Completions reasoning-disable conflict policy (per dialect)", () 
 		expect(payload.reasoning).toBeUndefined();
 	});
 
+	it("omits reasoning fields when a non-reasoning model disables reasoning for a forced tool", async () => {
+		const model = { ...reasoningDialectModel("openai"), reasoning: false, thinking: undefined };
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, forcedToolContext(), {
+			apiKey: "test-key",
+			fetch: createMockFetch(),
+			signal: createAbortedSignal(),
+			disableReasoning: true,
+			toolChoice: { type: "tool", name: "read" },
+			onPayload: payload => resolve(payload),
+		});
+
+		const payload = await promise;
+		expect(payload).not.toHaveProperty("reasoning_effort");
+		expect(payload).not.toHaveProperty("reasoning");
+	});
+
+	it("returns a terminal error when reasoning policy resolution fails", async () => {
+		const model: Model<"openai-completions"> = {
+			...reasoningDialectModel("openai"),
+			thinking: { mode: "effort", efforts: [] },
+		};
+		const stream = streamOpenAICompletions(model, forcedToolContext(), {
+			apiKey: "test-key",
+			fetch: createMockFetch(),
+			disableReasoning: true,
+			toolChoice: { type: "tool", name: "read" },
+		});
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("has no supported reasoning efforts");
+	});
+
 	it("applies the same per-dialect disable on the non-forced disableReasoningOnToolChoice path", async () => {
 		// Non-forced branch shares the dialect-aware helper: an OpenRouter
 		// reasoning model with disableReasoningOnToolChoice must emit

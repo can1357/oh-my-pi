@@ -42,9 +42,14 @@ pub mod markers {
 pub const MAX_CANDIDATES: usize = 200;
 /// Upper bound on candidate combinations explored for `all` ops.
 pub const MAX_COMBINATIONS: usize = 20_000;
-/// Leads apply failures so copy-ready payloads can extend to EOF.
-pub const ATOMICITY_NOTICE: &str =
-	"No operations were applied — ops apply atomically; re-send the full corrected payload.";
+/// Leads parse failures so copy-ready payloads can extend to EOF.
+pub const PARSE_FAILURE_NOTICE: &str =
+	"No operations were applied — the payload did not parse; re-send the full corrected payload.";
+/// Leads a file's rejected operations when other operations of the payload
+/// applied, so the model re-sends only the rejected ones.
+pub const PARTIAL_NOTICE: &str = "Rejected the operations below; the payload's other operations \
+                                  were applied. Re-send only the rejected operations — the \
+                                  applied ones are already in place.";
 
 /// Replacement or insertion applied by the sloppy engine to a matched source
 /// span.

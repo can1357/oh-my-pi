@@ -1,14 +1,11 @@
 import { AudioPlayback } from "@oh-my-pi/pi-natives";
+import { toError } from "@oh-my-pi/pi-utils";
 
 /** Kokoro emits 24 kHz mono PCM when a chunk does not declare a rate. */
 const DEFAULT_SAMPLE_RATE = 24_000;
 
 /** Output gain applied while the user speaks over assistant audio. */
 export const DUCK_GAIN = 0.25;
-
-function errorFrom(cause: unknown): Error {
-	return cause instanceof Error ? cause : new Error(String(cause));
-}
 
 /**
  * One native gapless playback session. Call {@link start}, enqueue mono `f32`
@@ -23,7 +20,7 @@ export class StreamingAudioPlayer {
 	#inputClosed = false;
 	#stopped = false;
 	#failNative(native: AudioPlayback, cause: unknown): void {
-		this.#error = errorFrom(cause);
+		this.#error = toError(cause);
 		if (this.#native === native) this.#native = null;
 		try {
 			native.stop();
@@ -43,7 +40,7 @@ export class StreamingAudioPlayer {
 			this.#native = native;
 		} catch (cause) {
 			if (native) this.#failNative(native, cause);
-			else this.#error = errorFrom(cause);
+			else this.#error = toError(cause);
 		}
 	}
 
@@ -90,7 +87,7 @@ export class StreamingAudioPlayer {
 		this.#ending = native
 			.end()
 			.catch(cause => {
-				throw errorFrom(cause);
+				throw toError(cause);
 			})
 			.finally(() => {
 				if (this.#native === native) this.#native = null;

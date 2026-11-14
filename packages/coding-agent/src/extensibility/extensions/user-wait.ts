@@ -12,6 +12,7 @@ const DIALOGS: Record<string, true> = {
 	editor: true,
 	custom: true,
 	askDialog: true,
+	formDialog: true,
 	approve: true,
 };
 

@@ -132,6 +132,27 @@ describe("terminal notifications", () => {
 		expect(out).toBe("\x1b]99;i=unsafe:f=b21w:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
 	});
 
+	it("generates OSC 99 ids that differ between notifications and between processes", () => {
+		// Kitty tracks ids per terminal process, so two omp processes in one kitty
+		// instance must never reuse each other's ids.
+		const script = `
+			import { getTerminalInfo, setOsc99Supported } from "@oh-my-pi/pi-tui/terminal-capabilities";
+			setOsc99Supported(true);
+			const kitty = getTerminalInfo("kitty");
+			for (let i = 0; i < 2; i++) console.log(kitty.formatNotification({ title: "omp", body: "Complete" }));
+		`;
+		const idsFromProcess = () => {
+			const result = Bun.spawnSync([process.execPath, "-e", script], { cwd: import.meta.dir });
+			expect(result.exitCode).toBe(0);
+			return [...result.stdout.toString().matchAll(/\x1b\]99;i=([^:;]+):f=/gu)].map(m => m[1]);
+		};
+		const first = idsFromProcess();
+		const second = idsFromProcess();
+		expect(first).toHaveLength(2);
+		expect(second).toHaveLength(2);
+		expect(new Set([...first, ...second]).size).toBe(4);
+	});
+
 	it("queries and confirms OSC 99 support before rich notifications", () => {
 		Bun.env.PI_TUI_OSC99_PROBE = "1";
 		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;

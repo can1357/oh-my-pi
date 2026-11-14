@@ -304,6 +304,24 @@ describe("Codex itemless array schemas", () => {
 			});
 		});
 
+		it("repairs an array whose items member is present but undefined", () => {
+			// JSON.stringify drops `items: undefined`, so it must be treated as omitted.
+			const tool: Tool = {
+				name: "list",
+				description: "List results",
+				strict: true,
+				parameters: {
+					type: "object",
+					properties: { listeners: { type: "array", items: undefined } },
+					required: ["listeners"],
+					additionalProperties: false,
+				},
+			};
+			const converted = JSON.parse(JSON.stringify(convert(tool)));
+			expect(converted.strict).toBeUndefined();
+			expect(converted.parameters.properties.listeners).toEqual({ type: "array", items: true });
+		});
+
 		it("retains strict mode for typed array items", () => {
 			const tool: Tool = {
 				name: "list",

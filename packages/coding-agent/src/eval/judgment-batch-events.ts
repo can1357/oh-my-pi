@@ -1,4 +1,4 @@
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { type } from "@oh-my-pi/omptype";
 
 /** Session event channel for editor-anchored judgment progress. */
 export const JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL = "eval:judgment-batch-progress";
@@ -23,29 +23,18 @@ export interface JudgmentBatchProgress {
 	error?: string;
 }
 
-function isNonNegativeInteger(value: unknown): value is number {
-	return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
+const JudgmentBatchProgressShape = type({
+	id: "string > 0",
+	intent: type("string").narrow(intent => intent.trim().length > 0),
+	done: "number.integer >= 0",
+	total: "number.integer >= 0",
+	failed: "number.integer >= 0",
+	cost: "number >= 0",
+	running: "boolean",
+	"error?": "string | undefined",
+}).narrow(progress => progress.done <= progress.total && progress.failed <= progress.done);
 
 /** Validate an untyped event-bus payload before rendering it. */
 export function isJudgmentBatchProgress(value: unknown): value is JudgmentBatchProgress {
-	if (!isRecord(value)) return false;
-	const progress = value;
-	if (
-		typeof progress.id !== "string" ||
-		progress.id.length === 0 ||
-		typeof progress.intent !== "string" ||
-		progress.intent.trim().length === 0 ||
-		!isNonNegativeInteger(progress.done) ||
-		!isNonNegativeInteger(progress.total) ||
-		!isNonNegativeInteger(progress.failed) ||
-		typeof progress.cost !== "number" ||
-		!Number.isFinite(progress.cost) ||
-		progress.cost < 0 ||
-		typeof progress.running !== "boolean" ||
-		(progress.error !== undefined && typeof progress.error !== "string")
-	) {
-		return false;
-	}
-	return progress.done <= progress.total && progress.failed <= progress.done;
+	return JudgmentBatchProgressShape.allows(value);
 }

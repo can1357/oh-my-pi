@@ -237,8 +237,8 @@ describe("Context overflow error handling", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Anthropic (OAuth)", () => {
-		it("claude-sonnet-4 - should detect overflow via isContextOverflow", async () => {
-			const model = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+		it("claude-sonnet-4-5 - should detect overflow via isContextOverflow", async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5-20250929");
 			const result = await testContextOverflow(model, e2eApiKey("ANTHROPIC_API_KEY")!);
 			logResult(result);
 

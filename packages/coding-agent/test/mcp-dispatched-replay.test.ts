@@ -10,6 +10,7 @@ import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { deadlinesOnlyUnderDeadline } from "./helpers/mcp-deadline";
 
 const TOOL_DEF = { name: "record_effect", inputSchema: { type: "object" as const } };
 const connections: MCPServerConnection[] = [];
@@ -17,6 +18,10 @@ let tempDir: string;
 let effectsPath: string;
 let auth: AuthStorage;
 let context: CustomToolContext;
+// No call here runs under a deadline: the subject is replay after dispatch, which
+// the fixture's exit or answer settles. A deadline (configured, or from
+// OMP_MCP_TIMEOUT_MS) only raced the fresh fixture's start on a loaded host.
+deadlinesOnlyUnderDeadline();
 
 beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-no-replay-"));
@@ -44,7 +49,6 @@ async function openConnection(): Promise<MCPServerConnection> {
 		type: "stdio",
 		command: process.execPath,
 		args: [path.join(import.meta.dir, "fixtures", "side-effect-mcp.ts"), effectsPath],
-		timeout: 300,
 	});
 	connections.push(connection);
 	return connection;

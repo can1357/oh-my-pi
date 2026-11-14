@@ -1,10 +1,11 @@
 import { Text } from "../components/text";
 import { ansi } from "../native/describe";
+import { Memo } from "../native/memo";
 import type { DescribeContext, NativeNode } from "../native/node";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
-import type { Theme } from "../theme/theme";
+import { getThemeEpoch, type Theme } from "../theme/theme";
 import type { Component } from "../tui";
-import { getPaddingX } from "../utils";
+import { getPaddingX, getWidthConfigEpoch } from "../utils";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
 import { getSixelLineMask } from "./sixel";
 import { formatExpandHint, replaceTabs } from "./render-utils";
@@ -158,8 +159,17 @@ export class OutputPane implements Component {
 	#lines: string[] = [];
 	#pendingCarriageReturn = false;
 	#text: Text;
-	#renderKey = "";
+	/** The content last handed to the inner `Text`, compared by identity. */
+	#renderContent: string | undefined;
 	#native: NativeNode | undefined;
+	/**
+	 * The styled-and-joined content of the last render, kept with the inputs
+	 * that produced it. A pane re-renders every frame while it sits in the live
+	 * transcript tail, but its content only changes when its rows, presentation,
+	 * width, theme, or image protocol change — so the styling, joining and
+	 * hashing would otherwise be repeated work on every frame.
+	 */
+	#memo = new Memo<string>();
 
 	constructor(theme: Theme, options: OutputPaneOptions, text = "") {
 		this.#theme = theme;
@@ -276,34 +286,67 @@ export class OutputPane implements Component {
 		return this.#native;
 	}
 
+	/**
+	 * The content the last render produced, rebuilt only when one of the
+	 * inputs it depends on changes.
+	 *
+	 * The pane's own state — the stored rows and the options — changes only
+	 * through methods that call {@link OutputPane.invalidate}, which drops
+	 * this memo. The dependencies below are the inputs that can change
+	 * *without* the pane hearing about it, and every one of them shapes the
+	 * content:
+	 *
+	 * - `contentWidth` — the wrapping width that feeds the visual cap as well
+	 *   as the inner `Text` render: `width` minus both horizontal paddings.
+	 * - `widthConfigEpoch` — the width-affecting runtime configuration (the
+	 *   Hangul compatibility-Jamo width), which `visibleWidth` — and so the
+	 *   visual cap — depends on.
+	 * - `themeEpoch` — the active theme's colors, which `styleLine` bakes into
+	 *   the styled rows and which the inner `Text` re-resolves on every render.
+	 * - `imageProtocol` — read by the formatter to decide whether rows carry
+	 *   sixel payload that must not be styled or split.
+	 *
+	 * A `styleLine` whose *captured* state changes without the pane hearing
+	 * about it would break this. Callers must call
+	 * {@link OutputPane.invalidate} when that happens.
+	 */
+	#renderDeps(): readonly unknown[] {
+		return [getWidthConfigEpoch(), getThemeEpoch(), TERMINAL.imageProtocol];
+	}
+
 	render(width: number): readonly string[] {
 		const paddingX = getPaddingX(this.#options.paddingX ?? 0);
 		const contentWidth = Math.max(1, width - paddingX * 2);
-		const formatted = formatOutputPaneLines(
-			{
-				...this.#options,
-				lines: this.#lines,
-				width: contentWidth,
-			},
-			this.#theme,
-		);
-		const content = `${this.#options.leadingBlank && formatted.lines.length > 0 ? "\n" : ""}${formatted.lines.join("\n")}`;
-		const key = `${width}:${content.length}:${Bun.hash(content).toString(36)}`;
-		if (key !== this.#renderKey) {
-			this.#renderKey = key;
+		const content = this.#memo.get([...this.#renderDeps(), contentWidth], () => {
+			const formatted = formatOutputPaneLines(
+				{
+					...this.#options,
+					lines: this.#lines,
+					width: contentWidth,
+				},
+				this.#theme,
+			);
+			return `${this.#options.leadingBlank && formatted.lines.length > 0 ? "\n" : ""}${formatted.lines.join("\n")}`;
+		});
+		// The memo hands back the same string while its inputs hold, so the
+		// identity check is a pointer compare — no re-hash of the content.
+		if (content !== this.#renderContent) {
+			this.#renderContent = content;
 			this.#text.setText(content);
 		}
 		return this.#text.render(width);
 	}
 
 	invalidate(): void {
-		this.#renderKey = "";
+		this.#renderContent = undefined;
 		this.#native = undefined;
+		this.#memo.clear();
 		this.#text.invalidate();
 	}
 
 	releaseRenderCaches(): void {
-		this.#renderKey = "";
+		this.#renderContent = undefined;
+		this.#memo.clear();
 		this.#text.setText("");
 		this.#text.releaseRenderCaches();
 	}

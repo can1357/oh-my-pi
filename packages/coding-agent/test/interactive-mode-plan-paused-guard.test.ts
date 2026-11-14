@@ -51,7 +51,7 @@ describe("InteractiveMode paused-plan guard message", () => {
 			settings: Settings.isolated({}),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, new EventBus());
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus());
 	});
 
 	afterEach(async () => {

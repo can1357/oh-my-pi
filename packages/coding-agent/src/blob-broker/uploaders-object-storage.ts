@@ -1,4 +1,5 @@
 import { type AwsCredentials, type SignedHeaders, signRequest } from "@oh-my-pi/pi-ai/providers/aws-sigv4";
+import { asStrictBytes } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobUploader, RemoteDeleteAction } from "./publication";
 import {
@@ -317,20 +318,15 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 	};
 }
 
-function strictBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-		return bytes as Uint8Array<ArrayBuffer>;
-	}
-	const copy = new Uint8Array(bytes.byteLength);
-	copy.set(bytes);
-	return copy;
-}
-
 async function hmacSha256Base64(key: Uint8Array, value: string): Promise<string> {
-	const cryptoKey = await crypto.subtle.importKey("raw", strictBytes(key), { name: "HMAC", hash: "SHA-256" }, false, [
-		"sign",
-	]);
-	const signature = await crypto.subtle.sign("HMAC", cryptoKey, strictBytes(encoder.encode(value)));
+	const cryptoKey = await crypto.subtle.importKey(
+		"raw",
+		asStrictBytes(key),
+		{ name: "HMAC", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign("HMAC", cryptoKey, asStrictBytes(encoder.encode(value)));
 	return new Uint8Array(signature).toBase64();
 }
 

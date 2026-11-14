@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgEditFuzzyMatch, cfgEditMode, cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { type EditModeSessionLike, resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 
@@ -26,12 +26,12 @@ function createSession(args: {
 	modelVariant?: EditMode;
 	settingsMode?: EditMode;
 }): EditModeSessionLike {
-	const settings = Settings.isolated({
-		"edit.mode": args.settingsMode ?? "hashline",
-		...(args.modelVariant && args.activeModel
-			? { "edit.modelVariants": { [args.activeModel]: args.modelVariant } }
-			: {}),
-	});
+	// Persisted (global-layer) values: a runtime override would outrank `PI_EDIT_VARIANT`.
+	const settings = Settings.isolated();
+	cfgEditMode.set(settings, args.settingsMode ?? "hashline");
+	if (args.modelVariant && args.activeModel) {
+		cfgEditModelVariants.set(settings, { [args.activeModel]: args.modelVariant });
+	}
 	return { getActiveModelString: () => args.activeModel, settings };
 }
 
@@ -122,6 +122,13 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "zai/glm-4.7-flash" }))).toBe("hashline");
 	});
 
+	test("uses replace for Qwen 3.8 without changing other Qwen generations", () => {
+		expect(resolveEditMode(createSession({ activeModel: "omlx/Qwen3.8-Flash-Next-oQ6e-mtp" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "lm-studio/qwen3.8-27b" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "openrouter/qwen/qwen3-coder" }))).toBe("hashline");
+		expect(resolveEditMode(createSession({ activeModel: "openrouter/qwen/qwen3.5-35b-a3b" }))).toBe("hashline");
+	});
+
 	test("does not exclude non-Kimi Moonshot models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
@@ -177,7 +184,9 @@ describe("PI_EDIT_FUZZY", () => {
 	test("forces fuzzy matching with 1/true and 0/false, deferring to edit.fuzzyMatch for auto or other text", () => {
 		const fuzzyWith = (raw: string, configured: boolean) => {
 			Bun.env.PI_EDIT_FUZZY = raw;
-			return cfgEditFuzzyMatch.get(Settings.isolated({ "edit.fuzzyMatch": configured }));
+			const settings = Settings.isolated();
+			cfgEditFuzzyMatch.set(settings, configured);
+			return cfgEditFuzzyMatch.get(settings);
 		};
 		expect(fuzzyWith("1", false)).toBe(true);
 		expect(fuzzyWith("true", false)).toBe(true);

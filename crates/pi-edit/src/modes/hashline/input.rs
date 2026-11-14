@@ -212,14 +212,10 @@ pub fn first_header_path(input: &str, options: &SplitOptions<'_>) -> Option<Stri
 }
 
 fn unquote(path: &str) -> &str {
-	if path.len() >= 2
-		&& ((path.starts_with('"') && path.ends_with('"'))
-			|| (path.starts_with('\'') && path.ends_with('\'')))
-	{
-		&path[1..path.len() - 1]
-	} else {
-		path
-	}
+	path
+		.strip_circumfix('"', '"')
+		.or_else(|| path.strip_circumfix('\'', '\''))
+		.unwrap_or(path)
 }
 fn normalize_hashline_path(raw: &str, cwd: Option<&Path>) -> String {
 	let cleaned = APPLY_PATCH_PATH_NOISE_RE
@@ -290,7 +286,7 @@ fn parse_header_line(line: &str, cwd: Option<&Path>) -> Result<Option<RawSection
 }
 
 fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
-	let body = line.strip_prefix('[')?.strip_suffix(']')?.trim();
+	let body = line.strip_circumfix('[', ']')?.trim();
 	let body = APPLY_PATCH_PATH_NOISE_RE.replace(body, "").into_owned();
 	if body.is_empty() {
 		return None;

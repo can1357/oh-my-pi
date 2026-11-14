@@ -188,6 +188,25 @@ describe("AIError.finalize", () => {
 		const reId = AIError.classifyMessage({ errorId: result.id, errorMessage: result.message });
 		expect(AIError.retriable(reId)).toBe(true);
 	});
+
+	it("treats Aliyun multimodal-gateway 400s as transient (flaky, replay succeeds)", () => {
+		const phrasings = [
+			"400 <400> InternalError.Algo.InvalidParameter: The provided URL does not appear to be valid. Ensure it is correctly formatted.\n<400> InternalError.Algo.InvalidParameter: The provided URL does not appear to be valid. Ensure it is correctly formatted. (type=invalid_request_error param=invalid_parameter_error)",
+			"400 <400> InternalError.Algo.InvalidParameter: Download multimodal file timed out\n<400> InternalError.Algo.InvalidParameter: Download multimodal file timed out (type=invalid_request_error param=invalid_parameter_error)",
+		];
+		for (const errorMessage of phrasings) {
+			const id = AIError.classifyMessage({ errorStatus: 400, errorMessage });
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		}
+	});
+
+	it("keeps genuine 400 validation errors terminal", () => {
+		const id = AIError.classifyMessage({
+			errorStatus: 400,
+			errorMessage: "400 invalid_request_error: unknown field 'temperaturee' in request body",
+		});
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+	});
 });
 
 describe("aierr flag helpers", () => {

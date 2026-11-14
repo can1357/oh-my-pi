@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -99,6 +100,29 @@ describe("openai-codex cyber access programs", () => {
 		sent.length = 0;
 		expect((await run("acct-daybreak", [200])).stopReason).toBe("stop");
 		expect(sent).toEqual([undefined]);
+	});
+
+	it("omits Daybreak Blue for eligible accounts while the host switch is off", async () => {
+		const accountId = "acct-daybreak-switch";
+		const switchModel = createCodexModel("gpt-6-sol-switch", {
+			preferWebsockets: false,
+			accountAccess: { [accountId]: { cyberPrograms: ["standard", "daybreak_blue"] } },
+		});
+		const sent: unknown[] = [];
+		const run = () =>
+			streamOpenAICodexResponses(switchModel, context, {
+				apiKey: createCodexTestToken(accountId),
+				fetch: createFetchMock([200], sent),
+			}).result();
+
+		configureCodexAccessPrograms(false);
+		try {
+			expect((await run()).stopReason).toBe("stop");
+		} finally {
+			configureCodexAccessPrograms(true);
+		}
+		expect((await run()).stopReason).toBe("stop");
+		expect(sent).toEqual([undefined, { cyber: "daybreak_blue" }]);
 	});
 
 	it.each([

@@ -1,0 +1,23 @@
+// Otari: an OpenAI-compatible AI gateway (https://api.otari.ai/api/v1) that
+// routes to upstream providers on a workspace's behalf. The roster is the set
+// of models one workspace enables, so nothing is bundled: discovery is
+// credential-scoped and authoritative. Self-hosted gateways set
+// `OTARI_BASE_URL` to the deployment's API root (`https://host/api/v1`).
+
+provider "otari" {
+	// Placeholder: `/models` marks no workspace default, so this only ranks the
+	// id when the workspace enables it. It is the example selector in Otari's
+	// `/models` API docs; ids are `<upstream-provider>/<model>`.
+	default-model "deepseek/deepseek-v4.1-flash"
+	env "OTARI_API_KEY"
+	dynamic-models-authoritative #true
+	// Same-id rows on other hosts may carry different limits or prices.
+	skip-cross-provider-reference-fills #true
+	discovery label="Otari"
+
+	// Requests forward through any-llm, and some upstreams reject `developer`:
+	// `anthropic/claude-haiku-4.5` answers 400 with it and 200 with `system`
+	// (verified 2026-11-02). `store`, `max_completion_tokens`, tools, and
+	// `reasoning_effort` minimal..xhigh passed on `anthropic/` and `google/`.
+	supports-developer-role #false
+}

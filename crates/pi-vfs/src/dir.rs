@@ -216,8 +216,9 @@ impl DirEntry {
 		}
 	}
 
-	/// The entry's type when known without a provider call.
-	pub(crate) fn known_file_type(&self) -> Option<FileType> {
+	/// The entry's type when known without a provider call (a host entry's
+	/// `d_type`, a provider entry's listed type); never blocks.
+	pub fn known_file_type(&self) -> Option<FileType> {
 		match &self.repr {
 			EntryRepr::Native(entry) => entry.file_type().ok().map(Into::into),
 			EntryRepr::Virtual(virt) => virt.file_type,

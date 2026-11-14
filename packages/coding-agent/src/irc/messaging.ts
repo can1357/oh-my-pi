@@ -1,9 +1,8 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
 
@@ -20,31 +19,10 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	return canSpawnAtDepth(maxDepth, taskDepth);
 }
 
-export function formatIncoming(msg: IrcMessage): string {
-	const replyTag = msg.replyTo ? ` (reply to ${msg.replyTo})` : "";
-	return `[${msg.id}] ${msg.from}${replyTag}: ${msg.body}`;
-}
-
-/** Session-buffered inbox drain used before parking a bus waiter. */
-export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
-	const session = registry.get(senderId)?.session;
-	return typeof session?.drainPendingIrcInboxMessages === "function"
-		? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0]
-		: undefined;
-}
-
-/** `wait` result carrying a consumed message. */
-export function messageResult(senderId: string, waited: IrcMessage): AgentToolResult<CoordinationDetails> {
-	return {
-		content: [{ type: "text", text: formatIncoming(waited) }],
-		details: { op: "wait", from: senderId, waited },
-	};
-}
-
-/** Send a direct message or broadcast; delivery never waits for a reply. */
+/** Send a direct message or, from a top-level agent only, a broadcast; delivery never waits for a reply. */
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string },
+	deps: { registry: AgentRegistryApi; senderId: string; sessionFileHint?: string | null },
+	params: { to: string; message: string; progress?: boolean },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
 	const to = params.to.trim();
@@ -55,6 +33,13 @@ export async function executeSend(
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	const isBroadcast = to === "all";
+	// A subagent's broadcast wakes every live peer for news that is almost never
+	// theirs; it messages the one agent that can answer instead.
+	if (isBroadcast && registry.get(senderId)?.kind !== "main")
+		return coordinationErrorResult(
+			"Only the main agent can broadcast. Message the one agent that can answer via `agent://<id>`.",
+			{ op: "send", from: senderId, to },
+		);
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
 	if (!isBroadcast && sessionFileHint) {
 		const recipient = registry.get(to);
@@ -62,14 +47,16 @@ export async function executeSend(
 	}
 
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-	const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
 	const bus = IrcBus.global();
 	const receipts = await Promise.all(
 		targets.map(target =>
-			bus.send(
-				{ from: senderId, to: target, body: message, ...(isBroadcast ? { broadcast: true } : {}) },
-				{ suppressRelay },
-			),
+			bus.send({
+				from: senderId,
+				to: target,
+				body: message,
+				...(isBroadcast ? { broadcast: true } : {}),
+				...(params.progress ? { progress: true } : {}),
+			}),
 		),
 	);
 	const delivered = receipts.filter(receipt => receipt.outcome !== "failed");

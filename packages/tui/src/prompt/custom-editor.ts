@@ -15,6 +15,7 @@ import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
 import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
+import { getNativeBlob, type NativeBlob, nativeBlob, withBlob } from "../native/blobs";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
@@ -42,6 +43,7 @@ import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spell
 import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
 import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
+import { motionEffectsEnabled } from "../motion-effects";
 import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
@@ -457,6 +459,13 @@ export type ComposerChipDescriptor =
 	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
 	| { kind: "paste"; n: number; text: TextAttachment };
 
+/** A draft image's blob id, riding on the image itself so its bytes are hashed once. */
+const kImageBlobId = Symbol("omp.imageBlobId");
+
+interface ImageContentWithBlobId extends ImageContent {
+	[kImageBlobId]?: string;
+}
+
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
@@ -620,7 +629,7 @@ export class CustomEditor extends Editor {
 					name => this.skillFilePath(name) !== undefined,
 					register,
 				),
-				selector => this.#mentionLabelFor(selector),
+				selector => this.#mentionChipFor(selector),
 				register,
 			),
 		);
@@ -635,18 +644,20 @@ export class CustomEditor extends Editor {
 	 */
 	skillFilePath: (name: string) => string | undefined = () => undefined;
 
-	/** Host-owned model probe: maps a mentionable selector to its display chip label. */
-	modelMentionLabel: (selector: string) => string | undefined = () => undefined;
+	/**
+	 * Host-owned model probe: a mentionable `provider/id[:level]` selector's chip label and
+	 * canonical selector, so equivalent spellings (`:hi`/`:high`, bare/`:auto`) share a chip.
+	 */
+	resolveModelMention: (selector: string) => { label: string; selector: string } | undefined = () => undefined;
 
 	/** Host-owned session probe: maps a persisted model pseudonym back to its selector. */
 	modelMentionSelector: (agent: string) => string | undefined = () => undefined;
 
-	#mentionLabelFor(selector: string): string | undefined {
-		const label = this.modelMentionLabel(selector);
-		if (label === undefined) return undefined;
-		const expansion = modelMentionToken(selector);
-		const registered = this.atoms.get(label);
-		return registered !== undefined && registered !== expansion ? undefined : label;
+	#mentionChipFor(selector: string): { label: string; selector: string } | undefined {
+		const chip = this.resolveModelMention(selector);
+		if (chip === undefined) return undefined;
+		const registered = this.atoms.get(chip.label);
+		return registered === undefined || registered === modelMentionToken(chip.selector) ? chip : undefined;
 	}
 
 	/**
@@ -700,9 +711,9 @@ export class CustomEditor extends Editor {
 					const start = match.index + match[1].length;
 					const end = match.index + match[0].length;
 					if (end === line.length && i === lines.length - 1) break;
-					const label = this.#mentionLabelFor(selector);
-					if (label === undefined) continue;
-					this.collapseToAtom(i, start, end, label, modelMentionToken(selector));
+					const chip = this.#mentionChipFor(selector);
+					if (chip === undefined) continue;
+					this.collapseToAtom(i, start, end, chip.label, modelMentionToken(chip.selector));
 					collapsed = true;
 					anyCollapsed = true;
 					break;
@@ -871,7 +882,8 @@ export class CustomEditor extends Editor {
 		const caret = this.getCursor();
 		this.#typing.update(this.textRevision, this.#decorationLines, caret.line, caret.col, this.focused);
 		const typing = this.#typing.word;
-		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
+		// With decorative motion off the keyword keeps its static highlight; the pending frame chain ends here.
+		const animated = this.focused && this.#shimmerEnabled() && motionEffectsEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		let sourceSearchOffset = 0;
@@ -954,8 +966,9 @@ export class CustomEditor extends Editor {
 	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
 	 * color, chips and markers take their token colors, misspellings are marked,
 	 * and queue-composer markers are dimmed/accented, all as ranges over the raw
-	 * buffer instead of painted text. A shell-mode draft is code: only its sigil
-	 * is decorated, hidden behind the mode chip.
+	 * buffer instead of painted text. An image's token or marker names the image's
+	 * blob, so copying it in the terminal copies the image. A shell-mode draft is
+	 * code: only its sigil is decorated, hidden behind the mode chip.
 	 */
 	override describeDecorations = (lines: readonly string[]): readonly TspEditorDecoration[] => {
 		const text = lines.join("\n");
@@ -966,8 +979,9 @@ export class CustomEditor extends Editor {
 		this.#syncComposerTokenPattern();
 		const decor: TspEditorDecoration[] = [];
 		let offset = 0;
-		const mark = (length: number, s: string): string => {
-			decor.push({ from: offset, to: offset + length, s });
+		const mark = (length: number, s: string, blob?: NativeBlob): string => {
+			const range = { from: offset, to: offset + length, s };
+			decor.push(blob ? withBlob(range, blob) : range);
 			offset += length;
 			return "";
 		};
@@ -980,7 +994,10 @@ export class CustomEditor extends Editor {
 				},
 				renderSkill: label => mark(label.length, "customMessageLabel strong"),
 				renderMention: label => mark(label.length, "statusLineModel strong"),
-				renderReference: value => mark(value.length, "accent strong"),
+				renderReference: (value, kind, index) => {
+					const image = kind === "image" ? this.pendingImages[index - 1] : undefined;
+					return mark(value.length, "accent strong", image && this.#imageBlob(image));
+				},
 			},
 			this.atomicTokenPattern,
 		);
@@ -1012,6 +1029,20 @@ export class CustomEditor extends Editor {
 		}
 		return decor.sort((a, b) => a.from - b.from);
 	};
+
+	/**
+	 * The blob of pending image `image`'s bytes: the chips band's while its card shows it, else
+	 * made anew. Its `decor` range owns it, so a deleted token's bytes are released.
+	 */
+	#imageBlob(image: ImageContent): NativeBlob {
+		const tagged = image as ImageContentWithBlobId;
+		const known = tagged[kImageBlobId];
+		const alive = known === undefined ? undefined : getNativeBlob(known);
+		if (alive) return alive;
+		const blob = nativeBlob(Buffer.from(image.data, "base64"), image.mimeType);
+		tagged[kImageBlobId] = blob.id;
+		return blob;
+	}
 
 	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;
@@ -1063,7 +1094,12 @@ export class CustomEditor extends Editor {
 	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled
 	 *  and no dictation is still writing into the draft. */
 	protected override get nativeSendable(): boolean {
-		return this.onSubmit !== undefined && !this.disableSubmit && !dictationHoldsDraft(this.composerState().dictation);
+		return (
+			!this.nativeKeyPassthrough &&
+			this.onSubmit !== undefined &&
+			!this.disableSubmit &&
+			!dictationHoldsDraft(this.composerState().dictation)
+		);
 	}
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;
@@ -1107,7 +1143,8 @@ export class CustomEditor extends Editor {
 	 * (or the effort glyph as the model chip's icon), the generation rate,
 	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
-	 * `submit`, `interrupt` and `focus:<id>` actions.
+	 * `submit`, `interrupt` and `focus:<id>` actions; `thinking.set` (the level
+	 * as `value`) picks a thinking level directly (a phone's effort menu).
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
 		const effortGlyph = cx.supports("effort");
@@ -1430,6 +1467,9 @@ export class CustomEditor extends Editor {
 			case "thinking.cycle":
 				this.onCycleThinkingLevel?.();
 				return;
+			case "thinking.set":
+				if (event.value) this.onSetThinkingLevel?.(event.value);
+				return;
 			case "dictation.toggle": {
 				const { dictation } = this.composerState();
 				if (dictation !== undefined && dictation !== "transcribing") this.onToggleDictation?.();
@@ -1452,6 +1492,8 @@ export class CustomEditor extends Editor {
 	onExit?: () => void;
 	onDisplayReset?: () => void;
 	onCycleThinkingLevel?: () => void;
+	/** A thinking level (`off`, `auto`, `minimal`…`max`) was picked by pointer. */
+	onSetThinkingLevel?: (level: string) => void;
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
 	onSelectModel?: () => void;

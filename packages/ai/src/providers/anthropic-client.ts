@@ -27,6 +27,7 @@ import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeout
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
 import type { FetchImpl } from "../types";
+import { getShouldRetryFromHeaders } from "../utils/retry-after";
 import type { MessageCreateParams } from "./anthropic-wire";
 
 /** Default pre-response timeout, matching the SDK's 10-minute default. */
@@ -101,9 +102,8 @@ function createAbortError(): Error {
 
 /** `x-should-retry` override, then 408/409/429/5xx. */
 function shouldRetryResponse(response: Response): boolean {
-	const shouldRetryHeader = response.headers.get("x-should-retry");
-	if (shouldRetryHeader === "true") return true;
-	if (shouldRetryHeader === "false") return false;
+	const verdict = getShouldRetryFromHeaders(response.headers);
+	if (verdict !== undefined) return verdict;
 	const status = response.status;
 	// Canonical transient set (408/429/5xx) plus 409, which Anthropic's client
 	// also retries.

@@ -1,8 +1,19 @@
-import type { DeviceType } from "@huggingface/transformers";
 import { $env } from "@oh-my-pi/pi-utils";
 
 /** ONNX Runtime execution provider accepted by transformers.js pipelines. */
-export type TinyOnnxDevice = DeviceType;
+export type TinyOnnxDevice =
+	| "auto"
+	| "gpu"
+	| "cpu"
+	| "wasm"
+	| "webgpu"
+	| "cuda"
+	| "dml"
+	| "coreml"
+	| "webnn"
+	| "webnn-npu"
+	| "webnn-gpu"
+	| "webnn-cpu";
 /** `PI_TINY_DEVICE` value selecting the mlx-lm Python backend (Apple silicon). */
 export const MLX_DEVICE = "mlx";
 export type TinyModelDevice = TinyOnnxDevice | typeof MLX_DEVICE;

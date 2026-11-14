@@ -34,19 +34,26 @@ mod count_fast {
 	/// `splice` system call, which is faster than using `read`.
 	///
 	/// On error it returns the number of bytes it did manage to read, since the
-	/// caller will fall back to a simpler method.
+	/// caller will fall back to a simpler method. So it does once the command
+	/// is cancelled: `splice` bypasses the reads that fail then, and a pipe
+	/// whose writer never stops (`cat /dev/zero | timeout 1 wc -c`) or never
+	/// writes never reaches EOF here, so it waits for data in short slices and
+	/// checks `is_cancelled` between them.
 	#[inline]
 	#[cfg(any(target_os = "linux", target_os = "android"))]
-	fn count_bytes_using_splice(fd: &impl AsFd) -> Result<usize, usize> {
+	fn count_bytes_using_splice(fd: &impl AsFd, is_cancelled: &dyn Fn() -> bool) -> Result<usize, usize> {
 		let null_file = uucore::pipes::dev_null().ok_or(0_usize)?;
 		// todo: avoid generating broker if input is pipe (fcntl_setpipe_size succeed)
 		// and directly splice() to /dev/null to save RAM usage
 		let (pipe_rd, pipe_wr) = pipe().map_err(|_| 0_usize)?;
-	
+
 		let mut byte_count = 0;
 		// improve throughput from pipe
 		let _ = rustix::pipe::fcntl_setpipe_size(fd, MAX_ROOTLESS_PIPE_SIZE);
 		loop {
+			if pi_vfs::wait_readable(fd.as_fd(), is_cancelled).is_err() {
+				return Err(byte_count);
+			}
 			match splice(fd, &pipe_wr, MAX_ROOTLESS_PIPE_SIZE) {
 				Ok(0) => break,
 				Ok(res) => {
@@ -59,10 +66,10 @@ mod count_fast {
 				Err(_) => return Err(byte_count),
 			}
 		}
-	
+
 		Ok(byte_count)
 	}
-	
+
 	/// In the special case where we only need to count the number of bytes. There
 	/// are several optimizations we can do:
 	///   1. On Unix,  we can simply `stat` the file if it is regular.
@@ -107,7 +114,7 @@ mod count_fast {
 				}
 				#[cfg(any(target_os = "linux", target_os = "android"))]
 				if (stat.st_mode as libc::mode_t & S_IFIFO) != 0 {
-					match count_bytes_using_splice(&fd) {
+					match count_bytes_using_splice(&fd, &|| handle.is_cancelled()) {
 						Ok(n) => return (n, None),
 						Err(n) => byte_count = n,
 					}
@@ -153,9 +160,7 @@ mod count_fast {
 	
 	/// A [`BUF_SIZE`] read buffer aligned to a 32-byte boundary.
 	///
-	/// This is useful as bytecount uses 256-bit wide vector operations that run
-	/// much faster on aligned data (at least on x86 with AVX2 support). One
-	/// serves every input of an invocation: zero-filling 256 KiB per file
+	/// One buffer serves every input of an invocation: zero-filling 256 KiB per file
 	/// dwarfs counting a small one.
 	#[repr(align(32))]
 	pub(crate) struct AlignedBuffer {
@@ -197,17 +202,14 @@ mod count_fast {
 						total.bytes += n;
 					}
 					if COUNT_CHARS {
-						total.chars += if simd_allowed {
-							bytecount::num_chars(&buf[..n])
-						} else {
-							bytecount::naive_num_chars(&buf[..n])
-						};
+						// Count leading bytes so UTF-8 sequences split across reads count once.
+						total.chars += buf[..n].iter().filter(|&&byte| byte & 0xc0 != 0x80).count();
 					}
 					if COUNT_LINES {
 						total.lines += if simd_allowed {
-							bytecount::count(&buf[..n], b'\n')
+							memchr::memchr_iter(b'\n', &buf[..n]).count()
 						} else {
-							bytecount::naive_count(&buf[..n], b'\n')
+							buf[..n].iter().filter(|&&byte| byte == b'\n').count()
 						};
 					}
 				},
@@ -241,6 +243,11 @@ mod countable {
 		/// The native host file behind this input, when it has one.
 		#[cfg(windows)]
 		fn native_file(&self) -> Option<&std::fs::File>;
+		/// Whether the command was cancelled; for the descriptor shortcuts,
+		/// which bypass the reads that fail once it is.
+		// Only the Linux splice path polls it.
+		#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+		fn is_cancelled(&self) -> bool;
 	}
 
 	impl WordCountable for &mut Stdin {
@@ -259,6 +266,10 @@ mod countable {
 		fn native_file(&self) -> Option<&std::fs::File> {
 			None
 		}
+
+		fn is_cancelled(&self) -> bool {
+			Stdin::is_cancelled(self)
+		}
 	}
 
 	impl WordCountable for File {
@@ -276,6 +287,10 @@ mod countable {
 		#[cfg(windows)]
 		fn native_file(&self) -> Option<&std::fs::File> {
 			self.native()
+		}
+
+		fn is_cancelled(&self) -> bool {
+			File::is_cancelled(self)
 		}
 	}
 }
@@ -547,7 +562,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use thiserror::Error;
 use utf8::{BufReadDecoder, BufReadDecoderError};
@@ -563,7 +577,7 @@ use self::{
 	countable::WordCountable,
 	word_count::WordCount,
 };
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy};
 
 /// The minimum character width for formatting counts when reading from stdin.
 const MINIMUM_WIDTH: usize = 7;
@@ -605,8 +619,7 @@ impl Settings {
 
 		let total_when = matches
 			.get_one::<String>(options::TOTAL)
-			.map(Into::into)
-			.unwrap_or_default();
+			.map_or_default(Into::into);
 
 		let settings = Self {
 			show_bytes: matches.get_flag(options::BYTES),
@@ -1363,7 +1376,7 @@ fn validate_files0(items: Vec<InputIterItem>, source: &Input) -> Vec<InputIterIt
 		.into_iter()
 		.enumerate()
 		.map(|(index, item)| match item {
-			Ok(Input::Path(path)) if path.as_os_str().is_empty() => {
+			Ok(Input::Path(path)) if path.is_empty() => {
 				Err(WcError::zero_len(Some((source, index + 1))))
 			},
 			_ => item,
@@ -1527,7 +1540,7 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 				record_error(
 					host,
 					WcError::Io {
-						context: format!("failed to print result for {}", title.to_string_lossy()),
+						context: format!("failed to print result for {}", title.display()),
 						source,
 					},
 				);
@@ -1584,11 +1597,6 @@ fn print_stats(
 	}
 	line.push(b'\n');
 	stdout.write_all(&line)
-}
-
-/// Creates the `wc` builtin registration.
-pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Wc, SE>()
 }
 
 #[cfg(test)]

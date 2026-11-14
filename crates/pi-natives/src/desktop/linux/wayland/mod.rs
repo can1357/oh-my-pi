@@ -4,15 +4,22 @@ mod libei;
 mod portal;
 mod xkb;
 
+use std::{
+	cell::OnceCell,
+	os::{fd::AsRawFd, unix::net::UnixStream},
+	path::PathBuf,
+};
+
 use image::RgbaImage;
 
 use crate::desktop::{
-	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
+	ax::AxHandle,
+	backend::{AxBackend, Backend, DeliveryMode, ElementDelivery, ElementInput, PointerEvent},
 	control::{self, OperationToken},
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
-	linux::ax::{AtSpiAx, AtSpiWindow},
+	linux::ax::{self, AtSpiAx, AtSpiWindow, resolve_focus},
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
 	},
@@ -129,11 +136,46 @@ pub struct WaylandBackend {
 		not(feature = "wayland-pipewire"),
 		expect(dead_code, reason = "only read by the pipewire capture path")
 	)]
-	display:  DisplaySelector,
-	ax:       Option<AtSpiAx>,
-	ax_error: Option<DesktopError>,
-	input:    Option<libei::Libei>,
-	displays: Vec<DesktopDisplay>,
+	display:           DisplaySelector,
+	ax:                Option<AtSpiAx>,
+	ax_error:          Option<DesktopError>,
+	input:             Option<libei::Libei>,
+	/// Why native input can never work here, probed once without a prompt;
+	/// `None` when it may.
+	input_unavailable: OnceCell<Option<String>>,
+	displays:          Vec<DesktopDisplay>,
+	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
+	/// own AT-SPI frames never count as the focused application window. On
+	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
+	compositor_pid:    Option<u32>,
+	/// Bus names of the applications that did not answer the last window
+	/// listing, whose windows it therefore left out.
+	unanswered:        Vec<String>,
+}
+
+/// Reads the compositor's PID from the peer credentials of its Wayland socket.
+fn compositor_pid() -> Option<u32> {
+	let display = PathBuf::from(std::env::var_os("WAYLAND_DISPLAY")?);
+	let path = if display.is_absolute() {
+		display
+	} else {
+		PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join(display)
+	};
+	let socket = UnixStream::connect(path).ok()?;
+	let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
+	let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+	// SAFETY: `credentials` and `length` are live, correctly sized out-params
+	// for SO_PEERCRED on a connected Unix socket; the kernel keeps no pointer.
+	let status = unsafe {
+		libc::getsockopt(
+			socket.as_raw_fd(),
+			libc::SOL_SOCKET,
+			libc::SO_PEERCRED,
+			(&raw mut credentials).cast(),
+			&raw mut length,
+		)
+	};
+	(status == 0 && credentials.pid > 0).then_some(credentials.pid as u32)
 }
 
 impl WaylandBackend {
@@ -145,7 +187,28 @@ impl WaylandBackend {
 			Ok(ax) => (Some(ax), None),
 			Err(err) => (None, Some(err)),
 		};
-		Self { display, ax, ax_error, input: None, displays: Vec::new() }
+		Self {
+			display,
+			ax,
+			ax_error,
+			input: None,
+			input_unavailable: OnceCell::new(),
+			displays: Vec::new(),
+			compositor_pid: compositor_pid(),
+			unanswered: Vec::new(),
+		}
+	}
+
+	/// Read on every call: a `LIBEI_SOCKET` set later in the session reaches
+	/// EIS directly, whatever the cached portal probe found.
+	fn input_unavailable(&self) -> Option<&str> {
+		if std::env::var_os("LIBEI_SOCKET").is_some() {
+			return None;
+		}
+		self
+			.input_unavailable
+			.get_or_init(portal::input_unavailable_reason)
+			.as_deref()
 	}
 
 	fn window_input_error(target: &Target, kind: &str) -> CoreResult<()> {
@@ -168,6 +231,9 @@ impl WaylandBackend {
 		control::check()?;
 		Self::window_input_error(target, kind)?;
 		if self.input.is_none() {
+			if let Some(reason) = self.input_unavailable() {
+				return Err(DesktopError::permission_denied(reason));
+			}
 			self.input = Some(libei::Libei::new()?);
 		}
 		let input = self.input.as_mut().expect("libei was initialized");
@@ -178,8 +244,8 @@ impl WaylandBackend {
 		result
 	}
 
-	fn atspi_windows(&self) -> CoreResult<Vec<AtSpiWindow>> {
-		self
+	fn atspi_windows(&mut self) -> CoreResult<Vec<AtSpiWindow>> {
+		let listed = self
 			.ax
 			.as_ref()
 			.ok_or_else(|| {
@@ -188,14 +254,19 @@ impl WaylandBackend {
 					.clone()
 					.unwrap_or_else(DesktopError::ax_unsupported)
 			})?
-			.windows()
+			.windows()?;
+		self.unanswered = listed.unanswered;
+		Ok(listed.windows)
 	}
 }
 
 impl Backend for WaylandBackend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
+		let input_unavailable = self.input.is_none() && self.input_unavailable().is_some();
 		let input_permission = if self.input.is_some() {
 			"granted"
+		} else if input_unavailable {
+			"unavailable"
 		} else {
 			"prompt-or-granted"
 		};
@@ -206,13 +277,15 @@ impl Backend for WaylandBackend {
 			// wayland-pipewire feature; without it capture() hard-errors, so the
 			// capability report must not advertise a capture the binary cannot do.
 			capture: cfg!(feature = "wayland-pipewire"),
-			input: true,
+			input: !input_unavailable,
 			ax: self.ax.is_some(),
 			background_window_input: false,
 			takeover: false,
 			applications: crate::desktop::applications::supported(),
 			menus: self.ax.is_some(),
-			held_input: true,
+			held_input: !input_unavailable,
+			secure_input: false,
+			secure_input_app: None,
 			spaces: false,
 			global_escape: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
@@ -263,19 +336,42 @@ impl Backend for WaylandBackend {
 	}
 
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
-		Ok(self
-			.atspi_windows()?
-			.into_iter()
-			.map(|entry| entry.window)
-			.collect())
+		let mut windows = self.atspi_windows()?;
+		if let Some(ax) = self.ax.as_ref() {
+			resolve_focus(&mut windows, self.compositor_pid, !self.unanswered.is_empty(), |window| {
+				ax.holds_focus(window)
+			});
+		}
+		Ok(windows.into_iter().map(|entry| entry.window).collect())
 	}
 
+	fn missing_window(&self, target: &Target) -> Option<DesktopError> {
+		// Window ids are `atspi:{bus name}:{object path}`.
+		let skipped = match target {
+			Target::Window(id) => {
+				let bus = id.strip_prefix("atspi:")?.split_once(":/")?.0;
+				self.unanswered.iter().any(|name| name == bus)
+			},
+			Target::Desktop | Target::Display(_) => !self.unanswered.is_empty(),
+		};
+		skipped.then(ax::not_answering)
+	}
+
+	/// Reads the unresolved list. A native app's frame has no known position,
+	/// so it must keep failing this check until the real outputs are counted;
+	/// resolving focus here would refuse GNOME display typing that `main` allows
+	/// through the shell frame, or, with a one-monitor shortcut, type on a
+	/// monitor the agent cannot see.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
 		let entry = self
 			.atspi_windows()?
 			.into_iter()
 			.find(|entry| entry.window.focused)
-			.ok_or_else(|| DesktopError::invalid_target("no focused Wayland window was found"))?;
+			.ok_or_else(|| {
+				self.missing_window(&Target::Desktop).unwrap_or_else(|| {
+					DesktopError::invalid_target("no focused Wayland window was found")
+				})
+			})?;
 		if !entry.position_known {
 			return Err(DesktopError::invalid_target(
 				"the focused Wayland surface has no known global position; cannot safely target \
@@ -315,7 +411,9 @@ impl Backend for WaylandBackend {
 						.into_iter()
 						.find(|entry| &entry.window.id == id)
 						.ok_or_else(|| {
-							DesktopError::window_not_found(format!("Wayland window {id} not found"))
+							self.missing_window(target).unwrap_or_else(|| {
+								DesktopError::window_not_found(format!("Wayland window {id} not found"))
+							})
 						})?;
 					let (x, y, width, height) = geometry.window_crop(&entry)?;
 					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
@@ -391,6 +489,26 @@ impl Backend for WaylandBackend {
 		super::menus::select(window, path)
 	}
 
+	/// Refuses before anything reaches the element's app. The default focuses
+	/// the element and then sends through its window's keyboard path, which
+	/// Wayland always refuses, so the refused call still moved focus inside
+	/// that app (GNOME announced "… is ready").
+	fn element_input(
+		&mut self,
+		_element: &AxHandle,
+		_input: &ElementInput,
+		_mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		token.check()?;
+		Err(DesktopError::background_unavailable(
+			"wayland-compositor-focus-only: Wayland cannot programmatically activate the element's \
+			 window, so el.type and el.press(keys) are refused before the element is focused; \
+			 nothing was sent. Use setValue, or click the field where a desktop screenshot shows it \
+			 (AX bounds are window-relative here) and then type with desktop input",
+		))
+	}
+
 	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
 		token.check()?;
 		Err(DesktopError::background_unavailable(format!(
@@ -419,16 +537,89 @@ mod tests {
 
 	fn backend_without_services() -> WaylandBackend {
 		WaylandBackend {
-			display:  DisplaySelector::All,
-			ax:       None,
-			ax_error: None,
-			input:    None,
-			displays: Vec::new(),
+			display:           DisplaySelector::All,
+			ax:                None,
+			ax_error:          None,
+			input:             None,
+			input_unavailable: OnceCell::from(None),
+			displays:          Vec::new(),
+			compositor_pid:    None,
+			unanswered:        Vec::new(),
 		}
 	}
+	/// Holds `LIBEI_ENV_LOCK` with `LIBEI_SOCKET` set to a test's value (removed
+	/// for `None`) and puts the previous value back when dropped, also while a
+	/// failing test unwinds, so no later test sees a leaked value.
+	struct LibeiSocket {
+		previous: Option<std::ffi::OsString>,
+		_lock:    std::sync::MutexGuard<'static, ()>,
+	}
+
+	impl LibeiSocket {
+		fn set(value: Option<&std::ffi::OsStr>) -> Self {
+			let lock = LIBEI_ENV_LOCK
+				.lock()
+				.unwrap_or_else(std::sync::PoisonError::into_inner);
+			let previous = std::env::var_os("LIBEI_SOCKET");
+			// SAFETY: LIBEI_ENV_LOCK is held, and every test that writes
+			// LIBEI_SOCKET or asserts on what it reads takes it first; std
+			// serializes the other env reads.
+			unsafe {
+				match value {
+					Some(value) => std::env::set_var("LIBEI_SOCKET", value),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+			Self { previous, _lock: lock }
+		}
+	}
+
+	impl Drop for LibeiSocket {
+		fn drop(&mut self) {
+			// SAFETY: as in `set`; the lock field is released only after this
+			// body.
+			unsafe {
+				match self.previous.take() {
+					Some(previous) => std::env::set_var("LIBEI_SOCKET", previous),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn a_window_of_an_application_that_did_not_answer_reports_the_timeout() {
+		use crate::desktop::error::ErrorCode;
+		let code = |backend: &WaylandBackend, target: &str| {
+			backend
+				.missing_window(&Target::parse(target))
+				.map(|error| error.code)
+		};
+		let mut backend = backend_without_services();
+		backend.unanswered = vec![":1.8".to_owned()];
+		assert_eq!(
+			code(&backend, "atspi::1.8:/org/a11y/atspi/accessible/2"),
+			Some(ErrorCode::Timeout)
+		);
+		assert_eq!(code(&backend, "atspi::1.7:/org/a11y/atspi/accessible/2"), None);
+		assert_eq!(
+			backend
+				.missing_window(&Target::Desktop)
+				.map(|error| error.code),
+			Some(ErrorCode::Timeout)
+		);
+		backend.unanswered.clear();
+		assert_eq!(code(&backend, "atspi::1.8:/org/a11y/atspi/accessible/2"), None);
+		assert_eq!(
+			backend
+				.missing_window(&Target::Desktop)
+				.map(|error| error.code),
+			None
+		);
+	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
-		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
 		let socket = std::env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
+		let _env = LibeiSocket::set(Some(socket.as_os_str()));
 		let _ = std::fs::remove_file(&socket);
 		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
 		listener
@@ -451,16 +642,9 @@ mod tests {
 				}
 			}
 		});
-		let previous = std::env::var_os("LIBEI_SOCKET");
-		unsafe { std::env::set_var("LIBEI_SOCKET", &socket) };
 		let mut backend = WaylandBackend::new(DisplaySelector::All);
 		action(&mut backend);
 		let _ = stop_tx.send(());
-		if let Some(previous) = previous {
-			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
-		} else {
-			unsafe { std::env::remove_var("LIBEI_SOCKET") };
-		}
 		let connected = accepted.join().expect("fake libei listener");
 		let _ = std::fs::remove_file(socket);
 		connected
@@ -476,6 +660,34 @@ mod tests {
 		assert_eq!(capabilities.input_permission, "prompt-or-granted");
 	}
 
+	/// Runs `action` with `LIBEI_SOCKET` unset, under the same lock as
+	/// `with_fake_libei`: `input_unavailable` reads the variable on every call,
+	/// so a fake socket from a test on another thread would otherwise report
+	/// input as reachable.
+	fn without_libei_socket(action: impl FnOnce()) {
+		let _env = LibeiSocket::set(None);
+		action();
+	}
+
+	#[test]
+	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
+		without_libei_socket(|| {
+			let mut backend = backend_without_services();
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			let capabilities = backend.capabilities();
+			assert!(!capabilities.input);
+			assert!(!capabilities.held_input);
+			assert_eq!(capabilities.input_permission, "unavailable");
+			let source = control::CancellationSource::default();
+			let error = backend
+				.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
+				.unwrap_err();
+			assert_eq!(error.code.as_str(), "PermissionDenied");
+			assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
+			assert!(backend.input.is_none());
+		});
+	}
+
 	#[test]
 	fn desktop_input_connects_to_libei_lazily() {
 		let connected = with_fake_libei(|backend| {
@@ -487,6 +699,23 @@ mod tests {
 			);
 		});
 		assert!(connected, "desktop input did not connect to libei");
+	}
+
+	/// A probe that already found no portal must not hide an EIS socket set
+	/// later in the session.
+	#[test]
+	fn a_socket_set_after_the_portal_probe_still_reaches_libei() {
+		let connected = with_fake_libei(|backend| {
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			assert!(backend.capabilities().input);
+			let _ = backend.type_text(
+				&Target::Desktop,
+				"hello",
+				DeliveryMode::Foreground,
+				&control::CancellationSource::default().token(),
+			);
+		});
+		assert!(connected, "a cached portal absence blocked the LIBEI_SOCKET route");
 	}
 
 	#[test]
@@ -545,6 +774,24 @@ mod tests {
 		assert_eq!(error.code.as_str(), "InvalidCoordinateFrame");
 	}
 
+	/// The refusal comes before any AT-SPI call: the default path's first step,
+	/// the window lookup, would fail `AxUnsupported` here instead, and its next
+	/// step focuses the element.
+	#[test]
+	fn element_input_is_refused_before_anything_reaches_the_app() {
+		let mut backend = backend_without_services();
+		let source = control::CancellationSource::default();
+		for input in [ElementInput::Text("zz".into()), ElementInput::Chord(vec![KeyName::Enter])] {
+			let error = backend
+				.element_input(&AxHandle::Test(1), &input, DeliveryMode::Foreground, &source.token())
+				.err()
+				.expect("Wayland element input is refused");
+			assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+			assert!(error.message.contains("nothing was sent"), "{}", error.message);
+		}
+		assert!(backend.input.is_none());
+	}
+
 	#[test]
 	fn cancelled_mutations_stop_before_initializing_input() {
 		let mut backend = backend_without_services();
@@ -592,13 +839,7 @@ mod tests {
 	#[test]
 	#[cfg(not(feature = "wayland-pipewire"))]
 	fn capabilities_report_no_capture_without_pipewire_feature() {
-		let mut backend = WaylandBackend {
-			display:  DisplaySelector::All,
-			ax:       None,
-			ax_error: None,
-			input:    None,
-			displays: Vec::new(),
-		};
+		let mut backend = backend_without_services();
 		let caps = backend.capabilities();
 		// Shipped builds compile without wayland-pipewire, so the capture path is
 		// absent; capabilities() must not advertise capture the binary cannot do.

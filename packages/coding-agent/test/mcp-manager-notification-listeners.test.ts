@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isRecord, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { CUSTOM_NOTIFICATION_METHOD, CUSTOM_NOTIFICATION_PAYLOAD } from "./fixtures/notifications-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "notifications-mcp.ts");
+/** Marks the post-connect frame the ordering test injects, apart from the fixture's own. */
+const INJECTED_PROBE = "post-connect";
 const BUN_EXEC = process.execPath;
 
 type CapturedFrame = { server: string; method: string; params: unknown };
@@ -256,37 +258,31 @@ describe("MCPManager notification listeners", () => {
 		// #handleServerNotification (which awaits refreshServerTools) sees
 		// the callback complete.
 		const manager = new MCPManager(workDir);
-		const events: string[] = [];
-		const { promise: hold, resolve: release } = Promise.withResolvers<void>();
-
+		// The initial tool load fires the callback from a background continuation;
+		// wait for that call, so the next one is the refresh this test drives.
+		const initialCallback = Promise.withResolvers<void>();
 		manager.setOnToolsChanged(async () => {
-			events.push("cb:start");
-			await hold;
-			events.push("cb:end");
+			initialCallback.resolve();
 		});
 
 		try {
-			await manager.connectServers({ alpha: serverConfig() }, {});
-			// connectServers may kick the callback for the initial tool load via
-			// its background continuation; drain that first so we can assert
-			// specifically on the refresh path.
-			await Bun.sleep(30);
-			release();
-			await Bun.sleep(30);
-			const priorLen = events.length;
+			// A zero startup window waits for the fresh fixture's initial load.
+			await manager.connectServers({ alpha: serverConfig() }, {}, undefined, 0);
+			await initialCallback.promise;
 
-			// Trigger a fresh refresh and hold the callback again — this is the
-			// path #handleServerNotification takes for tools/list_changed.
-			const { promise: hold2, resolve: release2 } = Promise.withResolvers<void>();
+			// Trigger a fresh refresh and hold the callback — this is the path
+			// #handleServerNotification takes for tools/list_changed.
+			const { promise: hold, resolve: release } = Promise.withResolvers<void>();
+			const started = Promise.withResolvers<void>();
 			let cbState: "started" | "ended" | undefined;
 			manager.setOnToolsChanged(async () => {
 				cbState = "started";
-				await hold2;
+				started.resolve();
+				await hold;
 				cbState = "ended";
 			});
 			const refreshDone = manager.refreshServerTools("alpha");
-			// Give the callback time to enter the await.
-			await Bun.sleep(20);
+			await started.promise;
 			expect(cbState).toBe("started");
 			// refreshServerTools has NOT resolved yet — proves it's awaiting.
 			let refreshResolved = false;
@@ -296,11 +292,9 @@ describe("MCPManager notification listeners", () => {
 			await Bun.sleep(10);
 			expect(refreshResolved).toBe(false);
 			// Release the callback; refresh should now resolve promptly.
-			release2();
+			release();
 			await refreshDone;
 			expect(cbState).toBe("ended");
-			// Drain events reference — just to silence unused var if refactored.
-			expect(events.length).toBeGreaterThanOrEqual(priorLen);
 		} finally {
 			await manager.disconnectAll();
 		}
@@ -322,37 +316,43 @@ describe("MCPManager notification listeners", () => {
 		const events: string[] = [];
 		let cbCall = 0;
 		const { promise: gate, resolve: releaseGate } = Promise.withResolvers<void>();
+		const initialDone = Promise.withResolvers<void>();
+		const callbackStarted = Promise.withResolvers<void>();
+		const listenerFired = Promise.withResolvers<void>();
 
 		manager.setOnToolsChanged(async () => {
 			cbCall++;
 			// Initial connect fires the callback via a background continuation
-			// (manager.ts line ~555, fire-and-forget). Return immediately so
-			// its floating promise resolves cleanly; only gate on the second
-			// call, which is the one our simulated post-connect notification
-			// triggers.
+			// (fire-and-forget). Return immediately so its floating promise
+			// resolves cleanly; only gate on the second call, which is the one
+			// our simulated post-connect notification triggers.
 			if (cbCall === 1) {
 				events.push("initial-cb:done");
+				initialDone.resolve();
 				return;
 			}
 			events.push("cb:start");
+			callbackStarted.resolve();
 			await gate;
 			events.push("cb:end");
 		});
 
-		manager.addNotificationListener((_server, method) => {
-			if (method === "notifications/tools/list_changed") {
+		// Only the frame this test injects counts: the fixture sends its own
+		// tools/list_changed during startup, which must not satisfy this wait.
+		manager.addNotificationListener((_server, method, params) => {
+			if (method === "notifications/tools/list_changed" && isRecord(params) && params.probe === INJECTED_PROBE) {
 				events.push("listener:fire");
+				listenerFired.resolve();
 			}
 		});
 
 		try {
-			await manager.connectServers({ alpha: serverConfig() }, {});
+			// A zero startup window waits for the fresh fixture's initial load.
+			await manager.connectServers({ alpha: serverConfig() }, {}, undefined, 0);
 			// Wait for the initial-connect background continuation to fire the
 			// callback (call #1, ungated). Once it's recorded, we know the
 			// callback is idle and the next invocation will be call #2.
-			for (let i = 0; i < 20 && !events.includes("initial-cb:done"); i++) {
-				await Bun.sleep(10);
-			}
+			await initialDone.promise;
 			expect(events).toContain("initial-cb:done");
 
 			// Simulate a post-connect `notifications/tools/list_changed` frame
@@ -363,12 +363,9 @@ describe("MCPManager notification listeners", () => {
 			// (where refresh actually runs and the callback is awaited).
 			const conn = manager.getConnection("alpha");
 			if (!conn?.transport.onNotification) throw new Error("expected transport onNotification to be wired");
-			void conn.transport.onNotification("notifications/tools/list_changed", {});
+			void conn.transport.onNotification("notifications/tools/list_changed", { probe: INJECTED_PROBE });
 
-			// Give the async chain time to enter the callback's await.
-			for (let i = 0; i < 20 && !events.includes("cb:start"); i++) {
-				await Bun.sleep(10);
-			}
+			await callbackStarted.promise;
 			expect(events).toContain("cb:start");
 
 			// CRITICAL: at this point the callback is holding, and the
@@ -381,11 +378,7 @@ describe("MCPManager notification listeners", () => {
 			// Release the gate. Now the callback resolves, refresh completes,
 			// and the listener fires — in that order.
 			releaseGate();
-
-			// Wait for the listener to fire (or bail on timeout).
-			for (let i = 0; i < 50 && !events.includes("listener:fire"); i++) {
-				await Bun.sleep(10);
-			}
+			await listenerFired.promise;
 
 			const idxCbEnd = events.indexOf("cb:end");
 			const idxFire = events.indexOf("listener:fire");

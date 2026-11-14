@@ -1,6 +1,6 @@
 //! Container and cloud command output filters.
 
-use std::fmt::Write as _;
+use std::fmt::{NumBuffer, Write as _};
 
 use serde_json::Value;
 
@@ -622,14 +622,14 @@ fn compact_table(input: &str, visible_rows: usize) -> String {
 		out.push_str(header.trim_end());
 		out.push('\n');
 	}
-	out.push_str(&(lines.len() - 1).to_string());
+	out.push_str((lines.len() - 1).format_into(&mut NumBuffer::new()));
 	out.push_str(" rows\n");
 	for line in lines.iter().skip(1).take(visible_rows) {
 		out.push_str(line.trim_end());
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&(lines.len() - 1 - visible_rows).to_string());
+	out.push_str((lines.len() - 1 - visible_rows).format_into(&mut NumBuffer::new()));
 	out.push_str(" rows elided…]\n");
 	out
 }

@@ -9,13 +9,18 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 
 use crate::{
-	diff_string::{CompactDiffOptions, build_compact_diff_preview},
-	engine::{EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, StagedFile},
+	diff_string::{
+		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
+	},
+	engine::{
+		EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, Resolved, StagedFile,
+	},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
+	modes::hashline::syntax::has_syntax_oracle,
 	notebook,
 	path_policy::{PathPolicy, UrlResolution, canonical_key},
-	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
+	store::{EditStore, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
 };
@@ -123,6 +128,11 @@ pub const MAX_EDIT_SNAPSHOT_TEXT_CHARS: usize = 32_768;
 /// Separates completed edit sections in model-visible tool output.
 pub const EDIT_RESULT_SEPARATOR: &str = "\n\n";
 
+/// Written rows kept on each side of a collapsed run in an edit response. The
+/// response is where the next edit takes its numbers, and only displayed rows
+/// count as seen, so a run of up to `2 * N + 1` rows renders whole.
+const RESPONSE_ADDED_RUN_CONTEXT_LINES: usize = 20;
+
 /// Per-call edit session.
 pub struct Session {
 	config:          SessionConfig,
@@ -216,6 +226,44 @@ impl Session {
 		self.generation += 1;
 	}
 
+	/// Drain authored paths that were missing on disk, with no recovery
+	/// answer yet, since the last call (deduped, first-seen order). Passes
+	/// treat them as not recovered; the host searches the working tree for a
+	/// unique suffix match, [`Self::provide_recovery`]s each answer, and
+	/// reruns the pass.
+	pub fn take_recovery_misses(&mut self) -> Vec<String> {
+		self.files.take_recovery_misses()
+	}
+
+	/// Record the host's recovery answer for the missing `authored` path
+	/// (`None`: no unique match) and make [`Self::preview_pending`] true.
+	/// Answers provided before the apply phase serve previews only.
+	pub fn provide_recovery(&mut self, authored: String, answer: Option<Resolved>) {
+		self.files.provide_recovery(authored, answer);
+		self.generation += 1;
+	}
+
+	/// Enter the apply phase (idempotent), stage the finished arguments in
+	/// memory without writing, and list the authored paths that were missing
+	/// on disk with no recovery answer, so the host can answer them before
+	/// [`Self::apply`] writes anything. Staging failures are left for
+	/// [`Self::apply`] to raise. Empty while the arguments are incomplete.
+	pub fn apply_recovery_misses(&mut self) -> Vec<String> {
+		self.begin_apply();
+		self.files.clear();
+		let snapshot = self.args.snapshot();
+		if !snapshot.complete {
+			return Vec::new();
+		}
+		// A probe: staging into the live store would record what a rejection
+		// reveals (unseen lines become seen, so the real apply passes the
+		// guard) and move clipboard registers.
+		let _ = self
+			.engine
+			.stage(&snapshot, &mut self.files, &self.store.fork());
+		self.files.take_recovery_misses()
+	}
+
 	/// Enter the apply phase (idempotent) and list the internal URL targets
 	/// the finished arguments name — section paths and move destinations,
 	/// deduped in payload order — so the host can answer them all in one
@@ -250,7 +298,7 @@ impl Session {
 	fn begin_apply(&mut self) {
 		if !self.applying {
 			self.applying = true;
-			self.files.forget_urls();
+			self.files.forget_answers();
 		}
 	}
 
@@ -330,10 +378,9 @@ impl Session {
 			};
 
 			let mut tag: Option<String> = None;
-			// Updated files register their response rows (plus still-valid prior
-			// provenance) against the minted tag: (store key, carried lines,
-			// drifted).
-			let mut provenance: Option<(PathBuf, Vec<u32>, bool)> = None;
+			// Updated files register their response rows against the minted tag
+			// (the store carries still-valid prior provenance): the store key.
+			let mut provenance: Option<PathBuf> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {
@@ -343,26 +390,40 @@ impl Session {
 				},
 				FileOp::Create | FileOp::Update => {
 					let dest_canonical = file.move_to.as_ref().map(|m| canonical_key(&m.absolute));
-					let track_provenance = file.record_snapshot && file.op == FileOp::Update;
-					let prior = if track_provenance {
-						self.store.by_content(&canonical, &file.before)
-					} else {
-						None
-					};
+					let track_provenance = file.record_snapshot
+						&& file.op == FileOp::Update
+						&& file.header == HeaderKind::HashlineTag;
 					if let Some(dest) = &dest_canonical {
 						self.store.relocate(&canonical, dest);
 					}
 					if file.record_snapshot {
 						let recorded = recorded_view(&file, &response.written);
-						let drifted = recorded != file.after;
-						if dest_canonical.is_none() && drifted {
-							file.warnings.push(write_drift_warning(&file.display));
+						if recorded != file.after {
+							// The host reformatted the write (LSP format-on-write,
+							// editor format-on-save): render the result from what
+							// landed so the rows match the tag minted below.
+							if dest_canonical.is_none() {
+								file.warnings.push(write_drift_warning(&file.display));
+							}
+							let diff =
+								generate_diff_string(&file.before, &recorded, None, &BlockContextSource {
+									path:      Some(&file.display),
+									lang:      None,
+									streaming: false,
+								});
+							file.diff = diff.diff;
+							file.preview_diff = None;
+							file.first_changed_line = diff.first_changed_line;
+							file.after = recorded;
 						}
 						let key = dest_canonical.unwrap_or_else(|| canonical.clone());
-						tag = Some(self.store.record(&key, &recorded, None));
+						tag = Some(if track_provenance {
+							self.store.record_edit(&key, &file.before, &file.after)
+						} else {
+							self.store.record(&key, &file.after, None)
+						});
 						if track_provenance {
-							let carried = carried_seen_lines(&file.before, &recorded, prior.as_ref());
-							provenance = Some((key, carried, drifted));
+							provenance = Some(key);
 						}
 					}
 					self.store.reset_noop(&canonical);
@@ -384,13 +445,8 @@ impl Session {
 				.as_ref()
 				.map_or_else(|| format!("[{header_path}]"), |tag| format!("[{header_path}#{tag}]"));
 			let text = format_file_text(&file, &header);
-			if let (Some((key, mut seen_lines, drifted)), Some(tag)) = (provenance, &response_tag) {
-				// A drifted write shows rows of the previewed text, not of the
-				// recorded version the tag names, so only carried lines
-				// stay anchorable.
-				if !drifted {
-					seen_lines.extend(seen_lines_from_body(&text));
-				}
+			if let (Some(key), Some(tag)) = (provenance, &response_tag) {
+				let seen_lines = seen_lines_from_body(&text);
 				if !seen_lines.is_empty() {
 					self.store.record_seen_lines(&key, tag, &seen_lines);
 				}
@@ -455,43 +511,6 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 	normalize_to_lf(strip_bom(written).1).into_owned()
 }
 
-/// Prior-snapshot lines that keep both their number and content in `after`:
-/// every unchanged run the edit did not shift (the leading run, plus runs below
-/// line-neutral hunks), filtered by what `prior` displayed. A missing or
-/// unrestricted prior snapshot let the edit anchor anywhere, so every such run
-/// carries over. Shifted lines never carry: their old numbers name other
-/// content.
-fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
-	let seen = prior
-		.and_then(|snapshot| snapshot.seen_lines.as_ref())
-		.filter(|seen| !seen.is_empty());
-	let old_lines: Vec<&str> = before.split('\n').collect();
-	let new_lines: Vec<&str> = after.split('\n').collect();
-	let (old_ids, new_ids) = pi_diff::intern(&old_lines, &new_lines);
-	let mut carried = Vec::new();
-	let (mut old_line, mut new_line) = (1_u32, 1_u32);
-	for run in pi_diff::myers_diff(&old_ids, &new_ids) {
-		if run.added {
-			new_line += run.count;
-			continue;
-		}
-		if run.removed {
-			old_line += run.count;
-			continue;
-		}
-		if old_line == new_line {
-			let unshifted = old_line..old_line + run.count;
-			match seen {
-				Some(seen) => carried.extend(seen.range(unshifted)),
-				None => carried.extend(unshifted),
-			}
-		}
-		old_line += run.count;
-		new_line += run.count;
-	}
-	carried
-}
-
 /// Model-facing text for one file (`formatEditResultText`).
 fn format_file_text(file: &StagedFile, header: &str) -> String {
 	if let Some(text) = &file.text_override {
@@ -501,8 +520,11 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 		format!("Deleted {}", file.display)
 	} else {
 		let preview_source = file.preview_diff.as_deref().unwrap_or(&file.diff);
-		let preview =
-			build_compact_diff_preview(preview_source, &CompactDiffOptions::default()).preview;
+		let preview = build_compact_diff_preview(preview_source, &CompactDiffOptions {
+			max_added_run_context: Some(RESPONSE_ADDED_RUN_CONTEXT_LINES),
+			..CompactDiffOptions::default()
+		})
+		.preview;
 		let mut lines: Vec<&str> = vec![header];
 		lines.extend(file.before_preview.iter().map(String::as_str));
 		let moved = file
@@ -551,19 +573,21 @@ fn prune_snapshots(
 /// True when tree-sitter parses `code` (language from `path`) without
 /// errors. Unknown languages never "parse", so they never regress.
 pub fn source_parses(code: &str, path: &str) -> bool {
+	if !has_syntax_oracle(path) {
+		return false;
+	}
 	let code = if code.is_empty() { "\n" } else { code };
 	pi_ast::summary::parse_code_status(code, None, Some(path))
 		.is_ok_and(|language| language.is_some())
 }
 
-/// The persisted bytes differ from what was sent (an editor reformatted on
-/// save); the recorded snapshot reflects the real file.
+/// The persisted bytes differ from what was sent (LSP format-on-write or an
+/// editor's format-on-save); the result rows and tag reflect the real file.
 pub fn write_drift_warning(path: &str) -> String {
 	format!(
-		"{path}: the file on disk after this write differs from what was sent — the client \
-		 (editor/IDE) likely reformatted it on save (e.g. format-on-save, tab/space settings). The \
-		 returned snapshot reflects the actual file; re-read before further edits if the extra \
-		 changes were unexpected."
+		"{path}: the file on disk after this write differs from what was sent — it was reformatted \
+		 on write (LSP format-on-write, or the client editor's format-on-save). The lines and tag \
+		 above reflect the file as written; anchor further edits on them."
 	)
 }
 
@@ -598,6 +622,78 @@ mod tests {
 		assert_eq!(strip_trailing_unbalanced_removal("+1|a\n-2|b\n-3|c"), "+1|a");
 		assert_eq!(strip_trailing_unbalanced_removal("-2|b"), "");
 		assert_eq!(strip_trailing_unbalanced_removal("-1|a\n+1|b\n 2|c"), "-1|a\n+1|b\n 2|c");
+	}
+
+	fn patch_session(root: &std::path::Path, input: &str) -> Session {
+		let config = SessionConfig {
+			mode:               EditMode::ApplyPatch,
+			policy:             PathPolicy {
+				cwd:                  root.to_owned(),
+				home_dir:             root.to_owned(),
+				url_schemes:          Vec::new(),
+				url_alias_schemes:    Vec::new(),
+				plan_writable_roots:  Vec::new(),
+				plan_active:          false,
+				block_auto_generated: false,
+			},
+			allow_fuzzy:        true,
+			fuzzy_threshold:    0.95,
+			enforce_seen_lines: false,
+			max_columns:        0,
+			raw_input:          false,
+		};
+		let mut session = Session::new(config, EditStore::new());
+		session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+		session.finish();
+		session
+	}
+
+	#[test]
+	fn recovery_answer_feeds_the_rerun_preview() {
+		let tmp = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tmp.path().join("deep/src")).unwrap();
+		std::fs::write(tmp.path().join("deep/src/a.ts"), "old\n").unwrap();
+		let mut session = patch_session(
+			tmp.path(),
+			"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n",
+		);
+
+		let missed = session.preview();
+		assert!(missed.files[0].error.is_some(), "{missed:?}");
+		assert_eq!(session.take_recovery_misses(), ["src/a.ts"]);
+
+		session.provide_recovery(
+			"src/a.ts".to_owned(),
+			Some(Resolved {
+				absolute: tmp.path().join("deep/src/a.ts"),
+				display:  "deep/src/a.ts".to_owned(),
+			}),
+		);
+		assert!(session.preview_pending());
+		let recovered = session.preview();
+		assert_eq!(recovered.files[0].display, "deep/src/a.ts");
+		assert!(recovered.files[0].error.is_none(), "{recovered:?}");
+		assert!(session.take_recovery_misses().is_empty());
+	}
+
+	#[test]
+	fn apply_phase_lists_recovery_misses_and_forgets_preview_answers() {
+		let tmp = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tmp.path().join("deep/src")).unwrap();
+		std::fs::write(tmp.path().join("deep/src/a.ts"), "old\n").unwrap();
+		let mut session = patch_session(
+			tmp.path(),
+			"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n",
+		);
+		let answer = Resolved {
+			absolute: tmp.path().join("deep/src/a.ts"),
+			display:  "deep/src/a.ts".to_owned(),
+		};
+		session.provide_recovery("src/a.ts".to_owned(), Some(answer.clone()));
+
+		assert_eq!(session.apply_recovery_misses(), ["src/a.ts"]);
+		session.provide_recovery("src/a.ts".to_owned(), Some(answer));
+		assert!(session.apply_recovery_misses().is_empty());
 	}
 
 	#[test]

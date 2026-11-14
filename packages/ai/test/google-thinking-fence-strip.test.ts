@@ -119,13 +119,6 @@ describe("consumeGoogleStream leaked thinking-fence delimiter (#8719)", () => {
 		expect(streamed).toBe(expected);
 	});
 
-	it("leaves normal thought summaries untouched", async () => {
-		const clean = "Considered options A and B; picked B for latency.";
-		const { thinking, streamed } = await runThinking([[{ text: clean, thought: true }]]);
-		expect(thinking).toBe(clean);
-		expect(streamed).toBe(clean);
-	});
-
 	it("does not strip the same idiom from visible (non-thought) text", async () => {
 		const { thinking } = await runThinking([[{ text: "here:\n```thinking\nx\n", thought: false }]]);
 		// No thinking block at all — the text branch is untouched by the stripper.

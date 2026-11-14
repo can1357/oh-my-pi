@@ -15,6 +15,8 @@
     # platform on the final stable branch that still receives security fixes.
     nixpkgs-darwin-x64.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
+    crane.url = "github:ipetkov/crane";
+
     bun2nix = {
       url = "github:nix-community/bun2nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -44,6 +46,7 @@
       self,
       bun2nix,
       bun2nix-darwin-x64,
+      crane,
       nix-bun,
       nixpkgs,
       nixpkgs-darwin-x64,
@@ -89,12 +92,11 @@
           pkgs = pkgsFor system;
           localPkgs = localPackagesFor system;
         in
-        pkgs.callPackage ./nix/package.nix (
-          {
-            source = self.outPath;
-          }
-          // localPkgs
-        );
+        pkgs.callPackage ./nix/package.nix {
+          source = self.outPath;
+          inherit (localPkgs) bun bun2nix;
+          craneLib = (crane.mkLib pkgs).overrideToolchain localPkgs.rustToolchain;
+        };
     in
     {
       packages = forAllSystems (

@@ -112,10 +112,10 @@ describe("AgentSession infinite retry via cooldown-expiry revert", () => {
 		// monotonic clock. Then spy on Date.now so we can push wall-clock past
 		// the 5-minute suppression cooldown — that's what arms
 		// maybeRestoreRetryFallbackPrimary mid-saga.
-		mockSchedulerWaitWithClock();
 		const realDateNow = Date.now.bind(Date);
 		let wallClockOffset = 0;
 		vi.spyOn(Date, "now").mockImplementation(() => realDateNow() + wallClockOffset);
+		mockSchedulerWaitWithClock();
 
 		// Advance the wall clock past the primary cooldown after each fallback
 		// hop. Without this, the primary selector stays suppressed and the bug

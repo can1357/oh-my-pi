@@ -1,5 +1,7 @@
 //! .NET CLI output filters.
 
+use std::fmt::NumBuffer;
+
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
 #[must_use]
@@ -33,15 +35,11 @@ fn filter_build_like(label: &str, input: &str, exit_code: i32) -> String {
 		let lines: Vec<&str> = input.lines().collect();
 		// Find the LAST occurrence of "0 Warning(s)" followed by indented "0
 		// Error(s)".
-		let mut last_match = None;
-		for i in 0..lines.len().saturating_sub(1) {
-			if lines[i].trim() == "0 Warning(s)"
-				&& lines[i + 1].trim() == "0 Error(s)"
-				&& lines[i + 1].starts_with(char::is_whitespace)
-			{
-				last_match = Some(i);
-			}
-		}
+		let last_match = lines.array_windows().rposition(|[warnings, errors]| {
+			warnings.trim() == "0 Warning(s)"
+				&& errors.trim() == "0 Error(s)"
+				&& errors.starts_with(char::is_whitespace)
+		});
 		if let Some(i) = last_match {
 			// Only short-circuit if no warnings or errors appear after this pair.
 			let has_later_issues = lines[i + 2..].iter().any(|line| {
@@ -186,7 +184,7 @@ fn compact_format_json(input: &str) -> Option<String> {
 	}
 	if rows.len() > 40 {
 		out.push_str("[…");
-		out.push_str(&(rows.len() - 40).to_string());
+		out.push_str((rows.len() - 40).format_into(&mut NumBuffer::new()));
 		out.push_str(" diagnostics elided…]\n");
 	}
 	Some(out)
@@ -214,11 +212,11 @@ fn collect_format_json_rows(
 				};
 				if let Some(line) = line {
 					row.push(':');
-					row.push_str(&line.to_string());
+					row.push_str(line.format_into(&mut NumBuffer::new()));
 				}
 				if let Some(column) = column {
 					row.push(':');
-					row.push_str(&column.to_string());
+					row.push_str(column.format_into(&mut NumBuffer::new()));
 				}
 				if let Some(diagnostic) = diagnostic {
 					row.push_str(": ");

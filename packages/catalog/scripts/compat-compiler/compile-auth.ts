@@ -329,10 +329,15 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 			leaf(node, ["base-url", "model", "label", "optional", "trust-forbidden"]);
 			return { kind, ...common, baseUrl: requiredProp(node, "base-url"), model: requiredProp(node, "model") };
 		case "models-endpoint": {
-			leaf(node, ["url", "base-url-env", "headers-hook", "label", "optional", "trust-forbidden"]);
+			leaf(node, ["url", "base-url-env", "base-url-path", "headers-hook", "label", "optional", "trust-forbidden"]);
 			const result: CompiledAuthValidation = { kind, ...common, url: requiredProp(node, "url") };
 			const baseUrlEnv = propString(node, "base-url-env");
 			if (baseUrlEnv !== undefined) result.baseUrlEnv = baseUrlEnv;
+			const baseUrlPath = propString(node, "base-url-path");
+			if (baseUrlPath !== undefined) {
+				if (baseUrlEnv === undefined || !baseUrlPath.startsWith("/")) malformed(node);
+				result.baseUrlPath = baseUrlPath;
+			}
 			if (propString(node, "headers-hook") !== undefined) result.headersHook = hookName(node, "headers-hook");
 			return result;
 		}
@@ -713,6 +718,9 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "org-scoped-identity":
 				result.orgScopedIdentity = singleBool(child);
 				break;
+			case "login-subscription":
+				result.loginSubscription = singleBool(child);
+				break;
 			case "oauth-token-env": {
 				leaf(child, []);
 				const vars = positionalStrings(child);
@@ -732,6 +740,16 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				break;
 			case "show-in-login-list":
 				result.showInLoginList = singleBool(child);
+				break;
+			case "disabled":
+				leaf(child, []);
+				result.disabled = singleString(child);
+				if (!result.disabled.trim()) malformed(child);
+				break;
+			case "login-warning":
+				leaf(child, []);
+				result.loginWarning = singleString(child);
+				if (!result.loginWarning.trim()) malformed(child);
 				break;
 			case "store-as":
 				leaf(child, []);
