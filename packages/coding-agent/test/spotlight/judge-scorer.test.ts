@@ -80,8 +80,20 @@ describe("judge scorer", () => {
 		await new JudgeScorer(judge, 5_000).score(["alpha", "beta"], context());
 		const [request] = requests;
 		expect(request!.questions).toEqual([lineKey(0), lineKey(1)]);
-		expect(Object.keys(request!.state)).toEqual(["commands", "intent", "lines", "said", "source", "task"]);
+		expect(Object.keys(request!.state)).toEqual(["commands", "criteria", "intent", "lines", "said", "source", "task"]);
 		expect((request!.state.lines as Record<string, string>)[lineKey(1)]).toBe("beta");
+	});
+
+	it("states the rubric once, not on every one of the 48 questions", async () => {
+		const { judge, requests } = fakeJudge(() => 0.5);
+		const items = Array.from({ length: JUDGE_CHUNK_ITEMS }, (_, i) => `line ${i}`);
+		await new JudgeScorer(judge, 5_000).score(items, context());
+		const [request] = requests;
+		// A request carries up to 48 questions; repeating the rubric in each costs more than the lines it ranks.
+		const rewritten = JSON.stringify(request!.questions);
+		expect(rewritten).not.toContain("Routine or incidental");
+		expect(JSON.stringify(request!.state)).toContain("Routine or incidental");
+		expect(rewritten.length).toBeLessThan(200 * JUDGE_CHUNK_ITEMS);
 	});
 
 	it("keeps at most 8 judge requests in flight across every stage of one result", async () => {

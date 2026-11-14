@@ -23,8 +23,17 @@ import questionFile from "../prompts/judge/shape.json" with { type: "json" };
 import { logger } from "@oh-my-pi/pi-utils";
 import type { CallContext, Scorer, ScorerUsage } from "./types";
 
-/** The one template this scorer sends; its rubric rides in the state's `criteria`. */
+/** The one template this scorer sends; the rubric rides once in the state's `criteria`, as `find`'s does. */
 const QUESTIONS = judgeQuestions(questionFile);
+
+/**
+ * What a line has to be, to reach the agent. It rides the state rather than each question: a request carries up to
+ * 48 questions, and repeating the rubric on every one costs more than the lines themselves.
+ */
+const LINE_CRITERIA = {
+	no: "Routine or incidental for this call: imports, braces and boilerplate, unrelated code, header prose, lines a passing run repeats.",
+	yes: "The agent needs this line for its current call: it names, defines, reports or decides something the intent, the agent's text or the task is about — an error, the asked-for symbol, a failing assertion, a changed value, the line that explains the ones around it.",
+} as const;
 
 /** Items one judge request ranks: 48 keeps a cut sharp, 96 scores every line the same. */
 export const JUDGE_CHUNK_ITEMS = 48;
@@ -57,6 +66,7 @@ export function lineBatch(
 	return {
 		state: {
 			commands: [...ctx.commands],
+			criteria: LINE_CRITERIA,
 			intent: ctx.intent,
 			lines: byKey,
 			said: ctx.said,
