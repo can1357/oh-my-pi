@@ -26,6 +26,7 @@
 - Fixed X11 takeover keys for a window going to another application that held the keyboard, such as its open menu or a screen locker's password prompt, while the call reported them typed into the window; they now wait up to half a second for such a grab to end and otherwise fail with nothing sent. A menu of the window's own application, or the window itself grabbing the keyboard (a VM viewer, a game), still gets the keys unless another application's popup is above it ([#19066](https://github.com/can1357/oh-my-pi/pull/19066) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS `axSetValue` refusing every option of a Chromium `<select>` (Chrome, Electron) with an empty option list: options are matched by the text Chromium reports as their value, the menu is opened when the closed popup publishes only its chosen option, and the menu is closed afterwards with Escape only when, after `AXCancel`, it neither reports closing nor leaves the window list within 300 ms, as a Chromium menu that ignores the cancel does, instead of being left open with your keystrokes when no option matched ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS posting Escape to an application whose background menu had already closed, or whose menu windows could not be read, when closing a menu a click opened: Escape now goes only to a menu window listed right before it, so it cannot cancel a dialog or form in the app instead ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `press()` and background `el.click()` reporting success on a control a person could not click, such as a hover toolbar's button after the pointer left, a hidden control, or one of a window that shows a sheet; they now fail before anything is sent and name what the window shows there ([#19258](https://github.com/can1357/oh-my-pi/pull/19258) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
@@ -86,14 +87,6 @@
 - Reduced memory usage when visualizing long multi-line shell commands.
 - Fixed the shell cp builtin so symlink-following options work correctly with archive and directory-copy modes without disabling recursion or attribute preservation.
 - Replaced built-in shell crashes on very long -a/-o chains in [ ] and test expressions with a clear error for excessively deep expressions.
-- Fixed `<text>` elements disappearing from rendered SVGs when a generic font family refers to an unavailable font ([#15181](https://github.com/can1357/oh-my-pi/issues/15181), [#18538](https://github.com/can1357/oh-my-pi/pull/18538)).
-- Fixed `worktree add` with source checkouts containing read-only files or directories, including cleanup and safety issues involving tracked directories replaced by symlinks ([#14190](https://github.com/can1357/oh-my-pi/issues/14190), [#18537](https://github.com/can1357/oh-my-pi/pull/18537)).
-- Fixed cancelled or timed-out `Shell.run` calls so they stop only jobs started by that invocation while preserving the shell session for subsequent runs.
-- Improved shell search behavior across local and network filesystems: local searches no longer descend into network mounts unexpectedly, network-backed walks keep more directory operations in flight, and `fd` uses parallel traversal with support for its ignore, pruning, depth, worker, and error-reporting options.
-- Reduced memory usage in shell visualization for long multi-line commands ([#18791](https://github.com/can1357/oh-my-pi/issues/18791), [#19177](https://github.com/can1357/oh-my-pi/pull/19177)).
-- Fixed the shell `cp` builtin so symlink-following options used with archive and directory-copy modes correctly override one another without disabling recursion or attribute preservation ([#19215](https://github.com/can1357/oh-my-pi/pull/19215)).
-- Fixed a built-in shell crash when `[ ]` or `test` expressions contained very long `-a`/`-o` chains; excessively deep parenthesized expressions now produce a clear error instead ([#18498](https://github.com/can1357/oh-my-pi/pull/18498)).
-- Fixed macOS `press()` and background `el.click()` reporting success on a control a person could not click, such as a hover toolbar's button after the pointer left, a hidden control, or one of a window that shows a sheet; they now fail before anything is sent and name what the window shows there
 
 ## [18.20.0] - 2026-11-12
 
