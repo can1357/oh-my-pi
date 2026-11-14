@@ -4,6 +4,10 @@
 
 ## [18.20.1] - 2026-11-14
 
+### Fixed
+
+- Gemini web search over a Google Antigravity login now identifies as the Antigravity client, sending the same user agent in the request body and header plus the client's per-request trace and request ids ([#19279](https://github.com/can1357/oh-my-pi/pull/19279) by [@Xytronix](https://github.com/Xytronix))
+
 ### Added
 
 - Added `/commit` to create commits containing only changes made by the agent or a selected subagent, while preserving other agents’ and the user’s work. The workflow is also available through the eval `commit` namespace, supports targeting repositories outside the session directory, handles binary and non-UTF-8 files, symlinks, file mode changes, and initial commits, and can optionally skip commit hooks with `no_verify`; use `commit.enabled` to disable it.
