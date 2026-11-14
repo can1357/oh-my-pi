@@ -2825,9 +2825,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
 				}
 			},
-			persist: (mode, state) => {
+			persist: (mode, state, usageOnly) => {
 				if (mode === "none") {
 					this.sessionManager.appendModeChange("none");
+				} else if (state && usageOnly) {
+					this.sessionManager.appendCustomEntry("goal_usage", {
+						id: state.goal.id,
+						tokensUsed: state.goal.tokensUsed,
+						timeUsedSeconds: state.goal.timeUsedSeconds,
+						updatedAt: state.goal.updatedAt,
+					});
 				} else if (state) {
 					this.sessionManager.appendModeChange(mode, { goal: state.goal });
 				}
