@@ -33,4 +33,31 @@ describe("AuthStorage keys.peek", () => {
 
 		expect(peeks).toEqual(["live-b", "live-b", "live-b"]);
 	});
+
+	it("treats an incomplete Kiro OAuth row as no credential and serves a complete sibling", async () => {
+		const storage = await AuthStorage.create(":memory:");
+		storages.push(storage);
+		const expires = Date.now() + 3_600_000;
+		// A row without `kiroLoginId` (an older or hand-written login) cannot be encoded.
+		const incomplete = {
+			type: "oauth" as const,
+			access: "incomplete-access",
+			refresh: "refresh-a",
+			expires,
+			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+		};
+		await storage.credentials.set("kiro", incomplete);
+		expect(await storage.keys.peek("kiro")).toBeUndefined();
+		expect(await storage.keys.peek("kiro", { includeExpired: true })).toBeUndefined();
+
+		await storage.credentials.set("kiro", [
+			incomplete,
+			{ ...incomplete, access: "complete-access", refresh: "refresh-b", kiroLoginId: "login-b" },
+		]);
+		expect(JSON.parse((await storage.keys.peek("kiro")) ?? "null")).toMatchObject({
+			kind: "oauth",
+			token: "complete-access",
+			loginId: "login-b",
+		});
+	});
 });

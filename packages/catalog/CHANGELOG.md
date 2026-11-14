@@ -6,6 +6,8 @@
 
 - Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 - Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
+- Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Added the Google/GitHub sign-in variant to the Kiro credential codec, carrying the login provider and profile ARN
 
 ### Fixed
 

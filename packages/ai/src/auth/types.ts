@@ -209,6 +209,8 @@ export type CompletionProbeCredential =
 	| {
 			type: "oauth";
 			accessToken: string;
+			/** The request key built by the provider's `getApiKey` hook, when it owns one; send it as-is. */
+			apiKey?: string;
 			refreshToken?: string;
 			expiresAt?: number;
 			accountId?: string;
@@ -276,9 +278,10 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
 	refresh: RemoteRefreshSentinel;
+	kiroClientSecret?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */

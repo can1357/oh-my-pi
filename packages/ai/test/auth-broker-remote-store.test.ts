@@ -13,6 +13,8 @@ import {
 	type SnapshotResponse,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -498,6 +500,41 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 
 		expect(remote.listAuthCredentials("anthropic")).toEqual([]);
 		expect(remote.listAuthCredentials("openai-codex")).toHaveLength(1);
+	});
+
+	test("a broker-refreshed Kiro login keeps the routing fields its API key needs", async () => {
+		const kiro = getProviderDefinition("kiro")!;
+		vi.spyOn(kiro, "refreshToken").mockImplementation(async current => ({
+			...current,
+			access: "access-fresh",
+			expires: Date.now() + 3_600_000,
+		}));
+		await storage!.credentials.upsert("kiro", {
+			type: "oauth",
+			access: "access-stale",
+			refresh: "refresh-kiro",
+			expires: Date.now() - 1_000,
+			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+			kiroLoginId: "login-a",
+			accountId: "login-a",
+		});
+		remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
+		await waitUntil(() => remote!.snapshot.credentials.some(entry => entry.provider === "kiro"));
+		const clientStorage = new AuthStorage(remote);
+		try {
+			await clientStorage.credentials.reload();
+			// `accessAll` refreshes the expired row in `tryOAuth`, without the key-selection preflight.
+			const [access] = await clientStorage.oauth.accessAll("kiro");
+			expect(access).toMatchObject({ ok: true, accessToken: "access-fresh", accountId: "login-a" });
+			const apiKey = await clientStorage.keys.get("kiro", "kiro-session");
+			expect(decodeKiroCredential(apiKey ?? "", {})).toMatchObject({
+				token: "access-fresh",
+				apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+				loginId: "login-a",
+			});
+		} finally {
+			clientStorage.close();
+		}
 	});
 
 	test("an allow-list pool hides unlisted providers and API keys over snapshots and SSE", async () => {

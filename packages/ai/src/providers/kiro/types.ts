@@ -1,0 +1,115 @@
+import type { SimpleStreamOptions } from "../../types";
+
+export interface KiroOptions extends SimpleStreamOptions {
+	/** A raw `ksk_…` key or the `encodeKiroCredential` string auth resolves for Kiro. */
+	apiKey?: string;
+}
+
+export interface KiroToolUse {
+	name: string;
+	toolUseId: string;
+	input: Record<string, unknown>;
+}
+
+export interface KiroToolResult {
+	content: Array<{ text: string }>;
+	status: "success" | "error";
+	toolUseId: string;
+}
+
+export interface KiroToolSpec {
+	toolSpecification: {
+		name: string;
+		description: string;
+		inputSchema: { json: Record<string, unknown> };
+	};
+}
+
+export interface KiroImageBlock {
+	format: "jpeg" | "png" | "gif" | "webp";
+	source: { bytes: string };
+}
+
+export interface KiroUserInputMessage {
+	content: string;
+	modelId: string;
+	origin: "KIRO_CLI";
+	images?: KiroImageBlock[];
+	userInputMessageContext?: {
+		toolResults?: KiroToolResult[];
+		tools?: KiroToolSpec[];
+	};
+}
+
+export interface KiroAssistantResponseMessage {
+	content: string;
+	toolUses?: KiroToolUse[];
+}
+
+export interface KiroHistoryEntry {
+	userInputMessage?: KiroUserInputMessage;
+	assistantResponseMessage?: KiroAssistantResponseMessage;
+}
+
+export type KiroAnthropicRequestFields = {
+	thinking: { type: "adaptive"; display: "summarized" | "omitted" };
+	output_config: { effort: string };
+	max_tokens?: number;
+};
+
+export type KiroGptRequestFields = {
+	reasoning: { mode: "standard"; effort: string };
+};
+
+export type KiroModelRequestFields = KiroAnthropicRequestFields | KiroGptRequestFields;
+
+export interface KiroRequest {
+	agentMode: "vibe";
+	conversationState: {
+		chatTriggerType: "MANUAL";
+		agentTaskType: "vibe";
+		conversationId: string;
+		currentMessage: { userInputMessage: KiroUserInputMessage };
+		history?: KiroHistoryEntry[];
+	};
+	profileArn?: string;
+	additionalModelRequestFields?: KiroModelRequestFields;
+}
+
+export interface KiroUsageMetrics {
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	reasoningTokens?: number;
+}
+
+/** `metadataEvent.stopDetails.refusal`: why the service's classifier ended the turn. */
+export interface KiroRefusalDetails {
+	category?: string;
+	explanation?: string;
+}
+
+export type KiroNormalizedEvent =
+	| {
+			type: "metadata";
+			requestId?: string;
+			stopReason?: string;
+			refusal?: KiroRefusalDetails;
+			/** Service-sent `metadataEvent.tokenUsage`. */
+			usage?: KiroUsageMetrics;
+	  }
+	| { type: "reasoning"; text?: string; signature?: string }
+	| { type: "content"; content: string; stopReason?: string }
+	| {
+			type: "tool";
+			toolUseId: string;
+			name?: string;
+			input?: string | Record<string, unknown>;
+			stop?: boolean;
+	  }
+	| { type: "contextUsage"; percentage: number }
+	| { type: "usage"; usage: KiroUsageMetrics }
+	/** The request was billed (`meteringEvent`); a billed stream is never replayed. */
+	| { type: "metering" }
+	| { type: "ignored" };

@@ -73,6 +73,14 @@ export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"inferenceRegion?": "'global' | 'eu' | 'us'",
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
+	"kiroClientId?": "string",
+	"kiroClientSecret?": "string",
+	"kiroClientSecretExpiresAt?": "number",
+	"kiroTokenEndpoint?": "string",
+	"kiroOidcRegion?": "string",
+	"kiroLoginId?": "string",
+	"kiroLoginProvider?": "'Google' | 'Github'",
+	"kiroProfileArn?": "string",
 });
 
 /** OAuth credential as it appears in broker snapshots — refresh replaced with sentinel. */
@@ -92,6 +100,15 @@ export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = ty
 	"inferenceRegion?": "'global' | 'eu' | 'us'",
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
+	"kiroClientId?": "string",
+	// Redacted by `redactCredentialForWire`; a snapshot carrying it is rejected.
+	"kiroClientSecret?": "undefined",
+	"kiroClientSecretExpiresAt?": "number",
+	"kiroTokenEndpoint?": "string",
+	"kiroOidcRegion?": "string",
+	"kiroLoginId?": "string",
+	"kiroLoginProvider?": "'Google' | 'Github'",
+	"kiroProfileArn?": "string",
 });
 
 export const apiKeyCredentialSchema: FluentType<ApiKeyCredential> = type({

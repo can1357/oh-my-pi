@@ -667,6 +667,29 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 * **Dynamic Discovery:** `fetchDevinModels` in `packages/catalog/src/discovery/devin.ts` invokes the unary Connect RPC `GetCliModelConfigs` (`/exa.api_server_pb.ApiServerService/GetCliModelConfigs`) with the native `chisel` discovery metadata from `packages/catalog/src/wire/devin.ts` and every supported display slot. `normalizeDevinModels` drops disabled/internal configs, converts `ClientModelConfig` into `ModelSpec<"devin-agent">` entries (context window from `ClientModelConfig.maxTokens`, else `ModelInfo.maxTokens`, where current catalogs carry it, else 200k; 64k max tokens by default), and preserves server-supplied output caps, pricing dimensions, tool/parallel-tool/image support, description, and `new`/`beta`/`recommended` badges. Exception: `DEVIN_IMAGE_BLIND_UIDS` strips the image modality from `swe-1-6`/`swe-1-6-fast`, whose configs advertise `supports_images` while the backend silently drops the `ChatMessagePrompt.images` field (verified live; every other model reads it). An empty-but-200 catalog response logs a stale-identity-pin warning. Router configs (`displayOption MODEL_ROUTER` or `isModelRouter`) stay standalone with `compat.modelRouter`.
 
+## Kiro
+
+The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the Kiro API. Stream logic lives in `packages/ai/src/providers/kiro/` (`streamKiro`, `transformKiroRequest`), login in `packages/ai/src/registry/oauth/kiro.ts`, usage in `packages/ai/src/usage/kiro.ts`, and discovery in `packages/catalog/src/discovery/kiro.ts`. User-facing setup is in [Kiro](./kiro.md).
+
+### Special casings
+
+- **Request identity**: Every request (chat, model and profile discovery, AWS sign-in, Google/GitHub sign-in) uses the same headers and service targets as the official Kiro CLI 3.2.0. The one intentional difference is `x-amzn-codewhisperer-optout: true`: OMP opts out of content sharing, where the CLI opts in by default.
+- **Tool-result byte budgets**: Each tool result is capped at 800,000 UTF-8 bytes (Kiro's service limit) and ends with a marker stating how much was omitted. The request budget is 850,000 bytes per 200,000 tokens of context window. Over budget, historical tool results are shrunk to 25,000 bytes oldest first, then current-turn results (never below 25,000 bytes). A request still over budget is reported as a context overflow so OMP compacts.
+
+### Stream behavior
+
+- **Transient retry**: A request is retried at most once, with an identical body and a fresh request id, and only before any output, for a `ThrottlingError` with reason `INSUFFICIENT_MODEL_CAPACITY` (over HTTP or as an in-stream exception) and for HTTP 400 `ValidationException: Invalid tool use format.`. A billed request is never replayed; every other failure is terminal.
+- **Stop reasons**: `MAX_TOKENS` maps to `length` and a tool call whose arguments were cut off is dropped. `CONTENT_FILTERED` is reported as a refusal with the service's category and explanation and is not retried.
+- **Context size**: `contextUsageEvent` percentages are reported as context size, scaled to the model's context window.
+
+### Auth & usage
+
+- **Token usage**: Usage comes only from Kiro's token metrics (including `metadataEvent.tokenUsage`); when none arrive, usage is zero, never estimated.
+
+### Catalog model handling
+
+- **Per-credential discovery**: The roster is discovered per credential and never bundled; default model `auto`. The model cache is scoped per OAuth login, or per API key and endpoint.
+
 ## GitLab Duo
 
 GitLab Duo is integrated via two distinct providers in OMP: **GitLab Duo Non-Agentic** (`gitlab-duo`), which proxies LLM requests through GitLab AI Gateway using standard HTTP/SSE sub-providers, and **GitLab Duo Agent** (`gitlab-duo-agent`), which connects to the GitLab Duo Workflow Service (DWS) over a WebSocket-based agent execution protocol. Entry modules for `gitlab-duo` are `packages/ai/src/providers/gitlab-duo.ts` and `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl` (OAuth hooks in `packages/ai/src/registry/oauth/gitlab-duo.ts`), while `gitlab-duo-agent` is implemented in `packages/ai/src/providers/gitlab-duo-workflow.ts`, `packages/catalog/src/compat/rules/auth/gitlab-duo-agent.kdl`, and catalog discovery in `packages/catalog/src/discovery/gitlab-duo-workflow.ts`.

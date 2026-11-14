@@ -202,10 +202,13 @@ export async function getOAuthApiKey(
 			{ kind: "validation", provider },
 		);
 	}
-	// Providers declaring `api-key-format "structured"` need request-time
-	// credential metadata, so the API key is the JSON-encoded credential.
-	const apiKey =
-		policy?.apiKeyFormat === "structured"
+	// A provider-owned encoding wins; otherwise providers declaring
+	// `api-key-format "structured"` need request-time credential metadata, so
+	// the API key is the JSON-encoded credential.
+	const getApiKey = getProviderDefinition(provider)?.getApiKey;
+	const apiKey = getApiKey
+		? getApiKey(creds)
+		: policy?.apiKeyFormat === "structured"
 			? JSON.stringify({
 					apiEndpoint: creds.apiEndpoint,
 					token: creds.access,

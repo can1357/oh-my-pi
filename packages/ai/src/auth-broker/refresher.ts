@@ -112,7 +112,7 @@ export class AuthBrokerRefresher {
 			await this.#storage.oauth.refresh(id);
 		} catch (error) {
 			const errorMsg = String(error);
-			if (isDefinitiveOAuthFailure(errorMsg)) {
+			if (isDefinitiveOAuthFailure(error)) {
 				// AuthStorage.oauth.refresh already CAS-disabled the row
 				// (unless a peer/login rotated it first, in which case the live
 				// credential is intentionally kept). Nothing to do here but record it.
