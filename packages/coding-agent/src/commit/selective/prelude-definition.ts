@@ -151,7 +151,7 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 					`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`,
 					`${outcome.paths.length} path(s): ${outcome.paths.join(", ")}`,
 				];
-				if (outcome.parent !== draft.head) {
+				if (outcome.parent && outcome.parent !== draft.head) {
 					lines.push(`HEAD had moved to ${outcome.parent.slice(0, 10)}; the selection applied cleanly on top.`);
 				}
 				lines.push(...outcome.indexNotes, "", "Remaining:", remaining.summary());

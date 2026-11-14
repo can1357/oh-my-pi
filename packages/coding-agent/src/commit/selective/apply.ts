@@ -29,6 +29,8 @@ export interface CommitRequest {
 	fixes?: number | string | ReadonlyArray<number | string>;
 	/** Replace HEAD instead of adding a commit; only allowed when this session's selective commit made HEAD. */
 	amend?: boolean;
+	/** Skip the `pre-commit` and `commit-msg` hooks, like `git commit --no-verify`. */
+	noVerify?: boolean;
 }
 
 /** Result of {@link commitSelection}. */
@@ -37,8 +39,8 @@ export interface CommitOutcome {
 	subject: string;
 	/** Repo-relative paths the commit changed. */
 	paths: string[];
-	/** HEAD the commit was placed on (differs from the draft's HEAD when someone committed meanwhile). */
-	parent: string;
+	/** HEAD the commit was placed on (differs from the draft's HEAD when someone committed meanwhile); `null` for a root commit. */
+	parent: string | null;
 	/** Committed paths whose shared-index entry kept someone else's staged content instead of the commit's. */
 	indexNotes: string[];
 }
@@ -57,9 +59,14 @@ export function composeMessage(request: CommitRequest): string {
 	return `${[subject, body, fixes.join("\n")].filter(Boolean).join("\n\n")}\n`;
 }
 
-async function patchFor(repo: VcsGitRepo, head: string, change: SelectedChange): Promise<string> {
-	if (change.kind === "text") return formatTextPatch(change.path, change.head, change.content, change.mode);
-	return change.untracked
+/** Abbreviated commit id, or a stand-in for the unborn HEAD. */
+function shortSha(sha: string | null): string {
+	return sha?.slice(0, 10) ?? "(no commits yet)";
+}
+
+async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedChange): Promise<string> {
+	if (change.kind === "text") return formatTextPatch(change.path, change.before, change.after);
+	return change.added || head === null
 		? repo.diffNoIndex("/dev/null", change.path, true)
 		: repo.diffText({ base: head, files: [change.path], binary: true });
 }
@@ -101,14 +108,13 @@ export async function commitSelection(
 	try {
 		for (let attempt = 1; sha === undefined; attempt++) {
 			context.signal?.throwIfAborted();
-			const head = await repo.headSha(context.signal);
-			if (!head) throw new Error("HEAD has no commit.");
-			if (ownCommits && !ownCommits.has(head)) {
-				throw new Error(
-					`HEAD ${head.slice(0, 10)} was not made by this session's commit flow; refusing to amend it.`,
-				);
+			const head = (await repo.headSha(context.signal)) ?? null;
+			if (ownCommits && (head === null || !ownCommits.has(head))) {
+				throw new Error(`HEAD ${shortSha(head)} was not made by this session's commit flow; refusing to amend it.`);
 			}
-			await repo.readTree(head, indexPath, context.signal);
+			// An unborn HEAD starts from an empty index: patches create the missing index file.
+			if (head === null) await fs.rm(indexPath, { force: true });
+			else await repo.readTree(head, indexPath, context.signal);
 			try {
 				await repo.applyPatch(joined, { cached: true, indexPath }, context.signal);
 			} catch (error) {
@@ -118,13 +124,18 @@ export async function commitSelection(
 					if (!(await repo.canApplyPatch(entry.patch, { cached: true, indexPath }))) blocked.push(entry.path);
 				}
 				throw new Error(
-					`HEAD moved from ${draft.head.slice(0, 10)} to ${head.slice(0, 10)}, which changed ${blocked.join(", ") || "selected paths"}; build a new draft.`,
+					`HEAD moved from ${shortSha(draft.head)} to ${shortSha(head)}, which changed ${blocked.join(", ") || "selected paths"}; build a new draft.`,
 				);
 			}
 			try {
 				sha = await repo.commitCreate(
 					message,
-					{ indexPath, expectedHead: head, amend: request.amend ?? false },
+					{
+						indexPath,
+						expectedHead: head ?? undefined,
+						amend: request.amend ?? false,
+						noVerify: request.noVerify ?? false,
+					},
 					context.signal,
 				);
 				parent = head;
@@ -137,7 +148,11 @@ export async function commitSelection(
 	}
 
 	const indexNotes: string[] = [];
-	for (const entry of patches) {
+	// A new repository may have no index file yet. Git reads that as an empty index, but patch
+	// application reads HEAD in its place, so seed it with the root commit's tree instead.
+	const seedIndex = parent === null && !(await Bun.file(path.join(repo.info().gitDir, "index")).exists());
+	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
+	for (const entry of seedIndex ? [] : patches) {
 		try {
 			await repo.applyPatch(entry.patch, { cached: true }, context.signal);
 		} catch {
