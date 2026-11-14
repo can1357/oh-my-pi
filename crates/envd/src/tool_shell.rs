@@ -63,6 +63,7 @@ impl ShellExecHost {
 		settings: ShellSettings,
 		sandbox: &SandboxSettings,
 	) -> Self {
+		host.configure_shell(&settings);
 		if let Ok(uri) = Url::parse(&cwd_uri)
 			&& let Ok(root) = uri.to_file_path()
 		{
