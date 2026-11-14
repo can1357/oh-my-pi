@@ -134,6 +134,7 @@
 - Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
 - Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
 - Fixed setValue() on Linux reporting success when Firefox or Thunderbird fields, including password fields, were not actually updated; failures now identify the affected field appropriately.
+- Fixed a crash in the built-in shell when a `[` or `test` expression chained tens of thousands of terms with `-a` or `-o`: the chain is now evaluated iteratively, and parentheses nested past the shell's nesting limit are reported as an error instead.
 
 ## [18.18.1] - 2026-11-08
 
