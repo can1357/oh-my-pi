@@ -37,6 +37,7 @@ import type {
 	InternalUrl,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeHost,
 	SchemeSpec,
 	UrlCompletion,
 	WriteContext,
@@ -149,8 +150,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
 	};
 
-	promptDoc(): string {
-		return agentPromptDoc.trim();
+	promptDoc(host: SchemeHost): string {
+		return prompt.render(agentPromptDoc, { subagent: host.subagent }).trim();
 	}
 
 	/**
@@ -259,6 +260,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		let contentType: InternalResource["contentType"] = "text/markdown";
 
 		let extractedFrom = scan.foundPath;
+		const shape: InternalResource["shape"] = extraction ? "value" : "document";
+		let absent: true | undefined;
 		if (extraction) {
 			let jsonValue: unknown;
 			let parsed = false;
@@ -281,6 +284,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 
 			const extracted = extractJsonPath(jsonValue, decodedSegments);
+			if (extracted === undefined) absent = true;
 			if (typeof extracted === "string") {
 				// A string field (e.g. a scout's markdown `report`) reads as prose,
 				// not as a JSON-escaped single line.
@@ -295,6 +299,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 			notes.push(`Extracted: /${decodedSegments.join("/")}`);
 			if (parsed) notes.push(`Source: ${path.basename(extractedFrom!)}`);
+			if (absent) notes.push("JSON path not found");
 		}
 
 		return {
@@ -304,7 +309,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: extractedFrom,
 			notes,
-			shape: extraction ? "value" : "document",
+			shape,
+			...(absent ? { absent } : {}),
 		};
 	}
 

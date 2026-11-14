@@ -13,9 +13,11 @@
 //! - [`collect`] gathers the entries a filter keeps, optionally in byte order
 //!   of their paths (each worker sorts its directory's share of the order;
 //!   collection only concatenates). Dropping its future cancels the walk.
+//! - [`ordered`] streams that path-ordered collection while the walk runs: each
+//!   entry as soon as every directory sorting before it is listed.
 //! - [`Tree`] is the serial, ordered traversal, driven one event at a time by
 //!   the caller, for tools whose output order and pruning decisions are
-//!   sequential (`find`, `fd`, workspace listing).
+//!   sequential (`find`, workspace listing).
 //!
 //! Directories open relative to their parent's handle, ignore files are read
 //! only when a listing contains them, unchanged directories are served from
@@ -46,7 +48,10 @@ use std::{
 	fmt, io,
 	path::{Path, PathBuf},
 	pin::Pin,
-	sync::{Arc, LazyLock},
+	sync::{
+		Arc, LazyLock,
+		atomic::{AtomicBool, Ordering},
+	},
 	task::{Context, Poll},
 };
 
@@ -59,38 +64,104 @@ pub(crate) use self::parallel::Sink;
 use self::{arena::Arena, parallel::Stored};
 use crate::fs::{Detail, Dir, FileType, Fs, Session};
 
+/// A caller's handle on one walk's stop flag ([`Options::stop`]).
+///
+/// Setting it ends the walk at its next directory or record, ahead of the
+/// prune and ignore filters, with no scheduler turn in between: a task abort
+/// reaches a walk only when a worker next polls it. One flag per walk; the
+/// serial [`Tree`] does not read it.
+#[derive(Clone, Debug, Default)]
+pub struct Stop(Arc<AtomicBool>);
+
+impl Stop {
+	/// A flag that is not set.
+	#[must_use]
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Ends the walk holding this flag at its next directory or record.
+	pub fn stop(&self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+
+	/// Whether the walk has ended, whether through this flag or on its own.
+	#[must_use]
+	pub fn stopped(&self) -> bool {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	/// Ends the walk when the returned guard is dropped. Kept in the frame
+	/// that owns the walk, this makes dropping that frame stop the walk
+	/// there and then.
+	#[must_use]
+	pub const fn on_drop(self) -> StopOnDrop {
+		StopOnDrop(self)
+	}
+}
+
+/// Two handles are the same flag, not two flags that happen to agree.
+impl PartialEq for Stop {
+	fn eq(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0)
+	}
+}
+
+impl Eq for Stop {}
+
+/// The guard [`Stop::on_drop`] returns.
+#[derive(Debug)]
+pub struct StopOnDrop(Stop);
+
+impl Drop for StopOnDrop {
+	fn drop(&mut self) {
+		self.0.stop();
+	}
+}
+
 /// Traversal options shared by [`walk`] and [`collect`]. The default walks
 /// everything except hidden entries, honouring no ignore files.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
 	/// Include dot-prefixed entries.
-	pub hidden:            bool,
+	pub hidden:              bool,
 	/// Honour `.ignore`, `.gitignore`, `.git/info/exclude`, and git's global
 	/// excludes ([`crate::ignore`]).
-	pub gitignore:         bool,
+	pub gitignore:           bool,
+	/// One more ignore file read in every directory and in the root's
+	/// ancestors up to the filesystem root (`fd`'s `.fdignore`): it beats
+	/// the files of [`Self::gitignore`] and applies with or without them.
+	pub ignore_file:         Option<&'static str>,
+	/// Read no ignore files above the root (`fd --no-ignore-parent`).
+	pub skip_parent_ignores: bool,
 	/// Prune entries named `.git`.
-	pub skip_git:          bool,
+	pub skip_git:            bool,
 	/// Prune entries named `node_modules`.
-	pub skip_node_modules: bool,
+	pub skip_node_modules:   bool,
 	/// Report symlinks as their targets (type, size, mtime) and descend into
 	/// linked directories. Dangling links, links to special files, and links
 	/// to a directory enclosing them (which would loop) are left out. The
 	/// root itself is always resolved through symlinks.
-	pub follow_links:      bool,
+	pub follow_links:        bool,
 	/// Listing metadata; [`Detail::Full`] is needed for sizes and mtimes.
-	pub detail:            Detail,
+	pub detail:              Detail,
 	/// Deepest entry depth reported (root's children are depth 1); `None`
 	/// is unlimited.
-	pub max_depth:         Option<usize>,
+	pub max_depth:           Option<usize>,
 	/// Do not descend into directories on another filesystem than the root
 	/// (they are still reported).
-	pub same_file_system:  bool,
+	pub same_file_system:    bool,
 	/// Directories listed at once; `None` (or 0) picks `PI_WALK_WORKERS` when
 	/// set, else [`Fs::workers`].
-	pub workers:           Option<usize>,
+	pub workers:             Option<usize>,
 	/// Reuse unchanged directories' listings from earlier walks ([`cache`]).
-	/// Only [`Detail::Minimal`] native walks consult it.
-	pub cache:             bool,
+	/// Only [`Detail::Minimal`] native walks without an
+	/// [`Self::ignore_file`] consult it.
+	pub cache:               bool,
+	/// The flag this walk ends on, when the caller wants to hold a clone and
+	/// end the walk from its own frame ([`Stop`]). The walk makes its own
+	/// otherwise.
+	pub stop:                Option<Stop>,
 }
 
 impl Options {
@@ -384,6 +455,64 @@ where
 	collect_in(fs, root, opts, sorted, filter, default_cache(fs, opts)).await
 }
 
+/// [`collect`] in path order, streamed while the walk runs.
+///
+/// [`Ordered::next`] delivers each kept entry as soon as every directory
+/// sorting before it has been listed, so output starts while the walk runs on
+/// its workers and a slow subtree holds back only what sorts after it.
+/// `filter` is as for [`collect`];
+/// `Action::Stop` ends the walk, delivering what was kept before. Dropping
+/// the [`Ordered`] cancels the walk.
+///
+/// # Errors
+/// As for [`walk`].
+pub async fn ordered<F>(
+	fs: &Fs,
+	root: &Path,
+	opts: &Options,
+	filter: F,
+) -> Result<Ordered, WalkError>
+where
+	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
+{
+	let sink = parallel::CollectSink::new(parallel::BoxedKeep(Box::new(filter)));
+	let started = parallel::start(fs, root, opts, sink, true, default_cache(fs, opts), None).await?;
+	Ok(Ordered(parallel::InOrder::new(started)))
+}
+
+/// A running [`ordered`] walk.
+pub struct Ordered(parallel::InOrder<parallel::CollectSink<parallel::BoxedKeep>>);
+
+impl Ordered {
+	/// The next kept entry in path order; `None` once the walk is done.
+	/// Cancel-safe: dropping the future loses no entry.
+	pub async fn next(&mut self) -> Option<Entry<'_>> {
+		let stored = self.0.next().await?;
+		Some(Entry {
+			// SAFETY: the path lives in a scratch arena of the walk, which
+			// `self` keeps until it is dropped.
+			path:      unsafe { stored.path.get() },
+			file_type: stored.file_type,
+			depth:     stored.depth,
+			size:      stored.size,
+			mtime:     stored.mtime,
+		})
+	}
+
+	/// Waits until [`Self::next`] can deliver without waiting, so a consumer
+	/// can bound how long its output sits unflushed while the walk works.
+	/// Cancel-safe.
+	pub async fn wait(&mut self) {
+		self.0.wait().await;
+	}
+
+	/// Directories below the root that could not be read, once the walk has
+	/// ended.
+	pub async fn into_errors(self) -> Vec<DirError> {
+		self.0.into_errors().await
+	}
+}
+
 /// [`collect`] against an explicit listing cache.
 async fn collect_in<F>(
 	fs: &Fs,
@@ -405,7 +534,10 @@ where
 
 /// The process-wide cache when `opts` asks for it and the walk can use it.
 fn default_cache(fs: &Fs, opts: &Options) -> Option<&'static cache::Cache> {
-	opts.cache.then(cache::global).filter(|_| fs.is_native())
+	opts
+		.cache
+		.then(cache::global)
+		.filter(|_| fs.is_native() && opts.ignore_file.is_none())
 }
 
 /// Whether `name` is pruned by the hidden, `.git`, and `node_modules` rules.

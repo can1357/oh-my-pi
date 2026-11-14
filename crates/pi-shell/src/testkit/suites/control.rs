@@ -1,9 +1,14 @@
 //! Control, restore and store-failure behaviour of the shell.
 
+use std::sync::Arc;
+
+use bstr::{BStr, BString};
+
 use crate::{
 	bash::{
-		Budget, Cx, Engine, EngineConfig, Incompatibility, MemStore, RestoreError, RestoreOpts,
-		Script, Shell, SigTarget, Signal, StateStore, Step, store::BlobSlot,
+		Attrs, Budget, CallOutcome, Cx, Engine, EngineConfig, Incompatibility, MemStore,
+		RestoreError, RestoreOpts, RunStdio, Script, Shell, ShellApi, SigTarget, Signal, StateStore,
+		Step, VarValue, VprocSel, store::BlobSlot,
 	},
 	testkit::{
 		FakeHost, Fault, Rig,
@@ -87,6 +92,71 @@ fn subshell_runs_do_not_leak_into_the_root() {
 }
 
 #[test]
+fn submitted_subshells_keep_state_before_queued_root_changes() {
+	for vproc in [
+		VprocSel::NewSubshell,
+		VprocSel::NewSubshellWithStdio([RunStdio::Inherit, RunStdio::Inherit, RunStdio::Inherit]),
+	] {
+		let mut r = rig();
+		assert_eq!(
+			r.run(Script::command(&b"kept=before; f() { echo old; }; set +f"[..]), Fault::None),
+			0
+		);
+		let child = r.shell().submit(Script {
+			vproc,
+			..Script::command(
+				&b"echo \"$kept:${later-absent}\"; f; type -t added; case $- in *f*) echo noglob;; \
+				 *) echo glob;; esac"[..],
+			)
+		});
+		let root = r.shell().submit(Script::command(
+			&b"kept=after; later=after; f() { echo new; }; added() { :; }; set -f"[..],
+		));
+		let (shell, host, store) = r.parts();
+		assert_eq!(advance(shell, host, store, root, Budget::default()), Stop::Done(0));
+		assert_eq!(advance(shell, host, store, child, Budget::default()), Stop::Done(0));
+		assert_eq!(host.stdout.bytes(), b"before:absent\nold\nglob\n");
+		assert!(host.stderr.bytes().is_empty());
+	}
+}
+
+#[test]
+fn api_subshells_keep_state_before_caller_changes() {
+	let mut r = rig();
+	r.host.tool(
+		"fork",
+		Arc::new(|_: &mut ShellApi<'_, '_>, _: &[BString]| -> CallOutcome {
+			unreachable!("the test driver answers `fork`")
+		}),
+	);
+	assert_eq!(
+		r.run(Script::command(&b"kept=before; f() { echo old; }; set +f"[..]), Fault::None),
+		0
+	);
+	let (shell, host, store) = r.parts();
+	let root =
+		shell.submit(Script::command(&b"fork; f() { echo new; }; added() { :; }; set -f"[..]));
+	let mut cx = Cx { host: &mut *host, store: &mut *store };
+	let Step::Call { id, .. } = shell.step(&mut cx, Budget::default()) else {
+		panic!("root must reach the fork callout");
+	};
+	let mut api = shell.api(&mut cx, id).expect("call is outstanding");
+	let child = api.run_subshell(Script::command(
+		&b"echo \"$kept:${later-absent}\"; f; type -t added; case $- in *f*) echo noglob;; \
+		 *) echo glob;; esac"[..],
+	));
+	api.set_var(BStr::new("kept"), VarValue::Str("after".into()), Attrs::NONE)
+		.unwrap();
+	api.set_var(BStr::new("later"), VarValue::Str("after".into()), Attrs::NONE)
+		.unwrap();
+	shell.complete(id, CallOutcome::Exit(0));
+	assert_eq!(advance(shell, host, store, root, Budget::default()), Stop::Done(0));
+	assert_eq!(advance(shell, host, store, child, Budget::default()), Stop::Done(0));
+	assert_eq!(host.stdout.bytes(), b"before:absent\nold\nglob\n");
+	assert!(host.stderr.bytes().is_empty());
+}
+
+#[test]
 fn restore_rejects_corrupt_and_foreign_frames_and_can_drop_them() {
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
@@ -132,6 +202,7 @@ fn restore_rejects_corrupt_and_foreign_frames_and_can_drop_them() {
 	let (mut shell, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..RestoreOpts::default()
 		})
 		.unwrap();
 	assert_eq!(report.abandoned, [id], "the header still names the abandoned run");
@@ -162,6 +233,7 @@ fn restore_drop_frames_abandons_the_running_script_with_255() {
 	let (mut shell, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..RestoreOpts::default()
 		})
 		.unwrap();
 	assert_eq!(report.abandoned, [id]);

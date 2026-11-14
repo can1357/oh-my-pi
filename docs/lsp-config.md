@@ -33,7 +33,7 @@ Within each config-directory row, directories are listed highest to lowest prior
 
 Merging is shallow per server: a higher-precedence server object overrides only its top-level fields, but object-valued fields such as `settings`, `initOptions`, `capabilities`, and `workspaceReadyTimings` replace the lower value as a whole rather than deep-merging it. Servers absent from override files remain at built-in defaults.
 
-The native user config directory follows `PI_CONFIG_DIR` and active profiles; `~/.omp/agent/lsp.json` is the default-profile spelling. This shared config lookup does not use `PI_CODING_AGENT_DIR` as an arbitrary replacement base. Claude's user directory honors `CLAUDE_CONFIG_DIR`. Foreign user sources (Claude, Codex, Gemini) are opt-in through the enabled-provider configuration; setting `CLAUDE_CONFIG_DIR` also opts Claude in unless explicitly disabled. Project and cwd sources do not walk ancestors and are not subject to that user-source opt-in.
+The native user config directory is the active agent directory: it follows `PI_CONFIG_DIR`, active profiles, and, in the default profile, `PI_CODING_AGENT_DIR`; `~/.omp/agent/lsp.json` is the default-profile spelling. Claude's user directory honors `CLAUDE_CONFIG_DIR`. Foreign user sources (Claude, Codex, Gemini) are opt-in through the enabled-provider configuration; setting `CLAUDE_CONFIG_DIR` also opts Claude in unless explicitly disabled. Project and cwd sources do not walk ancestors and are not subject to that user-source opt-in.
 
 **Recommended locations:**
 
@@ -86,7 +86,8 @@ Do not mix wrapped and flat server entries: when `servers` is an object, sibling
 | `settings`              | `object`   |                        no | Pushed via `workspace/didChangeConfiguration`                                                                                                            |
 | `disabled`              | `boolean`  |                        no | Set `true` to disable this server                                                                                                                        |
 | `warmupTimeoutMs`       | `number`   |                        no | Warmup initialize timeout in milliseconds (default 5000; built-in marksman uses 2000)                                                                    |
-| `isLinter`              | `boolean`  |                        no | Marks a dedicated linter/formatter server: excluded from type-intelligence, but preferred over type-checkers when choosing the `formatOnWrite` formatter |
+| `isLinter`              | `boolean`  |                        no | Dedicated linter/formatter: fallback for single-server actions; `rename_file` queries all matching LSP servers; preferred for `formatOnWrite`            |
+| `watchFiles`            | `boolean`  |                        no | Advertise `workspace/didChangeWatchedFiles` dynamic registration: omp watches the files the server registers and the server runs no watcher of its own. On by default; set `false` to keep a server's own watcher. A shared (mux) server keeps the setting of the session that started it; sessions that later reuse it get its watching either way |
 | `capabilities`          | `object`   |                        no | Opt-in server-specific features; see [Capabilities](#capabilities)                                                                                       |
 | `workspaceReadyTimings` | `object`   |                        no | Advanced rust-analyzer workspace-readiness timing overrides; see below                                                                                   |
 

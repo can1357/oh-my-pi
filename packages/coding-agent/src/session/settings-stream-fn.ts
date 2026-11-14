@@ -14,6 +14,7 @@ import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
@@ -102,13 +103,9 @@ export function createSettingsAwareStreamFn(
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 		const textVerbosity =
-			model.api === "openai-codex-responses"
-				? cfgTextVerbosity.isConfigured(settings)
-					? cfgTextVerbosity.get(settings)
-					: undefined
-				: model.api === "openai-responses"
-					? cfgTextVerbosity.get(settings)
-					: undefined;
+			model.api === "openai-codex-responses" || model.api === "openai-responses"
+				? cfgTextVerbosity.get(settings)
+				: undefined;
 		// "auto" leaves the option unset so provider defaults and the
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
@@ -195,7 +192,7 @@ export function createSettingsAwareStreamFn(
 			...(storeResponses !== undefined ? { storeResponses } : {}),
 			// A per-call worker never switches models: no fallback chain, including a
 			// caller-supplied one, and Factory drops its own refusal chain.
-			...(slowModeContext?.disableServerSideFallback
+			...(slowModeContext?.disableServerSideFallback || cfgOffline.get(settings)
 				? { fallbacks: undefined, disableServerSideFallback: true }
 				: {}),
 			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),

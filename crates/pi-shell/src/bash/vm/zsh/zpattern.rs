@@ -148,6 +148,18 @@ pub fn try_compile(
 	Ok(ex.k.engine.zsh_patterns().get(text, flags, &o))
 }
 
+/// zsh `patcompile` of `text` (metafied, tokenized) under the options `o`
+/// a pattern was compiled with earlier (zsh keeps compiled patterns:
+/// `zstyle`'s), cached; `None` for a malformed pattern.
+pub fn compile_with(
+	ex: &Expander<'_, '_>,
+	text: &[u8],
+	flags: PatFlags,
+	o: &Opts,
+) -> Option<Arc<Pattern>> {
+	ex.k.engine.zsh_patterns().get(text, flags, o)
+}
+
 /// `bad pattern: TEXT` for the tokenized pattern `text`.
 pub fn bad_pattern(text: &[u8]) -> Stop {
 	let mut t = text.to_vec();

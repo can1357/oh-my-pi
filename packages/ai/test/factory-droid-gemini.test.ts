@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type } from "@oh-my-pi/omptype";
 import { type FactoryDroidGeminiOptions, streamFactoryDroidGemini } from "../src/providers/factory-droid/gemini";
 import * as AIError from "../src/error";
@@ -630,6 +631,316 @@ describe("Factory Droid gemini wire — request options", () => {
 		const generation = captured[0].body.generationConfig as Record<string, unknown>;
 		// Disabled thinking flips the flag off and never emits a thinkingLevel.
 		expect(generation.thinkingConfig).toEqual({ includeThoughts: false });
+	});
+});
+
+describe("Factory Droid gemini wire — native replay policy", () => {
+	const argonPolicy = { googleOmitSampling: true, googlePinMaxOutputTokens: true, googleNativeReplay: true };
+	const argon = () => ({ ...gemini(), id: "gemini-4-argon", maxTokens: 65536 });
+	/** A thought summary, then an unsigned call carrying Gemini's own id and a field omp does not model. */
+	const nativeChunks = [
+		JSON.stringify({
+			candidates: [
+				{ content: { role: "model", parts: [{ text: "Plan.", thought: true, thoughtSignature: "sig-t" }] } },
+			],
+		}),
+		JSON.stringify({
+			candidates: [
+				{
+					content: {
+						role: "model",
+						parts: [{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, futureField: 1 }],
+					},
+					finishReason: "STOP",
+				},
+			],
+		}),
+	];
+	const tools = [{ name: "Read", description: "Read", parameters: type({ path: "string" }) }];
+
+	it("sends no sampling parameters and pins the output cap to the model maximum", async () => {
+		const { captured } = await run(
+			"hi",
+			undefined,
+			{
+				requestPolicy: argonPolicy,
+				temperature: 0.2,
+				topP: 0.5,
+				topK: 8,
+				reasoning: Effort.Medium,
+				thinkingDialect: "level-medium",
+			},
+			argon(),
+		);
+		expect(captured[0].body.generationConfig).toEqual({
+			maxOutputTokens: 65536,
+			thinkingConfig: { includeThoughts: true, thinkingLevel: "MEDIUM" },
+		});
+	});
+
+	it("replays its own turn as the native content Gemini streamed, call ids included", async () => {
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			nativeChunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const { contents } = await run(
+			{
+				messages: [{ role: "user", content: "go", timestamp: 1 }, first.result, toolResult(call.id, "body")],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [
+				{ text: "Plan.", thought: true, thoughtSignature: "sig-t" },
+				{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, futureField: 1 },
+			],
+		});
+		expect(contents[2].parts[0].functionResponse).toEqual({ id: "fc-1", name: "Read", response: { result: "body" } });
+	});
+
+	it("defaults a replayed native turn's role to model when stream chunks omit content.role", async () => {
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "s" },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			chunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const { contents } = await run(
+			{
+				messages: [{ role: "user", content: "go", timestamp: 1 }, first.result, toolResult(call.id, "body")],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "s" }],
+		});
+		expect(contents[2].parts[0].functionResponse).toEqual({ id: "fc-1", name: "Read", response: { result: "body" } });
+	});
+
+	it("rebuilds a rewritten turn and stamps its unsigned calls", async () => {
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			nativeChunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const rewritten = { ...first.result, content: [{ ...call, arguments: { path: "b" } }] };
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					rewritten,
+					toolResult(call.id, "body"),
+					{ role: "user", content: "next", timestamp: 3 },
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { name: "Read", args: { path: "b" } }, thoughtSignature: SKIP_THOUGHT_SIGNATURE }],
+		});
+		expect(contents[2].parts[0].functionResponse).not.toHaveProperty("id");
+	});
+
+	it("rebuilds a native turn that credential redaction rewrites, so the secret stays off the wire", async () => {
+		const token = "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d";
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							role: "model",
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: token } }, thoughtSignature: "s" },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			chunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const { contents } = await withCredentialRedaction(true, () =>
+			run(
+				{
+					messages: [{ role: "user", content: "go", timestamp: 1 }, first.result, toolResult(call.id, "body")],
+					tools,
+				},
+				undefined,
+				{ requestPolicy: argonPolicy },
+				argon(),
+			),
+		);
+		const wire = JSON.stringify(contents);
+		expect(wire).not.toContain(token);
+		expect(contents[1].parts[0]).toEqual({
+			functionCall: { name: "Read", args: { path: "[github_token_redacted]" } },
+			thoughtSignature: SKIP_THOUGHT_SIGNATURE,
+		});
+		expect(contents[2].parts[0].functionResponse).not.toHaveProperty("id");
+	});
+
+	it("rebuilds a native turn whose unsigned thought redaction would rewrite", async () => {
+		// The rebuilt turn drops the unsigned thought, so only the native content could carry it out.
+		const token = "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d";
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: { role: "model", parts: [{ text: `use ${token}`, thought: true }, { text: "done" }] },
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run("go", chunks, { requestPolicy: argonPolicy }, argon());
+		const { contents } = await withCredentialRedaction(true, () =>
+			run(
+				{
+					messages: [
+						{ role: "user", content: "go", timestamp: 1 },
+						first.result,
+						{ role: "user", content: "next", timestamp: 3 },
+					],
+				},
+				undefined,
+				{ requestPolicy: argonPolicy },
+				argon(),
+			),
+		);
+		expect(JSON.stringify(contents)).not.toContain(token);
+		expect(contents[1]).toEqual({ role: "model", parts: [{ text: "done" }] });
+	});
+
+	/** Streams `parts` as one Argon turn, then replays it with each call's result; returns the second request. */
+	async function replayWithResults(parts: Array<Record<string, unknown>>): Promise<Contents> {
+		const chunks = [JSON.stringify({ candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }] })];
+		const first = await run("go", chunks, { requestPolicy: argonPolicy }, argon());
+		const calls = first.result.content.filter(block => block.type === "toolCall");
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					first.result,
+					...calls.map(call => toolResult(call.id, "body", call.name)),
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		return contents;
+	}
+
+	it("rebuilds a native turn when normalization drops its malformed call beside a valid one", async () => {
+		const contents = await replayWithResults([
+			{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" },
+			{ functionCall: { id: "fc-bad", name: "", args: {} } },
+		]);
+		expect(JSON.stringify(contents)).not.toContain("fc-");
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" }],
+		});
+		expect(contents[2]).toEqual({
+			role: "user",
+			parts: [{ functionResponse: { name: "Read", response: { result: "body" } } }],
+		});
+	});
+
+	it("sends a native turn's parallel results in call order", async () => {
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							role: "model",
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "s" },
+								{ functionCall: { id: "fc-2", name: "Read", args: { path: "b" } } },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			chunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const [a, b] = first.result.content.filter(block => block.type === "toolCall");
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					first.result,
+					toolResult(b.id, "body b"),
+					toolResult(a.id, "body a"),
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1].parts.map(part => part.functionCall)).toEqual([
+			{ id: "fc-1", name: "Read", args: { path: "a" } },
+			{ id: "fc-2", name: "Read", args: { path: "b" } },
+		]);
+		expect(contents[2].parts.map(part => part.functionResponse)).toEqual([
+			{ id: "fc-1", name: "Read", response: { result: "body a" } },
+			{ id: "fc-2", name: "Read", response: { result: "body b" } },
+		]);
+	});
+
+	it("records no native content for models without the policy", async () => {
+		const { result } = await run({ messages: [{ role: "user", content: "go", timestamp: 1 }], tools }, nativeChunks);
+		expect(result.providerPayload).toBeUndefined();
 	});
 });
 

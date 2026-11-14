@@ -1,6 +1,7 @@
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
+import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
@@ -416,6 +417,33 @@ export const cfgTodoRemindersMax = register({
 	},
 });
 
+export const cfgTodoMidRunNudges = register({
+	id: "todo.midRunNudges",
+	type: "enum",
+	values: ["off", "capped", "backoff"] as const,
+	default: "capped",
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Mid-Run Todo Nudges",
+		description: "How often a long turn is reminded to update its todo list while it keeps changing things",
+		options: [
+			{ value: "off", label: "Off", description: "Never nudge mid-run" },
+			{
+				value: "capped",
+				label: "Capped",
+				description:
+					"Nudge after 12 edits or commands, at most twice until the todo list changes or you send a message",
+			},
+			{
+				value: "backoff",
+				label: "Backoff",
+				description: "Keep nudging with a doubling gap: after 12, 24, 48, 96, then every 192 edits or commands",
+			},
+		],
+	},
+});
+
 export const cfgTodoEager = register({
 	id: "todo.eager",
 	type: "enum",
@@ -547,6 +575,19 @@ export const cfgAstEditEnabled = register({
 	},
 });
 
+export const cfgFindVerifyModel = register({
+	id: "find.verifyModel",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tools",
+		group: "Find",
+		label: "Find Verification Model",
+		description:
+			"Model selector (e.g. openrouter/liquid/d1-ultra) tried first for find's passage verification, before the judge role; filename and sketch ranking stay on the judge role. Unset: the judge role verifies too",
+	},
+});
+
 export const cfgFindEnabled = register({
 	id: "find.enabled",
 	type: "enum",
@@ -567,6 +608,24 @@ export const cfgFindEnabled = register({
 			{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
 			{ value: "off", label: "Off", description: "Disable the find tool" },
 		],
+	},
+});
+
+/**
+ * Verified-passage probability at or above which `find` reports a file as a hit, and the floor for the
+ * line ranges it lists. Unset keeps the cascade's built-in threshold (0.2), which suits TypeSafe Jev; other
+ * decision models calibrate differently, so a judge that scores unrelated passages high needs a higher one.
+ */
+export const cfgFindHitThreshold = register({
+	id: "find.hitThreshold",
+	type: "number",
+	default: undefined,
+	// The registry reads a non-number config value as the default, so quoted text must fail here.
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !(raw > 0 && raw <= 1)) {
+			throw new Error(`Invalid find.hitThreshold: expected a number above 0, up to 1, got ${Bun.inspect(raw)}.`);
+		}
 	},
 });
 
@@ -594,6 +653,16 @@ export const cfgLaunchEnabled = register({
 		label: "Services",
 		description: "Enable named bash services and proc:// supervision for shared long-running project processes",
 	},
+});
+
+// A service normally ends with the last omp process in its project: the broker shuts
+// down once no client remains and stops every non-persistent service. Print, RPC and
+// ACP hosts override this on: their caller outlives the omp process and uses the
+// servers a run left running.
+export const cfgLaunchPersist = register({
+	id: "launch.persist",
+	type: "boolean",
+	default: false,
 });
 
 export const cfgSpeechgenEnabled = register({
@@ -655,6 +724,19 @@ export const cfgArchiveEnabled = register({
 		label: "Archive",
 		description:
 			"Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps",
+	},
+});
+
+export const cfgCommitEnabled = register({
+	id: "commit.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Selective commit",
+		description:
+			"Enable the commit eval prelude and /commit: commit only the lines this agent and its subagents wrote",
 	},
 });
 
@@ -1135,6 +1217,7 @@ export const cfgBuiltinToolGates = combine({
 	checkpoint: cfgCheckpointEnabled,
 	contextManagement: cfgCompactionExperimentalContextManagement,
 	debug: cfgDebugEnabled,
+	editMode: cfgEditMode,
 	evalJs: cfgEvalJs,
 	evalPy: cfgEvalPy,
 	find: cfgFindEnabled,

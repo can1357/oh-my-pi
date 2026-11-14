@@ -5,9 +5,11 @@
 //! oriented: a match is a line (in multiline mode, a block of lines)
 //! containing a match, reported with optional context lines, trailing
 //! whitespace trimmed, invalid UTF-8 replaced, and lines wider than
-//! `max_columns` cut to a window around their first match. A NUL byte in the
-//! first 64 KiB makes a file binary (searched, no matches); past that, a
-//! reported line holding a NUL ends the file's search.
+//! `max_columns` cut to a window around their first match. Explicit file roots
+//! are searched as text. For discovery and in-memory searches, a NUL byte in
+//! the first 64 KiB skips the input; past that, a reported line holding a NUL
+//! ends the search. Filesystem results list files whose skipped content
+//! holds a match.
 //!
 //! Directory searches read and scan files inside one parallel walk when
 //! results are unbounded; with a match budget a path-ordered walk streams
@@ -138,6 +140,7 @@ pub fn search(
 ) -> Result<SearchResult, String> {
 	let content_mode = opts.mode == Mode::Content;
 	let params = ScanParams {
+		text:        false,
 		content:     content_mode,
 		before:      if content_mode { opts.before } else { 0 },
 		after:       if content_mode { opts.after } else { 0 },
@@ -160,11 +163,25 @@ pub fn search(
 	Ok(SearchResult { matches, match_count: outcome.count, limit_reached: outcome.limit_reached })
 }
 
+/// The agent-dialect pattern an [`Engine`] was compiled from by
+/// [`Engine::compile`], for a searcher that compiles the dialect itself.
+#[derive(Clone, Debug)]
+pub struct Source {
+	/// Pattern text.
+	pub pattern:     String,
+	/// Case-insensitive matching.
+	pub ignore_case: bool,
+}
+
 /// Options of a [`grep`] search.
 #[derive(Clone)]
 pub struct GrepOptions {
 	/// Compiled pattern.
 	pub engine:             Arc<Engine>,
+	/// What `engine` was compiled from; with it, an ovnfs daemon may answer a
+	/// directory search below one of its checkouts instead of a walk. `None`
+	/// for engines not built by [`Engine::compile`].
+	pub source:             Option<Source>,
 	/// The engine was compiled for multiline matching.
 	pub multiline:          bool,
 	/// Restrict directory searches to [`crate::glob::Selector::scope`] of `glob`
@@ -209,6 +226,7 @@ impl GrepOptions {
 	pub fn new(engine: Arc<Engine>) -> Self {
 		Self {
 			engine,
+			source: None,
 			multiline: false,
 			glob: None,
 			recursive: true,
@@ -224,6 +242,20 @@ impl GrepOptions {
 			walk: walk::Options { hidden: true, gitignore: true, ..walk::Options::default() },
 			sink: None,
 		}
+	}
+
+	/// [`Self::new`] for `pattern` compiled by [`Engine::compile`], keeping
+	/// its [`Source`] and `multiline`.
+	///
+	/// # Errors
+	/// See [`Engine::compile`].
+	pub fn compile(pattern: String, ignore_case: bool, multiline: bool) -> Result<Self, String> {
+		let engine = Engine::compile(&pattern, ignore_case, multiline)?;
+		Ok(Self {
+			source: Some(Source { pattern, ignore_case }),
+			multiline,
+			..Self::new(Arc::new(engine))
+		})
 	}
 }
 
@@ -243,6 +275,9 @@ pub struct GrepResult {
 	pub limit_reached:      bool,
 	/// Files over [`MAX_FILE_BYTES`] that could not be read.
 	pub skipped_oversized:  u64,
+	/// Walk-relative paths, sorted, of files whose content binary detection
+	/// skipped although it holds a match.
+	pub binary_matches:     Vec<String>,
 }
 
 /// Why a [`grep`] failed.
@@ -286,11 +321,17 @@ impl std::error::Error for GrepError {}
 /// Searches the files below `root` (or `root` itself if it is a file; any
 /// other kind of root yields an empty result).
 ///
+/// A directory below an ovnfs checkout is searched by its daemon when `opts`
+/// allow it (see [`GrepOptions::source`]), else walked.
+///
 /// Takes `opts` by value so every sink sender is dropped when it returns.
 ///
 /// # Errors
 /// See [`GrepError`]; unreadable files and directories below `root` are
 /// skipped, and a closed sink receiver is [`GrepError::Sink`].
 pub async fn grep(fs: &Fs, root: &Path, opts: GrepOptions) -> Result<GrepResult, GrepError> {
+	if let Some(result) = crate::ovnfs::grep(fs, root, &opts).await {
+		return Ok(result);
+	}
 	run::grep(fs, root, opts).await
 }

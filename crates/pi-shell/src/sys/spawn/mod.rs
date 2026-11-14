@@ -38,7 +38,6 @@
 mod unix;
 #[cfg(windows)]
 mod windows;
-
 use std::{
 	fmt, fs, io,
 	sync::{Arc, Weak},
@@ -48,6 +47,8 @@ use std::{
 
 use bstr::BString;
 use parking_lot::Mutex;
+#[cfg(windows)]
+pub(crate) use windows::{break_console_groups, has_console_groups};
 
 #[cfg(unix)]
 use self::unix as imp;
@@ -57,6 +58,22 @@ use crate::{
 	bash::{ExtProc, SpawnSpec, StdioSpec},
 	sys::pump::{End, Feed, Pump, os},
 };
+
+/// Tell the spawners that the process changed a signal's disposition.
+///
+/// They read which signals the host ignores once per change (`sigaction`,
+/// `signal`), not per spawn, to reset those in the child. Everything that
+/// changes a disposition while spawners may run calls it (the shell's trap
+/// table, an embedding runtime's reset); a change it misses leaves a newly
+/// ignored signal ignored in later children.
+#[cfg_attr(
+	not(unix),
+	expect(clippy::missing_const_for_fn, reason = "the unix body re-reads signal dispositions")
+)]
+pub fn dispositions_changed() {
+	#[cfg(unix)]
+	imp::dispositions_changed();
+}
 
 /// Spawns externals for a [`Host`](crate::bash::Host). Cheap to clone; clones
 /// share the leak-check registry.
@@ -69,9 +86,12 @@ pub struct NativeSpawner {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpawnConfig {
 	/// Time between TERM and KILL when a running external is abandoned, and
-	/// on Windows after any TERM (`CTRL_BREAK` is often ignored).
+	/// on Windows after any TERM (console control events are often ignored).
+	/// On Windows TERM hangs up an owned external's console, and the system
+	/// ends what still runs on it 5 s later, whatever a longer grace says.
 	pub grace:    Duration,
-	/// Session layout of externals (Unix).
+	/// Session layout of externals (Unix; on Windows, whether they get a
+	/// private console).
 	pub sessions: Sessions,
 	/// Who observes the exits of externals (Linux).
 	pub exits:    Exits,
@@ -111,8 +131,10 @@ pub enum Exits {
 	/// switch per external fewer in each direction. For hosts whose engine
 	/// thread polls the `ExtProc`s and blocks only in [`Parker::park`]
 	/// (`obash`). An external falls back to a waiter thread when no parker
-	/// exists, `pidfd_open` fails, or it is abandoned while running; other
-	/// platforms always use [`Exits::Thread`].
+	/// exists, `pidfd_open` fails, or it is abandoned while running; a
+	/// job-controlled external ([`crate::bash::PgroupSpec::Job`]) always has
+	/// one (a pidfd reports exits, not stops); other platforms always use
+	/// [`Exits::Thread`].
 	///
 	/// [`Parker::park`]: crate::sys::Parker::park
 	Park,
@@ -127,7 +149,10 @@ pub enum Sessions {
 	/// terminal never stops it with `SIGTTIN`/`SIGTTOU`, and it cannot grab
 	/// the host's foreground. `PgroupSpec::Join` stages lead their own
 	/// sessions too: a process can never `setpgid`-join a leader in another
-	/// session (`EPERM`, the pi-shell lesson). The default, for agent hosts.
+	/// session (`EPERM`, the pi-shell lesson). On Windows no external shares
+	/// the host's console: an owned job gets a pseudoconsole the spawner holds
+	/// while its processes run, a released (`nohup`) one a hidden console of
+	/// its own. The default, for agent hosts.
 	#[default]
 	Detach,
 	/// Bash job-control layout: `PgroupSpec::New` leads a process group in the
@@ -139,11 +164,16 @@ pub enum Sessions {
 	/// Non-interactive bash layout: externals stay in the host's process
 	/// group and session (no `setpgid`, no `setsid`), so they share its
 	/// controlling terminal (`read < /dev/tty` in a nested shell works).
-	/// `PgroupSpec` is ignored. Because the group is the host's, every
-	/// group-wide operation narrows to the spawned process itself: signals,
-	/// `stop`/`cont` and the abandon escalation reach only that pid, and
-	/// leak checks see only it, not processes it forked (bash's own view of
-	/// its children). For standalone shells such as `obash`.
+	/// `PgroupSpec::New`/`Join` are ignored. Because the group is the
+	/// host's, every group-wide operation narrows to the spawned process
+	/// itself: signals, `stop`/`cont` and the abandon escalation reach only
+	/// that pid, and leak checks see only it, not processes it forked
+	/// (bash's own view of its children). For standalone shells such as
+	/// `obash` and the process shell. Job control is the exception: a
+	/// [`PgroupSpec::Job`](crate::bash::PgroupSpec::Job) spawn is placed as
+	/// under `Share` (its job's group, and the terminal for a foreground
+	/// job), so an interactive shell with `MONITOR` set runs every job in
+	/// its own group while its other externals stay in the shell's.
 	Inherit,
 }
 
@@ -158,14 +188,6 @@ pub struct Leftover {
 	pub group: u32,
 	/// Command name (Unix `comm`, Windows image path).
 	pub name:  BString,
-}
-
-/// A spawn asked for an fd the platform cannot hand to an external.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("fd {fd} to external on Windows")]
-pub struct UnsupportedFd {
-	/// The fd number (> 2).
-	pub fd: i32,
 }
 
 /// Spawner state shared by clones and by the processes it spawned.
@@ -280,8 +302,8 @@ impl NativeSpawner {
 	///
 	/// The OS error of the spawn (`NotFound`, `PermissionDenied`, …), or
 	/// `InvalidInput` for arguments the OS cannot represent (interior NUL;
-	/// non-UTF-8 on Windows). On Windows any extra fd fails with
-	/// `Unsupported` carrying an [`UnsupportedFd`].
+	/// non-UTF-8 on Windows). On Windows an extra fd reaches the child only
+	/// as the named pipe its `/dev/fd/N` argument becomes.
 	pub fn spawn(&self, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
 		imp::spawn(&self.shared, spec)
 	}
@@ -332,7 +354,8 @@ enum Dir {
 
 /// The child's side of one stream; pumps for engine objects go to `pumps`,
 /// shared input feeds the `ExtProc` must keep go to `held`. `None` for
-/// [`StdioSpec::Null`].
+/// [`StdioSpec::Null`] and [`StdioSpec::Closed`] (the platform installs the
+/// null device; Unix then closes a `Closed` target in the child).
 fn child_end(
 	shared: &Shared,
 	spec: StdioSpec,
@@ -342,7 +365,7 @@ fn child_end(
 ) -> io::Result<Option<fs::File>> {
 	let end = match spec {
 		StdioSpec::Inherit(h) => return imp::dup(h).map(Some),
-		StdioSpec::Null => return Ok(None),
+		StdioSpec::Null | StdioSpec::Closed => return Ok(None),
 		StdioSpec::Pipe(fd) => End::Fd(fd),
 		StdioSpec::File(f) => match f.os_handle() {
 			Some(h) => return imp::dup(h).map(Some),

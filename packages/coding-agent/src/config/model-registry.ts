@@ -18,6 +18,7 @@ import type {
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
@@ -54,7 +55,7 @@ import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
-import type { ConfigError, ConfigFile } from "./config-file";
+import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
 	buildCustomModelOverlay,
 	type CustomModelDefinitionLike,
@@ -153,6 +154,8 @@ setCodexAttestationProvider(generateCodexAttestation);
 
 /** One built-in discovery pass rewriting more payload rows than this is debug-logged. */
 const MODEL_CACHE_REWRITE_LOG_THRESHOLD = 5;
+/** Minimum spacing of {@link ModelRegistry.retryUnavailableDiscovery} passes. */
+const DISCOVERY_RETRY_INTERVAL_MS = 60_000;
 /** `scheme://user:pass@` in free text (e.g. a fetch error echoing the request URL). */
 const URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
 const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
@@ -164,6 +167,9 @@ const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Obje
 );
 const MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(MODELS_DEV_CATALOG_PROVIDER_IDS.map(providerId => [providerId, true as const])),
+);
+const SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
+	Object.fromEntries(SPECIAL_MODEL_MANAGER_PROVIDER_IDS.map(providerId => [providerId, true as const])),
 );
 const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(
@@ -370,6 +376,10 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
+	/** Cached models.yml load last copied into {@link #configWarnings}. */
+	#publishedModelsLoad?: LoadResult<ModelsConfig>;
+	/** Findings copied from {@link #publishedModelsLoad}, replaced when a new load is published. */
+	#publishedModelsFileWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -377,6 +387,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#discoveryRetry?: Promise<void>;
+	#lastDiscoveryRetryAt = Number.NEGATIVE_INFINITY;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
 	#initialRefreshSettled = false;
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
@@ -1046,10 +1058,10 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Refresh only named discovery providers (configured `models.yml` providers or
-	 * extension `fetchDynamicModels` managers). Unlike {@link refreshProvider},
-	 * this avoids a static reload and leaves unrelated runtime discovery alone.
-	 * Unknown ids have no effect.
+	 * Refresh only named discovery providers (built-in managers, configured
+	 * `models.yml` providers, or extension `fetchDynamicModels` managers). Unlike
+	 * {@link refreshProvider}, this avoids a static reload and leaves unrelated
+	 * runtime discovery alone. Unknown ids have no effect.
 	 */
 	async refreshDiscoverableProviders(
 		providerIds: Iterable<string>,
@@ -1059,6 +1071,45 @@ export class ModelRegistry {
 		const filter = new Set(providerIds);
 		if (filter.size === 0) return;
 		await this.#refreshRuntimeDiscoveries(strategy, filter);
+	}
+
+	/**
+	 * Re-run discovery for providers whose last attempt left them `unavailable`,
+	 * so a long-lived session recovers discovered models (Codex rosters, local
+	 * servers) after a startup failure instead of serving the bundled catalog
+	 * until restart. Views that list models (`^` mentions) call this as they
+	 * read the catalog. Single-flight and spaced by
+	 * {@link DISCOVERY_RETRY_INTERVAL_MS}; while the initial background refresh
+	 * runs it stands in for the retry.
+	 *
+	 * Returns the pass to wait for before re-reading the catalog, or `undefined`
+	 * when none is due. The pass never rejects.
+	 */
+	retryUnavailableDiscovery(): Promise<void> | undefined {
+		if (this.#discoveryRetry) return this.#discoveryRetry;
+		const now = Date.now();
+		if (now - this.#lastDiscoveryRetryAt < DISCOVERY_RETRY_INTERVAL_MS) return undefined;
+		const providers: string[] = [];
+		for (const state of this.#providerDiscoveryStates.values()) {
+			if (state.status === "unavailable") providers.push(state.provider);
+		}
+		if (providers.length === 0) return undefined;
+		this.#lastDiscoveryRetryAt = now;
+		const pass = this.isBackgroundRefreshPending()
+			? this.awaitBackgroundRefresh()
+			: this.refreshDiscoverableProviders(providers);
+		const retry = pass
+			.catch(error => {
+				logger.debug("model discovery retry failed", {
+					providers,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				this.#discoveryRetry = undefined;
+			});
+		this.#discoveryRetry = retry;
+		return retry;
 	}
 
 	/**
@@ -1308,6 +1359,28 @@ export class ModelRegistry {
 		return warnings;
 	}
 
+	#publishModelsFileWarnings(result: LoadResult<ModelsConfig>): void {
+		// The same cached load is what every registry in the process reads.
+		// Publish when that object changes, and replace the findings copied
+		// from the previous one: `omp models refresh` force-reparses before
+		// anything drains #configWarnings, and a second registry must still
+		// see the modality warning the first one already published.
+		if (result === this.#publishedModelsLoad) return;
+		this.#publishedModelsLoad = result;
+		if (this.#publishedModelsFileWarnings.length > 0) {
+			const published = new Set(this.#publishedModelsFileWarnings);
+			this.#configWarnings = this.#configWarnings.filter(warning => !published.has(warning));
+			this.#publishedModelsFileWarnings = [];
+		}
+		if (result.status !== "ok") return;
+		const prefix = `${this.#modelsConfigFile.path()}: `;
+		for (const warning of result.warnings) {
+			const message = `${prefix}${warning}`;
+			this.#publishedModelsFileWarnings.push(message);
+			this.#configWarnings.push(message);
+		}
+	}
+
 	#loadModels() {
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
@@ -1339,6 +1412,24 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+		this.#syncLiteLLMUsage();
+	}
+
+	/**
+	 * Register LiteLLM budget usage for `litellm` and every `discovery.type: litellm`
+	 * provider not in `disabledProviders`. A mirror's owner already did this.
+	 */
+	#syncLiteLLMUsage(): void {
+		if (this.#owner) return;
+		const disabled = getDisabledProviderIdsFromSettings(this.#settings);
+		const providers = new Map<string, UsageProvider>();
+		for (const provider of [
+			"litellm",
+			...this.#discoverableProviders.filter(c => c.discovery.type === "litellm").map(c => c.provider),
+		]) {
+			if (!disabled.has(provider)) providers.set(provider, litellmUsageProvider);
+		}
+		this.authStorage.usage.replaceConfiguredProviders(providers);
 	}
 
 	#resetStaticComposition(): void {
@@ -1386,6 +1477,14 @@ export class ModelRegistry {
 			}
 		}
 		this.#providerLookupSnapshots.delete(providerName);
+	}
+
+	/** A modifier runs only for a provider holding OAuth credentials; without one it cannot touch the catalog. */
+	#modelModifierCanApply(): boolean {
+		for (const providerName of this.#runtimeModelModifiers.keys()) {
+			if (this.authStorage.credentials.getOAuth(providerName)) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -1529,7 +1628,7 @@ export class ModelRegistry {
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		// A modifier is a whole-catalog transform. Build and project the full catalog
 		// before narrowing a lazy lookup, matching getAll() followed by filtering.
-		const projectFullCatalog = providerFilter !== undefined && this.#runtimeModelModifiers.size > 0;
+		const projectFullCatalog = providerFilter !== undefined && this.#modelModifierCanApply();
 		const compositionFilter = projectFullCatalog ? undefined : providerFilter;
 		const unprojected = this.#projectBaseModels(this.#composeBaseModels(compositionFilter), compositionFilter);
 		const projected = this.#finalizeModels(this.#applyRuntimeModelModifiers(unprojected));
@@ -1659,21 +1758,29 @@ export class ModelRegistry {
 	} {
 		const modelsByProvider = new Map<string, Model<Api>[]>();
 		const authoritativeFreshProviders = new Set<string>();
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
+			// An enabled, authenticated special provider runs its own discovery after startup.
+			const specialDiscovery =
+				SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP[providerId] === true &&
+				!disabledProviders.has(providerId) &&
+				this.authStorage.keys.source(providerId) !== undefined;
 			if (!cache) {
 				const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
 				const discoveryExpected =
-					sharedCatalogProvider ||
-					(descriptor !== undefined &&
-						(this.authStorage.keys.source(providerId) !== undefined ||
-							descriptor.allowUnauthenticated === true ||
-							this.#keylessProviders.has(providerId)));
-				if (discoveryExpected) {
+					!disabledProviders.has(providerId) &&
+					(sharedCatalogProvider ||
+						(descriptor !== undefined &&
+							(this.authStorage.keys.source(providerId) !== undefined ||
+								descriptor.allowUnauthenticated === true ||
+								this.#keylessProviders.has(providerId))) ||
+						specialDiscovery);
+				if (discoveryExpected && !this.#providerDiscoveryStates.has(providerId)) {
 					this.#providerDiscoveryStates.set(providerId, {
 						provider: providerId,
 						status: "idle",
@@ -1779,6 +1886,18 @@ export class ModelRegistry {
 					stale,
 					...(cacheContributed ? { fetchedAt: cache.updatedAt } : {}),
 					source: cacheContributed ? "cache" : "bundled",
+					models: cachedModels.map(model => model.id),
+				});
+			} else if (specialDiscovery && !this.#providerDiscoveryStates.has(providerId)) {
+				const hasCachedModels = cachedModels.length > 0;
+				const stale = !cache.fresh || !cache.authoritative || !hasCachedModels;
+				this.#providerDiscoveryStates.set(providerId, {
+					provider: providerId,
+					status: hasCachedModels ? "cached" : "unavailable",
+					optional: false,
+					stale,
+					...(hasCachedModels ? { fetchedAt: cache.updatedAt } : {}),
+					source: hasCachedModels ? "cache" : "bundled",
 					models: cachedModels.map(model => model.id),
 				});
 			}
@@ -2034,7 +2153,9 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
+		const loaded = this.#modelsConfigFile.tryLoad();
+		this.#publishModelsFileWarnings(loaded);
+		const { value, error, status } = loaded;
 
 		if (status === "error") {
 			return {
@@ -2883,10 +3004,12 @@ export class ModelRegistry {
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
+			// An offline pass only reads the cache: a missing row means "not fetched
+			// yet" (a cold, credential-scoped namespace), not an unreachable provider.
 			const status =
 				result.source === "cache"
 					? "cached"
-					: result.source === "bundled" && result.stale
+					: result.source === "bundled" && result.stale && strategy !== "offline"
 						? "unavailable"
 						: result.source === "bundled"
 							? "idle"
@@ -3438,7 +3561,7 @@ export class ModelRegistry {
 		// owned by refresh, discovery and runtime provider registration. Whole-
 		// catalog modifiers can inspect live credentials, so keep reprojecting
 		// those rather than extending the lifetime of their output.
-		if (availableProviders.size === 1 && this.#runtimeModelModifiers.size === 0) {
+		if (availableProviders.size === 1 && !this.#modelModifierCanApply()) {
 			const models = this.#modelsForProviderLookup(availableProviders.values().next().value!);
 			return kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind);
 		}
@@ -3777,11 +3900,14 @@ export class ModelRegistry {
 		return this.authStorage.keys.peek(provider, options);
 	}
 
-	/**
-	 * Check if a model is using OAuth credentials (subscription).
-	 */
+	/** Whether a model uses OAuth credentials. Kept separate from subscription billing for cache-tier decisions. */
 	isUsingOAuth(model: Model<Api>): boolean {
 		return this.authStorage.credentials.hasOAuth(model.provider);
+	}
+
+	/** Whether a model's credentials represent subscription billing. */
+	isUsingSubscription(model: Model<Api>): boolean {
+		return this.authStorage.credentials.hasSubscription(model.provider);
 	}
 
 	#clearRuntimeProviderState(providerName: string): void {
@@ -4019,8 +4145,13 @@ export class ModelRegistry {
 
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
-			// execution/error reporting by materializing only for this case.
-			if (config.oauth?.modifyModels && !this.#hasFullSnapshot) {
+			// execution/error reporting by materializing only for this case, and
+			// only once a credential lets the hook run at all.
+			if (
+				config.oauth?.modifyModels &&
+				!this.#hasFullSnapshot &&
+				this.authStorage.credentials.getOAuth(providerName)
+			) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
 			if (config.oauth?.modifyModels) {
@@ -4068,9 +4199,6 @@ export class ModelRegistry {
 			const fetcher = config.fetchDynamicModels;
 			const providerBaseUrl = config.baseUrl ?? "";
 			const providerApi = config.api;
-			const providerHeaders = config.headers;
-			const providerApiKey = config.apiKey;
-			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
@@ -4089,13 +4217,18 @@ export class ModelRegistry {
 					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
 					const results: Model<Api>[] = [];
 					for (const modelDef of modelDefs) {
+						// Provider-level headers/authHeader stay off live rows: this
+						// registration's #runtimeProviderOverrides entry applies them at
+						// projection. Baked in, every row would be header-bearing, which the
+						// model cache cannot persist, so a failed refresh would find no
+						// restorable rows and empty the catalog (#18227).
 						const overlay = buildCustomModelOverlay(
 							providerName,
 							modelDef.baseUrl ?? providerBaseUrl,
 							modelDef.api ?? providerApi,
-							providerHeaders,
-							providerApiKey,
-							providerAuthHeader,
+							undefined,
+							undefined,
+							undefined,
 							providerCompat,
 							undefined,
 							config.remoteCompaction,

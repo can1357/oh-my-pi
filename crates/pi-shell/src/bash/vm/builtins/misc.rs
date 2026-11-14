@@ -53,15 +53,13 @@ pub fn usable(
 	name: &[u8],
 	resolved: Option<IntrinsicId>,
 ) -> Result<Option<IntrinsicId>, StoreError> {
-	// Runs for every builtin command: nothing disabled (the root's flag,
-	// unless a subshell changed the list) skips the list.
-	let disabled = match vp
-		.overlay
-		.as_ref()
-		.and_then(|ov| ov.records.get(&KeyBuf::Misc(MiscKey::DisabledBuiltins)))
-	{
-		Some(Some(Record::Words(w))) => w.iter().any(|w| w == name),
-		Some(_) => false,
+	// Runs for every builtin command: nothing disabled (the root's flag; a
+	// forked vproc's own list) skips the list.
+	let disabled = match &vp.image {
+		Some(image) => matches!(
+			image.get(Key::Misc(MiscKey::DisabledBuiltins)),
+			Some(Record::Words(w)) if w.iter().any(|w| w == name)
+		),
 		None => {
 			k.root.builtins_disabled(store)?
 				&& matches!(
@@ -73,13 +71,40 @@ pub fn usable(
 	if disabled {
 		return Ok(None);
 	}
+	// A program's shell is a bash without readline
+	// ([`crate::bash::Profile::Tool`]): no programmable completion, no key
+	// bindings.
+	if matches!(
+		resolved,
+		Some(IntrinsicId::Compgen | IntrinsicId::Complete | IntrinsicId::Compopt | IntrinsicId::Bind)
+	) && crate::bash::vm::is_tool(store, vp)?
+	{
+		return Ok(None);
+	}
 	if name == b"strmatch" {
 		let on = words(store, vp, MiscKey::LoadedBuiltins)?
 			.iter()
 			.any(|w| w == name);
 		return Ok(on.then_some(IntrinsicId::Strmatch));
 	}
-	Ok(resolved.filter(|&id| id != IntrinsicId::Strmatch))
+	let resolved = resolved.filter(|&id| id != IntrinsicId::Strmatch);
+	// A zsh module's builtin exists while the module provides it or an
+	// autoload stub names it.
+	if let Some(id) = resolved
+		&& super::zsh_module::module_of(id).is_some()
+		&& !super::zsh_module::builtin_present(store, vp, id, name)?
+	{
+		return Ok(None);
+	}
+	// zsh: an autoload stub of a builtin no module of the engine defines
+	// (`zmodload -ab M NAME`) is a builtin, found before the path.
+	if resolved.is_none()
+		&& vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& super::zsh_module::builtin_stub(store, vp, name)?
+	{
+		return Ok(Some(IntrinsicId::ModuleStub));
+	}
+	Ok(resolved)
 }
 
 /// The builtin names `enable` knows, sorted as bash's table: bash's

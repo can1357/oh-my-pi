@@ -7,8 +7,25 @@ export function stripXdUrlPrefix(name: string): string {
 }
 
 /**
+ * `xd://` spelled in a tool-name charset without `:` or `/` (Anthropic allows
+ * `[a-zA-Z0-9_-]`): models substitute underscores, so `xd://recall` arrives as
+ * `xd_recall`, `xd__recall` or `xd___recall`.
+ */
+const XD_UNDERSCORE_PREFIX = /^xd_+/i;
+
+/** Returns `name` without an underscore-spelled `xd://` prefix. */
+export function stripXdUnderscorePrefix(name: string): string {
+	return name.replace(XD_UNDERSCORE_PREFIX, "");
+}
+
+/**
  * Parse an `xd://` URL into its device target.
  * Returns `null` for other or malformed URLs and `name: null` for the root.
+ *
+ * Trailing `:raw` / `:conflicts` stay in the name. Device URLs advertise
+ * `selectors: "none"`, and peeling them here would also widen write dispatch
+ * (`write xd://ast_edit:raw` would run the device). Cursor skips appending
+ * `:raw` for `xd://` instead.
  */
 export function parseXdUrl(input: string): { name: string | null } | null {
 	const trimmed = input.trim();

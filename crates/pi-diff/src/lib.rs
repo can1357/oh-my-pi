@@ -176,9 +176,19 @@ fn build_runs(arena: &ComponentArena, last: u32) -> Vec<Run> {
 /// (non-`oneChangePerToken`, no timeout / `maxEditLength`) execution path so
 /// the resulting run structure is identical.
 pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
+	myers_diff_within(old, new, old.len() + new.len())
+		.expect("Myers diff terminates within oldLen + newLen edits")
+}
+
+/// [`myers_diff`] bounded to `max_edits` added or removed tokens.
+///
+/// Returns `None` once the edit script needs more (jsdiff's `maxEditLength`).
+/// Bounds both time, `O((N + M) · max_edits)`, and frontier memory, for
+/// callers that can do without a diff of a wholesale rewrite.
+pub fn myers_diff_within(old: &[u32], new: &[u32], max_edits: usize) -> Option<Vec<Run>> {
 	let old_len = old.len() as isize;
 	let new_len = new.len() as isize;
-	let max_edit = old_len + new_len;
+	let max_edit = max_edits.min(old.len() + new.len()) as isize;
 	let offset = max_edit + 1;
 	let mut best: Vec<Option<PathState>> = vec![None; (2 * max_edit + 3) as usize];
 	let mut arena = ComponentArena::with_capacity((old.len() + new.len()).clamp(16, 4096));
@@ -187,7 +197,7 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 	let mut seed = PathState { old_pos: -1, last: NO_COMPONENT };
 	let seed_new_pos = extract_common(&mut arena, &mut seed, new, old, 0);
 	if seed.old_pos + 1 >= old_len && seed_new_pos + 1 >= new_len {
-		return build_runs(&arena, seed.last);
+		return Some(build_runs(&arena, seed.last));
 	}
 	best[offset as usize] = Some(seed);
 
@@ -241,7 +251,7 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 			};
 			let new_pos = extract_common(&mut arena, &mut base_path, new, old, diagonal);
 			if base_path.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-				return build_runs(&arena, base_path.last);
+				return Some(build_runs(&arena, base_path.last));
 			}
 			if base_path.old_pos + 1 >= old_len {
 				max_diagonal = max_diagonal.min(diagonal - 1);
@@ -256,26 +266,18 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 		}
 		edit_length += 1;
 	}
-	unreachable!("Myers diff terminates within oldLen + newLen edits")
+	None
 }
 
 /// Intern tokens as dense ids under exact equality.
-pub fn intern<T: Eq + Hash + Copy>(old: &[T], new: &[T]) -> (Vec<u32>, Vec<u32>) {
+pub fn intern<T: Eq + Hash>(old: &[T], new: &[T]) -> (Vec<u32>, Vec<u32>) {
 	fn assign<T: Eq + Hash + Copy>(ids: &mut HashMap<T, u32>, token: T) -> u32 {
 		let next = ids.len() as u32;
 		*ids.entry(token).or_insert(next)
 	}
 	let mut ids = HashMap::with_capacity(old.len() + new.len());
-	let old_ids = old
-		.iter()
-		.copied()
-		.map(|token| assign(&mut ids, token))
-		.collect();
-	let new_ids = new
-		.iter()
-		.copied()
-		.map(|token| assign(&mut ids, token))
-		.collect();
+	let old_ids = old.iter().map(|token| assign(&mut ids, token)).collect();
+	let new_ids = new.iter().map(|token| assign(&mut ids, token)).collect();
 	(old_ids, new_ids)
 }
 
@@ -334,7 +336,7 @@ pub fn line_tokens_str(text: &str) -> Vec<&str> {
 
 /// Myers runs over pre-split line tokens, so callers that also need the token
 /// slices for rendering split each text only once.
-pub fn diff_line_tokens<T: Eq + Hash + Copy>(old_tokens: &[T], new_tokens: &[T]) -> Vec<Run> {
+pub fn diff_line_tokens<T: Eq + Hash>(old_tokens: &[T], new_tokens: &[T]) -> Vec<Run> {
 	let (old_ids, new_ids) = intern(old_tokens, new_tokens);
 	myers_diff(&old_ids, &new_ids)
 }
@@ -998,6 +1000,19 @@ mod tests {
 			.into_iter()
 			.map(|change| (String::from_utf16(&change.value).unwrap(), change.added, change.removed))
 			.collect()
+	}
+
+	#[test]
+	fn line_tokens_accept_owned_normalized_keys() {
+		use std::borrow::Cow;
+
+		let old = [Cow::Owned("é".to_string()), Cow::Borrowed("old")];
+		let new = [Cow::Borrowed("é"), Cow::Owned("new".to_string())];
+		assert_eq!(diff_line_tokens(&old, &new), vec![
+			Run { count: 1, added: false, removed: false },
+			Run { count: 1, added: false, removed: true },
+			Run { count: 1, added: true, removed: false },
+		]);
 	}
 
 	#[test]

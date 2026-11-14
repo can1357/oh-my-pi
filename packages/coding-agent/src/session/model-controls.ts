@@ -41,7 +41,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -57,10 +57,19 @@ import {
 } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
-/** Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix. */
+/**
+ * Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix:
+ * Anthropic per-message `output_config`, or OpenAI `configuration_update` items (standard reasoning mode only).
+ */
 function takesPerMessageEffort(model: Model): boolean {
 	const { compat } = model;
-	return compat !== undefined && "supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true;
+	if (compat === undefined) return false;
+	if ("supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true) return true;
+	return (
+		"supportsConfigurationUpdate" in compat &&
+		compat.supportsConfigurationUpdate === true &&
+		model.reasoningMode !== "pro"
+	);
 }
 
 /**
@@ -156,8 +165,8 @@ export interface ModelControlsHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
-	resolveActiveEditMode(): EditMode;
-	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
+	resolveActiveEditMode(): EditModeSetting;
+	syncAfterModelChange(previousEditMode: EditModeSetting): Promise<void>;
 	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;

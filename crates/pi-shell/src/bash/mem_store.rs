@@ -1,10 +1,12 @@
 //! `MemStore`: the reference [`StateStore`], in memory.
 //!
 //! Used by `obash`, the testkit and the store conformance suite. Its maps are
-//! the shell's state (the engine keeps no copy): variables by name, the root
-//! shell's scopes as a stack of maps, every other record by key. Lookups
-//! borrow the key, so a hit allocates nothing, and [`Change::SetScalar`]
-//! reuses the value's buffer.
+//! the shell's state (the engine keeps no copy): global variables and every
+//! other record in an [`Image`] of persistent maps, the root shell's scopes
+//! as a stack of maps. Lookups borrow the key, so a hit allocates nothing,
+//! and [`Change::SetScalar`] reuses the value's buffer. Cloning the store,
+//! and [`StateStore::snapshot`], cost O(1): the copies share every record
+//! until one side writes it.
 //!
 //! Its image ([`MemStore::to_bytes`]) stands in for a heap snapshot: the
 //! fault injector serializes it, drops the shell, and restores into a fresh
@@ -13,91 +15,71 @@
 //! images force them into ordinary variable records, so snapshots contain
 //! values rather than process-local initializer functions.
 
-use std::sync::{Arc, OnceLock};
-
 use bstr::{BStr, BString};
-use hashbrown::{HashMap, hash_map::EntryRef};
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::bash::store::{
-	Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, Var, VarValue,
+use crate::bash::{
+	cow_map::CowMap,
+	image::Image,
+	store::{
+		Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, VarValue,
+	},
 };
 
 /// One root scope: its [`Record::Scope`] and its locals by name.
 type ScopeEntry = (Record, HashMap<BString, Record>);
 
-/// In-memory [`StateStore`].
+/// In-memory [`StateStore`]. Cloning it costs O(1) in its records and
+/// blobs: the clones share them until one writes ([`Image`]).
 #[derive(Clone, Debug, Default)]
 pub struct MemStore {
-	/// Global variables ([`Key::Var`]).
-	vars:     HashMap<BString, Record>,
-	/// Host defaults not yet observed. Resolved records use the ordinary
-	/// representation, including in images and scans.
-	deferred: HashMap<BString, Arc<DeferredScalar>>,
+	/// The root's process records ([`Key::forked`]): global variables,
+	/// functions, options, …, shared with the forks that cloned them.
+	image:       Image,
+	/// The records outside the image: kernel state and the root vproc's
+	/// own fields (job table, process table, `$?`, counters, …). Written
+	/// often while forks live, and never part of one.
+	other:       HashMap<KeyBuf, Record>,
 	/// The root shell's scopes, outermost first ([`Key::Scope`],
 	/// [`Key::Local`]).
-	scopes:   Vec<ScopeEntry>,
-	/// Every other record.
-	records:  HashMap<KeyBuf, Record>,
-	blobs:    HashMap<BlobSlot, Vec<u8>>,
-	epoch:    u64,
+	scopes:      Vec<ScopeEntry>,
+	/// `local_bloom[d]`: the [`local_bits`] of every local in scopes `0..=d`
+	/// ([`StateStore::may_have_local`]), one entry per scope. Deleting a
+	/// local leaves its bits until its scope pops: a false positive (a scope
+	/// walk), never a false negative.
+	local_bloom: Vec<[u64; 5]>,
+	blobs:       CowMap<BlobSlot, Vec<u8>>,
+	epoch:       u64,
 }
 
 /// The serialized form of a [`MemStore`]: records sorted by key (scopes
 /// before their locals), blobs sorted by slot.
 #[derive(Serialize, Deserialize)]
-struct Image {
+struct StoreImage {
 	records: Vec<(KeyBuf, Record)>,
 	blobs:   Vec<(BlobSlot, Vec<u8>)>,
 	epoch:   u64,
 }
 
-/// The shape error of `key`'s table.
-const fn shape(key: Key<'_>) -> StoreError {
-	StoreError::Shape { table: key.table() }
-}
-
-#[derive(Debug)]
-struct DeferredScalar {
-	initializer: fn() -> Option<BString>,
-	attrs:       Attrs,
-	record:      OnceLock<Option<Record>>,
-}
-
-impl DeferredScalar {
-	fn record(&self) -> Option<&Record> {
-		self
-			.record
-			.get_or_init(|| {
-				(self.initializer)()
-					.map(|value| Record::Var(Var { attrs: self.attrs, value: VarValue::Str(value) }))
-			})
-			.as_ref()
-	}
-}
-
+/// Equal stores hold the same records, blobs and epoch; the local-name
+/// bloom is an index (a deleted local leaves its bits) and does not count.
 impl PartialEq for MemStore {
 	fn eq(&self, other: &Self) -> bool {
-		if self.scopes != other.scopes
-			|| self.records != other.records
-			|| self.blobs != other.blobs
-			|| self.epoch != other.epoch
-			|| self.len() != other.len()
-		{
-			return false;
-		}
-		self
-			.vars
-			.iter()
-			.all(|(name, record)| other.record(Key::Var(BStr::new(name))) == Some(record))
-			&& self
-				.deferred
-				.iter()
-				.all(|(name, value)| other.record(Key::Var(BStr::new(name))) == value.record())
+		self.image == other.image
+			&& self.other == other.other
+			&& self.scopes == other.scopes
+			&& self.blobs == other.blobs
+			&& self.epoch == other.epoch
 	}
 }
 
 impl Eq for MemStore {}
+
+/// The shape error of `key`'s table.
+const fn shape(key: Key<'_>) -> StoreError {
+	StoreError::Shape { table: key.table() }
+}
 
 impl MemStore {
 	/// Empty store.
@@ -114,7 +96,7 @@ impl MemStore {
 		let mut blobs: Vec<(BlobSlot, Vec<u8>)> =
 			self.blobs.iter().map(|(s, b)| (*s, b.clone())).collect();
 		blobs.sort_unstable_by_key(|(s, _)| *s);
-		postcard::to_stdvec(&Image { records, blobs, epoch: self.epoch })
+		postcard::to_stdvec(&StoreImage { records, blobs, epoch: self.epoch })
 			.expect("MemStore serialization is infallible")
 	}
 
@@ -124,7 +106,7 @@ impl MemStore {
 	/// [`StoreError::Image`] when the bytes do not decode,
 	/// [`StoreError::Shape`] when a record does not fit its key.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Self, StoreError> {
-		let image: Image = postcard::from_bytes(bytes).map_err(StoreError::Image)?;
+		let image: StoreImage = postcard::from_bytes(bytes).map_err(StoreError::Image)?;
 		let mut store = Self::new();
 		for (key, record) in image.records {
 			store.put(key.as_key(), record)?;
@@ -161,30 +143,20 @@ impl MemStore {
 	#[inline]
 	pub fn record(&self, key: Key<'_>) -> Option<&Record> {
 		match key {
-			Key::Var(name) => self.vars.get(bytes(name)).or_else(|| {
-				self
-					.deferred
-					.get(bytes(name))
-					.and_then(|value| value.record())
-			}),
 			Key::Scope(depth) => self.scopes.get(depth as usize).map(|(r, _)| r),
 			Key::Local { depth, name } => self
 				.scopes
 				.get(depth as usize)
 				.and_then(|(_, vars)| vars.get(bytes(name))),
-			_ => self.records.get(&key),
+			_ if key.forked() => self.image.get(key),
+			_ => self.other.get(&key),
 		}
 	}
 
 	/// Number of records.
 	pub fn len(&self) -> usize {
-		self.vars.len()
-			+ self
-				.deferred
-				.values()
-				.filter(|value| value.record().is_some())
-				.count()
-			+ self.records.len()
+		self.image.len()
+			+ self.other.len()
 			+ self
 				.scopes
 				.iter()
@@ -199,26 +171,16 @@ impl MemStore {
 
 	/// Visit every record.
 	fn each(&self, f: &mut dyn FnMut(Key<'_>, &Record)) {
-		for (name, r) in &self.vars {
-			f(Key::Var(BStr::new(name)), r);
-		}
-		self.each_deferred(f);
+		self.image.each_var(&mut |name, r| f(Key::Var(name), r));
 		for (depth, (scope, vars)) in (0_u32..).zip(&self.scopes) {
 			f(Key::Scope(depth), scope);
 			for (name, r) in vars {
 				f(Key::Local { depth, name: BStr::new(name) }, r);
 			}
 		}
-		for (k, r) in &self.records {
+		self.image.each_other(f);
+		for (k, r) in &self.other {
 			f(k.as_key(), r);
-		}
-	}
-
-	fn each_deferred(&self, f: &mut dyn FnMut(Key<'_>, &Record)) {
-		for (name, value) in &self.deferred {
-			if let Some(record) = value.record() {
-				f(Key::Var(BStr::new(name)), record);
-			}
 		}
 	}
 
@@ -237,20 +199,13 @@ impl MemStore {
 			return Err(shape(key));
 		}
 		match key {
-			Key::Var(name) => {
-				let name: &[u8] = name;
-				self.deferred.remove(name);
-				match self.vars.get_mut(name) {
-					Some(slot) => *slot = record,
-					None => {
-						self.vars.insert(BString::from(name), record);
-					},
-				}
-			},
+			Key::Var(name) => self.image.put_var(name, record),
 			Key::Scope(depth) => {
 				let depth = depth as usize;
 				if depth == self.scopes.len() {
 					self.scopes.push((record, HashMap::new()));
+					let outer = self.local_bloom.last().copied().unwrap_or_default();
+					self.local_bloom.push(outer);
 				} else if let Some((scope, _)) = self.scopes.get_mut(depth) {
 					*scope = record;
 				} else {
@@ -261,18 +216,23 @@ impl MemStore {
 				let Some((_, vars)) = self.scopes.get_mut(depth as usize) else {
 					return Err(shape(key));
 				};
-				let name: &[u8] = name;
-				match vars.get_mut(name) {
-					Some(slot) => *slot = record,
-					None => {
-						vars.insert(BString::from(name), record);
-					},
+				if let Some(slot) = vars.get_mut(bytes(name)) {
+					*slot = record;
+				} else {
+					vars.insert(BString::from(bytes(name)), record);
+					let bits = local_bits(name);
+					for words in &mut self.local_bloom[depth as usize..] {
+						for (w, b) in bits {
+							words[w] |= b;
+						}
+					}
 				}
 			},
-			_ => match self.records.get_mut(&key) {
+			_ if key.forked() => self.image.put(key, record),
+			_ => match self.other.get_mut(&key) {
 				Some(slot) => *slot = record,
 				None => {
-					self.records.insert(key.to_buf(), record);
+					self.other.insert(key.to_buf(), record);
 				},
 			},
 		}
@@ -283,17 +243,22 @@ impl MemStore {
 	fn del(&mut self, key: Key<'_>) {
 		match key {
 			Key::Var(name) => {
-				self.vars.remove(bytes(name));
-				self.deferred.remove(bytes(name));
+				self.image.del_var(name);
 			},
-			Key::Scope(depth) => self.scopes.truncate(depth as usize),
+			Key::Scope(depth) => {
+				self.scopes.truncate(depth as usize);
+				self.local_bloom.truncate(depth as usize);
+			},
 			Key::Local { depth, name } => {
 				if let Some((_, vars)) = self.scopes.get_mut(depth as usize) {
 					vars.remove(bytes(name));
 				}
 			},
+			_ if key.forked() => {
+				self.image.del(key);
+			},
 			_ => {
-				self.records.remove(&key);
+				self.other.remove(&key);
 			},
 		}
 	}
@@ -303,13 +268,7 @@ impl MemStore {
 	#[inline]
 	fn var_mut(&mut self, key: Key<'_>) -> Option<&mut VarValue> {
 		let record = match key {
-			Key::Var(name) => match self.vars.entry_ref(name) {
-				EntryRef::Occupied(slot) => Some(slot.into_mut()),
-				EntryRef::Vacant(slot) => {
-					let record = self.deferred.remove(bytes(name))?.record()?.clone();
-					Some(slot.insert(record))
-				},
-			},
+			Key::Var(name) => self.image.var_mut(name),
 			Key::Local { depth, name } => self
 				.scopes
 				.get_mut(depth as usize)
@@ -321,6 +280,29 @@ impl MemStore {
 			_ => None,
 		}
 	}
+}
+
+/// `(word, bit)` pairs of local `name` in a [`MemStore::local_bloom`]
+/// entry. Word 0 is exact for one-byte names (bit `c & 63`: `[A-Za-z_]`
+/// never share one); words 1 to 4 are a 256-bit bloom with two bits per
+/// longer name, keyed by its length and its first and last two bytes. Per
+/// recursive call (scope push, two locals, lookups, pop) it costs about a
+/// third of a refcounted name map, which allocates each new name.
+#[inline]
+fn local_bits(name: &[u8]) -> [(usize, u64); 2] {
+	let key = match name {
+		[c] => return [(0, 1 << (c & 63)); 2],
+		[a, b, .., y, z] => {
+			name.len() as u64
+				| u64::from(u16::from_le_bytes([*a, *b])) << 8
+				| u64::from(u16::from_le_bytes([*y, *z])) << 24
+		},
+		[first, .., last] => name.len() as u64 | u64::from(*first) << 8 | u64::from(*last) << 16,
+		[] => 0,
+	};
+	let h = key.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+	let (p, q) = ((h >> 56) as usize, (h >> 48) as usize & 255);
+	[(1 + (p >> 6), 1 << (p & 63)), (1 + (q >> 6), 1 << (q & 63))]
 }
 
 /// The bytes of a name, for map lookups by `[u8]`.
@@ -335,17 +317,20 @@ fn assign(dst: &mut BString, src: &[u8]) {
 }
 
 impl StateStore for MemStore {
+	fn may_have_local(&mut self, name: &[u8]) -> bool {
+		self
+			.local_bloom
+			.last()
+			.is_some_and(|top| local_bits(name).iter().all(|&(w, b)| top[w] & b != 0))
+	}
+
 	fn defer_scalar(
 		&mut self,
 		name: &[u8],
 		attrs: Attrs,
 		initializer: fn() -> Option<BString>,
 	) -> Result<bool, StoreError> {
-		self.vars.remove(name);
-		self.deferred.insert(
-			BString::from(name),
-			Arc::new(DeferredScalar { initializer, attrs, record: OnceLock::new() }),
-		);
+		self.image.defer_var(name, attrs, initializer);
 		Ok(true)
 	}
 
@@ -355,12 +340,7 @@ impl StateStore for MemStore {
 
 	fn scan(&mut self, table: Table, f: &mut dyn FnMut(Key<'_>, &Record)) -> Result<(), StoreError> {
 		match table {
-			Table::Var => {
-				for (name, r) in &self.vars {
-					f(Key::Var(BStr::new(name)), r);
-				}
-				self.each_deferred(f);
-			},
+			Table::Var => self.image.each_var(&mut |name, r| f(Key::Var(name), r)),
 			Table::Scope => {
 				for (depth, (scope, _)) in (0_u32..).zip(&self.scopes) {
 					f(Key::Scope(depth), scope);
@@ -374,12 +354,12 @@ impl StateStore for MemStore {
 				}
 			},
 			_ => {
-				for (k, r) in self
-					.records
-					.iter()
-					.filter(|(k, _)| k.as_key().table() == table)
-				{
-					f(k.as_key(), r);
+				self.image.each_record(table, f);
+				for (k, r) in &self.other {
+					let key = k.as_key();
+					if key.table() == table {
+						f(key, r);
+					}
 				}
 			},
 		}
@@ -429,6 +409,12 @@ impl StateStore for MemStore {
 					_ => return Err(shape(key)),
 				}
 			},
+			Change::InsertElem(key, buckets, k, value) => match self.var_mut(key) {
+				Some(VarValue::Assoc(items)) => {
+					items.insert_front(buckets, BString::from(bytes(k)), BString::from(value));
+				},
+				_ => return Err(shape(key)),
+			},
 			Change::DelElem(key, elem) => match (self.var_mut(key), elem) {
 				(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
 					if let Ok(p) = items.binary_search_by_key(&i, |(k, _)| *k) {
@@ -461,6 +447,10 @@ impl StateStore for MemStore {
 	fn epoch(&self) -> u64 {
 		self.epoch
 	}
+
+	fn snapshot(&mut self) -> Result<Image, StoreError> {
+		Ok(self.image.clone())
+	}
 }
 
 #[cfg(test)]
@@ -468,6 +458,7 @@ mod tests {
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use super::*;
+	use crate::bash::store::Var;
 
 	#[test]
 	fn deferred_scalars_observe_and_snapshot_as_ordinary_records() {

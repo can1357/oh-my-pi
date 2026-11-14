@@ -54,7 +54,7 @@ Hook-capability loading already applies its own hook-specific disabled ids, so t
 
 ### 3) Installed plugin extension entries
 
-After hook discovery, `discoverAndLoadExtensions()` appends extension entry points from enabled installed plugins via `getAllPluginExtensionPaths(cwd)`.
+After hook discovery, `discoverAndLoadExtensions()` appends extension entry points from enabled installed plugins via `listPackageExtensionModules()`.
 
 Plugin extension entries come from package `omp.extensions` / `pi.extensions` manifests, including enabled feature entries.
 
@@ -163,6 +163,11 @@ disabledExtensions:
 An explicitly configured file path bypasses this name filter. Explicit-only
 sessions (`--no-extensions` / `disableExtensionDiscovery`) also omit the settings
 disable list entirely.
+
+`/extensions` lists every module this filter governs — native modules, installed-plugin
+entries, and entries expanded from configured directories (under OMP Extension
+Packages) — and toggles the same ids. Configured file paths have no row because
+the list cannot disable them.
 
 ### Live source changes
 
@@ -323,6 +328,15 @@ Revived children inherit the current owning session's extension roots and
 prepared factories, not extension authority from a saved transcript. Cold
 discovery without prepared factories respects the owner's explicit-only or
 merged roots.
+
+Caller-supplied `CreateAgentSessionOptions.extensions` are recorded in
+`preparedExtensions` under synthetic `<inline-N>` source IDs and rebind only in
+in-process children. `topLevelExtensions` (`@internal`; the interactive CLI's
+Warp event bridge) and the session's own autoresearch and custom-tool factories
+stay with that session. Worker threads re-import only entries whose
+`resolvedPath` is a filesystem path; `<inline-N>` entries arrive without a
+factory, and the main thread logs one warning per inline extension naming its
+ID and factory.
 
 Extension factories still execute host code when rebound; tool restrictions are
 not an extension sandbox. Existing per-module load-failure handling is unchanged.

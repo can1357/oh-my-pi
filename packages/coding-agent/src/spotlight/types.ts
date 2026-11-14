@@ -12,8 +12,8 @@ import type { SpotlightClient } from "./client";
  * prompt), `find` ranks with Spotlight, and the session journals one entry per shaped result.
  *
  * "Plain" is what a result would be without shaping: the tool's own output with pi's read summarizer and bash
- * minimizer off (the experiment turns both off), under pi's normal limits. Held-out and gated results get it, and
- * savings count against it.
+ * minimizer off (the experiment turns both off), under pi's normal limits. Held-out results get it, and savings count
+ * against it.
  */
 
 /** Stencil Cloud's Spotlight route. */
@@ -102,9 +102,11 @@ export interface ShapeInput {
 	/**
 	 * `read`: the path or URL as the agent wrote it, selectors included; any other tool: its `path` argument (a search
 	 * of `artifact://` output pages it back and is left whole, as are `agent://`, `local://`, `skill://`, `rule://`, and
-	 * a `read` of Markdown or of one line range without `:raw`).
+	 * a `read` of Markdown or of line ranges that all end).
 	 */
 	path?: string;
+	/** `read` with `:raw`: the text is the selected bytes, which paste back into tools, and is left whole. */
+	raw?: boolean;
 	/** `read` of a text file: its path as the agent named it, and the file's own content lines of the window. */
 	read?: {
 		path: string;

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
+import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
 import { ReadTool } from "../../src/tools/read";
 
 type ToolTextResult = {
@@ -72,7 +73,7 @@ describe("JSON query in read tool", () => {
 
 		await fs.writeFile(jsonFile, JSON.stringify(testData, null, 2), "utf-8");
 		await fs.writeFile(jsonlFile, testLines.join("\n") + "\n", "utf-8");
-		// Literals JS numbers cannot hold; jaq prints them verbatim.
+		// Literals JS numbers cannot hold; jq prints them verbatim.
 		await fs.writeFile(numbersFile, '{"ids":[12345678901234567890,1.0,3]}', "utf-8");
 		// `.name` fails on the third element.
 		await fs.writeFile(mixedFile, '[{"name":"a"},{"name":"b"},3]', "utf-8");
@@ -122,13 +123,25 @@ describe("JSON query in read tool", () => {
 		expect(lines).toEqual(["alice", "charlie"]);
 	});
 
+	it("names the byte budget when pretty-printed query output is truncated", async () => {
+		const largeJsonlFile = path.join(tempDir, "large-events.jsonl");
+		await Bun.write(
+			largeJsonlFile,
+			`${JSON.stringify({ id: 0, text: "x".repeat(60_000) })}\n${JSON.stringify({ id: 1, text: "short" })}\n`,
+		);
+
+		const tool = wrapToolWithMetaNotice(new ReadTool(session));
+		const result = await tool.execute("call_large_pretty", { path: `${largeJsonlFile}?q=.&limit=8` });
+		expect(getText(result)).toBe('{\n  "id": 0,\n\n[Showing lines 1-2 of 8 (50.0KB limit). Use :3 to continue]');
+	});
+
 	it("fails cleanly with descriptive error on invalid jq syntax", async () => {
 		await expect(readTool.execute("call_6", { path: `${jsonFile}?q=invalid [[[` })).rejects.toThrow(
 			/Failed to execute JSON query/i,
 		);
 	});
 
-	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+	it("retains the reason and key when jq rejects a large JSON value", async () => {
 		const largeFile = path.join(tempDir, "large.json");
 		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
 		await Bun.write(largeFile, JSON.stringify([{ rows }]));
@@ -138,8 +151,7 @@ describe("JSON query in read tool", () => {
 			error => error,
 		);
 		const message = String(error);
-		expect(message).toContain("cannot index");
-		expect(message).toContain('with "changedFiles"');
+		expect(message).toContain('Cannot index array with string ("changedFiles")');
 		expect(message.length).toBeLessThan(1000);
 	});
 
@@ -264,7 +276,7 @@ describe("JSON query in read tool", () => {
 
 	it("stops jq once the page is full, before later results fail", async () => {
 		const result = await readTool.execute("call_early_stop", { path: `${mixedFile}?q=.[] | .name&raw=true&limit=1` });
-		// jaq may report the later failure before it is stopped; the page still stands
+		// jq may report the later failure before it is stopped; the page still stands
 		expect(getText(result).split("\n").slice(-2)).toEqual([
 			"a",
 			"[more results; append ?q=.[] | .name&raw=true&limit=1&offset=1 to continue]",

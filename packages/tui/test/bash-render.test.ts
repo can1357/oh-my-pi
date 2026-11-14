@@ -7,6 +7,9 @@ import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { defaultShellVizPreferences, readShellPresentation } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -319,6 +322,58 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
+	});
+
+	it("keeps a long embedded argument wrapped inside the pending card under its nesting indent", () => {
+		const command = `pip3 list 2>/dev/null | grep -i -E "onnx|torch|ultralytics|opencv|numpy|espeak|sounddevice|piper|mediapipe|tflite|tf-|tensorflow"; sw_vers`;
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		const component = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const rows = component.render(77).map(row => Bun.stripANSI(row));
+		for (const row of rows) {
+			expect(visibleWidth(row)).toBeLessThanOrEqual(77);
+			expect(row).toMatch(/^[│╭╰].*[│╮╯]$/);
+		}
+		const inner = rows.slice(1, -1).map(row => row.slice(1, -1));
+		expect(inner.filter(row => row.trim().length === 0)).toEqual([]);
+		const indent = (row: string) => row.length - row.trimStart().length;
+		const topLevel = indent(inner.find(row => row.includes("sw_vers"))!);
+		const body = inner.filter(row => /onnx|tensorflow/.test(row));
+		expect(body.join("").replace(/\s/g, "")).toContain("tflite|tf-|tensorflow");
+		for (const row of body) expect(indent(row)).toBeGreaterThan(topLevel);
+	});
+
+	it("keeps the interpreted command when a result lands before the run's first trace", () => {
+		// An `async` call returns its background-start result before the trace poll ran once.
+		setThemeInstance(uiTheme);
+		const command = 'cd /elsewhere && for v in a b; do echo "$v" || break; done';
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		// Rows between the card's top border and the next divider (`Output`, or the bottom border).
+		const commandPane = (rows: readonly string[]) => {
+			const plain = rows.map(row => Bun.stripANSI(row));
+			const end = plain.findIndex((row, index) => index > 0 && /^[├╰]/.test(row));
+			return plain.slice(1, end);
+		};
+		const call = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const result = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { async: { state: "running", jobId: "bg_1", type: "bash" }, cwd: "/elsewhere" },
+			},
+			{ expanded: false, isPartial: false, shellPresentation },
+			uiTheme,
+			{ command },
+		);
+		const callPane = commandPane(call.render(90));
+		expect(commandPane(result.render(90))).toEqual(callPane);
+		expect(callPane.join("\n")).not.toContain("echo");
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

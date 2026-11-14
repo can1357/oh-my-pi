@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
@@ -10,20 +11,30 @@ import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
-import type {
-	DocumentBuildStatus,
-	LspClient,
-	LspJsonRpcId,
-	LspJsonRpcNotification,
-	LspJsonRpcRequest,
-	LspJsonRpcResponse,
-	LspTransport,
-	LspWriteSink,
-	PublishDiagnosticsParams,
-	ServerConfig,
-	WorkspaceEdit,
+import { MUX_RESTART_METHOD } from "./mux/protocol";
+import {
+	type DocumentBuildStatus,
+	FileChangeType,
+	type LspClient,
+	type LspJsonRpcId,
+	type LspJsonRpcNotification,
+	type LspJsonRpcRequest,
+	type LspJsonRpcResponse,
+	type LspTransport,
+	type LspWriteSink,
+	type PublishDiagnosticsParams,
+	type ServerConfig,
+	type WorkspaceEdit,
 } from "./types";
-import { detectLanguageId, EquivalentUriMap, fileToUri, readTextFromDisk, uriToFile } from "./utils";
+import {
+	detectLanguageId,
+	EquivalentUriMap,
+	fileToUri,
+	mergeDiagnosticLists,
+	readTextFromDisk,
+	uriToFile,
+} from "./utils";
+import { WATCHED_FILES_METHOD, WatchedFilesForwarder } from "./watched-files";
 
 /**
  * A JSON-RPC error response to one of our requests. The message keeps the code, so
@@ -366,12 +377,20 @@ const CLIENT_CAPABILITIES = {
 	},
 };
 
-/** LSP `FileChangeType` values for workspace/didChangeWatchedFiles notifications. */
-export enum FileChangeType {
-	Created = 1,
-	Changed = 2,
-	Deleted = 3,
-}
+/**
+ * Capabilities for servers that hand file watching to the client (every server
+ * unless configured with `watchFiles: false`): the client watches the files
+ * they register (see watched-files.ts) instead of their own watcher, which can
+ * fail in ways the client cannot contain (tsgo re-arms in a tight loop on SMB
+ * drives, and does not watch at all on Linux).
+ */
+const WATCHING_CLIENT_CAPABILITIES = {
+	...CLIENT_CAPABILITIES,
+	workspace: {
+		...CLIENT_CAPABILITIES.workspace,
+		didChangeWatchedFiles: { dynamicRegistration: true, relativePatternSupport: true },
+	},
+};
 
 /** Filesystem change authored by the harness and announced to active LSP clients. */
 export interface WatchedFileChange {
@@ -553,10 +572,21 @@ async function startMessageReader(client: LspClient): Promise<void> {
 							// Server notification
 							if (message.method === "textDocument/publishDiagnostics" && message.params) {
 								const params = message.params as PublishDiagnosticsParams;
-								client.diagnostics.set(params.uri, {
+								const record = {
 									diagnostics: params.diagnostics,
 									version: params.version ?? null,
-								});
+								};
+								client.publishedDiagnostics.set(params.uri, record);
+								if (supportsDocumentDiagnostics(client)) {
+									const pulled = client.pulledDiagnostics.get(params.uri)?.diagnostics ?? [];
+									const combined = mergeDiagnosticLists(pulled, params.diagnostics);
+									client.diagnostics.set(params.uri, {
+										diagnostics: combined,
+										version: record.version,
+									});
+								} else {
+									client.diagnostics.set(params.uri, record);
+								}
 								client.diagnosticsVersion += 1;
 								if (typeof params.version === "number") client.publishesDocumentVersions = true;
 							} else if (message.method === "$/progress" && message.params) {
@@ -769,6 +799,7 @@ async function addWorkspaceFolders(
 		undoLoad();
 		throw err;
 	}
+	void client.watchedFiles?.refresh();
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -930,12 +961,34 @@ export async function applyWorkspaceEditWithLsp(
 interface DynamicCapabilityRegistration {
 	id?: unknown;
 	method?: unknown;
+	registerOptions?: unknown;
 }
 
 interface DynamicCapabilityParams {
 	registrations?: DynamicCapabilityRegistration[];
 	unregisterations?: DynamicCapabilityRegistration[];
 	unregistrations?: DynamicCapabilityRegistration[];
+}
+
+/**
+ * The watcher of a server this client spawned and asked to hand watching over
+ * (`watchFiles`). A mux-shared server's watcher belongs to the mux, which
+ * outlives and is shared by every attached client.
+ */
+function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
+	// `watchFiles` is on unless configured `false`.
+	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
+	client.watchedFiles ??= new WatchedFilesForwarder({
+		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		send: changes =>
+			sendNotification(
+				client,
+				WATCHED_FILES_METHOD,
+				{ changes },
+				AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
+			),
+	});
+	return client.watchedFiles;
 }
 
 function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest): void {
@@ -950,6 +1003,9 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 		for (const registration of params.registrations) {
 			if (typeof registration.id === "string" && typeof registration.method === "string") {
 				registrations.set(registration.id, registration.method);
+				if (registration.method === WATCHED_FILES_METHOD) {
+					void ownWatchedFiles(client)?.register(registration.id, registration.registerOptions);
+				}
 			}
 		}
 		return;
@@ -962,6 +1018,7 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	for (const registration of unregistrations) {
 		if (typeof registration.id === "string") {
 			registrations.delete(registration.id);
+			void client.watchedFiles?.unregister(registration.id);
 		}
 	}
 }
@@ -1289,7 +1346,7 @@ export function shutdownStaleClients(
 		const stale = Array.from(clients.values()).filter(
 			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
 		);
-		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
+		const results = await Promise.all(stale.map(client => shutdownClientServer(client)));
 		const failed = stale.filter((_client, index) => results[index] !== true);
 		if (failed.length > 0) {
 			throw new Error(
@@ -1419,6 +1476,8 @@ export async function getOrCreateClient(
 			config,
 			requestId: 0,
 			diagnostics: new EquivalentUriMap(),
+			publishedDiagnostics: new EquivalentUriMap(),
+			pulledDiagnostics: new EquivalentUriMap(),
 			diagnosticsVersion: 0,
 			dynamicCapabilityRegistrations: new Map(),
 			openFiles: new Map(),
@@ -1439,6 +1498,7 @@ export async function getOrCreateClient(
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
+			client.watchedFiles?.close();
 
 			// Reject any pending requests — the server is gone, they will never complete.
 			if (client.pendingRequests.size > 0) {
@@ -1474,7 +1534,7 @@ export async function getOrCreateClient(
 					processId: process.pid,
 					rootUri: fileToUri(cwd),
 					rootPath: cwd,
-					capabilities: CLIENT_CAPABILITIES,
+					capabilities: client.config.watchFiles === false ? CLIENT_CAPABILITIES : WATCHING_CLIENT_CAPABILITIES,
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
@@ -1610,6 +1670,8 @@ function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 		if (pendingDiskWrites.has(uri) || fileOperationLocks.has(`${client.name}:${uri}`)) continue;
 		client.openFiles.delete(uri);
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
+		client.publishedDiagnostics.delete(uri);
 		(client.idleClosedFiles ??= new Map()).set(uri, info.version);
 		const notification: LspJsonRpcNotification = {
 			jsonrpc: "2.0",
@@ -1741,7 +1803,36 @@ export async function reconcileFileFromDisk(
 		return reopening && client.openFiles.has(uri);
 	}
 	openFile.lastUsedAt = Date.now();
+	return syncOpenFileFromDisk(client, filePath, uri, "throw", signal);
+}
 
+/** What a sync does with an open document whose file can no longer be read as text. */
+export type UnreadableOpenFile = "throw" | "close";
+
+/** What stat says identifies a file's bytes (change time, modification time, size); undefined when stat fails. */
+async function diskStamp(filePath: string): Promise<string | undefined> {
+	try {
+		const stats = await fs.stat(filePath, { bigint: true });
+		return `${stats.ctimeNs}:${stats.mtimeNs}:${stats.size}`;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Push disk text for an open document whose overlay diverged from it; `true` when a
+ * `didChange` went out. Does not count as a use of the document, so a sync of every
+ * open document leaves idle ones to close. A file gone from disk is closed; one that
+ * exists but cannot be read (a directory now, no permission, a FIFO) throws or is
+ * closed per `unreadable`.
+ */
+async function syncOpenFileFromDisk(
+	client: LspClient,
+	filePath: string,
+	uri: string,
+	unreadable: UnreadableOpenFile,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	// An in-flight OMP write has already synced newer (possibly formatted) text to
 	// the server ahead of committing it to disk; the on-disk file is the stale side,
 	// so reconciling from it would clobber the overlay. Leave it to the write.
@@ -1764,13 +1855,19 @@ export async function reconcileFileFromDisk(
 			return;
 		}
 
+		// A file whose stat is unchanged since a sync that left the server holding its text needs
+		// no read: the sweep over every open document then costs one stat each.
+		const stamp = await diskStamp(filePath);
+		throwIfAborted(signal);
+		if (stamp !== undefined && info.disk?.stamp === stamp && info.disk.hash === info.syncedHash) return;
+
 		let content: string;
 		try {
 			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
-			if (!isEnoent(err)) throw err;
-			// Deleted outside OMP; a write that started meanwhile owns the overlay instead.
+			if (!isEnoent(err) && (unreadable === "throw" || signal?.aborted)) throw err;
+			// Deleted (or unreadable) outside OMP; a write that started meanwhile owns the overlay instead.
 			if (!pendingDiskWrites.has(uri)) await closeDocument(client, uri, signal);
 			return;
 		}
@@ -1779,11 +1876,14 @@ export async function reconcileFileFromDisk(
 		// synced its overlay in the meantime, making this disk snapshot stale.
 		if (pendingDiskWrites.has(uri)) return;
 		const signature = documentSignature(content);
+		// Stat before read: a change in between leaves an older stamp, which only forces a later re-read.
+		if (stamp !== undefined) info.disk = { stamp, hash: signature };
 		if (signature === info.syncedHash) return;
 
 		// Drop cached diagnostics computed against the stale document before the
 		// server recomputes them for the reconciled content.
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
 		const version = ++info.version;
 		throwIfAborted(signal);
 		await sendNotification(
@@ -1819,20 +1919,25 @@ export async function reconcileFileFromDisk(
  * request reports success (#15772). Reconciling only the requested target
  * leaves those consumers stale, so sync all open documents first.
  *
- * Files with an in-flight OMP write are skipped by
- * {@link reconcileFileFromDisk} (their overlay leads disk), unchanged files
- * send nothing, and `excludeUri` is left for the caller to sync. Returns the
- * number of documents that were re-synced.
+ * Files with an in-flight OMP write are skipped (their overlay leads disk),
+ * unchanged files send nothing, and `excludeUri` is left for the caller to
+ * sync. The sweep is not a use of each document, so idle ones still close.
+ * `unreadable: "close"` closes a document whose file can no longer be read,
+ * so one broken file does not fail a query about another.
+ * Returns the number of documents that were re-synced.
  */
 export async function reconcileOpenFilesFromDisk(
 	client: LspClient,
 	signal?: AbortSignal,
 	excludeUri?: string,
+	unreadable: UnreadableOpenFile = "throw",
 ): Promise<number> {
 	let reconciled = 0;
-	for (const uri of Array.from(client.openFiles.keys())) {
+	for (const [uri, info] of Array.from(client.openFiles)) {
 		if (uri === excludeUri || !uri.startsWith("file://")) continue;
-		if (await reconcileFileFromDisk(client, uriToFile(uri), signal)) reconciled++;
+		throwIfAborted(signal);
+		if (client.openFiles.get(uri) !== info) continue;
+		if (await syncOpenFileFromDisk(client, uriToFile(uri), uri, unreadable, signal)) reconciled++;
 	}
 	return reconciled;
 }
@@ -1877,6 +1982,7 @@ export async function syncContent(
 	const syncPromise = (async () => {
 		// Clear stale diagnostics before syncing new content
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
 
 		const info = client.openFiles.get(uri);
 
@@ -2017,11 +2123,17 @@ export async function notifyWorkspaceWatchedFiles(
 						pendingDiskWrites.has(uri) &&
 						published !== undefined &&
 						published.version === client.openFiles.get(uri)?.version;
-					if (!current) client.diagnostics.delete(uri);
+					if (!current) {
+						client.diagnostics.delete(uri);
+						client.pulledDiagnostics.delete(uri);
+					}
 					return { uri, type: change.type };
 				});
 			if (clientChanges.length === 0) return;
-			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			const params = { changes: clientChanges };
+			// The watcher sees these writes too; it skips echoing them (the mux does this for shared servers).
+			client.watchedFiles?.announced(params);
+			await sendNotification(client, WATCHED_FILES_METHOD, params, sendSignal);
 			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
 			await refreshOpenFiles(client, sendSignal);
 		}),
@@ -2099,6 +2211,7 @@ async function refreshDocument(
 		// Otherwise an unrelated publishDiagnostics notification can advance the global
 		// diagnostics version and cause waiters to accept stale unversioned diagnostics.
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
 		const info = client.openFiles.get(uri);
 
 		if (!info) {
@@ -2211,6 +2324,8 @@ async function closeDocument(client: LspClient, uri: string, signal?: AbortSigna
 	await sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal);
 	client.openFiles.delete(uri);
 	client.diagnostics.delete(uri);
+	client.pulledDiagnostics.delete(uri);
+	client.publishedDiagnostics.delete(uri);
 }
 
 async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolean> {
@@ -2260,6 +2375,22 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 		maybeStartIdleChecker(client);
 	}
 	return exited;
+}
+
+/**
+ * Tear down a client together with the language-server process behind it.
+ *
+ * A broker-shared link's own `shutdown`/`exit` only detaches it: the mux answers
+ * both and keeps the server idle for reuse. When the server must not survive —
+ * a restart, or a superseded configuration that no reconnect will ask for —
+ * ask the mux to kill the link's server first (best-effort: the link may be the
+ * wedged part), then confirm the link exits like any other client.
+ */
+export async function shutdownClientServer(client: LspClient): Promise<boolean> {
+	if (client.proc.sharedMux) {
+		await sendNotification(client, MUX_RESTART_METHOD, undefined, AbortSignal.timeout(2_000)).catch(() => {});
+	}
+	return await shutdownClientInstance(client);
 }
 
 /**

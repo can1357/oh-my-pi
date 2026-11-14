@@ -1,8 +1,10 @@
 import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
+import { bgAnsi, colorToAnsi, fgAnsi, isLightLuma, resolveToHex } from "./color";
 import {
+	ANSI_COLOR_INDEX,
+	type AnsiColor,
 	type ColorMode,
 	isValidThemeColor,
 	OPTIONAL_THEME_COLOR_RECORD,
@@ -150,6 +152,7 @@ function wrapForeground(ansi: string, text: string): string {
 // Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
 // root chalk context, so later `chalk.level` changes still apply.
 const boldStyler = chalk.bold;
+const faintStyler = chalk.dim;
 const italicStyler = chalk.italic;
 const underlineStyler = chalk.underline;
 const strikethroughStyler = chalk.strikethrough;
@@ -182,6 +185,8 @@ export class Theme {
 	readonly #hexFgColors: Record<ThemeColor, string>;
 	/** Resolved hex strings for background colors — populated at construction. */
 	readonly #hexBgColors: Record<ThemeBg, string>;
+	/** Foreground SGR per `terminal.ansi` index; slots the theme omits use the terminal's palette. */
+	readonly #ansiFgColors: readonly string[];
 	/** Lazily resolved `fgResolved` ANSI per color; colors and mode are fixed per instance. */
 	readonly #resolvedFgColors = new Map<ThemeColor, string>();
 	/** Lazily built, frozen `sessionAccentInputs`; every input it reads is fixed per instance. */
@@ -205,10 +210,11 @@ export class Theme {
 		private readonly symbolPreset: SymbolPreset,
 		symbolOverrides: Partial<Record<SymbolKey, string>>,
 		spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>> = {},
+		ansiPalette: ReadonlyArray<string | number> = [],
 	) {
 		this.statusLineLuminance = colorLuma(bgColors.statusLineBg);
 		this.#statusLineContrastLuminance = relativeLuminance(bgColors.statusLineBg);
-		const slIsLight = this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		const slIsLight = isLightLuma(this.statusLineLuminance);
 
 		this.#fgColors = {} as Record<ThemeColor, string>;
 		this.#hexFgColors = {} as Record<ThemeColor, string>;
@@ -227,6 +233,7 @@ export class Theme {
 			this.#fgColors[key] ??= "\x1b[39m";
 			this.#hexFgColors[key] ??= "";
 		}
+		this.#ansiFgColors = Array.from({ length: 16 }, (_, index) => fgAnsi(ansiPalette[index] ?? index, mode));
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
@@ -250,7 +257,7 @@ export class Theme {
 
 	/** True when the active theme has a light status-line background. */
 	get isLight(): boolean {
-		return this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		return isLightLuma(this.statusLineLuminance);
 	}
 
 	/**
@@ -350,7 +357,8 @@ export class Theme {
 	/**
 	 * True when the theme paints `color` with a real foreground — i.e. the token
 	 * exists and is not the empty string (terminal default, `\x1b[39m`). Optional
-	 * tokens absent from the theme JSON are also false. Callers use this to keep
+	 * tokens absent from the theme JSON are also false, except `mdExtensionLink`, which
+	 * `createTheme` derives from `mdLink` and `text`. Callers use this to keep
 	 * terminal-default behavior byte-for-byte when an optional token is unset.
 	 */
 	hasColor(color: ThemeColor): boolean {
@@ -362,6 +370,15 @@ export class Theme {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
 		return wrapForeground(ansi, text);
+	}
+
+	/**
+	 * Color `text` with slot `color` of the theme's `terminal.ansi` palette, or
+	 * the terminal's own palette when the theme ships none. Like {@link fg}, the
+	 * color resumes after nested foreground resets.
+	 */
+	ansiFg(color: AnsiColor, text: string): string {
+		return wrapForeground(this.#ansiFgColors[ANSI_COLOR_INDEX[color]], text);
 	}
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
@@ -406,6 +423,11 @@ export class Theme {
 
 	bold(text: string): string {
 		return boldStyler(text);
+	}
+
+	/** Reduce terminal intensity without replacing the text's foreground colors. */
+	faint(text: string): string {
+		return faintStyler(text);
 	}
 
 	italic(text: string): string {

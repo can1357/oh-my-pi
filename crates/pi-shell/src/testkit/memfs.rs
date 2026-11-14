@@ -1,9 +1,9 @@
 //! `MemFs`: an in-memory [`Fs`] with seeded latency (`Pending` answers that
 //! resolve on a timer thread) and fault injection (EIO, EAGAIN, ENOSPC).
 //!
-//! `MemFs::with_latency(seed, 1.0, max_ms)` makes every operation `Pending`,
-//! which checks that no engine path expects a synchronous filesystem answer
-//!.
+//! `MemFs::with_latency(seed, 1.0, max_ms)` makes every operation `Pending`
+//! (on its first poll too, however soon its timer fires), which checks that
+//! no engine path expects a synchronous filesystem answer.
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -72,6 +72,11 @@ enum Node {
 	},
 	/// `/dev/null`: reads end of file, writes are discarded.
 	Null,
+	/// A symbolic link (followed by every operation but `lstat` and
+	/// `readlink`); a relative target is relative to the link's directory.
+	Link {
+		target: BString,
+	},
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +95,8 @@ pub struct MemFs {
 	faults:    Option<Faults>,
 	pending:   Arc<AtomicU64>,
 	temp_seq:  Arc<AtomicU64>,
+	/// Paths with a [`Fs::lock`] held.
+	locks:     Arc<Mutex<std::collections::BTreeSet<BString>>>,
 }
 
 impl Default for MemFs {
@@ -105,7 +112,8 @@ impl MemFs {
 	}
 
 	/// Empty filesystem whose operations return `Pending` with probability
-	/// `p_pending`, resolving after 0..=`max_ms` ms (seeded).
+	/// `p_pending`, resolving after 0..=`max_ms` ms (seeded) but never on
+	/// their first poll.
 	pub fn with_latency(seed: u64, p_pending: f64, max_ms: u64) -> Self {
 		let mut nodes = BTreeMap::new();
 		nodes.insert(BString::from("/"), Node::Dir { mode: 0o755 });
@@ -120,6 +128,7 @@ impl MemFs {
 			faults: None,
 			pending: Arc::new(AtomicU64::new(0)),
 			temp_seq: Arc::new(AtomicU64::new(0)),
+			locks: Arc::default(),
 		}
 	}
 
@@ -199,7 +208,14 @@ impl MemFs {
 		FsPoll::Pending(Box::new(Delayed::start(res, delay)))
 	}
 
+	/// The node at `path`, following symbolic links.
 	fn node(&self, path: &[u8]) -> io::Result<Node> {
+		let path = self.resolve_links(path);
+		self.lnode(&path)
+	}
+
+	/// The node at `path` itself.
+	fn lnode(&self, path: &[u8]) -> io::Result<Node> {
 		self
 			.nodes
 			.lock()
@@ -208,8 +224,32 @@ impl MemFs {
 			.ok_or_else(|| io::ErrorKind::NotFound.into())
 	}
 
+	/// `path` with symbolic links at its end followed (at most 40, as
+	/// `SYMLOOP_MAX`).
+	fn resolve_links(&self, path: &[u8]) -> BString {
+		let mut path = BString::from(trim(path));
+		let nodes = self.nodes.lock();
+		for _ in 0..40 {
+			match nodes.get(path.as_slice()) {
+				Some(Node::Link { target }) => path = link_target(&path, target),
+				_ => break,
+			}
+		}
+		path
+	}
+
+	/// The node at `path` with `f` applied to it (following links).
+	fn update(&self, path: &[u8], f: impl FnOnce(&mut Node) -> io::Result<()>) -> io::Result<()> {
+		let path = self.resolve_links(path);
+		match self.nodes.lock().get_mut(path.as_slice()) {
+			Some(node) => f(node),
+			None => Err(io::ErrorKind::NotFound.into()),
+		}
+	}
+
 	fn open_now(&self, path: &[u8], flags: OpenFlags, mode: u32) -> io::Result<Box<dyn File>> {
-		let path = trim(path);
+		let resolved = self.resolve_links(path);
+		let path = resolved.as_slice();
 		let mut nodes = self.nodes.lock();
 		let data = match nodes.get(path) {
 			Some(Node::Dir { .. }) if flags.contains(OpenFlags::WRITE) => {
@@ -217,6 +257,10 @@ impl MemFs {
 			},
 			Some(Node::Dir { .. }) => Arc::new(Mutex::new(Vec::new())),
 			Some(Node::Null) => return Ok(Box::new(NullFile)),
+			// A link loop.
+			Some(Node::Link { .. }) => {
+				return Err(io::Error::other("Too many levels of symbolic links"));
+			},
 			Some(Node::File { .. }) if flags.contains(OpenFlags::EXCL) => {
 				return Err(io::ErrorKind::AlreadyExists.into());
 			},
@@ -252,6 +296,53 @@ impl MemFs {
 	}
 }
 
+/// Where the link at `link` holding `target` points: `target` itself when
+/// absolute, else `target` under the link's directory with `.` and `..`
+/// resolved lexically.
+fn link_target(link: &[u8], target: &[u8]) -> BString {
+	if target.starts_with(b"/") {
+		return BString::from(trim(target));
+	}
+	let dir = parent(link);
+	let mut parts: Vec<&[u8]> = dir
+		.split(|&c| c == b'/')
+		.filter(|p| !p.is_empty())
+		.collect();
+	for part in target.split(|&c| c == b'/') {
+		match part {
+			b"" | b"." => {},
+			b".." => {
+				parts.pop();
+			},
+			p => parts.push(p),
+		}
+	}
+	let mut out = BString::from("/");
+	out.extend_from_slice(&parts.join(&b'/'));
+	out
+}
+
+/// Whether anything lives under the directory `dir`.
+fn has_children(nodes: &BTreeMap<BString, Node>, dir: &[u8]) -> bool {
+	let mut prefix = BString::from(dir);
+	if !prefix.ends_with(b"/") {
+		prefix.push(b'/');
+	}
+	nodes
+		.range::<[u8], _>((std::ops::Bound::Excluded(prefix.as_slice()), std::ops::Bound::Unbounded))
+		.next()
+		.is_some_and(|(k, _)| k.starts_with(prefix.as_slice()))
+}
+
+/// The directory holding `path` (`/` for a top-level name).
+fn parent(path: &[u8]) -> &[u8] {
+	let path = trim(path);
+	match path.rfind_byte(b'/') {
+		Some(0) | None => b"/",
+		Some(i) => &path[..i],
+	}
+}
+
 const fn trim(path: &[u8]) -> &[u8] {
 	match path {
 		[b'/'] => path,
@@ -260,11 +351,16 @@ const fn trim(path: &[u8]) -> &[u8] {
 	}
 }
 
-/// A `Pending` answer that becomes ready on a timer thread.
+/// A `Pending` answer that becomes ready on a timer thread, and never on its
+/// first poll: whether the timer already fired then (a 0 ms delay, a
+/// descheduled poller) is the threads' timing, which must not decide whether
+/// the operation finished at once.
 struct Delayed<T> {
-	res:   Option<io::Result<T>>,
-	ready: Arc<AtomicBool>,
-	waker: Arc<Mutex<Option<Waker>>>,
+	res:    Option<io::Result<T>>,
+	ready:  Arc<AtomicBool>,
+	waker:  Arc<Mutex<Option<Waker>>>,
+	/// Whether the first poll answered `Pending` yet.
+	polled: bool,
 }
 
 impl<T> Delayed<T> {
@@ -280,12 +376,21 @@ impl<T> Delayed<T> {
 				waker.wake();
 			}
 		});
-		Self { res: Some(res), ready, waker }
+		Self { res: Some(res), ready, waker, polled: false }
 	}
 }
 
 impl<T: Send> FsPending<T> for Delayed<T> {
 	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
+		if !self.polled {
+			self.polled = true;
+			*self.waker.lock() = Some(cx.waker().clone());
+			if self.ready.load(Ordering::Acquire) {
+				// The timer may have fired with no waker to take: come back.
+				cx.waker().wake_by_ref();
+			}
+			return Poll::Pending;
+		}
 		if !self.ready.load(Ordering::Acquire) {
 			*self.waker.lock() = Some(cx.waker().clone());
 			if !self.ready.load(Ordering::Acquire) {
@@ -427,6 +532,7 @@ fn stat_of(node: &Node) -> Stat {
 		Node::File { data, mode } => (StatKind::File, *mode, data.lock().len() as u64),
 		Node::Dir { mode } => (StatKind::Dir, *mode, 0),
 		Node::Null => (StatKind::CharDev, 0o666, 0),
+		Node::Link { target } => (StatKind::Symlink, 0o755, target.len() as u64),
 	};
 	Stat {
 		kind,
@@ -441,6 +547,8 @@ fn stat_of(node: &Node) -> Stat {
 		atime_ns: 0,
 		ctime_ns: 0,
 		blocks: size.div_ceil(512),
+		rdev: 0,
+		blksize: 4096,
 	}
 }
 
@@ -450,8 +558,13 @@ impl Fs for MemFs {
 		self.answer(res)
 	}
 
-	fn stat(&mut self, path: &BStr, _follow: bool) -> FsPoll<Stat> {
-		let res = self.node(path).map(|n| stat_of(&n));
+	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
+		let node = if follow {
+			self.node(path)
+		} else {
+			self.lnode(path)
+		};
+		let res = node.map(|n| stat_of(&n));
 		self.answer(res)
 	}
 
@@ -460,6 +573,7 @@ impl Fs for MemFs {
 			let bits = match n {
 				Node::File { mode, .. } | Node::Dir { mode } => mode,
 				Node::Null => 0o666,
+				Node::Link { .. } => 0,
 			};
 			let need = [(Access::READ, 0o444), (Access::WRITE, 0o222), (Access::EXEC, 0o111)];
 			if need
@@ -494,16 +608,20 @@ impl Fs for MemFs {
 					.collect();
 				Ok(Box::new(MemDir(entries)) as Box<dyn DirIter>)
 			},
-			Ok(Node::File { .. } | Node::Null) => Err(io::ErrorKind::NotADirectory.into()),
+			Ok(Node::File { .. } | Node::Null | Node::Link { .. }) => {
+				Err(io::ErrorKind::NotADirectory.into())
+			},
 			Err(e) => Err(e),
 		};
 		self.answer(res)
 	}
 
 	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
-		let res = self
-			.node(path)
-			.and_then(|_| Err(io::ErrorKind::InvalidInput.into()));
+		let res = match self.lnode(path) {
+			Ok(Node::Link { target }) => Ok(target),
+			Ok(_) => Err(io::ErrorKind::InvalidInput.into()),
+			Err(e) => Err(e),
+		};
 		self.answer(res)
 	}
 
@@ -522,10 +640,219 @@ impl Fs for MemFs {
 	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
 		let res = match self.node(path) {
 			Ok(Node::Dir { .. }) => Ok(()),
-			Ok(Node::File { .. } | Node::Null) => Err(io::ErrorKind::NotADirectory.into()),
+			Ok(Node::File { .. } | Node::Null | Node::Link { .. }) => {
+				Err(io::ErrorKind::NotADirectory.into())
+			},
 			Err(e) => Err(e),
 		};
 		self.answer(res)
+	}
+
+	fn unlink(&mut self, path: &BStr) -> FsPoll<()> {
+		let res = {
+			let mut nodes = self.nodes.lock();
+			match nodes.get(trim(path)) {
+				Some(Node::Dir { .. }) => Err(io::ErrorKind::IsADirectory.into()),
+				Some(_) => {
+					nodes.remove(trim(path));
+					Ok(())
+				},
+				None => Err(io::ErrorKind::NotFound.into()),
+			}
+		};
+		self.answer(res)
+	}
+
+	fn rename(&mut self, from: &BStr, to: &BStr) -> FsPoll<()> {
+		let res = {
+			let (from, to) = (trim(from), trim(to));
+			let mut nodes = self.nodes.lock();
+			match (nodes.get(from), nodes.get(to)) {
+				(None, _) => Err(io::ErrorKind::NotFound.into()),
+				_ if !matches!(nodes.get(parent(to)), Some(Node::Dir { .. })) => {
+					Err(io::ErrorKind::NotFound.into())
+				},
+				(Some(Node::Dir { .. }), Some(n)) if !matches!(n, Node::Dir { .. }) => {
+					Err(io::ErrorKind::NotADirectory.into())
+				},
+				(Some(n), Some(Node::Dir { .. })) if !matches!(n, Node::Dir { .. }) => {
+					Err(io::ErrorKind::IsADirectory.into())
+				},
+				(Some(Node::Dir { .. }), Some(Node::Dir { .. })) if has_children(&nodes, to) => {
+					Err(io::ErrorKind::DirectoryNotEmpty.into())
+				},
+				_ if to.starts_with(from) && to.get(from.len()) == Some(&b'/') => {
+					Err(io::ErrorKind::InvalidInput.into())
+				},
+				_ => {
+					// The node and, for a directory, everything under it.
+					let mut prefix = BString::from(from);
+					prefix.push(b'/');
+					let moved: Vec<BString> = nodes
+						.keys()
+						.filter(|k| k.as_slice() == from || k.starts_with(prefix.as_slice()))
+						.cloned()
+						.collect();
+					for key in moved {
+						if let Some(node) = nodes.remove(&key) {
+							let mut dest = BString::from(to);
+							dest.extend_from_slice(&key[from.len()..]);
+							nodes.insert(dest, node);
+						}
+					}
+					Ok(())
+				},
+			}
+		};
+		self.answer(res)
+	}
+
+	fn symlink(&mut self, target: &BStr, path: &BStr) -> FsPoll<()> {
+		let res = {
+			let mut nodes = self.nodes.lock();
+			if nodes.contains_key(trim(path)) {
+				Err(io::ErrorKind::AlreadyExists.into())
+			} else if !matches!(nodes.get(parent(path)), Some(Node::Dir { .. })) {
+				Err(io::ErrorKind::NotFound.into())
+			} else {
+				nodes.insert(BString::from(trim(path)), Node::Link { target: BString::from(target) });
+				Ok(())
+			}
+		};
+		self.answer(res)
+	}
+
+	fn link(&mut self, from: &BStr, to: &BStr) -> FsPoll<()> {
+		let res = match self.lnode(from) {
+			Ok(node) => {
+				let mut nodes = self.nodes.lock();
+				if nodes.contains_key(trim(to)) {
+					Err(io::ErrorKind::AlreadyExists.into())
+				} else {
+					// Files share their data, as hard links do.
+					nodes.insert(BString::from(trim(to)), node);
+					Ok(())
+				}
+			},
+			Err(e) => Err(e),
+		};
+		self.answer(res)
+	}
+
+	fn mkdir(&mut self, path: &BStr, mode: u32) -> FsPoll<()> {
+		let res = {
+			let path = trim(path);
+			let mut nodes = self.nodes.lock();
+			if nodes.contains_key(path) {
+				Err(io::ErrorKind::AlreadyExists.into())
+			} else {
+				match nodes.get(parent(path)) {
+					Some(Node::Dir { .. }) => {
+						nodes.insert(BString::from(path), Node::Dir { mode: mode & 0o7777 });
+						Ok(())
+					},
+					Some(_) => Err(io::ErrorKind::NotADirectory.into()),
+					None => Err(io::ErrorKind::NotFound.into()),
+				}
+			}
+		};
+		self.answer(res)
+	}
+
+	fn rmdir(&mut self, path: &BStr) -> FsPoll<()> {
+		let res = {
+			let path = trim(path);
+			let mut nodes = self.nodes.lock();
+			match nodes.get(path) {
+				Some(Node::Dir { .. }) if has_children(&nodes, path) => {
+					Err(io::ErrorKind::DirectoryNotEmpty.into())
+				},
+				Some(Node::Dir { .. }) => {
+					nodes.remove(path);
+					Ok(())
+				},
+				Some(_) => Err(io::ErrorKind::NotADirectory.into()),
+				None => Err(io::ErrorKind::NotFound.into()),
+			}
+		};
+		self.answer(res)
+	}
+
+	fn chmod(&mut self, path: &BStr, mode: u32) -> FsPoll<()> {
+		let res = self.update(path, |node| match node {
+			Node::File { mode: m, .. } | Node::Dir { mode: m } => {
+				*m = mode & 0o7777;
+				Ok(())
+			},
+			// `/dev/null` keeps its bits; a dangling link has no target.
+			Node::Null => Ok(()),
+			Node::Link { .. } => Err(io::ErrorKind::NotFound.into()),
+		});
+		self.answer(res)
+	}
+
+	fn sync(&mut self) -> FsPoll<()> {
+		// Nothing is buffered on the way to memory.
+		self.answer(Ok(()))
+	}
+
+	fn lock(&mut self, path: &BStr) -> FsPoll<Box<dyn File>> {
+		let resolved = self.resolve_links(path);
+		let res = if self.locks.lock().contains(&resolved) {
+			Err(io::ErrorKind::WouldBlock.into())
+		} else {
+			self
+				.open_now(&resolved, OpenFlags::READ.with(OpenFlags::WRITE), 0)
+				.map(|file| {
+					self.locks.lock().insert(resolved.clone());
+					Box::new(LockedFile { file, locks: Arc::clone(&self.locks), path: resolved })
+						as Box<dyn File>
+				})
+		};
+		self.answer(res)
+	}
+}
+
+/// A file a [`Fs::lock`] holds; dropping it releases the lock.
+struct LockedFile {
+	file:  Box<dyn File>,
+	locks: Arc<Mutex<std::collections::BTreeSet<BString>>>,
+	path:  BString,
+}
+
+impl Drop for LockedFile {
+	fn drop(&mut self) {
+		self.locks.lock().remove(&self.path);
+	}
+}
+
+impl File for LockedFile {
+	fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+		self.file.poll_read(cx, buf)
+	}
+
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+		self.file.poll_write(cx, buf)
+	}
+
+	fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		self.file.poll_flush(cx)
+	}
+
+	fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+		self.file.seek(pos)
+	}
+
+	fn kind(&self) -> FileKind {
+		FileKind::Regular
+	}
+
+	fn os_handle(&self) -> Option<OsHandle> {
+		None
+	}
+
+	fn dup(&self) -> io::Result<Box<dyn File>> {
+		self.file.dup()
 	}
 }
 
@@ -573,6 +900,31 @@ mod tests {
 			io::ErrorKind::NotFound
 		);
 		assert_eq!(fs.pending_count(), 4);
+	}
+
+	#[test]
+	fn an_answer_is_pending_on_its_first_poll_though_its_timer_fired() {
+		struct Count(AtomicU64);
+
+		impl Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let mut p = Delayed::start(Ok(()), 0);
+		// The timer thread is gone: it marked the answer ready, with no waker
+		// to take.
+		while Arc::strong_count(&p.waker) > 1 {
+			thread::yield_now();
+		}
+		std::sync::atomic::fence(Ordering::Acquire);
+		let wakes = Arc::new(Count(AtomicU64::new(0)));
+		let waker = Waker::from(Arc::clone(&wakes));
+		let mut cx = Context::from_waker(&waker);
+		assert!(p.poll(&mut cx).is_pending());
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "the poller is told to come back");
+		assert!(matches!(p.poll(&mut cx), Poll::Ready(Ok(()))));
 	}
 
 	#[test]

@@ -187,8 +187,11 @@ impl Options {
 /// zsh's evaluator globals, owned by the caller so that every evaluation
 /// of a shell (including the nested ones its [`Env`] starts) shares them,
 /// as zsh's do.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MathState {
+	/// The value of the last evaluation that ended, at any nesting level
+	/// (zsh `lastmathval`); `None` before the first.
+	pub last:              Option<Number>,
 	/// Nesting depth of evaluations in progress (zsh `mlevel`): a top-level
 	/// evaluation ([`matheval`] at 0) resets the output format.
 	pub mlevel:            u32,
@@ -239,6 +242,9 @@ pub enum FuncKind {
 	/// A built-in string function (`MFF_STR`): the argument text as is,
 	/// without an argument count check.
 	String,
+	/// A shell function taking its evaluated arguments as text
+	/// (`functions -M`, `MFF_USERFUNC`).
+	User,
 	/// A shell function taking its argument text (`functions -Ms`).
 	UserString,
 }
@@ -493,6 +499,12 @@ pub trait Env {
 	fn options(&self) -> Options;
 	/// The compiled-expression cache.
 	fn cache(&self) -> &Cache;
+	/// The compiled form of `text` under compile flags `flags`:
+	/// [`Cache::get`] of [`Env::cache`], unless the environment keeps a
+	/// nearer memo ([`Recent`]).
+	fn compiled(&mut self, text: &[u8], flags: u8) -> Arc<Expr> {
+		self.cache().get(text, flags)
+	}
 	/// zsh's evaluator globals.
 	fn state(&mut self) -> &mut MathState;
 	/// The variable `lval` names (zsh `getvalue`, then `getnumvalue`):
@@ -609,6 +621,48 @@ impl Cache {
 			.gens
 			.lock()
 			.insert(BString::from(text), Arc::clone(&expr));
+		expr
+	}
+}
+
+/// Slots of a [`Recent`] memo.
+const RECENT_SLOTS: usize = 256;
+
+/// The expressions one shell evaluated last, direct-mapped by a hash of
+/// their text: a loop's arithmetic finds its compiled form here without
+/// the shared [`Cache`]'s lock and map (bash's evaluator keeps the same,
+/// `arith::Recent`).
+pub struct Recent([Option<(BString, Arc<Expr>)>; RECENT_SLOTS]);
+
+impl Default for Recent {
+	fn default() -> Self {
+		Self([const { None }; RECENT_SLOTS])
+	}
+}
+
+impl Recent {
+	/// The compiled form of `text` under `flags`: from here, else from
+	/// `shared` (and kept here).
+	pub fn get(&mut self, text: &[u8], flags: u8, shared: &Cache) -> Arc<Expr> {
+		// Eight bytes per step: the text of a loop's expression is hashed
+		// on every evaluation.
+		let (words, tail) = text.as_chunks::<8>();
+		let mix = |h: u64, w: u64| (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95);
+		let mut last = [0; 8];
+		last[..tail.len()].copy_from_slice(tail);
+		let h = words
+			.iter()
+			.fold(text.len() as u64, |h, w| mix(h, u64::from_le_bytes(*w)));
+		let h = mix(h, u64::from_le_bytes(last));
+		let slot = &mut self.0[(h >> (u64::BITS - RECENT_SLOTS.ilog2())) as usize];
+		if let Some((t, e)) = slot
+			&& e.flags == flags
+			&& t.as_slice() == text
+		{
+			return Arc::clone(e);
+		}
+		let expr = shared.get(text, flags);
+		*slot = Some((BString::from(text), Arc::clone(&expr)));
 		expr
 	}
 }
@@ -844,7 +898,7 @@ enum Ins {
 
 /// A compiled expression.
 #[derive(Debug)]
-struct Expr {
+pub struct Expr {
 	/// The text as lexed: zsh removes the `_` of a float constant from its
 	/// copy of the text, spans index this copy.
 	src:      BString,
@@ -2008,13 +2062,15 @@ fn mathevall<E: Env + ?Sized>(
 	st.mlevel += 1;
 	let saved_lastbase = st.lastbase;
 	let opts = env.options();
-	let expr = env.cache().get(text, opts.flags(arg));
+	let expr = env.compiled(text, opts.flags(arg));
 	let r = Walk {
 		env: &mut *env,
 		expr: &expr,
 		opts,
 		noeval,
-		stack: Vec::new(),
+		// Each instruction pushes at most one operand: one allocation, not
+		// a regrowth per doubling on every evaluation.
+		stack: Vec::with_capacity(expr.prog.len().min(STACKSZ)),
 		saved: Vec::new(),
 		quest: Vec::new(),
 	}
@@ -2026,6 +2082,9 @@ fn mathevall<E: Env + ?Sized>(
 	} else {
 		expr.lastbase
 	};
+	if let Ok(n) = &r {
+		st.last = Some(*n);
+	}
 	r.map(|n| (n, expr.end, expr.last))
 }
 

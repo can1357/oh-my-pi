@@ -702,7 +702,22 @@ fn typeset_single(
 	}
 	let readonly = (usepm != 0 || newspecial) && off & pmf & PM_READONLY != 0;
 	if readonly || tc {
-		if pmf & PM_SPECIAL != 0 {
+		// zsh lets `SECONDS` switch between integer and floating point
+		// (`setsecondstype`, applied by `set_flags` below).
+		// A new local copy may take any numeric type (zsh `NS_SECONDS`).
+		let seconds = !readonly
+			&& pname == b"SECONDS"
+			&& if newspecial {
+				matches!(pm_type(on), 0 | PM_INTEGER | PM_EFLOAT | PM_FFLOAT)
+			} else {
+				matches!(pm_type((pmf | on) & !off), PM_INTEGER | PM_EFLOAT | PM_FFLOAT)
+			};
+		if seconds {
+			if !newspecial {
+				usepm = 1;
+			}
+			tc = false;
+		} else if pmf & PM_SPECIAL != 0 {
 			return Ok(zerrnam(
 				ctx,
 				format!("{}: can't change type of a special parameter", pname.as_bstr()),
@@ -714,6 +729,68 @@ fn typeset_single(
 				format!("{}: can't change type of autoloaded parameter", pname.as_bstr()),
 			));
 		}
+	}
+	// zsh `newspecial` of a computed read-only special (`local PPID`, an
+	// un-hidden module special) or `typeset +h` of a module's `PM_HIDE`
+	// one: the local copy is the special itself here (no stored variable
+	// shadows it), keeping `PM_READONLY` (a value fails); `+h` takes the
+	// module special's `PM_HIDE` off until its feature goes.
+	let computed = |s: Special| {
+		!s.is_plain()
+			&& !matches!(s, Special::TiedScalar(_) | Special::TiedArray(_))
+			&& (pmf & PM_READONLY != 0 || s.flags().contains(PmFlags::HIDE))
+	};
+	if newspecial && let Some(p) = pm.as_ref().filter(|p| p.special.is_some_and(computed)) {
+		let flags = PmFlags::from_bits((pmf | on) & !(off | PM_LOCAL));
+		let (width, base) = (p.width, p.base);
+		let name = pname.to_vec();
+		let value = asg.value.clone();
+		let array_param = pm_type(pmf) & (PM_ARRAY | PM_HASHED) != 0;
+		let r = px(ctx, |ex| {
+			params::set_flags(ex, &name, flags, width, base)?;
+			assign(ex, &name, &value, array_param)
+		})?;
+		return Ok(if r.is_some() {
+			Single::Ok
+		} else {
+			Single::Abort
+		});
+	}
+	// zsh `newspecial` of a writable computed special (`local SECONDS=5`,
+	// `local MARK`): the special itself, its value from before saved for
+	// the end of the scope (`scanendscope`); a value goes through its set
+	// function.
+	if newspecial
+		&& let Some(i) = locallevel
+		&& let Some(p) = pm.as_ref()
+		&& let Some(sp) = p.special.filter(|s| {
+			!s.is_plain()
+				&& !matches!(s, Special::TiedScalar(_) | Special::TiedArray(_))
+				&& pmf & PM_READONLY == 0
+		}) {
+		let flags = PmFlags::from_bits((pm_type(pmf) | on) & !(off | PM_LOCAL));
+		let width = p.width;
+		let base = if on & (PM_INTEGER | PM_EFLOAT | PM_FFLOAT) != 0 {
+			let Ok(base) = setbase(ctx, ts.ops, on, p.base, true) else {
+				return Ok(Single::Fail);
+			};
+			base
+		} else {
+			p.base
+		};
+		let name = pname.to_vec();
+		let value = asg.value.clone();
+		let array_param = pm_type(pmf) & (PM_ARRAY | PM_HASHED) != 0;
+		let r = px(ctx, |ex| {
+			crate::bash::vm::zsh::specials::make_local(ex, sp, &name, i)?;
+			params::set_flags(ex, &name, flags, width, base)?;
+			assign(ex, &name, &value, array_param)
+		})?;
+		return Ok(if r.is_some() {
+			Single::Ok
+		} else {
+			Single::Abort
+		});
 	}
 	if ts.posix {
 		if on & (PM_READONLY | PM_EXPORTED) != 0
@@ -826,7 +903,7 @@ fn typeset_single(
 		on |= !off & (PM_READONLY | PM_EXPORTED) & pmf;
 		scope = Where::Scope(pm.scope);
 		if !asg.has_value() && (pmf | on) & (PM_ARRAY | PM_HASHED) == 0 {
-			value = AsgVal::Scalar(pm.strval());
+			value = AsgVal::Scalar(pm.strval(params::mb_ctx(ctx)));
 		}
 		let name = pname.to_vec();
 		if px(ctx, |ex| {
@@ -890,7 +967,7 @@ fn typeset_single(
 	}
 	let name = pname.to_vec();
 	let known = pm.is_some() || newspecial;
-	if !(params::isident(pname) || known)
+	if !(params::isident(pname, params::wide_idents_ctx(ctx)) || known)
 		|| (pname.first().is_some_and(u8::is_ascii_digit) && pname != b"0")
 	{
 		let msg = if pname.first().is_some_and(u8::is_ascii_digit) {
@@ -915,13 +992,12 @@ fn typeset_single(
 	// A local tied special (`local path`): zsh keeps it special at the new
 	// level, starting empty; here the scalar it is computed from (`PATH`)
 	// becomes local, keeping its export.
-	let tied_local = pm
-		.as_ref()
-		.and_then(|p| p.special)
-		.filter(|s| newspecial && matches!(s, Special::TiedArray(_)))
-		.and_then(Special::tie_partner);
+	let tied_local = pm.as_ref().and_then(|p| p.special).and_then(|s| match s {
+		Special::TiedArray(t) if newspecial => Some(t.scalar()),
+		_ => None,
+	});
 	let r = px(ctx, |ex| {
-		if let Some((partner, _)) = tied_local {
+		if let Some(partner) = tied_local {
 			let partner = partner.as_bytes();
 			let cur = params::getparam(ex, partner)?;
 			// Already local here (`typeset MANPATH` then `typeset -T
@@ -930,10 +1006,17 @@ fn typeset_single(
 				.as_ref()
 				.is_none_or(|p| !matches!(scope, Where::Scope(s) if s == p.scope))
 			{
-				let exported = cur.map_or(0, |p| p.flags.bits() & PM_EXPORTED);
-				create_in(ex, partner, PmFlags::from_bits(exported), (0, 0), scope);
+				// `local -U path`: its uniqueness lives on the scalar's record
+				// ([`params::set_flags`]), local with it.
+				let kept = cur.map_or(0, |p| p.flags.bits() & PM_EXPORTED) | (flags & PM_UNIQUE);
+				create_in(ex, partner, PmFlags::from_bits(kept), (0, 0), scope);
 			}
 		} else {
+			// zsh `createparam` without `PM_LOCAL` over a private
+			// parameter (zsh/param/private) fails.
+			if matches!(scope, Where::Dynamic) {
+				params::refuse_private(ex, &name)?;
+			}
 			create_in(ex, &name, PmFlags::from_bits(flags), (width, base), scope);
 		}
 		assign(ex, &name, &value, array_param)?;
@@ -1282,7 +1365,7 @@ fn tie(ctx: &mut Ctx<'_, '_>, ts: &Ts<'_>, asgs: &[Asg]) -> R {
 				}
 			} else {
 				if !s.has_value() && !a.has_value() && pm_type(f) & (PM_ARRAY | PM_HASHED) == 0 {
-					oldval = Some(p.strval());
+					oldval = Some(p.strval(params::mb_ctx(ctx)));
 				}
 				on |= f & !ts.roff & PM_EXPORTED;
 			}

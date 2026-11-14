@@ -108,6 +108,24 @@ describe("BatchArgsScanner", () => {
 		expect(seen.indexOf(1)).toBe(raw.indexOf('"},{"name":"B"') + 1);
 		expect(seen.indexOf(2)).toBe(raw.length - 3);
 	});
+
+	it("scans appended deltas exactly like the growing buffer they add up to", () => {
+		const raw =
+			'{"context":"shared }\\" ctx","tasks":[{"name":"A","task":"use {x} and \\"}\\""},{"name":"B","task":"b"}]}';
+		for (const size of [1, 3, 7]) {
+			const fed = new BatchArgsScanner();
+			const appended = new BatchArgsScanner();
+			for (let start = 0; start < raw.length; start += size) {
+				fed.feed(raw.slice(0, start + size));
+				appended.append(raw.slice(start, start + size));
+				expect([appended.context, appended.items, appended.itemsOpened]).toEqual([
+					fed.context,
+					fed.items,
+					fed.itemsOpened,
+				]);
+			}
+		}
+	});
 });
 
 describe("task speculative launch", () => {
@@ -188,6 +206,25 @@ describe("task speculative launch", () => {
 		await manager.getJob("Beta")!.promise;
 		expect(manager.getJob("Alpha")!.status).toBe("completed");
 		expect(manager.getJob("Beta")!.status).toBe("completed");
+	});
+
+	it("adopts an empty model placeholder without changing the submitted arguments", async () => {
+		const { tool, manager, session } = await openSession();
+		const submitted = {
+			context: "ctx",
+			tasks: [{ name: "Alpha", agent: "task", task: "Do A.", model: [] as string[] }],
+		};
+		const original = structuredClone(submitted);
+		session.update(toolCall, JSON.stringify(submitted));
+		await spawn("Alpha").started.promise;
+		session.finalize({ toolCall, args: submitted });
+		const result = await tool.execute(toolCall.id, submitted);
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
+		expect(submitted).toEqual(original);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha"]);
+		spawn("Alpha").release.resolve();
+		await manager.getJob("Alpha")!.promise;
+		expect(manager.getJob("Alpha")!.status).toBe("completed");
 	});
 
 	it("aborts launched agents when the finished call is invalid", async () => {

@@ -18,7 +18,9 @@
 //!   the segmented engine path, but the whole-buffer minimizer still treats the
 //!   combined chain as opaque. Each segment's text is the verbatim source span
 //!   of its pipeline, redirections included, so quoting and redirect spelling
-//!   survive exactly as written.
+//!   survive exactly as written. Source offsets and lengths retain that same
+//!   pipeline span in original-command bytes; execution wrappers are the
+//!   caller's responsibility.
 //! - **Other compound commands are opaque.** `a || b`, background jobs, and
 //!   compound shell syntax such as subshells or function definitions are left
 //!   unchanged. Here-documents, command/process substitutions and arithmetic
@@ -30,9 +32,11 @@
 //! we return `Unsupported` and the engine passes through.
 
 use crate::bash::syntax::{
-	AndOrOp, ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, Features, ListItem,
-	Param, ParamOp, Pipeline, Program, Redir, RedirTarget, Sep, Simple, Span, Subscript, Word,
-	WordPart, parse_all,
+	AndOrOp, Features, Program, Sep, Span, parse_all,
+	tree::{
+		ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, ListItem, Param, ParamOp,
+		Part, Pipeline, Redir, RedirTarget, Seq, Simple, Subscript, Word, WordPart,
+	},
 };
 
 /// One segment of a safe `&&` / `;` chain.
@@ -40,6 +44,12 @@ use crate::bash::syntax::{
 pub struct ChainSegment {
 	/// The segment's pipeline verbatim from the source, redirections included.
 	pub command:                   String,
+	/// First byte of the pipeline in the original command, before any run
+	/// wrapper.
+	pub source_at:                 u32,
+	/// Byte length of the pipeline in the original command, excluding run
+	/// wrappers.
+	pub source_len:                u32,
 	/// Leading command word of the segment's first stage, as written.
 	pub program:                   String,
 	/// The segment follows `&&`: it runs only when the previous one succeeded.
@@ -108,10 +118,10 @@ const fn is_async(sep: Sep) -> bool {
 
 fn classify(program: &Program, src: &str) -> CommandPlan {
 	// Separator-separated top-level items across all complete commands.
-	let items: Vec<&ListItem> = program
+	let items: Vec<ListItem<'_>> = program
 		.commands
 		.iter()
-		.flat_map(|complete| complete.list.items.iter())
+		.flat_map(|complete| complete.list().items())
 		.collect();
 
 	if let Some(chain) = classify_chain(&items, src) {
@@ -129,32 +139,35 @@ fn classify(program: &Program, src: &str) -> CommandPlan {
 
 	// Conservative bail on a backgrounded command, and on `&&` / `||`
 	// continuations that did not form a safe chain.
-	if is_async(item.sep) || !item.and_or.rest.is_empty() {
+	if is_async(item.sep()) || item.and_or().rest().len() != 0 {
 		return CommandPlan::Compound;
 	}
 
 	// Only a single pipeline at this point.
-	classify_pipeline(&item.and_or.first, src).unwrap_or(CommandPlan::Unsupported)
+	classify_pipeline(item.and_or().first(), src).unwrap_or(CommandPlan::Unsupported)
 }
 
-fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
+fn classify_chain(items: &[ListItem<'_>], src: &str) -> Option<CommandPlan> {
 	let mut segments = Vec::new();
 
 	for item in items {
-		if is_async(item.sep) {
+		if is_async(item.sep()) {
 			return None;
 		}
 
 		let mut run_if_previous_succeeded = false;
-		let mut pipeline = &item.and_or.first;
-		let mut rest = item.and_or.rest.iter().peekable();
+		let mut pipeline = item.and_or().first();
+		let mut rest = item.and_or().rest().peekable();
 
 		loop {
 			let (command, program) = simple_segment(pipeline, src)?;
 
 			let suppress_errexit = rest.peek().is_some_and(|(op, _)| *op == AndOrOp::And);
+			let span = pipeline.span();
 			segments.push(ChainSegment {
 				command,
+				source_at: span.lo,
+				source_len: span.hi - span.lo,
 				program,
 				run_if_previous_succeeded,
 				suppress_errexit,
@@ -174,51 +187,45 @@ fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
 	(segments.len() >= 2).then_some(CommandPlan::Chain { segments })
 }
 
-fn words_are_safe(words: &[Word]) -> bool {
-	words.iter().all(word_is_safe)
+fn word_is_safe(word: Word<'_>) -> bool {
+	parts_are_safe(word.parts())
 }
 
-fn word_is_safe(word: &Word) -> bool {
-	parts_are_safe(&word.parts)
-}
-
-fn parts_are_safe(parts: &[WordPart]) -> bool {
-	parts.iter().all(|part| match part {
-		WordPart::Lit(_)
-		| WordPart::Escaped(_)
-		| WordPart::SQuote(_)
-		| WordPart::AnsiC(_)
-		| WordPart::DroppedQuote => true,
-		WordPart::DQuote(inner) | WordPart::Locale(inner) => parts_are_safe(inner),
-		WordPart::Param(param) => param_is_safe(param),
-		WordPart::Compound(elems) => elems.iter().all(array_elem_is_safe),
+fn parts_are_safe(parts: Seq<'_, WordPart<'_>>) -> bool {
+	parts.iter().all(|part| match part.get() {
+		Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote => {
+			true
+		},
+		Part::DQuote(inner) | Part::Locale(inner) => parts_are_safe(inner),
+		Part::Param(param) => param_is_safe(param),
+		Part::Compound(elems) => elems.iter().all(array_elem_is_safe),
 		// Command (`$(…)`, backticks, `${ …;}`, `${| …;}`) and process
 		// substitutions run commands of their own. Arithmetic text is not
 		// parsed into the tree and may hide one. Deferred-error words fail
 		// when expanded; zsh words never appear in bash grammar. All stay
 		// with the unsegmented whole command.
-		WordPart::Comsub(_)
-		| WordPart::ProcSub(_)
-		| WordPart::Arith(_)
-		| WordPart::BadSubst(_)
-		| WordPart::BadComsub(_)
-		| WordPart::Zsh(_) => false,
+		Part::Comsub(_)
+		| Part::ProcSub(_)
+		| Part::Arith(_)
+		| Part::BadSubst(_)
+		| Part::BadComsub(_)
+		| Part::Zsh(_) => false,
 	})
 }
 
 /// Arithmetic text inside `${x:off:len}` is unparsed; any `$` or backquote in
 /// it may be a command substitution, so only expansion-free text is safe.
-fn arith_text_is_safe(text: &ArithText) -> bool {
-	!text.src.iter().any(|&byte| matches!(byte, b'$' | b'`'))
+fn arith_text_is_safe(text: ArithText<'_>) -> bool {
+	!text.src().iter().any(|&byte| matches!(byte, b'$' | b'`'))
 }
 
-fn param_is_safe(param: &Param) -> bool {
-	let index_is_safe = match &param.index {
+fn param_is_safe(param: Param<'_>) -> bool {
+	let index_is_safe = match param.index() {
 		Some(Subscript::Expr(word)) => word_is_safe(word),
 		Some(Subscript::At | Subscript::Star) | None => true,
 	};
 	index_is_safe
-		&& match &param.op {
+		&& match param.op() {
 			ParamOp::None
 			| ParamOp::Length
 			| ParamOp::Indirect
@@ -229,31 +236,29 @@ fn param_is_safe(param: &Param) -> bool {
 			| ParamOp::Alt { word, .. }
 			| ParamOp::Trim { pat: word, .. } => word_is_safe(word),
 			ParamOp::Error { word, .. } | ParamOp::Case { pat: word, .. } => {
-				word.as_ref().is_none_or(word_is_safe)
+				word.is_none_or(word_is_safe)
 			},
 			ParamOp::Substr { offset, len } => {
-				arith_text_is_safe(offset) && len.as_ref().is_none_or(arith_text_is_safe)
+				arith_text_is_safe(offset) && len.is_none_or(arith_text_is_safe)
 			},
-			ParamOp::Replace { pat, rep, .. } => {
-				word_is_safe(pat) && rep.as_ref().is_none_or(word_is_safe)
-			},
+			ParamOp::Replace { pat, rep, .. } => word_is_safe(pat) && rep.is_none_or(word_is_safe),
 		}
 }
 
-fn array_elem_is_safe(elem: &ArrayElem) -> bool {
-	elem.key.as_ref().is_none_or(word_is_safe) && word_is_safe(&elem.value)
+fn array_elem_is_safe(elem: ArrayElem<'_>) -> bool {
+	elem.key().is_none_or(word_is_safe) && word_is_safe(elem.value())
 }
 
-fn assign_is_safe(assign: &Assign) -> bool {
-	assign.index.as_ref().is_none_or(word_is_safe)
-		&& match &assign.value {
+fn assign_is_safe(assign: Assign<'_>) -> bool {
+	assign.index().is_none_or(word_is_safe)
+		&& match assign.value() {
 			AssignValue::Scalar(word) => word_is_safe(word),
 			AssignValue::Array(elems) => elems.iter().all(array_elem_is_safe),
 		}
 }
 
-fn redir_is_safe(redir: &Redir) -> bool {
-	match &redir.target {
+fn redir_is_safe(redir: Redir<'_>) -> bool {
+	match redir.target() {
 		RedirTarget::Word(word) => word_is_safe(word),
 		// Here-docs are never safe to segment: the document body follows the
 		// command's line, outside the pipeline's source span, so a segment
@@ -267,18 +272,18 @@ fn redir_is_safe(redir: &Redir) -> bool {
 /// The simple command `command` is, when every part of it is safe to run as a
 /// standalone segment: no command/process substitution, arithmetic expansion
 /// or here-doc in its assignments, words, or redirections.
-fn safe_simple(command: &Command) -> Option<&Simple> {
-	let CommandKind::Simple(simple) = &command.kind else {
+fn safe_simple(command: Command<'_>) -> Option<Simple<'_>> {
+	let CommandKind::Simple(simple) = command.kind() else {
 		return None;
 	};
-	let safe = simple.assigns.iter().all(assign_is_safe)
-		&& words_are_safe(&simple.words)
-		&& command.redirs.iter().all(redir_is_safe);
+	let safe = simple.assigns().iter().all(assign_is_safe)
+		&& simple.words().iter().all(word_is_safe)
+		&& command.redirs().iter().all(redir_is_safe);
 	safe.then_some(simple)
 }
 
-fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
-	if pipeline.time.is_some() || pipeline.bang {
+fn simple_segment(pipeline: Pipeline<'_>, src: &str) -> Option<(String, String)> {
+	if pipeline.time().is_some() || pipeline.bang() {
 		return None;
 	}
 
@@ -286,9 +291,9 @@ fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
 	// (`if` / `for` / `while` / subshells / `{ … }`) keep the whole chain
 	// unsegmented; validating only the first stage once let
 	// `git log … | while read x; do … done` through.
-	let mut stages = pipeline.stages.iter();
-	let first = safe_simple(&stages.next()?.cmd)?;
-	if !stages.all(|stage| safe_simple(&stage.cmd).is_some()) {
+	let mut stages = pipeline.stages().iter();
+	let first = safe_simple(stages.next()?)?;
+	if !stages.all(|stage| safe_simple(stage).is_some()) {
 		return None;
 	}
 
@@ -296,7 +301,7 @@ fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
 	// are captured but never rewritten (runtime detects `CommandPlan::Piped`),
 	// keeping the chain decomposable when an inner stage pipes (e.g.
 	// `ls | head -10 && git status`).
-	let program = span_text(src, first.words.first()?.span)?;
+	let program = span_text(src, first.words().first()?.span())?;
 	if program.trim().is_empty() {
 		return None;
 	}
@@ -304,20 +309,21 @@ fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
 	// The chain runner re-executes this text: take it verbatim from the
 	// source span (all stages and their redirections) rather than re-printing
 	// the tree, so it is exactly what the user wrote.
-	let command = span_text(src, pipeline.span)?;
+	let command = span_text(src, pipeline.span())?;
 	if command.trim().is_empty() {
 		return None;
 	}
 	Some((command.to_owned(), program.to_owned()))
 }
 
-fn classify_pipeline(pipeline: &Pipeline, src: &str) -> Option<CommandPlan> {
-	if pipeline.stages.len() > 1 {
+fn classify_pipeline(pipeline: Pipeline<'_>, src: &str) -> Option<CommandPlan> {
+	let stages = pipeline.stages();
+	if stages.len() > 1 {
 		return Some(CommandPlan::Piped);
 	}
-	match &pipeline.stages.first()?.cmd.kind {
+	match stages.first()?.kind() {
 		CommandKind::Simple(simple) => {
-			let program = span_text(src, simple.words.first()?.span)?;
+			let program = span_text(src, simple.words().first()?.span())?;
 			if program.trim().is_empty() {
 				return None;
 			}
@@ -389,12 +395,16 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "git diff --stat".to_string(),
+					source_at:                 0,
+					source_len:                15,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
+					source_at:                 19,
+					source_len:                20,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
@@ -411,12 +421,16 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "git status".to_string(),
+					source_at:                 0,
+					source_len:                10,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
+					source_at:                 13,
+					source_len:                8,
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
@@ -433,18 +447,24 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "false".to_string(),
+					source_at:                 0,
+					source_len:                5,
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
+					source_at:                 9,
+					source_len:                7,
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
+					source_at:                 19,
+					source_len:                8,
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
@@ -478,6 +498,26 @@ mod tests {
 		assert_eq!(segments[0].program, "echo");
 		assert_eq!(segments[1].command, "FOO=\"x y\" printf '%s\\n' z");
 		assert_eq!(segments[1].program, "printf");
+	}
+
+	#[test]
+	fn repeated_segments_keep_distinct_original_byte_spans() {
+		let command = "  echo 'é' && echo 'é';\n echo 'é'";
+		let segments = chain_of(analyze(command)).expect("expected Chain");
+		assert_eq!(segments.len(), 3);
+		assert_eq!(
+			segments
+				.iter()
+				.map(|segment| (segment.source_at, segment.source_len))
+				.collect::<Vec<_>>(),
+			vec![(2, 9), (15, 9), (27, 9)],
+		);
+		for segment in segments {
+			assert_eq!(segment.command, "echo 'é'");
+			let start = segment.source_at as usize;
+			let end = start + segment.source_len as usize;
+			assert_eq!(&command[start..end], segment.command);
+		}
 	}
 
 	#[test]
@@ -563,14 +603,14 @@ mod tests {
 				let program = parse(&segment.command).unwrap_or_else(|| {
 					panic!("segment {:?} from {command:?} did not re-parse", segment.command)
 				});
-				let items: Vec<&ListItem> = program
+				let items: Vec<ListItem<'_>> = program
 					.commands
 					.iter()
-					.flat_map(|complete| complete.list.items.iter())
+					.flat_map(|complete| complete.list().items())
 					.collect();
 				let single_pipeline = matches!(
 					items.as_slice(),
-					[item] if item.and_or.rest.is_empty() && !is_async(item.sep)
+					[item] if item.and_or().rest().len() == 0 && !is_async(item.sep())
 				);
 				assert!(
 					single_pipeline,

@@ -16,11 +16,12 @@
 //!
 //! Windows specifics: `test -x` holds for directories, files with a
 //! `PATHEXT` extension and files starting with `#!`; process substitution
-//! uses a named pipe `\\.\pipe\obash-<pid>-<n>` (a regular temp file when
-//! the engine asks for [`TempPurpose::HereDoc`], e.g. for a consumer that
-//! must seek).
+//! uses a named pipe `\\.\pipe\obash-<pid>-<n>` (`\\.\pipe\LOCAL\…` in an
+//! `AppContainer`; a regular temp file when the engine asks for
+//! [`TempPurpose::HereDoc`], e.g. for a consumer that must seek).
 
 use std::{
+	cell::RefCell,
 	fs::{self, OpenOptions},
 	io::{self, IsTerminal, Read, Seek, Write},
 	path::Path,
@@ -50,30 +51,128 @@ pub struct StdFs {
 /// A host file, pipe or terminal as an engine [`File`].
 #[derive(Debug)]
 pub struct StdFile {
-	/// Pending readiness wait (pipes and sockets). Declared first so it is
-	/// dropped, and forgotten by the waiting thread, before `file` closes.
+	/// Pending readiness waits (pipes, sockets, terminals), one for reading
+	/// and one for writing: a terminal the line editor reads keys from is
+	/// written to meanwhile (job notices, the display), which must not
+	/// drop the read wait. Declared first so they are dropped, and
+	/// forgotten by the waiting thread, before `file` closes.
 	#[cfg(unix)]
-	watch:  Option<crate::sys::ready::Watch>,
+	watch:  [Option<crate::sys::ready::Watch>; 2],
 	file:   fs::File,
 	kind:   FileKind,
 	/// Access mode of the open file description (`O_ACCMODE` bits of
 	/// `F_GETFL`; `None` when unknown).
 	#[cfg(unix)]
 	access: Option<libc::c_int>,
+	/// The null device: a write is complete without a syscall.
+	null:   bool,
+	/// Read-ahead of a regular file this engine opened for reading only
+	/// ([`StdFile::opened`]); `None` for every other file and once the
+	/// descriptor was handed out ([`File::os_handle`], [`File::dup`]).
+	ahead:  RefCell<Option<Ahead>>,
+}
+
+/// Bytes of a regular file read from the kernel beyond what the engine
+/// consumed. `read` takes a chunk and gives back what follows its line
+/// (`SeekFrom::Current(-n)`): with these at hand that is a move of `pos`, not
+/// an `lseek`, and the next line needs no `read`. Only the kernel offset is
+/// ahead of the engine's, and nothing else sees it until the descriptor is
+/// handed out, which first [syncs](Ahead::sync) it.
+#[derive(Debug, Default)]
+struct Ahead {
+	/// Allocated on the first read.
+	buf:    Box<[u8]>,
+	filled: usize,
+	/// Next byte the engine reads.
+	pos:    usize,
+	/// The kernel offset: the file offset of `buf[filled]`.
+	end:    u64,
+}
+
+/// Bytes an [`Ahead`] reads per `read`.
+const AHEAD: usize = 32 << 10;
+
+impl Ahead {
+	fn read(&mut self, file: &mut fs::File, out: &mut [u8]) -> io::Result<usize> {
+		if out.is_empty() {
+			return Ok(0);
+		}
+		if self.pos == self.filled {
+			if self.buf.is_empty() {
+				self.buf = vec![0; AHEAD].into_boxed_slice();
+			}
+			let n = loop {
+				match file.read(&mut self.buf) {
+					Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
+					got => break got?,
+				}
+			};
+			self.filled = n;
+			self.pos = 0;
+			self.end += n as u64;
+		}
+		let n = out.len().min(self.filled - self.pos);
+		out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+		self.pos += n;
+		Ok(n)
+	}
+
+	/// Move the kernel offset back to the engine's and drop the bytes ahead.
+	fn sync(&mut self, mut file: &fs::File) -> io::Result<()> {
+		let ahead = self.filled - self.pos;
+		if ahead > 0 {
+			self.end = file.seek(io::SeekFrom::Current(-(ahead as i64)))?;
+		}
+		self.filled = 0;
+		self.pos = 0;
+		Ok(())
+	}
+
+	fn seek(&mut self, file: &mut fs::File, pos: io::SeekFrom) -> io::Result<u64> {
+		if let io::SeekFrom::Current(back @ ..=0) = pos
+			&& let Some(pos) = self.pos.checked_sub(back.unsigned_abs() as usize)
+		{
+			self.pos = pos;
+			return Ok(self.end - (self.filled - self.pos) as u64);
+		}
+		self.sync(file)?;
+		self.end = file.seek(pos)?;
+		Ok(self.end)
+	}
 }
 
 impl StdFile {
 	/// Wrap an open file, classifying it.
 	pub fn new(file: fs::File) -> Self {
-		let kind = classify(&file);
-		Self::with_kind(file, kind)
+		let (kind, null) = classify(&file);
+		Self::with_kind(file, kind, null)
+	}
+
+	/// Wrap a file this engine opened with `flags`. A regular file opened
+	/// for reading only gets a read-ahead: its open file description is the
+	/// engine's own until handed out.
+	fn opened(file: fs::File, flags: OpenFlags) -> Self {
+		let new = Self::new(file);
+		if new.kind == FileKind::Regular && !flags.contains(OpenFlags::WRITE) {
+			new.ahead.replace(Some(Ahead::default()));
+		}
+		new
+	}
+
+	/// Sync and drop the read-ahead: the descriptor is about to be shared.
+	fn hand_out(&self) {
+		if let Some(mut ahead) = self.ahead.take() {
+			// A regular file seeks back within what it read; were that to
+			// fail, the receiver could only see a later offset.
+			let _ = ahead.sync(&self.file);
+		}
 	}
 
 	#[cfg_attr(
 		not(unix),
 		expect(clippy::missing_const_for_fn, reason = "reads the access mode with fcntl on Unix")
 	)]
-	fn with_kind(file: fs::File, kind: FileKind) -> Self {
+	fn with_kind(file: fs::File, kind: FileKind, null: bool) -> Self {
 		// Only a descriptor that waits for readiness consults its access
 		// mode ([`Self::gated`]); a regular file or device skips the `fcntl`.
 		#[cfg(unix)]
@@ -89,9 +188,11 @@ impl StdFile {
 			file,
 			kind,
 			#[cfg(unix)]
-			watch: None,
+			watch: [None, None],
 			#[cfg(unix)]
 			access,
+			null,
+			ahead: RefCell::new(None),
 		}
 	}
 
@@ -119,25 +220,27 @@ impl StdFile {
 
 		use crate::sys::ready;
 		let fd = self.file.as_raw_fd();
+		let slot = usize::from(events != ready::READ);
 		match ready::now(fd, events) {
 			Ok(true) => {
-				self.watch = None;
+				self.watch[slot] = None;
 				return Poll::Ready(Ok(()));
 			},
 			Ok(false) => {},
 			Err(e) => return Poll::Ready(Err(e)),
 		}
-		// Replace any earlier watch, so only the latest waker is kept.
-		self.watch = None;
+		// Replace any earlier watch of this direction, so only the latest
+		// waker is kept.
+		self.watch[slot] = None;
 		match ready::watch(fd, events, cx.waker()) {
-			Ok(w) => self.watch = Some(w),
+			Ok(w) => self.watch[slot] = Some(w),
 			Err(e) => return Poll::Ready(Err(e)),
 		}
 		// It may have become ready before the watch was registered; the
 		// poller would see that too, this only saves a round trip.
 		match ready::now(fd, events) {
 			Ok(true) => {
-				self.watch = None;
+				self.watch[slot] = None;
 				Poll::Ready(Ok(()))
 			},
 			Ok(false) => Poll::Pending,
@@ -177,35 +280,120 @@ const fn waits(kind: FileKind) -> bool {
 	matches!(kind, FileKind::Pipe | FileKind::Socket | FileKind::Tty)
 }
 
-/// Only a character device (or a handle `fstat` cannot read) can be a
-/// terminal, so a regular file, pipe or socket costs one `fstat` and no
-/// terminal probe.
-fn classify(file: &fs::File) -> FileKind {
+/// The file's kind, and whether it is the null device. Only a character
+/// device (or a handle `fstat` cannot read) can be a terminal, so a regular
+/// file, pipe or socket costs one `fstat` and no terminal probe.
+#[cfg(unix)]
+fn classify(file: &fs::File) -> (FileKind, bool) {
+	use std::{
+		os::unix::fs::{FileTypeExt, MetadataExt},
+		sync::LazyLock,
+	};
 	let Ok(meta) = file.metadata() else {
 		return if file.is_terminal() {
-			FileKind::Tty
+			(FileKind::Tty, false)
 		} else {
-			FileKind::Device
+			(FileKind::Device, false)
 		};
 	};
 	let ft = meta.file_type();
 	if ft.is_file() {
-		return FileKind::Regular;
+		return (FileKind::Regular, false);
 	}
-	if file.is_terminal() {
-		return FileKind::Tty;
+	if ft.is_fifo() {
+		return (FileKind::Pipe, false);
 	}
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::FileTypeExt;
-		if ft.is_fifo() {
-			return FileKind::Pipe;
-		}
-		if ft.is_socket() {
-			return FileKind::Socket;
-		}
+	if ft.is_socket() {
+		return (FileKind::Socket, false);
 	}
-	FileKind::Device
+	if ft.is_char_device() && file.is_terminal() {
+		return (FileKind::Tty, false);
+	}
+	/// `/dev/null`'s device number.
+	static NULL: LazyLock<Option<u64>> =
+		LazyLock::new(|| fs::metadata("/dev/null").ok().map(|m| m.rdev()));
+	if ft.is_char_device() && Some(meta.rdev()) == *NULL {
+		return (FileKind::Device, true);
+	}
+	(FileKind::Device, false)
+}
+
+/// The file's kind (the null device is not told apart). The handle's type
+/// decides, not its metadata: `GetFileInformationByHandle` can succeed on
+/// a pipe and report a plain file, which made the line reader read ahead
+/// on a pipe and lose what it could not seek back over.
+#[cfg(windows)]
+fn classify(file: &fs::File) -> (FileKind, bool) {
+	use std::os::windows::io::AsRawHandle;
+
+	use windows_sys::Win32::Storage::FileSystem::{
+		FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType,
+	};
+	// SAFETY: `GetFileType` only inspects the handle `file` owns.
+	let kind = match unsafe { GetFileType(file.as_raw_handle()) } {
+		FILE_TYPE_DISK => FileKind::Regular,
+		FILE_TYPE_PIPE => FileKind::Pipe,
+		// A console; `NUL` and serial ports are character devices too.
+		FILE_TYPE_CHAR if file.is_terminal() => FileKind::Tty,
+		_ => FileKind::Device,
+	};
+	(kind, false)
+}
+
+/// How long a console read that ended with nothing read waits for the
+/// console's control handler (it runs on a thread of its own) to report a
+/// Ctrl-C before the read counts as end of input.
+#[cfg(windows)]
+const CTRL_C_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// A read of a console in line mode. Ctrl-C ends it with nothing read,
+/// which is no end of input: as a terminal read interrupted by `SIGINT`
+/// (`EINTR`), the shell takes the signal (its trap runs, or it ends) and
+/// reads on. The console reports it as `ERROR_OPERATION_ABORTED`, a
+/// pseudoconsole not at all, so a Ctrl-C the shell's handler claimed
+/// ([`console::ctrl_c_since`](crate::sys::console::ctrl_c_since)) counts
+/// too. `ReadFile` itself: the standard library reads through
+/// `NtReadFile`, which sets no last error.
+#[cfg(windows)]
+fn console_read(
+	file: &fs::File,
+	cx: &std::task::Context<'_>,
+	buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+	use std::os::windows::io::AsRawHandle;
+
+	use windows_sys::Win32::{
+		Foundation::{ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED, GetLastError, SetLastError},
+		Storage::FileSystem::ReadFile,
+	};
+
+	use crate::sys::console;
+	let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+	let mut got = 0u32;
+	let before = console::ctrl_c_count();
+	// SAFETY: `buf` holds at least `len` bytes; a synchronous read of the
+	// handle `file` owns; the last-error value is the calling thread's.
+	let (ok, err) = unsafe {
+		SetLastError(0);
+		let ok =
+			ReadFile(file.as_raw_handle(), buf.as_mut_ptr(), len, &raw mut got, std::ptr::null_mut());
+		(ok != 0, GetLastError())
+	};
+	if got != 0 {
+		return Poll::Ready(Ok(got as usize));
+	}
+	let claimed = console::ctrl_c_since(before, CTRL_C_GRACE);
+	if !claimed && err != ERROR_OPERATION_ABORTED {
+		return Poll::Ready(if ok || err == ERROR_BROKEN_PIPE {
+			Ok(0)
+		} else {
+			Err(io::Error::from_raw_os_error(err as i32))
+		});
+	}
+	// The handler has posted the signal: the shell takes it before it
+	// polls this read again.
+	cx.waker().wake_by_ref();
+	Poll::Pending
 }
 
 /// The process's own standard stream `fd` (a duplicate of it), `None` when
@@ -236,6 +424,9 @@ pub fn std_stream(fd: StdFd) -> Option<Box<dyn File>> {
 
 impl File for StdFile {
 	fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+		if let Some(ahead) = self.ahead.get_mut() {
+			return Poll::Ready(ahead.read(&mut self.file, buf));
+		}
 		#[cfg(unix)]
 		if self.gated(false) {
 			if let Err(e) = std::task::ready!(self.ready(cx, crate::sys::ready::READ)) {
@@ -244,12 +435,19 @@ impl File for StdFile {
 			// Readable (or hung up): this read returns without waiting.
 			return Poll::Ready(self.file.read(buf));
 		}
+		#[cfg(windows)]
+		if self.kind == FileKind::Tty && !buf.is_empty() {
+			return console_read(&self.file, cx, buf);
+		}
 		#[cfg(not(unix))]
 		let _ = cx;
 		Poll::Ready(self.file.read(buf))
 	}
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+		if self.null {
+			return Poll::Ready(Ok(buf.len()));
+		}
 		#[cfg(unix)]
 		if self.gated(true) && !buf.is_empty() {
 			if let Err(e) = std::task::ready!(self.ready(cx, crate::sys::ready::WRITE)) {
@@ -267,7 +465,10 @@ impl File for StdFile {
 	}
 
 	fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-		self.file.seek(pos)
+		match self.ahead.get_mut() {
+			Some(ahead) => ahead.seek(&mut self.file, pos),
+			None => self.file.seek(pos),
+		}
 	}
 
 	fn kind(&self) -> FileKind {
@@ -275,6 +476,7 @@ impl File for StdFile {
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
+		self.hand_out();
 		#[cfg(unix)]
 		{
 			use std::os::fd::AsRawFd;
@@ -287,17 +489,27 @@ impl File for StdFile {
 		}
 	}
 
+	fn stat(&self) -> io::Result<Stat> {
+		self.file.metadata().map(|m| stat_of(&m))
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
-		Ok(Box::new(Self::with_kind(self.file.try_clone()?, self.kind)))
+		self.hand_out();
+		Ok(Box::new(Self::with_kind(self.file.try_clone()?, self.kind, self.null)))
 	}
 }
 
 /// Engine path → host path (UTF-8 required on Windows). A URL path
 /// ([`crate::bash::fs::url_root_len`]) names no host file: `NotFound`, rather
-/// than a lookup relative to the process's working directory.
+/// than a lookup relative to the process's working directory. On Windows,
+/// `/dev/null` is the null device `NUL` (else `\dev\null` on the current
+/// drive, which does not exist).
 pub fn host_path(p: &[u8]) -> io::Result<&Path> {
 	if crate::bash::fs::url_root_len(p).is_some() {
 		return Err(io::Error::from(io::ErrorKind::NotFound));
+	}
+	if cfg!(windows) && p == b"/dev/null" {
+		return Ok(Path::new("NUL"));
 	}
 	p.to_path()
 		.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
@@ -362,6 +574,8 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 				.saturating_mul(1_000_000_000)
 				.saturating_add(meta.ctime_nsec()),
 			blocks: meta.blocks(),
+			rdev: meta.rdev(),
+			blksize: meta.blksize(),
 		}
 	}
 	#[cfg(windows)]
@@ -371,12 +585,13 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 			(_, true) => 0o444,
 			(_, false) => 0o644,
 		};
+		let (uid, gid) = crate::sys::user::owner();
 		Stat {
 			kind,
 			mode,
 			size: meta.len(),
-			uid: 0,
-			gid: 0,
+			uid,
+			gid,
 			dev: 0,
 			ino: 0,
 			nlink: 1,
@@ -385,6 +600,8 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 			// Windows has no status-change time: the creation time stands in.
 			ctime_ns: since_epoch(meta.created()),
 			blocks: meta.len().div_ceil(512),
+			rdev: 0,
+			blksize: 4096,
 		}
 	}
 }
@@ -395,7 +612,35 @@ fn open(path: &BStr, flags: OpenFlags, mode: u32, umask: Option<u32>) -> io::Res
 		return server;
 	}
 	let path = host_path(path)?;
-	Ok(Box::new(StdFile::new(create_with_mode(path, flags, mode, umask)?)))
+	Ok(Box::new(StdFile::opened(create_with_mode(path, flags, mode, umask, false)?, flags)))
+}
+
+/// [`open`] for writing only, without waiting for a FIFO's reader: such a
+/// FIFO fails at once with `ENXIO` (the caller then waits on the helper
+/// thread), and nothing is stat'ed first. The descriptor is left blocking,
+/// as a plain open leaves it, since externals inherit its flags.
+#[cfg(unix)]
+fn open_for_writing(
+	path: &BStr,
+	flags: OpenFlags,
+	mode: u32,
+	umask: Option<u32>,
+) -> io::Result<Box<dyn File>> {
+	use std::os::fd::AsRawFd;
+	let file = create_with_mode(host_path(path)?, flags, mode, umask, true)?;
+	let mut status = if flags.contains(OpenFlags::APPEND) {
+		libc::O_APPEND
+	} else {
+		0
+	};
+	if flags.contains(OpenFlags::NONBLOCK) {
+		status |= libc::O_NONBLOCK;
+	}
+	// SAFETY: F_SETFL sets the status flags of our own open descriptor.
+	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, status) } < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(Box::new(StdFile::opened(file, flags)))
 }
 
 /// Opens `path`, giving a file the open creates exactly `mode`.
@@ -412,11 +657,27 @@ fn create_with_mode(
 	flags: OpenFlags,
 	mode: u32,
 	process_umask: Option<u32>,
+	nonblock: bool,
 ) -> io::Result<fs::File> {
+	let options = || {
+		#[cfg_attr(not(unix), expect(unused_mut, reason = "custom flags are Unix's"))]
+		let mut o = options(flags, mode);
+		#[cfg(unix)]
+		if nonblock {
+			use std::os::unix::fs::OpenOptionsExt;
+			// `custom_flags` replaces the earlier ones.
+			o.custom_flags(libc::O_NONBLOCK | custom_flags(flags));
+		}
+		#[cfg(not(unix))]
+		let _ = nonblock;
+		o
+	};
+	#[cfg(not(unix))]
+	let _ = process_umask;
 	#[cfg(unix)]
 	if flags.contains(OpenFlags::CREATE) && process_umask.is_none_or(|mask| mode & mask != 0) {
 		use std::os::unix::fs::PermissionsExt as _;
-		let mut exclusive = options(flags, mode);
+		let mut exclusive = options();
 		exclusive.create_new(true);
 		match exclusive.open(path) {
 			Ok(file) => {
@@ -430,14 +691,19 @@ fn create_with_mode(
 			Err(err) => return Err(err),
 		}
 	}
-	options(flags, mode).open(path)
+	options().open(path)
 }
 
 fn options(flags: OpenFlags, mode: u32) -> OpenOptions {
 	let mut o = OpenOptions::new();
+	// `OpenOptions` refuses append with truncate, which `open(2)` takes
+	// (zsh `sysopen -a -o trunc`): on Unix the append flag then goes in as
+	// a custom flag ([`custom_flags`]).
+	let append_trunc =
+		cfg!(unix) && flags.contains(OpenFlags::APPEND) && flags.contains(OpenFlags::TRUNC);
 	o.read(flags.contains(OpenFlags::READ))
-		.write(flags.contains(OpenFlags::WRITE))
-		.append(flags.contains(OpenFlags::APPEND))
+		.write(flags.contains(OpenFlags::WRITE) || append_trunc)
+		.append(flags.contains(OpenFlags::APPEND) && !append_trunc)
 		.truncate(flags.contains(OpenFlags::TRUNC))
 		.create(flags.contains(OpenFlags::CREATE));
 	if flags.contains(OpenFlags::EXCL) {
@@ -447,10 +713,37 @@ fn options(flags: OpenFlags, mode: u32) -> OpenOptions {
 	{
 		use std::os::unix::fs::OpenOptionsExt;
 		o.mode(mode);
+		let custom = custom_flags(flags);
+		if custom != 0 {
+			o.custom_flags(custom);
+		}
 	}
 	#[cfg(windows)]
 	let _ = mode;
 	o
+}
+
+/// The `open(2)` flags of `flags` that [`OpenOptions`] has no setter for.
+#[cfg(unix)]
+const fn custom_flags(flags: OpenFlags) -> libc::c_int {
+	let mut custom = 0;
+	if flags.contains(OpenFlags::APPEND) && flags.contains(OpenFlags::TRUNC) {
+		custom |= libc::O_APPEND;
+	}
+	if flags.contains(OpenFlags::NOFOLLOW) {
+		custom |= libc::O_NOFOLLOW;
+	}
+	if flags.contains(OpenFlags::SYNC) {
+		custom |= libc::O_SYNC;
+	}
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	if flags.contains(OpenFlags::NOATIME) {
+		custom |= libc::O_NOATIME;
+	}
+	if flags.contains(OpenFlags::NONBLOCK) {
+		custom |= libc::O_NONBLOCK;
+	}
+	custom
 }
 
 /// Opening a FIFO in one direction blocks until the other end opens; it runs
@@ -599,6 +892,14 @@ fn access(path: &BStr, mode: Access) -> io::Result<()> {
 	}
 	#[cfg(windows)]
 	{
+		if path.as_bytes() == b"/dev/null" {
+			// The null device takes reads and writes; it runs nothing.
+			return if mode.contains(Access::EXEC) {
+				Err(io::ErrorKind::PermissionDenied.into())
+			} else {
+				Ok(())
+			};
+		}
 		let p = host_path(path)?;
 		let meta = fs::metadata(p)?;
 		if mode.contains(Access::WRITE) && meta.permissions().readonly() {
@@ -706,7 +1007,7 @@ mod pipe {
 
 	use crate::{
 		bash::{File, FileKind, OpenFlags, OsHandle, fs::TempNode},
-		sys::pump::os::OsPipe,
+		sys::pump::os::{OsPipe, PIPE_PREFIX},
 	};
 
 	/// Server ends not yet taken, by path; `true` when the server writes.
@@ -718,7 +1019,7 @@ mod pipe {
 	/// Create the pipe for a `<( )` (`output == false`: we write, the
 	/// consumer reads) or `>( )` substitution.
 	pub fn create(output: bool, seq: u32) -> io::Result<TempNode> {
-		let name = format!(r"\\.\pipe\obash-{}-{seq}", std::process::id());
+		let name = format!("{}obash-{}-{seq}", *PIPE_PREFIX, std::process::id());
 		let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
 		let access = if output {
 			PIPE_ACCESS_INBOUND
@@ -830,6 +1131,19 @@ mod pipe {
 
 impl Fs for StdFs {
 	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
+		// The console, as `/dev/tty` is the controlling terminal on Unix.
+		#[cfg(windows)]
+		if path.as_bytes() == b"/dev/tty" {
+			return FsPoll::Ready(crate::sys::console::open_tty());
+		}
+		#[cfg(unix)]
+		if flags.contains(OpenFlags::WRITE) && !flags.contains(OpenFlags::READ) {
+			match open_for_writing(path, flags, mode, self.umask) {
+				// No reader (or not a FIFO at all: the checks below tell).
+				Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {},
+				opened => return FsPoll::Ready(opened),
+			}
+		}
 		#[cfg(unix)]
 		if let Some(pending) = fifo::pending(path, flags, mode) {
 			return FsPoll::Pending(pending);
@@ -838,6 +1152,28 @@ impl Fs for StdFs {
 	}
 
 	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
+		// `NUL` has no metadata on Windows (`GetFileAttributesEx` fails):
+		// answer as Unix does for `/dev/null`, a world-writable character
+		// device.
+		#[cfg(windows)]
+		if path.as_bytes() == b"/dev/null" {
+			return FsPoll::Ready(Ok(Stat {
+				kind:     StatKind::CharDev,
+				mode:     0o666,
+				size:     0,
+				uid:      0,
+				gid:      0,
+				dev:      0,
+				ino:      0,
+				nlink:    1,
+				mtime_ns: 0,
+				atime_ns: 0,
+				ctime_ns: 0,
+				blocks:   0,
+				rdev:     0,
+				blksize:  4096,
+			}));
+		}
 		FsPoll::Ready(
 			host_path(path)
 				.and_then(|p| {
@@ -868,11 +1204,15 @@ impl Fs for StdFs {
 	}
 
 	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
-		FsPoll::Ready(
-			host_path(path)
-				.and_then(fs::canonicalize)
-				.map(|p| engine_path(&p)),
-		)
+		FsPoll::Ready(host_path(path).and_then(fs::canonicalize).map(|p| {
+			// `C:\x`, not `\\?\C:\x`, where both name the file.
+			let p = engine_path(&p);
+			if cfg!(windows) {
+				BString::from(crate::bash::fs::plain_windows_path(&p).into_owned())
+			} else {
+				p
+			}
+		}))
 	}
 
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode> {
@@ -882,6 +1222,153 @@ impl Fs for StdFs {
 	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
 		FsPoll::Ready(chdir_check(path))
 	}
+
+	fn unlink(&mut self, path: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(fs::remove_file))
+	}
+
+	fn rename(&mut self, from: &BStr, to: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(host_path(from).and_then(|f| fs::rename(f, host_path(to)?)))
+	}
+
+	fn symlink(&mut self, target: &BStr, path: &BStr) -> FsPoll<()> {
+		#[cfg(unix)]
+		let res = host_path(path).and_then(|p| std::os::unix::fs::symlink(host_path(target)?, p));
+		#[cfg(not(unix))]
+		let res = {
+			let _ = (target, path);
+			Err(io::ErrorKind::Unsupported.into())
+		};
+		FsPoll::Ready(res)
+	}
+
+	fn link(&mut self, from: &BStr, to: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(host_path(from).and_then(|f| fs::hard_link(f, host_path(to)?)))
+	}
+
+	fn lock(&mut self, path: &BStr) -> FsPoll<Box<dyn File>> {
+		FsPoll::Ready(lock_file(path))
+	}
+
+	fn lock_fd(&mut self, file: OsHandle, lock: crate::bash::fs::FdLock) -> FsPoll<()> {
+		FsPoll::Ready(lock_fd(file, lock))
+	}
+
+	fn mkdir(&mut self, path: &BStr, mode: u32) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::mkdir(p, mode, self.umask)))
+	}
+
+	fn rmdir(&mut self, path: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(fs::remove_dir))
+	}
+
+	fn chmod(&mut self, path: &BStr, mode: u32) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::chmod(p, mode)))
+	}
+
+	fn chown(
+		&mut self,
+		path: &BStr,
+		uid: Option<u32>,
+		gid: Option<u32>,
+		follow: bool,
+	) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::chown(p, uid, gid, follow)))
+	}
+
+	fn sync(&mut self) -> FsPoll<()> {
+		super::fs_ops::sync();
+		FsPoll::Ready(Ok(()))
+	}
+
+	fn getxattr(&mut self, path: &BStr, name: &BStr, follow: bool) -> FsPoll<BString> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::getxattr(p, name, follow)))
+	}
+
+	fn setxattr(&mut self, path: &BStr, name: &BStr, value: &[u8], follow: bool) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::setxattr(p, name, value, follow)))
+	}
+
+	fn removexattr(&mut self, path: &BStr, name: &BStr, follow: bool) -> FsPoll<()> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::removexattr(p, name, follow)))
+	}
+
+	fn listxattr(&mut self, path: &BStr, follow: bool) -> FsPoll<Vec<BString>> {
+		FsPoll::Ready(host_path(path).and_then(|p| super::fs_ops::listxattr(p, follow)))
+	}
+
+	fn user_db(
+		&mut self,
+		query: &crate::bash::fs::PwQuery,
+	) -> FsPoll<Vec<crate::bash::fs::PwEntry>> {
+		FsPoll::Ready(super::fs_ops::user_db(query))
+	}
+}
+
+/// `fcntl(F_SETLK)` of a whole-file lock on descriptor `file`
+/// ([`Fs::lock_fd`]): `WouldBlock` on contention.
+#[cfg(unix)]
+fn lock_fd(file: OsHandle, lock: crate::bash::fs::FdLock) -> io::Result<()> {
+	use crate::bash::fs::FdLock;
+	let fd = libc::c_int::try_from(file.0).map_err(|_| io::Error::from_raw_os_error(libc::EBADF))?;
+	// SAFETY: `flock` is plain data; all-zero is a valid value.
+	let mut lck: libc::flock = unsafe { std::mem::zeroed() };
+	lck.l_type = (match lock {
+		FdLock::Shared => libc::F_RDLCK,
+		FdLock::Exclusive => libc::F_WRLCK,
+		FdLock::Unlock => libc::F_UNLCK,
+	}) as _;
+	lck.l_whence = libc::SEEK_SET as _;
+	loop {
+		// SAFETY: `fcntl` on a caller-supplied descriptor with a valid
+		// `flock`; a stale descriptor fails with `EBADF`.
+		if unsafe { libc::fcntl(fd, libc::F_SETLK, &lck) } != -1 {
+			return Ok(());
+		}
+		let err = io::Error::last_os_error();
+		match err.raw_os_error() {
+			Some(libc::EINTR) => {},
+			Some(libc::EAGAIN | libc::EACCES) => return Err(io::ErrorKind::WouldBlock.into()),
+			_ => return Err(err),
+		}
+	}
+}
+
+/// Record locks on descriptors need `fcntl` ([`Fs::lock_fd`]).
+#[cfg(not(unix))]
+fn lock_fd(_file: OsHandle, _lock: crate::bash::fs::FdLock) -> io::Result<()> {
+	Err(io::ErrorKind::Unsupported.into())
+}
+
+/// [`Fs::lock`]: open `path` read-write and take a non-waiting `F_WRLCK`
+/// record lock on the whole file.
+fn lock_file(path: &BStr) -> io::Result<Box<dyn File>> {
+	let file = OpenOptions::new()
+		.read(true)
+		.write(true)
+		.open(host_path(path)?)?;
+	#[cfg(unix)]
+	{
+		use std::os::fd::AsRawFd;
+		// SAFETY: `flock` is plain data; all-zero is a valid value.
+		let mut lck: libc::flock = unsafe { std::mem::zeroed() };
+		lck.l_type = libc::F_WRLCK as _;
+		lck.l_whence = libc::SEEK_SET as _;
+		// SAFETY: a valid open descriptor and a valid `flock`.
+		if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lck) } == -1 {
+			let err = io::Error::last_os_error();
+			return Err(match err.raw_os_error() {
+				Some(libc::EAGAIN | libc::EACCES) => io::ErrorKind::WouldBlock.into(),
+				_ => err,
+			});
+		}
+	}
+	#[cfg(not(unix))]
+	file.try_lock().map_err(|e| match e {
+		fs::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+		fs::TryLockError::Error(e) => e,
+	})?;
+	Ok(Box::new(StdFile::new(file)))
 }
 
 #[cfg(test)]
@@ -1198,5 +1685,64 @@ mod tests {
 			.unwrap();
 		assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 		std::fs::remove_file(host_path(&node.path).unwrap()).unwrap();
+	}
+
+	/// A Windows pipe classified as a regular file made the line reader read
+	/// ahead and seek back, which a pipe cannot: `printf 'a\nb\n' | zsh` ran
+	/// only `a`.
+	#[cfg(windows)]
+	#[test]
+	fn windows_pipes_files_and_nul_get_their_own_kinds() {
+		use std::os::windows::io::OwnedHandle;
+		let (r, _w) = io::pipe().unwrap();
+		let pipe = StdFile::new(fs::File::from(OwnedHandle::from(r)));
+		assert_eq!(pipe.kind(), FileKind::Pipe);
+		let path = std::env::temp_dir().join(format!("pi-shell-classify-{}", std::process::id()));
+		let regular = StdFile::new(fs::File::create(&path).unwrap());
+		assert_eq!(regular.kind(), FileKind::Regular);
+		drop(regular);
+		fs::remove_file(&path).unwrap();
+		let nul = StdFile::new(fs::OpenOptions::new().write(true).open("NUL").unwrap());
+		assert_eq!(nul.kind(), FileKind::Device);
+	}
+}
+
+#[cfg(all(test, windows))]
+mod windows_devices {
+	use super::*;
+
+	/// `>/dev/null` failed with "The system cannot find the path
+	/// specified" (`\dev\null` on the current drive); `[[ -c /dev/null ]]`
+	/// and `-w` hold as on Unix.
+	#[test]
+	fn dev_null_is_the_null_device() {
+		let mut fs = StdFs::default();
+		let both = OpenFlags::READ.with(OpenFlags::WRITE);
+		let FsPoll::Ready(Ok(mut f)) = fs.open(b"/dev/null".as_bstr(), both, 0) else {
+			panic!("open /dev/null");
+		};
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(matches!(f.poll_write(&mut cx, b"x"), Poll::Ready(Ok(1))));
+		let FsPoll::Ready(stat) = fs.stat(b"/dev/null".as_bstr(), true) else {
+			unreachable!()
+		};
+		assert_eq!(stat.unwrap().kind, StatKind::CharDev);
+		let FsPoll::Ready(access) = fs.access(b"/dev/null".as_bstr(), Access::WRITE) else {
+			unreachable!()
+		};
+		access.unwrap();
+	}
+
+	/// `cd ..` left `$PWD` as `\\?\F:\…`: `realpath` must answer with the
+	/// drive path a user writes.
+	#[test]
+	fn realpath_has_no_verbatim_prefix() {
+		let dir = std::env::temp_dir();
+		let FsPoll::Ready(real) = StdFs::default().realpath(engine_path(&dir).as_bstr()) else {
+			unreachable!()
+		};
+		let real = real.unwrap();
+		assert!(!real.starts_with(br"\\?\"), "{real}");
+		assert!(real.get(1) == Some(&b':'), "{real}");
 	}
 }

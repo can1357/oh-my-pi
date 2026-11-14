@@ -8,7 +8,8 @@
  * tombstone) and can be revived (a `session_init` contract, not isolated) runs one
  * more monitored turn as a background job of its parent: the lifecycle reviver
  * rebuilds it from its transcript, {@link runSubagentFollowUpTurn} goes on with the
- * cut-off turn and drives it to `yield`, and the parent receives the result as the
+ * cut-off turn and drives it to `yield` (then through the steps a stepped run had not
+ * sent yet), and the parent receives the result as the
  * ordinary `async-result` of a job with the subagent's id, the id its first run's
  * job had, so a parent waiting on that job finds it again.
  */
@@ -23,7 +24,8 @@ import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
-import { persistedAgentDefinition } from "./persisted-revive";
+import { persistedAgentDefinition, persistedAgentName } from "./persisted-revive";
+import { readStepProgress } from "./steps";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskMaxRuntimeMs } from "./settings";
 
@@ -81,7 +83,9 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 			continue;
 		}
 		const sessionFileOfRef = ref.sessionFile;
+		const agentName = persistedAgentName(ref.displayName, init);
 		const structured = init.tools.includes("yield");
+		const steps = readStepProgress(sub.entries);
 		manager.register(
 			"task",
 			id,
@@ -91,6 +95,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					agent: persistedAgentDefinition(ref.displayName, init),
 					message: init.task,
 					restore: true,
+					steps,
 					structured,
 					workPoolYieldItems: init.workPoolYieldItems,
 					outputSchema: init.outputSchema,
@@ -100,7 +105,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					subagentEventBus: options.subagentEventBus,
 					artifactsDir: path.dirname(sessionFileOfRef),
 					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
-					...softRequestBudgetFor(ref.displayName, session.settings),
+					...softRequestBudgetFor(agentName, session.settings),
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;

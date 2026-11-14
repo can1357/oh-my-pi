@@ -47,9 +47,12 @@ function shaped(b: SpotlightSessionBuilder, name: string, args: Record<string, u
 function shapedRead(
 	b: SpotlightSessionBuilder,
 	file: string,
-	opts: { lines?: number; kept?: [number, number][]; heat?: string; artifact?: number } & Partial<
-		Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated" | "editLikely">
-	> = {},
+	opts: {
+		lines?: number;
+		kept?: [number, number][];
+		heat?: string;
+		artifact?: number;
+	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated">> = {},
 ): string {
 	return shaped(
 		b,
@@ -62,7 +65,6 @@ function shapedRead(
 			...(opts.holdout ? { holdout: opts.holdout } : {}),
 			...(opts.scoreFree ? { scoreFree: true } : {}),
 			...(opts.gated ? { gated: true } : {}),
-			...(opts.editLikely === undefined ? {} : { editLikely: opts.editLikely }),
 			original: {
 				url: `artifact://${opts.artifact ?? 0}`,
 				lines: opts.lines ?? 60,
@@ -254,69 +256,22 @@ describe("Spotlight holdout-adjusted net", () => {
 	});
 });
 
-describe("Spotlight edit-aware gate", () => {
-	it("classifies unmarked reads by pi's rule: code files of a main agent, or files the session already read or edited", async () => {
-		const main = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		main.user("go");
-		shapedRead(main, "src/a.ts");
-		// Not a code file: never edit-likely.
-		shapedRead(main, "docs/readme.md");
-		await write("main.jsonl", main);
-
-		const sub = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
-		sub.user("task");
-		// A subagent's first read of a file is not edit-likely; its second read is.
-		shapedRead(sub, "src/b.ts");
-		shapedRead(sub, "src/b.ts");
-		// Edited (an absolute path, resolved alike) before its first read.
-		edit(sub, "/repo/src/c.ts", ["line 1"]);
-		shapedRead(sub, "src/c.ts");
-		// Read before with a selector (selectors are stripped), by a call shaping left alone.
-		call(sub, "read", { path: "src/d.py:1-5" });
-		shapedRead(sub, "src/d.py");
-		call(sub, "read", { path: "notes.txt" });
-		shapedRead(sub, "notes.txt");
-		await write("main/Sub.jsonl", sub);
-
-		const mainStats = await dashboard("main");
-		expect(mainStats.editGate.reads?.cut).toBe(1);
-		expect(mainStats.editGate.editLikelyShare).toBe(1 / 2);
-		const subStats = await dashboard("subagent");
-		expect(subStats.editGate.reads?.cut).toBe(3);
-		expect(subStats.editGate.editLikelyShare).toBeCloseTo(3 / 5, 12);
-		const stats = await dashboard();
-		expect(stats.editGate.reads?.cut).toBe(4);
-		expect(stats.editGate.editLikelyShare).toBeCloseTo(4 / 7, 12);
-	});
-
-	it("prefers pi's mark over the rule", async () => {
-		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		b.user("go");
-		shapedRead(b, "src/x.ts", { editLikely: false });
-		shapedRead(b, "docs/plan.md", { editLikely: true });
-		await write("marked.jsonl", b);
-
-		const stats = await dashboard();
-		expect(stats.editGate.reads?.cut).toBe(1);
-		expect(stats.editGate.editLikelyShare).toBe(0.5);
-	});
-
-	it("never counts a gated read as a cut and compares edit-likely cuts with the reads shown whole", async () => {
+describe("Spotlight historical gated reads", () => {
+	it("never counts a gated read as a cut and fetches it back as a group of its own", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		// Gated (the model saw it whole): its would-be hidden lines are read again (100 tokens) in a request of its own.
-		const gated = shapedRead(b, "src/g.ts", { gated: true, editLikely: true });
+		const gated = shapedRead(b, "src/g.ts", { gated: true });
 		call(b, "read", { path: "src/g.ts:20-30" }, "x".repeat(400));
 		// Cut: one fetched back (200 tokens recovered), one not.
-		shapedRead(b, "src/c.ts", { editLikely: true });
+		shapedRead(b, "src/c.ts");
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
-		shapedRead(b, "src/d.ts", { editLikely: true });
+		shapedRead(b, "src/d.ts");
 		// Held out: shown whole, nothing fetched.
-		shapedRead(b, "src/h.ts", { editLikely: true, holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/h.ts", { holdout: { shapedUrl: "artifact://9" } });
 		await write("gate.jsonl", b);
 
 		const stats = await dashboard();
-		expect(stats.gated).toBe(1);
 		expect(stats.holdouts).toBe(1);
 		// Gated reads save nothing and show plain's page: not in the gross, steps, economics or the adjusted net.
 		expect(stats.gross).toMatchObject({ results: 4, shaped: 2, savedTokens: 4000, outTokens: 2000 + 3000 + 3000 });
@@ -329,68 +284,19 @@ describe("Spotlight edit-aware gate", () => {
 		});
 		expect(stats.recent.map(row => row.toolCallId)).not.toContain(gated);
 		const fetchBack = (group: string) => stats.fetchBack.find(c => c.tool === "read" && c.group === group);
-		expect(fetchBack("gated")).toMatchObject({ results: 1, sessions: 1, rate: { value: 1 } });
-		expect(fetchBack("applied")).toMatchObject({ results: 2, rate: { value: 0.5 } });
-		expect(fetchBack("holdout")).toMatchObject({ results: 1, rate: { value: 0 } });
-
-		const row = stats.editGate.reads;
-		expect(row).toMatchObject({
-			cut: 2,
-			gated: 1,
-			heldOut: 1,
-			cutFetchBack: { value: 0.5 },
-			wholeFetchBack: { value: 0.5 },
-			cutTurnsPer100: 50,
-			wholeTurnsPer100: 50,
+		expect(fetchBack("gated")).toMatchObject({
+			results: 1,
+			sessions: 1,
+			rate: { value: 1 },
 		});
-		// One held-out edit-likely read is under 30: the baseline falls back to all held-out reads, which fetched
-		// nothing back, so all 200 recovered tokens are excess (the gated read's re-read is not a holdout). Whole
-		// reads take half a fetch-back-only request each, as many as the two cuts took: no excess request cost.
-		const { savedUsd } = stats.compounding;
-		const carriedUsd = stats.clawback.usd;
-		expect(carriedUsd).toBeGreaterThan(0);
-		expect(row?.cutNetUsdPer100.value).toBeCloseTo(((savedUsd - carriedUsd - 0.002) * 100) / 2, 12);
-		expect(stats.editGate.editLikelyShare).toBe(1);
-	});
-
-	it("measures edit-likely read cuts against edit-likely holdouts and other read cuts against the rest", async () => {
-		// 30 edit-likely holdouts, each fetched back by 100 tokens anyway; 2 edit-likely cuts, one recovered 200.
-		const a = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		a.user("go");
-		for (let i = 0; i < 30; i++) {
-			shapedRead(a, `src/h${i}.ts`, { holdout: { shapedUrl: "artifact://9" } });
-			call(a, "read", { path: `src/h${i}.ts:20-30` }, "x".repeat(400));
-		}
-		shapedRead(a, "src/c1.ts");
-		call(a, "read", { path: "src/c1.ts:20-30" }, "y".repeat(800));
-		shapedRead(a, "src/c2.ts");
-		await write("edit-likely.jsonl", a);
-		// 30 other holdouts, never fetched back; 1 other cut that recovered 200. A subagent's, so the main agent's
-		// economics price the edit-likely cuts alone.
-		const b = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
-		b.user("go");
-		for (let i = 0; i < 30; i++) shapedRead(b, `docs/n${i}.md`, { holdout: { shapedUrl: "artifact://9" } });
-		shapedRead(b, "docs/x.md");
-		call(b, "read", { path: "docs/x.md:20-30" }, "z".repeat(800));
-		await write("edit-likely/Other.jsonl", b);
-
-		const stats = await dashboard();
-		// Pooled, every cut would be charged 3000 / 60 = 50 tokens of baseline: 400 − 150 = 250 excess. By stratum:
-		// edit-likely 200 − 100 × 2 → 0, other 200 − 0 × 1 = 200.
-		const read = stats.adjusted.byTool.find(t => t.tool === "read");
-		expect(read).toMatchObject({ cuts: 3, holdouts: 60, recoveredTokens: 400, baselinePerCut: { value: 50 } });
-		expect(read?.excessTokens.value).toBe(200);
-		expect(stats.steps.map(cell => [cell.tool, cell.cuts, cell.recoveredTokens, cell.excessTokens])).toEqual([
-			["read", 3, 400, 200],
-		]);
-		// The edit-likely cuts recovered no more than edit-likely holdouts fetch anyway, and took one fetch-back-only
-		// request where 2 whole reads take 2: only their saving and Spotlight's bill remain.
-		const row = stats.editGate.reads;
-		expect(row).toMatchObject({ cut: 2, heldOut: 30, gated: 0 });
-		const mainStats = await dashboard("main");
-		const savedUsd = mainStats.economics.find(c => c.tool === "read")?.savedUsd ?? 0;
-		expect(savedUsd).toBeGreaterThan(0);
-		expect(row?.cutNetUsdPer100.value).toBeCloseTo(((savedUsd - 0.002) * 100) / 2, 12);
+		expect(fetchBack("applied")).toMatchObject({
+			results: 2,
+			rate: { value: 0.5 },
+		});
+		expect(fetchBack("holdout")).toMatchObject({
+			results: 1,
+			rate: { value: 0 },
+		});
 	});
 });
 
@@ -453,5 +359,149 @@ describe("Spotlight needs backfill", () => {
 		// The restored heat ranks the two needed lines first.
 		expect(stats.ranking.cells.find(c => c.group === "applied")?.auc.value).toBe(1);
 		expect(stats.ranking.position.find(p => p.label === "line 1")?.meanHeat).toBe(9);
+	});
+});
+
+describe("Spotlight list reads' windows", () => {
+	/** A shaped `a.py;b.py` read: `a.py` (10 lines) first, then `b.py` (`bLines` lines), each its own window. */
+	function listRead(
+		b: SpotlightSessionBuilder,
+		opts: { kept: [number, number][]; bLines?: number; heat?: string; bWhole?: true },
+	): string {
+		const bLines = opts.bLines ?? 40;
+		return shaped(
+			b,
+			"read",
+			{ path: "a.py;b.py" },
+			{
+				inTokens: 3000,
+				outTokens: 1000,
+				costUsd: 0.001,
+				original: {
+					url: "artifact://0",
+					lines: 10 + bLines,
+					kept: opts.kept,
+					...(opts.heat ? { heat: opts.heat } : {}),
+					windows: [
+						{ at: 0, lines: 10, start: 1, path: "a.py" },
+						{ at: 10, lines: bLines, start: 1, path: "b.py", ...(opts.bWhole ? { wholeFile: opts.bWhole } : {}) },
+					],
+				},
+			},
+		);
+	}
+
+	async function need(id: string): Promise<{ open: number; reread: string; edit: string } | null> {
+		const db = await initDb();
+		return db
+			.query<{ open: number; reread: string; edit: string }, [string]>(
+				"SELECT open, reread, edit FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.get(id);
+	}
+
+	it("ranks a list's cut window as that read alone, and needs nothing of a window shown unchanged", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// `a.py` shown whole (unscored); `b.py` cut to its two hottest lines, as `src/good.ts` alone above.
+		listRead(b, {
+			kept: [
+				[1, 10],
+				[11, 12],
+			],
+			heat: `${"-".repeat(10)}99${"0".repeat(38)}`,
+		});
+		call(b, "read", { path: "b.py:1-2" });
+		call(b, "read", { path: "a.py:1-6" });
+		await write("list-rank.jsonl", b);
+
+		const cell = (await dashboard()).ranking.cells.find(c => c.group === "applied");
+		expect(cell).toMatchObject({ results: 1, neededLines: 2, auc: { value: 1 } });
+		expect(cell?.topLift.value).toBeCloseTo(10, 12);
+		expect(cell?.keptLift.value).toBeCloseTo(20, 12);
+	});
+
+	it("fetches back a list's whole-file part on a tail read of its file", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		listRead(b, {
+			kept: [
+				[1, 10],
+				[11, 20],
+			],
+			bWhole: true,
+		});
+		call(b, "read", { path: "b.py:-5" });
+		await write("list-tail.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.fetchBack.find(c => c.tool === "read" && c.group === "applied")).toMatchObject({
+			results: 1,
+			rate: { value: 1 },
+		});
+	});
+
+	it("locates an edit's Find in its own window and records it past the windows before", async () => {
+		// Both windows hold the same ten lines: only `b.py`'s own window places the Find once.
+		await Bun.write(sessionPath("list-edit/0.spotlight-read.log"), [...TEN_LINES, ...TEN_LINES].join("\n"));
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b, {
+			kept: [
+				[1, 2],
+				[11, 12],
+			],
+			bLines: 10,
+		});
+		edit(b, "b.py", ["line 7", "line 8"]);
+		await write("list-edit.jsonl", b);
+		await dashboard();
+
+		expect(JSON.parse((await need(list))?.edit ?? "null")).toEqual([[17, 18]]);
+	});
+
+	it("keeps a list's needs open until its last window stops collecting", async () => {
+		const file = sessionPath("list-open.jsonl");
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b, {
+			kept: [
+				[1, 2],
+				[11, 12],
+			],
+		});
+		call(b, "read", { path: "a.py" });
+		const written = b.text();
+		await Bun.write(file, written);
+		await syncAllSessions({ workers: 1 });
+		expect((await need(list))?.open).toBe(1);
+
+		call(b, "read", { path: "b.py" });
+		await fs.appendFile(file, b.text().slice(written.length));
+		await syncAllSessions({ workers: 1 });
+		expect((await need(list))?.open).toBe(0);
+	});
+
+	it("reads an open read persisted before windows as one at the original's start", async () => {
+		const file = sessionPath("list-state.jsonl");
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const read = shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 2]] });
+		const written = b.text();
+		await Bun.write(file, written);
+		await syncAllSessions({ workers: 1 });
+		// The cursor as a stats build before windows wrote it: its open reads carry no `at`.
+		const db = await initDb();
+		const row = db
+			.query<{ parser_state: string }, [string]>("SELECT parser_state FROM file_offsets WHERE session_file = ?")
+			.get(file);
+		const state = JSON.parse(row?.parser_state ?? "null", (key, value) => (key === "at" ? undefined : value));
+		db.query("UPDATE file_offsets SET parser_state = ? WHERE session_file = ?").run(JSON.stringify(state), file);
+
+		call(b, "read", { path: "src/x.ts:3-4" });
+		await fs.appendFile(file, b.text().slice(written.length));
+		await syncAllSessions({ workers: 1 });
+
+		expect(JSON.parse((await need(read))?.reread ?? "null")).toEqual([[3, 4]]);
 	});
 });
