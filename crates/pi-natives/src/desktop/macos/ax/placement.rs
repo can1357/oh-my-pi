@@ -23,13 +23,21 @@
 //! another window of the same app. Many controls never answer a hit-test
 //! themselves: an answer that contains the element (its row, cell, group or
 //! window) reaches it as long as each step down to the element is still listed
-//! among its parent's children, and one drawn inside the frame of an element
-//! still listed (a column's cell) does too; a hidden `AppKit` view is not
-//! listed. Web content is not judged: an element hidden there leaves the tree,
-//! while Chromium answers a hit-test from a cache that lags behind the page (a
-//! visible dialog button hit-tested to the web area once), clips the frame of
-//! an element scrolled out of view to a one-point strip at the scroll view's
-//! edge, and `WebKit` routes a check box's label text to the text.
+//! among its parent's children; a hidden `AppKit` view is not listed. A
+//! table's column answers through the cells drawn in it, which are children of
+//! the table's rows, not of the column: a cell that says it spans the column's
+//! index, in a row of the column's own table, reaches the column while the
+//! column is still listed. So does an answer drawn inside the element's frame
+//! that takes no click of its own (a group or text that offers none of
+//! [`CLICK_ACTIONS`]), since nothing else would act on the click. A different
+//! control that covers the element is refused, naming it; an element whose
+//! center alone is covered passes when another point of it reaches it, or when
+//! it is scrolled out of view. Web content is not judged: an
+//! element hidden there leaves the tree, while Chromium answers a hit-test
+//! from a cache that lags behind the page (a visible dialog button hit-tested
+//! to the web area once), clips the frame of an element scrolled out of view
+//! to a one-point strip at the scroll view's edge, and `WebKit` routes a check
+//! box's label text to the text.
 
 use crate::desktop::{
 	ax::{AxBounds, normalize_role_macos},
@@ -43,6 +51,11 @@ const MAX_DEPTH: usize = 64;
 /// takes clicks on.
 const TITLE_BAR_BUTTONS: [&str; 4] =
 	["AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"];
+
+/// The actions a left click on an element triggers. Showing a context menu
+/// or scrolling into view are not among them.
+const CLICK_ACTIONS: [&str; 6] =
+	["AXPress", "AXPick", "AXConfirm", "AXOpen", "AXIncrement", "AXDecrement"];
 
 /// The application's answers the test reads, so it can run on a fake tree.
 pub(super) trait Placement {
@@ -63,6 +76,12 @@ pub(super) trait Placement {
 	fn label(&self, element: &Self::Element) -> Option<String>;
 	/// Whether `element` is web content, or its app draws through Chromium.
 	fn web_content(&self, element: &Self::Element) -> bool;
+	/// The names of the actions `element` offers.
+	fn actions(&self, element: &Self::Element) -> Vec<String>;
+	/// A column's place among its table's columns (`AXIndex`).
+	fn column_index(&self, element: &Self::Element) -> Option<i64>;
+	/// The columns a table cell spans (`AXColumnIndexRange`): first and count.
+	fn column_span(&self, element: &Self::Element) -> Option<(i64, i64)>;
 }
 
 /// Refuses an action on `element` that a person could not click: its window
@@ -98,12 +117,10 @@ pub(super) fn require_shown<P: Placement>(
 	if app.window(&hit).is_none_or(|of| of != window) || reaches(app, &hit, element) {
 		return Ok(());
 	}
-	// Drawn inside a listed element, such as a column's cell; an element
-	// scrolled out of its view, which the press may scroll to; a part of the
-	// element away from its center; or web content.
-	if (app
-		.bounds(&hit)
-		.is_some_and(|inner| within(&inner, &bounds))
+	// A column's cell; something inside the element that takes no click of
+	// its own; an element scrolled out of its view, which the press may
+	// scroll to; a part of the element away from its center; or web content.
+	if ((in_column(app, &hit, element) || (inside(app, &hit, &bounds) && !takes_clicks(app, &hit)))
 		&& listed_under(app, &window, element))
 		|| clipped(app, element, center)
 		|| samples(&bounds).any(|(x, y)| app.hit(x, y).is_some_and(|hit| reaches(app, &hit, element)))
@@ -210,11 +227,49 @@ fn is_top<P: Placement>(app: &P, element: &P::Element) -> bool {
 	matches!(app.role(element).as_deref(), Some("AXWindow" | "AXApplication"))
 }
 
-fn within(inner: &AxBounds, outer: &AxBounds) -> bool {
-	inner.x >= outer.x
-		&& inner.y >= outer.y
-		&& inner.x + inner.width <= outer.x + outer.width
-		&& inner.y + inner.height <= outer.y + outer.height
+/// Whether `hit` is drawn within `bounds`.
+fn inside<P: Placement>(app: &P, hit: &P::Element, bounds: &AxBounds) -> bool {
+	app.bounds(hit).is_some_and(|inner| {
+		inner.x >= bounds.x
+			&& inner.y >= bounds.y
+			&& inner.x + inner.width <= bounds.x + bounds.width
+			&& inner.y + inner.height <= bounds.y + bounds.height
+	})
+}
+
+/// Whether a click on `element` triggers an action of its own.
+fn takes_clicks<P: Placement>(app: &P, element: &P::Element) -> bool {
+	app.actions(element).iter().any(|action| {
+		CLICK_ACTIONS
+			.iter()
+			.any(|click| action.eq_ignore_ascii_case(click))
+	})
+}
+
+/// Whether `hit` is, or lies in, a cell of the column `element`: an `AXCell`
+/// that says it spans the column's index, in an `AXRow` of the column's own
+/// table.
+fn in_column<P: Placement>(app: &P, hit: &P::Element, element: &P::Element) -> bool {
+	if app.role(element).as_deref() != Some("AXColumn") {
+		return false;
+	}
+	let (Some(index), Some(table)) = (app.column_index(element), app.parent(element)) else {
+		return false;
+	};
+	let cell_of_column = |candidate: &P::Element| {
+		app.role(candidate).as_deref() == Some("AXCell")
+			&& app
+				.column_span(candidate)
+				.is_some_and(|(first, count)| first <= index && index - first < count)
+			&& app.parent(candidate).is_some_and(|row| {
+				app.role(&row).as_deref() == Some("AXRow")
+					&& app.parent(&row).is_some_and(|of| of == table)
+			})
+	};
+	cell_of_column(hit)
+		|| ancestors(app, hit)
+			.take_while(|ancestor| !is_top(app, ancestor))
+			.any(|ancestor| cell_of_column(&ancestor))
 }
 
 /// Whether `(x, y)`, the element's center, lies outside an ancestor's bounds:
@@ -257,6 +312,12 @@ mod tests {
 		/// The window-server window that draws it: its nearest window, sheet
 		/// or popover ancestor.
 		drawn:   Option<usize>,
+		/// What a click on it triggers: `AXPress` for controls.
+		actions: &'static [&'static str],
+		/// A column's `AXIndex`.
+		column:  Option<i64>,
+		/// A cell's `AXColumnIndexRange`.
+		span:    Option<(i64, i64)>,
 	}
 
 	/// A fake application: nodes by index, and the nodes a click reaches,
@@ -293,6 +354,13 @@ mod tests {
 				bounds: bounds.into(),
 				hidden: false,
 				drawn,
+				actions: if matches!(role, "AXButton" | "AXCheckBox" | "AXPopUpButton") {
+					&["AXPress"]
+				} else {
+					&[]
+				},
+				column: None,
+				span: None,
 			});
 			index
 		}
@@ -380,6 +448,22 @@ mod tests {
 			}
 			false
 		}
+
+		fn actions(&self, element: &usize) -> Vec<String> {
+			self.nodes[*element]
+				.actions
+				.iter()
+				.map(|&action| action.to_owned())
+				.collect()
+		}
+
+		fn column_index(&self, element: &usize) -> Option<i64> {
+			self.nodes[*element].column
+		}
+
+		fn column_span(&self, element: &usize) -> Option<(i64, i64)> {
+			self.nodes[*element].span
+		}
 	}
 
 	#[test]
@@ -402,14 +486,97 @@ mod tests {
 		let item = app.add(Some(cell), "AXButton", "Open", rect(10.0, 202.0, 40.0, 16.0));
 		app.hittable.extend([table, row]);
 		assert_eq!(app.check(item), Ok(()));
-		// No answer below the window at all.
 		app.hittable.retain(|&node| node != row && node != table);
 		assert_eq!(app.check(item), Ok(()));
-		// A column answers through the cells drawn inside it, which are not its
-		// children: here its visible part is one cell.
-		let column = app.add(Some(table), "AXColumn", "Name", rect(0.0, 200.0, 200.0, 20.0));
-		app.hittable.extend([table, row, cell]);
-		assert_eq!(app.check(column), Ok(()));
+	}
+
+	#[test]
+	fn a_column_passes_through_a_cell_of_its_own_only() {
+		let (mut app, window, _) = App::window_with_button();
+		let table = app.add(Some(window), "AXTable", "", rect(0.0, 180.0, 400.0, 120.0));
+		let row = app.add(Some(table), "AXRow", "", rect(0.0, 200.0, 400.0, 20.0));
+		// The first column's cell is wider than the column, as in Finder's list
+		// view, so only the cell's own column range ties it to the column.
+		let name_cell = app.add(Some(row), "AXCell", "", rect(0.0, 200.0, 214.0, 20.0));
+		let size_cell = app.add(Some(row), "AXCell", "", rect(214.0, 200.0, 186.0, 20.0));
+		app.nodes[name_cell].span = Some((0, 1));
+		app.nodes[size_cell].span = Some((1, 1));
+		let name = app.add(Some(table), "AXColumn", "Name", rect(0.0, 200.0, 200.0, 20.0));
+		let size = app.add(Some(table), "AXColumn", "Size", rect(200.0, 200.0, 200.0, 20.0));
+		app.nodes[name].column = Some(0);
+		app.nodes[size].column = Some(1);
+		app.hittable.extend([table, row, name_cell, size_cell]);
+		assert_eq!(app.check(name), Ok(()));
+		assert_eq!(app.check(size), Ok(()));
+		// The hit is often the cell's content, here a field that takes clicks.
+		let field = app.add(Some(name_cell), "AXTextField", "", rect(10.0, 202.0, 150.0, 16.0));
+		app.nodes[field].actions = &["AXConfirm"];
+		app.hittable.push(field);
+		assert_eq!(app.check(name), Ok(()));
+		app.hittable.retain(|&node| node != field);
+		// A cell of another column does not reach this one, nor does a cell
+		// with an empty range, which menus and splitters also answer.
+		app.nodes[name_cell].span = Some((1, 1));
+		assert!(app.check(name).is_err());
+		app.nodes[name_cell].span = Some((0, 0));
+		assert!(app.check(name).is_err());
+		app.nodes[name_cell].span = Some((0, 1));
+		// Nor does a control in the row that is not a cell, whatever range it
+		// answers.
+		let tool = app.add(Some(row), "AXButton", "Tool", rect(40.0, 200.0, 120.0, 20.0));
+		app.nodes[tool].span = Some((0, 1));
+		app.hittable.push(tool);
+		assert!(app.check(name).unwrap_err().1.contains("button \"Tool\""));
+		app.hittable.retain(|&node| node != tool);
+		// Nor a cell that is not in a row of the table.
+		let group = app.add(Some(table), "AXGroup", "", rect(0.0, 200.0, 400.0, 20.0));
+		let stray = app.add(Some(group), "AXCell", "", rect(0.0, 200.0, 300.0, 20.0));
+		app.nodes[stray].span = Some((0, 1));
+		app.hittable.push(stray);
+		assert!(app.check(name).is_err());
+		app.hittable.retain(|&node| node != stray);
+		// Nor a cell of another table drawn over this one.
+		let other = app.add(Some(window), "AXTable", "", rect(0.0, 190.0, 400.0, 40.0));
+		let other_row = app.add(Some(other), "AXRow", "", rect(0.0, 195.0, 400.0, 30.0));
+		let other_cell = app.add(Some(other_row), "AXCell", "", rect(0.0, 195.0, 300.0, 30.0));
+		app.nodes[other_cell].span = Some((0, 1));
+		app.hittable.extend([other, other_row, other_cell]);
+		assert!(app.check(name).is_err());
+	}
+
+	#[test]
+	fn a_different_control_drawn_over_the_element_is_refused_and_a_non_control_passes() {
+		let (mut app, window, button) = App::window_with_button();
+		// A sibling control with the button's own frame.
+		let cover = app.add(Some(window), "AXButton", "Cover", rect(100.0, 100.0, 80.0, 20.0));
+		app.hittable.push(cover);
+		assert!(
+			app.check(button)
+				.unwrap_err()
+				.1
+				.contains("button \"Cover\"")
+		);
+		// A smaller control at the button's center, while a panel drawn over the
+		// button takes the clicks elsewhere on it.
+		app.hittable.retain(|&node| node != cover);
+		let panel = app.add(Some(window), "AXGroup", "", rect(90.0, 90.0, 100.0, 40.0));
+		let small = app.add(Some(window), "AXButton", "Small", rect(130.0, 105.0, 20.0, 10.0));
+		app.hittable.extend([panel, small]);
+		assert!(
+			app.check(button)
+				.unwrap_err()
+				.1
+				.contains("button \"Small\"")
+		);
+		// The same shapes drawn by elements a click does not act on pass.
+		app.hittable.retain(|&node| node != small);
+		let text = app.add(Some(window), "AXStaticText", "Title", rect(130.0, 105.0, 20.0, 10.0));
+		app.hittable.push(text);
+		assert_eq!(app.check(button), Ok(()));
+		app.hittable.retain(|&node| node != text && node != panel);
+		let twin = app.add(Some(window), "AXGroup", "", rect(100.0, 100.0, 80.0, 20.0));
+		app.hittable.push(twin);
+		assert_eq!(app.check(button), Ok(()));
 	}
 
 	#[test]
