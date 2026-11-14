@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `lsTree()` now returns `{ path, mode }` entries (`mode` as `git ls-tree` prints it, e.g. `100755` or `120000`) instead of bare paths.
+
 ### Added
 
 - Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.

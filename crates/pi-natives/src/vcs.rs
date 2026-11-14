@@ -161,6 +161,14 @@ pub struct VcsNumstatEntry {
 	pub added:   Option<u32>,
 	pub removed: Option<u32>,
 }
+/// One blob or symlink of a tree listing.
+#[napi(object)]
+pub struct VcsTreeEntry {
+	pub path: String,
+	/// Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
+	/// `120000`.
+	pub mode: String,
+}
 /// Bounded object contents.
 #[napi(object)]
 pub struct VcsShowResult {
@@ -319,6 +327,11 @@ impl From<VcsCommitAuthor> for core::CommitAuthor {
 impl From<core::CommitDetails> for VcsCommitDetails {
 	fn from(v: core::CommitDetails) -> Self {
 		Self { sha: v.sha, parents: v.parents, author: v.author.into(), message: v.message }
+	}
+}
+impl From<core::TreeEntry> for VcsTreeEntry {
+	fn from(v: core::TreeEntry) -> Self {
+		Self { path: v.path, mode: format!("{:06o}", v.mode) }
 	}
 }
 impl From<core::NumstatEntry> for VcsNumstatEntry {
@@ -1003,15 +1016,18 @@ impl VcsGitRepo {
 		})
 	}
 
-	/// List tree paths.
+	/// List a tree's blobs and symlinks recursively with their modes.
 	#[napi]
 	pub fn ls_tree(
 		&self,
 		rev: String,
 		paths: Vec<String>,
 		signal: Option<Unknown>,
-	) -> Promise<Vec<String>> {
-		blocking("vcs.lsTree", self.inner.clone(), signal, move |r| r.ls_tree(&rev, &paths))
+	) -> Promise<Vec<VcsTreeEntry>> {
+		blocking("vcs.lsTree", self.inner.clone(), signal, move |r| {
+			r.ls_tree(&rev, &paths)
+				.map(|v| v.into_iter().map(Into::into).collect())
+		})
 	}
 
 	/// List submodule paths.

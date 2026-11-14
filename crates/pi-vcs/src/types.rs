@@ -160,6 +160,15 @@ pub struct CommitDetails {
 	pub message: String,
 }
 
+/// One blob or symlink of a tree listing ([`crate::git::GitRepo::ls_tree`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+	/// Repository-relative path.
+	pub path: String,
+	/// Git file mode: `0o100644`, `0o100755`, or `0o120000`.
+	pub mode: u32,
+}
+
 /// Per-file added/removed line counts (`diff --numstat`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumstatEntry {
