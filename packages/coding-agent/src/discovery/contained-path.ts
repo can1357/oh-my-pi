@@ -46,6 +46,36 @@ export async function resolveContainedPath(realBase: string, target: string): Pr
 }
 
 /**
+ * Write-path variant of {@link resolveContainedPath}: a missing leaf is only
+ * accepted when the deepest existing ancestor resolves inside `realBase`.
+ * {@link resolveContainedPath} reports `missing` for a target whose parent
+ * chain escapes the root through a symlink, which a following `mkdir`/write
+ * would then follow outside the base. Callers that create the target resolve
+ * the existing prefix first, so an escaping or dangling link fails closed.
+ */
+export async function resolveContainedPathForWrite(realBase: string, target: string): Promise<ContainedPathResolution> {
+	if (!isContained(realBase, target)) return { status: "outside" };
+	const real = await realpathIfExists(target);
+	if (real !== null) return isContained(realBase, real) ? { status: "ok", realPath: real } : { status: "outside" };
+	// The leaf is missing. Find the deepest existing ancestor and resolve it:
+	// realpath follows every symlink in the existing prefix, so a link that
+	// escapes (or dangles) is rejected before the caller's mkdir/write follows
+	// it. `realBase` is the boundary — the caller creates it when absent.
+	let ancestor = path.dirname(target);
+	for (;;) {
+		try {
+			await fs.promises.lstat(ancestor);
+		} catch {
+			if (ancestor === realBase) return { status: "missing" };
+			ancestor = path.dirname(ancestor);
+			continue;
+		}
+		const resolved = await realpathIfExists(ancestor);
+		return resolved !== null && isContained(realBase, resolved) ? { status: "missing" } : { status: "outside" };
+	}
+}
+
+/**
  * Verify a package path stays within the filesystem-resolved plugin root:
  * lexically, and — when the target exists — after resolving symlinks. Unlike
  * {@link resolveContainedPath}, a missing target passes. ONLY for configured

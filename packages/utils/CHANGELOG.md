@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `getDocsCacheDir()`, the materialized `omp://` documentation cache directory (`~/.omp/cache/docs`), honoring `OMP_DOCS_CACHE_DIR` ([#18647](https://github.com/can1357/oh-my-pi/pull/18647) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ### Added
 
