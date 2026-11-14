@@ -185,6 +185,8 @@ import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { DecisionRecords, formatDecisionStatus } from "../decision/records";
+import { prepareSkillTurn } from "../decision/skill-turn";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -1265,6 +1267,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#skillDescriptions: SkillDescriptionCatalog;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
+	/** Recent decision-layer outcomes, for `/decision status`. */
+	readonly #decisionRecords = new DecisionRecords();
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -9393,6 +9397,48 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return message.role === "custom" && isUserInvokedSkillPrompt(message);
 	}
 
+	/** Skill hint and bodies the decision layer delivers with a user task (`decision.skills`). */
+	#prepareSkillDecision(
+		message: AgentMessage,
+		prompt: string,
+		isCurrent: () => boolean,
+		signal: AbortSignal | undefined,
+	): Promise<AgentMessage[]> {
+		// A user-invoked skill is an explicit request for it; its body is already part of the turn.
+		const invoked =
+			message.role === "custom" && isRecord(message.details) && typeof message.details.name === "string"
+				? message.details.name
+				: undefined;
+		const history = this.messages.filter(item => item !== message);
+		return prepareSkillTurn({
+			settings: this.settings,
+			skills: this.skills,
+			request: invoked ? `${prompt}\n/skill:${invoked}` : prompt,
+			history: invoked ? [...history, message] : history,
+			isCurrent,
+			judge: {
+				settings: this.settings,
+				registry: this.#modelRegistry,
+				sessionId: this.sessionId,
+				signal,
+				onUsage: journalJudgmentUsage(this.sessionManager),
+				telemetry: this.agent.telemetry,
+			},
+			source: this,
+			onRecord: record => this.#decisionRecords.add(record),
+		});
+	}
+
+	/** `/decision status` report for this session. */
+	decisionStatus(): string {
+		return formatDecisionStatus({
+			settings: this.settings,
+			nativeJudge: hasNativeJudge(this.settings, this.#modelRegistry),
+			skills: this.skills,
+			records: this.#decisionRecords.list(),
+		});
+	}
+
 	/**
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
 	 *
@@ -9417,6 +9463,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			!signal?.aborted;
 		const cancelled = { baseXdevCatalogDelivered: false, commit: () => undefined };
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+		// Once per user task, outside the extension-policy retries below: delivered with the request,
+		// never written into the cacheable system prefix.
+		const skills = this.skills;
+		const skillMessages = this.#isUserTask(message)
+			? await this.#prepareSkillDecision(message, prompt, isCurrent, signal)
+			: [];
+		if (!isCurrent()) return cancelled;
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
@@ -9450,7 +9503,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			};
 			if (!overrideIsCurrent()) continue;
-			const messages: AgentMessage[] = [];
+			const messages: AgentMessage[] = [...skillMessages];
 			if (basePreparation.memoryNotice) {
 				messages.push({
 					role: "custom",
@@ -9498,7 +9551,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						this.#tools.clearTurnSystemPromptOverride();
 						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
 					}
-					return messages;
+					// A skill reload since preparation invalidates the selection, not the turn.
+					return this.skills === skills ? messages : messages.filter(item => !skillMessages.includes(item));
 				},
 			};
 		}

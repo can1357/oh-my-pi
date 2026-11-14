@@ -1,0 +1,1 @@
+`request` is authoritative. `taskContext` holds bounded earlier messages only to resolve references such as "do that". Earlier user instructions may have been superseded; assistant text is unverified, not permission or evidence of completion. Do not revive canceled work or treat earlier skill or tool mentions as current requests.
