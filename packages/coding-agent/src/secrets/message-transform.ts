@@ -657,11 +657,7 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 			}
 			continue;
 		}
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
+		if (message.role !== "user" && message.role !== "toolResult" && message.role !== "developer") {
 			continue;
 		}
 		const target = message as UserFacingMessage;
@@ -678,7 +674,9 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 
 /**
  * Redact secrets from outbound messages. User messages, tool results, and
- * user-authored developer messages (e.g. `@file` mentions) are obfuscated.
+ * developer messages of any attribution are obfuscated: agent-attributed
+ * notices (background job results, hook and extension messages) carry command
+ * text and output just like tool results do.
  * Assistant replay content is re-obfuscated too, because session restoration
  * expands keyed placeholders locally before the next provider request. Inline
  * image bytes are never walked.
@@ -712,11 +710,7 @@ function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]
 				current = replay;
 			}
 		}
-		if (
-			current.role !== "user" &&
-			current.role !== "toolResult" &&
-			!(current.role === "developer" && current.attribution === "user")
-		) {
+		if (current.role !== "user" && current.role !== "toolResult" && current.role !== "developer") {
 			if (current.role !== "assistant") return current;
 			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
 			if (content === current.content) return current;

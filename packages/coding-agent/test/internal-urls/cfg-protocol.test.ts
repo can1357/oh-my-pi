@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type CfgAppliedChange,
@@ -11,6 +14,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgAdvisorEnabled, cfgAdvisorSyncBacklog } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgBashPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import type { InternalWriteResult } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
@@ -233,6 +237,48 @@ describe("CfgProtocolHandler", () => {
 		await write("cfg://modelRoles/save", '{"smol":"anthropic/next"}', settings);
 		expect(asked[2]?.shadowedBy).toBeUndefined();
 		expect(cfgModelRoles.get(settings)).toMatchObject({ default: "anthropic/project", smol: "anthropic/next" });
+	});
+
+	it("reports a saved bash.patterns list as applied under project rules that prepend to it", async () => {
+		const dir = TempDir.createSync("@omp-cfg-merged-list-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const projectDir = path.join(dir.path(), "project");
+			const resetDir = path.join(dir.path(), "reset");
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ bash: { patterns: [{ match: "make *", approval: "allow" }] } }),
+			);
+			await Bun.write(path.join(resetDir, ".omp", "config.yml"), YAML.stringify({ bash: { patterns: [] } }));
+			const asked: CfgChangeRequest[] = [];
+			const approveAll = (settings: Settings) =>
+				setCfgApprovalHost({
+					approve: async request => (asked.push(request), "once"),
+					applied: () => {},
+					persistentSettings: settings,
+				});
+
+			const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			approveAll(settings);
+			const saved = await write("cfg://bash/patterns/save", '[{"match":"git *","approval":"allow"}]', settings);
+			expect(asked[0]?.shadowedBy).toBeUndefined();
+			expect(saved.details?.cfg?.effective).toBeUndefined();
+			expect(textOf(saved)).not.toContain("Effective value is still");
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "make *", approval: "allow" },
+				{ match: "git *", approval: "allow" },
+			]);
+
+			// A project `[]` resets the list, so the saved global rules do not take effect there.
+			const reset = await Settings.loadIsolated({ cwd: resetDir, agentDir });
+			approveAll(reset);
+			const shadowed = await write("cfg://bash/patterns/save", '[{"match":"ls *","approval":"allow"}]', reset);
+			expect(asked[1]?.shadowedBy).toContain("project config");
+			expect(textOf(shadowed)).toContain("project config takes precedence");
+			expect(cfgBashPatterns.get(reset)).toEqual([]);
+		} finally {
+			await dir.remove();
+		}
 	});
 
 	it("persists /save writes to the host settings and mirrors them into a separate session instance", async () => {
