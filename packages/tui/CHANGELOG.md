@@ -20,6 +20,7 @@
 - Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
 - Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
+- `find` results show unranked literal keyword lines from the files already read when every judge request fails ([#19231](https://github.com/can1357/oh-my-pi/pull/19231) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
