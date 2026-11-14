@@ -265,6 +265,7 @@
 - Codex model refresh now lists models available to an entitled account even when other saved accounts return HTTP 402 ([#17198](https://github.com/can1357/oh-my-pi/issues/17198)).
 - LiteLLM discovery now reads every `/v2/model/info` page before selecting the proxy's model roster, rather than caching only the first 50 entries; malformed or incomplete pagination falls back without caching a partial page ([#17237](https://github.com/can1357/oh-my-pi/pull/17237) by [@maykonmichel](https://github.com/maykonmichel)).
 - Fixed hosted web search on OpenAI Responses and Codex Responses selecting GPT-5.6 Luna instead of GPT-6 Luna ([#17202](https://github.com/can1357/oh-my-pi/pull/17202) by [@mateo-bolanos](https://github.com/mateo-bolanos)).
+- Fixed Vertex AI Gemini 3+ models rejecting replayed or cross-model assistant turns whose first tool call lacks a thought signature by enabling the first-call `skip_thought_signature_validator` sentinel on `google-vertex` ([#10602](https://github.com/can1357/oh-my-pi/issues/10602), [#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@sinhduc01](https://github.com/sinhduc01))
 
 ## [18.13.2] - 2026-10-27
 
