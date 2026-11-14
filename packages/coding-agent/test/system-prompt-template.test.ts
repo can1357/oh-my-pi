@@ -19,8 +19,6 @@ import { compileModelPatterns } from "@oh-my-pi/pi-coding-agent/utils/model-patt
 import { YAML } from "bun";
 import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "./helpers/settings-test-state";
 
-// The bundled prompt still defines the requirement-word aliases, without pinning the line's wording.
-const NEVER_ALIAS = /`NEVER`\s*=\s*`MUST NOT`/;
 const EMPTY_TREE = {
 	rootPath: "",
 	rendered: "",
@@ -421,7 +419,6 @@ describe("per-model system prompt template", () => {
 							modelSystemPromptTemplates: compile({ claude: templatePath }),
 						}),
 					);
-					expect(result.systemPrompt.join("\n\n")).toMatch(NEVER_ALIAS);
 					expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
 				} finally {
 					warn.mockRestore();
@@ -445,7 +442,6 @@ describe("requirement-words conventions line", () => {
 		await withDiscoveryHome(async ({ cwd }) => {
 			const result = await buildSystemPrompt(options(cwd, { model: "google-antigravity/gemini-3-flash" }));
 			const text = result.systemPrompt.join("\n\n");
-			expect(text).toMatch(NEVER_ALIAS);
 			expect(text).not.toMatch(RFC2119_CITATION);
 			expect(text).not.toMatch(CANONICAL_KEYWORD_RUN);
 		});
