@@ -136,8 +136,7 @@ fn live_read_target(
 		return Ok((opaque_url, caller_selector.clone()));
 	}
 	let split = split_path_and_selector(parsed.resource);
-	let selector = parse_selector(split.selector)
-		.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?;
+	let selector = parse_selector(split.selector).map_err(Fault::invalid)?;
 	let url = parsed.query.map_or_else(
 		|| format!("{}://{}", parsed.raw_scheme, split.path),
 		|query| format!("{}://{}?{query}", parsed.raw_scheme, split.path),
