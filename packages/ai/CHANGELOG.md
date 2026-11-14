@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+
+### Fixed
+
+- Fixed auth-gateway requests dropping an advertised `top_k`, `min_p`, penalty, or stop sequence when the model rejects temperature and top_p. Chat completions sends that advertised stop sequence as well.
+- Fixed chat-completions and Responses requests sending `top_k` or `min_p` when model compat turns that extension off. Temperature and top_p are unchanged.
+- Fixed chat-completions and Responses requests dropping an advertised `top_k`, `min_p`, or penalty when the model rejects temperature and top_p.
+- A stored OpenZoo API key, including one copied to the auth broker, is used when `OPENZOO_API_KEY` is unset. The keyless `openzoo-local` placeholder remains only when nothing is stored.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

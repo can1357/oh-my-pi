@@ -83,6 +83,7 @@ import {
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
+import { openzooModelManagerOptions } from "./openzoo";
 import {
 	cloudflareWorkersAiModelManagerOptions,
 	cursorModelManagerOptions,
@@ -154,6 +155,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"opencode-go": config => opencodeGoModelManagerOptions(config),
 	"opencode-zen": config => opencodeZenModelManagerOptions(config),
 	openrouter: config => openrouterModelManagerOptions(config),
+	openzoo: config => openzooModelManagerOptions(config),
 	otari: config => otariModelManagerOptions(config),
 	qianfan: config => qianfanModelManagerOptions(config),
 	"qwen-portal": config => qwenPortalModelManagerOptions(config),

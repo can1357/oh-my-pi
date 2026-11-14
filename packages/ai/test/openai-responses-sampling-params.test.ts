@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function mockSseFetch(): { fetchMock: FetchImpl; captured: Record<string, unknown> } {
@@ -75,5 +76,44 @@ describe("openai-responses sampling-param gating (#5606)", () => {
 		const model = getBundledModel("openai", "gpt-5") as Model<"openai-responses">;
 		const body = await drain(model, { forceReasoningOff: true });
 		expect(body.reasoning).toEqual({ effort: "none" });
+	});
+
+	it("sends advertised top_k, min_p, and penalties when temperature is off", async () => {
+		const bundled = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
+		const { compat: _resolved, compatConfig: _authored, ...rest } = bundled;
+		const model = buildModel({
+			...rest,
+			id: "example-lab/extensions-only",
+			provider: "openzoo",
+			baseUrl: "http://localhost:8402/v1",
+			api: "openai-responses",
+			compat: {
+				supportsSamplingParams: false,
+				supportsTopK: true,
+				supportsMinP: true,
+				supportsPenaltyAndStopParams: true,
+			},
+		} as ModelSpec<"openai-responses">);
+		const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
+		streamSimple(model, ctx, {
+			apiKey: "k",
+			temperature: 0.2,
+			topP: 0.9,
+			topK: 40,
+			minP: 0.05,
+			presencePenalty: 0.1,
+			repetitionPenalty: 1.1,
+			onPayload: payload => {
+				resolve(JSON.parse(JSON.stringify(payload)) as Record<string, unknown>);
+			},
+		});
+		const body = await promise;
+		expect(body.temperature).toBeUndefined();
+		expect(body.top_p).toBeUndefined();
+		expect(body.top_k).toBe(40);
+		expect(body.min_p).toBe(0.05);
+		expect(body.presence_penalty).toBe(0.1);
+		expect(body.repetition_penalty).toBe(1.1);
+		expect(body).not.toHaveProperty("frequency_penalty");
 	});
 });

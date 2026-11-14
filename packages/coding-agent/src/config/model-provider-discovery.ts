@@ -28,6 +28,7 @@ export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(S
 
 // Keyless-mode markers: each api-key login's KDL `empty-fallback` (e.g.
 // `lm-studio-local`), stored on an empty paste and never sent as a bearer.
+// OpenZoo's `openzoo-local` comes from rules/auth/openzoo.kdl the same way.
 const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(
 	authProviders().flatMap(entry =>
 		entry.login?.kind === "api-key" && entry.login.emptyFallback ? [entry.login.emptyFallback] : [],

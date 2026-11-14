@@ -67,6 +67,7 @@ export type KnownProvider =
 	| "opencode-go"
 	| "opencode-zen"
 	| "openrouter"
+	| "openzoo"
 	| "otari"
 	| "qianfan"
 	| "qwen-portal"

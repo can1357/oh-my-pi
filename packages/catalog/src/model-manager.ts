@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
+import { DiscoveryAuthRejectionError } from "./discovery/auth-rejection";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
@@ -538,6 +539,10 @@ async function fetchDynamicModels<TApi extends Api>(
 		const models = await fetcher();
 		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
 	} catch (error) {
+		// A credential rejection has to reach the registry, which turns 401/403
+		// into an unauthenticated discovery state (and the /login remedy). Every
+		// other failure reports its message and falls back to cache.
+		if (error instanceof DiscoveryAuthRejectionError) throw error;
 		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}
 }
