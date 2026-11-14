@@ -112,6 +112,51 @@ runs:
            retry_cache="$(mktemp -d "${RUNNER_TEMP:-/tmp}/bun-cache-retry.XXXXXX")"
            bun install --frozen-lockfile --cache-dir="$retry_cache"
 
+      # The root manifest pins "trustedDependencies": [], so no dependency
+      # lifecycle script runs — but blocked is not the same as failing. bun
+      # skips a blocked script and exits 0, so a newly added native dependency
+      # that needs its postinstall would install green here and break at
+      # runtime. `bun pm untrusted` is the only thing that reports what was
+      # skipped, so read it here and pin the set. Every name on the pinned set
+      # below is blocked with or without the empty allowlist (three
+      # onnxruntime-node copies, pulled in by @huggingface/transformers and
+      # fastembed, plus protobufjs) and none needs its script to have run.
+      # Growth is what has to fail: a name outside this set means some
+      # dependency now expects a script to have executed, which is a
+      # trustedDependencies decision to take in review rather than a runtime
+      # failure to meet in production.
+      - name: Check blocked dependency lifecycle scripts
+        shell: bash
+        run: |
+           # Pinned set: names only, so an ordinary version bump of an existing
+           # offender does not churn this step.
+           expected='onnxruntime-node protobufjs'
+           actual="$(bun pm untrusted 2>/dev/null |
+             sed -n 's|^\./node_modules/||p' |
+             sed 's|.*/node_modules/||' |
+             sed 's/ @.*//' |
+             sort -u |
+             tr '\n' ' ')"
+           # Fail closed. bun exits 0 no matter what it skipped, so an empty or
+           # unparsed report means the guard went blind, not that the tree is
+           # clean (missing install, or an output-format change upstream).
+           if [ -z "$actual" ]; then
+             echo "::error::bun pm untrusted listed no blocked lifecycle scripts; the trustedDependencies posture is unverified"
+             exit 1
+           fi
+           for name in $actual; do
+             case " $expected " in
+               *" $name "*) ;;
+               *)
+                  echo "::error::$name ships a lifecycle script that trustedDependencies blocks"
+                  echo "::error::bun skips blocked scripts and installs green, so whatever needs that script fails at runtime"
+                  echo "Drop the dependency, or add it to trustedDependencies in the root manifest deliberately."
+                  exit 1
+                  ;;
+             esac
+           done
+           echo "blocked lifecycle scripts: $actual; pinned set unchanged"
+
       # Producer half of the split cache: only main saves, so the store exists
       # once per lockfile generation instead of once per ref.
       - name: Save bun store (GitHub cache)
