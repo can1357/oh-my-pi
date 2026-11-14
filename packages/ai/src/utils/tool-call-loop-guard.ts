@@ -112,7 +112,6 @@ export class ToolCallLoopGuard {
 	#count = 0;
 	#lastNormalizedHash: string | undefined;
 	#lastAssistantText: string | undefined;
-	#normalizedCount = 0;
 
 	/** Keeps transport-specific exemption policy outside the shared repetition detector. */
 	constructor(options: ToolCallLoopGuardOptions) {
@@ -136,7 +135,6 @@ export class ToolCallLoopGuard {
 			this.#count = 0;
 			this.#lastNormalizedHash = undefined;
 			this.#lastAssistantText = undefined;
-			this.#normalizedCount = 0;
 			return null;
 		}
 		if (toolCalls.every(tc => this.#isExempt(tc))) {
@@ -150,10 +148,9 @@ export class ToolCallLoopGuard {
 				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
 				this.#lastHash = undefined;
-				this.#count = 0;
-				this.#lastNormalizedHash = undefined;
-				this.#lastAssistantText = undefined;
-				this.#normalizedCount = 0;
+			this.#count = 0;
+			this.#lastNormalizedHash = undefined;
+			this.#lastAssistantText = undefined;
 			}
 			return null;
 		}
@@ -162,37 +159,35 @@ export class ToolCallLoopGuard {
 			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
 			.sort();
 		const turnHash = JSON.stringify(canonicalCalls);
-		if (turnHash === this.#lastHash) {
-			this.#count++;
-		} else {
-			this.#lastHash = turnHash;
-			this.#count = 1;
-		}
-
 		const normalizedCalls = toolCalls
 			.map(tc => JSON.stringify([tc.name, normalizeToolCallValue(tc.arguments)]))
 			.sort();
 		const normalizedHash = JSON.stringify(normalizedCalls);
 		const assistantText = normalizeAssistantText(turn.message);
-		if (
+		// The normalized fingerprint only continues the run when the assistant's
+		// own text repeats too, which keeps narration-varying iteration out of
+		// the detector, and argument keys that name paths, files or URLs keep
+		// their values verbatim so a legitimate sweep over distinct files reads
+		// as distinct turns.
+		const normalizedRepeat =
 			assistantText.length > 0 &&
 			normalizedHash === this.#lastNormalizedHash &&
-			assistantText === this.#lastAssistantText
-		) {
-			this.#normalizedCount++;
+			assistantText === this.#lastAssistantText;
+		if (turnHash === this.#lastHash || normalizedRepeat) {
+			this.#count++;
 		} else {
-			this.#lastNormalizedHash = assistantText.length > 0 ? normalizedHash : undefined;
-			this.#lastAssistantText = assistantText.length > 0 ? assistantText : undefined;
-			this.#normalizedCount = assistantText.length > 0 ? 1 : 0;
+			this.#count = 1;
 		}
+		this.#lastHash = turnHash;
+		this.#lastNormalizedHash = assistantText.length > 0 ? normalizedHash : undefined;
+		this.#lastAssistantText = assistantText.length > 0 ? assistantText : undefined;
 
-		if (this.#count < this.#threshold && this.#normalizedCount < this.#threshold) return null;
-		const count = this.#count >= this.#threshold ? this.#count : this.#normalizedCount;
+		if (this.#count < this.#threshold) return null;
 		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
-			count,
+			count: this.#count,
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
