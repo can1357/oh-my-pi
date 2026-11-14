@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In a compiled omp with no `bun` on PATH, the command `bun` in an eval cell's `Bun.$`, `Bun.spawn` or `child_process` is now bun (the executable re-entered as bun), where Bun's shell previously resolved it to omp itself and started a headless agent with the cell's words as its prompt. An `omp` started from the bash tool or an eval cell with a positional or piped prompt and no `-p` is now refused with an error; pass `-p` to run one on purpose
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
@@ -43,6 +47,11 @@
 - Language servers now recognize edits made shortly after a file is created, including on macOS.
 - Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
 - Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
+- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
+- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
+- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
+- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
+- A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
 
 ## [18.20.0] - 2026-11-12
 
