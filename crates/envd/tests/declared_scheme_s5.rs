@@ -12,10 +12,7 @@ use omp_core::{Principal, Str, sf};
 use omp_envd::{
 	HostResourceResult, HostResources, HostUriJudgment, SchemeClaim, SchemeGeneration,
 	exthost::control::ControlConnectionIdentity,
-	tool_url::{
-		host::HostUriResolver,
-		scheme_generation::SchemeTestReader,
-	},
+	tool_url::{host::HostUriResolver, scheme_generation::SchemeTestReader},
 };
 use omp_py::{
 	Engine,
@@ -98,7 +95,9 @@ async fn declared_scheme_s5_joined_conformance() {
 	assert_eq!(schemes[0].get("immutable").and_then(|v| v.as_bool()), Some(true));
 	assert_eq!(schemes[0].get("fetch").and_then(|v| v.as_bool()), Some(false));
 	assert!(
-		schemes.iter().all(|row| row.get("name").and_then(|v| v.as_str()) != Some("pr")),
+		schemes
+			.iter()
+			.all(|row| row.get("name").and_then(|v| v.as_str()) != Some("pr")),
 		"listing must never include built-in pr"
 	);
 
@@ -129,7 +128,11 @@ async fn declared_scheme_s5_joined_conformance() {
 		.expect("selector peel");
 	assert_eq!(std::str::from_utf8(&selected).expect("utf8"), "line2\nline3\n");
 	assert!(
-		seen.lock().expect("seen").iter().any(|url| url == "widget://id"),
+		seen
+			.lock()
+			.expect("seen")
+			.iter()
+			.any(|url| url == "widget://id"),
 		"handler must see peeled URL"
 	);
 
@@ -182,17 +185,17 @@ async fn declared_scheme_s5_joined_conformance() {
 	let err = HostResources::resolve_read(generation.as_ref(), "widget://id")
 		.await
 		.expect_err("quarantined");
-	assert!(
-		err.as_str().contains("no handler") || err.as_str().contains("widget"),
-		"got {err}"
-	);
+	assert!(err.as_str().contains("no handler") || err.as_str().contains("widget"), "got {err}");
 	assert!(SchemeGeneration::is_builtin_wire_name("pr"));
 	assert!(!matches!(Scheme::parse("pr"), Scheme::Unknown));
 	assert!(!generation.is_live("pr"));
 	assert!(!generation.is_live("https"));
 	let empty = generation.listing_payload();
 	assert_eq!(
-		empty.get("schemes").and_then(|v| v.as_array()).map(Vec::len),
+		empty
+			.get("schemes")
+			.and_then(|v| v.as_array())
+			.map(Vec::len),
 		Some(0)
 	);
 	let _ = FetchEffects { credentials: false };
@@ -299,13 +302,14 @@ fn listing_payload_excludes_builtins_and_orders_by_scheme() {
 		.map(|row| row["name"].as_str().expect("name").to_owned())
 		.collect::<Vec<_>>();
 	assert_eq!(names, ["gadget", "widget"]);
-	assert!(generation
-		.listing_payload()["schemes"]
-		.as_array()
-		.expect("array")
-		.iter()
-		.all(|row| {
-			let name = row["name"].as_str().unwrap_or("");
-			!SchemeGeneration::is_builtin_wire_name(name)
-		}));
+	assert!(
+		generation.listing_payload()["schemes"]
+			.as_array()
+			.expect("array")
+			.iter()
+			.all(|row| {
+				let name = row["name"].as_str().unwrap_or("");
+				!SchemeGeneration::is_builtin_wire_name(name)
+			})
+	);
 }

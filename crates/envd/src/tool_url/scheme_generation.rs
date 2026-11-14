@@ -589,7 +589,13 @@ mod tests {
 	#[test]
 	fn listing_payload_is_builtin_free() {
 		let generation = SchemeGeneration::new();
-		assert_eq!(generation.listing_payload()["schemes"].as_array().unwrap().len(), 0);
+		assert_eq!(
+			generation.listing_payload()["schemes"]
+				.as_array()
+				.unwrap()
+				.len(),
+			0
+		);
 		generation
 			.replace_owner("acme.widgets", None, vec![SchemeClaim {
 				scheme:      Str::new_static("widget"),
