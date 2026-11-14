@@ -1,6 +1,7 @@
 mod enablement;
 pub(crate) mod menus;
 pub(super) mod open_menu;
+mod placement;
 mod popup;
 mod selection;
 
@@ -32,7 +33,7 @@ use super::{
 			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
 			require_read_as, text_readback, truncate_chars,
 		},
-		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
+		backend::{AxBackend, DeliveryMode, KeyboardFocus, is_raise_action, native_action_name},
 		control,
 		error::{CoreResult, DesktopError, ErrorCode},
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
@@ -1544,6 +1545,11 @@ fn perform_choosing(
 			}
 			let pid = element_pid(element)?;
 			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
+			if judges_placement(native) {
+				// A Mac Catalyst press scrolls its row into view first, so where
+				// the row is now does not decide it.
+				require_shown_in(pid, element, scroll.is_none())?;
+			}
 			let perform = || {
 				entry_front.require_behind(skylight::front_pid, pid, || {
 					window_id(element).unwrap_or_default()
@@ -1720,6 +1726,126 @@ fn menu_window(
 			id != attached_to && input::attached_under(id, parent_of, |parent| parent == attached_to)
 		})
 		.unwrap_or(attached_to)
+}
+
+/// Whether `native` stands for a click a person could make on the element,
+/// which [`placement::require_shown`] judges: a scroll into view acts on the
+/// view instead.
+const fn judges_placement(native: &str) -> bool {
+	!native.eq_ignore_ascii_case(SCROLL_TO_VISIBLE)
+}
+
+/// Whether a click in `mode` is judged by [`placement::require_shown`]
+/// first: a takeover click brings the real pointer there before it clicks,
+/// which shows a control drawn only while the pointer is over it, while a
+/// background click reaches whatever the window shows at that moment.
+pub(super) const fn click_judges_placement(mode: DeliveryMode) -> bool {
+	matches!(mode, DeliveryMode::Background)
+}
+
+/// Refuses an element action that a person could not make
+/// ([`placement::require_shown`]).
+pub(super) fn require_shown(element: &AXUIElement) -> CoreResult<()> {
+	require_shown_in(element_pid(element)?, element, true)
+}
+
+fn require_shown_in(pid: libc::pid_t, element: &AXUIElement, hit_test: bool) -> CoreResult<()> {
+	let Some(app) = probe_application(pid) else {
+		return Ok(());
+	};
+	placement::require_shown(&AppPlacement { app, pid }, &Node(element.retain()), hit_test)
+}
+
+/// An element compared by `CFEqual`.
+struct Node(CFRetained<AXUIElement>);
+
+impl PartialEq for Node {
+	fn eq(&self, other: &Self) -> bool {
+		*self.0 == *other.0
+	}
+}
+
+/// [`placement::Placement`] read from a live application.
+struct AppPlacement {
+	app: CFRetained<AXUIElement>,
+	pid: libc::pid_t,
+}
+
+impl placement::Placement for AppPlacement {
+	type Element = Node;
+
+	fn bounds(&self, element: &Node) -> Option<AxBounds> {
+		bounds(&element.0)
+	}
+
+	fn parent(&self, element: &Node) -> Option<Node> {
+		copy_element(&element.0, "AXParent").map(Node)
+	}
+
+	fn children(&self, element: &Node) -> Vec<Node> {
+		copy_elements_optional(&element.0, "AXChildren")
+			.map_or_else(Vec::new, |children| children.into_iter().map(Node).collect())
+	}
+
+	fn role(&self, element: &Node) -> Option<String> {
+		copy_string(&element.0, "AXRole")
+	}
+
+	fn subrole(&self, element: &Node) -> Option<String> {
+		copy_string(&element.0, "AXSubrole")
+	}
+
+	fn window(&self, element: &Node) -> Option<Node> {
+		element_window(&element.0).map(Node)
+	}
+
+	fn drawn_in(&self, element: &Node, window: &Node) -> bool {
+		innermost_window_id(&element.0)
+			.zip(window_id(&window.0))
+			.is_some_and(|((drawn, _), own)| drawn == own)
+	}
+
+	fn hit(&self, x: f64, y: f64) -> Option<Node> {
+		if !x.is_finite() || !y.is_finite() {
+			return None;
+		}
+		let mut output: *const AXUIElement = ptr::null();
+		let slot = NonNull::from(&mut output);
+		// SAFETY: `slot` is writable and the application element remains
+		// retained through the synchronous hit-test.
+		if unsafe { self.app.copy_element_at_position(x as f32, y as f32, slot) } != AXError::Success
+		{
+			return None;
+		}
+		retained_element(output).ok().map(Node)
+	}
+
+	fn label(&self, element: &Node) -> Option<String> {
+		["AXTitle", "AXDescription", "AXValue"]
+			.into_iter()
+			.find_map(|name| copy_string(&element.0, name).filter(|text| !text.trim().is_empty()))
+			.map(|text| truncate_chars(text, 60))
+	}
+
+	fn web_content(&self, element: &Node) -> bool {
+		process::is_chromium(self.pid) || text_surface(&element.0) == TextSurface::Web
+	}
+
+	fn actions(&self, element: &Node) -> Vec<String> {
+		copy_strings_from_action_names(&element.0).unwrap_or_default()
+	}
+
+	fn column_index(&self, element: &Node) -> Option<i64> {
+		copy_attribute(&element.0, "AXIndex")?
+			.downcast::<CFNumber>()
+			.ok()?
+			.as_i64()
+	}
+
+	fn column_span(&self, element: &Node) -> Option<(i64, i64)> {
+		copy_range(&element.0, "AXColumnIndexRange")
+			.map(|range| (range.location as i64, range.length as i64))
+	}
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
@@ -3093,6 +3219,19 @@ mod tests {
 		let (result, sent) = perform("AXRaise", Some(false));
 		assert!(!result.unwrap_err().1.contains("disabled"));
 		assert!(sent.is_empty(), "{sent:?}");
+	}
+
+	#[test]
+	fn placement_judges_every_action_but_a_scroll_and_only_background_clicks() {
+		use crate::desktop::backend::DeliveryMode;
+		for native in ["AXPress", "AXShowMenu", "AXOpen", "AXPick", "AXIncrement"] {
+			assert!(super::judges_placement(native), "{native}");
+		}
+		assert!(!super::judges_placement("AXScrollToVisible"));
+		assert!(!super::judges_placement("axscrolltovisible"));
+		assert!(super::click_judges_placement(DeliveryMode::Background));
+		assert!(!super::click_judges_placement(DeliveryMode::Foreground));
+		assert!(!super::click_judges_placement(DeliveryMode::ForegroundReturnFocus));
 	}
 
 	#[test]

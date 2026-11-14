@@ -279,6 +279,9 @@ impl Backend for MacosBackend {
 		// blocks while it is busy; the user's front app is read before them.
 		let (entry_front, (target, event)) = EntryFront::before(skylight::front_pid, || {
 			ax::require_element_read_as(ax::mac_handle(element)?)?;
+			if ax::click_judges_placement(click.mode) {
+				ax::require_shown(ax::mac_handle(element)?)?;
+			}
 			locate_element_click(self, element, click)
 		})?;
 		if click.checks_menu_press() {

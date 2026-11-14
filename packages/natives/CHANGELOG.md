@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS `press()` and background `el.click()` reporting success on a control a person could not click, such as a hover toolbar's button after the pointer left, a hidden control, or one of a window that shows a sheet; they now fail before anything is sent and name what the window shows there ([#19258](https://github.com/can1357/oh-my-pi/pull/19258) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
