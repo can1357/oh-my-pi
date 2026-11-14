@@ -1531,13 +1531,13 @@ fn closed_loopback_port() -> u16 {
 /// credentialed fetch, and judges each call by the resolver that reads
 /// each target: a local path, an internal URI that reads local state, and a
 /// vault read that asks the Obsidian CLI are document reads; an http(s) URL
-/// and an unknown foreign scheme the RPC host resolves (no locality
-/// guarantee, owner decision Q12) are anonymous fetches; an `ssh://` host,
-/// `issue://`, `pr://` and an `mcp://` resource no mounted server advertises
-/// yet are credentialed fetches. A local read is `read` tier and runs
-/// unasked in every mode and sandbox state; a fetch asks only under
-/// `always-ask`. With URL reads disabled the maximum keeps the credentialed
-/// fetch and a URL read fetches nothing.
+/// is an anonymous fetch; an undeclared foreign scheme is a local document
+/// read (ADR 0050 S3 / D5: Host no longer blankets every host URI as
+/// anonymous Fetch); an `ssh://` host, `issue://`, `pr://` and an `mcp://`
+/// resource no mounted server advertises yet are credentialed fetches. A
+/// local read is `read` tier and runs unasked in every mode and sandbox
+/// state; a fetch asks only under `always-ask`. With URL reads disabled the
+/// maximum keeps the credentialed fetch and a URL read fetches nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
 	use crate::{
@@ -1562,7 +1562,7 @@ async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
 		("vault://notes/a.md", None),
 		("vault://_/a.md?op=read", None),
 		("vault://notes?op=search&q=todo", None),
-		("custom://thing", anonymous),
+		("custom://thing", None),
 		("ssh://", None),
 		("https://docs.rs/serde", anonymous),
 		("docs.rs:443/", anonymous),

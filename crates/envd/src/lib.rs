@@ -111,6 +111,9 @@ pub mod tool_settings;
 /// Shell-tool execution, managed process sessions, and shell URI resolution.
 pub mod tool_shell;
 pub mod tool_url;
+pub use tool_url::scheme_generation::{
+	LiveScheme, SchemeClaim, SchemeFoldError, SchemeGeneration, WRITE_NOT_ENABLED,
+};
 mod tools;
 mod vault;
 pub mod vcs;
@@ -193,8 +196,8 @@ use tokio_util::sync::CancellationToken;
 pub use tools::{
 	ActiveContentInputs, CommandCredentialExecutorFactory, ContentResolver, DeviceCatalogObserver,
 	DeviceControlFactory, DeviceInvocationAdmission, DynamicDeviceCatalogEntry, DynamicTool,
-	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, RegistryBridges,
-	RegistryControlFactory, SearchInference, TelemetryUpload,
+	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, HostUriJudgment,
+	RegistryBridges, RegistryControlFactory, SearchInference, TelemetryUpload,
 };
 
 use self::{
