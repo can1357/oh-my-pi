@@ -115,6 +115,7 @@
 
 - `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 - `ask` HTML forms hide to one row with `app.ask.hide` (`Alt+H`) or the Hide button, as the ask dialog does ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#18634](https://github.com/can1357/oh-my-pi/pull/18634) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 

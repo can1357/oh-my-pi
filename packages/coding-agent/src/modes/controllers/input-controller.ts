@@ -365,6 +365,182 @@ export class InputController {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 	}
 
+	/**
+	 * Leave the focused-subagent view: clear the typed draft, else detach back to
+	 * the main session. Esc reaches this through the configured `app.interrupt`
+	 * action and — when that action was remapped off Escape — through the editor's
+	 * raw-Escape cancel path (#8952). It never aborts the focused agent's turn.
+	 */
+	#cancelFocusedSubagentView(): void {
+		if (this.ctx.editor.getText().trim()) {
+			this.ctx.editor.setText("");
+			this.ctx.ui.requestRender();
+			return;
+		}
+		void this.ctx.unfocusSession();
+	}
+
+	/**
+	 * Escape precedence shared by the configured `app.interrupt` action and the
+	 * editor's raw-Escape cancel path: `/mcp test`, side panels, command reports,
+	 * maintenance, speech, and loop mode all own the key ahead of the
+	 * focused-subagent detach and the main turn.
+	 */
+	#handleEscapeInterrupt(): void {
+		// `/mcp test` advertises Esc until each owner's post-settlement grace expires.
+		// Cancel every overlapping test before any main-turn or side-channel action.
+		if (this.ctx.mcpTestEscapeHandlers.size > 0) {
+			// One Esc cancels every advertised /mcp test and consumes the ownership;
+			// the next Esc must reach the actions below instead of being swallowed
+			// by a stale registration or grace timer.
+			const handlers = [...this.ctx.mcpTestEscapeHandlers];
+			this.ctx.mcpTestEscapeHandlers.clear();
+			for (const handler of handlers) handler();
+			return;
+		}
+
+		// Side-channel panels own Esc for cancellation or closing before
+		// loop mode, maintenance, or the underlying main turn.
+		// Active context maintenance owns Esc: auto/manual compaction,
+		// handoff generation, and auto-retry backoff all advertise
+		// "(esc to cancel)". Dispatch on live session state instead of
+		// swapping onEscape handlers — interleaved start/end events used
+		// to clobber the single saved-handler slot (auto-compaction start
+		// → /compact → auto end → manual finally), leaving Esc wired to a
+		// stale no-op closure until restart.
+		//
+		// While a subagent is focused, Esc honors the advertised view action
+		// ("Esc returns to main") instead of cancelling maintenance —
+		// accidentally killing a focused subagent's compaction on the way out
+		// was #2819. The auto-maintenance loaders relabel their hint to match
+		// (see EventController). Main-session maintenance still owns Esc and
+		// stays cancellable from the main view (focused submit gates /compact
+		// and handoff, so manual maintenance is main-only anyway).
+		if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+			return;
+		}
+		if (this.ctx.hasActiveOmfg() && this.ctx.handleOmfgEscape()) {
+			return;
+		}
+		if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
+			return;
+		}
+		if (this.ctx.dismissCommandReport()) {
+			return;
+		}
+
+		if (!this.ctx.focusedAgentId) {
+			const viewSession = this.ctx.viewSession;
+			let aborted = false;
+			if (viewSession.isCompacting) {
+				safeAbort("compaction", () => viewSession.abortCompaction());
+				aborted = true;
+			}
+			if (viewSession.isGeneratingHandoff) {
+				safeAbort("handoff", () => viewSession.abortHandoff());
+				aborted = true;
+			}
+			if (viewSession.isRetrying) {
+				safeAbort("retry", () => viewSession.abortRetry());
+				aborted = true;
+			}
+			if (aborted) return;
+		}
+
+		if (vocalizer.isSpeaking()) {
+			// Playback from the completed response can overlap the next agent
+			// turn. Silence it before interrupting any ongoing main-turn work.
+			vocalizer.clear();
+			this.ctx.lastEscapeTime = 0;
+			return;
+		}
+
+		if (this.ctx.loopModeEnabled) {
+			// Esc suspends the loop even mid-iteration: abort the live turn,
+			// then drop the captured prompt so the 800ms auto-resubmit never
+			// fires. Loop stays enabled (paused) — the next manual prompt
+			// resumes with a new body.
+			if (this.ctx.session.isStreaming) {
+				this.#abortStreamingTurn();
+			}
+			this.ctx.pauseLoop();
+			this.ctx.cancelPendingSubmission();
+			// A setup cancelled before its turn starts emits no `agent_end`: hand the queue back here.
+			this.#restoreYieldCompactionOnStop();
+			return;
+		}
+		if (this.ctx.focusedAgentId) {
+			// Esc never interrupts the focused agent's turn: clear typed text,
+			// else return the view to the main session. Interrupt via empty
+			// steer-flush submit if needed.
+			this.#cancelFocusedSubagentView();
+			return; // double-escape backtrack (/tree, /branch) stays main-only
+		}
+		if (this.ctx.collabGuest) {
+			// Guest Esc: ask the host to interrupt its agent; the local replica
+			// session is never streaming, so the native abort path below would
+			// no-op.
+			if (this.ctx.collabGuest.state?.isStreaming || this.ctx.loadingAnimation) {
+				this.ctx.collabGuest.sendAbort();
+			}
+			return;
+		}
+		if (this.ctx.loadingAnimation && this.ctx.cancelPendingSubmission()) {
+			this.#restoreYieldCompactionOnStop();
+			return;
+		}
+		// The turn is over and only background jobs can resume it; its row
+		// stays mounted, so this is checked before the loader's abort.
+		const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
+		if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
+			this.restoreQueuedMessagesToEditor({ abort: true });
+		} else if (this.ctx.session.isBashRunning) {
+			this.ctx.session.abortBash();
+		} else if (this.ctx.isBashMode) {
+			this.ctx.editor.setText("");
+			this.ctx.isBashMode = false;
+			this.ctx.updateEditorBorderColor();
+		} else if (this.ctx.session.isEvalRunning) {
+			this.ctx.session.abortEval();
+		} else if (this.ctx.isPythonMode) {
+			this.ctx.editor.setText("");
+			this.ctx.isPythonMode = false;
+			this.ctx.updateEditorBorderColor();
+		} else if (awaitingAsyncWork) {
+			// End the wait. The jobs keep running; their results land in context
+			// for the next prompt instead of starting a turn.
+			void this.ctx.eventController.stopAwaitingAsyncWork();
+		} else if (this.ctx.session.isStreaming) {
+			this.#abortStreamingTurn();
+		} else if (this.ctx.editor.getText().trim()) {
+			// Esc must not destroy an in-progress draft.
+			this.ctx.lastEscapeTime = 0;
+		} else {
+			// Double-interrupt with an empty editor runs the configured action:
+			// the transcript rewind selector (default) or the session tree.
+			const doubleEscapeAction = cfgDoubleEscapeAction.get(settings);
+			if (doubleEscapeAction !== "none") {
+				const now = Date.now();
+				if (now - this.ctx.lastEscapeTime < 500) {
+					if (doubleEscapeAction === "tree") {
+						this.ctx.showTreeSelector();
+					} else {
+						this.ctx.showUserMessageSelector();
+					}
+					// Forced viewport repaint only: `resetDisplay()` replays the whole
+					// committed transcript (and clears native scrollback on direct
+					// terminals), which blocks on PTY backpressure for tens of seconds
+					// on long sessions — the selector opens invisibly and double-Esc
+					// reads as dead. O(viewport) is enough to settle the editor-slot swap.
+					this.ctx.ui.requestRender(true);
+					this.ctx.lastEscapeTime = 0;
+				} else {
+					this.ctx.lastEscapeTime = now;
+				}
+			}
+		}
+	}
+
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
@@ -373,6 +549,17 @@ export class InputController {
 			// First, so a tag letter typed in link-hint mode reaches no other listener or the editor.
 			this.ctx.ui.addInputListener(data => this.#handleLinkHintInput(data));
 		}
+		// Escape keeps leaving the focused-subagent view even when `app.interrupt`
+		// was remapped to another key: the remap moves the abort action, not the
+		// view's cancel key (#8952).
+		this.ctx.editor.onEscapeCancel = () => {
+			if (!this.ctx.focusedAgentId) return false;
+			// Raw Escape runs the same precedence chain as the configured
+			// interrupt action: `/mcp test`, side panels, speech, and loop mode
+			// still own the key ahead of the focused-view detach (#8952).
+			this.#handleEscapeInterrupt();
+			return true;
+		};
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
@@ -523,165 +710,7 @@ export class InputController {
 			// alternate screen.
 			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
 		}
-		this.ctx.editor.onEscape = () => {
-			// `/mcp test` advertises Esc until each owner's post-settlement grace expires.
-			// Cancel every overlapping test before any main-turn or side-channel action.
-			if (this.ctx.mcpTestEscapeHandlers.size > 0) {
-				// One Esc cancels every advertised /mcp test and consumes the ownership;
-				// the next Esc must reach the actions below instead of being swallowed
-				// by a stale registration or grace timer.
-				const handlers = [...this.ctx.mcpTestEscapeHandlers];
-				this.ctx.mcpTestEscapeHandlers.clear();
-				for (const handler of handlers) handler();
-				return;
-			}
-
-			// Side-channel panels own Esc for cancellation or closing before
-			// loop mode, maintenance, or the underlying main turn.
-			// Active context maintenance owns Esc: auto/manual compaction,
-			// handoff generation, and auto-retry backoff all advertise
-			// "(esc to cancel)". Dispatch on live session state instead of
-			// swapping onEscape handlers — interleaved start/end events used
-			// to clobber the single saved-handler slot (auto-compaction start
-			// → /compact → auto end → manual finally), leaving Esc wired to a
-			// stale no-op closure until restart.
-			//
-			// While a subagent is focused, Esc honors the advertised view action
-			// ("Esc returns to main") instead of cancelling maintenance —
-			// accidentally killing a focused subagent's compaction on the way out
-			// was #2819. The auto-maintenance loaders relabel their hint to match
-			// (see EventController). Main-session maintenance still owns Esc and
-			// stays cancellable from the main view (focused submit gates /compact
-			// and handoff, so manual maintenance is main-only anyway).
-			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
-				return;
-			}
-			if (this.ctx.hasActiveOmfg() && this.ctx.handleOmfgEscape()) {
-				return;
-			}
-			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
-				return;
-			}
-			if (this.ctx.dismissCommandReport()) {
-				return;
-			}
-
-			if (!this.ctx.focusedAgentId) {
-				const viewSession = this.ctx.viewSession;
-				let aborted = false;
-				if (viewSession.isCompacting) {
-					safeAbort("compaction", () => viewSession.abortCompaction());
-					aborted = true;
-				}
-				if (viewSession.isGeneratingHandoff) {
-					safeAbort("handoff", () => viewSession.abortHandoff());
-					aborted = true;
-				}
-				if (viewSession.isRetrying) {
-					safeAbort("retry", () => viewSession.abortRetry());
-					aborted = true;
-				}
-				if (aborted) return;
-			}
-
-			if (vocalizer.isSpeaking()) {
-				// Playback from the completed response can overlap the next agent
-				// turn. Silence it before interrupting any ongoing main-turn work.
-				vocalizer.clear();
-				this.ctx.lastEscapeTime = 0;
-				return;
-			}
-
-			if (this.ctx.loopModeEnabled) {
-				// Esc suspends the loop even mid-iteration: abort the live turn,
-				// then drop the captured prompt so the 800ms auto-resubmit never
-				// fires. Loop stays enabled (paused) — the next manual prompt
-				// resumes with a new body.
-				if (this.ctx.session.isStreaming) {
-					this.#abortStreamingTurn();
-				}
-				this.ctx.pauseLoop();
-				this.ctx.cancelPendingSubmission();
-				// A setup cancelled before its turn starts emits no `agent_end`: hand the queue back here.
-				this.#restoreYieldCompactionOnStop();
-				return;
-			}
-			if (this.ctx.focusedAgentId) {
-				// Esc never interrupts the focused agent's turn: clear typed text,
-				// else return the view to the main session. Interrupt via empty
-				// steer-flush submit if needed.
-				if (this.ctx.editor.getText().trim()) {
-					this.ctx.editor.setText("");
-					this.ctx.ui.requestRender();
-				} else {
-					void this.ctx.unfocusSession();
-				}
-				return; // double-escape backtrack (/tree, /branch) stays main-only
-			}
-			if (this.ctx.collabGuest) {
-				// Guest Esc: ask the host to interrupt its agent; the local replica
-				// session is never streaming, so the native abort path below would
-				// no-op.
-				if (this.ctx.collabGuest.state?.isStreaming || this.ctx.loadingAnimation) {
-					this.ctx.collabGuest.sendAbort();
-				}
-				return;
-			}
-			if (this.ctx.loadingAnimation && this.ctx.cancelPendingSubmission()) {
-				this.#restoreYieldCompactionOnStop();
-				return;
-			}
-			// The turn is over and only background jobs can resume it; its row
-			// stays mounted, so this is checked before the loader's abort.
-			const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
-			if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
-				this.restoreQueuedMessagesToEditor({ abort: true });
-			} else if (this.ctx.session.isBashRunning) {
-				this.ctx.session.abortBash();
-			} else if (this.ctx.isBashMode) {
-				this.ctx.editor.setText("");
-				this.ctx.isBashMode = false;
-				this.ctx.updateEditorBorderColor();
-			} else if (this.ctx.session.isEvalRunning) {
-				this.ctx.session.abortEval();
-			} else if (this.ctx.isPythonMode) {
-				this.ctx.editor.setText("");
-				this.ctx.isPythonMode = false;
-				this.ctx.updateEditorBorderColor();
-			} else if (awaitingAsyncWork) {
-				// End the wait. The jobs keep running; their results land in context
-				// for the next prompt instead of starting a turn.
-				void this.ctx.eventController.stopAwaitingAsyncWork();
-			} else if (this.ctx.session.isStreaming) {
-				this.#abortStreamingTurn();
-			} else if (this.ctx.editor.getText().trim()) {
-				// Esc must not destroy an in-progress draft.
-				this.ctx.lastEscapeTime = 0;
-			} else {
-				// Double-interrupt with an empty editor runs the configured action:
-				// the transcript rewind selector (default) or the session tree.
-				const doubleEscapeAction = cfgDoubleEscapeAction.get(settings);
-				if (doubleEscapeAction !== "none") {
-					const now = Date.now();
-					if (now - this.ctx.lastEscapeTime < 500) {
-						if (doubleEscapeAction === "tree") {
-							this.ctx.showTreeSelector();
-						} else {
-							this.ctx.showUserMessageSelector();
-						}
-						// Forced viewport repaint only: `resetDisplay()` replays the whole
-						// committed transcript (and clears native scrollback on direct
-						// terminals), which blocks on PTY backpressure for tens of seconds
-						// on long sessions — the selector opens invisibly and double-Esc
-						// reads as dead. O(viewport) is enough to settle the editor-slot swap.
-						this.ctx.ui.requestRender(true);
-						this.ctx.lastEscapeTime = 0;
-					} else {
-						this.ctx.lastEscapeTime = now;
-					}
-				}
-			}
-		};
+		this.ctx.editor.onEscape = () => this.#handleEscapeInterrupt();
 
 		this.ctx.editor.setActionKeys("app.clear", this.ctx.keybindings.getKeys("app.clear"));
 		this.ctx.editor.onClear = () => this.handleCtrlC();
