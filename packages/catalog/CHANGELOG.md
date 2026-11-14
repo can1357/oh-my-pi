@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
+- Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
+- Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
 
 ### Fixed
 
@@ -24,13 +25,22 @@
 ### Changed
 
 - Paused Google Antigravity (`google-antigravity`): it no longer offers a login and stored credentials are not used until it is re-enabled; use `GEMINI_API_KEY` (AI Studio) or `google-vertex` instead ([#18341](https://github.com/can1357/oh-my-pi/issues/18341))
+- Corrected Command Code model pricing and usage reporting across supported models, including long-context pricing tiers for Claude Haiku 5.5, GPT-6.1 Sol and Terra, Grok 4.7, and Claude Sonnet 5.5.
+- Fixed Gemini 4 Argon on Command Code so image attachments are preserved and usage is billed at the correct rates.
+- Increased the maximum output for Gemini 4 Argon, Carbon, and Hydrogen on the Gemini API and Vertex AI to 262,144 tokens, allowing long responses to continue beyond the previous limits.
+- Fixed thinking-level support for OpenCode Go Claude Haiku 5.5, including the full range through max and explicit disabling when thinking is off.
+- Updated Devin requests to identify as the current stable Devin CLI version.
+- Fixed Factory Droid GPT-6 models failing on the next turn after changing the thinking level during Bedrock or Snowflake sessions.
+- Fixed OpenRouter model listings for API keys with workspace allow-lists so the key-specific model roster is shown correctly and cached independently per key.
+- Preserved encrypted reasoning across OpenCode Go Muse Spark tool-call turns.
+- Fixed Vertex AI Gemini 3 and newer models rejecting replayed or cross-model tool calls that lack a thought signature.
+- Fixed Cursor model listings so models available to the provider, including GLM 5.3 and Grok 4.7, are not omitted.
 
 ## [18.20.0] - 2026-11-12
 
 ### Added
 
 - Added the Gemini Decision 1 judge model (`google/gemini-decision-1`, `GEMINI_API_KEY`); assign it to the `judge` role to use it ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
-- Added Chutes (`chutes`) with live model discovery from `https://llm.chutes.ai/v1/models` and `/login chutes` (`CHUTES_API_KEY`) ([#18640](https://github.com/can1357/oh-my-pi/pull/18640) by [@Algowary](https://github.com/Algowary))
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
 - Added Gemini 4 Hydrogen (`gemini-4-hydrogen`) on Google, Vertex, OpenCode Zen, OpenRouter, Vercel AI Gateway, and Kilo, with low, medium, high, and xhigh thinking levels on the native Google transports.
 
@@ -270,7 +280,6 @@
 - Codex model refresh now lists models available to an entitled account even when other saved accounts return HTTP 402 ([#17198](https://github.com/can1357/oh-my-pi/issues/17198)).
 - LiteLLM discovery now reads every `/v2/model/info` page before selecting the proxy's model roster, rather than caching only the first 50 entries; malformed or incomplete pagination falls back without caching a partial page ([#17237](https://github.com/can1357/oh-my-pi/pull/17237) by [@maykonmichel](https://github.com/maykonmichel)).
 - Fixed hosted web search on OpenAI Responses and Codex Responses selecting GPT-5.6 Luna instead of GPT-6 Luna ([#17202](https://github.com/can1357/oh-my-pi/pull/17202) by [@mateo-bolanos](https://github.com/mateo-bolanos)).
-- Fixed Vertex AI Gemini 3+ models rejecting replayed or cross-model assistant turns whose first tool call lacks a thought signature by enabling the first-call `skip_thought_signature_validator` sentinel on `google-vertex` ([#10602](https://github.com/can1357/oh-my-pi/issues/10602), [#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@sinhduc01](https://github.com/sinhduc01))
 
 ## [18.13.2] - 2026-10-27
 
