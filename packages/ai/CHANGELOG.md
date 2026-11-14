@@ -126,6 +126,8 @@
 
 ### Fixed
 
+- Retained regional Token Plan request routing for both tp- and ttp- keys alongside current catalog authentication.
+- Token Plan routing only replaces the standard Xiaomi host; explicit regional endpoints and proxies, including URLs with Xiaomi names in their paths, remain unchanged. Generic Xiaomi login stores no region and defaults to SGP until discovery; explicit regional provider IDs select their region.
 - Cursor exec frames keep tool-batch order: a file mutation (native StrReplace and Write, `write`, `delete`, `pi_edit`, `pi_write`) waits for the calls issued before it, and the calls issued after it wait until it lands, so a Shell sent in the same batch as a StrReplace no longer runs before the edit's write ([#18434](https://github.com/can1357/oh-my-pi/pull/18434) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))
 - Cursor Shell results no longer end with `Timeout clamped to 3600s (requested 86400s; …)`: Cursor's 24 h `hard_timeout` is capped at the bash tool's 3600 s ceiling before it reaches the tool ([#18433](https://github.com/can1357/oh-my-pi/pull/18433) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
@@ -351,6 +353,7 @@
 
 ### Fixed
 
+- Fixed Xiaomi MiMo `tp-` Token Plan keys being sent to the standard `api.xiaomimimo.com` host from bundled or cached model rows before discovery re-resolved the base URL; requests now use the Token Plan cluster of the stored login region, else SGP. ([#16646](https://github.com/can1357/oh-my-pi/pull/16646) by [@Komzpa](https://github.com/Komzpa))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 - Fixed Amazon Bedrock replies that a dropped connection or gateway cut off mid-stream ending the turn as if they were finished, instead of being retried ([#16559](https://github.com/can1357/oh-my-pi/pull/16559) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 
