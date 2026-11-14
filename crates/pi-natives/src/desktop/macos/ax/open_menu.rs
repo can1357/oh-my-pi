@@ -235,8 +235,8 @@ fn unchosen_message(press: Press<'_>, refusal: Option<&str>, items: &str) -> Str
 
 fn left_open_message(press: Press<'_>, items: &str) -> String {
 	format!(
-		"{} that is still open after Escape, which keeps the keyboard from the user's app; inspect \
-		 the desktop before retrying.{}",
+		"{} that is still open, which keeps the keyboard from the user's app; inspect the desktop \
+		 before retrying.{}",
 		opened(press),
 		listed(items)
 	)
@@ -1302,7 +1302,7 @@ mod tests {
 		};
 		let error =
 			guard(Press::Action("AXShowMenu"), Some(&[]), None, || Ok(()), open).expect_err("open");
-		assert!(error.message.contains("still open after Escape"), "{}", error.message);
+		assert!(error.message.contains("that is still open,"), "{}", error.message);
 		let cancelled = || Err(DesktopError::cancelled("cancelled"));
 		let error =
 			guard(Press::Action("AXPress"), Some(&[]), None, cancelled, open).expect_err("open");
