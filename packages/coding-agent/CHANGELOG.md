@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `async.processWatch.enabled` (off by default): while background jobs run, the `judge` model role checks them on a schedule (30 s, 1, 2, 4, 8 and 16 minutes, then every 30 minutes) and tells the agent at its next turn about jobs that look stalled, failing, or like a server it is waiting on as if it would exit. Tune with `async.processWatch.threshold`, `async.processWatch.schedule` and `async.processWatch.everySeconds`.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

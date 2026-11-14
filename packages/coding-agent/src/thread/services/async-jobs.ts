@@ -147,6 +147,7 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 		errorText: job.errorText,
 		structured: job.structured,
 		progressText: job.progressText,
+		lastProgressAt: job.lastProgressAt,
 		latestDetails: job.latestDetails,
 		ownerId: job.ownerId,
 		agentId: job.agentId,

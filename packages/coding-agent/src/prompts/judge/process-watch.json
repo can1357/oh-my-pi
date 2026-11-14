@@ -1,0 +1,13 @@
+{
+	"check": {
+		"instructions": "The state is a coding agent's session: `recent` is its latest conversation, oldest first, and `processes` lists the commands running now in the background. Look at the one with id {{id}} (`{{command}}`), running {{age}}{{#if quiet}}, nothing new written for {{quiet}}{{/if}}. Given what the session expects of it, what is it doing?",
+		"criteria": {
+			"progressing": "It writes output or produces results as a command like it should, and its last output shows the work moving.",
+			"waiting_as_expected": "It writes little or nothing, and that is what it does: it waits on something slow (a CI run, a sleep, a download, a long build or test run) or serves (a server, a watcher) as the session meant it to.",
+			"stalled": "It has written nothing for longer than a command like it should take, or it waits on something that will not come: input, a prompt, a lock, a network call that hangs.",
+			"failing": "Its output shows it failing (errors repeating, a crash loop) while it keeps running.",
+			"ready": "It is a server or watcher that is up and ready, and the agent waits on it as if it would end.",
+			"unclear": "The session shows too little of it to tell."
+		}
+	}
+}

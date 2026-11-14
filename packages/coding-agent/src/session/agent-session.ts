@@ -119,6 +119,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
+import { PROCESS_WATCH_MESSAGE_TYPE, ProcessWatch, registerProcessWatchDelivery } from "../async/process-watch";
 import { planParallel } from "../auto-parallel/planner";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
@@ -1216,6 +1217,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #asyncJobManager: AsyncJobManagerApi | undefined;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
+	/** Judge-driven watch over this agent's running jobs; set when a manager + agent id exist. */
+	#processWatch: ProcessWatch | undefined;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
 	 * this owner's jobs (see {@link AgentSession.#cancelOwnAsyncJobs}). Stamped
@@ -2620,13 +2623,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// non-consuming interrupt peek so `wait` can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		// Completion notices (finished background jobs, exited supervised
-		// processes) queue here for the same boundary; peeking them lets a
-		// `wait` return early rather than miss a queued completion. Entries
-		// consumed elsewhere since they queued (an eval cell awaiting the job)
-		// are dropped by the drain, so they must not cut a wait short.
+		// processes) and process-watch notices (a running job that looks stalled,
+		// failing, or ready) queue here for the same boundary; peeking them lets a
+		// `wait` return early rather than miss a queued completion or sit on a job
+		// that will not end. Entries consumed elsewhere since they queued (an eval
+		// cell awaiting the job) are dropped by the drain, so they must not cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
-			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable(PROCESS_WATCH_MESSAGE_TYPE);
 		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
 		// instead of sitting behind it. Deferred wakes are not peeked: no
 		// boundary injection would drain them. Foreground tools are unaffected.
@@ -2797,6 +2802,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,
+			});
+			// Process watch (`async.processWatch.*`): the judge looks at this agent's running
+			// jobs on a schedule and its notices ride this session's yield queue.
+			const ownerId = this.#agentId;
+			this.#processWatch = new ProcessWatch({
+				settings: this.settings,
+				runningJobs: () => manager.getRunningJobs({ ownerId }),
+				judge: () =>
+					resolveJudge({
+						settings: this.settings,
+						registry: this.#modelRegistry,
+						sessionModel: this.model,
+						sessionId: this.sessionId,
+						metadataResolver: provider => this.agent.metadataForProvider(provider),
+						purpose: "process-watch",
+						onUsage: journalJudgmentUsage(this.sessionManager),
+						telemetry: this.agent.telemetry,
+						costGate: this.#costGate,
+					}),
+				recent: () => buildTitleDriftTurns(this.agent.state.messages),
+				notify: registerProcessWatchDelivery(this.yieldQueue, jobId => manager.getJob(jobId)?.status === "running"),
 			});
 		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
@@ -3646,6 +3672,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// prior session's background result cannot inject into the next transcript.
 		this.#asyncDeliveryEpoch += 1;
 		this.yieldQueue.clear("async-result");
+		this.yieldQueue.clear(PROCESS_WATCH_MESSAGE_TYPE);
 	}
 
 	/**
@@ -5822,6 +5849,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
+		// A tool call may have started or backgrounded a job: watch it.
+		this.#processWatch?.poke();
 		return this.#ttsr.afterToolCall(ctx);
 	}
 	/**
@@ -6690,6 +6719,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.hasBackgroundCompletions = undefined;
 		this.agent.hasQueuedAsides = undefined;
 		this.#advisors.stopRuntime();
+		this.#processWatch?.dispose();
 		this.#eval.beginDispose();
 	}
 

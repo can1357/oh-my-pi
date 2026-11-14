@@ -133,6 +133,8 @@ export interface AsyncJob {
 	structured?: StructuredSubagentOutput;
 	/** Latest progress text the running job reported (a bash job's output tail). */
 	progressText?: string;
+	/** When {@link progressText} last changed: the job's latest new output. */
+	lastProgressAt?: number;
 	/** Latest tool-render details reported by the running job. */
 	latestDetails?: AsyncJobDetails;
 	/**
@@ -541,6 +543,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		};
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
+			if (text !== job.progressText) job.lastProgressAt = Date.now();
 			job.progressText = text;
 			if (details) job.latestDetails = details;
 			if (!options?.onProgress) return;
