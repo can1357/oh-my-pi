@@ -1191,6 +1191,9 @@ struct PendingControlActivation {
 	/// Per-dispatch budget for freeze and activation, from
 	/// [`ExtHostConfig::spawn_timeout`].
 	lifecycle_timeout:    Duration,
+	/// Envd-owned scheme generation folded at FREEZE / cleared on host-down
+	/// (ADR 0050 S4).
+	scheme_generation:    Option<Arc<crate::tool_url::scheme_generation::SchemeGeneration>>,
 }
 struct LiveControlRoute {
 	control:  RwLock<ControlHandle>,
@@ -1591,6 +1594,11 @@ fn publish_availability(
 }
 
 fn publish_host_down(activation: &PendingControlActivation, reason: &'static str) {
+	// D6: schemes are not live while the host is down. Successful FREEZE
+	// re-folds via replace_owner with the advanced CONTROL identity.
+	if let Some(generation) = activation.scheme_generation.as_ref() {
+		generation.clear_owner(activation.key.extension().clone());
+	}
 	let current = activation.availability.read();
 	let batch = AvailabilityBatch {
 		deltas: current
@@ -1970,6 +1978,7 @@ impl ExtHostSupervisor {
 				contributed_values: Arc::from(config.contributed_values.clone()),
 				python_route,
 				lifecycle_timeout: config.spawn_timeout,
+				scheme_generation: config.scheme_generation.clone(),
 				roots: config
 					.workspace_root
 					.iter()
@@ -2401,6 +2410,7 @@ impl ExtHostSupervisor {
 			&& !operation.starts_with("omp.jobs.")
 			&& !operation.starts_with("omp.prompts.")
 			&& !operation.starts_with("omp.telemetry.")
+			&& !operation.starts_with("omp.schemes.")
 		{
 			return Err(ExtensionCallbackError::InvalidOperation);
 		}
@@ -2764,8 +2774,19 @@ impl ExtHostSupervisor {
 
 	/// Immediately stops every process group containing a newly revoked
 	/// extension. Static routes remain registered and therefore fail closed as
-	/// unavailable deny stubs for the remainder of the session.
+	/// unavailable deny stubs for the remainder of the session. Declared
+	/// schemes owned by a quarantined extension are cleared before shutdown
+	/// (ADR 0050 S4 / D6); a refused co-claimant does not auto-inherit.
 	pub async fn quarantine(&self, extensions: &[Str]) {
+		for activation in &self.control_activations {
+			if extensions
+				.iter()
+				.any(|extension| extension == activation.key.extension())
+				&& let Some(generation) = activation.scheme_generation.as_ref()
+			{
+				generation.clear_owner(activation.key.extension().clone());
+			}
+		}
 		for host in &self.actors {
 			if host
 				.owners
@@ -4167,7 +4188,7 @@ async fn refresh_control_generation(
 		&activation.manifest,
 		&activation.settings,
 		activation.lifecycle_timeout,
-		None,
+		activation.scheme_generation.as_ref(),
 	)
 	.await?;
 	if let Some(previous) = frozen_registry.lock().get(&(
