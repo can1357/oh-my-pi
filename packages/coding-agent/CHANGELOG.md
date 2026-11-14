@@ -970,6 +970,10 @@
 - Fixed `/tan` clones ending without a final answer when they call `ask`; the clone now keeps running and the parent receives its final answer instead of an empty result ([#17223](https://github.com/can1357/oh-my-pi/pull/17223) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed GitHub `/review` diff links keeping the snapshot that built the request after the cached diff refreshes in the background, instead of opening whatever file now sits at the same index ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
 
+### Fixed
+
+- Up now recalls a multi-row prompt with the caret at its end, so typing continues after the old prompt instead of at its first line; Up then walks the entry's rows and only from its first line steps to older history ([#17233](https://github.com/can1357/oh-my-pi/pull/17233) by [@iacore](https://github.com/iacore))
+
 ## [18.13.2] - 2026-10-27
 
 ### Added

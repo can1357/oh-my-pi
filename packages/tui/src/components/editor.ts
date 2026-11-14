@@ -741,7 +741,6 @@ export interface EditorTextAssistProvider {
 	): EditorWordReplacements | null | Promise<EditorWordReplacements | null>;
 }
 
-type HistoryCursorAnchor = "start" | "end";
 type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
 
 /** What the paste transport knew about the input burst before the editor inserts the payload. */
@@ -806,8 +805,6 @@ export class Editor implements Component, Focusable {
 	#nativeOverlay?: { list: SelectList; caret: string; node: NativeNode };
 	#nativeRoot?: { role: string; tone: TspTone | undefined; children: readonly NativeChild[]; node: NativeNode };
 
-	// Store last layout width for cursor navigation
-	#lastLayoutWidth: number = 80;
 	/**
 	 * Width the caret's rows wrap at for Up/Down and paging: the painted layout width in
 	 * text mode. Natively it is unbounded (rows are logical lines): the terminal wraps with
@@ -1287,48 +1284,26 @@ export class Editor implements Component, Focusable {
 			this.restoreHistoryState(entry?.draft?.restore);
 			this.#historyDraftActive = entry?.draft !== undefined;
 		}
-		// Browsing asks for the edge the key came from, so one press still steps one
-		// entry: Up opens a multi-row entry at its top, Down at its bottom (#99).
-		// #setTextInternal drops that request for single-row entries — see there.
-		const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
-		this.#setTextInternal(entry?.text ?? "", cursorAnchor);
+		// A recalled prompt opens at its end, where the next edit goes — the same
+		// anchor wholesale text replacement (`setText`) and the first-edit path use.
+		// A multi-row entry is therefore entered at its bottom line: Up walks within
+		// it and only an Up from its first visual line steps to the older entry.
+		this.#setTextInternal(entry?.text ?? "");
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
-	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
+	#setTextInternal(text: string): void {
 		this.#endVimSession();
 		this.#undoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
-		// A single-row entry's top and bottom are the same row, so the directional
-		// anchor degenerates to a bare column choice: the caret would sit at the start
-		// when Up recalled the entry and at the end when Down reached the same entry,
-		// leaving delete/yank commands aimed at column 0 on one path and at the tail on
-		// the other. Single-row entries always open at the end — matching what
-		// wholesale text replacement (`setText`) and the first-edit anchor do.
-		if (cursorAnchor === "start" && this.#spansMultipleVisualRows()) {
-			this.#state.cursorLine = 0;
-			this.#setCursorCol(0);
-		} else {
-			this.#state.cursorLine = this.#state.lines.length - 1;
-			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
-		}
+		this.#state.cursorLine = this.#state.lines.length - 1;
+		this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
 		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
 			const mark = this.#undoMark();
 			this.#pinnedUndo = mark;
 			this.#startVimSession(mark, this.#vim.mode === "replace");
 		}
 		this.#notifyChange();
-	}
-
-	/** Whether the buffer needs more than one visual row at the last painted layout
-	 *  width. The directional history anchors are load-bearing only for such entries —
-	 *  they keep one keypress stepping one entry instead of walking inside it — so a
-	 *  newline-free line that wraps past the editor width counts as multi-row too. */
-	#spansMultipleVisualRows(): boolean {
-		if (this.#state.lines.length > 1) return true;
-		const width = this.#lastLayoutWidth;
-		if (width <= 0) return false;
-		return this.#layoutText(width).length > 1;
 	}
 
 	invalidate(): void {
@@ -1563,7 +1538,6 @@ export class Editor implements Component, Focusable {
 		const promptGutter = this.#getPromptGutter(width, paddingX);
 		const contentAreaWidth = this.#getContentWidth(width, paddingX);
 		const layoutWidth = this.#getLayoutWidth(width, paddingX);
-		this.#lastLayoutWidth = layoutWidth;
 		this.#caretRowWidth = layoutWidth;
 
 		const box = this.#theme.symbols.boxRound;
@@ -1871,9 +1845,7 @@ export class Editor implements Component, Focusable {
 	 * caret moves change only `text` and `cursor` on the same node.
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		// The terminal owns the wrap: the surface width only estimates whether a
-		// recalled history entry spans rows, and caret rows are logical lines.
-		this.#lastLayoutWidth = Math.max(1, cx.cols);
+		// The terminal owns the wrap, and caret rows are logical lines.
 		this.#caretRowWidth = Number.POSITIVE_INFINITY;
 		const { lines, cursorLine, cursorCol } = this.#state;
 		const text = lines.join("\n");
