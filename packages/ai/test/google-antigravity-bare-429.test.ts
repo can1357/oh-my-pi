@@ -12,7 +12,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { ProviderCooldowns } from "@oh-my-pi/pi-ai/auth/provider-cooldown";
+import {
+	DEFAULT_PROVIDER_COOLDOWN_MS,
+	ProviderCooldowns,
+	setProviderCooldownMs,
+} from "@oh-my-pi/pi-ai/auth/provider-cooldown";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -155,6 +159,7 @@ describe("Cloud Code Assist bare 429", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		setProviderCooldownMs(DEFAULT_PROVIDER_COOLDOWN_MS);
 		if (savedVersion === undefined) delete process.env.PI_AI_ANTIGRAVITY_VERSION;
 		else process.env.PI_AI_ANTIGRAVITY_VERSION = savedVersion;
 		storage?.close();
@@ -296,6 +301,30 @@ describe("Cloud Code Assist bare 429", () => {
 		vi.spyOn(Date, "now").mockReturnValue(startedAt + 120_001);
 		expect(untilMs(a)).toBeUndefined();
 		expect(b.isCooling("google-antigravity")).toBe(false);
+	});
+
+	it("pauses for the configured length", () => {
+		if (!store) throw new Error("test setup failed");
+		setProviderCooldownMs(5 * 60_000);
+		const startedAt = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(startedAt);
+		const cooldowns = new ProviderCooldowns(store);
+		cooldowns.trip("google-antigravity", "test refusal");
+		expect(() => cooldowns.assertReady("google-antigravity")).toThrow(new Date(startedAt + 5 * 60_000).toISOString());
+		vi.spyOn(Date, "now").mockReturnValue(startedAt + 5 * 60_000 + 1);
+		expect(cooldowns.isCooling("google-antigravity")).toBe(false);
+	});
+
+	it("does not pause the provider at 0, yet keeps the bare 429 on one account", async () => {
+		if (!store) throw new Error("test setup failed");
+		setProviderCooldownMs(0);
+		const { attempts, blockedCredentials, error } = await runPooledRequest("google-antigravity", {
+			body: BARE_429_BODY,
+		});
+		expect(attempts).toHaveLength(1);
+		expect(blockedCredentials).toBe(0);
+		expect(error instanceof Error ? error.message : "").toContain(AIError.UNATTRIBUTED_REJECTION_PREFIX);
+		expect(new ProviderCooldowns(store).isCooling("google-antigravity")).toBe(false);
 	});
 
 	it("still rotates an Antigravity 429 that carries Retry-After", async () => {

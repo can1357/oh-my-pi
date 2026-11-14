@@ -7,6 +7,8 @@
 ### Added
 
 - Added `setUnpausedProviders()` to `@oh-my-pi/pi-ai/oauth`, allowing applications to re-enable providers paused by authentication rules; loaded credential pools and extension logins recognize the change on their next read.
+- Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added `setProviderCooldownMs()` (`@oh-my-pi/pi-ai/auth/provider-cooldown`) to set how long an unattributed Google Antigravity 429 pauses the provider; `0` turns the pause off ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
@@ -28,7 +30,7 @@
 - Fixed Muse sessions after credential changes, key rotation, or idle resume so subsequent turns can continue normally.
 - Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
 - Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
-- Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the account that received it and pauses the provider for 30 minutes, while 429s that name a quota still rotate ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
+- Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the account and endpoint that received it, including when it arrives on an empty-response replay or as a stream error, and pauses the provider for 30 minutes by default (processes sharing the credential store see each other's pause at once), while 429s that name a quota still rotate ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 

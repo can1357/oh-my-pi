@@ -41,7 +41,7 @@ import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import {
-	applyUnpausedProviders,
+	applyOperatorAuthSettings,
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
@@ -149,7 +149,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
 	const token = await ensureToken();
 	const dbPath = getAgentDbPath();
-	applyUnpausedProviders(await resolveEffectiveSettings());
+	applyOperatorAuthSettings(await resolveEffectiveSettings());
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = createBrokerAuthStorage(store);
 	await storage.credentials.reload();
@@ -199,7 +199,7 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	if (flags.via && !flags.provider) {
 		throw new Error("Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)");
 	}
-	applyUnpausedProviders(await resolveEffectiveSettings());
+	applyOperatorAuthSettings(await resolveEffectiveSettings());
 	const providers = getOAuthProviders();
 	// One interface for picker + login prompts; closed before `--via` hands
 	// stdin to ssh.
@@ -299,7 +299,7 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
-	applyUnpausedProviders(await resolveEffectiveSettings());
+	applyOperatorAuthSettings(await resolveEffectiveSettings());
 	const providers = getOAuthProviders();
 	if (flags.json) {
 		process.stdout.write(`${JSON.stringify(providers.map(p => ({ id: p.id, name: p.name })))}\n`);

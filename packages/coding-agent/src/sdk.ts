@@ -201,7 +201,7 @@ import {
 import type { AgentSessionDisposeOptions } from "./session/agent-session-types";
 import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
-	applyUnpausedProviders,
+	applyOperatorAuthSettings,
 	createAuthStorageSettingsSync,
 	discoverAuthStorage as discoverAuthStorageFromConfig,
 	type EffectiveSettingsScope,
@@ -1159,7 +1159,7 @@ export async function discoverAuthStorage(
 ): Promise<AuthStorage> {
 	const { settings, cwd, ...discoveryOptions } = options;
 	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
-	applyUnpausedProviders(effective);
+	applyOperatorAuthSettings(effective);
 	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
 	return discoverAuthStorageFromConfig(agentDir, {
 		...discoveryOptions,

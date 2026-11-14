@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import {
+	DEFAULT_PROVIDER_COOLDOWN_MS,
+	ProviderCooldowns,
+	setProviderCooldownMs,
+} from "@oh-my-pi/pi-ai/auth/provider-cooldown";
+import { ProviderCooldownError } from "@oh-my-pi/pi-ai/error";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
@@ -9,7 +15,11 @@ import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { cfgAuthBrokerUrl, cfgAuthUnpausedProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import {
+	cfgAuthBrokerUrl,
+	cfgAuthUnattributedRefusalCooldownMinutes,
+	cfgAuthUnpausedProviders,
+} from "@oh-my-pi/pi-coding-agent/config/model-settings";
 
 const PROVIDER = "live-broker-test";
 const TOKEN = "live-broker-bearer";
@@ -50,6 +60,7 @@ describe("auth broker settings take effect live", () => {
 		for (const cleanup of cleanups.splice(0)) cleanup();
 		vi.restoreAllMocks();
 		setUnpausedProviders([]);
+		setProviderCooldownMs(DEFAULT_PROVIDER_COOLDOWN_MS);
 		for (const broker of brokers.splice(0)) {
 			await broker.handle.close();
 			broker.storage.close();
@@ -130,5 +141,73 @@ describe("auth broker settings take effect live", () => {
 		cleanups.push(() => authStorage.close());
 
 		expect(await authStorage.keys.get(paused)).toBe(expected);
+	});
+});
+
+describe("auth.unattributedRefusalCooldownMinutes", () => {
+	let tempDir: TempDir;
+	const cleanups: Array<() => void> = [];
+
+	beforeEach(() => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-refusal-cooldown-");
+	});
+
+	afterEach(() => {
+		for (const cleanup of cleanups.splice(0)) cleanup();
+		setProviderCooldownMs(DEFAULT_PROVIDER_COOLDOWN_MS);
+		AgentStorage.close();
+		tempDir.removeSync();
+	});
+
+	/** Minutes a fresh latch pauses a provider for, under the pause length this process applies. */
+	async function appliedPauseMinutes(): Promise<number | undefined> {
+		const store = await SqliteAuthCredentialStore.open(tempDir.join(`latch-${cleanups.length}.db`));
+		cleanups.push(() => store.close());
+		const cooldowns = new ProviderCooldowns(store);
+		const now = Date.now();
+		cooldowns.trip("google-antigravity", "test refusal");
+		try {
+			cooldowns.assertReady("google-antigravity");
+			return undefined;
+		} catch (error) {
+			if (!(error instanceof ProviderCooldownError)) throw error;
+			return Math.round((error.untilMs - now) / 60_000);
+		}
+	}
+
+	it.each([
+		{ layer: "global config", file: ["agent", "config.yml"], minutes: 5, expected: 5 },
+		{ layer: "global config set to 0", file: ["agent", "config.yml"], minutes: 0, expected: undefined },
+		{
+			layer: "project config (a repository cannot change it)",
+			file: [".omp", "config.yml"],
+			minutes: 5,
+			expected: 30,
+		},
+	])("discovery applies the pause from $layer", async ({ file, minutes, expected }) => {
+		const agentDir = tempDir.join("agent");
+		await Bun.write(path.join(tempDir.path(), ...file), `auth:\n  unattributedRefusalCooldownMinutes: ${minutes}\n`);
+		const settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+		const authStorage = await discoverAuthStorage(agentDir, { settings });
+		cleanups.push(() => authStorage.close());
+
+		expect(await appliedPauseMinutes()).toBe(expected);
+	});
+
+	it("applies an edit to a running session", async () => {
+		const agentDir = tempDir.join("agent");
+		const settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+		const authStorage = await discoverAuthStorage(agentDir, { settings });
+		cleanups.push(() => authStorage.close());
+		const sync = createAuthStorageSettingsSync(settings, authStorage);
+		cleanups.push(() => sync.stop());
+		expect(await appliedPauseMinutes()).toBe(30);
+
+		cfgAuthUnattributedRefusalCooldownMinutes.set(settings, 10);
+		await Promise.resolve();
+		await sync.settled();
+
+		expect(await appliedPauseMinutes()).toBe(10);
 	});
 });

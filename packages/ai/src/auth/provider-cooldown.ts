@@ -6,6 +6,18 @@ export const DEFAULT_PROVIDER_COOLDOWN_MS = 30 * 60 * 1000;
 
 const CACHE_KEY_PREFIX = "provider-cooldown:";
 
+/** Pause length new trips use (see {@link setProviderCooldownMs}). */
+let providerCooldownMs = DEFAULT_PROVIDER_COOLDOWN_MS;
+
+/**
+ * Sets how long an unattributed refusal pauses its provider, process-wide; `0`
+ * turns the pause off (the refusal still stays on the account that received
+ * it). Applies to trips from now on; running pauses keep their deadline.
+ */
+export function setProviderCooldownMs(ms: number): void {
+	providerCooldownMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+
 interface CooldownEntry {
 	untilMs: number;
 	reason: string;
@@ -23,17 +35,20 @@ interface CooldownEntry {
  */
 export class ProviderCooldowns {
 	readonly #store: CredentialCacheStore;
-	readonly #cooldownMs: number;
+	readonly #cooldownMs: number | undefined;
 	readonly #entries = new Map<string, CooldownEntry>();
 
-	constructor(store: CredentialCacheStore, cooldownMs = DEFAULT_PROVIDER_COOLDOWN_MS) {
+	/** `cooldownMs` pins the pause length; omitted, trips follow {@link setProviderCooldownMs}. */
+	constructor(store: CredentialCacheStore, cooldownMs?: number) {
 		this.#store = store;
 		this.#cooldownMs = cooldownMs;
 	}
 
-	/** Start (or extend) the provider's cooldown. */
+	/** Start (or extend) the provider's cooldown; a no-op while the pause length is `0`. */
 	trip(provider: string, reason: string): void {
-		const untilMs = Math.max(Date.now() + this.#cooldownMs, this.#active(provider)?.untilMs ?? 0);
+		const cooldownMs = this.#cooldownMs ?? providerCooldownMs;
+		if (cooldownMs <= 0) return;
+		const untilMs = Math.max(Date.now() + cooldownMs, this.#active(provider)?.untilMs ?? 0);
 		const entry = { untilMs, reason };
 		this.#entries.set(provider, entry);
 		this.#store.setCache(`${CACHE_KEY_PREFIX}${provider}`, JSON.stringify(entry), Math.ceil(untilMs / 1000));
