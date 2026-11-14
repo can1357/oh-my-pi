@@ -1054,6 +1054,8 @@ def _freeze_registry_ack() -> dict[str, object]:
     publication = registry_module.project_control_registry()
     provider = importlib.import_module("omp.provider")
     publication["providers"] = list(provider._sealed_provider_declarations())
+    schemes = importlib.import_module("omp.schemes")
+    publication["schemes"] = schemes.freeze_publication()
     return publication
 
 
@@ -1158,6 +1160,7 @@ def _builtin_dispatch(operation: str) -> DispatchHandler | None:
         ),
         "omp.verdicts.project": ("omp._verdicts", "_dispatch_prompt"),
         "omp.provider.callback": ("omp.provider", "dispatch_provider_callback"),
+        "omp.schemes.read": ("omp.schemes", "dispatch_read"),
     }
     if operation == "omp.lifecycle.freeze":
         return _freeze_registry_ack

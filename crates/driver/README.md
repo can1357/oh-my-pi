@@ -11,6 +11,11 @@ presentation adapter.
 
 ## Structure
 
+- `verification` provides a pure required-check policy and tri-state assessment.
+  It rejects empty required inventories and ambiguous observations, binds results
+  to supplied input/policy identities, and keeps missing evidence inconclusive.
+  This is the first verification slice: no snapshot capture, evidence validation,
+  check execution, durable receipt or commit gate is connected to it yet.
 - `headless::kernel` constructs the production kernel, `.oms` session,
   inference route, environment authority, and session-owned `task`/`hub`
   tools reused by chat, print, RPC, and ACP.
