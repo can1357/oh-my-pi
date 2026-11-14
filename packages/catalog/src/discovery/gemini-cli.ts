@@ -6,7 +6,7 @@ import { classifyModel } from "../compat/taxonomy";
 import { createBundledReferenceMap } from "../provider-models/bundled-references";
 import type { ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
-import { getGeminiCliHeaders } from "../wire/gemini-headers";
+import { ensureGeminiCliVersion, getGeminiCliHeaders } from "../wire/gemini-headers";
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist";
@@ -83,6 +83,8 @@ export interface FetchGeminiCliQuotaModelsOptions {
 export async function fetchGeminiCliQuotaModels(
 	options: FetchGeminiCliQuotaModelsOptions,
 ): Promise<ModelSpec<"google-gemini-cli">[] | null> {
+	// The npm registry is not Cloud Code Assist: the injected transport only carries provider requests.
+	await ensureGeminiCliVersion(fetch, options.signal);
 	const fetcher = discoveryFetch(options.fetcher);
 	const endpoint = (options.endpoint?.trim() || DEFAULT_ENDPOINT).replace(/\/+$/, "");
 	const headers = {
