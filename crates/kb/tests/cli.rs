@@ -49,8 +49,12 @@ fn repo(name: &str, lib: &str, worker: Option<&str>) -> TempDir {
 	dir
 }
 
-/// Every spawn gets a private, offline `CARGO_HOME`. rust-analyzer's `cargo
-/// metadata` and build-script check otherwise queue on the host-global
+/// Every spawn gets private build artifacts and an offline `CARGO_HOME`.
+/// Keep target output in `.git` too: a hosted runner has no inherited external
+/// target directory, and rust-analyzer otherwise creates unignored `target/`
+/// files that the source snapshot correctly treats as changes during indexing.
+/// Without a private Cargo home, rust-analyzer's metadata and build-script
+/// checks queue on the host-global
 /// `~/.cargo` package-cache lock behind every other cargo on a shared
 /// self-hosted Mac: one SCIP run measured 58s blocked in metadata and 84s in
 /// build scripts for about 3s of analysis.
@@ -60,6 +64,7 @@ fn kb(root: &Path) -> Command {
 		.arg("--repo")
 		.arg(root)
 		.env("CARGO_HOME", root.join(".git/cargo-home"))
+		.env("CARGO_TARGET_DIR", root.join(".git/cargo-target"))
 		.env("CARGO_NET_OFFLINE", "true");
 	command
 }
@@ -104,6 +109,7 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 	);
 	let root = dir.path();
 	success(command(root, &["update"]));
+	assert!(!root.join("target").exists(), "SCIP build output must not enter the source tree");
 	let index = root.join(".git/omp-kb/index.json");
 	let first = fs::read(&index).unwrap();
 	let first_object = object(root, &first);

@@ -1,8 +1,10 @@
 # Gap 7: Copilot instructions, `.github/instructions` and `~/.ssh/config`
 
 Status: research only. Nothing here is implemented or authorized.
-Date: 2026-11-13
+Date: 2026-11-13 (plan and open questions updated 2026-11-14 to match the revised ADR)
 Baseline: omp2 f4186b783b; upstream c308970263 (pinned checkout).
+
+The decisions now live in [ADR 0065](../adr/0065-config-discovery.md), revised 2026-11-14 after the first review round. Where this note's plan (section 5) and the ADR differ, the ADR wins.
 
 Evidence keys:
 
@@ -113,29 +115,30 @@ Choice: option 2, with a parser that is either hand-written (upstream's 117-line
 
 ### Slice 1: Copilot context files
 
-- Add `("github", ".github/copilot-instructions.md")` to the project table and `("github", ".copilot/copilot-instructions.md")` to the user table in `crates/driver/src/discovery/rules.rs`. Rank them after `CLAUDE.md` so no existing repository changes behaviour. Skip `COPILOT_HOME` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`: an environment variable that points discovery at arbitrary directories is a prompt-injection path for a parent process that sets it.
-- Acceptance: a repository with only the Copilot file gets it injected; a repository with both `AGENTS.md` and the Copilot file behaves as before; a symlink that escapes the repository is refused, like the existing case at `crates/driver/src/discovery/rules.rs:1394`.
-- Tests: extend the discovery tests at `crates/driver/src/discovery/rules.rs:1278` and `crates/driver/src/discovery/rules.rs:1305`.
+- Add `("github", ".github/copilot-instructions.md")` to the project table between `gemini` and `agents-md`, admitted at depth 0 only, and `("github", ".copilot/copilot-instructions.md")` to the user table after `opencode`, in `crates/driver/src/discovery/rules.rs`. This is upstream's ranking: `github` (30) shadows `agents-md` (10) at the same depth and loses to `gemini` (60), `claude` (80) and `native` (100) (`upstream:docs/context-files.md:117-135`, `upstream:docs/context-files.md:148-163`), and the project file is read from the cwd only (`upstream:packages/coding-agent/src/discovery/helpers.ts:127-135`). An earlier draft ranked the file after `CLAUDE.md`; with omp2's one-file-per-depth rule (`crates/driver/src/discovery/rules.rs:223`) that would have hidden it wherever an `AGENTS.md` sits beside it. The convar keeps every repository unchanged while off. Skip `COPILOT_HOME` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`: an environment variable that points discovery at arbitrary directories is a prompt-injection path for a parent process that sets it.
+- The convar must reach all four discovery call sites, since neither discovery function takes a console context: `crates/driver/src/headless/kernel.rs:4028`, `:4033`, the `compose_kernel` call at `:2565`, and `crates/driver/src/rules/stream.rs:215` (`omp rules`). See ADR 0065 D1.
+- Acceptance: with the convar off, nothing changes; with it on, a repository with only the Copilot file gets it injected, a Copilot file beside `AGENTS.md` wins that depth, and a symlink that escapes the repository is refused, like the existing case at `crates/driver/src/discovery/rules.rs:1388`.
+- Tests: extend the discovery tests at `crates/driver/src/discovery/rules.rs:1278` and `crates/driver/src/discovery/rules.rs:1305`, plus a `compose_kernel` integration test.
 - Gate: default-off convar `sv_discover_copilot`.
 
 ### Slice 2: `.github/instructions` rules
 
-- Add a `github` rule provider scanning `<project>/.github/instructions` recursively for `*.instructions.md`. Strip the suffix for the name. Map `applyTo` into `globs`, with `*`, `**` and `**/*` meaning `alwaysApply`. A missing `applyTo` loads the rule unscoped with a `Warning`. Place it after `cursor` and `windsurf` so first-wins collisions keep today's behaviour. Read through the same contained reader as `.cursor/rules` (`crates/driver/src/discovery/rules.rs:482-503`).
-- Acceptance: the three always-apply spellings inject the rule whole; a path glob lists it for `rule://<name>`; a missing `applyTo` warns; a name that collides with an existing rule is skipped with the existing collision warning.
+- Add a `github` rule provider scanning `<project>/.github/instructions` recursively for `*.instructions.md`. Strip the suffix for the name. Map `applyTo` into `globs`, with `*`, `**` and `**/*` meaning `alwaysApply`. Other globs force `alwaysApply: false` and get a generated description when the file has none; a missing `applyTo` warns, discards frontmatter `globs` and also gets a generated description (`upstream:packages/coding-agent/src/discovery/github.ts:204-237`), so the rule is listed rather than reachable only through `rule://` (`crates/driver/src/discovery/rules.rs:630-669`). Place it after `cline`, the last omp2 rule source (`crates/driver/src/discovery/rules.rs:542-562`), as upstream ranks `github` below `cline` (`upstream:docs/context-files.md:126-128`), so first-wins collisions keep today's behaviour. `rules_in_dir` does not recurse and names by `file_stem` (`crates/driver/src/discovery/rules.rs:1012-1080`), so the provider needs its own walk; it reads each file through `load_rule`. The full mapping is ADR 0065 D3.
+- Acceptance: the three always-apply spellings inject the rule whole; a path glob lists it for `rule://<name>` with a description; a missing `applyTo` warns and lists the rule; a name that collides with an existing rule is skipped with the existing collision warning.
 - Tests: port the cases from `upstream:packages/coding-agent/test/discovery/github-copilot.test.ts`.
 - Gate: the same convar.
 
 ### Slice 3: SSH config parser (no wiring)
 
-- A pure function from `~/.ssh/config` text to a list of resolved candidate hosts and a list of refusals. Handles `Host` (concrete aliases only), `HostName`, `User`, `Port`, `IdentityFile`, `Include` (depth 16, glob, cycle set), quoting and `=`. Refuses `ProxyJump`, `ProxyCommand`, `Match`, `CertificateFile` and unknown `%` tokens, each with a reason.
-- Acceptance: tests from upstream's `ssh-config.test.ts` for `Include` and aliases pass; every refused directive yields a typed reason; no file is read outside `~/.ssh` and `/etc/ssh`.
+- A pure function from `~/.ssh/config` text to a list of resolved candidate hosts and a list of refusals. Handles `Host` (concrete aliases as candidates, wildcard and negated blocks applied when resolving), `HostName`, `User`, `Port`, `IdentityFile` (recorded as a path, never opened), `Include` (global level only, depth 16, glob, cycle set, inside `~/.ssh`), quoting and `=`. Refuses hosts with `ProxyJump`, `ProxyCommand`, `CertificateFile`, `KnownHostsCommand` or unknown `%` tokens, each with a typed reason; `Match` blocks are ignored and reported. Config files must be regular, size-capped, owned by the user and not group- or world-writable; refusals never echo line text. The full rules are ADR 0065 D5 and D6.
+- Acceptance: tests from upstream's `ssh-config.test.ts` for `Include` and aliases pass; every refused or ignored directive yields a typed reason; no file is read outside `~/.ssh` and the two `known_hosts` files.
 - Gate: none needed; nothing calls it yet.
 
 ### Slice 4: import command
 
-- `omp ssh import-config` (name open) reads `~/.ssh/config`, pins each host from `known_hosts` through `known_host_fingerprint`, validates through `validate_configured_host`, and writes the user-scope `hosts.toml`. A host without a pin is skipped with the reason. A name already declared keeps the declared host, as the v1 importer does.
+- `omp ssh import-openssh` reads `~/.ssh/config`, pins each host from `known_hosts` through `known_host_fingerprint`, validates through `validate_configured_host`, and, only with `--write`, writes the user-scope `hosts.toml`; the default is a dry run. A host without a pin is skipped with the reason. A name already declared keeps the declared host, as the v1 importer does.
 - Acceptance: a fixture config and `known_hosts` produce the expected `hosts.toml`; a second run changes nothing; the project `hosts.toml` is never written.
-- Gate: `cap-ssh` (the existing feature) plus the command itself being opt-in.
+- Gate: default-off convar `sv_ssh_import_openssh`. `cap-ssh` cannot serve: it is default-on (`crates/app/Cargo.toml:24-32`) and does not gate `omp ssh`, which links `omp-ssh` unconditionally (`crates/app/Cargo.toml:99`).
 
 ### Security
 
@@ -146,11 +149,11 @@ Choice: option 2, with a parser that is either hand-written (upstream's 117-line
 
 ## 6. Open questions
 
-1. Ranking of the Copilot file against `AGENTS.md`: upstream puts it above (30 against 10). The plan puts it last so nothing changes. Which does the owner want?
-2. `applyTo` semantics against omp2 `globs` matching. How `Rule.globs` is matched at read time was not traced (UNVERIFIED). Check before claiming parity.
+1. Ranking of the Copilot file against `AGENTS.md`: upstream puts it above (30 against 10). The revised plan follows upstream behind the default-off convar (ADR 0065 D2, O1); the alternative is to load both.
+2. `applyTo` semantics against omp2 `globs` matching. Traced: in both codebases `globs` are advisory in the rulebook and a path gate for stream rules only (`upstream:docs/rulebook-matching-pipeline.md:242-248`, `upstream:docs/rulebook-matching-pipeline.md:322`; `crates/driver/src/discovery/rules.rs:590-612`, `crates/agent/src/directors/stream_rules.rs:447-468`). The glob dialects differ (`Bun.Glob` against `globset`) and were not compared (UNVERIFIED); ADR 0065 O2.
 3. Whether the import should also be a `/ssh` chat subcommand (`crates/app/src/ssh_cmd.rs:35` is the CLI enum).
-4. Hosts with `Host a b c` (several names) and `HostName %h` tokens.
-5. Hand-written parser or a crate. No crate was evaluated (UNVERIFIED).
+4. Hosts with `Host a b c` (several names) and `HostName %h` tokens. ADR 0065 D6 imports each concrete name and lists the accepted tokens.
+5. Hand-written parser or a crate. No crate was evaluated (UNVERIFIED); ADR 0065 D7 decides hand-written.
 6. A new `sv_discover_copilot` convar is additive. No existing tool, convar, hook, scheme or CLI command changes. No locked ADR conflicts: ADR 0049 concerns vendor integrations; reading a Copilot file is a file-format read, not a vendor integration. Flag for the owner if they read it differently.
 
 ## 7. Upstream origin and license

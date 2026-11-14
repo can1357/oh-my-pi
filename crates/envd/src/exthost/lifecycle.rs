@@ -1022,6 +1022,8 @@ pub struct ExtensionManifest {
 	/// Manifest-declared extension settings installed as dynamic convars before
 	/// the child starts.
 	pub setting_schemas:          BTreeMap<Str, SettingSchema>,
+	/// URL schemes the deployment claimed (ADR 0050); gated at register / fold.
+	pub schemes:                  omp_ext::scheme::SchemeDeclarations,
 	/// Per-extension CONTROL quota definitions.
 	pub resource_limits:          Box<[QuotaSpec]>,
 	/// Every boot class reachable from this manifest's declaration rows.
@@ -1108,6 +1110,7 @@ impl ExtensionManifest {
 			uniform_declarations: true,
 			runtime_declarations_trusted: false,
 			setting_schemas: BTreeMap::new(),
+			schemes: omp_ext::scheme::SchemeDeclarations::default(),
 			resource_limits: resource_limits.into_iter().collect(),
 			activation_triggers,
 		}
@@ -1117,6 +1120,14 @@ impl ExtensionManifest {
 	#[must_use]
 	pub fn with_setting_schemas(mut self, settings: BTreeMap<Str, SettingSchema>) -> Self {
 		self.setting_schemas = settings;
+		self
+	}
+
+	/// Installs the URL schemes claimed by the authenticated deployment
+	/// manifest.
+	#[must_use]
+	pub fn with_schemes(mut self, schemes: omp_ext::scheme::SchemeDeclarations) -> Self {
+		self.schemes = schemes;
 		self
 	}
 

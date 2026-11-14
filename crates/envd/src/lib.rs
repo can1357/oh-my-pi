@@ -111,6 +111,9 @@ pub mod tool_settings;
 /// Shell-tool execution, managed process sessions, and shell URI resolution.
 pub mod tool_shell;
 pub mod tool_url;
+pub use tool_url::scheme_generation::{
+	LiveScheme, SchemeClaim, SchemeFoldError, SchemeGeneration, WRITE_NOT_ENABLED,
+};
 mod tools;
 mod vault;
 pub mod vcs;

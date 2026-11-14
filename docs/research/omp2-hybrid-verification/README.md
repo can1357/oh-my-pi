@@ -75,6 +75,10 @@ executed experiment; no native runtime tests were rerun here.
     conditions for further decisions.
 11. [Implementation execution plan](11-execution-plan.md): ordered first slices,
     ownership, acceptance, parallel work boundaries and runner-limited readiness.
+12. [Skills/plan validation](12-skills-plan-validation.md): vendoring integrity,
+    local references and source-review limits.
+13. [S1 implementation and validation](13-required-inventory-s1.md): explicit
+    required-check policy, locally executed tests and remaining runtime gaps.
 
 ## Final comparison
 
