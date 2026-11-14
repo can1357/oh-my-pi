@@ -152,11 +152,9 @@ export async function fetchCursorUsableModels(
 		parsedUsable instanceof type.errors
 			? []
 			: normalizeCursorModels(parsedUsable.models, options.baseUrl, references);
-	const usableModelIds = usable === null ? undefined : new Set(legacyModels.map(model => model.id));
 	if (!available || available.models.length === 0) return legacyModels;
 	const richModels = normalizeRichCursorModels(
 		available.models,
-		usableModelIds,
 		options.baseUrl,
 		references,
 		defaultModel?.modelId,
@@ -541,7 +539,6 @@ function resolveCursorCardAxes(slug: string): { patch?: ModelCost; fallback?: Mo
 
 function normalizeRichCursorModels(
 	models: readonly AvailableModelsResponse_ModelDetails[],
-	usableModelIds: ReadonlySet<string> | undefined,
 	baseUrlOverride: string | undefined,
 	references: Map<string, ModelSpec<"cursor-agent">>,
 	defaultModelId: string | undefined,
@@ -555,7 +552,7 @@ function normalizeRichCursorModels(
 		// retention-required model would expose a route every invocation rejects.
 		if (details.requiresDataRetention === true) continue;
 
-		const variants = normalizeRichCursorVariants(details, baseId, usableModelIds);
+		const variants = normalizeRichCursorVariants(details);
 		if (variants.length === 0) continue;
 		// The bare lane id belongs to Cursor's flagged default configuration, so
 		// seed axis defaults from it before falling back to first-seen values;
@@ -612,15 +609,13 @@ function normalizeRichCursorModels(
 	return normalized.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function normalizeRichCursorVariants(
-	details: AvailableModelsResponse_ModelDetails,
-	baseId: string,
-	usableModelIds: ReadonlySet<string> | undefined,
-): NormalizedRichVariant[] {
+function normalizeRichCursorVariants(details: AvailableModelsResponse_ModelDetails): NormalizedRichVariant[] {
+	// #15527: `GetUsableModels` under-reports — it omits slugs the Run endpoint
+	// accepts (e.g. `glm-5p3*`), so entitlement cannot gate rich lanes.
+	// `supportsAgent` from `AvailableModels` is the inclusion contract; an
+	// un-entitled pick fails at request time with ERROR_BAD_MODEL_NAME.
 	if (details.variants.length === 0) {
-		const candidates = [baseId, ...details.legacySlugs, ...details.idAliases];
-		if (usableModelIds !== undefined && !candidates.some(id => usableModelIds.has(id))) return [];
-		return [{ id: baseId, parameters: [], variant: undefined, effort: undefined }];
+		return [{ id: details.name.trim(), parameters: [], variant: undefined, effort: undefined }];
 	}
 
 	const variants: NormalizedRichVariant[] = [];
@@ -634,11 +629,9 @@ function normalizeRichCursorVariants(
 		const id =
 			variant.legacySlug?.trim() ||
 			variant.variantStringRepresentation?.trim() ||
-			(parameterSuffix ? `${baseId}@${parameterSuffix}` : `${baseId}@variant-${index + 1}`);
-		const entitlementIds = [variant.legacySlug?.trim(), id, baseId, ...details.idAliases].filter(
-			(candidate): candidate is string => Boolean(candidate),
-		);
-		if (usableModelIds !== undefined && !entitlementIds.some(candidate => usableModelIds.has(candidate))) continue;
+			(parameterSuffix
+				? `${details.name.trim()}@${parameterSuffix}`
+				: `${details.name.trim()}@variant-${index + 1}`);
 		const routeSignature = `${parameterSuffix}\u0000${variant.isMaxMode === true ? "max" : "standard"}`;
 		if (seenRoutes.has(routeSignature)) continue;
 		seenRoutes.add(routeSignature);
