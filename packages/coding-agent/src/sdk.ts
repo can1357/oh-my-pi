@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { type CallRecord, ChangeJournal, callLabel } from "./commit/selective/journal";
+import { createCommitPrelude } from "./commit/selective/prelude-definition";
 import {
 	Agent,
 	type AgentEvent,
@@ -149,7 +151,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
-import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -200,10 +202,12 @@ import {
 import type { AgentSessionDisposeOptions } from "./session/agent-session-types";
 import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
+	applyUnpausedProviders,
 	createAuthStorageSettingsSync,
 	discoverAuthStorage as discoverAuthStorageFromConfig,
 	type EffectiveSettingsScope,
 	loadEffectiveAuthAccountPolicyConfig,
+	resolveEffectiveSettings,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { CostCapError, type CostGateApi, guardStreamFn } from "./session/cost-gate";
@@ -365,6 +369,7 @@ import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import {
 	cfgArchiveEnabled,
 	cfgAsyncMaxJobs,
+	cfgCommitEnabled,
 	cfgAsyncWidgets,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
@@ -1154,7 +1159,9 @@ export async function discoverAuthStorage(
 		Omit<EffectiveSettingsScope, "agentDir"> = {},
 ): Promise<AuthStorage> {
 	const { settings, cwd, ...discoveryOptions } = options;
-	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings, cwd, agentDir });
+	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
+	applyUnpausedProviders(effective);
+	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
 	return discoverAuthStorageFromConfig(agentDir, {
 		...discoveryOptions,
 		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
@@ -2071,9 +2078,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		totalLines: 0,
 		agentsMdFiles: [],
 	};
-	const scanWorkspaceTree = (): Promise<WorkspaceTree> => {
+	const scanWorkspaceTree = (root: string): Promise<WorkspaceTree> => {
 		const scan = logger.time("buildWorkspaceTree", () =>
-			buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
+			buildWorkspaceTree(root, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
 		);
 		scan.catch(() => {});
 		return scan;
@@ -2083,8 +2090,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let workspaceTreePromise: Promise<WorkspaceTree> | undefined = options.workspaceTree
 		? Promise.resolve(options.workspaceTree)
 		: cfgIncludeWorkspaceTree.get(settings)
-			? scanWorkspaceTree()
+			? scanWorkspaceTree(cwd)
 			: undefined;
+	// Conversation, directory, and transcript epoch the current tree describes.
+	// A rebuild after the conversation's cwd changes (`/move`, resuming a
+	// session from another project) or a fresh transcript starts (`/clear`,
+	// `/new`) rescans so the prompt reflects the tree on disk (e.g. after a
+	// branch checkout). Every other rebuild keeps the conversation's own tree,
+	// so its cached prompt prefix stays byte-stable: `workspaceTrees` hands a
+	// resumed conversation back the scan it was last sent with, even when
+	// another conversation rescanned in between. A tree the caller supplied is
+	// theirs: it is never replaced by a scan.
+	let workspaceTreeConversation: string | undefined;
+	let workspaceTreeRoot = path.resolve(cwd);
+	let workspaceTreeEpoch = 0;
+	const workspaceTrees = new Map<string, { root: string; scan: Promise<WorkspaceTree> }>();
 	// Tree from a mid-session scan; supersedes the startup value handed to subagents.
 	let lateWorkspaceTree: WorkspaceTree | undefined;
 
@@ -2552,6 +2572,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
+	/** This agent's identity in the session tree's change journal. */
+	const journalAgent = { agent: resolvedAgentId, parent: options.parentAgentId };
+	/** The session tree's change journal; `null` while the session keeps no artifacts. */
+	const changeJournal = (): ChangeJournal | null => {
+		const dir = sessionManager.getArtifactsDir();
+		return dir ? ChangeJournal.at(dir) : null;
+	};
 	const resolvedAgentDisplayName = options.agentDisplayName ?? agentKind;
 	let registeredAgentRef: AgentRef | undefined;
 	/**
@@ -2723,6 +2750,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return next;
 			},
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
+			recordFileChange: change => {
+				const journal = changeJournal();
+				// Session artifacts (local:// plans, outputs) are never commit material.
+				if (!journal || change.path.startsWith(`${journal.dir}${path.sep}`)) return;
+				const owner = change.agent ?? journalAgent;
+				journal.recordChange({
+					agent: owner.agent,
+					parent: owner.parent,
+					tool: change.tool,
+					path: change.path,
+					before: change.before,
+					after: change.after,
+					beforeMtimeMs: change.beforeMtimeMs,
+				});
+			},
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
@@ -2786,6 +2828,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
 		let archivePrelude: EvalPreludeDefinition | undefined;
+		let commitPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2804,6 +2847,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgArchiveEnabled.get(settings)) {
 				archivePrelude ??= createArchivePrelude(toolSession);
 				builtins.push(archivePrelude);
+			}
+			if (cfgCommitEnabled.get(settings)) {
+				commitPrelude ??= createCommitPrelude(toolSession);
+				builtins.push(commitPrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -4150,7 +4197,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// advertised while exact dispatch still answered from the snapshot.
 		// Callers with no request snapshot (the Cursor exec bridge) pass none and
 		// get device resolution only.
-		const resolveDeviceTool = (name: string, advertised: readonly AgentTool[] = []): AgentTool | undefined => {
+		const resolveDeviceSpelling = (name: string, advertised: readonly AgentTool[]): AgentTool | undefined => {
 			const bareName = stripXdUrlPrefix(name);
 			const state = toolSession.xdev;
 			// An exact mounted name is the name itself, not a guess.
@@ -4173,6 +4220,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				candidate =>
 					(state ? resolveMountedXdevExecutable(state, candidate) : undefined) ??
 					advertised.find(tool => tool.name === candidate),
+			);
+		};
+		// A model whose tool-name charset cannot carry `://` spells the prefix with
+		// underscores (`xd__recall`). Only a name every exact spelling missed is
+		// read that way, so a tool actually named `xd_<something>` keeps its own
+		// dispatch.
+		const resolveDeviceTool = (name: string, advertised: readonly AgentTool[] = []): AgentTool | undefined => {
+			const unprefixed = stripXdUnderscorePrefix(name);
+			return (
+				resolveDeviceSpelling(name, advertised) ??
+				(unprefixed === name ? undefined : resolveDeviceSpelling(unprefixed, advertised))
 			);
 		};
 		// Mounted devices are absent from the advertised tool set, so a miss on a
@@ -4420,15 +4478,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
 			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings);
-			if (includeWorkspaceTree && !workspaceTreePromise) {
-				const scan = scanWorkspaceTree();
-				workspaceTreePromise = scan;
-				scan.then(
-					tree => {
-						lateWorkspaceTree = tree;
-					},
-					() => {},
-				);
+			if (includeWorkspaceTree && !options.workspaceTree) {
+				const treeRoot = path.resolve(promptCwd);
+				const treeEpoch = hasSession ? session.transcriptEpoch : 0;
+				const conversation = sessionManager.getSessionId();
+				const held = workspaceTrees.get(conversation);
+				const stale =
+					treeEpoch !== workspaceTreeEpoch ||
+					((workspaceTreeConversation ?? conversation) === conversation && treeRoot !== workspaceTreeRoot);
+				// Not stale: a conversation seen before gets its own scan back; one first
+				// seen here shares the current scan when it describes the same directory.
+				const kept = stale
+					? undefined
+					: held?.root === treeRoot
+						? held.scan
+						: treeRoot === workspaceTreeRoot
+							? workspaceTreePromise
+							: undefined;
+				const scan = kept ?? scanWorkspaceTree(treeRoot);
+				workspaceTrees.set(conversation, { root: treeRoot, scan });
+				workspaceTreeConversation = conversation;
+				workspaceTreeRoot = treeRoot;
+				workspaceTreeEpoch = treeEpoch;
+				if (scan !== workspaceTreePromise) {
+					workspaceTreePromise = scan;
+					scan.then(
+						tree => {
+							if (workspaceTreePromise === scan) lateWorkspaceTree = tree;
+						},
+						() => {},
+					);
+				}
 			}
 			// Mounted xd:// readers stay out of the direct inventory, but their skill
 			// capability still drives catalog/URI guidance: project them into the
@@ -5038,6 +5118,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				mainRequestProvider = undefined;
 			}
 		});
+		// Shell-like calls bound the windows in which scripts, formatters, and codegen changed
+		// files on this agent's behalf; selective commits match file mtimes against them.
+		const shellCalls = new Map<string, Omit<CallRecord, "type" | "agent" | "parent" | "end">>();
+		agent.subscribe(event => {
+			if (event.type === "tool_execution_start") {
+				if (event.toolName !== "bash" && event.toolName !== "eval") return;
+				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), label: callLabel(event.args) });
+			} else if (event.type === "tool_execution_end") {
+				const call = shellCalls.get(event.toolCallId);
+				if (!call) return;
+				shellCalls.delete(event.toolCallId);
+				changeJournal()?.recordCall({ ...journalAgent, ...call, end: Date.now() });
+			}
+		});
 		// Catalog rows carry the registry settings' extended-window opt-ins; this
 		// session adopts every model with the window its own settings select (a
 		// subagent with a compaction override must not inherit the parent's).
@@ -5143,7 +5237,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// write transport), so xd:// devices are unreachable. Images are inlined,
 			// and the provider boundary handles text-only advisor models.
 			xdev: undefined,
-			isToolActive: name => toolSession.isToolActive?.(name) === true,
+			// Each slate binds its own predicate in `create`. The primary's active
+			// set, and the callback that mutates it, are not advisor state.
+			isToolActive: undefined,
+			setActiveToolNames: undefined,
 		});
 		// Advisor rosters build synchronously; `task` is the one built-in that
 		// discovers asynchronously, so resolve its agents once up front.
@@ -5166,18 +5263,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			create: granted => {
 				const advisorSession = createAdvisorToolSession();
+				// Descriptions, schemas, and execute-time gates read this live. A name
+				// is active only once its factory returns a tool, so a grant for an
+				// unavailable built-in (lsp with language servers off) is not advertised.
+				const activeToolNames = new Set<string>();
+				advisorSession.isToolActive = name => activeToolNames.has(name);
 				const tools: Tool[] = [];
 				for (const name of advisorBuiltinNames) {
 					if (!granted.has(name)) continue;
+					// Visible to this tool while it builds: bash reads its own launch gate live.
+					activeToolNames.add(name);
 					const tool = buildAdvisorTool(name, advisorSession);
+					if (!tool) {
+						activeToolNames.delete(name);
+						continue;
+					}
 					// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
 					// approval mode, per-tool `tools.approval.<tool>` policies and
 					// `autoApprove` are enforced. The advisor's loop and its Cursor exec
 					// bridge both run these instances directly, so a raw one would execute a
 					// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 					// first, matching the registry's wrap order.
-					if (tool)
-						tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
+					tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
 				}
 				return {
 					tools,
@@ -5365,7 +5472,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		}
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
-		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage);
+		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage, modelRegistry);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the
 		// `tools.format` catalog dialect, personality, …), so a bulk change rebuilds once.
 		// Hide Secrets first switches outbound obfuscation on the live obfuscator (earlier

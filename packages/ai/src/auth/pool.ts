@@ -1,5 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
-import { providerPauseReason } from "../registry/oauth";
+import { providerPauseReason, providerPauseRevision } from "../registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
@@ -90,8 +90,12 @@ export interface CredentialPoolOptions {
 
 /** In-memory credential snapshot over an AuthCredentialStore: CRUD, change detection, events. */
 export class CredentialPool implements CredentialsApi {
-	/** Provider -> credentials cache, populated from store on reload(). */
+	/** Provider -> credentials cache, populated from store on reload(), minus paused providers. */
 	#data: Map<string, StoredCredential[]> = new Map();
+	/** Every loaded row, paused providers included, so a pause change refilters without a reload. */
+	#loaded: Map<string, StoredCredential[]> = new Map();
+	/** {@link providerPauseRevision} `#data` was filtered against. */
+	#pauseRevision = providerPauseRevision();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	#credentialDisabledListeners: Set<(event: CredentialDisabledEvent) => void | Promise<void>> = new Set();
@@ -120,11 +124,14 @@ export class CredentialPool implements CredentialsApi {
 		return this.#closed;
 	}
 
+	/** Snapshot generation; refilters first so a pause change shows as a new generation. */
 	get generation(): number {
+		this.#syncPause();
 		return this.#generation;
 	}
 
 	providers(): IterableIterator<string> {
+		this.#syncPause();
 		return this.#data.keys();
 	}
 
@@ -309,7 +316,7 @@ export class CredentialPool implements CredentialsApi {
 			}
 		}
 
-		const removedProviders = new Set(this.#data.keys());
+		const removedProviders = new Set(this.#loaded.keys());
 		for (const [provider, entries] of dedupedGrouped) {
 			this.replace(provider, entries);
 			removedProviders.delete(provider);
@@ -325,19 +332,43 @@ export class CredentialPool implements CredentialsApi {
 	 * @returns Array of stored credentials, empty if none exist
 	 */
 	entries(provider: string): StoredCredential[] {
+		this.#syncPause();
 		return this.#data.get(provider) ?? [];
 	}
 
 	/**
 	 * Updates in-memory credential cache for a provider.
 	 * Removes the provider entry entirely if credentials array is empty.
-	 * A provider turned off in its auth rules (`disabled "<reason>"`) caches
-	 * nothing: its stored rows stay on disk untouched, but no read, selection,
-	 * refresh, usage probe or broker snapshot ever sees them.
+	 * A provider turned off in its auth rules (`disabled "<reason>"`) is kept
+	 * out of the cache: its stored rows stay on disk untouched, but no read,
+	 * selection, refresh, usage probe or broker snapshot sees them until it is
+	 * turned back on (see {@link CredentialPool.#syncPause}).
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
 	 * @param stored - Array of stored credentials to cache
 	 */
 	replace(provider: string, stored: StoredCredential[]): void {
+		if (stored.length === 0) {
+			this.#loaded.delete(provider);
+		} else {
+			this.#loaded.set(provider, stored);
+		}
+		this.#cache(provider, stored);
+	}
+
+	/**
+	 * Refilters every loaded provider when which providers are paused changed since the
+	 * last filter (an unpaused list edit, an extension login taking a paused id), so the
+	 * change reaches a loaded pool on its next read without a store reload.
+	 */
+	#syncPause(): void {
+		const revision = providerPauseRevision();
+		if (revision === this.#pauseRevision) return;
+		this.#pauseRevision = revision;
+		for (const [provider, stored] of this.#loaded) this.#cache(provider, stored);
+	}
+
+	/** Caches `stored` for `provider` unless it is paused, bumping the generation on change. */
+	#cache(provider: string, stored: StoredCredential[]): void {
 		const credentials = providerPauseReason(provider) === undefined ? stored : [];
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
@@ -599,6 +630,7 @@ export class CredentialPool implements CredentialsApi {
 				disabledCause: null,
 			}));
 		}
+		this.#syncPause();
 		const rows: StoredAuthCredential[] = [];
 		for (const [storedProvider, entries] of this.#data) {
 			for (const entry of entries) {
@@ -692,6 +724,7 @@ export class CredentialPool implements CredentialsApi {
 	 * Get all credentials.
 	 */
 	all(): AuthStorageData {
+		this.#syncPause();
 		const result: AuthStorageData = {};
 		for (const [provider, entries] of this.#data.entries()) {
 			const credentials = entries.map(entry => entry.credential);
@@ -713,6 +746,7 @@ export class CredentialPool implements CredentialsApi {
 	 * (the broker server's HTTP handler does this).
 	 */
 	snapshot(): AuthCredentialSnapshot {
+		this.#syncPause();
 		const entries: AuthCredentialSnapshotEntry[] = [];
 		for (const [provider, stored] of this.#data) {
 			for (const entry of stored) {
@@ -762,6 +796,7 @@ export class CredentialPool implements CredentialsApi {
 	 * `POST /v1/credential/:id/disable`. Returns `false` when no such row exists.
 	 */
 	async disable(id: number, disabledCause: string): Promise<boolean> {
+		this.#syncPause();
 		for (const [provider, entries] of this.#data) {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;

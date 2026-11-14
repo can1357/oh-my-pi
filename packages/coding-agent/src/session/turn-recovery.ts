@@ -2509,9 +2509,10 @@ export class TurnRecovery {
 	 * model is not worth retrying, yet a DIFFERENT model is a fresh chance, so
 	 * the chain is consulted before the error becomes final. Skips failures a
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
-	 * errors are not model faults), context overflow (compaction's job),
-	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+	 * errors are not model faults), context overflow the live context actually
+	 * exhibits (compaction's job), classifier refusals (chain consult is handled
+	 * on the retryable path with `pinFallback`), and turns that already emitted
+	 * replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -2534,7 +2535,11 @@ export class TurnRecovery {
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
 		const contextWindow = model.contextWindow ?? 0;
 		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
-		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
+		if (
+			!textAmbiguousOverflow &&
+			AIError.isContextOverflow(message, contextWindow) &&
+			!this.#overflowTextContradictedByFit(message, model, contextWindow)
+		) {
 			return false;
 		}
 		if (this.#hasReplayUnsafeOutput(message)) return false;
@@ -2542,6 +2547,25 @@ export class TurnRecovery {
 		return this.retryFallbackChainKeys(currentSelector).some(
 			role => this.findRetryFallbackCandidates(role, currentSelector).length > 0,
 		);
+	}
+
+	/**
+	 * An overflow known only from error text while the live context fits the
+	 * model's usable window. The provider rejected the request for another
+	 * reason (e.g. a local server's memory guard saying "prompt too large"), so
+	 * compaction cannot help but a different model can.
+	 */
+	#overflowTextContradictedByFit(message: AssistantMessage, model: Model, contextWindow: number): boolean {
+		if (contextWindow <= 0) return false;
+		if (AIError.isUsageBackedContextOverflow(message, contextWindow)) return false;
+		// Judge the text alone: a provider that attached the overflow flag itself keeps compaction.
+		const textEvidence = {
+			stopReason: message.stopReason,
+			errorMessage: message.errorMessage,
+			errorStatus: message.errorStatus,
+		};
+		if (!AIError.isContextOverflow(textEvidence)) return false;
+		return this.#host.contextFitsModel(model, message);
 	}
 
 	/**
@@ -3467,6 +3491,8 @@ export class TurnRecovery {
 	 * A restored session deliberately omits failed assistant turns from provider
 	 * context. In that case, the persisted display transcript remains the source
 	 * of truth for whether the current branch has a retryable failed tail.
+	 * `prunedTerminalFailure` retains a live failure omitted from both histories;
+	 * its context is already ready for continuation and must not be stripped again.
 	 *
 	 * When the failure is a fully failed/aborted tool batch with complete
 	 * arguments (see {@link toolReplayStart}), the retry strips the failed
@@ -3477,11 +3503,11 @@ export class TurnRecovery {
 	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(prunedTerminalFailure?: AssistantMessage): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
-		const activeTurnEnd = retryableAssistantTurnEnd(messages);
+		const activeTurnEnd = prunedTerminalFailure ? undefined : retryableAssistantTurnEnd(messages);
 		if (activeTurnEnd !== undefined) {
 			const replayStart = toolReplayStart(messages);
 			if (replayStart !== undefined) {
@@ -3495,7 +3521,7 @@ export class TurnRecovery {
 					...messages.slice(conversationEnd(messages)),
 				]);
 			}
-		} else {
+		} else if (!prunedTerminalFailure) {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.
