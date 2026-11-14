@@ -607,6 +607,19 @@ Runtime discovery probes LiteLLM management metadata in order: `GET /model_group
 
 If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
 
+### Bifrost provider discovery
+
+When `bifrost` has a credential (`BIFROST_API_KEY` or stored `/login bifrost` auth), runtime discovery reads the gateway's `GET /models` roster:
+
+- provider: `bifrost`; model ids keep Bifrost's `<bifrost-provider>/<model>` form (`anthropic/claude-opus-5-5`, `openrouter/google/gemini-decision-1`)
+- api: `openai-completions` for chat models; `openai-decisions` (kind `judge`, `POST {baseUrl}/decisions`) for rows that declare `decisions` output or whose `<model>` part is a bundled judge model (`openai/gpt-6-luna-decisions`, `<provider>/drex-max-v1.1`)
+- base URL: explicit provider `baseUrl` / `models.yml` config, otherwise `BIFROST_BASE_URL`, otherwise `http://localhost:8080/v1`
+- auth mode: the Bifrost virtual key as a bearer token; a gateway without governance accepts any value. Discovery does not run without a credential, because the default port is also llama.cpp's
+
+The live roster is authoritative and cached per key and base URL, since virtual keys can restrict it. Limits, modalities, reasoning, tool support, and prices come from the row's OpenRouter-style metadata; fields the row omits fall back to the bundled model of the upstream provider named by the id prefix, then to a bundled model with the same bare id. Rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are skipped, as are metadata-less embedding, speech, transcription, and image ids.
+
+When a Bifrost decision model is a judge, choose one fallback layer: omp's judge chain (`retry.fallbackChains.judge`) or Bifrost's own retries and routing-rule fallbacks. Using both multiplies upstream calls during an outage; see [Bifrost judge retries](provider-quirks.md#bifrost-bifrost).
+
 ### Generic OpenAI-compatible discovery
 
 `openai-models-list` reads `{baseUrl}/v1/models` by default (without adding a second `/v1`).

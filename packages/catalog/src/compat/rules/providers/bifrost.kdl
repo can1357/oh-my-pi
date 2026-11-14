@@ -1,0 +1,15 @@
+// Bifrost (github.com/maximhq/bifrost): a self-hosted OpenAI-compatible AI
+// gateway that routes to upstream providers. Its `/v1/models` roster is the
+// set of models the gateway (and the request's virtual key) exposes, with ids
+// `<bifrost-provider>/<model>`, so nothing is bundled: discovery runs live
+// against `BIFROST_BASE_URL` (default `http://localhost:8080/v1`).
+
+provider "bifrost" {
+	// Placeholder: only ranks the id when the gateway serves it.
+	default-model "anthropic/claude-opus-5-5"
+	env "BIFROST_API_KEY"
+	dynamic-models-authoritative #true
+	// No unauthenticated discovery: the default port is shared with llama.cpp's
+	// default server, whose roster must not surface as Bifrost models.
+	discovery label="Bifrost"
+}

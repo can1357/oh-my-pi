@@ -169,6 +169,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `nace`                           | `NACE_API_KEY`                                                                      |
 | `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                               |
 | `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint               |
+| `bifrost`                        | `BIFROST_API_KEY`; optional `BIFROST_BASE_URL` for the gateway endpoint             |
 | `kilo`                           | `KILO_API_KEY`                                                                      |
 | `zai`                            | `ZAI_API_KEY`                                                                       |
 | `zenmux`                         | `ZENMUX_API_KEY`                                                                    |
