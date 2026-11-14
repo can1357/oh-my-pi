@@ -238,6 +238,7 @@ export type SessionHostProtocol = {
 	watch: RpcMethod<[on: boolean], void>;
 	settleInFlightMessagePersistence: RpcMethod<[], void>;
 	setThinkingLevel: RpcMethod<[level: ConfiguredThinkingLevel | undefined, persist?: boolean], void>;
+	setAdvisorEnabled: RpcMethod<[enabled: boolean], void>;
 	/**
 	 * Retire queued message `id` (main restored it): take it out of its queue,
 	 * or keep whatever holds it aside from putting it back. Resolves once it can

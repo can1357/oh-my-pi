@@ -563,6 +563,10 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 		publisher.session.setThinkingLevel(level, persist);
 		publisher.schedule();
 	},
+	setAdvisorEnabled: (publisher, enabled) => {
+		publisher.session.setAdvisorEnabled(enabled);
+		publisher.schedule();
+	},
 	popQueuedMessage: (publisher, id) => {
 		const session = publisher.session;
 		// Neither queued nor held aside: it already left for good and can never be delivered.

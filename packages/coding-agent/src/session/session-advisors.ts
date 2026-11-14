@@ -2965,7 +2965,12 @@ export class SessionAdvisors {
 	 * configured flag and each advisor's status, yield and pause state, and review backlog.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
-	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
+	getAdvisorStatusOverview(): {
+		configured: boolean;
+		active: boolean;
+		model?: Model;
+		advisors: AdvisorStatusOverviewEntry[];
+	} {
 		// Override stale map entries with live runtime status: failureNotified/quotaExhausted
 		// clear on reset() but #advisorStatuses lags until the next build.
 		const liveStatusBySlug = new Map<
@@ -2997,7 +3002,12 @@ export class SessionAdvisors {
 				yielded: live?.canReview && this.#host.agent.state.isStreaming ? false : (live?.yielded ?? true),
 			};
 		});
-		return { configured: this.#advisorEnabled, advisors };
+		return {
+			configured: this.#advisorEnabled,
+			active: this.#advisors.length > 0,
+			model: this.#advisors[0]?.model,
+			advisors,
+		};
 	}
 
 	/** Return cumulative advisor cost recorded for the current session. */
