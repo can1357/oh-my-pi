@@ -1447,6 +1447,18 @@ describe("AgentSession handoff", () => {
 		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
 	});
 
+	it("accepts a handoff document whose Goal section follows a title line", async () => {
+		const handoffText = "# Handoff\n\n## Goal\nContinue from here";
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
+
+		const result = await session.handoff();
+
+		expect(result?.document).toBe(handoffText);
+		const compaction = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+		expect(compaction.summary).toContain(handoffText);
+	});
+
 	it("falls back from malformed auto-handoff to soft compaction", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
 		cfgCompactionHandoffSaveToDisk.set(session.settings, true);

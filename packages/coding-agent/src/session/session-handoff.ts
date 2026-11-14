@@ -193,7 +193,7 @@ export class SessionHandoff {
 			throwIfHandoffAborted(handoffSignal);
 			const failure = !handoffText?.trim()
 				? "no content"
-				: !/^## Goal[ \t]*\r?\n/.test(handoffText.trimStart())
+				: !/^## Goal[ \t]*\r?$/m.test(handoffText)
 					? "an invalid document"
 					: undefined;
 			if (failure) {
