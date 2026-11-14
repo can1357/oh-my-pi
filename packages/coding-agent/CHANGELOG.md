@@ -5,6 +5,7 @@
 ### Added
 
 - `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
+- Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow leading `KEY=VALUE` prefixes for exactly named environment variables on `allow` rules without duplicating rules for each variable combination ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - Subagents now preserve @upstream provider pinning on inherited models
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
@@ -30,6 +31,7 @@
 
 ### Fixed
 
+- Leading `KEY=VALUE` environment assignments are now stripped when evaluating `deny` and `prompt` rules in `bash.patterns` so they cannot bypass command restrictions ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - omp's WebKit engine is now pinned per omp release and updated in place: an engine in `~/.o2/lib/abkit` that names no version or an older release is replaced before the first open that runs it (once no process runs from it), so the ABKit 0.1.1 fix for plain-http cookies (sign-ins to router and LAN admin pages) reaches existing installs. Local builds (`VERSION` `dev`), newer releases and an engine another app manages (Tern's `manager.json` two folders above its real path, as for omp itself) are kept
 - Chromium and WebKit tabs: a click or key press that opens a `confirm()` or `prompt()` returns instead of timing out after 8 s, and while one is pending, calls that need the page (reads, actions, `evaluate`, waits on page content, screenshots) fail at once naming the dialog and `tab.handleDialog()`, instead of each running out its deadline with "could not count matches" or a bare timeout
 - `tab.waitForUrl()` given anything but a string or a RegExp (a predicate function, say) now fails at once on every backend with an error naming what it takes, instead of an internal `pattern.test is not a function` on WebKit, Tern and cmux

@@ -187,8 +187,26 @@ tools:
 
 `tools.approval` is a record keyed by tool name; dotted forms such as `tools.approval.eval` and `tools.approval.computer` identify entries in that record, not separate setting ids. Each entry sets that tool's default policy. One entry is not a tool: the literal key `computer.control` (`tools.approval["computer.control"]`, written `computer.control: allow` in YAML, never nested under `computer`) answers the `computer` tool's requests for foreground control; see [computer use](./computer-use.md#menus-held-input-and-task-control). For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard. Whitespace is the exception: before matching, every run of spaces, tabs, or newlines in both the pattern and the command collapses to a single space, and leading/trailing whitespace is trimmed. A newline in a pattern therefore matches any whitespace: `match: "*\n*"` behaves like `"* *"` and matches every command containing a space. A newline-specific rule is unnecessary to catch dangerous commands in a newline-separated list: `deny` and `prompt` rules check each segment (see below). `allow` rules reject unquoted newline command separators, but can approve commands containing quoted or escaped literal newlines when the full command matches.
 
-By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
+Leading `KEY=VALUE` environment assignments do not match an `allow` rule unless the pattern includes them explicitly or the variable name matches `bash.allowedEnvVars` (or a per-rule `env` list):
 
+```yaml
+bash:
+   allowedEnvVars:
+      - GOOS
+      - GOARCH
+      - CGO_ENABLED
+      - CARGO_TARGET_DIR
+   patterns:
+      - match: "go test*"
+        approval: allow
+      - match: "bun run build:native*"
+        approval: allow
+        env: [CMAKE_GENERATOR]
+```
+
+Because a name-only allowlist permits any value for that variable, list only benign build/test variables; avoid broad wildcards or execution-controlling variables (`PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `GIT_SSH_COMMAND`, `*_RUNNER`, `*_WRAPPER`), which would let a command run arbitrary code. `deny` and `prompt` rules always check segments both with and without leading `KEY=VALUE` assignments, so `FOO=1 rm -rf build` cannot bypass a `match: "rm -rf *"` restriction.
+
+By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
 ```yaml
 tools:
    approvalMode: write
