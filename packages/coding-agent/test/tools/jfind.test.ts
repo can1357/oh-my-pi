@@ -420,6 +420,11 @@ describe("jfind cascade", () => {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toStartWith('find unavailable for "token refresh"');
 			expect(text).not.toContain("no hits");
+			expect(result.details?.lexicalFallback).toEqual([
+				{ rel: "auth.ts", line: 1, snippet: "export function refreshToken() { return 1; }" },
+			]);
+			expect(text).toContain("unranked literal keyword matches (not semantically judged):");
+			expect(text).toContain("auth.ts:1");
 		} finally {
 			await removeWithRetries(dir);
 		}

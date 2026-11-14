@@ -15,7 +15,7 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindCoverage, FindHit, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { type SpotlightClient, SpotlightError } from "../../spotlight/client";
@@ -60,6 +60,11 @@ const CUTOFF = 0.45;
 const THRESHOLD = 0.2;
 /** Bytes of a file read for windowing. */
 const READ_LIMIT = 4 * 1024 * 1024;
+
+/** Unranked literal rows listed when every judge request failed. */
+const LEXICAL_FALLBACK_ROWS = 20;
+/** Longest fallback snippet, in characters. */
+const LEXICAL_FALLBACK_SNIPPET = 160;
 /** Sketch state budget per request; sized so cards stay well inside the judge's context. */
 const SKETCH_STATE_BYTES = 18_000;
 /** Hard cap on sketch cards per request. */
@@ -124,6 +129,8 @@ export interface CascadeOptions {
 export interface CascadeResult {
 	/** Files whose verified passages cleared the threshold, strongest first. */
 	hits: FindHit[];
+	/** Literal keyword lines from the already-read files; non-empty only when `coverage` is `unavailable`. */
+	lexicalFallback: FindLexicalMatch[];
 	/** Whether the judge answered; an empty `hits` proves nothing when `unavailable`. */
 	coverage: FindCoverage;
 	threshold: number;
@@ -159,6 +166,38 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
 
 function compareRel(a: FileEntry, b: FileEntry): number {
 	return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
+}
+
+/**
+ * Literal keyword lines from the already-read windows, in selection order.
+ * Only windows that matched lexically (`score > 0`) contribute; each matching
+ * line becomes one `rel:line` row, capped at {@link LEXICAL_FALLBACK_ROWS}.
+ */
+function fallbackMatches(
+	files: readonly FilePlan[],
+	entries: readonly FileEntry[],
+	keywords: readonly string[],
+): FindLexicalMatch[] {
+	if (keywords.length === 0) return [];
+	const out: FindLexicalMatch[] = [];
+	for (const plan of files) {
+		for (const passage of plan.passages) {
+			if (passage.score <= 0) continue;
+			const stripped = lines(plainContent(passage));
+			for (let i = 0; i < stripped.length; i++) {
+				const snippet = stripped[i]!;
+				const lower = snippet.toLowerCase();
+				if (!keywords.some(keyword => lower.includes(keyword))) continue;
+				out.push({
+					rel: entries[plan.node]!.rel,
+					line: passage.start + i,
+					snippet: takeChars(snippet.trim(), LEXICAL_FALLBACK_SNIPPET),
+				});
+				if (out.length >= LEXICAL_FALLBACK_ROWS) return out;
+			}
+		}
+	}
+	return out;
 }
 
 class Cascade {
@@ -454,7 +493,11 @@ class Cascade {
 		const { requests, failed } = this.stats;
 		const coverage: FindCoverage =
 			failed > 0 && failed === requests ? "unavailable" : failed > 0 || timeout ? "partial" : "complete";
-		return { hits, coverage, threshold, keywords, stats: this.stats, ranking, timeout };
+		// Every judge request failed, but the lexical pass already read the
+		// strongest files and cut keyword windows: surface those literal matches
+		// so the caller need not re-run the search with grep.
+		const lexicalFallback = coverage === "unavailable" ? fallbackMatches(files, entries, keywords) : [];
+		return { hits, coverage, threshold, keywords, stats: this.stats, ranking, timeout, lexicalFallback };
 	}
 
 	/**
