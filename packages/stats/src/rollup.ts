@@ -606,6 +606,11 @@ function normalizeCutoff(cutoff: number | null | undefined): number | null {
  */
 function seriesBucket(bucketMs: number): string {
 	if (bucketMs === DAY_MS) return "date(f.bucket / 1000, 'unixepoch', 'localtime')";
+	return epochBucket(bucketMs);
+}
+
+/** Epoch-aligned bucket start (ms) for a fact row, at any bucket size. */
+function epochBucket(bucketMs: number): string {
 	return `(f.bucket / ${bucketMs}) * ${bucketMs}`;
 }
 
@@ -1140,14 +1145,14 @@ export function getContextFactSeries(database: Database, { cutoff, bucketMs }: R
 	type Row = { bucket: number; agent_type: AgentType; n: number | null };
 	const toolRows = database
 		.query(
-			`SELECT ${seriesBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.result_chars) AS n
+			`SELECT ${epochBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.result_chars) AS n
 			 FROM (${tools.sql}) f GROUP BY 1, 2`,
 		)
 		.all(...tools.params) as Row[];
 	for (const row of toolRows) point(row.bucket, row.agent_type).resultChars += row.n ?? 0;
 	const messageRows = database
 		.query(
-			`SELECT ${seriesBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.output_tokens) AS n
+			`SELECT ${epochBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.output_tokens) AS n
 			 FROM (${messages.sql}) f GROUP BY 1, 2`,
 		)
 		.all(...messages.params) as Row[];
