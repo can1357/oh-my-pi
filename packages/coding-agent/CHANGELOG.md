@@ -89,6 +89,9 @@
 - Task progress, task results, and restored-agent context gauges now show the provider-reported occupied context instead of token totals summed across segmented continuation requests, so they no longer hit the context ceiling early ([#19190](https://github.com/can1357/oh-my-pi/pull/19190) by [@eggpeat](https://github.com/eggpeat))
 - Fixed omp exiting during its first web search after a crashed session left tabs open in the shared browser, and closing several browser tabs at once breaking later web searches in the session ([#19206](https://github.com/can1357/oh-my-pi/pull/19206) by [@tuschla](https://github.com/tuschla))
 - `omp zsh` on Windows: after a `zsh/system` call fails with a host error that has no POSIX counterpart (a sharing violation, an invalid name), `syserror` prints `Input/output error` instead of `Success` ([#19170](https://github.com/can1357/oh-my-pi/pull/19170) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Python eval cells now register their source in linecache under unique cell identifiers (`<cell-N>`), allowing `inspect.getsource` and `inspect.getsourcelines` to inspect functions defined in earlier cells ([#18857](https://github.com/can1357/oh-my-pi/issues/18857), [#19218](https://github.com/can1357/oh-my-pi/pull/19218) by [@harshaygadekar](https://github.com/harshaygadekar))
+- Nix builds with `withAppleFm = false` no longer compile the Apple Foundation Models bridge with the host's Xcode ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
+- Apple Silicon Nix builds include Apple Foundation Models support instead of silently building without it ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
 
 ### Removed
 
@@ -297,6 +300,10 @@
 
 - `curl -fsSL https://omp.sh/install | sh` and `install.ps1` now install the standalone binary by default, even when bun is present, so installs get delta updates; pass `--source`/`-Source` for a bun package install
 - Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+
+### Added
+
+- Added Hacker News search (`web/hackernews`): `web_search` queries scoped to `site:news.ycombinator.com` now search HN stories and comments through the keyless HN Search API before the configured engines
 
 ### Fixed
 
