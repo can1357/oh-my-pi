@@ -14,7 +14,7 @@ use super::{
 use crate::{
 	error::{Error, Result},
 	types::{
-		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary,
+		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary, TreeEntry,
 		UntrackedMode, WorktreeEntry,
 	},
 };
@@ -873,25 +873,26 @@ impl GitRepo {
 		Ok(out)
 	}
 
-	/// List recursive blob paths in a tree, optionally filtered by pathspec-like
-	/// prefixes.
-	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<String>> {
+	/// List the blobs and symlinks of a tree recursively with their modes,
+	/// sorted by path, optionally filtered by pathspec-like prefixes.
+	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
 		if self.is_reftable() {
-			let mut owned = vec![
-				"ls-tree".to_owned(),
-				"--name-only".to_owned(),
-				"-r".to_owned(),
-				"-z".to_owned(),
-				rev.to_owned(),
-			];
+			let mut owned =
+				vec!["ls-tree".to_owned(), "-r".to_owned(), "-z".to_owned(), rev.to_owned()];
 			if !paths.is_empty() {
 				owned.push("--".to_owned());
 				owned.extend(paths.iter().cloned());
 			}
+			// Records are `<mode> SP <type> SP <id> TAB <path>`; gitlinks have
+			// type `commit`.
 			return Ok(cli_text_owned(self.root(), &owned, super::cli::SYNC_TIMEOUT)?
 				.split('\0')
-				.filter(|s| !s.is_empty())
-				.map(str::to_owned)
+				.filter_map(|record| {
+					let (meta, path) = record.split_once('\t')?;
+					let mut fields = meta.split(' ');
+					let mode = u32::from_str_radix(fields.next()?, 8).ok()?;
+					(fields.next()? == "blob").then(|| TreeEntry { path: path.to_owned(), mode })
+				})
 				.collect());
 		}
 		let repo = self.gix()?;
@@ -909,10 +910,13 @@ impl GitRepo {
 			.map_err(|e| Error::backend("git ls-tree", e))?
 			.into_iter()
 			.filter(|e| e.mode.is_blob() || e.mode.is_link())
-			.map(|e| bytes_to_path(e.filepath.as_bstr()))
-			.filter(|p| paths.is_empty() || paths.iter().any(|wanted| path_matches(p, wanted)))
+			.map(|e| TreeEntry {
+				path: bytes_to_path(e.filepath.as_bstr()),
+				mode: u32::from(e.mode.value()),
+			})
+			.filter(|e| paths.is_empty() || paths.iter().any(|wanted| path_matches(&e.path, wanted)))
 			.collect();
-		out.sort();
+		out.sort_by(|a, b| a.path.cmp(&b.path));
 		Ok(out)
 	}
 
@@ -1719,7 +1723,10 @@ mod tests {
 				.collect();
 		assert_eq!(repo.log_onelines(2)?, expected_onelines);
 		assert_eq!(repo.rev_list_touching("HEAD", "two", 10)?, vec![second.clone()]);
-		assert_eq!(repo.ls_tree("HEAD", &[])?, vec!["one", "two"]);
+		assert_eq!(repo.ls_tree("HEAD", &[])?, vec![
+			TreeEntry { path: "one".to_owned(), mode: 0o100644 },
+			TreeEntry { path: "two".to_owned(), mode: 0o100644 },
+		]);
 		let shown = repo.show_blob("HEAD:two", Some(3))?;
 		assert_eq!(shown.bytes, b"two");
 		assert!(shown.truncated);
