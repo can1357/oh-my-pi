@@ -123,6 +123,11 @@ impl Fixture {
 	}
 }
 impl VizSource for Fixture {
+	/// Fixtures stand for announced runs.
+	fn streaming(&self) -> bool {
+		false
+	}
+
 	fn script(&self) -> &BStr {
 		BStr::new(&self.script)
 	}
