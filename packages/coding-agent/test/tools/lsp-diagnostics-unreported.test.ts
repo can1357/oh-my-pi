@@ -52,6 +52,8 @@ function silentClient(name: string, cwd: string, config: ServerConfig): LspClien
 		diagnostics: new Map(),
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
+		publishedDiagnostics: new Map(),
+		pulledDiagnostics: new Map(),
 		pendingRequests: new Map(),
 		isReading: false,
 		status: "ready",
