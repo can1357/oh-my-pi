@@ -934,17 +934,17 @@ describe("write resolves conflicts via conflict://N", () => {
 		const write = await getTool(session, "write");
 
 		await read.execute("read-bom-first", { path: "bom-first.ts:conflicts" });
-		expect(session.conflictHistory?.entries()).toHaveLength(2);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(2);
 		await write.execute("write-bom-first", { path: "conflict://1", content: "@theirs" });
 
 		expect(await fs.readFile(filePath, "utf8")).toBe(
 			"\uFEFFa-theirs\nmiddle\n<<<<<<< B\nb-ours\n=======\nb-theirs\n>>>>>>> B\ntail\n",
 		);
-		expect(session.conflictHistory?.entries().map(entry => entry.id)).toEqual([2]);
+		expect(session.state?.conflictHistory?.entries().map(entry => entry.id)).toEqual([2]);
 
 		await write.execute("write-bom-second", { path: "conflict://2", content: "@ours" });
 		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFa-theirs\nmiddle\nb-ours\ntail\n");
-		expect(session.conflictHistory?.entries()).toHaveLength(0);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(0);
 	});
 
 	it("keeps a UTF-8 byte-order mark when bulk-resolving `conflict://*`", async () => {
@@ -955,10 +955,10 @@ describe("write resolves conflicts via conflict://N", () => {
 		const write = await getTool(session, "write");
 
 		await read.execute("read-bom-bulk", { path: "bom-bulk.ts:conflicts" });
-		expect(session.conflictHistory?.entries()).toHaveLength(2);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(2);
 		await write.execute("write-bom-bulk", { path: "conflict://*", content: "@ours" });
 
 		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFa-ours\nmiddle\nb-ours\ntail\n");
-		expect(session.conflictHistory?.entries()).toHaveLength(0);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(0);
 	});
 });
