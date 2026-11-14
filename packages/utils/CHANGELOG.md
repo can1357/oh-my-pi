@@ -20,6 +20,7 @@
 
 ### Added
 
+- Added unstable RFD child-session protocol types (`SubagentCapabilities`, `SubagentSessionCapabilities`, `SubagentUpdate`, `StateUpdate`) and the `subagent_update` session update, gated on client `subagents` advertisement ([#18936](https://github.com/can1357/oh-my-pi/pull/18936) by [@nvandamme](https://github.com/nvandamme))
 - Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 

@@ -4,12 +4,18 @@ import { getLogsDir, postmortem } from "@oh-my-pi/pi-utils";
 import { AgentSideConnection, ndJsonStream, type Stream } from "@oh-my-pi/pi-utils/acp";
 import type { ExtensionUIContext } from "../../extensibility/extensions/types";
 import type { AgentSession } from "../../session/agent-session";
+import type { EventBus } from "../../utils/event-bus";
 import { AcpAgent } from "./acp-agent";
 
 /** Session and deferred tool UI hook created for an ACP client workspace. */
 export interface AcpSessionHandle {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	/**
+	 * Root-scoped bus carrying this session tree's `task:subagent:*` frames.
+	 * Present when the factory was built with one; the trackers subscribe to it.
+	 */
+	subagentEventBus?: EventBus;
 }
 
 /**

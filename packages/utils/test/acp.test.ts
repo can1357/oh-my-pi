@@ -402,4 +402,28 @@ describe("ACP runtime schemas", () => {
 			}).success,
 		).toBe(false);
 	});
+
+	it("accepts RFD subagent_update patches", () => {
+		for (const update of [
+			{ sessionUpdate: "subagent_update", sessionId: "child-1", title: "task", capabilities: { cancel: {} } },
+			{ sessionUpdate: "subagent_update", sessionId: "child-1", state: { state: "running" } },
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "child-1",
+				state: { state: "idle", stopReason: "end_turn" },
+				capabilities: { cancel: null },
+			},
+		]) {
+			expect(schema.zSessionNotification.safeParse({ sessionId: "parent-1", update }).success).toBe(true);
+		}
+	});
+
+	it("rejects subagent_update without a child session id", () => {
+		expect(
+			schema.zSessionNotification.safeParse({
+				sessionId: "parent-1",
+				update: { sessionUpdate: "subagent_update", title: "task" },
+			}).success,
+		).toBe(false);
+	});
 });

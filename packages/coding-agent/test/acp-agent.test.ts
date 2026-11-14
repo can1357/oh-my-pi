@@ -32,8 +32,11 @@ import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-a
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -211,6 +214,10 @@ class FakeAgentSession {
 
 	get sessionName(): string {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
+	}
+
+	getAgentId(): string | undefined {
+		return `acp-test:${this.sessionId}`;
 	}
 
 	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
@@ -514,6 +521,7 @@ interface AgentHarness {
 	cwdA: string;
 	cwdB: string;
 	findSession(sessionId: string): FakeAgentSession | undefined;
+	subagentEventBus: EventBus | undefined;
 }
 
 function getChunkMessageId(notification: SessionNotification): string | undefined {
@@ -559,6 +567,11 @@ async function createHarness(
 		extensionRunners?: boolean;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
 		authStorage?: AuthStorage;
+		/**
+		 * Attaches a subagentEventBus to each factory result. `true` creates one
+		 * shared bus; pass an EventBus to use it. Off by default.
+		 */
+		subagentEventBus?: boolean | EventBus;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -578,12 +591,17 @@ async function createHarness(
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
 	const sessionFactoryOptions: Array<{ interactivePrompts?: boolean } | undefined> = [];
+	let sharedSubagentEventBus: EventBus | undefined;
+	if (options.subagentEventBus === true) sharedSubagentEventBus = new EventBus();
 	const connection = {
 		sessionUpdate: async (notification: SessionNotification) => {
 			// Only await when a hook is configured: `await undefined` would insert a
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
+		},
+		notify: async (method: string, params: unknown) => {
+			if (method === "session/update") updates.push(params as SessionNotification);
 		},
 		extNotification: async (method: string, params: Record<string, unknown>) => {
 			extNotifications.push({ method, params });
@@ -617,7 +635,13 @@ async function createHarness(
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
 		sessionFactoryOptions.push(factoryOptions);
-		return { session: session as unknown as AgentSession, setToolUIContext };
+		const subagentEventBus =
+			options.subagentEventBus === true
+				? (sharedSubagentEventBus ??= new EventBus())
+				: typeof options.subagentEventBus === "object"
+					? options.subagentEventBus
+					: undefined;
+		return { session: session as unknown as AgentSession, setToolUIContext, subagentEventBus };
 	};
 
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
@@ -641,6 +665,7 @@ async function createHarness(
 		cwdA,
 		cwdB,
 		findSession: (sessionId: string) => sessions.find(session => session.sessionId === sessionId),
+		subagentEventBus: sharedSubagentEventBus,
 	};
 }
 
@@ -1217,6 +1242,445 @@ describe("ACP agent", () => {
 		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("announces RFD children only when the client advertises subagents", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const announces = harness.updates.filter(
+			update => update.sessionId === created.sessionId && update.update.sessionUpdate === "subagent_update",
+		);
+		expect(announces.map(entry => entry.update)).toEqual([
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				title: "task",
+				description: "Do the thing",
+				capabilities: { cancel: {} },
+			},
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				state: { state: "running" },
+			},
+		]);
+		await harness.agent.dispose();
+
+		const plain = await createHarness({ subagentEventBus: true });
+		const plainSession = await plain.agent.newSession({ cwd: plain.cwdA, mcpServers: [] });
+		plain.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		expect(
+			plain.updates.filter(
+				update => update.sessionId === plainSession.sessionId && update.update.sessionUpdate === "subagent_update",
+			),
+		).toHaveLength(0);
+		await plain.agent.dispose();
+	});
+
+	it("forwards child session events with the child outer id and settles to idle", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-1",
+			event: { type: "tool_execution_start", toolCallId: "tc-1", toolName: "read", args: { path: "a.ts" } },
+		});
+		await flushBusDelivery();
+		const childUpdates = harness.updates.filter(update => update.sessionId === "worker-1");
+		expect(childUpdates.length).toBeGreaterThan(0);
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "completed",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const terminals = harness.updates.filter(
+			update =>
+				update.sessionId === created.sessionId &&
+				update.update.sessionUpdate === "subagent_update" &&
+				(update.update as { sessionId?: string }).sessionId === "worker-1" &&
+				(update.update as { state?: unknown }).state !== undefined &&
+				(update.update as { state?: { state?: string } }).state?.state !== "running",
+		);
+		expect(terminals.map(entry => entry.update)).toEqual([
+			{
+				sessionUpdate: "subagent_update",
+				sessionId: "worker-1",
+				state: { state: "idle", stopReason: "end_turn" },
+				capabilities: { cancel: null },
+			},
+		]);
+		await harness.agent.dispose();
+	});
+
+	it("routes session/cancel on a child id to the child kill path", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		// Unknown to the parent turn; must resolve via the child path, not throw.
+		await harness.agent.cancel({ sessionId: "worker-1" });
+		await harness.agent.dispose();
+	});
+
+	it("child cancel failure rejects instead of reporting success", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-9",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			id: "worker-9",
+			displayName: "worker-9",
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "running",
+		});
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockRejectedValueOnce(new Error("boom"));
+		try {
+			await expect(harness.agent.cancel({ sessionId: "worker-9" })).rejects.toThrow(
+				/Failed to cancel child session worker-9: boom/,
+			);
+		} finally {
+			release.mockRestore();
+			registry.unregister("worker-9", ref);
+			await harness.agent.dispose();
+		}
+	});
+
+	it("starts the child tombstone release before the abort settles", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-race",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const abortGate = Promise.withResolvers<void>();
+		let abortCalls = 0;
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "worker-race",
+			displayName: "worker-race",
+			kind: "sub",
+			session: {
+				abort: async () => {
+					abortCalls++;
+					await abortGate.promise;
+				},
+				dispose: async () => {},
+			} as never,
+			sessionFile: null,
+			status: "running",
+		});
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release");
+		try {
+			// A finishing run accepted while the abort is still in flight must
+			// not flip the ref to idle: the tombstone lands first, so the
+			// executor's settle path sees the terminal `aborted` row.
+			const cancelled = harness.agent.cancel({ sessionId: "worker-race" });
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(abortCalls).toBe(1);
+			expect(release).toHaveBeenCalledWith("worker-race", expect.anything(), { tombstone: true });
+			abortGate.resolve();
+			await cancelled;
+			expect(registry.get("worker-race")?.status).toBe("aborted");
+		} finally {
+			release.mockRestore();
+			const current = registry.get("worker-race");
+			if (current) registry.unregister("worker-race", current);
+			await harness.agent.dispose();
+		}
+	});
+
+	it("forwards AIR child session events tagged with the child routing key", async () => {
+		const airCapabilities = {
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
+		};
+		const harness = await createHarness({ clientCapabilities: airCapabilities, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-7",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-7",
+			event: { type: "tool_execution_start", toolCallId: "tc-7", toolName: "read", args: { path: "a.ts" } },
+		});
+		await flushBusDelivery();
+		const tagged = harness.updates.filter(update => {
+			const meta = (update.update as { _meta?: unknown })._meta as
+				| { jetbrains?: { air?: { subagentSessionId?: unknown } } }
+				| undefined;
+			return meta?.jetbrains?.air?.subagentSessionId === "worker-7";
+		});
+		expect(tagged.length).toBeGreaterThan(0);
+		expect(tagged.every(update => update.sessionId !== "worker-7")).toBe(true);
+		await harness.agent.dispose();
+	});
+
+	it("dual-capable clients get one child projection, not both", async () => {
+		const dualCapabilities = {
+			subagents: {},
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
+		};
+		const harness = await createHarness({ clientCapabilities: dualCapabilities, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-dual",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-dual",
+			event: { type: "message_update", message, assistantMessageEvent: { type: "text_delta", delta: "hello" } },
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-dual",
+			event: { type: "message_end", message },
+		});
+		await flushBusDelivery();
+		// The RFD projection (child id as outer sessionId) must stay silent:
+		// it shares mapper state with the AIR projection, so both firing
+		// duplicates every streamed child response.
+		expect(harness.updates.filter(update => update.sessionId === "worker-dual")).toEqual([]);
+		const airChunks = harness.updates.filter(
+			update =>
+				(update.update as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk" &&
+				(
+					(update.update as { _meta?: unknown })._meta as
+						| { jetbrains?: { air?: { subagentSessionId?: unknown } } }
+						| undefined
+				)?.jetbrains?.air?.subagentSessionId === "worker-dual",
+		);
+		expect(airChunks).toHaveLength(1);
+		await harness.agent.dispose();
+	});
+
+	it("does not duplicate streamed child text on message end", async () => {
+		const airCapabilities = {
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
+		};
+		const harness = await createHarness({ clientCapabilities: airCapabilities, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-7",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-7",
+			event: { type: "message_update", message, assistantMessageEvent: { type: "text_delta", delta: "hello" } },
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-7",
+			event: { type: "message_end", message },
+		});
+		await flushBusDelivery();
+		const childChunks = harness.updates.filter(
+			update =>
+				update.sessionId !== "worker-7" &&
+				(update.update as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk" &&
+				(
+					(update.update as { _meta?: unknown })._meta as
+						| { jetbrains?: { air?: { subagentSessionId?: unknown } } }
+						| undefined
+				)?.jetbrains?.air?.subagentSessionId === "worker-7",
+		);
+		expect(childChunks).toHaveLength(1);
+		await harness.agent.dispose();
+	});
+
+	it("cancels nested grandchildren via registry ancestry", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const ownerId = harness.findSession(created.sessionId)?.getAgentId?.() ?? "acp-test";
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		// A grandchild whose immediate parent is another child, not the root agent.
+		const registry = AgentRegistry.global();
+		const refs: Array<{ id: string; ref: unknown }> = [];
+		for (const [id, parentId] of [
+			["mid-1", ownerId],
+			["leaf-1", "mid-1"],
+		] as const) {
+			refs.push({
+				id,
+				ref: registry.register({
+					id,
+					displayName: id,
+					kind: "sub",
+					parentId,
+					session: null,
+					sessionFile: null,
+					status: "running",
+				}),
+			});
+		}
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "leaf-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		// Must resolve via the child path (owned descendant), not throw "not found".
+		await harness.agent.cancel({ sessionId: "leaf-1" });
+		for (const { id, ref } of refs) registry.unregister(id, ref as never);
+		await harness.agent.dispose();
+	});
+
+	it("suppresses child coordination writes from the external stream", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const before = harness.updates.length;
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "tc-internal",
+				toolName: "write",
+				args: { path: "agent://peer/notes", content: "hi" },
+			},
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-1",
+			event: {
+				type: "tool_execution_end",
+				toolCallId: "tc-internal",
+				toolName: "write",
+				result: { path: "agent://peer/notes", wrote: true },
+			},
+		});
+		await flushBusDelivery();
+		// No frame at all: the internal write must not leak on any session id.
+		expect(harness.updates.slice(before)).toEqual([]);
+		await harness.agent.dispose();
 	});
 
 	it("delivers the thinking config update before resolving the command", async () => {

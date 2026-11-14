@@ -72,6 +72,8 @@ import type { AgentSession, AgentSessionEvent } from "../../session/agent-sessio
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
+import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
+import { AgentRegistry } from "../../registry/agent-registry";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -104,14 +106,24 @@ import {
 	TTS_SPEED_OPTIONS,
 } from "../../tts/models";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import type { EventBus } from "../../utils/event-bus";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	extractAssistantMessageText,
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
+import {
+	AcpSubagentTracker,
+	AIR_EXTENSION_VERSION,
+	AIR_NATIVE_SUBAGENT_SESSIONS_CAPABILITY,
+	declaresNativeSubagents,
+	isAirClient,
+	withSubagentMeta,
+} from "./acp-subagent-tracker";
+import { isStandardSubagentClient, RfdSubagentTracker } from "./acp-rfd-subagents";
+import { TASK_SUBAGENT_EVENT_CHANNEL, type SubagentEventPayload } from "../../task/types";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
-
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 
@@ -415,8 +427,43 @@ type ManagedSessionRecord = {
 	closedError: RequestError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
+	/**
+	 * AIR-private child-session tracker. Installed at registration when the
+	 * client is AIR with `nativeSubagentSessions` declared; subscribes the
+	 * session tree's subagent bus and emits `subagent_spawned` /
+	 * tagged child updates / `subagent_state_update`. Disposed with the record.
+	 */
+	subagentTracker: AcpSubagentTracker | undefined;
+	/**
+	 * Upstream-RFD child-session tracker. Installed at registration when the
+	 * client advertises `subagents`; emits `subagent_update` association
+	 * patches and routes child traffic with the child id as outer sessionId.
+	 * Disposed with the record.
+	 */
+	rfdSubagentTracker: RfdSubagentTracker | undefined;
+	/** Registry status feed for the RFD tracker; released with the record. */
+	rfdRegistryUnsubscribe: (() => void) | undefined;
+	/**
+	 * Per-child live assistant-message state for transcript forwarding.
+	 * The parent turn streams one message at a time; each child does too,
+	 * so progress tracking is keyed by child id instead of a single slot.
+	 */
+	childMessageState: Map<
+		string,
+		{ messageId: string | undefined; progress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined }
+	>;
+	/**
+	 * Per-child tool args for transcript forwarding. `tool_execution_end`
+	 * carries no args, so start/update frames are cached here per child (the
+	 * parent path uses `toolArgsById` the same way). Needed to keep
+	 * coordination-scoped writes off the external stream.
+	 */
+	childToolArgs: Map<string, Map<string, unknown>>;
+	/** Child-event forwarding subscription for the AIR tracker; released with the record. */
+	airChildEventUnsubscribe: (() => void) | undefined;
+	/** Child-event forwarding subscription for the RFD tracker; released with the record. */
+	rfdChildEventUnsubscribe: (() => void) | undefined;
 };
-
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
@@ -453,6 +500,7 @@ type MCPSourceMap = {
 type AcpSessionHandle = {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	subagentEventBus?: EventBus;
 };
 
 type CreateAcpSession = (
@@ -463,8 +511,15 @@ type CreateAcpSession = (
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
 	session: AgentSession;
 	setToolUIContext: AcpSessionHandle["setToolUIContext"] | undefined;
+	subagentEventBus: AcpSessionHandle["subagentEventBus"];
 } {
-	return "session" in created ? created : { session: created, setToolUIContext: undefined };
+	return "session" in created
+		? {
+				session: created.session,
+				setToolUIContext: created.setToolUIContext,
+				subagentEventBus: created.subagentEventBus,
+			}
+		: { session: created, setToolUIContext: undefined, subagentEventBus: undefined };
 }
 
 type AcpSpeechOption = {
@@ -1095,10 +1150,18 @@ export class AcpAgent implements Agent {
 				},
 			},
 			// Top-level `_meta` (sibling of `agentCapabilities`) is where
-			// claude-agent-acp and codex-acp advertise steering; clients such as
-			// agent-shell gate `_session/steering` on it.
+			// claude-agent-acp and codex-acp advertise steering and the AIR
+			// extension capabilities; clients such as agent-shell gate
+			// `_session/steering` on it, and JetBrains AIR gates native child
+			// sessions on `jetbrains.air.capabilities: ["nativeSubagentSessions"]`.
 			_meta: {
 				steering: { supported: true },
+				jetbrains: {
+					air: {
+						version: AIR_EXTENSION_VERSION,
+						capabilities: [AIR_NATIVE_SUBAGENT_SESSIONS_CAPABILITY],
+					},
+				},
 			},
 		};
 	}
@@ -1556,6 +1619,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async cancel(params: { sessionId: string }): Promise<void> {
+		if (await this.#cancelSubagentChild(params.sessionId)) return;
 		const record = this.#getSessionRecord(params.sessionId);
 		// Stop means stop everything accepted on this session: prompts still
 		// inside the dispatch window or queued behind the running turn must not
@@ -1607,6 +1671,71 @@ export class AcpAgent implements Agent {
 		} finally {
 			clearTimeout(timer);
 		}
+	}
+
+	/**
+	 * Cancel a native child session by its `subagentSessionId` (the task-executor
+	 * registry id). Returns true when the id named a live child of one of this
+	 * connection's sessions. Mirrors `handleRpcCancelSubagent`: start the
+	 * tombstone release first — it publishes the terminal `aborted` row
+	 * synchronously, so the executor cannot accept a finishing run (flipping
+	 * the ref to idle and emitting `completed`/`end_turn`) while the abort
+	 * below is still settling — then abort the live run. Settle both together
+	 * so a failed tombstone still rejects the ACP cancel request.
+	 */
+	async #cancelSubagentChild(sessionId: string): Promise<boolean> {
+		for (const record of this.#sessions.values()) {
+			const tracked =
+				(record.subagentTracker && record.subagentTracker.children.has(sessionId)) ||
+				(record.rfdSubagentTracker && record.rfdSubagentTracker.children.has(sessionId));
+			if (!tracked) continue;
+			const ownerId = record.session.getAgentId();
+			const registry = AgentRegistry.global();
+			const ref = registry.get(sessionId);
+			if (ref?.kind !== "sub") return true;
+			if (!this.#isOwnedDescendant(ref, ownerId)) continue;
+			try {
+				// Capture the live session before starting the release: the
+				// tombstone transition detaches `ref.session` synchronously,
+				// so reading it after `release()` returns would skip the abort
+				// (mirrors `resolveOwnedLiveSubagent` capturing `owned.session`).
+				const liveSession = ref.status === "running" ? ref.session : null;
+				const [released, aborted] = await Promise.allSettled([
+					AgentLifecycleManager.global().release(sessionId, ref, { tombstone: true }),
+					liveSession ? liveSession.abort({ reason: USER_INTERRUPT_LABEL }) : Promise.resolve(),
+				]);
+				if (released.status === "rejected") throw released.reason;
+				if (aborted.status === "rejected") throw aborted.reason;
+			} catch (error) {
+				// A failed kill must reject the ACP cancel request: returning true
+				// would tell the client the child stopped while it is still running.
+				throw new Error(
+					`Failed to cancel child session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Whether the child ref belongs to this connection's tree: its registry
+	 * ancestry reaches the owning root agent. Nested children have their
+	 * immediate spawner as `parentId`, so a direct comparison would wrongly
+	 * refuse grandchildren the tracker advertised cancel for. Cycles and
+	 * missing refs deny.
+	 */
+	#isOwnedDescendant(ref: { parentId?: string | undefined }, ownerId: string | undefined): boolean {
+		if (ownerId === undefined) return true;
+		if (ref.parentId === undefined) return true;
+		const seen = new Set<string>();
+		let current: string | undefined = ref.parentId;
+		while (current !== undefined && !seen.has(current)) {
+			if (current === ownerId) return true;
+			seen.add(current);
+			current = AgentRegistry.global().get(current)?.parentId;
+		}
+		return false;
 	}
 
 	/**
@@ -1841,7 +1970,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #createNewSessionRecord(cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, subagentEventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1852,7 +1981,7 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, subagentEventBus);
 	}
 
 	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1907,7 +2036,7 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, subagentEventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1925,7 +2054,7 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
+		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, subagentEventBus);
 	}
 
 	async #openStoredSession(
@@ -1934,7 +2063,7 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		protocolSessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, subagentEventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1948,14 +2077,21 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, protocolSessionId);
+		return await this.#registerPreparedSession(
+			session,
+			mcpServers,
+			setToolUIContext,
+			subagentEventBus,
+			protocolSessionId,
+		);
 	}
 
 	async #registerPreparedSession(
 		session: AgentSession,
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
-		protocolSessionId = session.sessionId,
+		subagentEventBus?: EventBus,
+		protocolSessionId: string = session.sessionId,
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId);
 		// Registered before extensions start: a `session_start` handler can already replace the durable session.
@@ -1976,6 +2112,8 @@ export class AcpAgent implements Agent {
 				this.#handleLifetimeEvent(record, event);
 			});
 			record.lifetimeUnsubscribe = unsubscribeEvents;
+			this.#installSubagentTracker(record, subagentEventBus);
+			this.#installRfdSubagentTracker(record, subagentEventBus);
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(record.protocolSessionId, record);
@@ -1984,6 +2122,236 @@ export class AcpAgent implements Agent {
 			await this.#disposeSessionRecord(record);
 			throw error;
 		}
+	}
+
+	/**
+	 * Subscribe the AIR-private child-session tracker when this connection
+	 * serves an AIR client with `nativeSubagentSessions` declared. Other
+	 * clients never see the private updates (the tracker stays uninstalled).
+	 */
+	#installSubagentTracker(record: ManagedSessionRecord, subagentEventBus: EventBus | undefined): void {
+		if (!isAirClient(this.#clientCapabilities) || !declaresNativeSubagents(this.#clientCapabilities)) return;
+		if (!subagentEventBus) return;
+		const tracker = new AcpSubagentTracker({
+			parentSessionId: record.protocolSessionId,
+			// The private `subagent_*` updates sit outside the typed
+			// `SessionUpdate` union, so they bypass the typed `sessionUpdate`
+			// sender and go out as ordinary JSON-RPC notifications.
+			send: params => this.#connection.notify("session/update", params),
+		});
+		tracker.subscribe(subagentEventBus);
+		record.airChildEventUnsubscribe = subagentEventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+			void this.#forwardAirChildEvent(record, data as SubagentEventPayload).catch(() => {});
+		});
+		record.subagentTracker = tracker;
+	}
+
+	/**
+	 * Re-emit a child's session event on the parent session tagged with the
+	 * child's routing key. AIR's `routeNativeSubagentEvents` reads
+	 * `_meta.jetbrains.air.subagentSessionId` and attributes the update to
+	 * the child transcript. Only for announced children; unannounced frames
+	 * stay silent so a client never routes traffic for an unknown child.
+	 */
+	async #forwardAirChildEvent(record: ManagedSessionRecord, payload: SubagentEventPayload): Promise<void> {
+		const tracker = record.subagentTracker;
+		if (!tracker || !tracker.children.has(payload.id)) return;
+		this.#prepareChildMessage(record, payload.id, payload.event);
+		if (payload.event.type !== "tool_execution_end") this.#trackChildToolArgs(record, payload.id, payload.event);
+		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, record.protocolSessionId, {
+			getMessageId: message => this.#getChildMessageId(record, payload.id, message),
+			getMessageProgress: message => this.#getChildMessageProgress(record, payload.id, message),
+			getToolArgs: toolCallId => {
+				const hit = record.childToolArgs.get(payload.id)?.get(toolCallId);
+				return hit;
+			},
+			cwd: this.#childCwd(payload.id, record),
+			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
+		})) {
+			const tagged = {
+				...notification,
+				update: withSubagentMeta(notification.update, payload.id),
+			};
+			await this.#connection.sessionUpdate(tagged);
+		}
+		this.#trackChildToolArgs(record, payload.id, payload.event);
+		this.#clearChildMessageAfterEvent(record, payload.id, payload.event);
+	}
+
+	/**
+	 * Cache a child tool call's args from its start/update frame (the end
+	 * frame carries none), and drop the entry when the call settles — the
+	 * same lifecycle as the parent turn's `toolArgsById`.
+	 */
+	#trackChildToolArgs(record: ManagedSessionRecord, childId: string, event: AgentSessionEvent): void {
+		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+			if (!("args" in event)) return;
+			let byCall = record.childToolArgs.get(childId);
+			if (!byCall) {
+				byCall = new Map();
+				record.childToolArgs.set(childId, byCall);
+			}
+			byCall.set(event.toolCallId, event.args);
+		} else if (event.type === "tool_execution_end") {
+			const byCall = record.childToolArgs.get(childId);
+			byCall?.delete(event.toolCallId);
+			if (byCall && byCall.size === 0) record.childToolArgs.delete(childId);
+		}
+	}
+
+	/** Resolve the emitting child's workspace for tool locations, falling back to the parent cwd. */
+	#childCwd(childId: string, record: ManagedSessionRecord): string | undefined {
+		const cwd = AgentRegistry.global().get(childId)?.session?.sessionManager.getCwd();
+		return typeof cwd === "string" && cwd.length > 0 ? cwd : record.session.sessionManager.getCwd();
+	}
+
+	/** Per-child equivalent of `#prepareLiveAssistantMessage`: one message streams at a time per child. */
+	#prepareChildMessage(record: ManagedSessionRecord, childId: string, event: AgentSessionEvent): void {
+		if (
+			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+			event.message.role === "assistant"
+		) {
+			let state = record.childMessageState.get(childId);
+			if (!state) {
+				state = { messageId: crypto.randomUUID(), progress: { textEmitted: false, thoughtEmitted: false } };
+				record.childMessageState.set(childId, state);
+			}
+		}
+	}
+
+	/** Per-child equivalent of `#clearLiveAssistantMessageAfterEvent`. */
+	#clearChildMessageAfterEvent(record: ManagedSessionRecord, childId: string, event: AgentSessionEvent): void {
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			record.childMessageState.delete(childId);
+		}
+	}
+
+	#getChildMessageId(record: ManagedSessionRecord, childId: string, message: unknown): string | undefined {
+		if (typeof message !== "object" || message === null) return undefined;
+		let state = record.childMessageState.get(childId);
+		if (!state) {
+			state = { messageId: crypto.randomUUID(), progress: { textEmitted: false, thoughtEmitted: false } };
+			record.childMessageState.set(childId, state);
+		}
+		return state.messageId;
+	}
+
+	#getChildMessageProgress(
+		record: ManagedSessionRecord,
+		childId: string,
+		message: unknown,
+	): { textEmitted: boolean; thoughtEmitted: boolean } | undefined {
+		if (typeof message !== "object" || message === null) return undefined;
+		let state = record.childMessageState.get(childId);
+		if (!state) {
+			state = { messageId: crypto.randomUUID(), progress: { textEmitted: false, thoughtEmitted: false } };
+			record.childMessageState.set(childId, state);
+		}
+		return state.progress;
+	}
+
+	/**
+	 * Subscribe the upstream-RFD child-session tracker when the client
+	 * advertises `subagents`. Other clients never see `subagent_update`
+	 * (the tracker stays uninstalled, and the RFD requires the advertisement).
+	 * Skipped when the AIR-private tracker is installed: both projections
+	 * share the record's child mapper state, so installing both would emit
+	 * every streamed child response twice (once tagged under the parent,
+	 * once under the child id). The AIR projection wins ties because AIR
+	 * renders only the private contract.
+	 */
+	#installRfdSubagentTracker(record: ManagedSessionRecord, subagentEventBus: EventBus | undefined): void {
+		if (!isStandardSubagentClient(this.#clientCapabilities)) return;
+		if (record.subagentTracker) return;
+		if (!subagentEventBus) return;
+		const tracker = new RfdSubagentTracker({
+			parentSessionId: record.protocolSessionId,
+			send: notification => this.#connection.sessionUpdate(notification),
+			resolveSpawner: id => AgentRegistry.global().get(id)?.parentId,
+		});
+		tracker.subscribe(subagentEventBus);
+		record.rfdChildEventUnsubscribe = subagentEventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+			void this.#forwardChildEvent(record, data as SubagentEventPayload).catch(() => {});
+		});
+		record.rfdSubagentTracker = tracker;
+		record.rfdRegistryUnsubscribe = AgentRegistry.global().onChange(event => {
+			if (event.type !== "status_changed") return;
+			tracker.handleRegistryStatus({ id: event.ref.id, status: event.ref.status });
+		});
+	}
+
+	/**
+	 * Re-emit a child's session event with the child id as outer `sessionId`
+	 * (codex's `notificationSessionId` rule). Only for announced RFD children;
+	 * anything else stays on the parent stream.
+	 */
+	async #forwardChildEvent(record: ManagedSessionRecord, payload: SubagentEventPayload): Promise<void> {
+		const tracker = record.rfdSubagentTracker;
+		if (!tracker || !tracker.children.has(payload.id)) return;
+		this.#prepareChildMessage(record, payload.id, payload.event);
+		// Cache start/update args before mapping; the end frame carries none
+		// and its cleanup must run after mapping consumed them.
+		if (payload.event.type !== "tool_execution_end") this.#trackChildToolArgs(record, payload.id, payload.event);
+		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, payload.id, {
+			getMessageId: message => this.#getChildMessageId(record, payload.id, message),
+			getMessageProgress: message => this.#getChildMessageProgress(record, payload.id, message),
+			getToolArgs: toolCallId => {
+				const hit = record.childToolArgs.get(payload.id)?.get(toolCallId);
+				return hit;
+			},
+			cwd: this.#childCwd(payload.id, record),
+			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
+		})) {
+			await this.#connection.sessionUpdate(notification);
+		}
+		this.#trackChildToolArgs(record, payload.id, payload.event);
+		this.#clearChildMessageAfterEvent(record, payload.id, payload.event);
+	}
+
+	/**
+	 * Tag parent-side `task` tool updates with the spawned child that owns the
+	 * call (`parentToolCallId` match recorded from the lifecycle frame), so AIR
+	 * attributes the tool block to the child transcript. The mapper keeps the
+	 * outer `sessionId` on the parent; the tag is the routing signal
+	 * (`AcpV1RuntimeUpdateMapper` reads `_meta.jetbrains.air.subagentSessionId`
+	 * from the update and falls back to tool ownership learned from spawns).
+	 * Non-task tools and unowned calls pass through untouched.
+	 */
+	#tagSubagentUpdate(
+		record: ManagedSessionRecord,
+		event: AgentSessionEvent,
+		notification: SessionNotification,
+	): SessionNotification {
+		const tracker = record.subagentTracker;
+		if (!tracker) return notification;
+		if (
+			event.type !== "tool_execution_start" &&
+			event.type !== "tool_execution_update" &&
+			event.type !== "tool_execution_end"
+		) {
+			return notification;
+		}
+		if (!this.#isTaskToolCall(record, event)) return notification;
+		// Exact `parentToolCallId` match only: the spawn frame precedes the
+		// start event, but under parallel fan-out a fresh task call has no owner
+		// yet and must not inherit a running sibling (that would poison AIR's
+		// tool→child map; AIR also learns ownership from `subagent_spawned`).
+		const childId = tracker.childForToolCall(event.toolCallId);
+		if (!childId) return notification;
+		return { ...notification, update: withSubagentMeta(notification.update, childId) };
+	}
+
+	#isTaskToolCall(record: ManagedSessionRecord, event: AgentSessionEvent): boolean {
+		if (
+			event.type !== "tool_execution_start" &&
+			event.type !== "tool_execution_update" &&
+			event.type !== "tool_execution_end"
+		) {
+			return false;
+		}
+		if (event.toolName === "task") return true;
+		const args = "args" in event ? event.args : record.toolArgsById.get(event.toolCallId);
+		return typeof args === "object" && args !== null && !Array.isArray(args) && "task" in args;
 	}
 
 	#createManagedSessionRecord(
@@ -2012,6 +2380,13 @@ export class AcpAgent implements Agent {
 			commandMetadataUnsubscribe: undefined,
 			lifetimeUpdatesReady: false,
 			pendingCompactionNotifications: undefined,
+			subagentTracker: undefined,
+			rfdSubagentTracker: undefined,
+			rfdRegistryUnsubscribe: undefined,
+			childMessageState: new Map(),
+			childToolArgs: new Map(),
+			airChildEventUnsubscribe: undefined,
+			rfdChildEventUnsubscribe: undefined,
 		};
 	}
 
@@ -2152,7 +2527,8 @@ export class AcpAgent implements Agent {
 			cwd: record.session.sessionManager.getCwd(),
 			resolveImageData: resolveImageDataForAcp,
 		})) {
-			const delivery = this.#connection.sessionUpdate(notification);
+			const tagged = this.#tagSubagentUpdate(record, event, notification);
+			const delivery = this.#connection.sessionUpdate(tagged);
 			if (streamedAssistantError) {
 				// Resolves true only once the error chunk actually reached the
 				// client — a failed delivery keeps the agent_end fallback armed.
@@ -3552,6 +3928,19 @@ export class AcpAgent implements Agent {
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
 		record.commandMetadataUnsubscribe?.();
+		record.subagentTracker?.dispose();
+		record.subagentTracker = undefined;
+		record.rfdSubagentTracker?.dispose();
+		record.rfdSubagentTracker = undefined;
+		record.rfdRegistryUnsubscribe?.();
+		record.rfdRegistryUnsubscribe = undefined;
+		record.childMessageState.clear();
+		record.childToolArgs.clear();
+		record.childMessageState.clear();
+		record.airChildEventUnsubscribe?.();
+		record.airChildEventUnsubscribe = undefined;
+		record.rfdChildEventUnsubscribe?.();
+		record.rfdChildEventUnsubscribe = undefined;
 		record.pendingCompactionNotifications = undefined;
 		if (record.mcpManager) {
 			try {
