@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     task_timeout_seconds: float = Field(2400.0, alias="ROBOMP_TASK_TIMEOUT_SECONDS")
     task_timeout_hard_grace_seconds: float = Field(60.0, alias="ROBOMP_TASK_TIMEOUT_HARD_GRACE_SECONDS")
     request_timeout_seconds: float = Field(120.0, alias="ROBOMP_REQUEST_TIMEOUT_SECONDS")
+    # Cap on streamed agent events per RPC session. Big PRs can stream
+    # 100k+ events; the old 50k default aborted reviews of >~150k-line PRs.
+    max_event_history: int = Field(200_000, alias="ROBOMP_MAX_EVENT_HISTORY", ge=1000)
 
     # Automatic retry of transiently-failed events. When an event handler
     # raises (and it isn't an operator cancel or a shutdown interrupt), the
