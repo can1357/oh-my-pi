@@ -1,7 +1,13 @@
 use std::time::Duration;
 
-use enigo::{Axis, Button, Direction, Enigo, Keyboard, Mouse, Settings};
-use windows_sys::Win32::Foundation::HWND;
+use enigo::{Axis, Button, Direction, Enigo, Mouse, Settings};
+use windows_sys::Win32::{
+	Foundation::HWND,
+	UI::{
+		Input::KeyboardAndMouse::{GetKeyboardLayout, HKL},
+		WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+	},
+};
 
 use super::{
 	super::{
@@ -70,34 +76,21 @@ fn modifier_keys(modifiers: Modifiers) -> impl Iterator<Item = KeyName> {
 	.flatten()
 }
 
-fn emit_global_key(input: &mut Enigo, key: KeyName, direction: KeyDirection) -> CoreResult<()> {
-	match direction {
-		KeyDirection::Press => {
-			control::check()?;
-			let result = input
-				.key(key.to_enigo(), Direction::Press)
-				.map_err(enigo_error);
-			if result.is_err() {
-				// Enigo can partially deliver a press. The shared hold helper
-				// releases successful presses, so unwind this attempted key here.
-				completed(
-					result,
-					control::cleanup(|| {
-						input
-							.key(key.to_enigo(), Direction::Release)
-							.map_err(enigo_error)
-					}),
-				)
-			} else {
-				result
-			}
+fn keyboard_layout(target: Option<HWND>) -> HKL {
+	super::keyboard::target_layout(
+		target,
+		// SAFETY: GetForegroundWindow has no preconditions.
+		|| unsafe { GetForegroundWindow() },
+		|hwnd| {
+			// SAFETY: Both calls accept scalar window/thread identifiers.
+			let layout =
+				unsafe { GetKeyboardLayout(GetWindowThreadProcessId(hwnd, std::ptr::null_mut())) };
+			(!layout.is_null()).then_some(layout)
 		},
-		KeyDirection::Release => control::cleanup(|| {
-			input
-				.key(key.to_enigo(), Direction::Release)
-				.map_err(enigo_error)
-		}),
-	}
+		// Console window threads expose no layout; retain the worker's mapping.
+		// SAFETY: Thread ID zero requests this thread's current layout.
+		|| unsafe { GetKeyboardLayout(0) },
+	)
 }
 
 fn global_button(input: &mut Enigo, button: MouseButton, direction: Direction) -> CoreResult<()> {
@@ -112,19 +105,7 @@ fn with_global_keys(
 	keys: &[KeyName],
 	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	for &key in keys {
-		background::virtual_key(key)?;
-	}
-	with_held_keys(
-		input,
-		keys.iter().copied(),
-		emit_global_key,
-		|input| {
-			control::check()?;
-			operation(input)
-		},
-		completed,
-	)
+	foreground::with_desktop_keys(keys, || operation(input))
 }
 
 fn with_global_modifiers(
@@ -132,16 +113,13 @@ fn with_global_modifiers(
 	modifiers: Modifiers,
 	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	with_held_keys(
-		input,
-		modifier_keys(modifiers),
-		emit_global_key,
-		|input| {
-			control::check()?;
-			operation(input)
-		},
-		completed,
-	)
+	let mut keys = [KeyName::Shift; 4];
+	let mut count = 0;
+	for (index, key) in modifier_keys(modifiers).enumerate() {
+		keys[index] = key;
+		count = index + 1;
+	}
+	with_global_keys(input, &keys[..count], operation)
 }
 
 fn scroll_steps(delta: f64) -> i32 {
@@ -227,10 +205,7 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 /// Presses `keys` and releases them. A shortcut fires on its last press, so a
 /// cancel once every key is down no longer fails the call.
 fn global_key_chord(input: &mut Enigo, keys: &[KeyName]) -> CoreResult<()> {
-	for &key in keys {
-		background::virtual_key(key)?;
-	}
-	with_held_keys(input, keys.iter().copied(), emit_global_key, |_| Ok(()), completed)
+	with_global_keys(input, keys, |_| Ok(()))
 }
 
 mod background {
@@ -240,12 +215,12 @@ mod background {
 		Foundation::{ERROR_ACCESS_DENIED, GetLastError, HWND, LPARAM, POINT, WPARAM},
 		UI::{
 			Input::KeyboardAndMouse::{
-				IsWindowEnabled, MAPVK_VK_TO_VSC, MapVirtualKeyW, VK_BACK, VK_CAPITAL, VK_CONTROL,
+				IsWindowEnabled, MAPVK_VK_TO_VSC, MapVirtualKeyExW, VK_BACK, VK_CAPITAL, VK_CONTROL,
 				VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7,
 				VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18,
 				VK_F19, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN,
 				VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT,
-				VK_SPACE, VK_TAB, VK_UP, VkKeyScanW,
+				VK_SPACE, VK_TAB, VK_UP, VkKeyScanExW,
 			},
 			WindowsAndMessaging::{
 				CS_DBLCLKS, GCL_STYLE, GetClassLongW, IsChild, IsWindow, PostMessageW,
@@ -266,8 +241,7 @@ mod background {
 		ax::Win32Ax,
 		delivery::{
 			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
-			posted_modifiers_dropped, posts_double_click, text_input_unsupported, text_units,
-			would_be_silently_dropped,
+			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
 		},
 		window,
 	};
@@ -473,7 +447,11 @@ mod background {
 				let (target, point) = child_at(root, x, y)?;
 				ensure_delivery(id, target, kind)?;
 				let (down, up, double, button_flag) = mouse_messages(button);
-				ensure_unmodified(target, super::modifier_keys(modifiers))?;
+				ensure_unmodified(
+					target,
+					super::keyboard_layout(Some(target)),
+					super::modifier_keys(modifiers),
+				)?;
 				// SAFETY: GetClassLongW reads the class style of a live window.
 				let wants_double = unsafe { GetClassLongW(target, GCL_STYLE) } & CS_DBLCLKS != 0;
 				for index in 0..count {
@@ -581,7 +559,7 @@ mod background {
 		}
 	}
 
-	pub(super) fn virtual_key(key: KeyName) -> CoreResult<(u16, u8)> {
+	pub(super) fn virtual_key(key: KeyName, layout: super::HKL) -> CoreResult<(u16, u8)> {
 		let value = match key {
 			KeyName::Ctrl => (VK_CONTROL, 0),
 			KeyName::Alt => (VK_MENU, 0),
@@ -637,11 +615,11 @@ mod background {
 						"{character:?} has no Win32 virtual key"
 					)));
 				}
-				// SAFETY: VkKeyScanW performs a scalar lookup in the active layout.
-				let mapped = unsafe { VkKeyScanW(units[0]) };
+				// SAFETY: VkKeyScanExW is a scalar lookup on this layout.
+				let mapped = unsafe { VkKeyScanExW(units[0], layout) };
 				if mapped == -1 {
 					return Err(DesktopError::input_failed(format!(
-						"{character:?} is absent from the active keyboard layout"
+						"{character:?} is absent from the receiving keyboard layout"
 					)));
 				}
 				let bytes = mapped.to_ne_bytes();
@@ -672,7 +650,8 @@ mod background {
 	}
 
 	struct KeyEmitter {
-		hwnd: HWND,
+		hwnd:   HWND,
+		layout: super::HKL,
 	}
 	impl KeyEmitter {
 		/// Only an established focus target may receive posted text/keys.
@@ -683,7 +662,7 @@ mod background {
 					"no unambiguous focused control in the target window; no input was sent",
 				)
 			})?;
-			Ok(Self { hwnd })
+			Ok(Self { hwnd, layout: super::keyboard_layout(Some(hwnd)) })
 		}
 
 		/// The control of window `id` (`root`) that background keys of `kind`
@@ -699,7 +678,7 @@ mod background {
 							"the element's control window is not inside window {id}"
 						)));
 					}
-					Self { hwnd }
+					Self { hwnd, layout: super::keyboard_layout(Some(hwnd)) }
 				},
 				_ => Self::focused(root)?,
 			};
@@ -711,8 +690,9 @@ mod background {
 		/// ([`ensure_unmodified`]), so Alt is never down and no transition is a
 		/// `WM_SYSKEY*` message.
 		fn transition(&self, vk: u16, down: bool) -> CoreResult<()> {
-			// SAFETY: MapVirtualKeyW is a pure scalar lookup.
-			let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } & 0xff;
+			// SAFETY: MapVirtualKeyExW is a pure scalar lookup in the receiving
+			// layout.
+			let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, self.layout) } & 0xff;
 			let mut bits = 1u32 | (scan << 16);
 			if is_extended(vk) {
 				bits |= 1 << 24;
@@ -736,17 +716,22 @@ mod background {
 		}
 
 		fn key(&self, key: KeyName, down: bool) -> CoreResult<()> {
-			self.transition(virtual_key(key)?.0, down)
+			self.transition(virtual_key(key, self.layout)?.0, down)
 		}
 	}
 
 	/// Refuses background input holding a modifier before anything is posted:
-	/// see [`posted_modifiers_dropped`]. Every key was already resolved.
-	fn ensure_unmodified(hwnd: HWND, keys: impl IntoIterator<Item = KeyName>) -> CoreResult<()> {
-		let keys = keys
-			.into_iter()
-			.map(|key| (key, virtual_key(key).map_or(0, |(_, implicit)| implicit)));
-		posted_modifiers_dropped(keys).map_or(Ok(()), |reason| {
+	/// see [`super::super::keyboard::posted_keys_dropped`]. Every key was
+	/// already resolved.
+	fn ensure_unmodified(
+		hwnd: HWND,
+		layout: super::HKL,
+		keys: impl IntoIterator<Item = KeyName>,
+	) -> CoreResult<()> {
+		super::super::keyboard::posted_keys_dropped(keys, layout, |key, layout| {
+			virtual_key(key, layout).map_or(0, |(_, implicit)| implicit)
+		})
+		.map_or(Ok(()), |reason| {
 			// Name the top-level window the caller selected, not the control.
 			let root = window::root(hwnd);
 			let class = window::class_name(root);
@@ -763,8 +748,9 @@ mod background {
 		keys: &[KeyName],
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
+		let mut emitter = KeyEmitter { hwnd, layout: super::keyboard_layout(Some(hwnd)) };
 		for &key in keys {
-			virtual_key(key)?;
+			virtual_key(key, emitter.layout)?;
 		}
 		if !keys.is_empty() {
 			let class = window::class_name(hwnd);
@@ -782,8 +768,7 @@ mod background {
 				)));
 			}
 		}
-		ensure_unmodified(hwnd, keys.iter().copied())?;
-		let mut emitter = KeyEmitter { hwnd };
+		ensure_unmodified(hwnd, emitter.layout, keys.iter().copied())?;
 		with_held_keys(
 			&mut emitter,
 			keys.iter().copied(),
@@ -824,9 +809,6 @@ mod background {
 		held: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		control::check()?;
-		for &key in keys {
-			virtual_key(key)?;
-		}
 		let root = hwnd(id)?;
 		let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
 			EventKind::KeyCombo
@@ -834,7 +816,10 @@ mod background {
 			EventKind::Keystroke
 		};
 		let mut emitter = KeyEmitter::to(id, root, element, kind)?;
-		ensure_unmodified(emitter.hwnd, keys.iter().copied())?;
+		for &key in keys {
+			virtual_key(key, emitter.layout)?;
+		}
+		ensure_unmodified(emitter.hwnd, emitter.layout, keys.iter().copied())?;
 		with_held_keys(
 			&mut emitter,
 			keys.iter().copied(),
@@ -899,7 +884,7 @@ mod foreground {
 				MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
 				MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
 				MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-				MapVirtualKeyW, SendInput, VK_RETURN,
+				MapVirtualKeyExW, SendInput, VK_RETURN,
 			},
 			WindowsAndMessaging::{
 				GA_ROOTOWNER, GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
@@ -1300,7 +1285,7 @@ mod foreground {
 			PointerEvent::Hold { x, y, button, keys, duration } => {
 				let at = move_event(x, y)?;
 				let (down, up) = button_flags(button);
-				with_keys(target, &keys, || {
+				with_keys(Some(target), &keys, || {
 					send_to(target, &[at, mouse_event(down, 0)])?;
 					let held = control::wait(duration);
 					let released = control::cleanup(|| send(&[mouse_event(up, 0)]));
@@ -1315,7 +1300,7 @@ mod foreground {
 				};
 				let start = move_event(x, y)?;
 				let (down, up) = button_flags(button);
-				with_keys(target, &keys, || {
+				with_keys(Some(target), &keys, || {
 					send_to(target, &[start, mouse_event(down, 0)])?;
 					let movement = path.iter().skip(1).try_for_each(|&(x, y)| {
 						control::wait(DRAG_STEP)?;
@@ -1360,9 +1345,9 @@ mod foreground {
 
 	/// Virtual-key transition carrying the hardware scan code and extended
 	/// flag, for applications that read scan codes rather than virtual keys.
-	fn key_event(vk: u16, up: bool) -> INPUT {
-		// SAFETY: MapVirtualKeyW is a pure scalar lookup.
-		let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } as u16;
+	fn key_event(vk: u16, up: bool, layout: super::HKL) -> INPUT {
+		// SAFETY: MapVirtualKeyExW is a scalar lookup on this layout.
+		let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, layout) } as u16;
 		let mut flags = if up { KEYEVENTF_KEYUP } else { 0 };
 		if background::is_extended(vk) {
 			flags |= KEYEVENTF_EXTENDEDKEY;
@@ -1387,7 +1372,7 @@ mod foreground {
 	/// Once every press is in, only `operation` can still be cancelled: a
 	/// chord's shortcut has fired by then.
 	fn holding(
-		target: HWND,
+		target: Option<HWND>,
 		presses: &[INPUT],
 		releases: &[INPUT],
 		operation: impl FnOnce() -> CoreResult<()>,
@@ -1395,7 +1380,10 @@ mod foreground {
 		let mut held = 0;
 		let result = (|| {
 			for press in presses {
-				send_to(target, std::slice::from_ref(press))?;
+				match target {
+					Some(target) => send_to(target, std::slice::from_ref(press))?,
+					None => send(std::slice::from_ref(press))?,
+				}
 				held += 1;
 			}
 			operation()
@@ -1416,20 +1404,21 @@ mod foreground {
 		modifiers: Modifiers,
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
+		let layout = super::keyboard_layout(Some(target));
 		let mut keys = Vec::with_capacity(4);
 		for key in super::modifier_keys(modifiers) {
-			keys.push(background::virtual_key(key)?.0);
+			keys.push(background::virtual_key(key, layout)?.0);
 		}
 		let presses = keys
 			.iter()
-			.map(|&vk| key_event(vk, false))
+			.map(|&vk| key_event(vk, false, layout))
 			.collect::<Vec<_>>();
 		let releases = keys
 			.iter()
 			.rev()
-			.map(|&vk| key_event(vk, true))
+			.map(|&vk| key_event(vk, true, layout))
 			.collect::<Vec<_>>();
-		holding(target, &presses, &releases, operation)
+		holding(Some(target), &presses, &releases, operation)
 	}
 
 	/// Takeover chord for window `id`. `focus` runs once the user's foreground
@@ -1454,54 +1443,63 @@ mod foreground {
 		focus: impl FnOnce() -> CoreResult<()>,
 		held: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		// Resolve all key names before activation or input.
-		for &key in keys {
-			background::virtual_key(key)?;
-		}
 		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
 			focus()?;
-			with_keys(target, keys, held)
+			with_keys(Some(target), keys, held)
 		})
 	}
 
+	pub(super) fn with_desktop_keys(
+		keys: &[KeyName],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		with_keys(None, keys, operation)
+	}
+
 	fn with_keys(
-		target: HWND,
+		target: Option<HWND>,
 		keys: &[KeyName],
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		control::check()?;
+		// Focus may move to an embedded control on a different UI thread.
+		// Resolve every key there before holding() can send any input.
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let receiver = target.unwrap_or_else(|| unsafe { GetForegroundWindow() });
+		let receiver = window::focused_descendant(receiver).unwrap_or(receiver);
+		let layout = super::keyboard_layout(Some(receiver));
 		let mut virtual_keys = Vec::with_capacity(keys.len().saturating_mul(2));
 		for &key in keys {
 			control::check()?;
-			let (vk, implicit) = background::virtual_key(key)?;
+			let (vk, implicit) = background::virtual_key(key, layout)?;
 			if implicit & 1 != 0 {
-				virtual_keys.push(background::virtual_key(KeyName::Shift)?.0);
+				virtual_keys.push(background::virtual_key(KeyName::Shift, layout)?.0);
 			}
 			if implicit & 2 != 0 {
-				virtual_keys.push(background::virtual_key(KeyName::Ctrl)?.0);
+				virtual_keys.push(background::virtual_key(KeyName::Ctrl, layout)?.0);
 			}
 			if implicit & 4 != 0 {
-				virtual_keys.push(background::virtual_key(KeyName::Alt)?.0);
+				virtual_keys.push(background::virtual_key(KeyName::Alt, layout)?.0);
 			}
 			virtual_keys.push(vk);
 		}
 		let presses = virtual_keys
 			.iter()
-			.map(|&vk| key_event(vk, false))
+			.map(|&vk| key_event(vk, false, layout))
 			.collect::<Vec<_>>();
 		let releases = virtual_keys
 			.iter()
 			.rev()
-			.map(|&vk| key_event(vk, true))
+			.map(|&vk| key_event(vk, true, layout))
 			.collect::<Vec<_>>();
 		holding(target, &presses, &releases, operation)
 	}
 
-	fn text_events(unit: TextUnit, events: &mut [INPUT; 4]) -> &[INPUT] {
+	fn text_events(unit: TextUnit, events: &mut [INPUT; 4], layout: super::HKL) -> &[INPUT] {
 		match unit {
 			TextUnit::Enter => {
-				events[0] = key_event(VK_RETURN, false);
-				events[1] = key_event(VK_RETURN, true);
+				events[0] = key_event(VK_RETURN, false, layout);
+				events[1] = key_event(VK_RETURN, true, layout);
 				&events[..2]
 			},
 			TextUnit::Char(character) => {
@@ -1523,11 +1521,12 @@ mod foreground {
 	}
 
 	fn send_text(target: Option<HWND>, text: &str) -> CoreResult<()> {
+		let layout = super::keyboard_layout(target);
 		let mut events = [unicode_event(0, false); 4];
 		for grapheme in graphemes_str(text) {
 			control::check()?;
 			for unit in text_units(grapheme) {
-				let events = text_events(unit, &mut events);
+				let events = text_events(unit, &mut events, layout);
 				match target {
 					Some(target) => send_to(target, events)?,
 					None => send(events)?,
@@ -1591,7 +1590,8 @@ mod foreground {
 		}
 		// SAFETY: no preconditions.
 		let before = unsafe { GetKeyState(i32::from(DRAIN_KEY)) } & 1;
-		let marker = [key_event(DRAIN_KEY, false), key_event(DRAIN_KEY, true)];
+		let layout = super::keyboard_layout(Some(reader));
+		let marker = [key_event(DRAIN_KEY, false, layout), key_event(DRAIN_KEY, true, layout)];
 		// The text is out, so the marker goes even after a cancel that came
 		// since; the wait below ends on it.
 		// SAFETY: `marker` is an initialized INPUT slice copied synchronously.
@@ -1701,19 +1701,20 @@ mod foreground {
 
 		#[test]
 		fn text_packets_keep_surrogates_and_return_transitions_together() {
+			let layout = std::ptr::null_mut();
 			let mut storage = [unicode_event(0, false); 4];
-			let emoji = text_events(TextUnit::Char('\u{1f600}'), &mut storage);
+			let emoji = text_events(TextUnit::Char('\u{1f600}'), &mut storage, layout);
 			assert_eq!(emoji.len(), 4);
 			let pending = pending_releases(&emoji[..3]);
 			assert_eq!(pending.len(), 1);
 			assert!(same_release(&pending[0], &unicode_event(0xde00, true)));
 			assert!(pending_releases(emoji).is_empty());
 
-			let enter = text_events(TextUnit::Enter, &mut storage);
+			let enter = text_events(TextUnit::Enter, &mut storage, layout);
 			assert_eq!(enter.len(), 2);
 			let pending = pending_releases(&enter[..1]);
 			assert_eq!(pending.len(), 1);
-			assert!(same_release(&pending[0], &key_event(VK_RETURN, true)));
+			assert!(same_release(&pending[0], &key_event(VK_RETURN, true, layout)));
 			assert!(pending_releases(enter).is_empty());
 		}
 
@@ -1850,9 +1851,6 @@ pub(super) fn hold_keys(
 	mode: DeliveryMode,
 ) -> CoreResult<()> {
 	control::check()?;
-	for &key in keys {
-		background::virtual_key(key)?;
-	}
 	match target {
 		Target::Desktop | Target::Display(_) => {
 			with_global_keys(global, keys, |_| control::wait(duration))

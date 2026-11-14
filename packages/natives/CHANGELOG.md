@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows computer keys and shortcuts typing the wrong characters when the receiving control, including an embedded editor on another UI thread, uses a different keyboard layout from omp ([#19025](https://github.com/can1357/oh-my-pi/pull/19025) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
