@@ -40,6 +40,7 @@ import type { ApiKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { FallbackParam, MessageCreateParamsStreaming, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
@@ -88,6 +89,7 @@ export interface ApiOptionsMap {
 	"factory-droid-agent": FactoryDroidOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"antigravity-acp": AntigravityCliOptions;
 	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
@@ -1218,12 +1220,36 @@ export interface GeminiNativeContentPayload {
 	content: { role?: string; parts: Record<string, unknown>[]; [key: string]: unknown };
 }
 
+/** Row counts of an agy conversation store at a turn end; truncating to them rewinds the conversation there. */
+export interface AntigravityCliCheckpoint {
+	steps: number;
+	generations: number;
+	executions: number;
+}
+
+/**
+ * Where an Antigravity CLI (`agy`) step ran. Written and read by the
+ * `antigravity-acp` transport: when the transcript diverges from agy's own
+ * history, it rewinds agy's conversation to the newest turn end whose digest
+ * still matches instead of replaying the whole transcript as text.
+ */
+export interface AntigravityCliPayload {
+	type: "antigravityCli";
+	/** agy conversation (ACP session) the step ran in. */
+	conversationId: string;
+	/** Structural digest of the transcript through this message. */
+	digest: string;
+	/** Present on the step that ended agy's turn. */
+	checkpoint?: AntigravityCliCheckpoint;
+}
+
 export type ProviderPayload =
 	| OpenAIResponsesHistoryPayload
 	| AnthropicMessagePayload
 	| AnthropicCompactionPayload
 	| CursorHistoryPayload
-	| GeminiNativeContentPayload;
+	| GeminiNativeContentPayload
+	| AntigravityCliPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
