@@ -2813,18 +2813,20 @@ export class ModelRegistry {
 				createOptions: oauthToken =>
 					googleAntigravityModelManagerOptions({
 						resolveAccounts: async () => {
-							const accounts = await resolveOAuthDiscoveryAccounts(
+							const resolved = await resolveOAuthDiscoveryAccounts(
 								this.authStorage,
 								"google-antigravity",
 								oauthToken,
 							);
-							return (
-								accounts?.map(account => ({
+							if (!resolved) return null;
+							return {
+								accounts: resolved.accounts.map(account => ({
 									accessToken: account.accessToken,
 									accountKey: oauthAccountKey(account),
 									projectId: account.projectId,
-								})) ?? null
-							);
+								})),
+								partial: resolved.partial,
+							};
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
 						fetch: this.#fetch,
@@ -2860,8 +2862,10 @@ export class ModelRegistry {
 					if (officialCredential || isOfficialCodexApiUrl(configuredBaseUrl)) {
 						return openaiCodexModelManagerOptions({
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
-							resolveAccounts: () =>
-								resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken),
+							// Codex has no `on-use-only` refresh rule, so its account set is never partial.
+							resolveAccounts: async () =>
+								(await resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken))
+									?.accounts ?? null,
 							fetch: this.#fetch,
 						});
 					}

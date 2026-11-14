@@ -4,7 +4,7 @@ import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import { createNativeJudge } from "@oh-my-pi/pi-ai/judgment";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -12,7 +12,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -799,6 +799,69 @@ describe("ModelRegistry runtime discovery", () => {
 		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
 		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
 		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
+	});
+
+	test("Antigravity discovery refreshes no expired account and caches the valid accounts' union as non-authoritative", async () => {
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
+		// `refresh { on-use-only #true }`: refreshing every pooled account from one host
+		// with no request behind it links the accounts, so discovery must not do it.
+		await authStorage.credentials.set(
+			"google-antigravity",
+			["a", "b", "c"].map((name, index) => ({
+				type: "oauth" as const,
+				access: `token-${name}`,
+				refresh: `refresh-${name}`,
+				expires: index === 0 ? Date.now() + 3_600_000 : Date.now() - 60_000,
+				email: `${name}@example.com`,
+				projectId: `project-${name}`,
+			})),
+		);
+		const rosterCalls: string[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			if (String(input).includes(":fetchAvailableModels")) {
+				const authorization = new Headers(init?.headers).get("authorization") ?? "";
+				rosterCalls.push(authorization);
+				return Response.json({
+					models: { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } },
+				});
+			}
+			return new Response("version: 2.19.1\n");
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("google-antigravity", "online");
+
+		expect(refreshCalls).toEqual([]);
+		expect(rosterCalls).toEqual(["Bearer token-a"]);
+		expect(registry.find("google-antigravity", "gemini-3.1-pro")?.accountAccess).toEqual({ "a@example.com": {} });
+		// The expired accounts' rosters were not read, so the union must not stand for the whole catalog.
+		const cache = readModelCache<Api>("google-antigravity", 24 * 60 * 60 * 1000, Date.now, cacheDbPath);
+		expect(cache?.models.some(model => model.id === "gemini-3.1-pro")).toBe(true);
+		expect(cache?.authoritative).toBe(false);
+		// …nor prune bundled rows that an unread account may serve.
+		expect(registry.find("google-antigravity", "claude-sonnet-5-5")).toBeDefined();
+	});
+
+	test("Codex discovery still refreshes every expired account (no on-use-only rule)", async () => {
+		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", access: "fresh-codex", refresh: "refresh-fresh", expires: Date.now() + 3_600_000 },
+			{ type: "oauth", access: "expired-codex-1", refresh: "refresh-1", expires: Date.now() - 60_000 },
+			{ type: "oauth", access: "expired-codex-2", refresh: "refresh-2", expires: Date.now() - 60_000 },
+		]);
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.startsWith("https://chatgpt.com/backend-api") && url.includes("/models")) {
+				return Response.json({ models: [] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("openai-codex", "online");
+
+		expect(refreshCalls).toEqual(["openai-codex", "openai-codex"]);
 	});
 
 	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {

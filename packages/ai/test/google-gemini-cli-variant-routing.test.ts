@@ -229,10 +229,12 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		);
 		try {
 			const options = googleAntigravityModelManagerOptions({
-				resolveAccounts: async () => [
-					{ accessToken: "token-a", accountKey: "a@example.com" },
-					{ accessToken: "token-b", accountKey: "b@example.com" },
-				],
+				resolveAccounts: async () => ({
+					accounts: [
+						{ accessToken: "token-a", accountKey: "a@example.com" },
+						{ accessToken: "token-b", accountKey: "b@example.com" },
+					],
+				}),
 				endpoint: "https://cca.test",
 				fetch: fetcher,
 			});
@@ -410,7 +412,7 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		);
 		try {
 			const options = googleAntigravityModelManagerOptions({
-				resolveAccounts: async () => [{ accessToken: "token", accountKey: "a@example.com" }],
+				resolveAccounts: async () => ({ accounts: [{ accessToken: "token", accountKey: "a@example.com" }] }),
 				endpoint: "https://cca.test",
 				fetch: fetcher,
 			});
