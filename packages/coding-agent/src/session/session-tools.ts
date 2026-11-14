@@ -924,6 +924,11 @@ export class SessionTools {
 		);
 		return alias && this.#wrapToolForAcpPermission(alias);
 	}
+	/** Restricted task side-call reserved for explicit host grants; does not change the model-enabled tool set. */
+	wrapTrustedTask(task: AgentTool): AgentTool {
+		if (task.name !== "task") throw new Error("Controlled side-call can only use the native task");
+		return this.#wrapToolForAcpPermission(task);
+	}
 
 	/** Canonical and unambiguous wire names accepted by the eval bridge. */
 	getEvalBridgeToolNames(): string[] {

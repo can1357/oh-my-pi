@@ -93,6 +93,7 @@ import type {
 	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
+	RegisteredTaskObservation,
 	RegisteredTool,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
@@ -600,6 +601,17 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
 });
 
+/** Preserves the originating tool call ID when a controlled task fails so callers can reconcile read-only. */
+export class RegisteredTaskInvocationError extends Error {
+	constructor(
+		readonly toolCallId: string,
+		cause: unknown,
+	) {
+		super(`Controlled task ${toolCallId} failed: ${String(cause)}`, { cause });
+		this.name = "RegisteredTaskInvocationError";
+	}
+}
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -768,6 +780,77 @@ export class ExtensionRunner {
 	 */
 	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
 	#toolCallPreflight?: ToolCallPreflight;
+	#registeredTaskInvoker?: (
+		extensionPath: string,
+		outerToolCallId: string,
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+	) => Promise<{ toolCallId: string; result: AgentToolResult }>;
+	#registeredTaskQuery?: (extensionPath: string, outerToolCallId: string) => RegisteredTaskObservation[];
+	#registeredTaskInputs = new Map<string, unknown>();
+	/** Whether this outer tool call ID belongs to a controlled native task invocation. */
+	isRegisteredTask(toolCallId: string): boolean {
+		return this.#registeredTaskInputs.has(toolCallId);
+	}
+	#registeredTaskExtensions = new Set<string>();
+
+	/** Record the principals allowed to invoke the native task from inside a tool call. */
+	authorizeRegisteredTaskExtensions(paths: readonly string[]): void {
+		this.#registeredTaskExtensions = new Set(paths);
+	}
+
+	canInvokeRegisteredTask(extensionPath: string): boolean {
+		return this.#registeredTaskInvoker !== undefined && this.#registeredTaskExtensions.has(extensionPath);
+	}
+
+	setRegisteredTaskInvoker(
+		invoker: (
+			extensionPath: string,
+			outerToolCallId: string,
+			params: Record<string, unknown>,
+			signal?: AbortSignal,
+		) => Promise<{ toolCallId: string; result: AgentToolResult }>,
+	): void {
+		this.#registeredTaskInvoker = invoker;
+	}
+
+	/** Snapshot the approved arguments of a controlled task call for tamper detection. */
+	setRegisteredTaskInput(toolCallId: string, params: unknown): void {
+		this.#registeredTaskInputs.set(toolCallId, structuredClone(params));
+	}
+
+	checkRegisteredTaskInput(toolCallId: string, params: unknown): void {
+		const expected = this.#registeredTaskInputs.get(toolCallId);
+		if (expected !== undefined && !Bun.deepEquals(expected, params)) {
+			throw new Error("Controlled task arguments were modified before approval");
+		}
+	}
+
+	clearRegisteredTaskInput(toolCallId: string): void {
+		this.#registeredTaskInputs.delete(toolCallId);
+	}
+
+	setRegisteredTaskQuery(
+		query: (extensionPath: string, outerToolCallId: string) => RegisteredTaskObservation[],
+	): void {
+		this.#registeredTaskQuery = query;
+	}
+
+	queryRegisteredTask(extensionPath: string, outerToolCallId: string): RegisteredTaskObservation[] {
+		if (!this.canInvokeRegisteredTask(extensionPath) || !this.#registeredTaskQuery)
+			throw new Error("Controlled task queries are unavailable");
+		return this.#registeredTaskQuery(extensionPath, outerToolCallId);
+	}
+
+	invokeRegisteredTask(
+		extensionPath: string,
+		outerToolCallId: string,
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+	) {
+		if (!this.#registeredTaskInvoker) throw new Error("Controlled task invocation is unavailable");
+		return this.#registeredTaskInvoker(extensionPath, outerToolCallId, params, signal);
+	}
 
 	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
 	setNativeToolResolver(

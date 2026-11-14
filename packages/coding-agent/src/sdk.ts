@@ -11,6 +11,7 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
+	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -125,6 +126,8 @@ import {
 	loadExtensionFromFactory,
 	loadExtensions,
 	type PreparedExtension,
+	REGISTERED_TASK_ENTRY,
+	RegisteredTaskInvocationError,
 	type RegisteredTool,
 	type ToolDefinition,
 	wrapRegisteredTools,
@@ -584,6 +587,24 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 	}
 }
 
+function freezeRegisteredTaskInput(input: unknown): void {
+	if (input === null || typeof input !== "object" || Object.isFrozen(input)) return;
+	for (const nested of Object.values(input)) freezeRegisteredTaskInput(nested);
+	Object.freeze(input);
+}
+type RegisteredTaskRecord =
+	| { kind: "intent"; sessionId: string; extensionPath: string; outerToolCallId: string; toolCallId: string }
+	| { kind: "jobs"; sessionId: string; toolCallId: string; jobIds: string[] };
+
+function isRegisteredTaskRecord(value: unknown): value is RegisteredTaskRecord {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (typeof record.sessionId !== "string" || typeof record.toolCallId !== "string") return false;
+	if (record.kind === "intent")
+		return typeof record.extensionPath === "string" && typeof record.outerToolCallId === "string";
+	return record.kind === "jobs" && Array.isArray(record.jobIds) && record.jobIds.every(id => typeof id === "string");
+}
+
 // Types
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
@@ -596,6 +617,8 @@ export interface CreateAgentSessionOptions {
 	spawns?: string;
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
+	/** Grants only the named custom tools of a restricted SDK session the hidden native task side-call. */
+	trustedTaskDelegationTools?: readonly string[];
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -1493,6 +1516,8 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
 		localProtocolOptions: ctx.localProtocolOptions,
+		invokeRegisteredTask: ctx.invokeRegisteredTask,
+		queryRegisteredTask: ctx.queryRegisteredTask,
 	};
 }
 
@@ -2497,6 +2522,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	const trustedSideTaskTools = options.trustedTaskDelegationTools ?? [];
+	if (trustedSideTaskTools.length > 0) {
+		if (
+			!restrictToolNames ||
+			options.allowRestrictedCustomTools !== true ||
+			normalizeToolNames(options.toolNames ?? []).includes("task")
+		) {
+			throw new Error(
+				"Controlled SDK task delegation requires a restricted tool set and must not expose the native task",
+			);
+		}
+		if (
+			new Set(trustedSideTaskTools).size !== trustedSideTaskTools.length ||
+			trustedSideTaskTools.some(
+				name =>
+					!options.toolNames?.includes(name) ||
+					options.customTools?.filter(tool => tool.name === name && !isLegacyBuiltinToolDefinition(tool))
+						.length !== 1,
+			)
+		) {
+			throw new Error("Controlled SDK task delegation must bind to exactly one enabled SDK tool");
+		}
+	}
 	// The session tree shares one cost gate: a subagent is given its parent's; a root
 	// session owns one that follows its session file. Read it per request, so a request
 	// lands on the gate of the session file it was sent for.
@@ -2843,6 +2891,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
+		const sideNativeTask = trustedSideTaskTools.length > 0 ? await BUILTIN_TOOLS.task(toolSession) : undefined;
+		if (trustedSideTaskTools.length > 0 && (!sideNativeTask || toolRegistry.has("task"))) {
+			throw new Error("Native task side-call is unavailable or already exposed");
+		}
 		const initialBrowserPreludeAvailable = shouldFilterBrowserMCPForPrelude({
 			restrictToolNames,
 			browserEnabled: cfgBrowserEnabled.get(settings),
@@ -3921,6 +3973,103 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		for (const tool of toolRegistry.values()) {
 			toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
 		}
+		const sideTask = sideNativeTask
+			? new ExtensionToolWrapper(wrapToolWithMetaNotice(sideNativeTask), extensionRunner)
+			: undefined;
+		extensionRunner.authorizeRegisteredTaskExtensions(trustedSideTaskTools.map(name => `<sdk>:${name}`));
+		const registeredTaskSessions = new Map<string, { sessionId: string; sessionFile: string }>();
+		const persistRegisteredTaskRecord = async (
+			record: RegisteredTaskRecord,
+			expected: { sessionId: string; sessionFile: string },
+		): Promise<void> => {
+			const sameSession = () =>
+				sessionManager.getSessionId() === expected.sessionId &&
+				sessionManager.getSessionFile() === expected.sessionFile;
+			if (!sameSession()) throw new Error("Controlled task session changed");
+			await sessionManager.ensureOnDisk();
+			if (!sameSession()) throw new Error("Controlled task session changed");
+			sessionManager.appendCustomEntry(REGISTERED_TASK_ENTRY, record);
+			await sessionManager.flush();
+			if (!sameSession()) throw new Error("Controlled task session changed");
+		};
+		toolSession.isRegisteredTask = toolCallId => extensionRunner.isRegisteredTask(toolCallId);
+		toolSession.persistRegisteredTaskJobs = async (toolCallId, jobIds) => {
+			const expected = registeredTaskSessions.get(toolCallId);
+			if (!expected) throw new Error("Controlled task persistence intent is missing");
+			await persistRegisteredTaskRecord(
+				{ kind: "jobs", sessionId: expected.sessionId, toolCallId, jobIds },
+				expected,
+			);
+		};
+		extensionRunner.setRegisteredTaskQuery((extensionPath, outerToolCallId) => {
+			const sessionId = sessionManager.getSessionId();
+			const records = sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === REGISTERED_TASK_ENTRY)
+				.map(entry => (entry.type === "custom" ? entry.data : undefined))
+				.filter(isRegisteredTaskRecord)
+				.filter(record => record.sessionId === sessionId);
+			return records
+				.filter(
+					record =>
+						record.kind === "intent" &&
+						record.extensionPath === extensionPath &&
+						record.outerToolCallId === outerToolCallId,
+				)
+				.map(intent => {
+					const bindings = records.filter(
+						record => record.kind === "jobs" && record.toolCallId === intent.toolCallId,
+					);
+					const jobIds = bindings.length === 1 && bindings[0]?.kind === "jobs" ? bindings[0].jobIds : [];
+					const jobs = jobIds.map(id => {
+						const job = session.asyncJobManager?.getJob(id);
+						return { id, status: job?.toolCallId === intent.toolCallId ? job.status : ("unknown" as const) };
+					});
+					return {
+						toolCallId: intent.toolCallId,
+						jobIds,
+						jobs,
+						state:
+							jobs.length > 0 && jobs.every(job => job.status !== "unknown")
+								? ("observed" as const)
+								: ("unknown" as const),
+					};
+				});
+		});
+		extensionRunner.setRegisteredTaskInvoker(async (extensionPath, outerToolCallId, params, signal) => {
+			if (!extensionRunner.canInvokeRegisteredTask(extensionPath)) {
+				throw new Error("Controlled task is not authorized or is no longer the native tool");
+			}
+			const task = sideTask && session.wrapTrustedTask(sideTask);
+			if (!task || task.name !== "task") throw new Error("Native task is not enabled");
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Controlled task delegation requires a persistent session");
+			const expected = { sessionId: sessionManager.getSessionId(), sessionFile };
+			const toolCallId = `extension-task-${crypto.randomUUID()}`;
+			const input = validateAgentToolArguments(task, {
+				type: "toolCall",
+				id: toolCallId,
+				name: "task",
+				arguments: structuredClone(params),
+			});
+			try {
+				await persistRegisteredTaskRecord(
+					{ kind: "intent", sessionId: expected.sessionId, extensionPath, outerToolCallId, toolCallId },
+					expected,
+				);
+				signal?.throwIfAborted();
+				registeredTaskSessions.set(toolCallId, expected);
+				extensionRunner.setRegisteredTaskInput(toolCallId, input);
+				freezeRegisteredTaskInput(input);
+				const result = await task.execute(toolCallId, input, signal, undefined, toolContextStore.getContext());
+				return { toolCallId, result };
+			} catch (error) {
+				throw new RegisteredTaskInvocationError(toolCallId, error);
+			} finally {
+				registeredTaskSessions.delete(toolCallId);
+				extensionRunner.clearRegisteredTaskInput(toolCallId);
+			}
+		});
 		// Image and speech generation are optional custom tools gated by live settings.
 		// They install here, not through the custom-tools extension, so the settings
 		// reconcile can add and remove exactly the entries it owns and never a

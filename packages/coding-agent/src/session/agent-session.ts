@@ -7513,6 +7513,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		return this.#tools.getToolForEvalBridge(name);
 	}
+	/** Restricted task side-call reserved for explicit host authorization. */
+	wrapTrustedTask(task: AgentTool): AgentTool {
+		return this.#tools.wrapTrustedTask(task);
+	}
 
 	/** Names currently authorized through the eval bridge. */
 	getEvalBridgeToolNames(): string[] {

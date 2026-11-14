@@ -1,0 +1,103 @@
+import { it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { createAgentSession, type CustomTool } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as executor from "@oh-my-pi/pi-coding-agent/task/executor";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import * as fs from "node:fs/promises";
+
+it("aborts the process at the real host boundary for the parent test", async () => {
+	const root = Bun.env.OMP_REGISTERED_TASK_PROBE_ROOT;
+	const stage = Bun.env.OMP_REGISTERED_TASK_PROBE_STAGE;
+	if (!root || (stage !== "before" && stage !== "after")) throw new Error("Missing isolation experiment arguments");
+	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+		agents: [{ name: "task", description: "Task worker", systemPrompt: "Worker", source: "bundled" }],
+		projectAgentsDir: null,
+	});
+	vi.spyOn(executor, "runSubprocess").mockImplementation(async () => {
+		if (stage === "after") {
+			const parentSessionFile = session.sessionManager.getSessionFile();
+			const entries = await fs.readdir(root, { withFileTypes: true });
+			const sessionFiles = entries
+				.filter(entry => entry.isFile() && entry.name.endsWith(".jsonl"))
+				.map(entry => `${root}/${entry.name}`);
+			await Bun.write(`${root}/probe-state.json`, JSON.stringify({ parentSessionFile, sessionFiles }));
+			process.stdout.write(`PROBE_READY:${parentSessionFile}\n`);
+			const wait = Promise.withResolvers<void>();
+			await wait.promise;
+		}
+		throw new Error("Isolation experiment must not run the model");
+	});
+	if (stage === "before") {
+		const register = AsyncJobManager.prototype.register;
+		vi.spyOn(AsyncJobManager.prototype, "register").mockImplementation(
+			function (this: AsyncJobManager, type, label, run, options) {
+				if (type === "task") {
+					process.stdout.write(`PROBE_READY:${session.sessionManager.getSessionFile()}\n`);
+					const wait = new Int32Array(new SharedArrayBuffer(4));
+					for (;;) Atomics.wait(wait, 0, 0, 1000);
+				}
+				return register.call(this, type, label, run, options);
+			},
+		);
+	}
+	const hookExtension: ExtensionFactory = pi => {
+		const pauseAfterResult = async () => {
+			if (stage !== "after") return;
+			await Promise.withResolvers<void>().promise;
+		};
+		pi.on("tool_result", async event => {
+			if (event.toolName === "task") await pauseAfterResult();
+		});
+	};
+	const manager: CustomTool = {
+		name: "manager_test",
+		label: "Manager",
+		description: "Delegate an inspection.",
+		parameters: type({ agent: "string", name: "string", task: "string" }),
+		async execute(_id, args, _onUpdate, ctx) {
+			if (!ctx.invokeRegisteredTask) throw new Error("missing task grant");
+			return (await ctx.invokeRegisteredTask(args as Record<string, unknown>)).result;
+		},
+	};
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime("mock", "test-key");
+	const { session } = await createAgentSession({
+		cwd: root,
+		agentDir: root,
+		modelRegistry: new ModelRegistry(auth),
+		model: createMockModel({ responses: [] }),
+		sessionManager: SessionManager.create(root, root),
+		settings: Settings.isolated({
+			"async.enabled": true,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+		}),
+		preloadedPreparedExtensions: [
+			{ path: "<inline-0>", resolvedPath: "<inline-0>", factory: hookExtension, error: null },
+		],
+		restrictToolNames: true,
+		allowRestrictedCustomTools: true,
+		customTools: [manager],
+		trustedTaskDelegationTools: ["manager_test"],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+		toolNames: ["manager_test"],
+	});
+	const tool = session.getToolForEvalBridge("manager_test");
+	if (!tool) throw new Error("manager tool unavailable");
+	await tool.execute("outer-crash", { agent: "task", name: "crash-job", task: "Inspect" });
+}, 120_000);

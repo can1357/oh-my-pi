@@ -373,6 +373,7 @@ it("rejects intercepted bash command before invoking ACP requestPermission", asy
  * interactive UI (so the inner tier gate fails closed) and no event handlers.
  */
 function noUiRunner(): ExtensionRunner {
+	const registeredTaskInputs = new Map<string, unknown>();
 	return {
 		hasHandlers: () => false,
 		consumeToolCallEmitted: () => false,
@@ -381,6 +382,15 @@ function noUiRunner(): ExtensionRunner {
 		sessionId: "acp-permission-test",
 		runScoped<T>(fn: () => T): T {
 			return fn();
+		},
+		checkRegisteredTaskInput(toolCallId: string, params: unknown): void {
+			const expected = registeredTaskInputs.get(toolCallId);
+			if (expected !== undefined && !Bun.deepEquals(expected, params)) {
+				throw new Error("Controlled task arguments were modified before approval");
+			}
+		},
+		isRegisteredTask(toolCallId: string): boolean {
+			return registeredTaskInputs.has(toolCallId);
 		},
 	} as unknown as ExtensionRunner;
 }

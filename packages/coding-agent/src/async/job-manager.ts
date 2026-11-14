@@ -148,6 +148,8 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
+	/** Native tool call identity that started the job. */
+	toolCallId?: string;
 	/**
 	 * Whether this job's turn published the agent's `<agentId>.md` output. A
 	 * follow-up turn that neither yielded nor produced a message result writes
@@ -289,6 +291,10 @@ export interface AsyncJobRegisterOptions {
 	ownerId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
+	/** Native tool call identity that started the job; mirrors {@link AsyncJob.toolCallId}. */
+	toolCallId?: string;
+	/** Internal reservation credential keeping reserved job IDs out of competing registrations while persistence binds. */
+	reservationToken?: string;
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
@@ -388,6 +394,16 @@ export interface AsyncJobManagerApi {
 	isDeliveryPending(jobId: string): boolean;
 	/** True when a foreground snapshot consumed this job's result while its push was still queued. */
 	isDeliverySuperseded(jobId: string): boolean;
+	/**
+	 * Optional capability: synchronously reserve final job IDs before the caller
+	 * persists anything, so controlled task delegation can durably bind identities
+	 * without racing other registrations. Returns a token plus the reserved IDs.
+	 * Only the local {@link AsyncJobManager} implements it; uncommitted
+	 * reservations can be released safely via {@link releaseTaskJobIds}.
+	 */
+	reserveTaskJobIds?(preferredIds: string[]): { token: string; jobIds: string[] };
+	/** Optional capability counterpart of {@link reserveTaskJobIds}. */
+	releaseTaskJobIds?(token: string): void;
 }
 
 export class AsyncJobManager implements AsyncJobManagerApi {
@@ -409,6 +425,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	readonly #jobs = new Map<string, AsyncJob>();
+	readonly #reservedJobIds = new Map<string, string>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
@@ -500,6 +517,25 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		return activeCount >= this.#maxRunningJobs;
 	}
 
+	/** Synchronously reserve final IDs before persistence; uncommitted reservations release safely. */
+	reserveTaskJobIds(preferredIds: string[]): { token: string; jobIds: string[] } {
+		if (this.#disposed) throw new Error("Async job manager is disposed");
+		const token = crypto.randomUUID();
+		const jobIds: string[] = [];
+		for (const preferredId of preferredIds) {
+			const id = this.#resolveJobId(preferredId);
+			this.#reservedJobIds.set(id, token);
+			jobIds.push(id);
+		}
+		return { token, jobIds };
+	}
+
+	releaseTaskJobIds(token: string): void {
+		for (const [id, owner] of this.#reservedJobIds) {
+			if (owner === token) this.#reservedJobIds.delete(id);
+		}
+	}
+
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
@@ -517,6 +553,12 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			);
 		}
 
+		if (options?.reservationToken !== undefined) {
+			if (!options.id || this.#reservedJobIds.get(options.id) !== options.reservationToken) {
+				throw new Error("Invalid job ID reservation");
+			}
+			this.#reservedJobIds.delete(options.id);
+		}
 		const id = this.#claimJobId(options?.id);
 		if (options?.foreground) this.#suppressedDeliveries.add(id);
 		const abortController = new AbortController();
@@ -534,6 +576,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
+			toolCallId: options?.toolCallId,
 			process: options?.process,
 			widgetInputs: options?.widgetInputs,
 			queued: options?.queued === true,
@@ -1080,16 +1123,16 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			while (true) {
 				const id = `bg_${this.#nextAutoId}`;
 				this.#nextAutoId += 1;
-				if (!this.#jobs.has(id)) return id;
+				if (!this.#jobs.has(id) && !this.#reservedJobIds.has(id)) return id;
 			}
 		}
 
 		const base = preferredId.trim();
-		if (!this.#jobs.has(base)) return base;
+		if (!this.#jobs.has(base) && !this.#reservedJobIds.has(base)) return base;
 
 		let suffix = 2;
 		let candidate = `${base}-${suffix}`;
-		while (this.#jobs.has(candidate)) {
+		while (this.#jobs.has(candidate) || this.#reservedJobIds.has(candidate)) {
 			suffix += 1;
 			candidate = `${base}-${suffix}`;
 		}

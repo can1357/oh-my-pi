@@ -1200,6 +1200,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 
+		if (this.session.isRegisteredTask?.(toolCallId) && (!manager || asyncItems.length !== spawnItems.length)) {
+			throw new Error("Controlled task delegations must all be background jobs");
+		}
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
 			// wired a job manager, or every item's agent type declares
@@ -1350,34 +1353,57 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		const started: Array<{ agentId: string; jobId: string }> = [];
 		const failedSchedules: string[] = [];
-		for (const spawn of asyncSpawns) {
-			try {
-				const jobId = this.#registerSpawnJob({
-					manager,
-					toolCallId,
-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
-					agentId: spawn.agentId,
-					run: spawn.run,
-					progress: spawn.progress,
-					ircEnabled,
-					buildDetails: buildAsyncDetails,
-					onUpdate,
-					onSettled: failed => {
-						settledCount += 1;
-						if (failed) failedCount += 1;
-					},
-				});
-				if (started.length === 0) primaryJobId = jobId;
-				started.push({ agentId: spawn.agentId, jobId });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				// An adopted run already executes; without its job nothing would own it.
-				spawn.run?.discard(`background job registration failed: ${message}`);
-				failedSchedules.push(`${spawn.agentId}: ${message}`);
-				spawn.progress.status = "failed";
-				settledCount += 1;
-				failedCount += 1;
+		const controlled = this.session.isRegisteredTask?.(toolCallId) === true;
+		let reservation: { token: string; jobIds: string[] } | undefined;
+		if (controlled) {
+			if (typeof manager.reserveTaskJobIds !== "function") {
+				throw new Error("Controlled task delegation requires a main-thread session job manager");
 			}
+			reservation = manager.reserveTaskJobIds(asyncSpawns.map(spawn => spawn.agentId));
+		}
+		try {
+			if (reservation) {
+				if (!this.session.persistRegisteredTaskJobs)
+					throw new Error("Controlled task persistence binding is unavailable");
+				await this.session.persistRegisteredTaskJobs(toolCallId, reservation.jobIds);
+				signal?.throwIfAborted();
+			}
+			for (const [index, spawn] of asyncSpawns.entries()) {
+				try {
+					const jobId = this.#registerSpawnJob({
+						manager,
+						toolCallId,
+						spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+						agentId: spawn.agentId,
+						reservedJobId: reservation?.jobIds[index],
+						reservationToken: reservation?.token,
+						run: spawn.run,
+						progress: spawn.progress,
+						ircEnabled,
+						buildDetails: buildAsyncDetails,
+						onUpdate,
+						onSettled: failed => {
+							settledCount += 1;
+							if (failed) failedCount += 1;
+						},
+					});
+					if (started.length === 0) primaryJobId = jobId;
+					started.push({ agentId: spawn.agentId, jobId });
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					// An adopted run already executes; without its job nothing would own it.
+					spawn.run?.discard(`background job registration failed: ${message}`);
+					failedSchedules.push(`${spawn.agentId}: ${message}`);
+					spawn.progress.status = "failed";
+					settledCount += 1;
+					failedCount += 1;
+				}
+			}
+		} finally {
+			if (reservation) manager.releaseTaskJobIds?.(reservation.token);
+		}
+		if (controlled && failedSchedules.length > 0) {
+			throw new Error(`Controlled task partially failed to register: ${failedSchedules.join("; ")}`);
 		}
 
 		if (started.length === 0 && syncSpawns.length === 0) {
@@ -1533,6 +1559,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		toolCallId: string;
 		spawnParams: TaskParams;
 		agentId: string;
+		reservedJobId?: string;
+		reservationToken?: string;
 		/** Run already started while the call streamed; the job adopts it instead of launching. */
 		run?: SpawnRun;
 		progress: AgentProgress;
@@ -1546,6 +1574,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			toolCallId,
 			spawnParams,
 			agentId,
+			reservedJobId,
+			reservationToken,
 			run,
 			progress,
 			ircEnabled,
@@ -1729,8 +1759,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			},
 			{
-				id: agentId,
+				id: reservedJobId ?? agentId,
 				agentId,
+				toolCallId,
+				reservationToken,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				widgetInputs: createTaskWidgetInputs({

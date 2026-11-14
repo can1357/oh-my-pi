@@ -26,6 +26,7 @@ import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
+import type { ExtensionContext } from "../extensions/types";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -104,6 +105,9 @@ export interface CustomToolContext {
 	fetch?: FetchImpl;
 	/** Calling session's `local://` root mapping for tools that bridge out of the OMP process. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Available only when the host explicitly grants this SDK tool identity. */
+	invokeRegisteredTask?: ExtensionContext["invokeRegisteredTask"];
+	queryRegisteredTask?: ExtensionContext["queryRegisteredTask"];
 	/** Whether to auto-approve all destructive tool operations (--auto-approve CLI flag) */
 	autoApprove?: boolean;
 }

@@ -29,7 +29,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import type { ExtensionRunner } from "./runner";
+import { RegisteredTaskInvocationError, type ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
@@ -119,24 +119,96 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		onUpdate?: AgentToolUpdateCallback<any>,
 		context?: AgentToolContext,
 	) {
+		const taskPrincipal =
+			this.registeredTool.extensionPath === "<sdk>"
+				? `<sdk>:${this.registeredTool.definition.name}`
+				: this.registeredTool.extensionPath;
+		// Without a controlled-task grant this adapter must behave exactly like the upstream
+		// baseline: pass the result (including undefined) and any thrown error through untouched.
+		if (!this.runner.canInvokeRegisteredTask(taskPrincipal)) {
+			return this.registeredTool.definition.execute(
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				this.runner.createContext(undefined, {
+					toolName: this.registeredTool.definition.name,
+					context,
+					signal,
+					onUpdate,
+				}),
+			);
+		}
 		// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
 		// native built-in of the same name (present only when this tool re-registers a built-in). The
 		// wrapper's own context, abort signal, and progress callback are inherited by the delegated
 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
 		// aborted, and still streams native progress.
-		return this.registeredTool.definition.execute(
-			toolCallId,
-			params,
+		const extensionContext = this.runner.createContext(undefined, {
+			toolName: this.registeredTool.definition.name,
+			context,
 			signal,
 			onUpdate,
-			this.runner.createContext(undefined, {
-				toolName: this.registeredTool.definition.name,
-				context,
+		});
+		let available = true;
+		let active = true;
+		let taskPending = false;
+		let taskPromise: Promise<{ toolCallId: string; result: AgentToolResult }> | undefined;
+		const taskAbort = new AbortController();
+		extensionContext.invokeRegisteredTask = params => {
+			if (!available) throw new Error("Controlled task invocation has already been used or ended");
+			available = false;
+			taskPending = true;
+			const taskSignal = signal ? AbortSignal.any([signal, taskAbort.signal]) : taskAbort.signal;
+			taskPromise = this.runner.invokeRegisteredTask(taskPrincipal, toolCallId, params, taskSignal).finally(() => {
+				taskPending = false;
+			});
+			void taskPromise.catch(() => undefined);
+			return taskPromise;
+		};
+		extensionContext.queryRegisteredTask = outerToolCallId => {
+			if (!active) throw new Error("Controlled task queries have ended");
+			return this.runner.queryRegisteredTask(taskPrincipal, outerToolCallId);
+		};
+		// `threw` is a dedicated flag (not truthiness of the error) so falsy throws such as
+		// `throw undefined` or `throw 0` still propagate.
+		let executionResult: AgentToolResult | undefined;
+		let threw = false;
+		let thrownError: unknown;
+		try {
+			executionResult = await this.registeredTool.definition.execute(
+				toolCallId,
+				params,
 				signal,
 				onUpdate,
-			}),
-		);
+				extensionContext,
+			);
+		} catch (error) {
+			threw = true;
+			thrownError = error;
+		}
+		available = false;
+		active = false;
+		if (taskPending && taskPromise) {
+			taskAbort.abort();
+			try {
+				const receipt = await taskPromise;
+				threw = true;
+				thrownError = new RegisteredTaskInvocationError(
+					receipt.toolCallId,
+					new Error("outer tool finished without awaiting the controlled task"),
+				);
+			} catch (error) {
+				threw = true;
+				thrownError = error;
+			}
+		}
+		if (threw) throw thrownError;
+		// Pass the result through unchanged. The declared `AgentToolResult` return type is the
+		// upstream one; a tool that resolves `undefined` at runtime flows out exactly as it did
+		// before this seam existed.
+		return executionResult as AgentToolResult<any, any>;
 	}
 }
 
@@ -351,6 +423,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				throw new Error(preflight.reason || "Tool execution was blocked by a preflight rule");
 			}
 		}
+		this.runner.checkRegisteredTaskInput(toolCallId, effectiveParams);
 
 		// 2. Full approval gate against the (possibly revised) input that will actually run — resolves
 		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
@@ -526,9 +599,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				details: undefined as TDetails,
 			};
 		}
+		const nativeTaskResult = this.runner.isRegisteredTask(toolCallId) ? structuredClone(result) : undefined;
 		if (!loopDispatchedToolCall) {
 			const postflight = await this.runner.runToolCallPreflightAfter?.(toolCallId, result, context);
 			if (postflight) result = postflight as AgentToolResult<TDetails, TParameters>;
+			if (nativeTaskResult && !Bun.deepEquals(nativeTaskResult, result)) {
+				throw new Error("Native task receipt was modified");
+			}
 		}
 
 		// Emit tool_result event - extensions can modify the result and error status
@@ -548,6 +625,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				},
 				this.#agent,
 			);
+			if (
+				nativeTaskResult &&
+				(!Bun.deepEquals(nativeTaskResult, result) ||
+					resultResult?.content !== undefined ||
+					resultResult?.details !== undefined ||
+					resultResult?.isError !== undefined)
+			) {
+				throw new Error("Native task receipt was modified");
+			}
 
 			// Handler context reports into this call's sink like tool-authored
 			// context: it is delivered even for a failed call (the handler saw

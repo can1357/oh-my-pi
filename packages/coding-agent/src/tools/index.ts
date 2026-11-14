@@ -385,6 +385,9 @@ export interface ToolSession {
 	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
+	/** Persist-bind assigned job identities before the native registration lands. */
+	persistRegisteredTaskJobs?: (toolCallId: string, jobIds: string[]) => Promise<void>;
+	isRegisteredTask?: (toolCallId: string) => boolean;
 	/** Tool names the eval description advertises as callable from cells; frozen with the cached prompt prefix. */
 	getAdvertisedEvalToolNames?: () => readonly string[];
 	/** Return whether a built-in tool is active in this turn's tool set. */
