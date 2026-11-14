@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed background taps on iPhone Mirroring reaching nothing once one takeover tap had gone to the phone ([#17756](https://github.com/can1357/oh-my-pi/pull/17756) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
