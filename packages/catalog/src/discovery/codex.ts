@@ -135,7 +135,8 @@ export interface CodexModelDiscoveryResult {
 export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Promise<CodexModelDiscoveryResult | null> {
 	const explicitClientVersion = normalizeClientVersion(options.clientVersion);
 	// The backend filters the roster by client version; ask with the current release.
-	if (!explicitClientVersion) await ensureCodexClientVersion(options.fetchFn ?? fetch, options.signal);
+	// The npm registry is not Codex: the injected transport only carries provider requests.
+	if (!explicitClientVersion) await ensureCodexClientVersion(fetch, options.signal);
 	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
 	const paths = normalizePaths(options.paths);

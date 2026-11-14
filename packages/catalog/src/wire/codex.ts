@@ -49,7 +49,8 @@ export function getCodexClientVersion(): string {
  * Resolves the latest `@openai/codex` release from npm, so the backend lists
  * the models a current Codex client would see. Skipped entirely when
  * PI_AI_CODEX_VERSION is set; see {@link createVersionLookup} for caching,
- * back-off, and `signal` semantics.
+ * back-off, and `signal` semantics. Callers pass the global fetch: a provider
+ * transport only carries provider requests.
  */
 export function ensureCodexClientVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
 	if (process.env.PI_AI_CODEX_VERSION) return Promise.resolve();

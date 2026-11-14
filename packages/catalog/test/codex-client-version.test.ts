@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { fetchCodexModels } from "@oh-my-pi/pi-catalog/discovery/codex";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
@@ -31,6 +31,28 @@ function codexFetch(latest: () => Response): { fetcher: FetchImpl; requests: Cap
 		{ preconnect: fetch.preconnect },
 	);
 	return { fetcher, requests };
+}
+
+/** A backend-only discovery transport: it serves the Codex roster and rejects any other host. */
+function backendOnlyFetch(): { fetcher: FetchImpl; requests: CapturedRequest[] } {
+	const requests: CapturedRequest[] = [];
+	const fetcher = Object.assign(
+		async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+			const url = String(input);
+			if (!url.startsWith("https://chatgpt.com/backend-api/")) throw new Error(`blocked: ${url}`);
+			requests.push({ url, version: new Headers(init?.headers).get("version") });
+			return new Response(JSON.stringify({ models: [{ slug: "gpt-6.1-terra", visibility: "list" }] }));
+		},
+		{ preconnect: fetch.preconnect },
+	);
+	return { fetcher, requests };
+}
+
+/** Routes the global fetch (the registry lookup's transport) to `latest`, recording the URLs. */
+function stubRegistry(latest: () => Response) {
+	return spyOn(globalThis, "fetch").mockImplementation(
+		Object.assign(async () => latest(), { preconnect: fetch.preconnect }),
+	);
 }
 
 const distTags = (latest: string) => () => new Response(JSON.stringify({ latest, alpha: `${latest}-alpha.1` }));
@@ -74,33 +96,49 @@ describe("Codex client version lookup", () => {
 		expect(getCodexClientVersion()).toBe("0.1.2");
 	});
 
-	it("asks /models with the npm version in both `client_version` and the `version` header", async () => {
-		const { fetcher, requests } = codexFetch(distTags("0.999.1"));
+	it("asks /models with the npm version, looked up through the global fetch, not the discovery transport", async () => {
+		const registry = stubRegistry(distTags("0.999.1"));
+		const { fetcher, requests } = backendOnlyFetch();
 
-		const result = await fetchCodexModels({ accessToken: "test-token", fetchFn: fetcher });
+		try {
+			const result = await fetchCodexModels({ accessToken: "test-token", fetchFn: fetcher });
 
-		expect(result?.models.map(model => model.id)).toEqual(["gpt-6.1-terra"]);
-		expect(requests).toEqual([
-			{ url: DIST_TAGS_URL, version: null },
-			{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.999.1", version: "0.999.1" },
-		]);
+			expect(registry.mock.calls.map(([input]) => String(input))).toEqual([DIST_TAGS_URL]);
+			expect(result?.models.map(model => model.id)).toEqual(["gpt-6.1-terra"]);
+			expect(requests).toEqual([
+				{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.999.1", version: "0.999.1" },
+			]);
+		} finally {
+			registry.mockRestore();
+		}
 	});
 
 	it("keeps an explicit discovery client version without consulting npm", async () => {
-		const { fetcher, requests } = codexFetch(distTags("0.999.1"));
+		const registry = stubRegistry(distTags("0.999.1"));
+		const { fetcher, requests } = backendOnlyFetch();
 
-		await fetchCodexModels({ accessToken: "test-token", clientVersion: "0.150.0", fetchFn: fetcher });
+		try {
+			await fetchCodexModels({ accessToken: "test-token", clientVersion: "0.150.0", fetchFn: fetcher });
 
-		expect(requests).toEqual([
-			{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.150.0", version: "0.150.0" },
-		]);
+			expect(registry).not.toHaveBeenCalled();
+			expect(requests).toEqual([
+				{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.150.0", version: "0.150.0" },
+			]);
+		} finally {
+			registry.mockRestore();
+		}
 	});
 
 	it("keeps the model cache namespace on the pin while discovery sends the npm version", async () => {
 		const pinned = resolveModelCacheProviderId("openai-codex");
-		const { fetcher, requests } = codexFetch(distTags("0.999.1"));
+		const registry = stubRegistry(distTags("0.999.1"));
+		const { fetcher, requests } = backendOnlyFetch();
 
-		await fetchCodexModels({ accessToken: "test-token", fetchFn: fetcher });
+		try {
+			await fetchCodexModels({ accessToken: "test-token", fetchFn: fetcher });
+		} finally {
+			registry.mockRestore();
+		}
 
 		expect(requests.at(-1)?.version).toBe("0.999.1");
 		expect(resolveModelCacheProviderId("openai-codex")).toBe(pinned);
