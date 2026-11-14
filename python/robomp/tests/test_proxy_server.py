@@ -151,10 +151,13 @@ def _signed(
     return {HEADER_TIMESTAMP: timestamp, HEADER_SIGNATURE: sig}
 
 
-def _build_app(cfg: Settings, gh_handler: Callable[[httpx.Request], httpx.Response] | None = None):
+def _build_app(
+    cfg: Settings,
+    gh_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+):
     app = create_proxy_app(cfg)
-    transport = httpx.MockTransport(gh_handler) if gh_handler is not None else None
-    app.state.github = GitHubClient(_TOKEN, transport=transport)
+    gh_transport = httpx.MockTransport(gh_handler) if gh_handler is not None else None
+    app.state.github = GitHubClient(_TOKEN, transport=gh_transport)
     app.state.settings = cfg
     return app
 
@@ -418,6 +421,95 @@ async def test_list_review_comments(proxy_settings: Settings) -> None:
     items = resp.json()["items"]
     assert items[0]["path"] == "a.py"
     assert items[0]["line"] == 5
+
+
+async def test_get_issue_comment(proxy_settings: Settings) -> None:
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/repos/octo/widget/issues/comments/14253"
+        return httpx.Response(
+            200,
+            json={
+                "id": 14253,
+                "user": {"login": "miracodeai-bot"},
+                "body": "the real walkthrough",
+                "created_at": "2026-09-15T16:33:10Z",
+            },
+        )
+
+    app = _build_app(proxy_settings, gh)
+    params = {"repo": "octo/widget", "comment_id": 14253}
+    async with await _async_client(app) as client:
+        resp = await client.get(
+            "/gh/v1/get_issue_comment",
+            params=params,
+            headers=_signed("GET", "/gh/v1/get_issue_comment", params=params),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "id": 14253,
+        "author": "miracodeai-bot",
+        "body": "the real walkthrough",
+        "created_at": "2026-09-15T16:33:10Z",
+    }
+
+
+async def test_get_issue_comment_rejects_unsigned_request(proxy_settings: Settings) -> None:
+    """No HMAC headers → 401 before upstream is touched."""
+
+    def gh(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("upstream called without auth")
+
+    app = _build_app(proxy_settings, gh)
+    async with await _async_client(app) as client:
+        resp = await client.get("/gh/v1/get_issue_comment", params={"repo": "octo/widget", "comment_id": 1})
+    assert resp.status_code == 401
+
+
+async def test_get_pr_review(proxy_settings: Settings) -> None:
+    """Review-summary ids (approve / request-changes verdicts) resolve on the
+    `pulls/{pr}/reviews/{id}` endpoint — verified against Forgejo 16.0.3."""
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/repos/octo/widget/pulls/1686/reviews/555"
+        return httpx.Response(
+            200,
+            json={
+                "id": 555,
+                "user": {"login": "djdembeck"},
+                "body": "## Verdict: changes requested",
+                "state": "REQUEST_CHANGES",
+                "submitted_at": "2026-09-06T00:00:00Z",
+            },
+        )
+
+    app = _build_app(proxy_settings, gh)
+    params = {"repo": "octo/widget", "review_id": 555, "pr_number": 1686}
+    async with await _async_client(app) as client:
+        resp = await client.get(
+            "/gh/v1/get_pr_review",
+            params=params,
+            headers=_signed("GET", "/gh/v1/get_pr_review", params=params),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "id": 555,
+        "author": "djdembeck",
+        "body": "## Verdict: changes requested",
+        "state": "REQUEST_CHANGES",
+        "submitted_at": "2026-09-06T00:00:00Z",
+    }
+
+
+async def test_get_pr_review_rejects_unsigned_request(proxy_settings: Settings) -> None:
+    """No HMAC headers → 401 before upstream is touched."""
+
+    def gh(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("upstream called without auth")
+
+    app = _build_app(proxy_settings, gh)
+    async with await _async_client(app) as client:
+        resp = await client.get("/gh/v1/get_pr_review", params={"repo": "octo/widget", "review_id": 1, "pr_number": 2})
+    assert resp.status_code == 401
 
 
 async def test_list_pr_reviews(proxy_settings: Settings) -> None:
@@ -948,6 +1040,65 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
     assert "workspace_key" in resp.text
 
 
+@pytest.mark.parametrize("origin_host", ["git.example.com:3000", "github.com", "attacker.invalid"])
+async def test_forgejo_release_push_enforces_configured_origin_host(
+    proxy_settings: Settings,
+    upstream_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origin_host: str,
+) -> None:
+    from robomp.git_ops import PushResult
+    from robomp.proxy import server as proxy_server
+
+    proxy_settings.forgejo_token = SecretStr("forgejo-release-pat")
+    proxy_settings.forgejo_repos_raw = "octo/widget"
+    proxy_settings.api_base = "https://git.example.com:3000/api/v1"
+    proxy_settings.git_host = "git.example.com:3000"
+    branch = "release/test"
+    repo_dir, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    origin = f"https://{origin_host}/octo/widget.git"
+    _git(["remote", "set-url", "origin", origin], repo_dir)
+    pushes: list[tuple[Path, dict[str, object]]] = []
+
+    def push_release(path: Path, **kwargs: object) -> PushResult:
+        pushes.append((path, kwargs))
+        return PushResult(head=head, branch=branch)
+
+    monkeypatch.setattr(proxy_server, "git_push_release", push_release)
+    app = _build_app(proxy_settings)
+    endpoint = "/gh/v1/git/push_release"
+    params = {"platform": "forgejo"}
+    body = json.dumps(
+        {
+            "repo": "octo/widget",
+            "workspace_key": "octo__widget__1",
+            "branch": branch,
+            "tag": "v1.2.3",
+            "expected_head": head,
+        }
+    ).encode()
+    async with await _async_client(app) as client:
+        response = await client.post(
+            endpoint,
+            params=params,
+            content=body,
+            headers={**_signed("POST", endpoint, body, params=params), "Content-Type": "application/json"},
+        )
+    if origin_host == proxy_settings.git_host:
+        assert response.status_code == 200, response.text
+        assert response.json() == {"head": head, "branch": branch, "tag": "v1.2.3"}
+        assert len(pushes) == 1
+        path, kwargs = pushes[0]
+        assert path == repo_dir
+        assert kwargs["remote_url"] == origin
+        assert kwargs["auth_url"] == origin
+        assert kwargs["token"] == "forgejo-release-pat"
+        assert kwargs["git_auth_username"] == "git"
+    else:
+        assert response.status_code == 400, response.text
+        assert pushes == []
+
+
 async def test_git_push_release_requires_hmac(proxy_settings: Settings) -> None:
     app = _build_app(proxy_settings)
     body = json.dumps(
@@ -1142,6 +1293,38 @@ async def test_hmac_rejects_query_mutation(proxy_settings: Settings) -> None:
         resp = await client.get("/gh/v1/issue", params=mutated, headers=headers)
     assert resp.status_code == 401, resp.text
     # Upstream GitHub mock MUST NOT have been called — auth failed first.
+    assert captured == []
+
+
+async def test_get_issue_comment_rejects_query_mutation(proxy_settings: Settings) -> None:
+    """Sign a request for comment 14253, replay it against comment 1.
+
+    The HMAC binds the query, so an attacker who captures a signed request
+    cannot retarget the fetch at another comment id; the upstream mock MUST
+    stay untouched.
+    """
+    captured: list[httpx.Request] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(
+            200,
+            json={"id": 1, "user": {"login": "x"}, "body": "b", "created_at": "2026-01-01T00:00:00Z"},
+        )
+
+    app = _build_app(proxy_settings, gh)
+    headers = _signed(
+        "GET",
+        "/gh/v1/get_issue_comment",
+        params={"repo": "octo/widget", "comment_id": 14253},
+    )
+    async with await _async_client(app) as client:
+        resp = await client.get(
+            "/gh/v1/get_issue_comment",
+            params={"repo": "octo/widget", "comment_id": 1},
+            headers=headers,
+        )
+    assert resp.status_code == 401, resp.text
     assert captured == []
 
 
@@ -1514,6 +1697,154 @@ async def test_git_fetch_ref_allows_slashy_branch_name(proxy_settings: Settings,
         resp = await client.post(
             "/gh/v1/git/fetch_ref",
             content=body,
-            headers={**_signed("POST", "/gh/v1/git/fetch_ref", body), "Content-Type": "application/json"},
+            headers=_signed("POST", "/gh/v1/git/fetch_ref", body),
         )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 200
+
+
+# ============================================================================
+# git-host port parsing + platform-aware repo validation
+# ============================================================================
+
+
+def test_split_git_host_parses_host_and_port() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    assert proxy_server._split_git_host("github.com") == ("github.com", None, "")
+    assert proxy_server._split_git_host("git.example.com:3000") == ("git.example.com", 3000, "")
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._split_git_host("git.example.com:abc")
+    assert exc.value.status_code == 400
+
+
+def test_split_git_host_bracketed_ipv6_with_port() -> None:
+    from robomp.proxy import server as proxy_server
+
+    # Bracketed IPv6 literal with a port: host is the literal, port is parsed.
+    assert proxy_server._split_git_host("[fec0::1]:3000") == ("fec0::1", 3000, "")
+
+
+def test_split_git_host_bare_ipv6_without_port() -> None:
+    from robomp.proxy import server as proxy_server
+
+    # Bare IPv6 literal (no brackets, no port) must be treated as the whole host.
+    assert proxy_server._split_git_host("2001:db8::1") == ("2001:db8::1", None, "")
+
+
+def test_split_git_host_parses_base_path_prefix() -> None:
+    """A configured git host may carry a URL prefix (Forgejo under /forgejo)."""
+    from robomp.proxy import server as proxy_server
+
+    assert proxy_server._split_git_host("git.example.com/forgejo") == ("git.example.com", None, "/forgejo")
+    assert proxy_server._split_git_host("git.example.com:3000/forgejo/") == ("git.example.com", 3000, "/forgejo")
+
+
+def test_validate_repo_name_forgejo_accepts_underscore_owner() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    # GitHub's owner regex forbids `_`; Forgejo's allows it.
+    proxy_server._validate_repo_name("my_org/widget", platform="forgejo")
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._validate_repo_name("my_org/widget")
+    assert exc.value.status_code == 400
+
+
+def test_normalized_github_https_url_accepts_configured_port() -> None:
+    from robomp.proxy import server as proxy_server
+
+    normalized = proxy_server._normalized_github_https_url(
+        "https://git.example.com:3000/my_org/widget.git",
+        "my_org/widget",
+        git_host="git.example.com:3000",
+        platform="forgejo",
+    )
+    assert normalized == "https://git.example.com:3000/my_org/widget.git"
+
+
+def test_normalized_github_https_url_rejects_wrong_port() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._normalized_github_https_url(
+            "https://git.example.com:4000/my_org/widget.git",
+            "my_org/widget",
+            git_host="git.example.com:3000",
+            platform="forgejo",
+        )
+    assert exc.value.status_code == 400
+
+
+def test_github_url_for_repo_brackets_ipv6_literal() -> None:
+    """A bare IPv6 git host must be bracketed when formatted into a URL; a
+    bracketed literal with a port keeps its port; non-IPv6 hosts stay as-is."""
+    from robomp.proxy import server as proxy_server
+
+    assert proxy_server._github_url_for_repo("my_org/widget", git_host="2001:db8::1", platform="forgejo") == (
+        "https://[2001:db8::1]/my_org/widget.git"
+    )
+    assert proxy_server._github_url_for_repo("my_org/widget", git_host="[2001:db8::1]:3000", platform="forgejo") == (
+        "https://[2001:db8::1]:3000/my_org/widget.git"
+    )
+    assert proxy_server._github_url_for_repo("my_org/widget", git_host="git.example.com:3000", platform="forgejo") == (
+        "https://git.example.com:3000/my_org/widget.git"
+    )
+
+
+def test_normalized_github_https_url_accepts_ipv6_host() -> None:
+    from robomp.proxy import server as proxy_server
+
+    normalized = proxy_server._normalized_github_https_url(
+        "https://[2001:db8::1]/my_org/widget.git",
+        "my_org/widget",
+        git_host="2001:db8::1",
+        platform="forgejo",
+    )
+    assert normalized == "https://[2001:db8::1]/my_org/widget.git"
+
+
+def test_normalized_github_https_url_preserves_base_path_prefix() -> None:
+    """A URL-prefix git host (git.example.com/forgejo) accepts clone URLs
+    under the prefix and reconstructs with it."""
+    from robomp.proxy import server as proxy_server
+
+    normalized = proxy_server._normalized_github_https_url(
+        "https://git.example.com/forgejo/my_org/widget.git",
+        "my_org/widget",
+        git_host="git.example.com/forgejo",
+        platform="forgejo",
+    )
+    assert normalized == "https://git.example.com/forgejo/my_org/widget.git"
+
+
+def test_normalized_github_https_url_rejects_prefix_mismatch() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._normalized_github_https_url(
+            "https://git.example.com/other/my_org/widget.git",
+            "my_org/widget",
+            git_host="git.example.com/forgejo",
+            platform="forgejo",
+        )
+    assert exc.value.status_code == 400
+
+
+def test_validate_repo_name_forgejo_accepts_40_char_owner() -> None:
+    """Forgejo owner names may be 40 characters; GitHub stays at 39."""
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    owner = "o" * 40
+    proxy_server._validate_repo_name(f"{owner}/widget", platform="forgejo")
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._validate_repo_name(f"{owner}/widget")
+    assert exc.value.status_code == 400

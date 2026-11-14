@@ -198,6 +198,114 @@ async def test_signed_headers_present_and_verify() -> None:
     assert result.ok, result.reason
 
 
+async def test_forgejo_platform_param_included_in_signing_target() -> None:
+    """On the forgejo path the `platform` query param is merged into the request
+    AND covered by the HMAC signature target, so gh-proxy can route + verify."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "full_name": "octo/widget",
+                "default_branch": "main",
+                "clone_url": "https://example/octo/widget.git",
+                "private": False,
+            },
+        )
+
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+        platform="forgejo",
+    )
+    info = await client.get_repo("octo/widget")
+
+    assert isinstance(info, RepoInfo)
+    req = captured[0]
+    assert req.url.params.get("platform") == "forgejo"
+    raw_query = req.url.query.decode("ascii")
+    target = f"{req.url.path}?{raw_query}" if raw_query else req.url.path
+    assert "platform=forgejo" in target
+    result = verify(
+        method=req.method,
+        path=target,
+        body=req.content or b"",
+        timestamp=req.headers[HEADER_TIMESTAMP],
+        signature=req.headers[HEADER_SIGNATURE],
+        key=_HMAC_BYTES,
+    )
+    assert result.ok, result.reason
+
+
+async def test_github_platform_omits_platform_param() -> None:
+    """The default github platform must NOT pollute the query with a platform param."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "full_name": "octo/widget",
+                "default_branch": "main",
+                "clone_url": "https://example/octo/widget.git",
+                "private": False,
+            },
+        )
+
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+        platform="github",
+    )
+    await client.get_repo("octo/widget")
+
+    req = captured[0]
+    assert "platform" not in req.url.params
+    assert "platform=" not in req.url.query.decode("ascii")
+
+
+def test_proxy_git_transport_forgejo_platform_in_signing_target() -> None:
+    """ProxyGitTransport folds `platform=forgejo` into the query the HMAC covers."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={})
+
+    transport = ProxyGitTransport(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+        platform="forgejo",
+    )
+    transport.clone_pool(
+        repo="octo/widget",
+        clone_url="https://example/widget.git",
+        default_branch="main",
+        target=Path("/tmp/unused"),
+    )
+
+    assert len(captured) == 1
+    req = captured[0]
+    raw_query = req.url.query.decode("ascii")
+    assert "platform=forgejo" in raw_query
+    target = f"{req.url.path}?{raw_query}"
+    result = verify(
+        method="POST",
+        path=target,
+        body=req.content or b"",
+        timestamp=req.headers[HEADER_TIMESTAMP],
+        signature=req.headers[HEADER_SIGNATURE],
+        key=_HMAC_BYTES,
+    )
+    assert result.ok, result.reason
+
+
 # ============================================================================
 # 2. Round-trip via ASGI against a real proxy app
 # ============================================================================
@@ -286,6 +394,16 @@ def round_trip_app(proxy_settings: Settings):
                 201,
                 json={"id": 11, "user": {"login": "bot"}, "body": "posted", "created_at": "2026-01-01T00:00:00Z"},
             )
+        if path == "/repos/octo/widget/issues/comments/14253" and req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 14253,
+                    "user": {"login": "miracodeai-bot"},
+                    "body": "canonical walkthrough",
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
         if path == "/repos/octo/widget/pulls/2/comments":
             return httpx.Response(
                 200,
@@ -312,6 +430,17 @@ def round_trip_app(proxy_settings: Settings):
                         "submitted_at": "2026-01-01T00:00:00Z",
                     }
                 ],
+            )
+        if path == "/repos/octo/widget/pulls/2/reviews/12" and req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 12,
+                    "user": {"login": "rev"},
+                    "body": "approved",
+                    "state": "APPROVED",
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                },
             )
         if path == "/repos/octo/widget/pulls/2/files":
             return httpx.Response(
@@ -407,12 +536,22 @@ async def test_round_trip_all_endpoints(round_trip_app) -> None:
     comments = await client.list_comments("octo/widget", 1)
     assert len(comments) == 1 and isinstance(comments[0], CommentInfo)
 
+    fetched_comment = await client.get_issue_comment("octo/widget", 14253)
+    assert isinstance(fetched_comment, CommentInfo)
+    assert fetched_comment.id == 14253
+    assert fetched_comment.author == "miracodeai-bot"
+    assert fetched_comment.body == "canonical walkthrough"
+
     rcs = await client.list_review_comments("octo/widget", 2)
     assert len(rcs) == 1 and isinstance(rcs[0], ReviewCommentInfo)
     assert rcs[0].line == 5
 
     prs = await client.list_pr_reviews("octo/widget", 2)
     assert len(prs) == 1 and isinstance(prs[0], PullRequestReviewInfo)
+
+    review = await client.get_pr_review("octo/widget", 12, pr_number=2)
+    assert isinstance(review, PullRequestReviewInfo)
+    assert review.id == 12 and review.state == "APPROVED"
 
     files = await client.list_pr_files("octo/widget", 2)
     assert len(files) == 1 and isinstance(files[0], PullRequestFileInfo)
