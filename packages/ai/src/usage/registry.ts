@@ -13,14 +13,14 @@ import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { museCodeUsageProvider } from "./muse-code";
-import { minimaxCodeUsageProvider } from "./minimax-code";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "./minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./openai-codex";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./opencode-go";
 import { syntheticUsageProvider } from "./synthetic";
 import { umansUsageProvider } from "./umans";
 import { xaiOauthRankingStrategy, xaiOauthUsageProvider } from "./xai-oauth";
-import { zaiRankingStrategy, zaiUsageProvider } from "./zai";
+import { zaiRankingStrategy, zaiUsageProvider, zhipuCodingPlanUsageProvider } from "./zai";
 
 /** Resolves the usage-based ranking strategy for a provider. */
 export type RankingStrategyResolver = (provider: Provider) => CredentialRankingStrategy | undefined;
@@ -31,6 +31,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	openaiCodexUsageProvider,
 	kimiUsageProvider,
 	minimaxCodeUsageProvider,
+	minimaxCodeCnUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
 	googleGeminiCliUsageProvider,
@@ -40,6 +41,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	claudeUsageProvider,
 	clinePassUsageProvider,
 	zaiUsageProvider,
+	zhipuCodingPlanUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
@@ -69,6 +71,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["factory-droid", factoryDroidRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
+	["zhipu-coding-plan", zaiRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 	["xai-oauth", xaiOauthRankingStrategy],
 	["commandcode", commandCodeRankingStrategy],
