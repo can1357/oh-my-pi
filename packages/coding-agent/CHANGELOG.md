@@ -27,6 +27,10 @@
 - Changed the default `spotlight.thinking` level from `low` to `med` for deeper result analysis and improved ranking, at a higher request cost.
 - When Spotlight is enabled, commonly reread source and issue or pull-request content is shown more completely before outlining, including support for additional source file types.
 
+### Changed
+
+- The `eval` tool description now always points the model to `judge_batch` (`judgeBatch` in JS) for about 20+ homogeneous items sharing one yes/no, bucket or score question, with the rubric fixed before reading the data; it reads only the items the judge flags, is unsure about or fails on, instead of scanning them all by hand ([#19052](https://github.com/can1357/oh-my-pi/pull/19052) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).
