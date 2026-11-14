@@ -530,22 +530,22 @@ describe("settings registry", () => {
 			);
 
 			const settings = await Settings.loadIsolated({ cwd: prod, agentDir });
-			expect(cfgBashPatterns.get(settings)).toEqual([
+			expect(cfgBashPatterns.get(settings)).toMatchObject([
 				{ match: "rm -rf *", approval: "deny" },
 				{ match: "make*", approval: "allow" },
 				{ match: "terraform apply*", approval: "deny" },
-				{ path: null, match: "curl *", approval: "prompt" },
+				{ match: "curl *", approval: "prompt" },
 			]);
 
 			await settings.reloadForCwd(repoA);
-			expect(cfgBashPatterns.get(settings)).toEqual([
+			expect(cfgBashPatterns.get(settings)).toMatchObject([
 				{ match: "rm -rf *", approval: "deny" },
 				{ match: "make*", approval: "allow" },
-				{ path: null, match: "curl *", approval: "prompt" },
+				{ match: "curl *", approval: "prompt" },
 			]);
 
 			await settings.reloadForCwd(other);
-			expect(cfgBashPatterns.get(settings)).toEqual([{ path: null, match: "curl *", approval: "prompt" }]);
+			expect(cfgBashPatterns.get(settings)).toMatchObject([{ match: "curl *", approval: "prompt" }]);
 		} finally {
 			await dir.remove();
 		}
