@@ -23,6 +23,8 @@ export interface MCPServer {
 	requestIdFormat?: MCPRequestIdFormat;
 	/** Include server-provided instructions in the system prompt (default: true) */
 	instructions?: boolean;
+	/** When to start this server's process (default: `"eager"`). */
+	lifecycle?: "eager" | "lazy";
 	/** Command to run (for stdio transport) */
 	command?: string;
 	/** Command arguments */

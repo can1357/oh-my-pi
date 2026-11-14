@@ -131,6 +131,12 @@
           "default": true,
           "description": "Include server-provided instructions in the system prompt. Set false to omit them without disabling the server or its tools. OMP-specific: supported by native config, standalone mcp.json/.mcp.json, and OMP extension packages; imported tool configs ignore it."
         },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["eager", "lazy"],
+          "default": "eager",
+          "description": "When the server process starts (default: \"eager\"). \"lazy\" advertises the tools cached by a previous session and starts the process on the first tool call; until then its instructions, prompts, and resources are unavailable. OMP-specific: supported by native config, standalone mcp.json/.mcp.json, and OMP extension packages; imported tool configs ignore it."
+        },
         "auth": {
           "$ref": "#/$defs/authConfig"
         },
@@ -153,6 +159,7 @@
             "timeout": {},
             "requestIdFormat": {},
             "instructions": {},
+            "lifecycle": {},
             "auth": {},
             "oauth": {},
             "type": {
@@ -200,6 +207,7 @@
             "enabled": {},
             "timeout": {},
             "requestIdFormat": {},
+            "lifecycle": {},
             "instructions": {},
             "auth": {},
             "oauth": {},
@@ -237,6 +245,7 @@
             "enabled": {},
             "timeout": {},
             "requestIdFormat": {},
+            "lifecycle": {},
             "instructions": {},
             "auth": {},
             "oauth": {},

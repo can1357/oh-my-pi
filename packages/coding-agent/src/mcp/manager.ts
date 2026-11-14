@@ -916,6 +916,7 @@ export class MCPManager implements MCPManagerApi {
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
+		options?: { forceEager?: boolean },
 	): Promise<MCPLoadResult> {
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
@@ -963,6 +964,36 @@ export class MCPManager implements MCPManagerApi {
 				continue;
 			}
 
+			// A lazy server advertises the tools a previous session cached and
+			// starts its process on the first tool call. Without a cache entry
+			// there is nothing to advertise, so it connects eagerly this once.
+			if (!options?.forceEager && config.lifecycle === "lazy" && this.toolCache) {
+				const lazyValidationErrors = validateServerConfig(name, config);
+				if (lazyValidationErrors.length === 0) {
+					const cached = await this.toolCache.get(name, config, this.cwd);
+					if (cached && cached.length > 0) {
+						this.#forgetLostServer(name);
+						this.#serverConfigs.set(name, config);
+						this.#replaceServerTools(
+							name,
+							DeferredMCPTool.fromTools(
+								name,
+								cached,
+								() => this.#ensureConnected(name),
+								this.#sources.get(name),
+								() => this.reconnectServer(name),
+								this.#observeToolCall(name),
+							),
+						);
+						// Nothing was started, so readiness must not wait on this name:
+						// `waitForStartup()` classifies an untracked server as failed,
+						// and print mode then warns (or refuses the run under
+						// `OMP_MCP_REQUIRE_READY`) about tools that are callable.
+						this.#startupServers.delete(name);
+						continue;
+					}
+				}
+			}
 			statusServerNames.push(name);
 
 			// Validate config
@@ -1064,7 +1095,7 @@ export class MCPManager implements MCPManagerApi {
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
 					this.#replaceServerTools(name, customTools);
 					await this.#notifyOwnerToolsChanged();
-					void this.toolCache?.set(name, config, serverTools);
+					void this.toolCache?.set(name, config, serverTools, this.cwd);
 
 					notify({ type: "connected", serverName: name });
 					void this.#loadServerResourcesAndPrompts(name, connection);
@@ -1119,7 +1150,7 @@ export class MCPManager implements MCPManagerApi {
 			if (pendingTasks.length > 0 && this.toolCache) {
 				await Promise.all(
 					pendingTasks.map(async task => {
-						const cached = await this.toolCache?.get(task.name, task.config);
+						const cached = await this.toolCache?.get(task.name, task.config, this.cwd);
 						if (cached) {
 							cachedTools.set(task.name, cached);
 						}
@@ -1510,6 +1541,50 @@ export class MCPManager implements MCPManagerApi {
 			if (result) return result;
 		}
 		throw new Error(`MCP server not connected: ${name}`);
+	}
+
+	/**
+	 * Connect a server on demand — the first tool call of a {@link
+	 * MCPServerConfig.lifecycle} `"lazy"` server lands here before its process
+	 * exists. Idempotent: shares an existing or in-flight connection, and forces
+	 * the eager path so {@link connectServers} cannot take its cache branch
+	 * again.
+	 */
+	async #ensureConnected(name: string): Promise<MCPServerConnection> {
+		const connection = this.#connections.get(name);
+		if (connection) return connection;
+		const pending = this.#pendingConnections.get(name);
+		if (pending) return pending;
+		if (this.#pendingToolLoads.has(name)) {
+			await this.#pendingToolLoads.get(name)?.catch(() => {});
+			return this.waitForConnection(name);
+		}
+		const config = this.#serverConfigs.get(name);
+		if (!config) throw new Error(`MCP server not configured: ${name}`);
+		const source = this.#sources.get(name);
+		const result = await this.connectServers({ [name]: config }, source ? { [name]: source } : {}, undefined, 0, {
+			forceEager: true,
+		});
+		// `waitForConnection` only knows the server is not connected; the spawn
+		// error (bad command, auth, handshake) lives in the load result, and the
+		// caller surfaces it to the model.
+		const failure = result.errors.get(name);
+		if (failure) throw new Error(failure);
+		return this.waitForConnection(name);
+	}
+
+	/**
+	 * Connection for a non-tool surface (resource read, prompt execution). A
+	 * deferred `lifecycle` `"lazy"` server starts on first use of any surface,
+	 * not only on its first tool call; every other server reports its current
+	 * state without spawning, so an eager server still handshaking stays absent.
+	 */
+	async #surfaceConnection(name: string): Promise<MCPServerConnection | undefined> {
+		const connected = this.#connections.get(name);
+		if (connected) return connected;
+		const config = this.#serverConfigs.get(name);
+		if (!config || config.lifecycle !== "lazy") return undefined;
+		return this.#ensureConnected(name);
 	}
 
 	/**
@@ -1949,7 +2024,7 @@ export class MCPManager implements MCPManagerApi {
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
-			void this.toolCache?.set(name, config, serverTools);
+			void this.toolCache?.set(name, config, serverTools, this.cwd);
 			this.#replaceServerTools(name, customTools);
 			this.#notifyOwnerToolsChanged().catch(error => logger.debug("MCP tools-changed handler failed", { error }));
 			void this.#loadServerResourcesAndPrompts(name, connection);
@@ -2047,7 +2122,7 @@ export class MCPManager implements MCPManagerApi {
 		const reconnect = () => this.reconnectServer(name);
 		const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
 		if (callProvoked) this.#scopeAddedTools(name, customTools);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		void this.toolCache?.set(name, connection.config, serverTools, this.cwd);
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
@@ -2210,7 +2285,7 @@ export class MCPManager implements MCPManagerApi {
 		uri: string,
 		options?: MCPRequestOptions,
 	): Promise<MCPResourceReadResult | undefined> {
-		const connection = this.#connections.get(name);
+		const connection = await this.#surfaceConnection(name);
 		if (!connection) return undefined;
 		return readResource(connection, uri, options);
 	}
@@ -2233,7 +2308,7 @@ export class MCPManager implements MCPManagerApi {
 		args?: Record<string, string>,
 		options?: MCPRequestOptions,
 	): Promise<MCPGetPromptResult | undefined> {
-		const connection = this.#connections.get(name);
+		const connection = await this.#surfaceConnection(name);
 		if (!connection) return undefined;
 		return getPrompt(connection, promptName, args, options);
 	}

@@ -185,6 +185,15 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
 }
 
 /**
+ * Parse an MCP `lifecycle` value. Unrecognized values are dropped so a typo
+ * degrades to the default eager start rather than a silently different one.
+ */
+export function parseLifecycle(value: unknown): "eager" | "lazy" | undefined {
+	if (value === "eager" || value === "lazy") return value;
+	return undefined;
+}
+
+/**
  * Parse a comma-separated string into an array of trimmed, non-empty strings.
  */
 export function parseCSV(value: string): string[] {

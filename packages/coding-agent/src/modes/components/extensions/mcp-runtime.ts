@@ -14,6 +14,8 @@ export interface MCPToggleManager {
 		configs: Record<string, MCPServerConfig>,
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
+		startupTimeoutMs?: number,
+		options?: { forceEager?: boolean },
 	): Promise<Pick<MCPLoadResult, "errors"> | MCPLoadResult>;
 }
 
@@ -60,6 +62,10 @@ export async function applyMcpToggleRuntime(options: ApplyMcpToggleRuntimeOption
 		return;
 	}
 	const source = sources[name];
-	await manager.connectServers({ [name]: config }, source ? { [name]: source } : {}, onStatus);
+	// Toggling a server on is an explicit start request, so a lazy server must
+	// spawn instead of re-registering its cached tools.
+	await manager.connectServers({ [name]: config }, source ? { [name]: source } : {}, onStatus, undefined, {
+		forceEager: true,
+	});
 	await session?.refreshMCPTools(manager.getTools());
 }

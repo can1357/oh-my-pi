@@ -8,6 +8,7 @@ import {
 	setServerDisabled,
 	updateMCPServer,
 } from "../../mcp/config-writer";
+import { loadAllMCPConfigs } from "../../mcp";
 import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 import { MCPManager } from "../../mcp/manager";
 import {
@@ -336,23 +337,44 @@ async function handleEnableDisableCommand(
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),
 		]);
+		let scopeSuffix: string;
 		if (projectConfig.mcpServers?.[name] !== undefined) {
 			await updateMCPServer(projectPath, name, { ...projectConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (project config).`);
-			return commandConsumed();
-		}
-		if (userConfig.mcpServers?.[name] !== undefined) {
+			scopeSuffix = " (project config)";
+		} else if (userConfig.mcpServers?.[name] !== undefined) {
 			await updateMCPServer(userPath, name, { ...userConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (user config).`);
-			return commandConsumed();
-		}
-		const disabledList = await readDisabledServers(userPath);
-		if (!enabled || disabledList.includes(name)) {
+			scopeSuffix = " (user config)";
+		} else if (!enabled || (await readDisabledServers(userPath)).includes(name)) {
 			await setServerDisabled(userPath, name, !enabled);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
-			return commandConsumed();
+			scopeSuffix = "";
+		} else {
+			return usage(`Server "${name}" not found in user or project config.`, runtime);
 		}
-		return usage(`Server "${name}" not found in user or project config.`, runtime);
+		await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}${scopeSuffix}.`);
+		// Persisting the flag is not enough on ACP/RPC/print surfaces: they own a
+		// live manager, and a lazy server stays absent until it is told to start.
+		const manager = runtime.mcpManager;
+		if (manager) {
+			if (enabled) {
+				const { configs, sources } = await loadAllMCPConfigs(runtime.cwd, {
+					extensionRoots: runtime.session.effectiveExtensionRoots,
+				});
+				const config = configs[name];
+				if (config) {
+					await manager.connectServers(
+						{ [name]: config },
+						sources[name] ? { [name]: sources[name] } : {},
+						undefined,
+						undefined,
+						{ forceEager: true },
+					);
+				}
+			} else {
+				await manager.disconnectServer(name);
+			}
+			await runtime.session.refreshMCPTools(manager.getTools());
+		}
+		return commandConsumed();
 	} catch (err) {
 		return usage(`Failed to ${verb} MCP server: ${errorMessage(err)}`, runtime);
 	}

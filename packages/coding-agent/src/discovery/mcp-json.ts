@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseLifecycle, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -28,6 +28,7 @@ interface MCPConfigFile {
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
 			instructions?: boolean;
+			lifecycle?: "eager" | "lazy";
 			command?: string;
 			args?: string[];
 			env?: Record<string, string>;
@@ -101,12 +102,21 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
+			const lifecycle = parseLifecycle(serverConfig.lifecycle);
+			if (lifecycle === undefined && serverConfig.lifecycle !== undefined) {
+				logger.warn("MCP server has invalid 'lifecycle' value, ignoring", {
+					name,
+					value: serverConfig.lifecycle,
+				});
+			}
+
 			const server: MCPServer = {
 				name,
 				enabled,
 				timeout,
 				requestIdFormat,
 				instructions,
+				lifecycle,
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,

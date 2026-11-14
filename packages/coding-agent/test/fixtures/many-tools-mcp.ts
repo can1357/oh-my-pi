@@ -29,6 +29,12 @@ export function manyToolName(index: number): string {
 	return `tool_${hi}${lo}`;
 }
 
+/** Surfaces the lazy-lifecycle test drives without calling a tool first. */
+export const FIXTURE_RESOURCE_URI = "fixture://greeting";
+export const FIXTURE_RESOURCE_TEXT = "hello from fixture";
+export const FIXTURE_PROMPT_NAME = "greet";
+export const FIXTURE_PROMPT_TEXT = "hi from fixture";
+
 type JsonRpcRequest = {
 	jsonrpc: "2.0";
 	id?: string | number;
@@ -42,7 +48,7 @@ function buildResult(method: string): Record<string, unknown> {
 			return {
 				protocolVersion: "2025-03-26",
 				serverInfo: { name: "many-fixture", version: "1.0.0" },
-				capabilities: { tools: {} },
+				capabilities: { tools: {}, resources: {}, prompts: {} },
 			};
 		case "tools/list":
 			return {
@@ -52,6 +58,20 @@ function buildResult(method: string): Record<string, unknown> {
 					inputSchema: { type: "object", properties: {}, additionalProperties: false },
 				})),
 			};
+		case "tools/call":
+			return { content: [{ type: "text", text: "ok" }] };
+		case "resources/list":
+			return {
+				resources: [{ uri: FIXTURE_RESOURCE_URI, name: "greeting", mimeType: "text/plain" }],
+			};
+		case "resources/templates/list":
+			return { resourceTemplates: [] };
+		case "resources/read":
+			return { contents: [{ uri: FIXTURE_RESOURCE_URI, mimeType: "text/plain", text: FIXTURE_RESOURCE_TEXT }] };
+		case "prompts/list":
+			return { prompts: [{ name: FIXTURE_PROMPT_NAME, description: "Fixture prompt", arguments: [] }] };
+		case "prompts/get":
+			return { messages: [{ role: "user", content: { type: "text", text: FIXTURE_PROMPT_TEXT } }] };
 		default:
 			return {};
 	}

@@ -93,6 +93,27 @@ interface MCPServerConfigBase {
 	 * parse this option; providers for other tools' formats ignore it.
 	 */
 	instructions?: boolean;
+	/**
+	 * When to start this server's process (default: `"eager"`).
+	 *
+	 * `"lazy"` advertises the server's tools from the tool cache written by an
+	 * earlier session and starts the process on the first tool call. A lazy
+	 * server with no cache entry connects eagerly for that session, since there
+	 * would be nothing to advertise.
+	 *
+	 * Tradeoffs while the process is down: the server contributes tools only —
+	 * its `instructions`, MCP prompts, and resources appear after the first call,
+	 * and the instructions arriving mid-session rebuilds the system prompt (the
+	 * provider prompt cache is invalidated once). Explicit start actions
+	 * (`/mcp enable`, the extensions toggle, reconnect) force an eager start.
+	 * The tool-cache key covers the whole server config, so flipping a server
+	 * between eager and lazy misses the cache once and connects eagerly for that
+	 * session.
+	 *
+	 * OMP-specific: only native config, standalone `mcp.json`, and OMP plugins
+	 * parse it; providers for other tools' formats ignore it.
+	 */
+	lifecycle?: "eager" | "lazy";
 	/** Authentication configuration (optional) */
 	auth?: MCPAuthConfig;
 	/** OAuth configuration for servers requiring explicit client credentials */
