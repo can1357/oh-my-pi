@@ -18,8 +18,8 @@ counts as passing. This script verifies the pieces that must agree:
   `name:` of a job in ci.yml, because a required check is matched by name;
 * in every workflow a pull request can start, a job whose `runs-on` could name
   a self-hosted runner (anything but a plain GitHub-hosted label) sends a pull
-  request from another repository to a hosted label first, with the `rust`
-  job's fork test verbatim, and the BuildBuddy trust action applies that test.
+  request from another repository to a hosted label first, with the established
+  fork test verbatim, and the BuildBuddy trust action applies that test.
 
 Plain text scanning keeps this free of third-party YAML dependencies.
 """
@@ -40,7 +40,7 @@ RULESET = ROOT / ".github/rulesets/omp2-protected.json"
 WORKFLOWS = ROOT / ".github/workflows"
 TRUST_ACTION = ROOT / ".github/actions/buildbuddy-remote/action.yml"
 
-# The `rust` job's fork test, verbatim. `pull_request` runs the workflow file of
+# The established fork test, verbatim. `pull_request` runs the workflow file of
 # the pull request's own merge ref, so this routes rather than guards: what keeps
 # a stranger's code off the self-hosted Mac is the repository's approval policy
 # for fork pull requests. The check keeps an honest edit from dropping the route.

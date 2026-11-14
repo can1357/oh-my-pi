@@ -1,0 +1,29 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+skill: "egm-drift-report"
+description: "Behavioral evaluation scenario suite for egm-drift-report skill."
+
+scenarios:
+  - scenario_id: "detect_all_drift"
+    description: "Compares implemented code against design specs; verifies all documentation and implementation discrepancies are identified."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-drift-report/SKILL.md"
+    turns:
+      - user_input: "Run egm-drift-report on `docs/designs/drift_report.md` against implemented source files."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(drift|discrepancy|matches|out of sync|report)"
+            message: "Drift report must evaluate alignment between design documents and source code."

@@ -1,0 +1,6 @@
+interface:
+  display_name: "EGM Drift report"
+  short_description: "Find differences between designs and code"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+  brand_color: "#E86E00"

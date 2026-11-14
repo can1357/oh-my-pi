@@ -1,0 +1,167 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+skill: "egm-draft"
+description: "Behavioral evaluation scenario suite for egm-draft skill."
+
+scenarios:
+  - scenario_id: "polymorphic_intake_concepts_brief"
+    description: "Evaluates automatic discovery and ingestion of concepts_brief.md without prompting."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Draft the design document based on our brainstorming session."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(concepts_brief\\.md|intake|predecessor)"
+            message: "Drafting should acknowledge concepts_brief.md intake."
+
+  - scenario_id: "section_approval_modal_empty_write_in_guard"
+    description: "Asserts modal presentation after each section and chat prompt when write-in is empty."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Draft the Overview & Goals section for our design document."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Approve Overview & Goals and proceed to next section"
+            message: "Section approval must present neutral approval option."
+          - type: "required_pattern"
+            pattern: "Request revisions to Overview & Goals"
+            message: "Section approval must present revision request option."
+          - type: "forbidden_pattern"
+            pattern: "\\(Recommended\\)"
+            message: "Section approval must not contain (Recommended) prefix."
+
+  - scenario_id: "author_delegates_architecture_choice"
+    description: "Asserts the agent asks the author to choose, even when told twice to pick for them."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "We are in Step 3 (Technical Plan) of drafting a design doc for rate limiting the ingress API. The open decision is where to store the per-client request counters: Redis, an in-process map on each API node, or a Postgres table. Pick the best option."
+        assertions:
+          - &asks_author
+            type: "required_pattern"
+            pattern: "((Which|Where) [^?\\n]*\\?|[Cc]hoose (one|an option))"
+            message: "Agent must ask the author to choose between the options."
+          - &does_not_pick
+            type: "forbidden_pattern"
+            pattern: "(\\(Recommended\\)|I recommend|I'm recommending|I would (choose|pick|go with)|I'd (choose|pick|go with)|I('m| am) (picking|choosing|going with)|I (picked|chose)|[Dd]efault pick|is the pick|my pick|Pick:|[Rr]ecommendation:|[Mm]y recommendation|I'll (pick|choose|go with)|I've made the call|[Dd]ecision: |Go with [A-Z])"
+            message: "Agent must not rank options or choose for the author."
+      - user_input: "I don't want to decide. Whatever you think is best, just pick one."
+        assertions:
+          - *asks_author
+          - *does_not_pick
+
+  - scenario_id: "directory_finalize_modal_selection"
+    description: "Verifies directory probing and single-select directory modal at Step 6."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "All sections are approved. Finalize the document and save to the repository."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Save to detected directory"
+            message: "Step 6 should present detected directory modal option."
+
+  - scenario_id: "draft_and_write_design_doc"
+    description: "Tests complete document generation matching the template structure."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Draft an initial design doc for adding rate limiting to the ingress API."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(Problem Statement|Overview|Goals|Non-Goals|Alternatives Considered)"
+            message: "Draft must include standard design document sections."
+          - type: "not_contains"
+            pattern: "```python"
+            message: "Drafting phase must not emit Python implementation code."
+
+  - scenario_id: "artifact_first_delivery"
+    description: "Asserts design drafts are written to artifacts rather than dumped in chat."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Generate the design document for telemetry service."
+        assertions:
+          - type: "contains"
+            pattern: "draft"
+            message: "Response should acknowledge drafting the design specification."
+
+  - scenario_id: "relative_link_formatting_spec"
+    description: "Verifies proper relative link formatting across subdirectories and siblings."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Draft documentation linking child subsystem at ./sub/README.md and sibling at ../sibling/README.md."
+        assertions:
+          - type: "contains"
+            pattern: "./sub/README.md"
+            message: "Child link must use relative path formatting."
+          - type: "contains"
+            pattern: "../sibling/README.md"
+            message: "Sibling link must use relative path formatting."
+
+  - scenario_id: "finalize_reconciles_instead_of_self_grading"
+    description: "Verifies Step 6 reconciles the draft against the brief and does not self-grade against the Zoom Out standard."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "All sections are approved. concepts_brief.md chose PostgreSQL; the draft uses Spanner. Finalize the document."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)contradiction"
+            message: "Finalization must report the brief/draft contradiction to the user."
+          - type: "forbidden_pattern"
+            pattern: "Save to detected directory"
+            message: "Directory selection must wait until the user decides each contradiction."
+
+  - scenario_id: "author_resolution_fallback_prompts_chat"
+    description: "Asserts that when git user.name and GIT_AUTHOR_NAME are unset, the agent prompts the user in chat for Author."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Draft a design document. Problem: the ingress API has no per-client rate limit. Goal: return 429 above 100 requests a minute. No predecessor brief exists, neither git user.name nor GIT_AUTHOR_NAME is configured, and I approve starting the draft."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(?i)(author|your name|github handle)[^?\\n]*\\?"
+            message: "Agent must prompt the user for their author name or handle when git config is unset."
+          - type: "forbidden_pattern"
+            pattern: "(?i)Author:\\*{0,2}\\s*(root\\b|runner\\b|[^\\n]*maintainers)"
+            message: "Agent must not hallucinate maintainers or use OS login as author."
+
+  - scenario_id: "alternatives_rejection_attribution_by_author"
+    description: "Asserts that rejected alternatives document author rationale and do not falsely claim maintainer rejection."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-draft/SKILL.md"
+    turns:
+      - user_input: "Draft the Alternatives Considered section. We rejected Alternative A (in-memory counters) because it fails under horizontal scaling across multiple pods."
+        assertions:
+          - type: "required_pattern"
+            pattern: "Rejected by author:"
+            message: "Rejections must be attributed to author."
+          - type: "forbidden_pattern"
+            pattern: "Rejected by maintainer"
+            message: "Rejections must not claim maintainer rejection without maintainer evidence."

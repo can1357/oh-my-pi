@@ -26,7 +26,7 @@ env:
 jobs:
   package:
     name: Package and install-smoke omp (macOS arm64)
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    runs-on: macos-15
     # Bound manual runner occupancy while leaving time to upload artifacts.
     timeout-minutes: 120
     env:
