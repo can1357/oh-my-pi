@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- Chromium and WebKit tabs: a click or key press that opens a `confirm()` or `prompt()` returns instead of timing out after 8 s, and while one is pending, calls that need the page (reads, actions, `evaluate`, waits on page content, screenshots) fail at once naming the dialog and `tab.handleDialog()`, instead of each running out its deadline with "could not count matches" or a bare timeout
 - `tab.waitForUrl()` given anything but a string or a RegExp (a predicate function, say) now fails at once on every backend with an error naming what it takes, instead of an internal `pattern.test is not a function` on WebKit, Tern and cmux
 - WebKit tabs' request log: an XHR or `fetch` to a plain-http host that answers `text/html` (as many router UIs' APIs do) is `fetch`, not `subdocument`; only a frame's document request is a `subdocument`. Request body sizes, which the engine does not report, are left out (HAR `bodySize` -1) instead of 0, and a response without `Content-Length` no longer reports a body size of 0. `sizes.requestBody` is now optional in the request-record type
 - `write` no longer fails with "content is required" on strict-mode providers such as Wafer and Fireworks, where models sent `content: null` for an ordinary file write
