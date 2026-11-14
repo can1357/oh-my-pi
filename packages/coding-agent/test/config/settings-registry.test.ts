@@ -627,7 +627,10 @@ describe("settings registry", () => {
 
 			// A global `null` counts as unset, so project rules still prepend to the schema default.
 			const nullAgentDir = path.join(dir.path(), "null-agent");
-			await Bun.write(path.join(nullAgentDir, "config.yml"), YAML.stringify({ bashInterceptor: { patterns: null } }));
+			await Bun.write(
+				path.join(nullAgentDir, "config.yml"),
+				YAML.stringify({ bashInterceptor: { patterns: null } }),
+			);
 			const nullGlobalSettings = await Settings.loadReadOnly({ cwd: projectDir, agentDir: nullAgentDir });
 			expect(cfgBashInterceptorPatterns.get(nullGlobalSettings)).toEqual([
 				{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." },

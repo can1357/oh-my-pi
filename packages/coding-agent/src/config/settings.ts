@@ -4396,9 +4396,7 @@ export class Settings {
 			if (
 				isOverrideRecord &&
 				(isBaseRecord ||
-					(arrays === "layer" &&
-						baseVal === undefined &&
-						Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
+					(arrays === "layer" && baseVal === undefined && Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
 			) {
 				setOwn(
 					result,
