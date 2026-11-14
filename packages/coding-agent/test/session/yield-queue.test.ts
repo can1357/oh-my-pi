@@ -198,6 +198,53 @@ describe("YieldQueue", () => {
 		expect(harness.streamingMessages.map(messageText)).toEqual(["fresh"]);
 	});
 
+	test("discardStale rejects only stale entries without building or injecting survivors", async () => {
+		const harness = createHarness(true);
+		let builds = 0;
+		let otherBuilds = 0;
+		const predicateFailure: unknown = "stale predicate failed";
+		harness.queue.register<Entry>("items", {
+			isStale: entry => {
+				if (entry.id === "throws") throw predicateFailure;
+				return entry.stale === true;
+			},
+			build: entries => {
+				builds++;
+				return userMessage(entries.map(entry => entry.id).join(","));
+			},
+		});
+		harness.queue.register<Entry>("other", {
+			build: entries => {
+				otherBuilds++;
+				return userMessage(entries.map(entry => entry.id).join(","));
+			},
+		});
+		const first = harness.queue.enqueueWithReceipt("items", { id: "first" });
+		const stale = harness.queue.enqueueWithReceipt("items", { id: "stale", stale: true });
+		const broken = harness.queue.enqueueWithReceipt("items", { id: "throws" });
+		const second = harness.queue.enqueueWithReceipt("items", { id: "second" });
+		const other = harness.queue.enqueueWithReceipt("other", { id: "untouched" });
+		void stale.catch(() => {});
+		void broken.catch(() => {});
+		let firstSettled = false;
+		void first.then(() => {
+			firstSettled = true;
+		});
+
+		harness.queue.discardStale("items");
+		harness.queue.discardStale("other"); // no stale predicate: leave it alone
+		await expect(stale).rejects.toThrow("Yield queue entry became stale: items");
+		await expect(broken).rejects.toThrow("stale predicate failed");
+		expect(firstSettled).toBe(false);
+		expect(builds).toBe(0);
+		expect(otherBuilds).toBe(0);
+		expect(harness.streamingMessages).toHaveLength(0);
+		expect(harness.queue.has("other")).toBe(true);
+		await harness.queue.flush("streaming");
+		await Promise.all([first, second, other]);
+		expect(harness.streamingMessages.map(messageText)).toEqual(["first,second", "untouched"]);
+	});
+
 	test("build returning null does not inject", async () => {
 		const harness = createHarness(true);
 		harness.queue.register<Entry>("items", {

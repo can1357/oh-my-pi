@@ -562,9 +562,9 @@ describe("getRepoRoot", () => {
 	});
 
 	it("preserves the generic git-not-found error for directories without any repo", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-norepo-"));
-		tempDirs.push(dir);
-		await expect(getRepoRoot(dir)).rejects.toThrow("Git repository not found for isolated task execution.");
+		await expect(getRepoRoot(path.parse(os.tmpdir()).root)).rejects.toThrow(
+			"Git repository not found for isolated task execution.",
+		);
 	});
 
 	it("rejects a pure jj workspace nested inside an unrelated outer git checkout", async () => {

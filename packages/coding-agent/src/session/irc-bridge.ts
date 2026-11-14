@@ -71,6 +71,28 @@ export class IrcBridge {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
+	/** Whether any queued record matches, including wakes parked outside the aside poll. */
+	hasQueuedMatching(predicate: (record: AgentMessage) => boolean): boolean {
+		return [this.#interrupts, this.#asides, this.#deferredWakes].some(queue => queue.some(predicate));
+	}
+
+	/** Take matching records in queue priority order, leaving every other record in its original queue. */
+	drainQueuedMatching(predicate: (record: AgentMessage) => boolean): AgentMessage[] {
+		const selected: AgentMessage[] = [];
+		const retain = (queue: AgentMessage[]): AgentMessage[] => {
+			const remaining: AgentMessage[] = [];
+			for (const record of queue) {
+				if (predicate(record)) selected.push(record);
+				else remaining.push(record);
+			}
+			return remaining;
+		};
+		this.#interrupts = retain(this.#interrupts);
+		this.#asides = retain(this.#asides);
+		this.#deferredWakes = retain(this.#deferredWakes);
+		return selected;
+	}
+
 	/** Whether an IRC message from `from` is still queued for a turn yet to run. */
 	hasQueuedFrom(from: string): boolean {
 		return [this.#interrupts, this.#asides, this.#deferredWakes].some(queue =>

@@ -6,9 +6,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
@@ -20,8 +23,10 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	attachIrcWakeTurnMonitor,
 	runSubagentFollowUpTurn,
@@ -31,8 +36,10 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const AGENT_ID = "accepted-result";
 
@@ -84,10 +91,8 @@ interface SessionHarness {
 }
 
 /**
- * Minimal session that satisfies the executor's run surface. `prompt` submits a
- * terminal `yield` (so `runSubprocess` / `runSubagentFollowUpTurn` settle), and
- * `subscribeRunState` never fires — the run-state mirror omits `idle`, which is
- * exactly the leak the acceptance boundary must cover.
+ * Minimal session for initial-spawn and autonomous-wake monitor tests. `prompt`
+ * submits a terminal `yield`, and its run-state mirror omits `idle`.
  */
 function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: AsyncJobManager }): SessionHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -189,6 +194,58 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		emitAgentEnd,
 		emitToolResult,
 		wakeObserver: () => wakeObserver,
+	};
+}
+
+function createRealAcceptanceSession(structured: boolean) {
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime("mock", "test-key");
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		"todo.reminders": false,
+		"advisor.enabled": false,
+		modelRoles: { default: "mock/mock-model" },
+	});
+	const mock = createMockModel({
+		handler: context => {
+			if (structured && context.messages.at(-1)?.role !== "toolResult") {
+				return {
+					content: [
+						{ type: "toolCall", name: "yield", arguments: { type: "result", data: { report: "continue" } } },
+					],
+				};
+			}
+			return { content: ["accepted response"] };
+		},
+	});
+	const yieldTool = new YieldTool({
+		cwd: "/tmp",
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings,
+	});
+	const tools = structured ? [yieldTool] : [];
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["test"], tools, messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		}),
+		sessionManager: SessionManager.inMemory(),
+		settings,
+		modelRegistry: new ModelRegistry(auth, undefined, { settings }),
+		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+	});
+	return {
+		session,
+		async close() {
+			await session.dispose();
+			auth.close();
+		},
 	};
 }
 
@@ -298,21 +355,19 @@ describe("runSubprocess result acceptance", () => {
 	});
 
 	it("terminalizes an existing ref on a follow-up turn whose run-state mirror omits idle", async () => {
-		const harness = createHarness();
+		const harness = createRealAcceptanceSession(true);
 		registerRunning(harness.session);
-
-		const result = await runSubagentFollowUpTurn({
-			id: AGENT_ID,
-			agent: baseAgent,
-			message: "continue",
-		});
-
-		expect(result.exitCode).toBe(0);
-		const settled = AgentRegistry.global().get(AGENT_ID);
-		expect(settled?.status).not.toBe("running");
-		expect(settled?.lifecycle?.responseAt).toBeNumber();
-		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
-		expect(settled?.lifecycle?.terminalAt).toBeNumber();
+		try {
+			const result = await runSubagentFollowUpTurn({ id: AGENT_ID, agent: baseAgent, message: "continue" });
+			expect(result.exitCode).toBe(0);
+			const settled = AgentRegistry.global().get(AGENT_ID);
+			expect(settled?.status).not.toBe("running");
+			expect(settled?.lifecycle?.responseAt).toBeNumber();
+			expect(settled?.lifecycle?.acceptedAt).toBeNumber();
+			expect(settled?.lifecycle?.terminalAt).toBeNumber();
+		} finally {
+			await harness.close();
+		}
 	});
 
 	it("terminalizes the ref when an autonomous wake turn's yield is accepted", async () => {
@@ -648,12 +703,8 @@ describe("runSubprocess result acceptance", () => {
 	it("keeps the accepted artifact and sidecar when an unstructured follow-up starts aborted", async () => {
 		const tempDir = TempDir.createSync("@omp-aborted-agent-result-");
 		const artifactsDir = tempDir.path();
-		const harness = createHarness();
+		const harness = createRealAcceptanceSession(false);
 		registerRunning(harness.session);
-		vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
-			harness.emitAssistantText("cancelled replacement");
-			return true;
-		});
 		const accepted = '{"report":"accepted verdict"}';
 
 		try {
@@ -671,6 +722,7 @@ describe("runSubprocess result acceptance", () => {
 			expect(await Bun.file(path.join(artifactsDir, `${AGENT_ID}.md`)).text()).toBe(accepted);
 			expect(await Bun.file(path.join(artifactsDir, `${AGENT_ID}.json`)).text()).toBe(accepted);
 		} finally {
+			await harness.close();
 			tempDir.removeSync();
 		}
 	});

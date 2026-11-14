@@ -300,6 +300,7 @@ export interface TurnRecoveryHost {
 		source: string;
 		delayMs?: number;
 		generation?: number;
+		drivenTurn?: object;
 		shouldContinue?: () => boolean;
 		onError?: (error: unknown) => void;
 	}): void;
@@ -879,8 +880,9 @@ export class TurnRecovery {
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
+		busyPolicy: "retry" | "propagate" = "retry",
 	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
+		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, busyPolicy);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3373,6 +3375,7 @@ export class TurnRecovery {
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
+		busyPolicy: "retry" | "propagate" = "retry",
 	): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
@@ -3396,7 +3399,7 @@ export class TurnRecovery {
 				await claim;
 				return;
 			} catch (err) {
-				if (!(err instanceof AgentBusyError)) {
+				if (!(err instanceof AgentBusyError) || busyPolicy === "propagate") {
 					throw err;
 				}
 				if (Date.now() >= deadline) {
@@ -3477,7 +3480,7 @@ export class TurnRecovery {
 	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(options?: { drivenTurn?: object }): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
@@ -3511,7 +3514,7 @@ export class TurnRecovery {
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1, drivenTurn: options?.drivenTurn });
 
 		return true;
 	}

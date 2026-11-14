@@ -85,14 +85,14 @@ function finishedChild(id: string, agent: string): SingleResult {
 }
 
 /**
- * Every child exits 0. An isolated child's checkout stops being a git
- * repository once it finishes, so its merge step throws; a plain child has
- * nothing to merge.
+ * Every child exits 0. An isolated child's git metadata becomes unreadable
+ * after it finishes, so its merge step throws; a plain child has nothing to merge.
  */
 async function finishChildrenThenBreakMerge(dir: string): Promise<void> {
 	await initRepo(dir);
 	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions, agentId }) => {
 		await fs.rm(path.join(dir, ".git"), { recursive: true, force: true });
+		await Bun.write(path.join(dir, ".git"), new Uint8Array([0xff]));
 		return finishedChild(agentId, baseOptions.agent.name);
 	});
 	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
@@ -120,9 +120,10 @@ describe("failed child evidence", () => {
 		await initRepo(tempDir.path());
 		let artifactPath = "";
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions, agentId }) => {
-			// The real isolation context was prepared; the checkout stops being a
-			// git repository after the child finishes, so the merge step throws.
+			// The real isolation context was prepared; corrupt its git metadata
+			// after the child finishes so the merge step throws.
 			await fs.rm(path.join(tempDir.path(), ".git"), { recursive: true, force: true });
+			await Bun.write(path.join(tempDir.path(), ".git"), new Uint8Array([0xff]));
 			const artifactsDir = baseOptions.artifactsDir;
 			if (!artifactsDir) throw new Error("artifactsDir missing");
 			artifactPath = path.join(artifactsDir, `${agentId}.md`);
