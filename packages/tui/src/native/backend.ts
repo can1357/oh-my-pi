@@ -280,17 +280,28 @@ function overlaySize(options: OverlayOptions | undefined, cols: number): "sm" | 
 	return "sm";
 }
 
-/** Blob ids referenced by `image` nodes an op adds or sets. */
+/** Blob ids referenced by `image` nodes and editor `decor` ranges an op adds or sets. */
 function collectBlobs(op: TspOp, out: Set<string>): void {
 	if (op[0] === "set") {
 		const blob = op[2].blob;
 		if (typeof blob === "string") out.add(blob);
+		collectDecorBlobs(op[2].decor, out);
 	} else if (op[0] === "add") {
 		const visit = (wire: TspNode): void => {
 			if (wire.k === "image" && typeof wire.p?.blob === "string") out.add(wire.p.blob);
+			if (wire.k === "editor" || wire.k === "input") collectDecorBlobs(wire.p?.decor, out);
 			if (wire.c) for (const child of wire.c) visit(child);
 		};
 		visit(op[4]);
+	}
+}
+
+/** Blob ids of the ranges of an editor's `decor` prop. */
+function collectDecorBlobs(decor: unknown, out: Set<string>): void {
+	if (!Array.isArray(decor)) return;
+	for (const range of decor) {
+		const blob = typeof range === "object" && range !== null && "blob" in range ? range.blob : undefined;
+		if (typeof blob === "string") out.add(blob);
 	}
 }
 

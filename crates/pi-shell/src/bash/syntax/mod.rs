@@ -56,9 +56,6 @@ pub mod zsh;
 
 use alloc::vec::Vec;
 
-#[cfg(test)]
-pub(crate) use crate::bash::syntax::parser::MAX_NESTING;
-pub(crate) use crate::bash::syntax::util::ansi_decode_all;
 pub use crate::bash::syntax::{
 	ast::*,
 	features::{AliasLookup, Features, NO_ALIASES, NoAliases},
@@ -72,6 +69,7 @@ pub use crate::bash::syntax::{
 		RedirTarget, Seq, Simple, Subscript, Tree, Word, WordPart,
 	},
 };
+pub(crate) use crate::bash::syntax::{parser::MAX_NESTING, util::ansi_decode_all};
 
 /// Parse a whole source without aliases (tools, visualizers, tests).
 ///

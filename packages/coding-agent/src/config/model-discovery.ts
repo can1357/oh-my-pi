@@ -10,6 +10,7 @@ import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { AmbiguousIdentityError } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -34,7 +35,7 @@ import {
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -1349,12 +1350,41 @@ export async function discoverOpenAIModelsList(
 					: {}),
 			},
 		} as ModelSpec<Api>;
-		specs.push(withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"));
+		const prepared = skipAmbiguousModel(providerConfig.provider, id, () =>
+			withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"),
+		);
+		if (prepared) specs.push(prepared);
 	}
 	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
-	return providerConfig.discovery.type === "litellm"
-		? specs.map(spec => buildDiscoveredModel(spec, "litellm"))
-		: specs.map(spec => buildModel(spec));
+	const build =
+		providerConfig.discovery.type === "litellm"
+			? (spec: ModelSpec<Api>) => buildDiscoveredModel(spec, "litellm")
+			: (spec: ModelSpec<Api>) => buildModel(spec);
+	const built: Model<Api>[] = [];
+	for (const spec of specs) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () => build(spec));
+		if (model) built.push(model);
+	}
+	return built;
+}
+
+/**
+ * Runs one discovered model's catalog classification. Classification stays
+ * strict, so an upstream id that names two vendors (`amazon/openai.gpt-...`)
+ * throws; skip that one model rather than losing the provider's whole list.
+ */
+function skipAmbiguousModel<T>(provider: string, id: string, classify: () => T): T | undefined {
+	try {
+		return classify();
+	} catch (error) {
+		if (!(error instanceof AmbiguousIdentityError)) throw error;
+		logger.warn("Skipping discovered model with an ambiguous identity", {
+			provider,
+			model: id,
+			error: error.message,
+		});
+		return undefined;
+	}
 }
 
 export async function discoverLiteLLMModels(
@@ -1409,7 +1439,14 @@ export async function discoverLiteLLMModels(
 	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
-	return richModels.map(spec => buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"));
+	const built: Model<Api>[] = [];
+	for (const spec of richModels) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () =>
+			buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"),
+		);
+		if (model) built.push(model);
+	}
+	return built;
 }
 
 /**
@@ -1524,7 +1561,10 @@ export async function discoverProxyModels(
 						supportsReasoningEffort: false,
 					},
 		} as ModelSpec<Api>;
-		discovered.push(buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)));
+		const model = skipAmbiguousModel(providerConfig.provider, id, () =>
+			buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)),
+		);
+		if (model) discovered.push(model);
 	}
 	return discovered;
 }

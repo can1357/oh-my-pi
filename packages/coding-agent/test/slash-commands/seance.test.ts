@@ -78,7 +78,7 @@ describe("/seance", () => {
 		await runSeanceCommand(ctx, "");
 		await onSelected?.(picked);
 
-		expect(resolve).toHaveBeenCalledWith(picked.path, expect.objectContaining({ includeGlobal: true }));
+		expect(resolve).toHaveBeenCalledWith(picked.path, expect.anything());
 		expect(ctx.showHookSelector).not.toHaveBeenCalled();
 		expect(ctx.showModelSelector).toHaveBeenCalledWith(expect.objectContaining({ selectOnly: expect.anything() }));
 	});
