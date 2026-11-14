@@ -22,7 +22,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, Snowflake, sanitizeText, toError } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
 import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
@@ -30,6 +30,7 @@ import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-exe
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { parseExportArgs } from "../../export/html/args";
 import { shareSession } from "../../export/share";
+import { prepareCompactOptions } from "../../extensibility/extensions/compact-handler";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
 	diffMentalModelContent,
@@ -2264,24 +2265,37 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
+		const baseOptions =
+			customInstructionsOrOptions && typeof customInstructionsOrOptions === "object"
+				? customInstructionsOrOptions
+				: undefined;
+		// A failed compaction must reach the extension's `onError` exactly once
+		// (issue #12041). The session reports the failures it owns, but it
+		// rejects some calls before that report — "Compaction already in
+		// progress" is raised before the compaction pass starts — so the same
+		// reporter also runs from the catch below. It collapses both into a
+		// single call and keeps a throwing or rejecting extension callback from
+		// escaping; `onComplete` is contained the same way.
+		const prepared = prepareCompactOptions(baseOptions);
+		// Compaction succeeded but the transcript refresh afterwards threw: the
+		// extension must not see a failure for a compaction that committed.
+		let compacted = false;
 		try {
 			const instructions = typeof customInstructionsOrOptions === "string" ? customInstructionsOrOptions : undefined;
-			const baseOptions =
-				customInstructionsOrOptions && typeof customInstructionsOrOptions === "object"
-					? customInstructionsOrOptions
-					: undefined;
 			// The slash path passes `mode` positionally; the extension path carries
 			// it inside the options object. Either source wins over no mode.
 			const effectiveMode = mode ?? baseOptions?.mode;
 			const options =
-				baseOptions || effectiveMode || readerModel
+				prepared.options || effectiveMode || readerModel
 					? {
-							...baseOptions,
+							...prepared.options,
 							...(effectiveMode ? { mode: effectiveMode } : {}),
 							...(readerModel ? { readerModel } : {}),
+							onError: prepared.reportFailure,
 						}
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
+			compacted = true;
 
 			compactingLoader.stop();
 			this.ctx.statusContainer.disposeChildren();
@@ -2295,13 +2309,14 @@ export class CommandController {
 			// duplicate transcript, exactly as `/compact` reproduced (#12140).
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} catch (error) {
+			const failure = toError(error);
+			if (!compacted) prepared.reportFailure(failure);
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
 				this.ctx.showError("Compaction cancelled");
 			} else {
 				outcome = "failed";
-				const message = error instanceof Error ? error.message : String(error);
-				this.ctx.showError(`Compaction failed: ${message}`);
+				this.ctx.showError(`Compaction failed: ${failure.message}`);
 			}
 		} finally {
 			compactingLoader.stop();

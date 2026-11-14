@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { toError } from "@oh-my-pi/pi-utils";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
@@ -27,6 +28,7 @@ import type {
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
+import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -1678,15 +1680,24 @@ export class ExtensionUiController {
 		);
 		this.ctx.present(errorText);
 	}
+	/**
+	 * The interactive `ctx.compact()` adapter.
+	 *
+	 * `executeCompaction` reports and displays a failed compaction itself, but
+	 * it still awaits the compaction queue flush afterwards; anything that
+	 * throws there must not turn a fired-and-forgotten `ctx.compact()` into an
+	 * unhandled rejection (issue #12041).
+	 */
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		await this.ctx.executeCompaction(instructionsOrOptions, false);
+		try {
+			await this.ctx.executeCompaction(instructionsOrOptions, false);
+		} catch (error) {
+			this.ctx.showError(`Compaction failed: ${toError(error).message}`);
+		}
 	}
 
 	async #compactSession(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		const instructions = typeof instructionsOrOptions === "string" ? instructionsOrOptions : undefined;
-		const options =
-			instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
-		await this.ctx.session.compact(instructions, options);
+		await runExtensionCompact(this.ctx.session, instructionsOrOptions);
 	}
 
 	async #updateSessionName(name: string): Promise<void> {
