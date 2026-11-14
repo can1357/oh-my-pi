@@ -241,7 +241,7 @@ describe("advisor tool-call loop guard", () => {
 					const call = (context as (AgentToolContext & { toolCall?: ToolCallContext }) | undefined)?.toolCall;
 					if (call?.earlierEffectsSettled) {
 						await call.earlierEffectsSettled;
-							result = bytes;
+						result = bytes;
 					}
 					return { content: [{ type: "text", text: result }] };
 				},
