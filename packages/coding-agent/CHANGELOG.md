@@ -566,6 +566,7 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- Added the `wait.maxMs` setting for the `wait` safety cap (default 30 minutes); set it to `0` so a wait on long background work returns only on a result, a message, or a steering interrupt instead of a still-running snapshot every 30 minutes ([#14223](https://github.com/can1357/oh-my-pi/pull/14223) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Changed
 
