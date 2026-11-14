@@ -3,6 +3,8 @@
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { getOpenCodeUserAgent, toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
+import { usesOpenCodeClientIdentity } from "./opencode-free";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -21,6 +23,8 @@ export interface InferenceHeaderOptions {
 	 */
 	providerType?: string;
 	protocol: "anthropic" | "google" | "openai";
+	/** Resolved model compat; carries the free Zen client-identity opt-in. */
+	compat?: object;
 	sessionId?: string;
 	/**
 	 * Shared prompt-cache affinity key (see {@link resolveOpenCodeGoCacheAffinity}).
@@ -105,12 +109,14 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	}
 
 	const isOpenCode = backend === "opencode-go" || backend === "opencode-zen";
+	const clientIdentity = isOpenCode && usesOpenCodeClientIdentity(options.compat);
 	const sessionId = options.sessionId;
 	// The conversation id and the explicit cache key are independently
 	// optional: a Go sibling lane can carry its family affinity with no
 	// conversation session in hand (V1 compaction, direct client-options
-	// builds), while every other lane still needs the conversation id.
-	if (!sessionId && !options.cacheAffinity) return;
+	// builds), while every other lane still needs the conversation id. A gated
+	// free lane always owes the gateway a User-Agent, session or not.
+	if (!sessionId && !options.cacheAffinity && !clientIdentity) return;
 
 	if (sessionId) {
 		if (options.protocol === "anthropic") {
@@ -122,12 +128,19 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	}
 
 	if (isOpenCode) {
-		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+		// Free Zen models are gated on the OpenCode client's own identity: a
+		// different User-Agent or session shape is refused with a plain 429
+		// before the model is reached (see ./opencode-free).
+		setHeaderIfAbsent(headers, "User-Agent", clientIdentity ? getOpenCodeUserAgent() : USER_AGENT);
 		// Go's session header doubles as the gateway's cache-affinity handle:
 		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
 		// task cache key there; every other lane keeps the conversation id.
 		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
-		if (goSession) setHeader(headers, "x-opencode-session", goSession);
+		// A gated lane with no conversation id cannot be cached, so a fresh
+		// token per request is the honest answer rather than a missing header.
+		if (clientIdentity)
+			setHeader(headers, "x-opencode-session", toOpenCodeSessionToken(goSession ?? crypto.randomUUID()));
+		else if (goSession) setHeader(headers, "x-opencode-session", goSession);
 	}
 }
 

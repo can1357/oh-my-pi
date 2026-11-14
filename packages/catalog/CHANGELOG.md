@@ -6,6 +6,7 @@
 
 - Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 - Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
+- Added the `opencode-client-identity` compat axis and the `wire/opencode` client identity (pinned User-Agent with `PI_AI_OPENCODE_VERSION` overrides, `ses_` session-token derivation), set on free OpenCode Zen models by `opencode-zen.kdl` ([#19112](https://github.com/can1357/oh-my-pi/pull/19112) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
