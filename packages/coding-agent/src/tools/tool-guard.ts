@@ -68,6 +68,9 @@ const MAX_CONSECUTIVE_REFUSALS = 3;
 const MAX_TOTAL_REFUSALS = 20;
 /** A judgment unanswered after this lets the call through. */
 const JUDGE_TIMEOUT_MS = 15_000;
+/** Judge failures or timeouts in a row that open the breaker: calls then go unjudged for the cooldown. */
+const BREAKER_FAILURES = 3;
+const BREAKER_COOLDOWN_MS = 5 * 60_000;
 /** A call's arguments beyond this tell the judge nothing more about what it does. */
 const CALL_CHARS = 6000;
 /** Characters of each script shown, and how many scripts one call shows. */
@@ -210,10 +213,18 @@ function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 	}
 }
 
+/** Read-subcommand options that write a file or run a program: `--output=F`, `git grep -O<cmd>`, external diff and textconv drivers. */
+const GIT_EXEC_OPTION = /^(?:--output|-O|--open-files-in-pager|--ext-diff|--textconv)/;
+
 function readOnlyGit(args: string[]): boolean {
 	let i = 0;
 	while (i < args.length && args[i].startsWith("-")) {
-		if (inTable(GIT_VALUE_OPTIONS, args[i])) i++;
+		const option = args[i];
+		// Config set on the command line (`-c diff.external=x`) or another exec path can run anything.
+		if (option.startsWith("-c") || option.startsWith("--config-env") || option.startsWith("--exec-path")) {
+			return false;
+		}
+		if (inTable(GIT_VALUE_OPTIONS, option)) i++;
 		i++;
 	}
 	const sub = args[i];
@@ -221,6 +232,7 @@ function readOnlyGit(args: string[]): boolean {
 	const positional = rest.filter(arg => !arg.startsWith("-"));
 	const flags = rest.filter(arg => arg.startsWith("-"));
 	if (sub === undefined) return true;
+	if (flags.some(flag => GIT_EXEC_OPTION.test(flag))) return false;
 	if (inTable(GIT_READS, sub)) return true;
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
@@ -283,10 +295,10 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
 		case "rg":
 			return !args.some(arg => arg.startsWith("--pre"));
-		case "sed":
-			return !args.some(arg => /^-[a-zA-Z]*i/.test(arg) || arg.startsWith("--in-place"));
 		case "sort":
-			return !args.some(arg => arg.startsWith("-o") || arg.startsWith("--output"));
+			return !args.some(
+				arg => /^-[a-zA-Z]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"),
+			);
 		case "git":
 			return readOnlyGit(args);
 		default:
@@ -313,7 +325,8 @@ function scriptFile(words: string[]): string | undefined {
 	if (program === undefined) return undefined;
 	const name = path.basename(program);
 	const args = command.slice(1);
-	if (name === "source" || name === ".") return args[0];
+	// A sourced file (`source .env`) is often credentials; the judge reasons from the call text alone.
+	if (name === "source" || name === ".") return undefined;
 	if (inTable(RUNNERS, name) && args[0] === "run") {
 		const rest = args.slice(1);
 		while (rest.length > 0 && rest[0].startsWith("-")) rest.shift();
@@ -348,7 +361,7 @@ function writtenWords(segment: string[]): string[] {
 	return written;
 }
 
-/** The files a shell command runs as code (`python x.py`, `bash x.sh`, `./x`, `source x`, `uv run x.py`), at most three. */
+/** The files a shell command runs as code (`python x.py`, `bash x.sh`, `./x`, `uv run x.py`), at most three. Sourced files are never read: they are often credentials. */
 export function scriptsRun(command: string, cwd: string): string[] {
 	const segments = tokenizeShellSegments(command);
 	const written = new Set<string>();
@@ -523,6 +536,10 @@ export class ToolGuard {
 	#total = 0;
 	/** Non-synthetic user messages when the counts last restarted; one more starts a new run. */
 	#runKey: number | undefined;
+	/** Judgments in a row that failed or timed out. */
+	#judgeFailures = 0;
+	/** While set and in the future, the judge is skipped and every call goes through. */
+	#breakerOpenUntil: number | undefined;
 
 	constructor(host: ToolGuardHost) {
 		this.#host = host;
@@ -593,6 +610,7 @@ export class ToolGuard {
 		cwd: string,
 		signal: AbortSignal | undefined,
 	): Promise<GuardVerdict | undefined> {
+		if (this.#breakerOpenUntil !== undefined && Date.now() < this.#breakerOpenUntil) return undefined;
 		try {
 			const authority = this.#host.settings.grantAuthority?.() ?? this.#host.settings;
 			const allowances = cfgToolGuardAllowances.get(authority)?.trim();
@@ -626,16 +644,36 @@ export class ToolGuard {
 				},
 				{ signal: signal ? AbortSignal.any([signal, timeout]) : timeout },
 			);
-			return guardVerdict(answers, {
+			const verdict = guardVerdict(answers, {
 				risk: cfgToolGuardRiskThreshold.get(authority),
 				asked: cfgToolGuardAskedThreshold.get(authority),
 			});
+			this.#judgeFailures = 0;
+			if (this.#breakerOpenUntil !== undefined) {
+				this.#breakerOpenUntil = undefined;
+				logger.info("tool guard: judge answering again, judging resumed");
+			}
+			return verdict;
 		} catch (error) {
 			logger.debug("tool guard: judgment failed, call allowed", {
 				tool: call.toolName,
 				error: error instanceof Error ? error.message : String(error),
 			});
+			// A call the user aborted says nothing about the judge.
+			if (!signal?.aborted) this.#recordJudgeFailure();
 			return undefined;
 		}
+	}
+
+	#recordJudgeFailure(): void {
+		this.#judgeFailures++;
+		if (this.#judgeFailures < BREAKER_FAILURES) return;
+		// After the cooldown the judge is tried again; three more failures open the breaker again.
+		this.#breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS;
+		this.#judgeFailures = 0;
+		logger.warn("tool guard: judge failing, calls go unjudged for a while", {
+			failures: BREAKER_FAILURES,
+			cooldownMs: BREAKER_COOLDOWN_MS,
+		});
 	}
 }
