@@ -1038,7 +1038,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 
 function spawnJsProcess(): JsEvalWorkerHandle {
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
-		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG),
+		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
 		env: workerEnvFromParent(),
 		exitLabel: "JS eval worker",
 		detached: shouldDetachKernel(process.platform),
