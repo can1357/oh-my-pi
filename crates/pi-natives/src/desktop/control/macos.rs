@@ -8,7 +8,7 @@ use std::{
 		atomic::{AtomicU32, Ordering},
 	},
 	thread::{self, JoinHandle},
-	time::Instant,
+	time::{Duration, Instant},
 };
 
 use objc2_core_foundation::CGPoint;
@@ -32,6 +32,9 @@ const KEY_DOWN: u32 = 10;
 const OTHER_MOUSE_DOWN: u32 = 25;
 const SESSION_TAP: u32 = 1;
 const ANNOTATED_SESSION_TAP: u32 = 2;
+/// `kCGEventSourceStateHIDSystemState`: input from every source the HID
+/// system has seen.
+const HID_SYSTEM_STATE: i32 = 1;
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
 type Callback = unsafe extern "C" fn(Ref, u32, Ref, Ref) -> Ref;
@@ -64,6 +67,7 @@ unsafe extern "C" {
 	fn CGEventGetLocation(event: Ref) -> CGPoint;
 	fn CGEventGetFlags(event: Ref) -> u64;
 	fn CGEventTapEnable(tap: Ref, enable: bool);
+	fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -425,6 +429,24 @@ const fn foreign_input(tag: i64, source_pid: i64, own_pid: i64, kind: u32, point
 	foreign(tag, source_pid, own_pid) && !make_key
 }
 
+/// How the user-input tap counts a press: `None` when it is not someone
+/// else's input; otherwise whether it came from the user's own keyboard or
+/// pointer (source pid zero, the takeover monitor's rule), which holds a
+/// takeover back, rather than from another program.
+const fn observed(
+	tag: i64,
+	source_pid: i64,
+	own_pid: i64,
+	kind: u32,
+	point: CGPoint,
+) -> Option<bool> {
+	if foreign_input(tag, source_pid, own_pid, kind, point) {
+		Some(source_pid == 0)
+	} else {
+		None
+	}
+}
+
 /// The event types the user-input monitor's tap listens to: key presses and
 /// every pointer press.
 const USER_INPUT_MASK: u64 =
@@ -505,10 +527,14 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 				CGEventGetLocation(event),
 			)
 		};
-		if foreign_input(tag, source, i64::from(std::process::id()), kind, point)
-			&& let Some(pid) = input_target(kind, target, front_pid)
-		{
-			context.inner.record(pid, Instant::now());
+		if let Some(hardware) = observed(tag, source, i64::from(std::process::id()), kind, point) {
+			let at = Instant::now();
+			if hardware {
+				context.inner.pressed(at);
+			}
+			if let Some(pid) = input_target(kind, target, front_pid) {
+				context.inner.record(pid, at);
+			}
 		}
 	}
 	event
@@ -657,15 +683,18 @@ impl EscapeMonitor {
 }
 
 /// Records every foreign key press and click by the process it lands in, at
-/// the annotated session tap where `WindowServer` has named that process. It
-/// listens during background input and between calls, not only during
-/// takeover like the Escape monitor.
+/// the annotated session tap where `WindowServer` has named that process, and
+/// when the user's own keyboard or pointer last pressed anything, wherever it
+/// went. It listens during background input and between calls, not only
+/// during takeover like the Escape monitor. For presses before it starts, the
+/// HID system's idle time stands in ([`UserInputs::tap_started`]).
 pub(super) struct UserInputMonitor {
 	_tap: TapThread,
 }
 
 impl UserInputMonitor {
 	pub(super) fn start(inputs: Arc<UserInputs>) -> CoreResult<Self> {
+		inputs.tap_started(Instant::now(), since_last_press());
 		let tap = TapThread::start(
 			"desktop-user-input",
 			"user input",
@@ -676,6 +705,18 @@ impl UserInputMonitor {
 		)?;
 		Ok(Self { _tap: tap })
 	}
+}
+
+/// How long ago the HID system last saw a key press or click, from any
+/// source; `None` when it cannot say.
+fn since_last_press() -> Option<Duration> {
+	[KEY_DOWN, LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, OTHER_MOUSE_DOWN]
+		.into_iter()
+		// SAFETY: HIDSystemState and these CGEventType values are defined by
+		// CGEventSource.h and CGEventTypes.h; the call is a read-only query.
+		.map(|kind| unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, kind) })
+		.filter_map(|seconds| Duration::try_from_secs_f64(seconds).ok())
+		.min()
 }
 
 #[cfg(test)]
@@ -799,6 +840,19 @@ mod tests {
 		assert!(foreign_input(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::new(0.0, 1.0)));
 		assert!(foreign_input(0, 4242, own, LEFT_MOUSE_DOWN, CGPoint::new(1.0, 0.0)));
 		assert!(foreign_input(0, 4242, own, RIGHT_MOUSE_DOWN, CGPoint::ZERO));
+	}
+
+	#[test]
+	fn only_the_users_own_devices_hold_a_takeover_back() {
+		let own = 500;
+		// Hardware input has source pid zero.
+		assert_eq!(observed(0, 0, own, KEY_DOWN, CGPoint::ZERO), Some(true));
+		assert_eq!(observed(0, 0, own, LEFT_MOUSE_DOWN, CGPoint::new(5.0, 5.0)), Some(true));
+		// Another program's posted key is foreign input but no press of theirs.
+		assert_eq!(observed(0, 4242, own, KEY_DOWN, CGPoint::ZERO), Some(false));
+		// This process's own input, tagged or not, is neither.
+		assert_eq!(observed(SYNTHETIC_EVENT_TAG, 0, own, KEY_DOWN, CGPoint::ZERO), None);
+		assert_eq!(observed(0, own, own, KEY_DOWN, CGPoint::ZERO), None);
 	}
 
 	#[test]

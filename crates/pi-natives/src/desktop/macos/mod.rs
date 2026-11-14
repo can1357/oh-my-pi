@@ -37,7 +37,7 @@ use super::{
 		AxBackend, Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery,
 		ElementInput, PointerEvent, locate_element_click,
 	},
-	control::OperationToken,
+	control::{self, OperationToken},
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
@@ -148,6 +148,14 @@ impl Backend for MacosBackend {
 
 	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
 		session::hold_display_awake().map(|hold| Box::new(hold) as DisplayAwakeHold)
+	}
+
+	fn admit_takeover(&mut self) -> CoreResult<()> {
+		control::intervention::admit_takeover()
+	}
+
+	fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		Ok(control::intervention::takeover_admitted())
 	}
 
 	fn capture(

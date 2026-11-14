@@ -123,6 +123,10 @@
 - Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
 
+### Fixed
+
+- Fixed the computer tool telling the model that only an X11 takeover can end with nothing sent because the user kept typing; a macOS takeover now waits for the user's pause too and reports `UserIntervened` the same way
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

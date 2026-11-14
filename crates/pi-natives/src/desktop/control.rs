@@ -40,6 +40,23 @@ pub(crate) use macos::{
 /// Time left before the run's deadline for a refusal to reach the caller.
 pub(crate) const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 
+/// How long the user leaves the keyboard and pointer alone before a takeover
+/// brings its target in front of them (X11 and macOS), and leaves an app alone
+/// before a read of it shows what they left there (macOS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) const USER_QUIET: Duration = Duration::from_secs(5);
+
+/// The refusal of a takeover whose user was still active shortly before the
+/// run's deadline, their last press `idle` ago.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn still_active_refusal(idle: Duration) -> DesktopError {
+	DesktopError::user_intervened(format!(
+		"the user is still typing, clicking or holding input (last activity {:.1} s ago), so no \
+		 takeover started; nothing was sent; try again once they pause",
+		idle.as_secs_f64(),
+	))
+}
+
 #[derive(Default)]
 struct CancellationState {
 	generation:   AtomicU64,

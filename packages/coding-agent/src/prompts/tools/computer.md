@@ -200,8 +200,8 @@ await win.click(120, 48, button="right")
   and every other spelling `perform()` takes for `AXOpen` and `AXShowMenu` are refused too.
 - On macOS, `AxUnconfirmed` means an AX action may already have taken effect.
   Inspect fresh AX or a screenshot before repeating it; NEVER retry blindly.
-- `UserIntervened` (macOS or X11): on macOS the user came to that app, or typed or clicked in it;
-  on X11 they kept typing or clicking until the takeover's admission deadline, or pressed a key or button during takeover.
+- `UserIntervened` (macOS or X11): the user kept typing or clicking until the takeover's admission deadline, so no takeover started;
+  on macOS they also came to that app, or typed or clicked in it; on X11 they pressed a key or button during takeover.
   Nothing more was sent, and the tool never reruns it in takeover.
   - The user's edits stand: NEVER undo or retype over them.
   - Read that window again (`win.ax()`, `win.observe()` or `win.screenshot()`) and continue the task from what it shows.

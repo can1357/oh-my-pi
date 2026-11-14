@@ -278,13 +278,13 @@ pub trait Backend: Send {
 		ScreenState::default()
 	}
 	/// Waits, before a window or element takeover takes the input lease,
-	/// until the backend lets it start: X11 waits for the user to pause.
-	/// Backends that see no user input admit it at once.
+	/// until the backend lets it start: X11 and macOS wait for the user to
+	/// pause. Backends that see no user input admit it at once.
 	fn admit_takeover(&mut self) -> CoreResult<()> {
 		Ok(())
 	}
 	/// With the lease held: whether the last [`Self::admit_takeover`] still
-	/// holds (on X11, the user has pressed nothing since).
+	/// holds (on X11 and macOS, the user has pressed nothing since).
 	fn takeover_admitted(&mut self) -> CoreResult<bool> {
 		Ok(true)
 	}

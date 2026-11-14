@@ -2193,7 +2193,11 @@ pub(super) enum ForegroundInput {
 /// re-activating it can clear Chromium's renderer focus. The window is made
 /// key without being raised; callers that need it unobstructed raise it.
 /// `return_focus` restores even after user input during the action; see
-/// [`hands_focus_back`].
+/// [`hands_focus_back`]. It starts from the worker's admission, which waited
+/// for the user to pause in every app, and fails without sending anything if
+/// they pressed a key or clicked since
+/// ([`control::intervention::start_takeover`]): a key they type once the target
+/// is in front lands in it.
 pub(super) fn with_foreground<T>(
 	pid: pid_t,
 	wid: u32,
@@ -2202,6 +2206,7 @@ pub(super) fn with_foreground<T>(
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
+	control::intervention::start_takeover()?;
 	let choices = control::user_choices();
 	// Read with `choices`, before takeover posts anything: a click of the
 	// user's at any later point is then a choice the monitor counts once it has
