@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed X11 takeover and desktop typing arriving in the wrong case or layout while Caps Lock, a StickyKeys modifier or a second keyboard layout was active ([#19080](https://github.com/can1357/oh-my-pi/pull/19080) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
