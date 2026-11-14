@@ -154,6 +154,7 @@
 
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
+- `usage-display` now exports the usage-report seams the coding-agent surfaces share: `usageWindowSuffix`, `usageAccountOrg`/`UsageAccountIdentity`/`resolveUsageAccountIdentity`, and `usageResetExpiry`/`UsageResetExpiry` ([#15305](https://github.com/can1357/oh-my-pi/pull/15305) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ### Changed
 
