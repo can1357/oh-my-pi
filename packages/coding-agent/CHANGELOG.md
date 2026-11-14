@@ -302,6 +302,9 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+### Fixed
+
+- Fixed omp's run status dropping out mid-run on OSC 7501 terminals where omp draws its transcript as text, such as Rex, iTerm2 3.7.5 and Tern with "Native program surfaces" off: each redraw of a user message (a resize, a tool starting, a todo reminder) cleared the `working` or waiting status, and Rex posted a "done" notification for every one. On terminals that confirm OSC 7501, user messages now leave out their OSC 133 prompt marks until the run settles ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#18969](https://github.com/can1357/oh-my-pi/pull/18969) by [@robfeldmann](https://github.com/robfeldmann))
 
 ## [18.19.0] - 2026-11-12
 
