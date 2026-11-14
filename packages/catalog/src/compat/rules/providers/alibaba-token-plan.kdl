@@ -138,4 +138,20 @@ provider "alibaba-token-plan" {
 		thinking-default-level "xhigh"
 		thinking-efforts "low" "medium" "xhigh"
 	}
+	// Qwen4 Max Preview's /models row has no capabilities; the published
+	// Chat Completions contract uses OpenAI effort and preserves reasoning.
+	models "qwen4-max-preview" "qwen4.0-max-preview" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "medium" "xhigh"
+		thinking-default-level "xhigh"
+		supports-reasoning-effort #true
+		replay-reasoning-content #true
+		input-modalities "text" "image"
+		when-thinking {
+			thinking-format "openai"
+			extra-body {
+				enable_thinking #true
+			}
+		}
+	}
 }

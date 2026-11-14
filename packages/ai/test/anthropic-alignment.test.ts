@@ -9,17 +9,15 @@ import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
-	buildAnthropicHeaders,
 	claudeCodeSystemInstruction,
 	claudeToolPrefix,
 	deriveClaudeDeviceId,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
-	mapStainlessArch,
-	mapStainlessOs,
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { buildAnthropicHeaders, mapStainlessArch, mapStainlessOs } from "@oh-my-pi/pi-ai/providers/anthropic-headers";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
@@ -135,6 +133,23 @@ function captureSimpleAnthropicPayload(
 	return promise;
 }
 
+function countSerializedSchemaParameters(schema: unknown): { optionalCount: number; unionCount: number } {
+	const counts = { optionalCount: 0, unionCount: 0 };
+	const visit = (node: unknown): void => {
+		if (node === null || typeof node !== "object") return;
+		const record = node as Record<string, unknown>;
+		if (record.properties !== null && typeof record.properties === "object") {
+			const required = new Set(Array.isArray(record.required) ? record.required : []);
+			counts.optionalCount += Object.keys(record.properties).filter(name => !required.has(name)).length;
+		}
+		if (Array.isArray(record.type) || Array.isArray(record.anyOf)) counts.unionCount++;
+		for (const value of Object.values(node)) visit(value);
+	};
+	// Match the wire representation, without deduplicating shared schema objects.
+	visit(JSON.parse(JSON.stringify(schema)));
+	return counts;
+}
+
 function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionId?: string): void {
 	expect(typeof userId).toBe("string");
 	const parsed = JSON.parse(userId ?? "{}") as {
@@ -193,8 +208,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
-		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
-		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Package-Version"]).toBe("0.128.0");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.12.1");
 		expect(headers["X-Stainless-Timeout"]).toBe("600");
 		expect(headers["anthropic-client-platform"]).toBeUndefined();
 		expect(headers["anthropic-client-version"]).toBeUndefined();
@@ -221,7 +236,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		]);
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["anthropic-beta"]).toBe(
-			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(headers["x-client-request-id"]).toBeUndefined();
 	});
@@ -276,7 +291,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(
-			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});
@@ -769,6 +784,51 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(result.stopReason).toBe("error");
 	});
 
+	it("retries every concurrent first request rejected as too old, not just the first", async () => {
+		const pinned = getClaudeCodeVersion();
+		const required = "100.0.0";
+		const pinnedUserAgent = `claude-cli/${pinned} (external, cli)`;
+		const requiredUserAgent = `claude-cli/${required} (external, cli)`;
+		const tooOld = JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: `Claude Code ${pinned} does not support this model; version ${required} or newer is required.`,
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		});
+		const captured = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } });
+		const concurrency = 3;
+		const requests: string[] = [];
+		let firstAttempts = 0;
+		const { promise: allFirstAttemptsSent, resolve: allFirstAttemptsSentResolve } = Promise.withResolvers<void>();
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const userAgent = new Headers(init?.headers).get("User-Agent") ?? "";
+			requests.push(userAgent);
+			if (userAgent === pinnedUserAgent) {
+				firstAttempts++;
+				if (firstAttempts === concurrency) allFirstAttemptsSentResolve();
+				// Hold every first rejection until all concurrent requests have sent
+				// theirs, so they race on the adoption instead of serializing.
+				await allFirstAttemptsSent;
+				return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response(captured, { status: 400, headers: { "Content-Type": "application/json" } });
+		}) as typeof fetch;
+		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+		const results = await Promise.all(
+			Array.from({ length: concurrency }, () =>
+				streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result(),
+			),
+		);
+
+		expect(requests).toHaveLength(concurrency * 2);
+		for (const userAgent of requests.slice(0, concurrency)) expect(userAgent).toBe(pinnedUserAgent);
+		for (const userAgent of requests.slice(concurrency)) expect(userAgent).toBe(requiredUserAgent);
+		for (const result of results) expect(result.stopReason).toBe("error");
+	});
+
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {
 		let capturedBeta: string | undefined;
 		let capturedBody:
@@ -1065,7 +1125,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(headers["anthropic-beta"]).not.toBe("custom-beta-token");
 		expect(headers["x-app"]).toBe("cli");
-		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.12.1");
 	});
 
 	it("suppresses the client-level X-Api-Key when model.headers carries a custom Authorization (#3391)", () => {
@@ -1880,6 +1940,70 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(strictNames).toEqual(["python", "edit", "find", "yield"]);
 		expect(payload.tools?.find(tool => tool.name === "edit")?.input_schema?.required).toEqual(["requiredValue"]);
 	});
+
+	for (const copies of [11, 12]) {
+		it(`charges optional parameters for all ${copies} occurrences of a shared schema`, async () => {
+			const shared = {
+				type: "object",
+				properties: { first: { type: "string" }, second: { type: "string" } },
+			};
+			const payloads: Array<{ tools: Array<{ strict?: boolean; input_schema: unknown }> }> = [];
+			for (const reuse of [true, false]) {
+				const properties = Object.fromEntries(
+					Array.from({ length: copies }, (_, index) => [`item${index}`, reuse ? shared : structuredClone(shared)]),
+				);
+				const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+				payloads.push(
+					(await captureAnthropicPayload(
+						ANTHROPIC_MODEL,
+						{
+							messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+							tools: [
+								{
+									name: "find",
+									description: "Find a value",
+									parameters: { type: "object", properties: { query: { type: "string" } } } as TJsonSchema,
+								},
+								{ name: "edit", description: "Edit values", parameters },
+							],
+						},
+						{ isOAuth: false },
+					)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> },
+				);
+			}
+
+			for (const payload of payloads) {
+				const counts = countSerializedSchemaParameters(
+					payload.tools.filter(tool => tool.strict).map(tool => tool.input_schema),
+				);
+				expect(counts.unionCount).toBeLessThanOrEqual(16);
+				expect(payload.tools[0].strict).toBe(true);
+				expect(payload.tools[1].strict).toBe(true);
+				expect(counts.optionalCount).toBe(copies === 11 ? 23 : 24);
+			}
+			expect(JSON.stringify(payloads[0].tools)).toBe(JSON.stringify(payloads[1].tools));
+		});
+	}
+
+	for (const copies of [16, 17]) {
+		it(`charges union parameters for all ${copies} occurrences of a shared schema`, async () => {
+			const shared = { anyOf: [{ type: "string" }, { type: "number" }] };
+			const properties = Object.fromEntries(Array.from({ length: copies }, (_, index) => [`item${index}`, shared]));
+			const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+			const payload = (await captureAnthropicPayload(
+				ANTHROPIC_MODEL,
+				{
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [{ name: "edit", description: "Edit values", parameters }],
+				},
+				{ isOAuth: false },
+			)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> };
+
+			const tool = payload.tools[0];
+			expect(tool.strict).toBe(copies === 16 ? true : undefined);
+			if (tool.strict) expect(countSerializedSchemaParameters(tool.input_schema).unionCount).toBeLessThanOrEqual(16);
+		});
+	}
 
 	it("sends yield with buffered input streaming while other tools stream eagerly", async () => {
 		const tools: Tool[] = (["yield", "read"] as const).map(name => ({

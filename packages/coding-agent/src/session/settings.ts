@@ -1,4 +1,6 @@
-import { combine, effect, register, type SettingValueOf } from "../config/registry";
+import * as path from "node:path";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -20,8 +22,10 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
+import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
-import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -29,7 +33,27 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
+const EMPTY_STRING_RECORD: Record<string, string> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+
+/** Scope of the resume picker's current-folder list. */
+export const cfgSessionWorktreeScope = register({
+	id: "session.worktreeScope",
+	type: "enum",
+	values: ["directory", "repo"] as const,
+	default: "repo",
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Resume Worktree Scope",
+		description:
+			"Choose whether the resume picker's current folder includes sessions from other repository worktrees",
+		options: [
+			{ value: "directory", label: "This Directory", description: "Only sessions saved for this directory" },
+			{ value: "repo", label: "Repository Worktrees", description: "Also include sessions from sibling worktrees" },
+		],
+	},
+});
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({
@@ -42,7 +66,7 @@ export const cfgPowerSleepPrevention = register({
 		group: "Power",
 		label: "Sleep Prevention",
 		description:
-			"Prevent the system sleeping during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
+			"Prevent the system sleeping while the agent is running a turn; an idle session, including one waiting on background jobs, does not hold it. Each level is cumulative — it adds the flags of all lower levels.",
 		options: [
 			{
 				value: "off",
@@ -52,7 +76,7 @@ export const cfgPowerSleepPrevention = register({
 			{
 				value: "idle",
 				label: "Prevent Idle Sleep",
-				description: "Keep the system awake while a session is open (macOS `caffeinate -i`)",
+				description: "Keep the system awake while the agent is running a turn (macOS `caffeinate -i`)",
 			},
 			{
 				value: "display",
@@ -79,6 +103,31 @@ export const cfgPrewalkEnabled = register({
 		label: "Enable Prewalk",
 		description:
 			"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
+	},
+});
+
+export const cfgPrewalkFrom = register({
+	id: "prewalk.from",
+	type: "string",
+	default: "@default",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk planning model",
+		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+	},
+});
+
+export const cfgPrewalkInto = register({
+	id: "prewalk.into",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk target",
+		description:
+			"Model or role (default '@smol') that prewalk hands off to at the first edit/write: /prewalk, /prewalk restart, Enable Prewalk, and --prewalk. Auto-prewalk uses its own target.",
 	},
 });
 
@@ -122,10 +171,6 @@ export const cfgPrewalkAutoTarget = register({
 	},
 });
 
-function isLimitRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
 }
@@ -133,7 +178,7 @@ function isPositiveLimit(limit: unknown): limit is number {
 /** Per-provider request limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	const normalized: Record<string, number> = {};
-	if (!isLimitRecord(value)) return normalized;
+	if (!isRecord(value)) return normalized;
 	for (const provider in value) {
 		const limit = value[provider];
 		if (isPositiveLimit(limit)) normalized[provider] = Math.max(1, Math.floor(limit));
@@ -147,7 +192,7 @@ export function normalizeProviderMaxInFlightRequests(value: unknown): Record<str
  * @throws Error naming every provider whose limit is not a positive number.
  */
 export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (isLimitRecord(value)) {
+	if (isRecord(value)) {
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {
@@ -340,7 +385,8 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
-		description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+		description:
+			"Tool names, or xd:// device names of write dispatches (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
 
@@ -379,6 +425,56 @@ export const cfgIncludeModelInPrompt = register({
 	},
 });
 
+/** Template paths must not depend on the session cwd: absolute, or under the user's home via `~`. */
+function isUserTemplatePath(templatePath: unknown): templatePath is string {
+	if (typeof templatePath !== "string") return false;
+	return templatePath.startsWith("~/") || templatePath.startsWith("~\\") || path.isAbsolute(templatePath);
+}
+
+/**
+ * `systemPromptTemplates` entries, unchanged.
+ *
+ * @throws Error naming every blank model pattern (use SYSTEM.md / APPEND_SYSTEM.md for all models)
+ * and every pattern whose template path is not absolute or `~/`-relative.
+ */
+export function validateSystemPromptTemplates(value: unknown): Record<string, string> {
+	if (!isRecord(value)) return EMPTY_STRING_RECORD;
+	const blankPatterns: string[] = [];
+	const invalidPaths: string[] = [];
+	for (const pattern in value) {
+		if (!pattern.trim()) blankPatterns.push(JSON.stringify(pattern));
+		else if (!isUserTemplatePath(value[pattern])) invalidPaths.push(pattern);
+	}
+	const problems: string[] = [];
+	if (blankPatterns.length > 0) {
+		problems.push(
+			`model patterns must not be blank (use SYSTEM.md or APPEND_SYSTEM.md for every model): ${blankPatterns.join(", ")}`,
+		);
+	}
+	if (invalidPaths.length > 0) {
+		problems.push(`template paths must be absolute or start with ~/: ${invalidPaths.join(", ")}`);
+	}
+	if (problems.length > 0) throw new Error(`systemPromptTemplates ${problems.join("; ")}`);
+	return value as Record<string, string>;
+}
+
+/**
+ * Per-model system prompt: model-selector substring (case-insensitive) → Handlebars template path. Config-file only.
+ * Templates should be copies of the bundled `src/prompts/system/system-prompt.md`; see docs/system-prompt-customization.md.
+ */
+export const cfgSystemPromptTemplates = register({
+	id: "systemPromptTemplates",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
+	validate: validateSystemPromptTemplates,
+	normalize: validateSystemPromptTemplates,
+});
+
+/** {@link cfgSystemPromptTemplates} compiled for `matchModelPattern`. */
+export const systemPromptTemplatePatterns = cfgSystemPromptTemplates.map(templates =>
+	compileModelPatterns(templates, (templatePath: string) => templatePath),
+);
+
 export const cfgIncludeWorkspaceTree = register({
 	id: "includeWorkspaceTree",
 	type: "boolean",
@@ -389,6 +485,19 @@ export const cfgIncludeWorkspaceTree = register({
 		label: "Include Workspace Tree",
 		description:
 			"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+	},
+});
+
+/** Whether the system prompt carries a critical rule making `edit` mandatory for file edits; off omits edit guidance. */
+export const cfgEncourageEdits = register({
+	id: "encourageEdits",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "model",
+		group: "Prompt",
+		label: "Encourage Edits",
+		description: "Require the edit tool for file edits and forbid sed/perl/python edits",
 	},
 });
 
@@ -584,15 +693,15 @@ export const cfgTextVerbosity = register({
 	id: "textVerbosity",
 	type: "enum",
 	values: ["low", "medium", "high"] as const,
-	default: "medium",
+	default: "low",
 	ui: {
 		tab: "model",
 		group: "Sampling",
 		label: "Text Verbosity",
 		description: "OpenAI Responses and Codex response verbosity (low, medium, or high)",
 		options: [
-			{ value: "low", label: "Low", description: "Prefer concise responses" },
-			{ value: "medium", label: "Medium", description: "Balance brevity and detail (default)" },
+			{ value: "low", label: "Low", description: "Prefer concise responses (default)" },
+			{ value: "medium", label: "Medium", description: "Balance brevity and detail" },
 			{ value: "high", label: "High", description: "Prefer detailed responses" },
 		],
 	},
@@ -765,6 +874,19 @@ export const cfgRetryFallbackOn = register({
 	},
 });
 
+export const cfgRetryRateLimitWalksChain = register({
+	id: "retry.rateLimitWalksChain",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Rate Limit Walks Chain",
+		description:
+			"On a rate limit, do not hold the retry.fallbackChains walk for a turn whose thinking is signed by the failing model. Off (the default), such a turn keeps retrying the rate-limited model until retry.maxRetries is spent before the chain is reached.",
+	},
+});
+
 export const cfgRetryUsageAwareFallback = register({
 	id: "retry.usageAwareFallback",
 	type: "boolean",
@@ -873,6 +995,7 @@ export const cfgRetry = combine({
 	waitForUsageReset: cfgRetryWaitForUsageReset,
 	modelFallback: cfgRetryModelFallback,
 	fallbackOn: cfgRetryFallbackOn,
+	rateLimitWalksChain: cfgRetryRateLimitWalksChain,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
@@ -1102,20 +1225,32 @@ export const cfgProvidersOpenaiWebsockets = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "OpenAI WebSockets",
-		description: "Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables)",
+		label: "OpenAI Codex WebSockets",
+		description: "WebSocket policy for OpenAI Codex models only",
 		options: [
-			{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
-			{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
+			{ value: "auto", label: "Auto", description: "Use Codex model defaults" },
+			{ value: "off", label: "Off", description: "Disable WebSockets for OpenAI Codex models" },
 			{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
 		],
+	},
+});
+
+export const cfgProvidersOpenaiResponsesWebsockets = register({
+	id: "providers.openaiResponsesWebsockets",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "OpenAI Responses WebSockets",
+		description: "Opt in for catalog-supported standard Responses models; model or request false disables it",
 	},
 });
 
 export const cfgProvidersOpenaiLiveSteering = register({
 	id: "providers.openaiLiveSteering",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "providers",
 		group: "Protocol",
@@ -1141,6 +1276,22 @@ export const cfgProvidersMuseCodeStoreResponses = register({
 // Process-wide too, so side requests that call `completeSimple`/`streamSimple`
 // directly (titles, commit messages, memories) follow the setting.
 effect(cfgProvidersMuseCodeStoreResponses, enabled => configureProviderStoreResponses({ "muse-code": enabled }));
+
+export const cfgProvidersOpenaiCodexDaybreak = register({
+	id: "providers.openai-codex.daybreak",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Codex Daybreak Blue",
+		description:
+			"Automatically request the Daybreak Blue cyber access program on ChatGPT accounts eligible for it. OpenAI may use content from Daybreak Blue sessions to improve its models. Does not cover dedicated Daybreak Blue models (gpt-daybreak-blue-*), which may still run as Daybreak sessions.",
+	},
+});
+// Sessions pass their own value per request; this process-wide default covers
+// callers without a session stream function (titles, commit messages, memories).
+effect(cfgProvidersOpenaiCodexDaybreak, enabled => configureCodexAccessPrograms(enabled));
 
 export const cfgProvidersCacheRetention = register({
 	id: "providers.cacheRetention",
@@ -1295,30 +1446,41 @@ export const cfgProvidersFetch = register({
 	},
 });
 
+/** A saved-reset window with its own auto-redeem consent. */
+export type ResetWindow = "5h" | "weekly" | "fable";
+
+function resetWindowSetting<const Id extends string>(id: Id, label: string, description: string) {
+	return register({
+		id,
+		type: "enum",
+		values: ["unset", "yes", "no"] as const,
+		default: "unset" as const,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label,
+			description: `${description} unset asks before spending and never spends without a prompt; yes spends without asking; no never spends.`,
+			options: [
+				{ value: "unset", label: "Unset", description: "Ask before spending; never spend without a prompt." },
+				{ value: "yes", label: "Yes", description: "Spend eligible saved resets without asking." },
+				{ value: "no", label: "No", description: "Never spend saved resets for this window." },
+			],
+		},
+	});
+}
+
 // Codex saved rate-limit resets (auto-redeem)
-export const cfgCodexResetsAutoRedeem = register({
-	id: "codexResets.autoRedeem",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Auto-Redeem Saved Resets",
-		description:
-			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables both checks.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description:
-					"Check eligibility, then ask before spending the first saved reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
-		],
-	},
-});
+export const cfgCodexResetsAutoRedeem5h = resetWindowSetting(
+	"codexResets.autoRedeem5h",
+	"Codex Auto-Redeem Saved Resets (5h)",
+	"Spend saved Codex resets on 5-hour-only blocks and on expiring credits whose fullest chat window is 5h.",
+);
+
+export const cfgCodexResetsAutoRedeemWeekly = resetWindowSetting(
+	"codexResets.autoRedeemWeekly",
+	"Codex Auto-Redeem Saved Resets (Weekly)",
+	"Spend saved Codex resets on weekly blocks and on expiring credits whose fullest chat window is weekly. A block known only from a short 429 wait needs both Codex windows.",
+);
 
 export const cfgCodexResetsMinBlockedMinutes = register({
 	id: "codexResets.minBlockedMinutes",
@@ -1361,39 +1523,34 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
-	autoRedeem: cfgCodexResetsAutoRedeem,
+	autoRedeem5h: cfgCodexResetsAutoRedeem5h,
+	autoRedeemWeekly: cfgCodexResetsAutoRedeemWeekly,
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */
-export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem>;
+export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem5h>;
 
-// Claude Cedar/Juniper rate-limit resets (independent auto-redeem consent)
-export const cfgClaudeResetsAutoRedeem = register({
-	id: "claudeResets.autoRedeem",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Claude Auto-Redeem Resets",
-		description:
-			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description:
-					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
-		],
-	},
-});
+// Claude Cedar/Juniper/Fable rate-limit resets (independent auto-redeem consent)
+export const cfgClaudeResetsAutoRedeem5h = resetWindowSetting(
+	"claudeResets.autoRedeem5h",
+	"Claude Auto-Redeem Saved Resets (5h)",
+	"Spend Claude Cedar or Juniper resets on 5-hour-only blocks and on expiring grants whose fullest covered limit is 5h.",
+);
+
+export const cfgClaudeResetsAutoRedeemWeekly = resetWindowSetting(
+	"claudeResets.autoRedeemWeekly",
+	"Claude Auto-Redeem Saved Resets (Weekly)",
+	"Spend Claude Cedar resets on weekly or model-scoped blocks and on expiring grants whose fullest covered limit is weekly.",
+);
+
+export const cfgClaudeResetsAutoRedeemFable = resetWindowSetting(
+	"claudeResets.autoRedeemFable",
+	"Claude Auto-Redeem Fable Resets",
+	"Spend Claude Fable launch resets, which restore Fable weekly usage plus the 5h window. Only this setting governs them.",
+);
 
 export const cfgClaudeResetsMinBlockedMinutes = register({
 	id: "claudeResets.minBlockedMinutes",
@@ -1436,11 +1593,38 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 
 /** Claude reset auto-redeem policy (`claudeResets.*`), independent of {@link cfgCodexResets}. */
 export const cfgClaudeResets = combine({
-	autoRedeem: cfgClaudeResetsAutoRedeem,
+	autoRedeem5h: cfgClaudeResetsAutoRedeem5h,
+	autoRedeemWeekly: cfgClaudeResetsAutoRedeemWeekly,
+	autoRedeemFable: cfgClaudeResetsAutoRedeemFable,
 	minBlockedMinutes: cfgClaudeResetsMinBlockedMinutes,
 	keepCredits: cfgClaudeResetsKeepCredits,
 	salvageHorizonHours: cfgClaudeResetsSalvageHorizonHours,
 });
+
+/** Each provider's saved-reset window settings: the only keys a consent answer is saved to. */
+export const resetWindowSettings: Record<
+	"openai-codex" | "anthropic",
+	Partial<Record<ResetWindow, Setting<ResetAutoRedeemMode>>>
+> = {
+	"openai-codex": { "5h": cfgCodexResetsAutoRedeem5h, weekly: cfgCodexResetsAutoRedeemWeekly },
+	anthropic: {
+		"5h": cfgClaudeResetsAutoRedeem5h,
+		weekly: cfgClaudeResetsAutoRedeemWeekly,
+		fable: cfgClaudeResetsAutoRedeemFable,
+	},
+};
+
+/** Each saved-reset window's consent; a window a provider lacks reads as `no`. */
+export type ResetWindowModes = Partial<Record<ResetWindow, ResetAutoRedeemMode>>;
+
+/** The current consent of every saved-reset window `provider` has. */
+export function resetWindowModes(provider: "openai-codex" | "anthropic", scope: ScopeLike): ResetWindowModes {
+	const modes: ResetWindowModes = {};
+	for (const [window, setting] of Object.entries(resetWindowSettings[provider])) {
+		modes[window as ResetWindow] = setting.get(scope);
+	}
+	return modes;
+}
 
 export const cfgProviderAppendOnlyContext = register({
 	id: "provider.appendOnlyContext",
@@ -1481,4 +1665,28 @@ export const cfgThinkingBudgets = combine({
 	high: cfgThinkingBudgetsHigh,
 	xhigh: cfgThinkingBudgetsXhigh,
 	max: cfgThinkingBudgetsMax,
+});
+
+/** Rejects a cost threshold that is not a positive USD amount. */
+function validateCostThreshold(id: string): (raw: unknown) => void {
+	return raw => {
+		if (raw === undefined || raw === null || (typeof raw === "number" && Number.isFinite(raw) && raw > 0)) return;
+		throw new Error(`Invalid ${id}: expected a positive USD amount, got ${Bun.inspect(raw)}.`);
+	};
+}
+
+/** Session-tree spend (USD) at which omp warns once; `--warn-cost` overrides it for one run. */
+export const cfgSessionWarnCost = register({
+	id: "session.warnCost",
+	type: "number",
+	default: undefined,
+	validate: validateCostThreshold("session.warnCost"),
+});
+
+/** Session-tree spend (USD) at which omp stops sending model requests; `--max-cost` overrides it for one run. */
+export const cfgSessionMaxCost = register({
+	id: "session.maxCost",
+	type: "number",
+	default: undefined,
+	validate: validateCostThreshold("session.maxCost"),
 });

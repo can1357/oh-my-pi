@@ -189,6 +189,39 @@ describe("Markdown component", () => {
 			expect(plainLines.join("")).toContain("x");
 		});
 
+		it("renders a table inside an ordered list item under its continuation indent", () => {
+			const source = `10. **Keep:**
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |
+11. Next item`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			const lines = markdown.render(30).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.filter(line => line.startsWith("    |"))).toHaveLength(2);
+			expect(lines.some(line => line.includes("pi") && line.includes("MIT"))).toBe(true);
+			expect(lines.at(-1)).toBe("11. Next item");
+			expect(lines.every(line => visibleWidth(line) <= 30)).toBe(true);
+		});
+
+		it("keeps a narrow list-item table visible as raw markdown", () => {
+			const source = `10. Keep:
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(10)
+				.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.slice(1).join("\n")).toContain("Part");
+			expect(lines.slice(1).join("\n")).toContain("MIT");
+			expect(lines.every(line => visibleWidth(line) <= 10)).toBe(true);
+		});
+
 		it("should maintain numbering when code blocks are not indented (LLM output)", () => {
 			// When code blocks aren't indented, marked parses each item as a separate list.
 			// We use token.start to preserve the original numbering.
@@ -1704,6 +1737,63 @@ bar`,
 			}
 		});
 
+		it("links every wrapped fragment of a URL in a fenced code block, and only when hyperlinks are on (issue #12321)", () => {
+			const url =
+				"https://example.com/very/long/path/segment-one/segment-two/segment-three/segment-four?query=value&another=value";
+			const text = `\`\`\`\n${url}\n\`\`\``;
+			// Highlighters can split a URL across several SGR spans; the link must span them all.
+			const highlighted = {
+				...defaultMarkdownTheme,
+				highlightCode: (code: string): string[] =>
+					code.split("\n").map(line => `\x1b[32m${line.slice(0, 30)}\x1b[39m\x1b[33m${line.slice(30)}\x1b[39m`),
+			};
+
+			for (const theme of [defaultMarkdownTheme, highlighted]) {
+				clearRenderCache();
+				const lines = new Markdown(text, 0, 0, theme).render(40);
+				const fragments = lines.filter(line => inspectHyperlinks(line).targets.includes(url));
+				expect(fragments.length).toBeGreaterThan(2);
+				for (const line of fragments) {
+					const { visible, targets } = inspectHyperlinks(line);
+					expect(line.split(`\x1b]8;;${url}\x07`)).toHaveLength(2);
+					expect(line.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
+					expect(visible.length).toBeLessThanOrEqual(40);
+					for (let i = 0; i < visible.length; i++) {
+						if (visible[i] !== " ") expect(targets[i]).toBe(url);
+					}
+				}
+				const linkedText = fragments.map(line => inspectHyperlinks(line).visible.trimEnd()).join("");
+				expect(linkedText).toBe(url);
+
+				terminalState.hyperlinks = false;
+				try {
+					clearRenderCache();
+					const plainLines = new Markdown(text, 0, 0, theme).render(40);
+					expect(plainLines.join("")).not.toContain("\x1b]8;");
+					expect(plainLines.map(line => inspectHyperlinks(line).visible)).toEqual(
+						lines.map(line => inspectHyperlinks(line).visible),
+					);
+				} finally {
+					terminalState.hyperlinks = true;
+				}
+			}
+		});
+
+		it("leaves an unbalanced closing bracket after a code-block URL out of the link", () => {
+			const cases = [
+				["urls = [https://a.com/x]", "https://a.com/x"],
+				["{https://a.com/x}", "https://a.com/x"],
+				["(https://a.com/x),", "https://a.com/x"],
+				["https://a.com/w[1]", "https://a.com/w[1]"],
+			] as const;
+			for (const [code, target] of cases) {
+				clearRenderCache();
+				const lines = new Markdown(`\`\`\`\n${code}\n\`\`\``, 0, 0, defaultMarkdownTheme).render(80);
+				const targets = lines.flatMap(line => inspectHyperlinks(line).targets).filter(t => t !== null);
+				expect(new Set(targets)).toEqual(new Set([target]));
+			}
+		});
+
 		it("should isolate wrapped OSC 8 links from adjacent table cells", () => {
 			const issueUrl = "https://github.com/can1357/oh-my-pi/issues/5860";
 			const markdown = new Markdown(
@@ -2243,6 +2333,40 @@ describe("Module-level LRU render cache", () => {
 		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
 		expect(closed).toContain("F<def f():>");
 		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("settles an open fence's finished lines so a long block can retire", () => {
+		// A fenced block never reaches a "\n\n" boundary, so the block walk alone
+		// settles nothing for it and a long streamed SQL/log block stays in the
+		// mutable viewport, losing every row that leaves the screen (#9780).
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		// The last two lines stay live: the newest is still being written, and the
+		// cut keeps one more so the publisher always has a tail to extend.
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\n");
+
+		markdown.setText("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
+	});
+
+	it("clears the settled fence text when a non-append edit rewinds it", () => {
+		// Regression: the stored prefix survived a rewind, so every later frame
+		// failed the prefix check and the block stayed unretirable for the rest
+		// of the stream.
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nold\nrow\n", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nold\n");
+
+		markdown.setText("```sql\nnew\nrow\n");
+		markdown.render(80);
+		markdown.setText("```sql\nnew\nrow\nthird\nfourth\n");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nnew\nrow\nthird\n");
 	});
 
 	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {

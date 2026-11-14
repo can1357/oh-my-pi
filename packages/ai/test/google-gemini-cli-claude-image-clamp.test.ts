@@ -115,14 +115,16 @@ describe("Antigravity Claude image clamp", () => {
 	});
 
 	it("clamps a Claude image past 8000px", async () => {
-		const tallData = await makeRedPng(1440, 8570);
-		const images = await captureImages(
-			claude,
-			userImages([{ type: "image", data: tallData, mimeType: "image/png" }]),
-		);
+		const tallData = await makeRedPng(240, 8570);
+		const source = await dimensions(tallData);
+		expect(source.height).toBeGreaterThan(8000);
+		expect(tallData.length).toBeLessThanOrEqual(Math.floor(ANTIGRAVITY_CLAUDE_IMAGE_PAYLOAD_BYTES * 0.9));
+		const tall: ImageContent = { type: "image", data: tallData, mimeType: "image/png" };
+		const images = await captureImages(claude, userImages([tall]));
 
 		expect(images).toHaveLength(1);
-		expect(await dimensions(images[0].data)).toEqual({ width: 1344, height: 8000 });
+		expect(tall.data).toBe(tallData);
+		expect(await dimensions(images[0].data)).toEqual({ width: 224, height: 8000 });
 	});
 
 	it("applies the many-image cap to Claude past 20 images", async () => {
@@ -144,7 +146,8 @@ describe("Antigravity Claude image clamp", () => {
 
 	it("sends Gemini images on the same gateway as they are", async () => {
 		const heavyData = await makeHeavyPng();
-		const tallData = await makeRedPng(1440, 8570);
+		const tallData = await makeRedPng(240, 8570);
+		expect((await dimensions(tallData)).height).toBeGreaterThan(8000);
 		const images = await captureImages(
 			gemini,
 			userImages([

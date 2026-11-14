@@ -7,11 +7,11 @@ import { sessionFilesFromDisk } from "../internal-urls/registry-helpers";
 import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" with { type: "text" };
 import seanceTaskGuidanceTemplate from "../prompts/tools/seance-task-guidance.md" with { type: "text" };
 import { buildSessionContext, getRestorableSessionModels } from "../session/session-context";
-import { listSessionsReadOnly } from "../session/session-listing";
+import { findSessionFiles, listSessionsReadOnly } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
 import { resolveSessionLeafId, type SessionEntry } from "../session/session-entries";
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
-import { SessionManager, type PersistedSessionInit } from "../session/session-manager";
+import type { PersistedSessionInit } from "../session/session-manager";
 import { loadSessionFile } from "../session/session-loader";
 import type { ModelRegistry } from "../config/model-registry";
 import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
@@ -19,7 +19,7 @@ import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { getBundledAgent } from "./agents";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
-import type { AgentDefinition } from "./types";
+import type { AgentDefinition, SeanceTaskSchemaFields } from "./types";
 
 export interface ResolvedSeanceSource {
 	file: string;
@@ -104,8 +104,8 @@ async function validateSourceFile(file: string, storage: SessionStorage): Promis
 
 /**
  * Resolve an explicit session path or an unambiguous stored session id without opening its writer.
- * Ids search the caller's artifact tree, then the current project; `includeGlobal` (user-typed
- * `/seance` ids) also searches every project's sessions.
+ * Ids search the caller's artifact tree, then the current project, then every project by filename,
+ * so a short id copied from `archive` or another project's listing resolves without its path.
  */
 export async function resolveSeanceSource(
 	selector: string,
@@ -113,7 +113,6 @@ export async function resolveSeanceSource(
 		cwd: string;
 		sessionDirHint?: string;
 		artifactsDirHint?: string;
-		includeGlobal?: boolean;
 		storage?: SessionStorage;
 	},
 ): Promise<ResolvedSeanceSource> {
@@ -150,17 +149,17 @@ export async function resolveSeanceSource(
 	const local = await listSessionsReadOnly(sessionDir, storage);
 	const localMatch = chooseId(local, source);
 	if (localMatch) return validateSourceFile(localMatch.path, storage);
-	if (options.includeGlobal) {
-		const matchGlobal = chooseId(await SessionManager.listAll(storage), source);
-		if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
-	}
+	// Filename lookup: a header scan of every project takes seconds on large session trees.
+	const global = await findSessionFiles(source);
+	if (global.length > 1) throw new Error(`Session selector "${label}" is ambiguous.`);
+	if (global.length === 1) return validateSourceFile(global[0]!, storage);
 	throw new Error(`Session "${label}" was not found.`);
 }
 const modelSelectorInputSchema = type("string | string[]");
 export const seanceTaskSchemaFields = {
 	"sourceSession?": type("string"),
 	"model?": modelSelectorInputSchema,
-};
+} satisfies Required<SeanceTaskSchemaFields>;
 export const seanceTaskGuidance = seanceTaskGuidanceTemplate;
 
 function validateSeanceFields(
@@ -172,7 +171,7 @@ function validateSeanceFields(
 	if (agent !== SEANCE_AGENT_NAME) {
 		if (item.sourceSession !== undefined)
 			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		// Elsewhere `model` is the per-call selector, decided by `task.perCallModel` at preflight.
 		return undefined;
 	}
 	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.
@@ -205,9 +204,11 @@ export function validateSeanceParams(context: {
 }): string | undefined {
 	const { params, batchEnabled, defaultAgent, seanceAdvertised } = context;
 	if (batchEnabled && params.tasks !== undefined) {
-		if (params.sourceSession !== undefined || params.model !== undefined) {
-			return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
+		if (params.sourceSession !== undefined) {
+			const fields = params.model !== undefined ? "`sourceSession` and `model`" : "`sourceSession`";
+			return `Put ${fields} on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
 		}
+		if (params.model !== undefined) return "Put `model` on the individual items inside `tasks[]`.";
 		for (let index = 0; index < params.tasks.length; index++) {
 			const item = params.tasks[index]!;
 			const label = `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;

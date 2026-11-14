@@ -419,7 +419,11 @@ describe("builtin-defaults rule provider", () => {
 		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
 		return (...deltas) => {
 			manager.resetBuffer();
-			return deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(r => r.name));
+			const names = deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(r => r.name));
+			// The stream ends with a final check, as the TTSR coordinator sends: matches on a long
+			// unterminated line may be deferred until then.
+			names.push(...manager.checkDelta("", ctx, { final: true }).map(r => r.name));
+			return [...new Set(names)];
 		};
 	}
 
@@ -441,8 +445,22 @@ describe("builtin-defaults rule provider", () => {
 			'const KINDS = new Set([/* categories * kept together */ "a", "b"]);',
 			'const CLOSERS = new Map([["close", "]"]]);',
 			'const SIZES = new Map([["small", 1] as const, ["large", 2] as const]);',
+			'const KINDS = new Set(["text", "json"] as const);',
+			'const KEYS = new Set(["topP", "topK"] as const satisfies readonly (keyof StreamOptions)[]);',
+			'const KINDS = new Set([\n\t"text",\n\t"json",\n],\n);',
+			// Any type clause after the array: only the token right after `]` is read.
+			'const KINDS = new Set(["a"] as const satisfies\n\treadonly string[]);',
+			'const SIZES = new Map([["a", 1]] as const satisfies\n\tReadonlyArray<readonly [string, number]>);',
+			'const KINDS = new Set(["a", "b"] as const satisfies readonly ((typeof KIND)[number])[]);',
+			'const KINDS = new Set(["a"] as ReadonlyArray<\n\tstring\n>);',
+			'const SIZES = new Map([["a", { x: 1 }]] as [string, { x: number; y?: number }][]);',
+			'const KINDS = new Set(["a"] /* static */ as const);',
 		];
-		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
+		for (const snippet of hits) {
+			expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
+			// Streamed a character at a time it fires too, once the token after `]` arrives.
+			expect(new Set(fired(...snippet)), snippet).toEqual(new Set(["ts-set-map"]));
+		}
 
 		// Shapes the rule body keeps as Set/Map: runtime-built membership and lookups.
 		const misses = [
@@ -458,8 +476,42 @@ describe("builtin-defaults rule provider", () => {
 			'const counts = new Map([["known", 1], ...runtimeEntries]);',
 			// A table filling a 1000-character line is not small; bailing there keeps streaming one cheap.
 			`const SCHEMAS = new Map([["schema", "${"x".repeat(1000)}"]]);`,
+			// A literal array that is only the input to a computed argument.
+			'const known = new Map([["known", 1] as const].filter(predicate));',
+			'const known = new Map([["known", 1]].filter(predicate));',
+			'const kinds = new Set(["a", "b"].map(normalize));',
+			'const kinds = new Set(["a", "b"]\n\t.map(normalize));',
+			'const kinds = new Set(["a"] /* raw */ .map(normalize));',
+			'const kinds = new Set(["a", "b"].concat(extra));',
+			'const kinds = new Set(["a", "b"]?.map(normalize));',
 		];
-		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+		for (const snippet of misses) {
+			expect(fired(snippet), snippet).toEqual([]);
+			// Streamed, it waits for the token after `]` instead of firing at the bracket.
+			expect(fired(...snippet), snippet).toEqual([]);
+		}
+	});
+
+	it("checks ts-set-map in linear time while a long single-line table streams in", async () => {
+		// A backtracking `Set` condition streams 10,000 characters fast but takes 5 s at 20,000.
+		const value = "x".repeat(20_000);
+		const fired = await streamRule("ts-set-map");
+		const cases: [source: string, names: string[]][] = [
+			// The Map condition gives up on a `new Map` line past 1000 characters: no table that long is small.
+			[`const SCHEMAS = new Map([["schema", "${value}"]]);`, []],
+			[`const SCHEMAS = new Map([["schema", ${"x+".repeat(10_000)}x]]);`, []],
+			[`const SCHEMAS = new Set(["${value}"]);`, ["ts-set-map"]],
+			[`const SCHEMAS = new Set([/* ${value} */ "a"]);`, ["ts-set-map"]],
+		];
+		for (const [source, expected] of cases) {
+			const deltas = source.match(/[\s\S]{1,20}/g) ?? [];
+			// Each delta rescans the whole unfinished line; a per-character backtrack there made this take seconds.
+			const start = performance.now();
+			const names = fired(...deltas);
+			const elapsed = performance.now() - start;
+			expect(new Set(names), source.slice(0, 40)).toEqual(new Set(expected));
+			expect(elapsed, source.slice(0, 40)).toBeLessThan(500);
+		}
 	});
 
 	it("fires ts-import-type on inline type imports but not on runtime import() calls", async () => {
@@ -481,6 +533,7 @@ describe("builtin-defaults rule provider", () => {
 			'type Keys = keyof typeof import("./mod");',
 			'type Client = import(/* SDK * pinned */ "sdk").Client;',
 			'type Temperature = import("./units").温度;',
+			'type Kelvin = import("./units").𐐀;',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -492,6 +545,9 @@ describe("builtin-defaults rule provider", () => {
 			"const { completeText } = await import(`${cwd}/src/client.ts`);",
 			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
 			'const impit = import("impit").then(({ Impit }) => new Impit());',
+			// Non-ASCII whitespace around a Promise method is not part of a member name.
+			'const impit = import("impit").then\u00a0(({ Impit }) => new Impit());',
+			'const impit = import("impit").\u2028catch(error => error);',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 

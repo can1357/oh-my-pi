@@ -81,6 +81,12 @@ describe("browser readable extraction", () => {
 		expect(result?.markdown).not.toContain("Read logs.");
 	});
 
+	it("keeps underscores inside identifiers in filtered plain text", async () => {
+		const html = `<main><h2>Setup DOCX_NEEDLE_1</h2><p>Set my__var, <em>not</em> _this_ or __init__.</p><h2>Other</h2><p>no</p></main>`;
+		const result = await extractReadableFromHtml(html, "https://example.com/", "text", { filter: "setup" });
+		expect(result?.text).toBe("Setup DOCX_NEEDLE_1\n\nSet my__var, not _this_ or __init__.");
+	});
+
 	it("keeps block boundaries as line breaks in Readability text", async () => {
 		const paragraph = (n: number) =>
 			`<p>Paragraph ${n} explains the fare rules in enough words that Readability scores this block as article prose rather than page chrome.</p>`;

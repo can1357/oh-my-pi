@@ -236,6 +236,15 @@ export interface AutocompleteItem {
 
 type Awaitable<T> = T | Promise<T>;
 
+/**
+ * `^` model mention completion at the cursor. `unhandled` means no mention token there, or
+ * another completion outranks it, so the async {@link AutocompleteProvider.getSuggestions} decides.
+ */
+export type ModelMentionCompletion =
+	| { kind: "unhandled" }
+	| { kind: "no-match" }
+	| { kind: "matched"; suggestions: { items: AutocompleteItem[]; prefix: string } };
+
 export interface SlashCommand {
 	name: string;
 	aliases?: string[];
@@ -294,6 +303,11 @@ export interface AutocompleteProvider {
 	 * the collapsed `/skill:` namespace row. Returns null outside a command-name token or with no match.
 	 */
 	trySyncSlashCompletion?(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null;
+	/**
+	 * Synchronously list `^` model mention completions for the token at the cursor, so a
+	 * shown mention popup never lags the typed text.
+	 */
+	trySyncModelMentionCompletion?(lines: string[], cursorLine: number, cursorCol: number): ModelMentionCompletion;
 	/**
 	 * Synchronously try to expand text immediately before the cursor (no async I/O).
 	 * Called after every single-character insert. Implementations MUST cheaply
@@ -504,6 +518,13 @@ function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
  * Match a bare skill name from the beginning of any hyphen-delimited segment.
  * This stays allocation-free on the hot path: it scans segment boundaries
  * in-place and never materializes split/slice arrays.
+ *
+ * Inner-segment hits rank at leading-prefix strength (900), never above it:
+ * a command whose name starts with the query must not lose to a skill that
+ * only contains the query mid-name (`/job` → `jobs` before
+ * `skill:…-job-…`; #18891). Only a bare-name-exact hit keeps the 1000 tier.
+ * Ties fall back to registry order in the stable sort, so builtins win, and
+ * {@link collapseSkillNamespace} keeps the popup command-only on a tie.
  */
 function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
 	if (lowerPrefix.length === 0) return 0;
@@ -518,13 +539,7 @@ function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): 
 		segmentStart += 1;
 		if (segmentStart >= lowerBareName.length) break;
 
-		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) {
-			let segmentEnd = segmentStart;
-			while (segmentEnd < lowerBareName.length && lowerBareName.charCodeAt(segmentEnd) !== 45) {
-				segmentEnd += 1;
-			}
-			return lowerPrefix.length === segmentEnd - segmentStart ? 1000 : 900;
-		}
+		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) return 900;
 	}
 
 	return 0;

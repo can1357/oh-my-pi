@@ -844,7 +844,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		).toThrow("without surrounding whitespace");
 	});
 
-	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {
+	test("keeps hot-window safety ahead of configured priority but not a failed usage fetch", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
@@ -877,8 +877,34 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-safety");
-		expectExclusivePreference(counts, "api-acct-safe", "api-acct-hot");
-		expectExclusivePreference(counts, "api-acct-safe", "api-acct-unknown");
+		expectExclusivePreference(counts, "api-acct-unknown", "api-acct-hot");
+		expectExclusivePreference(counts, "api-acct-unknown", "api-acct-safe");
+	});
+
+	test("prefers a measured account over a failed usage fetch at equal configured priority", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{ provider: "openai-codex", account: { email: "unknown@example.com" }, priority: 10 },
+				{ provider: "openai-codex", account: { email: "measured@example.com" }, priority: 10 },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-unknown", "unknown@example.com") },
+			{ type: "oauth", ...createCredential("acct-measured", "measured@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-measured",
+			createCodexUsageReport({
+				accountId: "acct-measured",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-equal-priority");
+		expectExclusivePreference(counts, "api-acct-measured", "api-acct-unknown");
 	});
 
 	test("applies deterministic priority without a usage ranking strategy", async () => {
@@ -1485,6 +1511,54 @@ describe("AuthStorage codex oauth ranking", () => {
 		usageByAccount.set("acct-team", teamReport);
 
 		expect(await authStorage.keys.get("openai-codex", "allowed-team-at-100-percent")).toBe("api-acct-team");
+	});
+
+	test("selects an open Pro Max account over a blocked Pro account, including when pinned", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-pro", "pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-promax", "promax@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-pro",
+			addSparkUsage(
+				createCodexUsageReport({
+					accountId: "acct-pro",
+					primary: { usedFraction: 1, resetInMs: 3 * 24 * HOUR_MS },
+					secondary: { usedFraction: 1, resetInMs: 3 * 24 * HOUR_MS },
+					metadata: { allowed: false, limitReached: true, planType: "pro" },
+				}),
+				1,
+				1,
+			),
+		);
+		usageByAccount.set(
+			"acct-promax",
+			addSparkUsage(
+				createCodexUsageReport({
+					accountId: "acct-promax",
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+					metadata: { allowed: true, limitReached: false, planType: "promax" },
+				}),
+				0.2,
+				0.2,
+			),
+		);
+		const proMax = authStorage.oauth.accounts("openai-codex").find(account => account.accountId === "acct-promax");
+		if (!proMax) throw new Error("expected Pro Max account");
+
+		expect(
+			await authStorage.keys.get("openai-codex", "promax-over-blocked-pro", { modelId: "gpt-5.3-codex-spark" }),
+		).toBe("api-acct-promax");
+		expect(
+			await authStorage.keys.get("openai-codex", "promax-over-blocked-pro-paid", { modelId: "gpt-6.1-terra" }),
+		).toBe("api-acct-promax");
+		expect(authStorage.sessions.pin("openai-codex", "pinned-promax", proMax.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", "pinned-promax", { modelId: "gpt-5.3-codex-spark" })).toBe(
+			"api-acct-promax",
+		);
 	});
 
 	test("temporarily blocks only the exhausted Codex OAuth credential after a quota 429", async () => {

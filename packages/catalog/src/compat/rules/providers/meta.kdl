@@ -77,6 +77,19 @@ provider "meta" {
 			supports-reasoning-effort #true
 			include-encrypted-reasoning #true
 		}
+		// Muse Ember: dev.meta.ai/docs/muse-ember + pricing-rate-limits
+		// (2026-11-10). Standard mode only; `max` documented. Requests over
+		// 200K input tokens bill the long-context card below.
+		model "muse-ember-1.0" name="Muse Ember" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.1 output=0.5 cache-read=0.004 cache-write=0
+			limits context=1048576 max-tokens=524288
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
 	}
 
 	include-encrypted-reasoning #true
@@ -85,6 +98,15 @@ provider "meta" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	models "muse-ember-1.0" {
+		long-context-cost {
+			input-threshold 200000
+			input 0.3
+			output 1.5
+			cache-read 0.012
+			cache-write 0
+		}
+	}
 	// `/v1/models` carries no capability metadata: an id no seed or taxonomy
 	// knows is offered this ladder for the user to opt into.
 	class "unknown" {

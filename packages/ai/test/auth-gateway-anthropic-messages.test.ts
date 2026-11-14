@@ -308,6 +308,18 @@ describe("anthropic-messages parseRequest", () => {
 		expect(absent.options.reasoning).toBeUndefined();
 	});
 
+	it("rejects structured-output requests instead of serving them unconstrained (#18842)", () => {
+		const base = { model: "m", max_tokens: 8, messages: [{ role: "user", content: "hi" }] };
+		const format = { type: "json_schema", schema: { type: "object" } };
+		expect(() => parseRequest({ ...base, output_config: { effort: "low", format } })).toThrow(
+			/output_config\.format \(structured output\) is unsupported/,
+		);
+		expect(() => parseRequest({ ...base, output_format: format })).toThrow(/output_format \(structured output\)/);
+		expect(parseRequest({ ...base, output_config: { effort: "low", format: null } }).options.reasoning).toBe(
+			Effort.Low,
+		);
+	});
+
 	it("rejects missing required fields and unsupported request controls", () => {
 		expect(() => parseRequest({})).toThrow(/model/);
 		expect(() => parseRequest({ model: "m", messages: [] })).toThrow(/max_tokens/);

@@ -1,12 +1,16 @@
 import { transcriptEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { type CopyPickSource, CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import {
+	COPY_SELECTOR_OVERLAY_OPTIONS,
+	type CopyPickSource,
+	CopySelectorComponent,
+} from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { assistantText } from "@oh-my-pi/pi-tui/overlays/copy-targets";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { isTranscriptEntry } from "../../../../session/session-context";
 import type { SessionEntry } from "../../../../session/session-entries";
 import type { TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 
-export type AnnotationSourceKind = "code-review" | "last" | "session" | "file" | "prompt";
+export type AnnotationSourceKind = "code-review" | "last" | "session" | "file" | "prompt" | "draft";
 
 export const ANNOTATION_SOURCE_CHOICES = [
 	{
@@ -33,6 +37,11 @@ export const ANNOTATION_SOURCE_CHOICES = [
 		kind: "prompt",
 		label: "Text prompt",
 		description: "Enter text directly for annotation",
+	},
+	{
+		kind: "draft",
+		label: "Saved draft",
+		description: "Resume notes kept when an annotation was closed without sending them",
 	},
 ] as const satisfies ReadonlyArray<{ kind: AnnotationSourceKind; label: string; description: string }>;
 
@@ -131,16 +140,18 @@ export async function selectSessionTextReviewSource(
 		ctx.ui.notify("No messages to annotate yet.", "warning");
 		return undefined;
 	}
-	const selection = await ctx.ui.custom<SessionPick | undefined>((tui, _theme, _keybindings, done) => {
-		return new CopySelectorComponent(entries, {
-			ui: tui,
-			cwd: ctx.sessionManager.getCwd?.() ?? ctx.cwd,
-			title: "Select message to annotate",
-			actionLabel: "select",
-			requestRender: () => tui.requestRender(),
-			onPick: (content, label, source) => done({ content, label, ...source }),
-			onCancel: () => done(undefined),
-		});
-	});
+	const selection = await ctx.ui.custom<SessionPick | undefined>(
+		(tui, _theme, _keybindings, done) =>
+			new CopySelectorComponent(entries, {
+				ui: tui,
+				cwd: ctx.sessionManager.getCwd?.() ?? ctx.cwd,
+				title: "Select message to annotate",
+				actionLabel: "select",
+				requestRender: () => tui.requestRender(),
+				onPick: (content, label, source) => done({ content, label, ...source }),
+				onCancel: () => done(undefined),
+			}),
+		{ overlay: true, overlayOptions: COPY_SELECTOR_OVERLAY_OPTIONS },
+	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }
