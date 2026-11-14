@@ -95,7 +95,6 @@ export async function buildChangelogSummaryPrompt(
 	const rendered = renderChangelogEntries(entries, {
 		maxBytes,
 		truncationHint: CHANGELOG_SUMMARY_TRUNCATION_HINT,
-		oldestFirst: false,
 	});
 	return {
 		message: prompt.render(changelogReviewTemplate, {
