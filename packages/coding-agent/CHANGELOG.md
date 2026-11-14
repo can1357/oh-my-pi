@@ -133,6 +133,7 @@
 ### Fixed
 
 - Hide Secrets now redacts agent-attributed notices (background job results, hook and extension messages), so a background bash job's command and output no longer reach the provider with saved secret values in plain text ([#18967](https://github.com/can1357/oh-my-pi/issues/18967))
+- Deleting a session (`/delete`, `/session delete`, the `/resume` picker) now purges its prompts, title, recaps and per-message stats rows from `history.db` / `stats.db`, the same set `omp gc --archive --apply` removes, plus its `session_rollup` / `session_dirty` rows, so none of the deleted conversation outlives the transcript ([#18674](https://github.com/can1357/oh-my-pi/issues/18674), [#18877](https://github.com/can1357/oh-my-pi/pull/18877) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Leading `KEY=VALUE` environment assignments are now stripped when evaluating `deny` and `prompt` rules in `bash.patterns` so they cannot bypass command restrictions ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - omp's WebKit engine is now pinned per omp release and updated in place: an engine in `~/.o2/lib/abkit` that names no version or an older release is replaced before the first open that runs it (once no process runs from it), so the ABKit 0.1.1 fix for plain-http cookies (sign-ins to router and LAN admin pages) reaches existing installs. Local builds (`VERSION` `dev`), newer releases and an engine another app manages (Tern's `manager.json` two folders above its real path, as for omp itself) are kept
 - Chromium and WebKit tabs: a click or key press that opens a `confirm()` or `prompt()` returns instead of timing out after 8 s, and while one is pending, calls that need the page (reads, actions, `evaluate`, waits on page content, screenshots) fail at once naming the dialog and `tab.handleDialog()`, instead of each running out its deadline with "could not count matches" or a bare timeout
@@ -415,19 +416,6 @@
 ### Fixed
 
 - With `includeWorkspaceTree` enabled, the workspace tree and nested `AGENTS.md` list in the system prompt now reflect the current directory after `/move` and the files on disk after `/clear` or `/new`, instead of the scan taken at startup ([#18866](https://github.com/can1357/oh-my-pi/pull/18866) by [@bigHippoZz](https://github.com/bigHippoZz))
-
-### Fixed
-
-- `omp update` runs mise, Homebrew, bun, and npm on the terminal's own output, so their progress bars redraw in place instead of printing every frame as a new line ([#18874](https://github.com/can1357/oh-my-pi/pull/18874) by [@a-glapinski](https://github.com/a-glapinski))
-### Changed
-
-- Snapcompact compaction resolves the frame shape once in its preflight and passes it to `compact()`, which re-derived it with the `auto` shape setting; the preflight scans the transcript once instead of twice, runs as the `compaction.snapcompact` loop phase, and yields to the event loop before rendering ([#15689](https://github.com/can1357/oh-my-pi/issues/15689), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
-- Full session file rewrites (pruning, image drops, rescue stamping) run as the `session.rewrite` loop phase, so their stalls are attributed in `ui.loop-blocked` logs ([#15027](https://github.com/can1357/oh-my-pi/issues/15027), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
-### Fixed
-
-- Fixed Anthropic prompt caching freezing for the rest of a turn when a `context` extension rewrites messages the same way on every request (for example a stable tag prefix on each message): every rewritten message was marked per-call, so the rolling breakpoint could not land on anything the tool loop appended and each step re-billed the whole tail as uncached input. A rewritten message is now per-call only once its bytes differ from the previous request; streamed assistant messages are no longer marked per-call just because `structuredClone` dropped their streaming symbols ([#12392](https://github.com/can1357/oh-my-pi/issues/12392), [#18869](https://github.com/can1357/oh-my-pi/pull/18869) by [@tsankotsanev](https://github.com/tsankotsanev))
-- Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
-- With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.18.8] - 2026-11-11
 
