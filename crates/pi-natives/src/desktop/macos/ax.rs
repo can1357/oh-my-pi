@@ -1830,6 +1830,22 @@ impl placement::Placement for AppPlacement {
 	fn web_content(&self, element: &Node) -> bool {
 		process::is_chromium(self.pid) || text_surface(&element.0) == TextSurface::Web
 	}
+
+	fn actions(&self, element: &Node) -> Vec<String> {
+		copy_strings_from_action_names(&element.0).unwrap_or_default()
+	}
+
+	fn column_index(&self, element: &Node) -> Option<i64> {
+		copy_attribute(&element.0, "AXIndex")?
+			.downcast::<CFNumber>()
+			.ok()?
+			.as_i64()
+	}
+
+	fn column_span(&self, element: &Node) -> Option<(i64, i64)> {
+		copy_range(&element.0, "AXColumnIndexRange")
+			.map(|range| (range.location as i64, range.length as i64))
+	}
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
