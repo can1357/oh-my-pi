@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Linux `press()` on a GTK 3 or Qt combo box opening its list as a popup that took the keyboard, so a user typing elsewhere lost their keys to it: that press is now refused with nothing sent, even when takeover is allowed, naming the options. `setValue("Two")` and `press({ menu: ["Two"] })` choose a GTK 3 or Chromium combo box's option with no popup and check the choice took; Qt combo boxes have no such route and are refused ([#19034](https://github.com/can1357/oh-my-pi/pull/19034) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes

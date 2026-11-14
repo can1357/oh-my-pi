@@ -18,6 +18,7 @@ use crate::desktop::{
 	types::DesktopWindow,
 };
 
+mod combo;
 mod menus;
 
 /// How long an application gets to answer before it counts as not answering:
@@ -1458,11 +1459,52 @@ impl AxBackend for AtSpiAx {
 					.await
 					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
 				let index = resolve_action(&proxy, &accessible, action).await?;
+				let role = accessible
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI role: {err}")))?;
+				if role == Role::ComboBox {
+					let name = proxy
+						.get_name(index)
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI actions: {err}")))?;
+					if combo::opens_grabbing_list(&name) {
+						return Err(self.combo_press_refusal(&object).await?);
+					}
+				}
 				proxy
 					.do_action(index)
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI action: {err}")))?
 					.ok_or_else(|| DesktopError::ax_failed(format!("AT-SPI action '{action}' failed")))
+			})
+			.map_err(unconfirmed)
+	}
+
+	fn perform_menu(&mut self, h: &AxHandle, action: &str, path: &[String]) -> CoreResult<()> {
+		let object = Self::object(h).clone();
+		self
+			.request(async {
+				let role = object
+					.as_accessible_proxy(&self.connection)
+					.await
+					.map_err(|err| DesktopError::ax_failed(err.to_string()))?
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+				if !action.eq_ignore_ascii_case("press") || role != Role::ComboBox {
+					return Err(DesktopError::new(
+						ErrorCode::Unsupported,
+						"choosing a menu item in the action that opens the menu is available on Linux \
+						 only for a combo box's press, and on macOS",
+					));
+				}
+				let [value] = path else {
+					return Err(DesktopError::ax_failed(
+						"a combo box option is one title: pass menu: [\"<option>\"]",
+					));
+				};
+				self.combo_choose(&object, value).await
 			})
 			.map_err(unconfirmed)
 	}
@@ -1494,6 +1536,14 @@ impl AxBackend for AtSpiAx {
 						&mut emptied,
 					)
 					.await;
+				}
+				if accessible
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI role: {err}")))?
+					== Role::ComboBox
+				{
+					return self.combo_choose(&object, value).await;
 				}
 				if !interfaces.contains(atspi::Interface::Value) {
 					return Err(DesktopError::ax_failed(
@@ -2958,6 +3008,8 @@ mod tests {
 	}
 
 	mod unanswered {
+		use std::sync::{Arc, Mutex};
+
 		use atspi::zbus::{
 			Guid, connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
 		};
@@ -3576,6 +3628,340 @@ mod tests {
 					.collect::<Vec<_>>(),
 				[("File > Mark".to_owned(), false), ("File > Other".to_owned(), false)]
 			);
+		}
+
+		/// Which option of a fake combo box is chosen, and the actions performed.
+		#[derive(Clone, Default)]
+		struct ComboLog {
+			chosen:    Arc<Mutex<Option<&'static str>>>,
+			performed: Arc<Mutex<Vec<&'static str>>>,
+		}
+
+		struct ComboElement {
+			name:      &'static str,
+			role:      Role,
+			parent:    &'static str,
+			children:  &'static [&'static str],
+			selection: bool,
+			enabled:   bool,
+			name_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl ComboElement {
+			#[zbus(property)]
+			async fn name(&self) -> String {
+				let gate = self.name_gate.lock().unwrap().take();
+				if let Some(gate) = gate {
+					gate.wait().await;
+				}
+				self.name.to_owned()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path(self.parent))
+			}
+
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			fn get_interfaces(&self) -> Vec<&'static str> {
+				let mut interfaces = vec!["org.a11y.atspi.Accessible", "org.a11y.atspi.Action"];
+				if self.selection {
+					interfaces.push("org.a11y.atspi.Selection");
+				}
+				interfaces
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				let state = if self.enabled {
+					State::Enabled as u64 | State::Sensitive as u64
+				} else {
+					0
+				};
+				vec![state as u32, (state >> 32) as u32]
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self
+					.children
+					.iter()
+					.map(|child| (PEER.to_owned(), path(child)))
+					.collect()
+			}
+		}
+
+		/// An element's actions. Performing one records `title`, and chooses it
+		/// when `applies`.
+		struct ComboAction {
+			names:   &'static [&'static str],
+			title:   &'static str,
+			applies: bool,
+			log:     ComboLog,
+		}
+
+		#[interface(name = "org.a11y.atspi.Action")]
+		impl ComboAction {
+			#[zbus(property)]
+			fn n_actions(&self) -> i32 {
+				self.names.len() as i32
+			}
+
+			fn get_name(&self, index: i32) -> String {
+				self.names[index as usize].to_owned()
+			}
+
+			fn do_action(&self, index: i32) -> bool {
+				let exists = usize::try_from(index).is_ok_and(|index| index < self.names.len());
+				if exists {
+					self.log.performed.lock().unwrap().push(self.title);
+				}
+				if exists && self.applies {
+					*self.log.chosen.lock().unwrap() = Some(self.title);
+				}
+				exists
+			}
+		}
+
+		/// The `Selection` naming the chosen option.
+		struct ComboSelection {
+			log: ComboLog,
+		}
+
+		#[interface(name = "org.a11y.atspi.Selection")]
+		impl ComboSelection {
+			#[zbus(property)]
+			fn n_selected_children(&self) -> i32 {
+				i32::from(self.log.chosen.lock().unwrap().is_some())
+			}
+
+			fn get_selected_child(&self, index: i32) -> (String, OwnedObjectPath) {
+				let chosen = self.log.chosen.lock().unwrap().filter(|_| index == 0);
+				let at = chosen.map_or_else(
+					|| "/org/a11y/atspi/null".to_owned(),
+					|title| format!("/combo/list/{title}"),
+				);
+				(PEER.to_owned(), path(&at))
+			}
+		}
+
+		#[derive(Clone, Copy)]
+		enum Toolkit {
+			/// GTK 3: the combo box publishes the choice, options take `click`.
+			Gtk,
+			/// The option names wait until all their reads are in flight.
+			Concurrent,
+			/// Chromium: the list publishes the choice, options take `select`,
+			/// and the combo box's `open` takes no keyboard grab.
+			Chromium,
+			/// Qt: nothing publishes the choice, options take only `Toggle`.
+			Qt,
+			/// GTK 3, but the app ignores the option's action.
+			Ignoring,
+			/// GTK 3, greyed out.
+			Disabled,
+		}
+
+		/// A combo box at `/combo` with options One, Two and Three.
+		fn combo_box(toolkit: Toolkit) -> (AtSpiAx, Connection, ComboLog) {
+			const OPTIONS: [&str; 3] = ["One", "Two", "Three"];
+			const PATHS: [&str; 3] = ["/combo/list/One", "/combo/list/Two", "/combo/list/Three"];
+			struct Shape {
+				combo_selection: bool,
+				list_selection:  bool,
+				combo_actions:   &'static [&'static str],
+				names:           &'static [&'static str],
+				applies:         bool,
+				enabled:         bool,
+			}
+			let log = ComboLog::default();
+			let gtk = Shape {
+				combo_selection: true,
+				list_selection:  false,
+				combo_actions:   &["press"],
+				names:           &["click"],
+				applies:         true,
+				enabled:         true,
+			};
+			let Shape { combo_selection, list_selection, combo_actions, names, applies, enabled } =
+				match toolkit {
+					Toolkit::Gtk | Toolkit::Concurrent => gtk,
+					Toolkit::Chromium => Shape {
+						combo_selection: false,
+						list_selection: true,
+						combo_actions: &["open", "showContextMenu"],
+						names: &["select", "showContextMenu"],
+						..gtk
+					},
+					Toolkit::Qt => Shape {
+						combo_selection: false,
+						combo_actions: &["Show-Menu", "Press"],
+						names: &["Toggle"],
+						..gtk
+					},
+					Toolkit::Ignoring => Shape { applies: false, ..gtk },
+					Toolkit::Disabled => Shape { enabled: false, ..gtk },
+				};
+			let name_gate = matches!(toolkit, Toolkit::Concurrent)
+				.then(|| Arc::new(tokio::sync::Barrier::new(OPTIONS.len())));
+			let served = log.clone();
+			let (ax, server) = backend(HUNG_CALL_TIMEOUT, move |server| {
+				let mut server = server
+					.serve_at("/combo", ComboElement {
+						name: "Choice",
+						role: Role::ComboBox,
+						parent: "/frame",
+						children: &["/combo/list"],
+						selection: combo_selection,
+						enabled,
+						name_gate: Mutex::new(None),
+					})
+					.unwrap()
+					.serve_at("/combo", ComboAction {
+						names:   combo_actions,
+						title:   "the combo box",
+						applies: false,
+						log:     served.clone(),
+					})
+					.unwrap()
+					.serve_at("/combo/list", ComboElement {
+						name:      "",
+						role:      Role::Menu,
+						parent:    "/combo",
+						children:  &PATHS,
+						selection: list_selection,
+						enabled:   true,
+						name_gate: Mutex::new(None),
+					})
+					.unwrap();
+				if combo_selection {
+					server = server
+						.serve_at("/combo", ComboSelection { log: served.clone() })
+						.unwrap();
+				}
+				if list_selection {
+					server = server
+						.serve_at("/combo/list", ComboSelection { log: served.clone() })
+						.unwrap();
+				}
+				for (title, at) in OPTIONS.into_iter().zip(PATHS) {
+					server = server
+						.serve_at(at, ComboElement {
+							name:      title,
+							role:      Role::MenuItem,
+							parent:    "/combo/list",
+							children:  &[],
+							selection: false,
+							enabled:   true,
+							name_gate: Mutex::new(name_gate.clone()),
+						})
+						.unwrap()
+						.serve_at(at, ComboAction { names, title, applies, log: served.clone() })
+						.unwrap();
+				}
+				server
+			});
+			(ax, server, log)
+		}
+
+		#[test]
+		fn a_combo_box_option_is_chosen_without_opening_its_list() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let option =
+				AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo/list/One"));
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+			let error = |result: CoreResult<()>| result.unwrap_err();
+			let message = |result: CoreResult<()>| error(result).message;
+
+			// GTK 3: setValue performs the option's own action and reads it back.
+			let (mut ax, _server, log) = combo_box(Toolkit::Gtk);
+			ax.set_value(&combo, "Two").unwrap();
+			assert_eq!(performed(&log), ["Two"]);
+			// Already chosen: nothing is performed again.
+			ax.set_value(&combo, "Two").unwrap();
+			assert_eq!(performed(&log), ["Two"]);
+			let missing = message(ax.set_value(&combo, "Four"));
+			assert!(missing.contains("Options: \"One\", \"Two\", \"Three\""), "{missing}");
+			// A press would open the list: refused, the combo box's own action
+			// not performed.
+			let press = message(ax.perform(&combo, "press"));
+			assert!(press.contains("nothing was pressed"), "{press}");
+			assert!(press.contains("setValue(option)"), "{press}");
+			// A menu path names one option, and only a combo box's press takes
+			// one.
+			let two = error(ax.perform_menu(&combo, "press", &["One".to_owned(), "Two".to_owned()]));
+			assert_eq!(two.code, ErrorCode::AxFailed, "{}", two.message);
+			let item = error(ax.perform_menu(&option, "press", &["One".to_owned()]));
+			assert_eq!(item.code, ErrorCode::Unsupported, "{}", item.message);
+			assert_eq!(performed(&log), ["Two"]);
+		}
+
+		#[test]
+		fn combo_option_names_are_read_concurrently_before_choosing() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let (mut ax, _server, log) = combo_box(Toolkit::Concurrent);
+			ax.set_value(&combo, "Two").unwrap();
+			assert_eq!(*log.performed.lock().unwrap(), ["Two"]);
+		}
+
+		#[test]
+		fn chromium_combo_menu_chooses_and_plain_press_still_opens() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// Chromium: press with a menu path chooses through the list, and a
+			// plain press opens it as on main.
+			let (mut ax, _server, log) = combo_box(Toolkit::Chromium);
+			ax.perform_menu(&combo, "press", &["Three".to_owned()])
+				.unwrap();
+			ax.perform(&combo, "press").unwrap();
+			assert_eq!(performed(&log), ["Three", "the combo box"]);
+		}
+
+		#[test]
+		fn qt_combo_refuses_to_open_or_choose_its_hidden_list() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let message = |result: CoreResult<()>| result.unwrap_err().message;
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// Qt: no action chooses an option, and both of the combo box's
+			// actions open the list, so nothing is performed.
+			let (mut ax, _server, log) = combo_box(Toolkit::Qt);
+			let qt = message(ax.set_value(&combo, "Two"));
+			assert!(qt.contains("needs the user's screen"), "{qt}");
+			for action in ["press", "Show-Menu"] {
+				let press = message(ax.perform(&combo, action));
+				assert!(press.contains("nothing was pressed"), "{action}: {press}");
+			}
+			assert!(performed(&log).is_empty());
+		}
+
+		#[test]
+		fn a_combo_option_action_that_does_not_choose_is_reported() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let message = |result: CoreResult<()>| result.unwrap_err().message;
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// An app that ignores the action: the choice is not confirmed.
+			let (mut ax, _server, log) = combo_box(Toolkit::Ignoring);
+			let ignored = message(ax.set_value(&combo, "Two"));
+			assert!(ignored.contains("now shows no option"), "{ignored}");
+			assert_eq!(performed(&log), ["Two"]);
+		}
+
+		#[test]
+		fn a_disabled_combo_is_left_alone() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let message = |result: CoreResult<()>| result.unwrap_err().message;
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// A greyed-out combo box is left alone.
+			let (mut ax, _server, log) = combo_box(Toolkit::Disabled);
+			let disabled = message(ax.set_value(&combo, "Two"));
+			assert!(disabled.contains("disabled"), "{disabled}");
+			assert!(performed(&log).is_empty());
 		}
 	}
 }
