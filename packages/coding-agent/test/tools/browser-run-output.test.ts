@@ -109,9 +109,15 @@ describe("browser handle enrichment — guarded actions", () => {
 	// for the page receiving the click, and then dispatches through the page mouse,
 	// so a stub stands in for those seams rather than a raw `click` method. The
 	// watch's in-page state reports the element attached and the click delivered.
+	// The element sits in the main frame, which outlives any press.
 	/** A clickable handle whose page's mouse press is `mousePress`; the move before it and the release succeed. */
-	const clickableStub = (mousePress: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle =>
-		({
+	const clickableStub = (mousePress: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle => {
+		const page = {
+			mouse: { move: async () => {}, down: mousePress, up: async () => {} },
+			mainFrame: () => frame,
+		};
+		const frame = { page: () => page };
+		return {
 			boundingBox: async () => ({ x: 10, y: 10, width: 20, height: 20 }),
 			evaluate: async () => ({ ok: true, x: 20, y: 20 }),
 			evaluateHandle: async () => ({
@@ -119,11 +125,12 @@ describe("browser handle enrichment — guarded actions", () => {
 					fn({ detached: false, delivered: () => true, stop: () => {} }),
 				dispose: async () => {},
 			}),
-			frame: { page: () => ({ mouse: { move: async () => {}, down: mousePress, up: async () => {} } }) },
+			frame,
 			type: async () => {},
 			dispose: async () => {},
 			...extra,
-		}) as unknown as ElementHandle;
+		} as unknown as ElementHandle;
+	};
 
 	it("fails a stalled handle.click() fast with a named error instead of hanging", async () => {
 		const stalled = Promise.withResolvers<void>();

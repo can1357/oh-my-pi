@@ -13,6 +13,10 @@ function unexpectedNativePaste(): never {
 	throw new Error("unexpected native clipboard paste");
 }
 
+function unexpectedHtmlPaste(): never {
+	throw new Error("unexpected HTML paste");
+}
+
 describe("EnhancedPasteController", () => {
 	it("requests image data from an OSC 5522 paste event and preserves chunk boundaries", () => {
 		const writes: string[] = [];
@@ -24,6 +28,8 @@ describe("EnhancedPasteController", () => {
 			pasteImage: image => {
 				pastedImages.push({ data: image.data, mimeType: image.mimeType });
 			},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => statuses.push(message),
 			pasteNative: unexpectedNativePaste,
 		});
@@ -69,6 +75,8 @@ describe("EnhancedPasteController", () => {
 			pasteImage: () => {
 				throw new Error("unexpected image paste");
 			},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => pastedText.push(`status:${message}`),
 			pasteNative: unexpectedNativePaste,
 		});
@@ -106,6 +114,8 @@ describe("EnhancedPasteController", () => {
 			write: data => writes.push(data),
 			pasteText: () => {},
 			pasteImage: () => {},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => statuses.push(message),
 			pasteNative: () => {
 				nativePastes++;
@@ -141,6 +151,8 @@ describe("EnhancedPasteController", () => {
 			write: () => {},
 			pasteText: () => {},
 			pasteImage: () => {},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => statuses.push(message),
 			pasteNative: unexpectedNativePaste,
 		});
@@ -162,6 +174,8 @@ describe("EnhancedPasteController", () => {
 			pasteImage: () => {
 				throw new Error("unexpected image paste");
 			},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => pastedText.push(`status:${message}`),
 			pasteNative: unexpectedNativePaste,
 		});
@@ -205,6 +219,8 @@ describe("EnhancedPasteController", () => {
 				throw new Error("unexpected text paste");
 			},
 			pasteImage: () => {},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: () => {},
 			pasteNative: unexpectedNativePaste,
 		});
@@ -222,5 +238,42 @@ describe("EnhancedPasteController", () => {
 		controller.handleInput(packet("type=read:status=DONE"));
 
 		expect(writes.at(-1)).toBe(`${OSC}type=read;${imageMime}${BEL}`);
+	});
+
+	it("reads HTML over plain text only where styled text goes", () => {
+		const htmlMime = Buffer.from("text/html", "utf8").toString("base64");
+		const textMime = Buffer.from("text/plain", "utf8").toString("base64");
+		const listing = Buffer.from("text/plain text/html", "utf8").toString("base64");
+		const dot = Buffer.from(".", "utf8").toString("base64");
+		for (const composer of [true, false]) {
+			const writes: string[] = [];
+			const pasted: string[] = [];
+			const controller = new EnhancedPasteController({
+				write: data => writes.push(data),
+				pasteText: text => pasted.push(`text:${text}`),
+				pasteImage: () => {
+					throw new Error("unexpected image paste");
+				},
+				acceptsHtml: () => composer,
+				pasteHtml: html => {
+					pasted.push(`html:${html}`);
+				},
+				showStatus: message => pasted.push(`status:${message}`),
+				pasteNative: unexpectedNativePaste,
+			});
+			controller.handleInput(packet("type=read:status=OK"));
+			controller.handleInput(packet(`type=read:status=DATA:mime=${dot}`, listing));
+			controller.handleInput(packet("type=read:status=DONE"));
+			const mime = composer ? htmlMime : textMime;
+			expect(writes.at(-1)).toBe(`${OSC}type=read;${mime}${BEL}`);
+
+			const body = composer ? "<b>hi</b>" : "hi";
+			controller.handleInput(packet("type=read:status=OK"));
+			controller.handleInput(
+				packet(`type=read:status=DATA:mime=${mime}`, Buffer.from(body, "utf8").toString("base64")),
+			);
+			controller.handleInput(packet("type=read:status=DONE"));
+			expect(pasted).toEqual([composer ? "html:<b>hi</b>" : "text:hi"]);
+		}
 	});
 });
