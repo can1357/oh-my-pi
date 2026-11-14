@@ -47,6 +47,20 @@ export const cfgSupermemoryAutoRecall = register({
 	},
 });
 
+export const cfgSupermemoryRecallEveryTurn = register({
+	id: "supermemory.recallEveryTurn",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "memory",
+		group: "Supermemory",
+		label: "Supermemory Recall Every Turn",
+		description:
+			"Re-run auto recall on each user turn, replacing the previous block (changes the system prompt each turn)",
+		condition: "supermemoryActive",
+	},
+});
+
 export const cfgSupermemoryAutoRetain = register({
 	id: "supermemory.autoRetain",
 	type: "boolean",

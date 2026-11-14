@@ -154,13 +154,15 @@ export class SupermemoryClient {
 		return { id: object.id, status: object.status };
 	}
 
+	/** `timeoutMs` overrides the client's request timeout (automatic recall uses a shorter one). */
 	async search(
 		namespace: string,
 		input: SupermemorySearchInput,
 		signal?: AbortSignal,
+		timeoutMs?: number,
 	): Promise<SupermemorySearchItem[]> {
 		const body = { ...input, rewriteQuery: false };
-		const rawResults = asRecord(await this.#request("POST", namespace, "search", body, signal))?.results;
+		const rawResults = asRecord(await this.#request("POST", namespace, "search", body, signal, timeoutMs))?.results;
 		if (!Array.isArray(rawResults)) throw new Error("Supermemory returned an invalid search response.");
 		const results: SupermemorySearchItem[] = [];
 		for (const raw of rawResults) {
@@ -182,8 +184,10 @@ export class SupermemoryClient {
 		return results;
 	}
 
-	async profile(namespace: string, signal?: AbortSignal): Promise<SupermemoryProfile> {
-		const profile = asRecord(asRecord(await this.#request("POST", namespace, "profile", {}, signal))?.profile);
+	async profile(namespace: string, signal?: AbortSignal, timeoutMs?: number): Promise<SupermemoryProfile> {
+		const profile = asRecord(
+			asRecord(await this.#request("POST", namespace, "profile", {}, signal, timeoutMs))?.profile,
+		);
 		if (!profile) throw new Error("Supermemory returned an invalid profile response.");
 		return { static: profileMemories(profile.static), dynamic: profileMemories(profile.dynamic) };
 	}
@@ -261,9 +265,10 @@ export class SupermemoryClient {
 		resource: string,
 		body: unknown,
 		callerSignal?: AbortSignal,
+		timeoutMs = this.#timeoutMs,
 	): Promise<unknown> {
 		if (callerSignal?.aborted) throw new Error("Supermemory request cancelled.");
-		const timeoutSignal = AbortSignal.timeout(this.#timeoutMs);
+		const timeoutSignal = AbortSignal.timeout(timeoutMs);
 		const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		let response: Response;
 		try {

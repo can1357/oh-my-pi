@@ -61,12 +61,15 @@ export const supermemoryBackend: MemoryBackend = {
 	},
 
 	async buildDeveloperInstructions(_agentDir, _cwd, settings, session): Promise<string | undefined> {
-		if (!isSupermemoryConfigured(loadSupermemoryConfig(settings))) return undefined;
+		const config = loadSupermemoryConfig(settings);
+		if (!isSupermemoryConfigured(config)) return undefined;
 		const parts = [
 			prompt.render(supermemoryInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
 		];
 		// Only the session's own recall: a subagent does its own `recall` instead of inheriting the parent's.
-		const snippet = session?.getSupermemorySessionState()?.lastRecallSnippet;
+		// With per-turn recall the block is its own prompt part, replaced each user turn; a copy here would
+		// survive the replacement. A rebuild before the next user turn therefore drops it until that turn.
+		const snippet = config.recallEveryTurn ? undefined : session?.getSupermemorySessionState()?.lastRecallSnippet;
 		if (snippet) parts.push(snippet);
 		return parts.join("\n\n");
 	},
@@ -77,6 +80,7 @@ export const supermemoryBackend: MemoryBackend = {
 		if (!state || !preparation) return undefined;
 		return {
 			context: preparation.context,
+			replaces: preparation.replaces,
 			commit: () => session.getSupermemorySessionState() === state && preparation.commit(),
 		};
 	},

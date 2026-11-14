@@ -241,6 +241,7 @@ describe("memory thread service", () => {
 				namespace: undefined,
 				scoping: "global",
 				autoRecall: false,
+				recallEveryTurn: false,
 				autoRetain: false,
 				retainEveryNTurns: 1,
 				recallLimit: 5,
