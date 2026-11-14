@@ -536,7 +536,6 @@
 
 - Custom command packages, custom tools, and extension manifests that are symlinked into their discovery directory are now discovered instead of being dropped silently ([#18492](https://github.com/can1357/oh-my-pi/pull/18492))
 
-
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
