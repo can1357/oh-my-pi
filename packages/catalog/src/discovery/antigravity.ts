@@ -1,8 +1,10 @@
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
-import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
+import { pricingPeerFor } from "../compat/behavior";
+import { collapseVariants, reviewedVariantFamilyId, type VariantCollapseTable } from "../compat/collapse";
+import { getBundledModel } from "../models";
 import { createBundledReferenceMap, createReferenceResolver } from "../provider-models/bundled-references";
-import type { AntigravityModelWireProfile, ModelSpec } from "../types";
+import type { AntigravityModelWireProfile, ModelCost, ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
 import { ensureAntigravityVersion, getAntigravityHeaders } from "../wire/gemini-headers";
 
@@ -25,15 +27,53 @@ const ANTIGRAVITY_THINKING_LEVELS: Readonly<Record<number, AntigravityModelWireP
 };
 
 /**
- * Antigravity's roster omits capability metadata for some SKUs entirely (Gemini
- * 3.5 Flash-Lite arrives with no `supportsThinking` at all). An absent field is
- * unknown, not a denial, so the bundled reference decides instead of a silent
- * `false` that strips the model's effort dial. Wire routing is provider-specific,
- * so `thinking` itself is never inherited; the reviewed provider rules own it.
+ * What a roster row leaves out, keyed by the logical (collapsed) model id:
+ * capability flags for an absent `supportsThinking`/`supportsImages`, and a
+ * price for the row the roster never prices.
  */
-const resolveReference = createReferenceResolver<"google-gemini-cli">(() =>
+export interface AntigravityRowReference {
+	reasoning?: boolean;
+	input?: readonly ("text" | "image")[];
+	cost?: ModelCost;
+}
+
+const resolveBundledReference = createReferenceResolver<"google-gemini-cli">(() =>
 	createBundledReferenceMap("google-antigravity"),
 );
+
+/**
+ * Price an Antigravity id through the `pricing-peer provider="google-antigravity"`
+ * rule the generator and stats also use: the alias `peer-id` first, then the id
+ * itself, across the peers in declared order.
+ */
+function pricingPeerCost(modelId: string): ModelCost | undefined {
+	const peer = pricingPeerFor("google-antigravity", modelId);
+	if (!peer) return undefined;
+	for (const candidateId of peer.peerId !== modelId ? [peer.peerId, modelId] : [modelId]) {
+		for (const provider of peer.peers) {
+			const cost = getBundledModel(provider, candidateId)?.cost;
+			if (cost && (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0)) {
+				return cost;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Default {@link AntigravityRowReference} for `google-antigravity` discovery.
+ * Antigravity's roster omits capability metadata for some SKUs entirely (Gemini
+ * 3.5 Flash-Lite arrives with no `supportsThinking` at all), and prices nothing.
+ * Capabilities come from the bundled row for the logical id (or the bare-id
+ * reference); `thinking` itself is never inherited, the provider rules own it.
+ * The price comes from the pricing-peer rule.
+ */
+export function antigravityRowReference(logicalId: string): AntigravityRowReference | undefined {
+	const bundled = resolveBundledReference(logicalId);
+	const cost = pricingPeerCost(logicalId);
+	if (!bundled && !cost) return undefined;
+	return { reasoning: bundled?.reasoning, input: bundled?.input, cost };
+}
 
 /**
  * Raw model metadata returned by Antigravity's `fetchAvailableModels` endpoint.
@@ -188,6 +228,14 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 	 * level-transport table so cloudcode-pa keeps `thinkingLevel`.
 	 */
 	collapseTable?: VariantCollapseTable;
+	/**
+	 * Fills what the roster omits, keyed by the logical (collapsed) id: an
+	 * absent capability flag reads as unknown and takes the reference's value
+	 * (an explicit roster value always wins), and a zero-cost row takes the
+	 * reference's price. Only `google-antigravity` sets it; without it, an
+	 * absent flag is `false` and rows stay $0.
+	 */
+	resolveReference?: (logicalId: string) => AntigravityRowReference | undefined;
 }
 
 /**
@@ -231,11 +279,11 @@ export async function fetchAntigravityDiscoveryModels(
 				continue;
 			}
 
-			// The roster never prices anything, so pricing comes from the bundled
-			// reference when one exists; a zeroed row would read as a free lane in
-			// cost accounting and model choice.
-			const reference = resolveReference(modelId);
-			const supportsImages = model.supportsImages ?? reference?.input.includes("image") ?? false;
+			// Tier SKUs (`claude-opus-5-5-low`) share their family's reference.
+			const reference = options.resolveReference?.(
+				reviewedVariantFamilyId("google-antigravity", modelId) ?? modelId,
+			);
+			const supportsImages = model.supportsImages ?? reference?.input?.includes("image") ?? false;
 			const wireProfile = antigravityWireProfileOf(model);
 			models.push({
 				id: modelId,
@@ -245,7 +293,7 @@ export async function fetchAntigravityDiscoveryModels(
 				baseUrl: discovered.endpoint,
 				reasoning: model.supportsThinking ?? reference?.reasoning ?? false,
 				input: supportsImages ? ["text", "image"] : ["text"],
-				cost: reference?.cost ?? {
+				cost: {
 					input: 0,
 					output: 0,
 					cacheRead: 0,
@@ -265,8 +313,20 @@ export async function fetchAntigravityDiscoveryModels(
 		models,
 		options.collapseTable === undefined ? undefined : { table: options.collapseTable },
 	);
-	collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-	return { models: collapsed };
+	// The roster never prices anything, so every row arrives at $0. Price after
+	// collapsing, keyed by the logical id, so a tiered family takes its rate
+	// too; a zeroed row would read as a free lane in cost accounting and model
+	// choice.
+	const resolveReference = options.resolveReference;
+	const priced =
+		resolveReference === undefined
+			? collapsed
+			: collapsed.map(model => {
+					const cost = resolveReference(model.id)?.cost;
+					return cost ? { ...model, cost: { ...cost } } : model;
+				});
+	priced.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+	return { models: priced };
 }
 
 /**

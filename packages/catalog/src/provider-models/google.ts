@@ -3,7 +3,7 @@ import { isExcludedModel } from "../compat/behavior";
 import { reviewedCollapseTable } from "../compat/collapse";
 import { classifyModel } from "../compat/taxonomy";
 import { providerEntry } from "../compat/providers";
-import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
+import { antigravityRowReference, fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
 import type { ModelManagerOptions } from "../model-manager";
@@ -117,6 +117,7 @@ export function googleAntigravityModelManagerOptions(
 									endpoint: config?.endpoint,
 									projectId: account.projectId,
 									fetcher,
+									resolveReference: antigravityRowReference,
 								}),
 							})),
 						);

@@ -86,19 +86,6 @@ provider "google-antigravity" {
 				thinking-requires-effort #true
 			}
 		}
-		// The roster ships some Flash-Lite SKUs with no capability metadata at
-		// all (3.5 arrives with no thinking, modalities or price), so the dial
-		// is declared for the family rather than pinned to the one revision
-		// that happened to regress. 2.5 keeps its budget mode: it reports its
-		// own metadata and the CCA route bills it by budget, not level.
-		family "lite" {
-			revision ">=3.5" {
-				thinking-efforts "minimal" "low" "medium" "high"
-				thinking-mode "google-level"
-				thinking-requires-effort #true
-				input-modalities "text" "image"
-			}
-		}
 		family "pro" {
 			revision ">=3 <3.2" {
 				thinking-suppress-when-off #true

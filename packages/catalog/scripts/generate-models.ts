@@ -22,7 +22,11 @@ import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
-import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import {
+	ANTIGRAVITY_PRIMARY_ENDPOINT,
+	antigravityRowReference,
+	fetchAntigravityDiscoveryModels,
+} from "../src/discovery/antigravity";
 import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
@@ -509,6 +513,7 @@ async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[
 			token: access.accessToken,
 			projectId: access.projectId,
 			endpoint: ANTIGRAVITY_ENDPOINT,
+			resolveReference: antigravityRowReference,
 		});
 		if (discovered === null || discovered.rejectedStatus !== undefined) {
 			console.warn("Antigravity API fetch failed, will use previous models");
