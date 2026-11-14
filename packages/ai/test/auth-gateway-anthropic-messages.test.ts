@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
+import { convertMessages as convertGoogleMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import type {
 	ToolSearchServerToolUseBlockParam,
 	ToolSearchToolResultBlockParam,
@@ -10,6 +11,7 @@ import type {
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
+	Context,
 	Model,
 	ToolCall,
 	ToolResultMessage,
@@ -18,6 +20,7 @@ import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/p
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function emptyUsage(): AssistantMessage["usage"] {
 	return {
@@ -1323,5 +1326,205 @@ describe("anthropic-messages encodeStream", () => {
 			0, 0, 1,
 		]);
 		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
+	});
+});
+
+describe("anthropic-messages Google thought signatures", () => {
+	const GEMINI = "gemini-3.7-flash";
+	const WIRE_MODEL = `google-antigravity/${GEMINI}`;
+	const CALL_SIGNATURE = "Q2FsbFNpZ25hdHVyZQ==";
+	const SKIP_SIGNATURE = "skip_thought_signature_validator";
+
+	const gemini = (id = GEMINI) => getBundledModel<"google-gemini-cli">("google-antigravity", id);
+
+	function geminiTurn(
+		content: AssistantMessage["content"],
+		stopReason: AssistantMessage["stopReason"],
+	): AssistantMessage {
+		return {
+			role: "assistant",
+			content,
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			model: GEMINI,
+			usage: emptyUsage(),
+			stopReason,
+			timestamp: 0,
+		};
+	}
+
+	/** The assistant content an Anthropic SDK client builds from a streamed reply, as it sends it back. */
+	function accumulateClientContent(sse: SseEvent[]): Record<string, unknown>[] {
+		const blocks: Record<string, unknown>[] = [];
+		const inputJson = new Map<number, string>();
+		for (const { data } of sse) {
+			const index = data.index as number;
+			if (data.type === "content_block_start") {
+				blocks[index] = { ...(data.content_block as Record<string, unknown>) };
+			} else if (data.type === "content_block_delta") {
+				const block = blocks[index]!;
+				const delta = data.delta as Record<string, string>;
+				if (delta.type === "thinking_delta") block.thinking = `${block.thinking}${delta.thinking}`;
+				else if (delta.type === "signature_delta") block.signature = `${block.signature ?? ""}${delta.signature}`;
+				else if (delta.type === "text_delta") block.text = `${block.text}${delta.text}`;
+				else if (delta.type === "input_json_delta")
+					inputJson.set(index, `${inputJson.get(index) ?? ""}${delta.partial_json}`);
+			}
+		}
+		for (const [index, json] of inputJson) blocks[index]!.input = JSON.parse(json);
+		return blocks;
+	}
+
+	/** A Gemini tool step (thought summary, signed first call, unsigned parallel call) as a client replays it. */
+	async function replayedToolStep(): Promise<Record<string, unknown>[]> {
+		const message = geminiTurn(
+			[
+				{ type: "thinking", thinking: "Check both shards.", summary: true },
+				{
+					type: "toolCall",
+					id: "lookup_1",
+					name: "lookup",
+					arguments: { shard: 1 },
+					thoughtSignature: CALL_SIGNATURE,
+				},
+				{ type: "toolCall", id: "lookup_2", name: "lookup", arguments: { shard: 2 } },
+			],
+			"toolUse",
+		);
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: message },
+			{ type: "thinking_start", contentIndex: 0, partial: message },
+			{ type: "thinking_delta", contentIndex: 0, delta: "Check both shards.", partial: message },
+			{ type: "thinking_end", contentIndex: 0, content: "Check both shards.", partial: message },
+		];
+		for (const contentIndex of [1, 2]) {
+			const toolCall = message.content[contentIndex] as ToolCall;
+			events.push(
+				{ type: "toolcall_start", contentIndex, partial: message },
+				{ type: "toolcall_delta", contentIndex, delta: JSON.stringify(toolCall.arguments), partial: message },
+				{ type: "toolcall_end", contentIndex, toolCall, partial: message },
+			);
+		}
+		events.push({ type: "done", reason: "toolUse", message });
+		return accumulateClientContent(await collectSse(encodeStream(makeStream(events), WIRE_MODEL)));
+	}
+
+	function parseToolStepReplay(model: string, assistantContent: Record<string, unknown>[]) {
+		return parseRequest({
+			model,
+			max_tokens: 1024,
+			messages: [
+				{ role: "user", content: "are the shards sorted?" },
+				{ role: "assistant", content: assistantContent },
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "lookup_1", content: "sorted" },
+						{ type: "tool_result", tool_use_id: "lookup_2", content: "sorted" },
+					],
+				},
+			],
+		});
+	}
+
+	function googleModelParts(model: Model<"google-gemini-cli">, context: Context) {
+		return convertGoogleMessages(model, context).find(content => content.role === "model")?.parts ?? [];
+	}
+
+	it("returns a streamed Gemini step's signatures to the parts Google signed", async () => {
+		const replayed = await replayedToolStep();
+		// Anthropic clients replay an unsigned thinking block as visible text,
+		// so every thinking block the client gets is signed.
+		expect(replayed.map(block => block.type)).toEqual(["thinking", "tool_use", "tool_use", "thinking"]);
+		for (const block of replayed.filter(block => block.type === "thinking")) {
+			expect(block.signature).toEqual(expect.any(String));
+		}
+
+		const parsed = parseToolStepReplay(WIRE_MODEL, replayed);
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		expect(assistant).toMatchObject({ api: "google-gemini-cli", provider: "google-antigravity", model: GEMINI });
+
+		const parts = googleModelParts(gemini(), parsed.context);
+		expect(parts).toHaveLength(3);
+		expect(parts[0]).toEqual({ thought: true, text: "Check both shards." });
+		expect(parts[1]).toMatchObject({
+			functionCall: { name: "lookup", args: { shard: 1 } },
+			thoughtSignature: CALL_SIGNATURE,
+		});
+		expect(parts[2]?.functionCall).toMatchObject({ name: "lookup", args: { shard: 2 } });
+		expect(parts[2]?.thoughtSignature).toBeUndefined();
+	});
+
+	it("returns a Gemini reply's thought and text signatures through a non-streamed response", () => {
+		const reply = geminiTurn(
+			[
+				{ type: "thinking", thinking: "Both runs are ordered.", thinkingSignature: "VGhvdWdodA==", summary: true },
+				{ type: "text", text: "Both shards are sorted.", textSignature: "UmVwbHk=" },
+			],
+			"stop",
+		);
+		const content = encodeResponse(reply, WIRE_MODEL).content as Record<string, unknown>[];
+		const parsed = parseRequest({
+			model: WIRE_MODEL,
+			max_tokens: 1024,
+			messages: [
+				{ role: "user", content: "are the shards sorted?" },
+				{ role: "assistant", content },
+				{ role: "user", content: "thanks" },
+			],
+		});
+
+		expect(googleModelParts(gemini(), parsed.context)).toEqual([
+			{ thought: true, text: "Both runs are ordered.", thoughtSignature: "VGhvdWdodA==" },
+			{ text: "Both shards are sorted.", thoughtSignature: "UmVwbHk=" },
+		]);
+	});
+
+	it("keeps a Gemini turn's signatures from every other model", async () => {
+		const replayed = await replayedToolStep();
+
+		const otherGemini = gemini("gemini-3.8-flash");
+		const toOtherGemini = parseToolStepReplay(`google-antigravity/${otherGemini.id}`, replayed);
+		const parts = googleModelParts(otherGemini, toOtherGemini.context);
+		expect(parts.find(part => part.functionCall)?.thoughtSignature).toBe(SKIP_SIGNATURE);
+		expect(JSON.stringify(parts)).not.toContain(CALL_SIGNATURE);
+
+		const claude: Model<"anthropic-messages"> = buildModel({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-fable-5-1",
+			name: "Claude Fable 5.1",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		});
+		const toClaude = parseToolStepReplay("anthropic/claude-fable-5-1", replayed);
+		const wire = JSON.stringify(convertAnthropicMessages(toClaude.context.messages, claude, false));
+		expect(wire).not.toContain("omp-google-signatures:");
+		expect(wire).not.toContain(CALL_SIGNATURE);
+	});
+
+	it("never forwards an envelope that does not open as a signature", () => {
+		const parsed = parseRequest({
+			model: WIRE_MODEL,
+			max_tokens: 1024,
+			messages: [
+				{ role: "user", content: "hi" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "reasoning", signature: "omp-google-signatures:bm90IGpzb24" },
+						{ type: "tool_use", id: "lookup_1", name: "lookup", input: {} },
+					],
+				},
+				{ role: "user", content: [{ type: "tool_result", tool_use_id: "lookup_1", content: "ok" }] },
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		expect(assistant?.provider).toBe("anthropic");
+		expect(JSON.stringify(assistant?.content)).not.toContain("omp-google-signatures:");
 	});
 });

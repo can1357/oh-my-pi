@@ -372,6 +372,158 @@ function stampedAssistantModelId(wireModelId: string, provider: string): string 
 	return wireModelId.startsWith(prefix) ? wireModelId.slice(prefix.length) : wireModelId;
 }
 
+// ---------------------------------------------------------------------------
+// Google thought signatures
+// ---------------------------------------------------------------------------
+
+// Google models sign their reasoning with `thoughtSignature`s and need them
+// back, unchanged, on the parts that carried them: mostly the first function
+// call of a step or the last text part of a reply, sometimes a thought part.
+// Without them the model loses its earlier reasoning, and an unsigned first
+// function call needs `skip_thought_signature_validator`.
+//
+// Anthropic clients keep a thinking block's `signature` and send it back
+// verbatim; text and tool_use blocks have no such field. So a Google turn's
+// signatures travel in thinking-block signatures, inside an envelope that
+// names the model that produced the turn. Each thinking block carries its own
+// signature (often none); a trailing empty thinking block carries the text and
+// tool-call signatures. `parseRequest` opens the envelopes, puts each
+// signature back on its block and labels the turn with that model, so
+// `transformMessages` replays it natively to the same model and drops the
+// signatures for any other. The envelope is a label, not a MAC: like every
+// other block, the history is the client's to send, and a forged signature
+// only fails Google's own validation.
+
+const GOOGLE_ENVELOPE_PREFIX = "omp-google-signatures:";
+
+const googleEnvelopeSchema = type({
+	api: "'google-generative-ai' | 'google-gemini-cli' | 'google-vertex'",
+	provider: "string",
+	model: "string",
+	"thinking?": "string",
+	"toolCalls?": { "[string]": "string" },
+	"texts?": { "[string]": "string" },
+});
+
+/**
+ * A Google turn's origin and signatures: the thinking block's own, tool calls'
+ * by id, and text blocks' by position among the turn's non-blank text blocks
+ * (clients drop blank ones on replay).
+ */
+type GoogleEnvelope = typeof googleEnvelopeSchema.infer;
+
+function isGoogleApi(api: AssistantMessage["api"]): api is GoogleEnvelope["api"] {
+	return api === "google-generative-ai" || api === "google-gemini-cli" || api === "google-vertex";
+}
+
+function packGoogleEnvelope(envelope: GoogleEnvelope): string {
+	return GOOGLE_ENVELOPE_PREFIX + Buffer.from(JSON.stringify(envelope)).toString("base64url");
+}
+
+function unpackGoogleEnvelope(signature: string): GoogleEnvelope | undefined {
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(Buffer.from(signature.slice(GOOGLE_ENVELOPE_PREFIX.length), "base64url").toString("utf8"));
+	} catch {
+		return undefined;
+	}
+	const envelope = googleEnvelopeSchema(decoded);
+	return envelope instanceof type.errors ? undefined : envelope;
+}
+
+/** The `signature` a thinking block goes out with: an envelope for a Google turn, verbatim otherwise. */
+function wireThinkingSignature(message: AssistantMessage, block: ThinkingContent): string | undefined {
+	const { api } = message;
+	if (!isGoogleApi(api)) return block.thinkingSignature || undefined;
+	// An envelope even when unsigned: clients replay an unsigned thinking block
+	// as visible text, and the model then writes its reasoning into its replies.
+	return packGoogleEnvelope({
+		api,
+		provider: message.provider,
+		model: message.model,
+		thinking: block.thinkingSignature,
+	});
+}
+
+/** The signature of the trailing block that carries a Google turn's text and tool-call signatures, if it has any. */
+function googleCarrierSignature(message: AssistantMessage): string | undefined {
+	const { api } = message;
+	if (!isGoogleApi(api)) return undefined;
+	const toolCalls: [string, string][] = [];
+	const texts: [string, string][] = [];
+	let textPosition = 0;
+	for (const block of message.content) {
+		if (block.type === "toolCall") {
+			if (block.thoughtSignature) toolCalls.push([block.id, block.thoughtSignature]);
+		} else if (block.type === "text" && block.text.trim().length > 0) {
+			if (block.textSignature) texts.push([String(textPosition), block.textSignature]);
+			textPosition++;
+		}
+	}
+	if (toolCalls.length === 0 && texts.length === 0) return undefined;
+	return packGoogleEnvelope({
+		api,
+		provider: message.provider,
+		model: message.model,
+		toolCalls: Object.fromEntries(toolCalls),
+		texts: Object.fromEntries(texts),
+	});
+}
+
+function isSameGoogleOrigin(a: GoogleEnvelope, b: GoogleEnvelope): boolean {
+	return a.api === b.api && a.provider === b.provider && a.model === b.model;
+}
+
+/**
+ * Put the signatures in a replayed Google turn's envelopes back on their
+ * blocks, drop the carrier and label the turn with the model that produced it.
+ * A turn without an envelope that opens keeps its Anthropic label. An envelope
+ * that does not open, or names another model than the turn's first, loses its
+ * signature rather than reach any provider as one.
+ */
+function adoptGoogleEnvelopes(assistant: AssistantMessage): void {
+	let origin: GoogleEnvelope | undefined;
+	const envelopes = new Map<ThinkingContent, GoogleEnvelope>();
+	for (const block of assistant.content) {
+		if (block.type !== "thinking" || !block.thinkingSignature?.startsWith(GOOGLE_ENVELOPE_PREFIX)) continue;
+		const envelope = unpackGoogleEnvelope(block.thinkingSignature);
+		if (envelope && (!origin || isSameGoogleOrigin(envelope, origin))) {
+			origin ??= envelope;
+			envelopes.set(block, envelope);
+		} else {
+			block.thinkingSignature = undefined;
+		}
+	}
+	if (!origin) return;
+
+	// Maps, not objects: tool-call ids come from the client and may be any string.
+	const toolCalls = new Map<string, string>();
+	const texts = new Map<string, string>();
+	for (const envelope of envelopes.values()) {
+		for (const [id, signature] of Object.entries(envelope.toolCalls ?? {})) toolCalls.set(id, signature);
+		for (const [position, signature] of Object.entries(envelope.texts ?? {})) texts.set(position, signature);
+	}
+	let textPosition = 0;
+	assistant.content = assistant.content.filter(block => {
+		if (block.type === "thinking") {
+			// In a Google turn only signatures from its envelopes are Google's.
+			block.thinkingSignature = envelopes.get(block)?.thinking;
+			return block.thinking.trim().length > 0 || block.thinkingSignature !== undefined;
+		}
+		if (block.type === "toolCall") {
+			const thoughtSignature = toolCalls.get(block.id);
+			if (thoughtSignature) block.thoughtSignature = thoughtSignature;
+		} else if (block.type === "text" && block.text.trim().length > 0) {
+			const textSignature = texts.get(String(textPosition++));
+			if (textSignature) block.textSignature = textSignature;
+		}
+		return true;
+	});
+	assistant.api = origin.api;
+	assistant.provider = origin.provider;
+	assistant.model = origin.model;
+}
+
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	const data = anthropicMessagesRequestSchema(body);
 	if (data instanceof type.errors) {
@@ -414,6 +566,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
 				timestamp: now,
 			};
+			adoptGoogleEnvelopes(assistant);
 			messages.push(assistant);
 		}
 	}
@@ -605,7 +758,8 @@ function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>
 				break;
 			case "thinking": {
 				const b: Record<string, unknown> = { type: "thinking", thinking: c.thinking };
-				if (c.thinkingSignature) b.signature = c.thinkingSignature;
+				const signature = wireThinkingSignature(message, c);
+				if (signature) b.signature = signature;
 				blocks.push(b);
 				break;
 			}
@@ -623,6 +777,8 @@ function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>
 				break;
 		}
 	}
+	const carrier = googleCarrierSignature(message);
+	if (carrier) blocks.push({ type: "thinking", thinking: "", signature: carrier });
 	return blocks;
 }
 
@@ -900,12 +1056,13 @@ export function encodeStream(
 						case "thinking_end": {
 							if (suppressed.has(ev.contentIndex)) break;
 							const c = ev.partial.content[ev.contentIndex];
-							if (c?.type === "thinking" && c.thinkingSignature) {
+							const signature = c?.type === "thinking" ? wireThinkingSignature(ev.partial, c) : undefined;
+							if (signature) {
 								controller.enqueue(
 									sseFrame("content_block_delta", {
 										type: "content_block_delta",
 										index: wireIndex(ev.contentIndex),
-										delta: { type: "signature_delta", signature: c.thinkingSignature },
+										delta: { type: "signature_delta", signature },
 									}),
 								);
 							}
@@ -957,6 +1114,26 @@ export function encodeStream(
 						case "done": {
 							for (const idx of Array.from(open.keys())) closeBlock(idx);
 							emitServerToolBlocksBefore(ev.message, ev.message.content.length);
+							const carrier = googleCarrierSignature(ev.message);
+							if (carrier) {
+								// Last, because Google signs a reply's text only after it has streamed.
+								const index = wireIndex(ev.message.content.length);
+								controller.enqueue(
+									sseFrame("content_block_start", {
+										type: "content_block_start",
+										index,
+										content_block: { type: "thinking", thinking: "" },
+									}),
+								);
+								controller.enqueue(
+									sseFrame("content_block_delta", {
+										type: "content_block_delta",
+										index,
+										delta: { type: "signature_delta", signature: carrier },
+									}),
+								);
+								controller.enqueue(sseFrame("content_block_stop", { type: "content_block_stop", index }));
+							}
 							controller.enqueue(
 								sseFrame("message_delta", {
 									type: "message_delta",
