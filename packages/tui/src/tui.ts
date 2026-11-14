@@ -1643,9 +1643,10 @@ export class TUI extends Container {
 			data => this.#handleInput(data),
 			() => {
 				if (this.#nativeLive) {
-					// The terminal lays the surface out: a resize only refreshes the
-					// width `rows` fallback nodes render at. No replay.
-					this.#native!.noteTerminalColumns(this.terminal.columns);
+					// The terminal lays the surface out: a resize refreshes the width
+					// `rows` fallback nodes render at, and a height change describes
+					// again for components sized by the pane's rows. No replay.
+					this.#native!.noteTerminalSize(this.terminal.columns, this.terminal.rows);
 					return;
 				}
 				if (this.#resizeProbe) {

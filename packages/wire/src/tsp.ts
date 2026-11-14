@@ -666,6 +666,10 @@ export interface TspPickerProps {
 	icon?: string;
 	/** Plural noun for counts and empty copy ("models", "sessions"). */
 	noun?: string;
+	/**
+	 * `md`/`lg`: a sheet of that size. `screen`: fills its container, a screen
+	 * surface or, when the picker is inside an `overlay`, that overlay's card.
+	 */
 	size?: "md" | "lg" | "screen";
 	layout?: "rows" | "cards" | "timeline" | "tree";
 	/** The program's search text (keys stay the program's); `null` hides the field. */

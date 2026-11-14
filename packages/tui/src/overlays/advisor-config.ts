@@ -53,6 +53,7 @@ import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "..
 import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
 import {
 	CLOSE_ACTION,
+	NestedPicker,
 	pickerAction,
 	pickerEvent,
 	routeSelectListPicker,
@@ -230,32 +231,6 @@ const SYNC_BACKLOG_INHERIT = "inherit";
 /** The tools list's terminal-only "Done" row; the picker applies with its own action instead. */
 const TOOLS_DONE = "__done";
 
-/**
- * A picker editor as a component of its own: a component's root picker stays
- * where it is described, the prefs page's editor slot, where a picker
- * described inside the page would be hoisted into `layer` under the sheet.
- */
-class EditorSheet implements Component {
-	node: NativeNode | undefined;
-	readonly #route: (event: NativeUiEvent) => void;
-
-	constructor(route: (event: NativeUiEvent) => void) {
-		this.#route = route;
-	}
-
-	render(): readonly string[] {
-		return [];
-	}
-
-	describe(): NativeNode | null {
-		return this.node ?? null;
-	}
-
-	handleNativeEvent(event: NativeUiEvent): void {
-		this.#route(event);
-	}
-}
-
 /** Whether two memo dependency lists hold the same values by identity. */
 function sameDeps(a: readonly unknown[], b: readonly unknown[]): boolean {
 	return a.length === b.length && a.every((value, i) => value === b[i]);
@@ -361,7 +336,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#modelCurrent: string | undefined;
 	/** Picker sheet options of the current list screen (thinking, review mode, sync backlog, tools). */
 	#sheetOptions: SelectPickerOptions | undefined;
-	readonly #editorSheet = new EditorSheet(event => this.#routeEditorPicker(event));
+	readonly #editorSheet = new NestedPicker(event => this.#routeEditorPicker(event));
 	#screen: Screen = "list";
 	/** The interactive element for the current screen. */
 	#active: Component = new SelectList([], 1, getSelectListTheme());
