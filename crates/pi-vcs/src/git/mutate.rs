@@ -203,7 +203,9 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		let index_path = options.index_path.as_deref();
-		run_commit_hook(self, "pre-commit", &[], index_path)?;
+		if !options.no_verify {
+			run_commit_hook(self, "pre-commit", &[], index_path)?;
+		}
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit", err))?;
@@ -290,7 +292,9 @@ impl GitRepo {
 		};
 		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
 		fs::write(&message_path, message)?;
-		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()], index_path)?;
+		if !options.no_verify {
+			run_commit_hook(self, "commit-msg", &[message_path.as_os_str()], index_path)?;
+		}
 		let message = fs::read_to_string(&message_path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let id = if sign {
@@ -2428,6 +2432,28 @@ mod tests {
 			})
 			.unwrap();
 		assert_eq!(fs::read_to_string(&seen).unwrap(), alt.to_str().unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn commit_no_verify_skips_rejecting_hooks() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		let hooks = temp.path().join(".git").join("hooks");
+		fs::create_dir_all(&hooks).unwrap();
+		for name in ["pre-commit", "commit-msg"] {
+			let hook = hooks.join(name);
+			fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+			fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+		}
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let options = CommitOptions { allow_empty: true, ..Default::default() };
+		repo.commit_create("verified", &options).unwrap_err();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head);
+		let id = repo
+			.commit_create("unverified", &CommitOptions { no_verify: true, ..options })
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
 	}
 
 	#[cfg(unix)]
