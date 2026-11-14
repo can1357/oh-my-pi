@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed DEC 2048 in-band resize reports typing `48;rows;cols;…` into the composer on iTerm2 ([#16695](https://github.com/can1357/oh-my-pi/pull/16695) by [@demon-i386](https://github.com/demon-i386))
 - A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line ([#19202](https://github.com/can1357/oh-my-pi/pull/19202) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback
 - Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback ([#19204](https://github.com/can1357/oh-my-pi/pull/19204) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -461,7 +462,6 @@
 
 ### Fixed
 
-- Fixed DEC 2048 in-band resize reports typing `48;rows;cols;…` into the composer on iTerm2 ([#16695](https://github.com/can1357/oh-my-pi/pull/16695) by [@demon-i386](https://github.com/demon-i386))
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
 ## [18.12.4] - 2026-10-20
