@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { abliteratedllmModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -147,5 +149,56 @@ describe("AbliteratedLLM provider discovery", () => {
 		expect(bare).toMatchObject({ provider: "abliteratedllm", reasoning: false, input: ["text"] });
 		expect(bare?.thinking).toBeUndefined();
 		expect(bare?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+});
+
+/** The Chat Completions request body omp sends for the bundled AbliteratedLLM model `id` at `effort`. */
+async function chatRequestBody(id: string, effort: Effort): Promise<Record<string, unknown>> {
+	const model = getBundledModel<"openai-completions">("abliteratedllm", id);
+	const requests: { url: string; body: Record<string, unknown> }[] = [];
+	const fetch: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+		requests.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+		const chunk = {
+			id: "chatcmpl-test",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: id,
+			choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+		};
+		return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	};
+	const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 0 }] };
+	await streamSimple(model, context, { apiKey: "sk-test", fetch, reasoning: effort }).result();
+	expect(requests.map(request => request.url)).toEqual(["https://api.abliteratedllm.dev/v1/chat/completions"]);
+	return requests[0]!.body;
+}
+
+// Checked against api.abliteratedllm.dev on 2026-11-14: glm-5.3 and kimi-k3
+// accept `reasoning_effort: "max"`, and glm-5.3-flash-abliterated rejects
+// `minimal`, which the provider rule sends as `low`.
+describe("AbliteratedLLM chat completions requests", () => {
+	test("Qwen 3.8 sends the selected effort as reasoning_effort, not enable_thinking", async () => {
+		for (const effort of [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]) {
+			const body = await chatRequestBody("qwen3.8-max", effort);
+			expect(body.reasoning_effort).toBe(effort);
+			expect(body.enable_thinking).toBeUndefined();
+			expect(body.chat_template_kwargs).toBeUndefined();
+			expect(body.store).toBeUndefined();
+		}
+	});
+
+	test("minimal is sent as low", async () => {
+		for (const id of ["qwen3.8-max", "glm-5.3-flash-abliterated"]) {
+			expect((await chatRequestBody(id, Effort.Minimal)).reasoning_effort).toBe("low");
+		}
+	});
+
+	test("max passes through on GLM-5.3 and Kimi K3", async () => {
+		for (const id of ["glm-5.3", "kimi-k3"]) {
+			expect((await chatRequestBody(id, Effort.Max)).reasoning_effort).toBe("max");
+		}
 	});
 });

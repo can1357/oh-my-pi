@@ -14,9 +14,11 @@ provider "abliteratedllm" {
 	// fields the gateway does not list are passed to the model unchanged, so no
 	// `store` is sent, and reasoning rides `reasoning_effort` on every model
 	// (not Qwen's `enable_thinking`, which Qwen 3.8 templates reject when false).
-	// `low`/`medium`/`high` are the documented values; `minimal` has no match
-	// and is sent as `low`. System prompts already ride the `system` role, and
-	// both `max_tokens` and `max_completion_tokens` are accepted.
+	// Checked live on 2026-11-14: `low`/`medium`/`high`/`xhigh`/`max` are
+	// accepted on every model, while `glm-5.3-flash-abliterated` rejects
+	// `minimal`, so `minimal` is sent as `low`. System prompts already ride the
+	// `system` role, and both `max_tokens` and `max_completion_tokens` are
+	// accepted.
 	supports-store #false
 	thinking-format "openai"
 	reasoning-effort-map {
