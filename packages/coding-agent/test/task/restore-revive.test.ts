@@ -188,15 +188,28 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 		createPersistedSubagentReviverFactory({ session, authStorage, modelRegistry, settings, enableLsp: false }),
 		() => 0,
 	);
-	const delivered = Promise.withResolvers<string>();
-	manager.registerDeliverySink(MAIN_AGENT_ID, (_jobId, text) => {
-		delivered.resolve(text);
+	const delivered = Promise.withResolvers<Parameters<Parameters<typeof manager.registerDeliverySink>[1]>>();
+	manager.registerDeliverySink(MAIN_AGENT_ID, (jobId, text, job) => {
+		delivered.resolve([jobId, text, job] as never);
 	});
 
 	try {
 		const outcome = await restoreSession(session);
 		expect(outcome.subagents).toEqual([AGENT_ID]);
-		return { delivered: await delivered.promise, readResults, readEfforts };
+		const deliveredArgs = await delivered.promise;
+		const [, text, job] = deliveredArgs as unknown as [string, string, { latestDetails?: { model?: unknown } }];
+		expect(text).toContain("restored: 42");
+		// A restored subagent never streams `progress[]`, so its job's own
+		// carrier is the only place the delivery `details` can report the model
+		// from; without it the parent is back to parsing the child's session
+		// JSONL (#16135 review). The exact selector differs per case (spawn or
+		// handoff model, plus the resolved thinking suffix), so this asserts the
+		// carrier's shape rather than one case's id.
+		const model = job.latestDetails?.model as { selector?: unknown; fallback?: unknown } | undefined;
+		expect(typeof model?.selector).toBe("string");
+		expect(String(model?.selector)).toMatch(/^mock\//);
+		expect(model?.fallback).toBe(false);
+		return { delivered: text, readResults, readEfforts };
 	} finally {
 		authStorage.close();
 	}

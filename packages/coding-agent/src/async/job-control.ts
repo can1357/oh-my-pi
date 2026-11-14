@@ -11,7 +11,7 @@ import {
 	type AsyncJobDetails,
 	type AsyncJobManagerApi,
 	type AsyncJobType,
-	agentProgress,
+	jobProgressRecord,
 } from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
@@ -160,6 +160,8 @@ interface TrackedJobLike {
 	startTime: number;
 	endTime?: number;
 	latestDetails?: AsyncJobDetails;
+	/** Registry id of the subagent the job runs; matches `progress[].id` when the job id was suffixed on collision. */
+	agentId?: string;
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
@@ -185,38 +187,38 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
 		if (latest.type === "task") {
-			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
-			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
-			if (progressRecord) {
-				const modelValue = progressRecord?.resolvedModel;
-				if (typeof modelValue === "string") {
-					const trimmed = modelValue.trim();
-					if (trimmed) resolvedModel = trimmed;
-				}
-				const identityValue = progressRecord?.resolvedModelIdentity;
-				if (typeof identityValue === "string") {
-					const trimmed = identityValue.trim();
-					if (trimmed) resolvedModelIdentity = trimmed;
-				}
-				const thinkingValue = progressRecord?.resolvedThinkingLevel;
-				if (typeof thinkingValue === "string") {
-					resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
-				}
-				advisor = progressRecord?.advisor === true;
-				const completionValue = progressRecord?.completionPercent;
-				if (typeof completionValue === "number" && Number.isFinite(completionValue)) {
-					completionPercent = completionValue;
-				}
-				const stageValue = progressRecord?.stage;
-				if (typeof stageValue === "string") {
-					const trimmed = stageValue.trim();
-					if (trimmed) stage = trimmed;
-				}
-				requests = finiteNumber(progressRecord?.requests);
-				cost = finiteNumber(progressRecord?.cost);
-				contextTokens = finiteNumber(progressRecord?.contextTokens);
-				contextWindow = finiteNumber(progressRecord?.contextWindow);
+			const progressRecord = jobProgressRecord(latest.latestDetails, latest.id, latest.agentId);
+			// A run that never streamed `progress[]` (restored subagent, wake
+			// turn, resumed delivery) still names its model on the job (#16017).
+			const carried = latest.latestDetails?.model;
+			const modelValue = progressRecord?.resolvedModel ?? carried?.selector;
+			if (typeof modelValue === "string") {
+				const trimmed = modelValue.trim();
+				if (trimmed) resolvedModel = trimmed;
 			}
+			const identityValue = progressRecord?.resolvedModelIdentity;
+			if (typeof identityValue === "string") {
+				const trimmed = identityValue.trim();
+				if (trimmed) resolvedModelIdentity = trimmed;
+			}
+			const thinkingValue = progressRecord?.resolvedThinkingLevel;
+			if (typeof thinkingValue === "string") {
+				resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
+			}
+			advisor = progressRecord?.advisor === true;
+			const completionValue = progressRecord?.completionPercent;
+			if (typeof completionValue === "number" && Number.isFinite(completionValue)) {
+				completionPercent = completionValue;
+			}
+			const stageValue = progressRecord?.stage;
+			if (typeof stageValue === "string") {
+				const trimmed = stageValue.trim();
+				if (trimmed) stage = trimmed;
+			}
+			requests = finiteNumber(progressRecord?.requests);
+			cost = finiteNumber(progressRecord?.cost);
+			contextTokens = finiteNumber(progressRecord?.contextTokens);
+			contextWindow = finiteNumber(progressRecord?.contextWindow);
 		}
 		const running = latest.status === "running";
 		const widget = current ? session.asyncJobManager?.widgets?.view(current) : undefined;

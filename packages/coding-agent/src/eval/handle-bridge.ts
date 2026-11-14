@@ -1,5 +1,5 @@
 import { isRecord, truncate } from "@oh-my-pi/pi-utils";
-import { type AsyncJob, type AsyncJobManagerApi, agentProgress } from "../async";
+import { type AsyncJob, type AsyncJobManagerApi, jobProgressRecord } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -164,7 +164,7 @@ function emitProgress(
 ): unknown {
 	if (!emitStatus || !("job" in resolved)) return previousProgress;
 	const id = resolved.job.agentId ?? resolved.job.id;
-	const progress = agentProgress(resolved.job.latestDetails, id);
+	const progress = jobProgressRecord(resolved.job.latestDetails, resolved.job.id, resolved.job.agentId);
 	if (!progress || progress === previousProgress) return previousProgress;
 	const task = typeof progress.assignment === "string" ? progress.assignment : progress.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
