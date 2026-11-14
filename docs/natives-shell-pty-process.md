@@ -87,8 +87,10 @@ Three search-related builtins are worth calling out:
 
 - `grep` is implemented on the ripgrep libraries (`grep-regex`/`grep-searcher`), with directory walks and ordered parallel search served by `pi-walker` (`rg`/`grep` output stays in path order).
 - `rg` is a sibling builtin with ripgrep defaults (recursive search, ignore/hidden filtering, binary suppression) — a separate module and argument model, not an alias of `grep`.
-- `fd` is backed by `pi-walker`'s ordered `walk::tree` traversal, `globset`, and `regex`.
+- `fd` is backed by `pi-walker`'s parallel `walk::ordered` walk (filters run on the walk's workers; matches print in path order as the walk settles them, with `.fdignore` read by the walker as an extra ignore file), `globset`, and `regex`.
 - `ast-grep` (also `sg`) runs ast-grep 0.50's `run` command (`-p`/`-r`/`-U`, `--json`, context, `--heading`, `--files-with-matches`, `--stdin`) on the `pi-ast` search engine with ast-grep's piped (uncolored) output; `scan`, `test`, `new`, `lsp`, `outline`, `--config`, `--interactive`, `--kind`, `--debug-query`, and `--inspect` exit 2 as unsupported.
+
+Walks rooted on a local filesystem (`find`, `fd`, `rg`, `grep -r`, and the `grep`/`glob` natives) list network mounts below the root (NFS, SMB, autofs, sshfs, …; read from the mount table in `crates/pi-walker/src/fs/mounts.rs`) but do not descend into them; name the mount as the search root to walk it. ovnfs mounts are always walked. The ordered traversal behind `find` lists the next directories ahead on the blocking pool while listings are slow (network filesystems, cold caches) and stays serial while they are fast.
 
 Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated (`ExtrasGate` in `crates/pi-shell/src/extras.rs`, built in `crates/pi-shell/src/tools/mod.rs`):
 

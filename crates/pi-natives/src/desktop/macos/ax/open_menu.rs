@@ -533,18 +533,17 @@ fn render<M: Menus>(
 	let mut parts = Vec::with_capacity(entries.len());
 	for entry in entries {
 		let mut part = format_menu_item(&entry.title, entry.enabled, entry.submenu.is_some());
-		if let Some(submenu) = &entry.submenu {
-			if entry.enabled
-				&& depth < MAX_LISTED_DEPTH
-				&& let Ok(children) = menus.items(submenu)
-				&& !children.is_empty()
-				&& children.len() <= *budget
-			{
-				*budget -= children.len();
-				part.push_str(" [");
-				part.push_str(&render(menus, &children, depth + 1, budget));
-				part.push(']');
-			}
+		if let Some(submenu) = &entry.submenu
+			&& entry.enabled
+			&& depth < MAX_LISTED_DEPTH
+			&& let Ok(children) = menus.items(submenu)
+			&& !children.is_empty()
+			&& children.len() <= *budget
+		{
+			*budget -= children.len();
+			part.push_str(" [");
+			part.push_str(&render(menus, &children, depth + 1, budget));
+			part.push(']');
 		}
 		parts.push(part);
 	}

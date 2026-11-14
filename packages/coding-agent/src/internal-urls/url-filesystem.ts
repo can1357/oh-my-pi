@@ -46,7 +46,7 @@ const VIRTUAL_DIR_MODE = 0o555;
 const REPLY_FILE_MODE = 0o222;
 const ERRNO_CODE_RE = /^E[A-Z0-9]+$/;
 const DENIED_MESSAGE_RE = /\b(?:not allowed|escapes|outside)\b/i;
-const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed)\b/i;
+const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed|must be numeric)\b/i;
 const MISSING_MESSAGE_RE = /\b(?:not found|unknown|does not exist|no such|unavailable)\b/i;
 
 /** Whether `input` is spelled `scheme://…`: the only form the shell filesystem hands to URL handlers. */
@@ -177,6 +177,8 @@ interface VirtualNode {
 	entries?: ReadonlyMap<string, ShellFsFileType>;
 	/** Host directory a directory resource lists. */
 	sourcePath?: string;
+	/** JSON path named no stored value. Bytes stay the `"null"` sentinel. */
+	absent?: boolean;
 }
 
 type FsNode = NativeNode | HostNode | VirtualNode;
@@ -245,6 +247,11 @@ export interface UrlFileStat {
 	size: number;
 	/** Host modification time; 0 for rendered resources, which have none. */
 	mtimeMs: number;
+	/**
+	 * The URL named no stored JSON value. Bytes are still the `"null"` sentinel.
+	 * Only the search-list split probe treats this as missing.
+	 */
+	absent?: boolean;
 }
 
 export interface InternalUrlFilesystemOptions {
@@ -319,9 +326,11 @@ export class InternalUrlFilesystem {
 		try {
 			const node = await this.#node(input, true, false);
 			if (node.kind === "virtual") {
-				return node.directory
+				const stat: UrlFileStat = node.directory
 					? { type: "directory", size: 0, mtimeMs: 0 }
 					: { type: "file", size: node.bytes.length, mtimeMs: 0 };
+				if (node.absent === true) stat.absent = true;
+				return stat;
 			}
 			const stats = await fs.stat(node.path);
 			return {
@@ -753,7 +762,14 @@ export class InternalUrlFilesystem {
 				sourcePath: resource.sourcePath,
 			};
 		}
-		return { kind: "virtual", url, spec, directory: false, bytes: Buffer.from(resource.content, "utf-8") };
+		return {
+			kind: "virtual",
+			url,
+			spec,
+			directory: false,
+			bytes: Buffer.from(resource.content, "utf-8"),
+			...(resource.absent === true ? { absent: true } : {}),
+		};
 	}
 
 	#enumerated(scheme: string): Promise<Map<string, string>> {

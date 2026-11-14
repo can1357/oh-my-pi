@@ -5,6 +5,7 @@ import {
 	type AgentToolResult,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -22,14 +23,27 @@ import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 
-function session(manager?: AsyncJobManager, agentId = "Main", launch = false): ToolSession {
+function session(
+	manager?: AsyncJobManager,
+	agentId = "Main",
+	launch = false,
+	extra: Partial<ToolSession> = {},
+): ToolSession {
 	return {
 		cwd: process.cwd(),
 		settings: Settings.isolated({ "launch.enabled": launch }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
+		...extra,
 	} as unknown as ToolSession;
+}
+
+/** A caller context whose latest turn made `elapse`'s wait call plus one call to each of `otherTools`. */
+function latestTurn(...otherTools: string[]): () => Message[] {
+	const calls = [{ id: "idle-wait", name: "wait" }, ...otherTools.map((name, i) => ({ id: `${name}-${i}`, name }))];
+	const message = { role: "assistant", content: calls.map(call => ({ type: "toolCall", ...call, arguments: {} })) };
+	return () => [message as unknown as Message];
 }
 
 // Lets every pending continuation run, so the wait reaches its next block before the test acts.
@@ -149,21 +163,21 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager));
+		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn("read") }));
 		const first = await elapse(tool, 5_000);
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
 		expect(report(first)).toContain("within 5.0s");
-		expect(report(first)).toContain("up to 10.0s");
+		expect(report(first)).toContain("Call `wait` right away with no other tool call: it then blocks up to 4m.");
 		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
 		await elapse(tool, 60_000);
-		await elapse(tool, 300_000);
-		const capped = await elapse(tool, 300_000);
-		expect(report(capped)).toContain("within 5m");
-		expect(report(capped)).toContain("up to 5m");
-		expect(notice(capped)).toContain("11m45s");
+		await elapse(tool, 240_000);
+		const capped = await elapse(tool, 240_000);
+		expect(report(capped)).toContain("within 4m");
+		expect(report(capped)).toContain("up to 4m");
+		expect(notice(capped)).toContain("9m45s");
 		build.resolve("done");
 	});
 
@@ -186,6 +200,39 @@ describe("wait", () => {
 		vi.advanceTimersByTime(1_500);
 		expect((await woke).useless).toBeUndefined();
 		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
+		build.resolve("done");
+	});
+
+	test("a back-to-back wait that is the only call of its turn takes the top rung at once", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn() }));
+		// The first wait of a streak keeps the floor: the agent has not yet shown it has nothing else to do.
+		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
+		const top = await elapse(tool, 240_000);
+		expect(report(top)).toContain("within 4m");
+		expect(notice(top)).toContain("4m5s");
+		build.resolve("done");
+	});
+
+	test("only the top-level interactive session is told to end its turn instead of waiting again", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
+		expect(interactive.description).toContain("End your turn instead");
+		expect(report(await elapse(interactive, 5_000))).toContain(
+			"End your turn: results and messages start your next one.",
+		);
+		// Print mode exits and cancels the jobs when the turn ends; ACP holds results until the client's next prompt.
+		const headless = new WaitTool(session(manager));
+		expect(headless.description).not.toContain("End your turn");
+		const headlessReport = report(await elapse(headless, 5_000));
+		expect(headlessReport).not.toContain("End your turn");
+		expect(headlessReport).toContain("Call `wait` right away with no other tool call");
 		build.resolve("done");
 	});
 

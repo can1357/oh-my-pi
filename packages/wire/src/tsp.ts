@@ -490,6 +490,8 @@ export interface TspEditorDecoration {
 	to: number;
 	s: string;
 	fx?: TspEffect;
+	/** An image blob the range stands for (an attachment token): copying the range copies the image. */
+	blob?: string;
 }
 export interface TspEditorProps {
 	text?: string;

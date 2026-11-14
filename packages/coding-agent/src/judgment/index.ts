@@ -25,6 +25,7 @@ import {
 	checkBoxQuestions,
 	createNativeJudge,
 	type ImageContent,
+	isGatewayCredentialsExhausted,
 	isJudgmentApi,
 	judgmentImagesWithin,
 	nativeJudgmentImageBounds,
@@ -54,6 +55,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { type FittedImage, fitImage } from "../utils/image-resize";
+import { cfgNoJudge, cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
 import {
@@ -163,8 +165,9 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
 
 /**
  * How long a candidate stays skipped after a rejection that persists until
- * something changes out of band: 401/403 credential, 402 billing cap, or 404
- * for a model the route no longer serves. Every judgment rebuilds the chain,
+ * something changes out of band: 401/403 credential, 402 billing cap, 404
+ * for a model the route no longer serves, or a gateway's 502
+ * `upstream_credentials_exhausted`. Every judgment rebuilds the chain,
  * so without this each call re-pays the rejected request (plus a
  * credential-rotation round trip) before reaching the next candidate.
  */
@@ -389,9 +392,20 @@ function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainC
  * prompted on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
  * tool under `find.enabled: auto`.
  */
-export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
-	const [primary] = judgeRoleChain(settings, registry);
+export function hasNativeJudge(settings: Settings, registry: ModelRegistry, sessionModel?: Model): boolean {
+	const [primary] = allowedJudgeCandidates(judgeRoleChain(settings, registry), settings, sessionModel);
 	return primary !== undefined && kindOf(primary) === "native";
+}
+
+/** Restrict auxiliary judgments to the active provider when requested; an unknown provider fails closed. */
+function allowedJudgeCandidates(
+	candidates: RoleChainCandidate[],
+	settings: Settings,
+	sessionModel?: Model,
+): RoleChainCandidate[] {
+	if (!cfgNoJudge.get(settings) && !cfgOffline.get(settings)) return candidates;
+	const provider = sessionModel?.provider;
+	return provider ? candidates.filter(candidate => candidate.model.provider === provider) : [];
 }
 
 /** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. With `deps.leadModel`, that model is tried first. */
@@ -403,6 +417,7 @@ export function resolveJudge(deps: JudgeDeps): ChainJudge {
 export interface NativeJudgmentDeps {
 	settings: Settings;
 	registry: ModelRegistry;
+	sessionModel?: Model;
 	sessionId?: string;
 	signal?: AbortSignal;
 	onUsage?: (usage: JudgmentUsage) => void;
@@ -425,6 +440,7 @@ export async function judgeNatively<Q extends Questions>(
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
+		sessionModel: deps.sessionModel,
 		sessionId: deps.sessionId,
 		purpose,
 		onUsage: deps.onUsage,
@@ -682,7 +698,13 @@ export class ChainJudge implements Judge {
 
 	#resolveCandidates(request?: JudgmentRequest): RoleChainCandidate[] {
 		const { sessionModel } = this.#deps;
-		const { roleChain, list: chain } = this.#roleChains();
+		const resolved = this.#roleChains();
+		const restricted = cfgNoJudge.get(this.#deps.settings) || cfgOffline.get(this.#deps.settings);
+		if (restricted && !sessionModel?.provider) return [];
+		const roleChain = restricted
+			? allowedJudgeCandidates(resolved.roleChain, this.#deps.settings, sessionModel)
+			: resolved.roleChain;
+		const chain = restricted ? textJudgeRoleChain(roleChain) : resolved.list;
 		const images = request?.images ?? [];
 		// A prompted model cannot locate anything, so no session fallback either.
 		if (request && asksForBoxes(request.questions)) {
@@ -691,6 +713,7 @@ export class ChainJudge implements Judge {
 			);
 		}
 		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(roleChain, images), sessionModel, true);
+		if (restricted) return withSessionFallback(chain, sessionModel);
 		if (chain === this.#candidates?.chain) return this.#candidates.list;
 		const list = withSessionFallback(chain, sessionModel);
 		this.#candidates = { chain, list };
@@ -894,9 +917,11 @@ interface CandidateRejection {
 
 /**
  * Reason for a rejection the route keeps answering until something changes out of band — a credential or
- * billing rejection of the account, or a 404 for a model the route does not serve — else `undefined`.
+ * billing rejection of the account, a 404 for a model the route does not serve, or a gateway 502 saying
+ * every upstream key for the model failed — else `undefined`.
  */
 function rejectionReason(error: unknown): string | undefined {
+	if (isGatewayCredentialsExhausted(error)) return "had no usable gateway credentials";
 	switch (AIError.status(error)) {
 		case 401:
 		case 402:

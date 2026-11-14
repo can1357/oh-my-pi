@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Traces tab so background jobs end at their actual completion times, accurately displaying idle periods and turn durations.
+- Fixed the Frustration page's per-model message counts so all answered messages are included.
+- Improved dashboard responsiveness by keeping other pages and Live status available while the Spotlight view rebuilds.
+- Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
+
 ## [18.20.0] - 2026-11-12
 
 ### Fixed

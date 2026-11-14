@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved retry-hint extraction for Cloud Code Assist quota reset information, including compound durations and reset timestamps.
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

@@ -13,6 +13,7 @@ use crate::bash::{
 	ir::{CondIr, Op, Unit},
 	pattern::{PatOpts, Regex},
 	store::{Attrs, OptId, OptKind, VarValue},
+	syntax::MAX_NESTING,
 	vm::{
 		Cx, Kernel,
 		exec::{Flow, expanding},
@@ -336,10 +337,13 @@ impl Primaries for Ctx<'_, '_> {
 /// `[`, `argv` keeps the closing `]` just past `argc`, which bash's
 /// ``"`)' expected, found ]"`` names.
 struct Test<'x, P: ?Sized> {
-	prim: &'x mut P,
-	argv: &'x [BString],
-	argc: usize,
-	pos:  usize,
+	prim:  &'x mut P,
+	argv:  &'x [BString],
+	argc:  usize,
+	pos:   usize,
+	/// Parenthesis nesting, bounded by [`MAX_NESTING`]. A chain of one
+	/// operator does not count: it costs no stack.
+	depth: u32,
 }
 
 /// Run the `test` grammar over `argv[..argc]` (bash's `test_command`):
@@ -352,7 +356,7 @@ fn test_command<P: Primaries + ?Sized>(
 	if argc == 0 {
 		return Ok(Some(false));
 	}
-	let mut t = Test { prim, argv, argc, pos: 0 };
+	let mut t = Test { prim, argv, argc, pos: 0, depth: 0 };
 	let v = t.posixtest(argc)?;
 	if t.pos == argc {
 		return Ok(Some(v));
@@ -393,24 +397,44 @@ impl<'x, P: Primaries + ?Sized> Test<'x, P> {
 		self.or()
 	}
 
+	/// bash's `or_`. bash recurses once per `-o`, which costs one stack
+	/// frame per operator; the chain is folded here instead, so its length
+	/// is bounded only by the argument list. Every term is still evaluated,
+	/// left to right, as bash's `or_` does: the operator does not
+	/// short-circuit, so an error in a later term is still reported.
 	fn or(&mut self) -> T<bool> {
-		let v = self.and()?;
-		if self.pos < self.argc && self.arg(self.pos) == b"-o" {
+		let mut v = self.and()?;
+		while self.pos < self.argc && self.arg(self.pos) == b"-o" {
 			self.advance(false)?;
-			let r = self.or()?;
-			return Ok(v || r);
+			let r = self.and()?;
+			v = v || r;
 		}
 		Ok(v)
 	}
 
+	/// bash's `and_`, folded like [`Test::or`] and evaluating every term.
 	fn and(&mut self) -> T<bool> {
-		let v = self.term()?;
-		if self.pos < self.argc && self.arg(self.pos) == b"-a" {
+		let mut v = self.term()?;
+		while self.pos < self.argc && self.arg(self.pos) == b"-a" {
 			self.advance(false)?;
-			let r = self.and()?;
-			return Ok(v && r);
+			let r = self.term()?;
+			v = v && r;
 		}
 		Ok(v)
+	}
+
+	/// Run `f` one parenthesis level deeper. Parentheses are real nesting,
+	/// not a chain, so they keep the parser's [`MAX_NESTING`] policy: past
+	/// the limit the expression is a usage error rather than a stack
+	/// overflow that takes the host process down.
+	fn nested<V>(&mut self, f: impl FnOnce(&mut Self) -> T<V>) -> T<V> {
+		if self.depth >= MAX_NESTING {
+			return Err(syntax("maximum nesting level exceeded"));
+		}
+		self.depth += 1;
+		let r = f(self);
+		self.depth -= 1;
+		r
 	}
 
 	fn term(&mut self) -> T<bool> {
@@ -441,11 +465,13 @@ impl<'x, P: Primaries + ?Sized> Test<'x, P> {
 				}
 				nargs += 1;
 			}
-			let v = if self.pos + nargs < self.argc && nargs <= 4 {
-				self.posixtest(nargs)?
-			} else {
-				self.expr()?
-			};
+			let v = self.nested(|t| {
+				if t.pos + nargs < t.argc && nargs <= 4 {
+					t.posixtest(nargs)
+				} else {
+					t.expr()
+				}
+			})?;
 			match self.at(self.pos) {
 				None => return Err(syntax("`)' expected")),
 				Some(a) if a != b")" => {
