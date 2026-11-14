@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- `chillax` now drops thinking to the lowest effort on GPT-6 models (e.g. `gpt-6-astra`), including mid-turn steers; it previously applied only on Claude models
 - Retry and F5 now retry a failed request after a provider refusal instead of reporting "Nothing to retry"; starting, clearing, or rewinding a conversation discards the old failure
 - Pressing Enter in `/resume` on a session recorded in a folder that has since been moved or deleted no longer does nothing: a session filed under the current folder is moved here and resumed, and any other one reports why it cannot be resumed
 - Leading `KEY=VALUE` environment assignments are now stripped when evaluating `deny` and `prompt` rules in `bash.patterns` so they cannot bypass command restrictions ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
