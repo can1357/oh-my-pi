@@ -12546,7 +12546,7 @@ Used by:
 - quote 1.0.47 (https://github.com/dtolnay/quote)
 - ref-cast-impl 1.0.27 (https://github.com/dtolnay/ref-cast)
 - ref-cast 1.0.27 (https://github.com/dtolnay/ref-cast)
-- reis 0.5.0 (https://github.com/ids1024/reis)
+- reis 0.7.1 (https://github.com/ids1024/reis)
 - rustix 0.38.44 (https://github.com/bytecodealliance/rustix)
 - rustix 1.1.5 (https://github.com/bytecodealliance/rustix)
 - rustversion 1.0.23 (https://github.com/dtolnay/rustversion)
