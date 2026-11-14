@@ -1537,10 +1537,8 @@ export class SelectorController {
 
 	/** Fork from here: the session moves onto a new file holding the conversation up to `entryId`. */
 	async #forkAt(entryId: string): Promise<void> {
-		if (this.ctx.session.isStreaming) {
-			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
-			return;
-		}
+		// An entry fork requires an idle session; stop the running turn first.
+		if (this.ctx.session.isStreaming) await this.ctx.session.abort();
 		const previous = this.ctx.sessionManager.isSessionOnDisk() ? this.ctx.sessionManager.getSessionId() : undefined;
 		try {
 			if (!(await this.ctx.session.fork(entryId))) {
