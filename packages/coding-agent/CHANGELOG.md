@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the default system prompt carrying omp's own changelog rule into every project; changelog conventions now come from each project's context files such as `AGENTS.md` ([#19294](https://github.com/can1357/oh-my-pi/pull/19294) by [@bigHippoZz](https://github.com/bigHippoZz)).
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
