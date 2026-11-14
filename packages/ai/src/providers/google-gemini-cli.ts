@@ -610,8 +610,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			// The backend gates newer models on the client version; a process that
 			// skipped discovery (fresh model cache) must still send the current one.
+			// The npm registry is not Cloud Code Assist, so the Gemini CLI lookup goes
+			// through the global fetch: a caller's transport only carries provider requests.
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
-			else await ensureGeminiCliVersion(options?.fetch ?? fetch, options?.signal);
+			else await ensureGeminiCliVersion(fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
 			const requestHeaders = {
