@@ -796,11 +796,14 @@ export class CredentialSelector {
 			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
 			: undefined;
 		// An on-use-only provider (`refresh { on-use-only #true }`) mints a token
-		// only behind a request that is about to use it. A preflight for a sibling
-		// account has no such request, and one host rotating a whole pool together
-		// is what links those accounts, so only the serving candidate refreshes.
+		// only behind a request that is about to use it. The preflight cannot know
+		// which candidate the final pass will reach — filters, blocks and failed
+		// attempts move it — and a preflight for an account nothing uses is exactly
+		// the request-less rotation that links a pool, so it refreshes none of them.
+		// `tryOAuth` still refreshes the credential it actually serves with, and a
+		// forced recovery keeps the preflight because that path must re-mint a token
+		// that still looks fresh.
 		const onUseOnlyPreflight = providerRefreshesOnUseOnly(provider);
-		const servingIndex = forceRefreshIndex ?? candidates[0]?.selection.index;
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
@@ -826,10 +829,8 @@ export class CredentialSelector {
 					(rejectedAccess === undefined || candidate.selection.credential.access !== rejectedAccess);
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
 				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
-				// On-use-only: a stale credential this request will not use stays as it
-				// is. Refreshing it here would mint the whole pool's tokens with no
-				// request behind them, which is the linking pattern the rule prevents.
-				if (onUseOnlyPreflight && candidate.selection.index !== servingIndex) return;
+				// On-use-only: no request is about to use any of these yet; see above.
+				if (onUseOnlyPreflight && !force) return;
 				const latestCredential = this.#deps.pool.credentials(provider)[candidate.selection.index];
 				if (
 					!force &&
