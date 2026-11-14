@@ -16,12 +16,15 @@
 //! of their item and can be read and pressed without opening the submenu.
 
 use std::{
+	cell::Cell,
+	ffi::c_void,
 	ptr::{self, NonNull},
-	time::{Duration, Instant},
+	rc::Rc,
+	time::Duration,
 };
 
-use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::CFRetained;
+use objc2_application_services::{AXError, AXObserver, AXUIElement};
+use objc2_core_foundation::{CFRetained, CFRunLoop, CFRunLoopRunResult, CFRunLoopSource, CFString};
 
 use super::{
 	super::{capture, input, skylight},
@@ -47,6 +50,16 @@ pub(crate) const CONTROL_MENU_TIMEOUT: Duration = Duration::from_millis(1000);
 /// How long a menu may take to close after Escape; it fades out for about
 /// 270 ms.
 const MENU_CLOSE_TIMEOUT: Duration = Duration::from_millis(600);
+/// How long a menu whose `AXCancel` returned may stay listed, with no report
+/// from its application that it closed, before the cancel counts as ignored
+/// and Escape goes to it. A native menu that took the cancel reported it,
+/// naming that menu, within 9 ms and left the window list within 177 ms on a
+/// loaded machine; a Chromium `<select>`'s menu takes the cancel and stays
+/// open. A menu that takes the cancel without a report (no `AppKit` menu
+/// measured, but a menu whose element reports another process than the one
+/// showing it may be one) gets Escape at this timeout, not
+/// [`MENU_CLOSE_TIMEOUT`], if it is still listed then.
+const MENU_CANCEL_TIMEOUT: Duration = Duration::from_millis(300);
 const MENU_POLL: Duration = Duration::from_millis(5);
 /// Most items an error lists, submenus included; a submenu that would pass it
 /// is listed by its title alone.
@@ -292,6 +305,17 @@ trait Menus {
 	fn shown_again(&mut self) -> bool {
 		false
 	}
+	/// Listens, until the returned watch is dropped, for the application's
+	/// report (`AXMenuClosed`) that `menu` closed. `None` when it cannot listen.
+	fn watch_closed(&mut self, _menu: &Self::Node) -> Option<Box<dyn ClosedWatch>> {
+		None
+	}
+}
+
+/// A listener [`Menus::watch_closed`] set up for one menu.
+trait ClosedWatch {
+	/// Whether the application has reported the menu closed.
+	fn closed(&mut self) -> bool;
 }
 
 /// Settles a menu that a press of `app_pid` opened, within `timeout`, since
@@ -417,15 +441,46 @@ fn end_chosen<M: Menus>(menus: &mut M, window: u32, menu: &M::Node) -> CoreResul
 /// fallback, leaves it fading out for about 270 ms, and until the fade ends
 /// the keyboard stays with the target, which types the user's keys into its
 /// own key window once the menu is gone.
+///
+/// A native menu that took the cancel stays listed for a few milliseconds
+/// (11-22 ms, 177 ms once under load), and Escape posted then reaches the
+/// app's key window (80 of 80 on four kinds of native menu), so once the
+/// application reports the menu closed nothing is posted: the menu gets
+/// [`MENU_CLOSE_TIMEOUT`] to leave the list and is reported open if it does
+/// not. Escape goes only when the menu neither reports closing nor leaves the
+/// list within [`MENU_CANCEL_TIMEOUT`], as a Chromium `<select>`'s, which
+/// takes the cancel and stays open. Without a report to listen for, the menu
+/// gets [`MENU_CLOSE_TIMEOUT`] to leave the list first.
 fn close<M: Menus>(menus: &mut M, window: u32, menu: Option<&M::Node>) -> CoreResult<bool> {
 	if !is_open(menus, window) {
 		return Ok(true);
 	}
-	if let Some(menu) = menu
-		&& menus.cancel(menu).is_ok()
-		&& await_closed(menus, window)?
-	{
-		return Ok(true);
+	if let Some(menu) = menu {
+		// Listening starts before the cancel, so a report sent at once is kept.
+		let mut watch = menus.watch_closed(menu);
+		if menus.cancel(menu).is_ok() {
+			match watch.as_mut() {
+				Some(watch) => {
+					let reported = poll(MENU_CANCEL_TIMEOUT, || {
+						if is_open(menus, window) {
+							watch.closed().then_some(true)
+						} else {
+							Some(false)
+						}
+					})?;
+					match reported {
+						Some(false) => return Ok(true),
+						Some(true) => return await_closed(menus, window),
+						None => {},
+					}
+				},
+				None => {
+					if await_closed(menus, window)? {
+						return Ok(true);
+					}
+				},
+			}
+		}
 	}
 	escape_listed(menus, window)
 }
@@ -522,6 +577,10 @@ impl<M: Menus, S: FnMut() -> bool> Menus for Opened<'_, M, S> {
 
 	fn cancel(&mut self, menu: &Self::Node) -> CoreResult<()> {
 		self.menus.cancel(menu)
+	}
+
+	fn watch_closed(&mut self, menu: &Self::Node) -> Option<Box<dyn ClosedWatch>> {
+		self.menus.watch_closed(menu)
 	}
 
 	fn escape(&mut self) -> CoreResult<()> {
@@ -717,15 +776,60 @@ pub(crate) fn poll<T>(
 	timeout: Duration,
 	mut probe: impl FnMut() -> Option<T>,
 ) -> CoreResult<Option<T>> {
-	let deadline = Instant::now() + timeout;
+	let deadline = clock::now() + timeout;
 	loop {
 		if let Some(value) = probe() {
 			return Ok(Some(value));
 		}
-		if Instant::now() >= deadline {
+		if clock::now() >= deadline {
 			return Ok(None);
 		}
-		control::wait(MENU_POLL)?;
+		clock::wait(MENU_POLL)?;
+	}
+}
+
+/// The time [`poll`] reads and waits on: the wall clock, and in tests a clock
+/// each wait moves forward at once, so a test counts reads, not milliseconds.
+#[cfg(not(test))]
+mod clock {
+	use std::time::{Duration, Instant};
+
+	use crate::desktop::{control, error::CoreResult};
+
+	pub(super) fn now() -> Instant {
+		Instant::now()
+	}
+
+	pub(super) fn wait(duration: Duration) -> CoreResult<()> {
+		control::wait(duration)
+	}
+}
+
+#[cfg(test)]
+mod clock {
+	use std::{
+		cell::Cell,
+		sync::LazyLock,
+		time::{Duration, Instant},
+	};
+
+	use crate::desktop::{control, error::CoreResult};
+
+	static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+	thread_local! {
+		/// How far this thread's waits have moved the clock.
+		static WAITED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+	}
+
+	pub(super) fn now() -> Instant {
+		*START + WAITED.get()
+	}
+
+	pub(super) fn wait(duration: Duration) -> CoreResult<()> {
+		control::check()?;
+		WAITED.set(WAITED.get() + duration);
+		Ok(())
 	}
 }
 
@@ -804,6 +908,110 @@ impl Menus for AxMenus {
 	fn escape(&mut self) -> CoreResult<()> {
 		input::post_escape(self.pid)
 	}
+
+	fn watch_closed(&mut self, menu: &Self::Node) -> Option<Box<dyn ClosedWatch>> {
+		MenuClosedWatch::new(menu).map(|watch| Box::new(watch) as Box<dyn ClosedWatch>)
+	}
+}
+
+/// The notification an application posts when one of its menus closes.
+const MENU_CLOSED: &str = "AXMenuClosed";
+/// The run-loop mode the watch's source is in, so reading it runs nothing
+/// else on this thread.
+const MENU_CLOSED_MODE: &str = "pi.menu-closed";
+
+/// What the notification callback writes: the menu it waits for, and whether
+/// its application reported that menu closed.
+struct ClosedState {
+	menu:   CFRetained<AXUIElement>,
+	closed: Cell<bool>,
+}
+
+/// `AXMenuClosed` from one menu's application, kept only when it names that
+/// menu, so another menu closing meanwhile does not count. Registered on this
+/// thread's run loop in a mode of its own; dropping the watch removes the
+/// registration and invalidates the source.
+struct MenuClosedWatch {
+	observer: CFRetained<AXObserver>,
+	app:      CFRetained<AXUIElement>,
+	source:   CFRetained<CFRunLoopSource>,
+	run_loop: CFRetained<CFRunLoop>,
+	state:    Rc<ClosedState>,
+}
+
+impl MenuClosedWatch {
+	fn new(menu: &CFRetained<AXUIElement>) -> Option<Self> {
+		let pid = element_pid(menu).ok()?;
+		let app = create_application(pid).ok()?;
+		set_timeout(&app).ok()?;
+		let run_loop = CFRunLoop::current()?;
+		let mut raw = ptr::null_mut();
+		// SAFETY: `raw` is a valid out pointer, and `menu_closed` matches
+		// `AXObserverCallback`.
+		let created = unsafe { AXObserver::create(pid, Some(menu_closed), NonNull::from(&mut raw)) };
+		if created != AXError::Success {
+			return None;
+		}
+		// SAFETY: a successful create returns an observer the caller owns.
+		let observer = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
+		let state = Rc::new(ClosedState { menu: menu.clone(), closed: Cell::new(false) });
+		// SAFETY: `refcon` points at `state`, which the watch keeps alive and
+		// only reads through shared references, until `Drop` has removed the
+		// registration.
+		let added = unsafe {
+			observer.add_notification(
+				&app,
+				&CFString::from_static_str(MENU_CLOSED),
+				Rc::as_ptr(&state).cast_mut().cast(),
+			)
+		};
+		if added != AXError::Success {
+			return None;
+		}
+		// SAFETY: the observer is valid; its source is retained here.
+		let source = unsafe { observer.run_loop_source() };
+		run_loop.add_source(Some(&source), Some(&CFString::from_static_str(MENU_CLOSED_MODE)));
+		Some(Self { observer, app, source, run_loop, state })
+	}
+}
+
+impl ClosedWatch for MenuClosedWatch {
+	fn closed(&mut self) -> bool {
+		let mode = CFString::from_static_str(MENU_CLOSED_MODE);
+		while CFRunLoop::run_in_mode(Some(&mode), 0.0, true) == CFRunLoopRunResult::HandledSource {}
+		self.state.closed.get()
+	}
+}
+
+impl Drop for MenuClosedWatch {
+	fn drop(&mut self) {
+		// SAFETY: removes the registration `new` added, before `state` drops.
+		let _ = unsafe {
+			self
+				.observer
+				.remove_notification(&self.app, &CFString::from_static_str(MENU_CLOSED))
+		};
+		self
+			.run_loop
+			.remove_source(Some(&self.source), Some(&CFString::from_static_str(MENU_CLOSED_MODE)));
+		self.source.invalidate();
+	}
+}
+
+/// Notes `AXMenuClosed` when it names the watched menu.
+unsafe extern "C-unwind" fn menu_closed(
+	_: NonNull<AXObserver>,
+	element: NonNull<AXUIElement>,
+	_: NonNull<CFString>,
+	refcon: *mut c_void,
+) {
+	// SAFETY: `refcon` is the `ClosedState` a live `MenuClosedWatch` owns; the
+	// callback runs only while that watch reads its source on this thread, and
+	// `element` is valid for the call.
+	let (state, element) = unsafe { (&*refcon.cast::<ClosedState>(), element.as_ref()) };
+	if *element == *state.menu {
+		state.closed.set(true);
+	}
 }
 
 #[cfg(test)]
@@ -812,6 +1020,7 @@ mod tests {
 		cell::{Cell, RefCell},
 		collections::HashMap,
 		rc::Rc,
+		time::Instant,
 	};
 
 	use super::*;
@@ -845,7 +1054,33 @@ mod tests {
 		/// The window list cannot be read.
 		unreadable:   bool,
 		escape_works: bool,
+		/// The read of a watch ([`Menus::watch_closed`]) from which the app
+		/// reports the menu closed; `None` when no watch can be set up.
+		reports_at:   Option<usize>,
+		/// Watches set up, and those still live.
+		watches:      Rc<Cell<(usize, usize)>>,
 		log:          RefCell<Vec<String>>,
+	}
+
+	/// A [`ClosedWatch`] that reports on its `reports_at`th read.
+	struct FakeWatch {
+		reads:      usize,
+		reports_at: usize,
+		watches:    Rc<Cell<(usize, usize)>>,
+	}
+
+	impl ClosedWatch for FakeWatch {
+		fn closed(&mut self) -> bool {
+			self.reads += 1;
+			self.reads >= self.reports_at
+		}
+	}
+
+	impl Drop for FakeWatch {
+		fn drop(&mut self) {
+			let (made, live) = self.watches.get();
+			self.watches.set((made, live - 1));
+		}
 	}
 
 	impl Menus for Fake {
@@ -909,6 +1144,13 @@ mod tests {
 				self.element.set(false);
 			}
 			Ok(())
+		}
+
+		fn watch_closed(&mut self, _: &u32) -> Option<Box<dyn ClosedWatch>> {
+			let reports_at = self.reports_at?;
+			let (made, live) = self.watches.get();
+			self.watches.set((made + 1, live + 1));
+			Some(Box::new(FakeWatch { reads: 0, reports_at, watches: Rc::clone(&self.watches) }))
 		}
 	}
 
@@ -1045,6 +1287,62 @@ mod tests {
 		let mut app = Fake { cancel_works: false, unreadable: true, ..showing() };
 		assert!(!close(&mut app, 1, Some(&1)).expect("not closed"));
 		assert_eq!(*app.log.borrow(), ["cancel"]);
+	}
+
+	/// Menu window 1, which takes the cancel but stays listed (a Chromium
+	/// `<select>`'s, or a native menu on its way out), watched for the app's
+	/// report from read `reports_at` on.
+	fn watched(reports_at: usize) -> Fake {
+		Fake { cancel_stays: true, reports_at: Some(reports_at), ..showing() }
+	}
+
+	#[test]
+	fn a_menu_reported_closed_gets_no_escape_while_it_stays_listed() {
+		// The report comes at once; the window leaves the list at read 100,
+		// past the cancel timeout (61 reads), so only the report keeps Escape
+		// away, which would reach the app's key window.
+		let mut app = Fake { closes_at: Some(100), ..watched(2) };
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn a_menu_reported_closed_that_never_leaves_the_list_is_reported_open_without_escape() {
+		let mut app = watched(2);
+		assert!(!close(&mut app, 1, Some(&1)).expect("read"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn a_menu_that_leaves_the_list_without_a_report_gets_no_escape() {
+		// A toolkit that takes the cancel and posts nothing, listed 170 ms.
+		let mut app = Fake { closes_at: Some(35), ..watched(usize::MAX) };
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn an_ignored_cancel_gets_escape_once_the_cancel_timeout_passes() {
+		// A Chromium `<select>`: no report, still listed.
+		let mut app = watched(usize::MAX);
+		let start = clock::now();
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		let waited = clock::now() - start;
+		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
+		assert!(waited >= MENU_CANCEL_TIMEOUT && waited < MENU_CLOSE_TIMEOUT, "{waited:?}");
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn without_a_watch_an_unclosed_menu_gets_the_close_timeout_before_escape() {
+		let mut app = Fake { cancel_stays: true, ..showing() };
+		let start = clock::now();
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
+		assert!(clock::now() - start >= MENU_CLOSE_TIMEOUT);
 	}
 
 	#[test]
@@ -1215,9 +1513,9 @@ mod tests {
 		assert_eq!(new_menu(&[5], &[5, 9]), Some(9));
 		assert_eq!(new_menu(&[], &[]), None);
 		// No menu: the press returns once the timeout passes.
-		let started = Instant::now();
+		let started = clock::now();
 		assert_eq!(poll(Duration::from_millis(30), || new_menu(&[5], &[5])).expect("poll"), None);
-		assert!(started.elapsed() >= Duration::from_millis(30));
+		assert!(clock::now() - started >= Duration::from_millis(30));
 	}
 
 	#[test]
