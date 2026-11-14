@@ -17,6 +17,8 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- `models.yml` speech models accept `voice` (sent when the `tts` tool or the vocalizer names no voice, for gateways that reject a voiceless request) and `speechFormats` (the only containers the model returns). The `tts` tool asks a WAV-only model for WAV when the path ends in `.mp3` (and an MP3-only one for MP3 when it ends in `.wav`) and writes the sibling file with that extension; a model that returns neither is skipped ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- `speech.enabled` now speaks through the `openai-speech` or `xai-tts` models you explicitly configured in the `speech` role chain, falling back to a later model (or local Kokoro) when one fails and warning when every model failed; a model that fails with a missing key or a 4xx is skipped for the rest of the session. Unconfigured, vocalization stays on local Kokoro; `--offline` keeps only the session provider's models, as before. If you upgrade with `speech.enabled` on and set the speech role to a cloud model only for the `tts` tool, vocalization now uses that model too ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

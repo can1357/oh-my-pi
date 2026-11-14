@@ -93,6 +93,10 @@ export function runnerApiKind(api: Api): ModelKind | undefined {
 	return RUNNER_API_KIND_BY_API.get(api);
 }
 
+/** Audio containers an `openai-speech`/`xai-tts` runner can be asked to return. */
+export const SPEECH_FORMATS = ["mp3", "wav", "pcm", "opus", "aac", "flac"] as const;
+export type SpeechFormat = (typeof SPEECH_FORMATS)[number];
+
 /** Catalog APIs `generate_image` runs through a pi-ai image client; the hosted Responses pair needs a carrier model. */
 export const IMAGE_GENERATION_APIS = [
 	"openai-images",
@@ -1755,6 +1759,10 @@ export interface Model<TApi extends Api = Api> {
 	pricingStatus?: Exclude<ModelPricingStatus, "fixed">;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
+	/** Speech runners: voice sent when the caller names none (gateways may reject a voiceless request). */
+	voice?: string;
+	/** Speech runners: the only output formats the endpoint returns; absent means any {@link SpeechFormat}. */
+	speechFormats?: SpeechFormat[];
 	contextWindow: number | null;
 	/** Preserve the host's supplied window instead of applying inferred expansion or reference-price caps. */
 	contextWindowAuthoritative?: boolean;

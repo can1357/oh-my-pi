@@ -72,7 +72,7 @@ export interface TtsStreamHandle {
  * is awaiting are buffered in order; {@link close} ends the iterator and
  * {@link fail} surfaces an error to the awaiting (or next) consumer.
  */
-class AudioChunkChannel {
+export class AudioChunkChannel {
 	#queue: TtsAudioChunk[] = [];
 	#waiters: Array<{
 		resolve: (result: IteratorResult<TtsAudioChunk>) => void;

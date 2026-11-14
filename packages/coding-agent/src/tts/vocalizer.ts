@@ -20,7 +20,10 @@
  *
  * In both modes the synthesis session (worker, player) opens lazily on the
  * first speakable segment, and an idle timer speaks buffered text when
- * generation stalls (tool call, thinking block). One
+ * generation stalls (tool call, thinking block). The session is local Kokoro
+ * streaming unless the speech role chain starts with an explicitly configured
+ * cloud model, which then synthesizes each segment as WAV
+ * ({@link createCloudSpeechStream}). One
  * {@link StreamingAudioPlayer} per utterance plays chunks back gaplessly;
  * utterance playback is chained so sequential utterances never overlap.
  *
@@ -37,12 +40,15 @@
  * questions); the event controller wires the per-session model source and
  * enhancer via {@link Vocalizer.setModelSource} and {@link Vocalizer.setEnhancer}.
  */
+import type { Api, ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
+import { isSpeechApi, speechModelSupportsFormat } from "@oh-my-pi/pi-ai/speech";
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
+import { createCloudSpeechStream } from "./cloud-stream";
 import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS } from "./models";
 import { SpeakableStream } from "./speakable";
 import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
@@ -60,8 +66,10 @@ const MAX_REWRITES_IN_FLIGHT = 2;
 
 export interface VocalizerModelSource {
 	settings: Settings;
-	registry: ModelBrowserRegistry;
+	/** `resolver` authenticates cloud speech; a registry without it limits the vocalizer to local models. */
+	registry: ModelBrowserRegistry & { resolver?(model: Model<Api>, sessionId?: string): ApiKeyResolver };
 	getSessionProvider?: () => string | undefined;
+	sessionId?: string;
 }
 
 /** Resolve the first speech-role candidate that the local streaming worker can run. */
@@ -73,6 +81,27 @@ export function resolveLocalSpeechModelId(source: VocalizerModelSource): string 
 			(!cfgOffline.get(source.settings) || candidate.model.provider === source.getSessionProvider?.()),
 	);
 	return local?.model.id ?? TTS_LOCAL_MODELS[0].key;
+}
+
+/**
+ * Speech-role candidates the vocalizer can play, in chain order: local models,
+ * plus explicitly configured cloud speech models that return WAV when the
+ * source can authenticate them. Unconfigured cloud defaults are left out, so
+ * speech without a configured role stays on-device. `models.offline` admits
+ * only the session provider's models, as for {@link resolveLocalSpeechModelId}.
+ */
+export function resolveVocalizerSpeechChain(source: VocalizerModelSource): Model<Api>[] {
+	const pool = roleCandidatePool("speech", source.settings, source.registry);
+	const canAuthenticate = source.registry.resolver !== undefined;
+	const offline = cfgOffline.get(source.settings);
+	return resolveRoleChain("speech", source.settings, pool)
+		.filter(
+			({ model, explicit }) =>
+				(!offline || model.provider === source.getSessionProvider?.()) &&
+				(model.api === "local-inference" ||
+					(explicit && canAuthenticate && isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav"))),
+		)
+		.map(candidate => candidate.model);
 }
 
 export interface VocalizerPlayer {
@@ -115,6 +144,8 @@ export class Vocalizer {
 	#enhancer: SpeechEnhancer | null = null;
 	/** Live per-session settings and registry used to resolve the speech role. */
 	#modelSource: VocalizerModelSource | null = null;
+	/** Cloud speech models (`provider/id`) that failed permanently in this session; reset with the model source. */
+	#cloudExcluded = new Set<string>();
 	/** Fires when the delta stream goes quiet mid-sentence; speaks the partial. */
 	#idleTimer: NodeJS.Timeout | null = null;
 	/** Abort controllers of every not-yet-finished utterance; all aborted on {@link clear}. */
@@ -141,10 +172,11 @@ export class Vocalizer {
 		this.#enhancer = enhancer;
 	}
 
-	/** Wire (or drop) the live per-session model source used by local speech synthesis. */
+	/** Wire (or drop) the live per-session model source that resolves the speech role. */
 	setModelSource(source: VocalizerModelSource | null): void {
 		this.clear();
 		this.#modelSource = source;
+		this.#cloudExcluded = new Set();
 	}
 
 	/** Stop any active local synthesis when the session provider no longer permits it. */
@@ -395,11 +427,23 @@ export class Vocalizer {
 	 */
 	#openSession(abort: AbortController): TtsStreamHandle {
 		const source = this.#modelSource;
-		const modelKey = source ? resolveLocalSpeechModelId(source) : TTS_LOCAL_MODELS[0].key;
 		const sessionSettings = source?.settings ?? settings;
 		const voice = cfgSpeechVoice.get(sessionSettings) || DEFAULT_TTS_VOICE;
 		const speed = cfgSpeechSpeed.get(sessionSettings);
-		const handle = ttsClient.synthesizeStream(modelKey, { voice, speed, signal: abort.signal });
+		const chain = source ? resolveVocalizerSpeechChain(source) : [];
+		const first = chain[0];
+		// The chain only admits a cloud model when the registry can resolve its credentials.
+		const handle =
+			source && first && first.api !== "local-inference"
+				? createCloudSpeechStream({
+						chain,
+						resolveApiKey: model => source.registry.resolver!(model, source.sessionId),
+						localVoice: voice,
+						localSpeed: speed,
+						excluded: this.#cloudExcluded,
+						signal: abort.signal,
+					})
+				: ttsClient.synthesizeStream(first?.id ?? TTS_LOCAL_MODELS[0].key, { voice, speed, signal: abort.signal });
 		const player = this.#createPlayer();
 		player.setGain(this.#ducked ? DUCK_GAIN : 1);
 		this.#liveAborts.add(abort);

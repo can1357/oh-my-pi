@@ -216,3 +216,92 @@ describe("tts speech chain execution", () => {
 		expect(fs.existsSync(path.join(tempDir, "voice.mp3"))).toBe(false);
 	});
 });
+
+describe("configured gateway speech models", () => {
+	function writeGatewaySpeechModels(): string {
+		const modelsPath = path.join(tempDir, "models.yml");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					gw: {
+						baseUrl: "https://gateway.example/v1",
+						api: "openai-completions",
+						apiKey: "gw-test-key",
+						models: [
+							{ id: "gemini/flash-tts", api: "openai-speech", voice: "kore", speechFormats: ["wav"] },
+							{ id: "openai/tts-1", api: "openai-speech" },
+						],
+					},
+				},
+			}),
+		);
+		return modelsPath;
+	}
+
+	test("sends the model's default voice and requests WAV from a WAV-only model asked for MP3", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { speech: "gw/gemini/flash-tts" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = new ModelRegistry(authStorage, writeGatewaySpeechModels(), { settings });
+		const bodies: unknown[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			if (typeof init?.body !== "string") throw new Error("Expected JSON request body");
+			bodies.push(JSON.parse(init.body));
+			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+		};
+
+		const result = await ttsTool.execute(
+			"tts-gateway-default-voice",
+			{ text: "Hello gateway", output_path: "voice.mp3" },
+			undefined,
+			createContext(settings, registry, tempDir, fetchImpl),
+		);
+
+		expect(result.isError).not.toBe(true);
+		expect(bodies).toEqual([
+			{ model: "gemini/flash-tts", input: "Hello gateway", response_format: "wav", voice: "kore" },
+		]);
+		expect(result.details).toMatchObject({ voiceId: "kore", codec: "wav", backend: "openai-speech" });
+		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);
+		expect(fs.existsSync(path.join(tempDir, "voice.mp3"))).toBe(false);
+	});
+
+	test("an explicit voice_id outranks the model default, and a model without one sends no voice", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { speech: "gw/gemini/flash-tts" },
+			"retry.fallbackChains": { speech: ["gw/openai/tts-1"] },
+		});
+		const registry = new ModelRegistry(authStorage, writeGatewaySpeechModels(), { settings });
+		const bodies: Record<string, unknown>[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			if (typeof init?.body !== "string") throw new Error("Expected JSON request body");
+			const body = JSON.parse(init.body) as Record<string, unknown>;
+			bodies.push(body);
+			if (body.model === "gemini/flash-tts") return new Response("upstream down", { status: 500 });
+			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+		};
+
+		const explicit = await ttsTool.execute(
+			"tts-gateway-explicit-voice",
+			{ text: "One", voice_id: "puck", output_path: "one.wav" },
+			undefined,
+			createContext(settings, registry, tempDir, fetchImpl),
+		);
+		expect(explicit.details).toMatchObject({ voiceId: "puck" });
+		expect(bodies.map(body => [body.model, body.voice])).toEqual([
+			["gemini/flash-tts", "puck"],
+			["openai/tts-1", "puck"],
+		]);
+
+		bodies.length = 0;
+		await ttsTool.execute(
+			"tts-gateway-no-voice",
+			{ text: "Two", output_path: "two.wav" },
+			undefined,
+			createContext(settings, registry, tempDir, fetchImpl),
+		);
+		expect(bodies[1]).not.toHaveProperty("voice");
+	});
+});
