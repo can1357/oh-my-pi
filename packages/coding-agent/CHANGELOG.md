@@ -146,6 +146,10 @@
 - Added the `antigravity-cli` provider for Google Antigravity over ACP, with managed binary installation, `/login antigravity-cli` Google sign-in, host tool execution, and retained conversations across tool steps and history changes.
 
 ## [18.20.1] - 2026-11-14
+### Changed
+
+- `/fork` and fork-from-transcript now abort a running response and fork instead of refusing with "Wait for the current response to finish".
+- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused.
 
 ### Added
 

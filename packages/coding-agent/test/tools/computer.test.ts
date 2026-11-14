@@ -3688,8 +3688,14 @@ describe("expanded computer APIs", () => {
 		const native = new ArgumentSession();
 		new ComputerWorkerCore(transport, () => native);
 		for (const [code, message] of [
-			['await desktop.ref("e1").setValue()', "setValue(value) requires a string, got undefined"],
-			['await desktop.ref("e1").setValue(42)', "setValue(value) requires a string, got number"],
+			['await desktop.ref("e1").setValue()', "setValue(value) requires a string or a finite number, got undefined"],
+			['await desktop.ref("e1").setValue(NaN)', "setValue(value) requires a string or a finite number, got NaN"],
+			[
+				'await desktop.ref("e1").setValue(Infinity)',
+				"setValue(value) requires a string or a finite number, got Infinity",
+			],
+			['await desktop.ref("e1").setValue(true)', "setValue(value) requires a string or a finite number, got boolean"],
+			['await desktop.ref("e1").setValue({})', "setValue(value) requires a string or a finite number, got object"],
 			['await desktop.ref("e1").selectText()', "selectText(text) requires a string, got undefined"],
 			['await desktop.ref("e1").selectText(["cat"])', "selectText(text) requires a string, got an array"],
 			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
@@ -3746,7 +3752,7 @@ describe("expanded computer APIs", () => {
 		runInContext(prelude.javascript, realm);
 		try {
 			await expect(runInContext('computer.ref("e1").setValue()', realm)).rejects.toThrow(
-				"setValue(value) requires a string, got undefined",
+				"setValue(value) requires a string or a finite number, got undefined",
 			);
 			await expect(runInContext('computer.ref("e1").perform()', realm)).rejects.toThrow(
 				"perform(action) requires a non-empty string, got undefined",
@@ -3758,6 +3764,27 @@ describe("expanded computer APIs", () => {
 			await prelude.invoke({ action: "close" }, context);
 		}
 		expect(native.calls).toEqual([]);
+	});
+
+	it("writes a finite number given to setValue as its decimal text, and a string unchanged", async () => {
+		class ValueSession extends FakeNativeSession {
+			readonly values: string[] = [];
+			override async axSetValue(_ref: string, value: string): Promise<void> {
+				this.values.push(value);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new ValueSession();
+		new ComputerWorkerCore(transport, () => native);
+		for (const code of [
+			'await desktop.ref("e1").setValue(75)',
+			'await desktop.ref("e1").setValue(-2.5)',
+			'await desktop.ref("e1").setValue(" 007 ")',
+		]) {
+			const result = await runWorker(transport, `value-${code}`, code);
+			expect(result.ok ? undefined : result.error).toBeUndefined();
+		}
+		expect(native.values).toEqual(["75", "-2.5", " 007 "]);
 	});
 
 	it("leaves a printed observe() tree out of the JavaScript value's echo, but keeps ax readable", async () => {
