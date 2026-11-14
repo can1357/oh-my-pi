@@ -104,11 +104,13 @@
 
 ### Added
 
+- Exposed Codex subscription-account usage-credit balances as exact decimal strings in normalized usage reports, broker/gateway `/v1/usage`, and `omp usage --json` ([#14795](https://github.com/can1357/oh-my-pi/pull/14795) by [@schickling-assistant](https://github.com/schickling-assistant))
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
 ### Fixed
 
+- Fixed Codex usage-credit reports with partially reported flags being rejected by normalized and broker usage schemas ([#14795](https://github.com/can1357/oh-my-pi/pull/14795) by [@schickling-assistant](https://github.com/schickling-assistant))
 - Fixed rotated credential pools reporting a stale sibling credential's authentication error instead of the exhausted credential's usage-limit status and reset time.
 - Fixed OpenAI image edits with multiple input images failing because image parameters were duplicated.
 - Fixed Cursor-provider reads of xd:// devices failing due to incorrect device URL handling.

@@ -8,6 +8,7 @@ import type {
 	CredentialRankingStrategy,
 	PlanGate,
 	UsageAmount,
+	UsageCredits,
 	UsageFetchContext,
 	UsageFetchParams,
 	UsageLimit,
@@ -238,6 +239,42 @@ function parseAdditionalRateLimit(payload: unknown): ParsedAdditionalUsage | nul
 	const limitReached = toBoolean(rateLimit.limit_reached);
 	if (!primary && !secondary && allowed === undefined && limitReached === undefined) return null;
 	return { limitName, meteredFeature, allowed, limitReached, primary, secondary };
+}
+
+/** Keep string precision; numeric payloads have already passed through JSON parsing. */
+function parseCredits(payload: unknown): UsageCredits | undefined {
+	if (!isRecord(payload) || !isRecord(payload.credits)) return undefined;
+	const credits = payload.credits;
+	let balance: string | null = null;
+	if (typeof credits.balance === "string") {
+		balance = credits.balance;
+	} else if (typeof credits.balance === "number" && Number.isFinite(credits.balance)) {
+		const text = String(credits.balance);
+		const [coefficient, exponent] = text.split("e");
+		if (exponent === undefined) {
+			balance = text;
+		} else {
+			const sign = coefficient.startsWith("-") ? "-" : "";
+			const [integer, fraction = ""] = coefficient.replace(/^-/, "").split(".");
+			const digits = integer + fraction;
+			const point = integer.length + Number(exponent);
+			balance =
+				sign +
+				(point <= 0
+					? `0.${"0".repeat(-point)}${digits}`
+					: point >= digits.length
+						? digits + "0".repeat(point - digits.length)
+						: `${digits.slice(0, point)}.${digits.slice(point)}`);
+		}
+	}
+	const result: UsageCredits = { balance, unit: "credits" };
+	const hasCredits = toBoolean(credits.has_credits);
+	const unlimited = toBoolean(credits.unlimited);
+	const overageLimitReached = toBoolean(credits.overage_limit_reached);
+	if (hasCredits !== undefined) result.hasCredits = hasCredits;
+	if (unlimited !== undefined) result.unlimited = unlimited;
+	if (overageLimitReached !== undefined) result.overageLimitReached = overageLimitReached;
+	return result;
 }
 
 /**
@@ -751,6 +788,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			limits.push(buildSpendCapLimit(parsed.spendCap, accountId, nowMs));
 		}
 
+		const credits = parseCredits(payload);
 		const resetCredits = parseResetCredits(payload);
 		if (resetCredits && resetCredits.availableCount > 0) {
 			try {
@@ -786,6 +824,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			fetchedAt: nowMs,
 			limits,
 			...(resetCredits ? { resetCredits } : {}),
+			...(credits ? { credits } : {}),
 			metadata: {
 				planType,
 				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),

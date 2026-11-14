@@ -89,6 +89,31 @@ omp auth-broker status    [--json]
 
 Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
 
+Usage reports from broker/gateway `GET /v1/usage` and `omp usage --json` omit
+provider-specific `raw` payloads. Codex subscription accounts also expose an
+optional account-wide `credits` object:
+
+```json
+{
+  "credits": {
+    "balance": "62170.7214510000",
+    "unit": "credits",
+    "hasCredits": true,
+    "unlimited": false,
+    "overageLimitReached": false
+  }
+}
+```
+
+`balance` preserves the provider's decimal string (including trailing zeroes);
+numeric provider values become decimal strings with the precision available
+after JSON parsing. A missing balance is `null`, not zero. An unreported credit
+pool omits `credits` entirely. The three boolean flags are optional and retain
+explicit `false` values; unlimited entitlement is separate from the balance.
+These are usage credits, not USD or OpenAI API credits. They are also separate
+from `resetCredits` (saved quota resets); no grant or expiry information is
+implied. The balance observation time is the report's `fetchedAt`.
+
 A snapshot contains `generation`, `generatedAt`, `serverNowMs`, `refresher`
 (`enabled`, `intervalMs`, `skewMs`, `nextSweepInMs`), and `credentials`.
 Each credential carries its id/provider/redacted credential/`identityKey`,

@@ -7,6 +7,9 @@
  * widget lose per-model visibility.
  */
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { usageReportSchema } from "@oh-my-pi/pi-ai";
+import { usageResponseSchema } from "@oh-my-pi/pi-ai/auth-broker/wire-schemas";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
@@ -327,6 +330,111 @@ describe("openai-codex usage parser", () => {
 		);
 		expect(report).not.toBeNull();
 		expect(report?.limits.map(l => l.id)).toEqual(["openai-codex:spark:primary"]);
+	});
+
+	it("exposes exact account credits through normalized and broker reports without mixing in saved resets", async () => {
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture },
+			},
+			{
+				fetch: fakeFetch({
+					...makePayload(),
+					credits: {
+						balance: "62170.7214510000",
+						has_credits: true,
+						unlimited: false,
+						overage_limit_reached: false,
+					},
+					rate_limit_reset_credits: { available_count: 0 },
+				}),
+			},
+		);
+		expect(report?.credits).toEqual({
+			balance: "62170.7214510000",
+			unit: "credits",
+			hasCredits: true,
+			unlimited: false,
+			overageLimitReached: false,
+		});
+		expect(report?.resetCredits).toEqual({ availableCount: 0 });
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+		if (local instanceof type.errors) throw new Error("expected valid normalized report");
+		const { raw: _raw, ...publicReport } = local;
+		const brokered = usageResponseSchema(JSON.parse(JSON.stringify({ generatedAt: 1, reports: [publicReport] })));
+		expect(brokered).not.toBeInstanceOf(type.errors);
+		if (brokered instanceof type.errors) throw new Error("expected valid broker response");
+		expect(brokered.reports[0]?.credits?.balance).toBe("62170.7214510000");
+		expect(brokered.reports[0]).not.toHaveProperty("raw");
+	});
+
+	it("converts numeric credit balances to signed decimal strings, including exponent notation", async () => {
+		for (const [balance, expected] of [
+			[62500, "62500"],
+			[-12.5, "-12.5"],
+			[1e-7, "0.0000001"],
+			[1e21, "1000000000000000000000"],
+		] as const) {
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture },
+				},
+				{ fetch: fakeFetch({ ...makePayload(), credits: { balance, has_credits: false } }) },
+			);
+			expect(report?.credits?.balance).toBe(expected);
+			expect(report?.credits?.hasCredits).toBe(false);
+		}
+	});
+
+	it("omits an unreported credits pool", async () => {
+		for (const credits of [undefined, null]) {
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture },
+				},
+				{ fetch: fakeFetch({ ...makePayload(), credits }) },
+			);
+			expect(report).not.toHaveProperty("credits");
+		}
+	});
+
+	it.each([
+		["an empty pool", {}, { balance: null, unit: "credits" }],
+		["only a balance", { balance: "12.00" }, { balance: "12.00", unit: "credits" }],
+		["only unlimited", { unlimited: true }, { balance: null, unit: "credits", unlimited: true }],
+		["only has_credits", { has_credits: false }, { balance: null, unit: "credits", hasCredits: false }],
+		[
+			"only overage_limit_reached",
+			{ overage_limit_reached: false },
+			{ balance: null, unit: "credits", overageLimitReached: false },
+		],
+		[
+			"partial false flags",
+			{ balance: "0", has_credits: false, unlimited: false },
+			{ balance: "0", unit: "credits", hasCredits: false, unlimited: false },
+		],
+	] as const)("validates %s without materializing absent credit flags", async (_name, credits, expected) => {
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture },
+			},
+			{ fetch: fakeFetch({ ...makePayload(), credits }) },
+		);
+		expect(report?.credits).toStrictEqual(expected);
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+		if (local instanceof type.errors) throw new Error("expected valid normalized report");
+		const { raw: _raw, ...publicReport } = local;
+		// Validate the in-memory object: JSON serialization would hide undefined properties.
+		const brokered = usageResponseSchema({ generatedAt: 1, reports: [publicReport] });
+		expect(brokered).not.toBeInstanceOf(type.errors);
+		if (brokered instanceof type.errors) throw new Error("expected valid broker response");
+		expect(brokered.reports[0]?.credits).toStrictEqual(expected);
 	});
 
 	// Credit-billed workspace seats (Business/Enterprise flexible pricing) report
