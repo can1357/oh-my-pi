@@ -531,7 +531,8 @@ describe("model thinking derivation", () => {
 		});
 		expect(mapEffortToGoogleThinkingLevel(Effort.Low)).toBe("LOW");
 		expect(mapEffortToGoogleThinkingLevel(Effort.High)).toBe("HIGH");
-		expect(mapEffortToGoogleThinkingLevel(Effort.XHigh)).toBe("HIGH");
+		// The ladder, not the wire mapper, keeps `xhigh` off models that reject it.
+		expect(() => requireSupportedEffort(model, Effort.XHigh)).toThrow(/not supported/);
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
@@ -598,11 +599,11 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(resellerFlash37)).toContain(Effort.Minimal);
 	});
 
-	it("drives Gemini 4 with thinkingLevel low/medium/high on the direct Google transports", () => {
+	it("drives Gemini 4 with its thinkingLevel ladder on the direct Google transports", () => {
 		// Google documents LOW/MEDIUM/HIGH for Gemini 4:
 		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
 		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
-		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive", "gemini-4-carbon"]) {
+		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive", "gemini-4-carbon", "gemini-4-hydrogen"]) {
 			for (const [provider, api] of [
 				["google-vertex", "google-vertex"],
 				["google", "google-generative-ai"],
@@ -613,7 +614,9 @@ describe("model thinking derivation", () => {
 					const gemini4 = createModel({ id, api, provider, reasoning });
 					expect(gemini4.reasoning).toBe(true);
 					expect(gemini4.thinking?.mode).toBe("google-level");
-					expect(getSupportedEfforts(gemini4)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+					const efforts = [Effort.Low, Effort.Medium, Effort.High];
+					if (id === "gemini-4-hydrogen") efforts.push(Effort.XHigh);
+					expect(getSupportedEfforts(gemini4)).toEqual(efforts);
 					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, gemini4)).toBe("MEDIUM");
 				}
 			}

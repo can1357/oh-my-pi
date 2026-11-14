@@ -122,7 +122,7 @@ pub(crate) fn windows_spelling(path: &[u8], cwd: &[u8]) -> BString {
 
 /// The length of the root of `path` (`/`; on Windows also `C:/` and
 /// `//server/share/`), 0 when it is relative.
-fn root_len(path: &[u8], windows: bool) -> usize {
+pub(super) fn root_len(path: &[u8], windows: bool) -> usize {
 	if windows {
 		if let [drive, b':', b'/' | b'\\', ..] = path
 			&& drive.is_ascii_alphabetic()
@@ -633,7 +633,7 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 		}
 		Ok(())
 	})?;
-	if ctx.vp.overlay.is_none() {
+	if ctx.vp.image.is_none() {
 		ctx.k.root.set_misc(ctx.cx.store, MiscKey::Cwd, new.clone());
 	}
 	ctx.vp.cwd = new.clone();

@@ -37,6 +37,18 @@ async function createSession(): Promise<ToolSession> {
 }
 
 const capturedLog: ForgeCliResult = { exitCode: 0, stdout: "first log line\nCAPTURED_LOG", stderr: "" };
+const escapedLog: ForgeCliResult = {
+	exitCode: 0,
+	stdout:
+		"\u001b[31mfirst log line\u001b[0m\r\n\t\u001b]8;;https://example.com\u0007CAPTURED_LOG\u001b]8;;\u0007\n\u001b[0m",
+	stderr: "",
+};
+const normalizedEscapedLog = "first log line\n    CAPTURED_LOG";
+const unsupportedEscapeFlag: ForgeCliResult = {
+	exitCode: 1,
+	stdout: "",
+	stderr: "unknown flag: --allow-escape-sequences\n\nUsage: gh api <endpoint> [flags]",
+};
 const unavailableLog: ForgeCliResult = {
 	exitCode: 7,
 	stdout: "NOT_A_CAPTURED_LOG",
@@ -47,8 +59,43 @@ interface WatchCase {
 	logs: ForgeCliResult[];
 	label: string;
 	reason?: string;
+	normalizedLogs?: string[];
+	oldGh?: boolean;
 }
 const watchCases: WatchCase[] = [
+	{
+		name: "captures ESC-containing logs as sanitized full logs and selects the tail after stripping escapes",
+		logs: [escapedLog],
+		normalizedLogs: [normalizedEscapedLog],
+		label: "Full failed-job logs",
+	},
+	{
+		name: "captures sanitized logs on older gh after one unsupported-flag retry",
+		logs: [escapedLog],
+		normalizedLogs: [normalizedEscapedLog],
+		oldGh: true,
+		label: "Full failed-job logs",
+	},
+	{
+		name: "preserves the actual fetch failure after the unsupported-flag retry",
+		logs: [unavailableLog],
+		oldGh: true,
+		label: "Failed-job log diagnostics",
+		reason: "exit code 7",
+	},
+	{
+		name: "stops after two attempts when the compatibility fetch also reports an unknown flag",
+		logs: [unsupportedEscapeFlag],
+		oldGh: true,
+		label: "Failed-job log diagnostics",
+		reason: "unknown flag: --allow-escape-sequences",
+	},
+	{
+		name: "does not retry an unrelated unknown-flag failure",
+		logs: [{ exitCode: 1, stdout: "", stderr: "unknown flag: --hostname" }],
+		label: "Failed-job log diagnostics",
+		reason: "unknown flag: --hostname",
+	},
 	{
 		name: "labels all-unavailable logs as diagnostics and keeps a bounded fetch failure",
 		logs: [unavailableLog],
@@ -79,6 +126,13 @@ const watchCases: WatchCase[] = [
 	{
 		name: "does not claim full logs for a successful fetch with empty output",
 		logs: [{ exitCode: 0, stdout: "\n\t\n", stderr: "" }],
+		label: "Failed-job log diagnostics",
+		reason: "empty",
+	},
+	{
+		name: "does not claim full logs when only terminal escapes and whitespace were captured",
+		logs: [{ exitCode: 0, stdout: "\u001b[31m\n\t\u001b[0m", stderr: "" }],
+		normalizedLogs: [""],
 		label: "Failed-job log diagnostics",
 		reason: "empty",
 	},
@@ -114,7 +168,19 @@ for (const mode of ["run", "commit"] as const) {
 				const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
 					const endpoint = args.find(arg => arg.startsWith("/repos/"));
 					const jobMatch = endpoint?.match(/\/actions\/jobs\/(\d+)\/logs$/);
-					if (jobMatch) return fixture.logs[Number(jobMatch[1]) - 201];
+					if (jobMatch) {
+						const log = fixture.logs[Number(jobMatch[1]) - 201];
+						if (fixture.oldGh && args.includes("--allow-escape-sequences")) return unsupportedEscapeFlag;
+						if (!fixture.oldGh && log.stdout.includes("\u001b") && !args.includes("--allow-escape-sequences")) {
+							return {
+								exitCode: 1,
+								stdout: "",
+								stderr:
+									"the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway",
+							};
+						}
+						return log;
+					}
 					let data: unknown;
 					switch (endpoint) {
 						case "/repos/owner/repo/branches/main":
@@ -149,24 +215,27 @@ for (const mode of ["run", "commit"] as const) {
 				expect(result.details?.watch?.state).toBe("completed");
 				for (const [index, log] of fixture.logs.entries()) {
 					const failedLog = result.details?.watch?.failedLogs?.[index];
-					const available = log.exitCode === 0 && log.stdout.trim().length > 0;
+					const normalizedLog = fixture.normalizedLogs?.[index] ?? log.stdout;
+					const available = log.exitCode === 0 && normalizedLog.trim().length > 0;
 					expect(failedLog?.available).toBe(available);
 					expect(text).toContain(jobs[index].name);
 					expect(artifact).toContain(jobs[index].name);
 					if (available) {
-						expect(artifact).toContain(log.stdout);
+						expect(artifact).toContain(normalizedLog);
+						expect(failedLog?.tail).toBe(normalizedLog.split("\n").at(-1));
+						expect(text).toContain(normalizedLog.split("\n").at(-1)!);
 						if (log.stdoutTruncated) {
 							expect(artifact).toContain("Partial log (capture truncated):");
 							expect(text).toContain("log capture truncated");
 						} else {
 							expect(artifact).toContain("Full log:");
 						}
-						expect(text).not.toContain(log.stdout.split("\n")[0]);
+						expect(text).not.toContain(normalizedLog.split("\n")[0]);
 					} else {
 						expect(text).toContain(fixture.reason!);
 						expect(artifact).toContain(fixture.reason!);
 						expect(JSON.stringify(failedLog)).toContain(fixture.reason!);
-						if (log.stderr) {
+						if (log === unavailableLog) {
 							expect(text).toContain("HTTP 403: log access denied");
 							expect(Buffer.byteLength(JSON.stringify(failedLog))).toBeLessThan(1024);
 						}
@@ -176,6 +245,9 @@ for (const mode of ["run", "commit"] as const) {
 				for (const output of [text, artifact, JSON.stringify(result.details)]) {
 					expect(output).not.toContain("NOT_A_CAPTURED_LOG");
 					expect(output).not.toContain("OMITTED_ERROR_SUFFIX");
+					expect(output).not.toContain("\u001b");
+					expect(output).not.toContain("\\u001b");
+					expect(output).not.toContain("\u0007");
 				}
 				if (fixture.logs[0] === unavailableLog) {
 					await themeModule.initTheme();
@@ -186,9 +258,19 @@ for (const mode of ["run", "commit"] as const) {
 					expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("exit code 7");
 					expect(JSON.stringify(githubToolRenderer.describeResult(result, options))).toContain("exit code 7");
 				}
-				expect(
-					runSpy.mock.calls.filter(([, args]) => args.some(arg => /\/actions\/jobs\/\d+\/logs$/.test(arg))),
-				).toHaveLength(fixture.logs.length);
+				for (const job of jobs) {
+					const calls = runSpy.mock.calls.filter(([, args]) =>
+						args.includes(`/repos/owner/repo/actions/jobs/${job.id}/logs`),
+					);
+					expect(calls).toHaveLength(fixture.oldGh ? 2 : 1);
+					expect(calls[0][1]).toContain("--allow-escape-sequences");
+					if (fixture.oldGh) expect(calls[1][1]).not.toContain("--allow-escape-sequences");
+				}
+				for (const [, args] of runSpy.mock.calls) {
+					if (!args.some(arg => /\/actions\/jobs\/\d+\/logs$/.test(arg))) {
+						expect(args).not.toContain("--allow-escape-sequences");
+					}
+				}
 			});
 		}
 	});

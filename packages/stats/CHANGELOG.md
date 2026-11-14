@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Traces tab so background jobs end at their actual completion times, accurately displaying idle periods and turn durations.
+- Fixed the Frustration page's per-model message counts so all answered messages are included.
+- Improved dashboard responsiveness by keeping other pages and Live status available while the Spotlight view rebuilds.
+- Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Spotlight stats count a `;`/`,` path `read` once with all its parts, and count a later read of any of its files as a re-read or a needed line ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

@@ -3,6 +3,8 @@ import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
+import { uriToFile } from "../utils";
+import { advertisesWatchedFiles, WATCHED_FILES_METHOD, WatchedFilesForwarder } from "../watched-files";
 import {
 	LSP_MUX_PROJECT_DIR_ENV,
 	LSP_MUX_SOCKET_ENV,
@@ -80,6 +82,8 @@ class Session {
 
 class ServerInstance {
 	readonly key: string;
+	/** The server's working directory; plain relative watch globs resolve against it. */
+	readonly cwd: string;
 	readonly proc: ptree.ChildProcess<"pipe">;
 	readonly sessions = new Set<Session>();
 	readonly documents = new Set<string>();
@@ -97,9 +101,15 @@ class ServerInstance {
 	nextClientId = 1;
 	lingerTimer?: NodeJS.Timeout;
 	stopping = false;
+	/**
+	 * Watches for the server's `workspace/didChangeWatchedFiles` registrations, for every
+	 * attached session at once; created when the initialize asked the server to hand watching over.
+	 */
+	watchedFiles?: WatchedFilesForwarder;
 
 	constructor(key: string, params: MuxConnectParams) {
 		this.key = key;
+		this.cwd = params.cwd;
 		this.proc = ptree.spawn([params.command, ...params.args], {
 			cwd: params.cwd,
 			stdin: "pipe",
@@ -305,6 +315,13 @@ export class LspMuxServer {
 		}
 		if (message.method === "workspace/didChangeWorkspaceFolders" && !request) {
 			this.#trackWorkspaceFolders(session, message);
+			void server.watchedFiles?.refresh();
+			await this.#writeServer(server, message);
+			return;
+		}
+		if (message.method === WATCHED_FILES_METHOD && !request) {
+			// A client reporting its own writes: the mux's watcher skips echoing them.
+			server.watchedFiles?.announced(message.params);
 			await this.#writeServer(server, message);
 			return;
 		}
@@ -340,8 +357,24 @@ export class LspMuxServer {
 		const params = isRecord(message.params)
 			? { ...message.params, processId: process.pid }
 			: { processId: process.pid };
+		// The server hands watching to the client only when asked to, so the mux
+		// (the server's process owner) watches only then.
+		if (advertisesWatchedFiles(params)) server.watchedFiles ??= this.#watchedFiles(server);
 		// Language servers commonly self-terminate with their advertised client pid.
 		await this.#writeServer(server, { ...message, id: muxId, params });
+	}
+
+	#watchedFiles(server: ServerInstance): WatchedFilesForwarder {
+		return new WatchedFilesForwarder({
+			roots: () => [
+				server.cwd,
+				...[...server.sessions].flatMap(session =>
+					[...session.workspaceFolders.keys()].map(folderUri => uriToFile(folderUri)),
+				),
+			],
+			send: changes =>
+				this.#writeServer(server, { jsonrpc: "2.0", method: WATCHED_FILES_METHOD, params: { changes } }),
+		});
 	}
 
 	async #didOpen(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
@@ -489,6 +522,11 @@ export class LspMuxServer {
 							isRecord(registration) && typeof registration.id === "string",
 					);
 					server.registrations.push({ registrations: valid });
+					for (const registration of valid) {
+						if (registration.method === WATCHED_FILES_METHOD) {
+							void server.watchedFiles?.register(registration.id, registration.registerOptions);
+						}
+					}
 				}
 			} else if (message.method === "client/unregisterCapability" && isRecord(message.params)) {
 				const raw = message.params.unregisterations ?? message.params.unregistrations;
@@ -498,6 +536,7 @@ export class LspMuxServer {
 					);
 					for (const batch of server.registrations)
 						batch.registrations = batch.registrations.filter(item => !ids.has(item.id));
+					for (const id of ids) void server.watchedFiles?.unregister(id);
 				}
 			}
 			await this.#writeServer(server, rpcResult(message.id, null));
@@ -622,6 +661,7 @@ export class LspMuxServer {
 					params: { event: { added: [], removed: [...session.workspaceFolders.values()] } },
 				});
 			}
+			void server.watchedFiles?.refresh();
 			// The write queue is serial, so the last teardown write settling means all have.
 			await cleanup;
 			if (server.sessions.size === 0 && !server.stopping) {
@@ -636,6 +676,7 @@ export class LspMuxServer {
 
 	#serverExited(server: ServerInstance): void {
 		server.stopping = true;
+		server.watchedFiles?.close();
 		this.#servers.delete(server);
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		server.pending.clear();

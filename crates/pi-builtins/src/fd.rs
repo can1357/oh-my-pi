@@ -3,7 +3,7 @@
 //! Relocated from pi-shell's native implementation.
 
 use std::{
-	collections::HashMap,
+	borrow::Cow,
 	ffi::{OsStr, OsString},
 	io::{self, Write},
 	path::{Path, PathBuf},
@@ -14,9 +14,9 @@ use std::{
 use clap::{ArgAction, Parser, ValueEnum};
 use globset::{GlobBuilder, GlobMatcher};
 use pi_walker::{
-	FileType,
+	Detail, FileType,
 	ignore::{Match as RuleMatch, Rules},
-	walk::{Action, Event, Follow, Order, Tree, TreeOptions, WalkError},
+	walk::{self, Action, Entry, WalkError, Worker},
 };
 use pi_vfs::Metadata;
 use regex::{Regex, RegexBuilder};
@@ -321,19 +321,6 @@ impl Excludes {
 	}
 }
 
-struct FdIgnoreMatcher {
-	fs:      pi_vfs::Fs,
-	enabled: bool,
-	root:    PathBuf,
-	global:  Vec<IgnoreFile>,
-	states:  HashMap<PathBuf, Arc<FdIgnoreState>>,
-}
-
-struct FdIgnoreState {
-	parent:  Option<Arc<Self>>,
-	matcher: Option<IgnoreFile>,
-}
-
 /// The rules of one ignore file, matched relative to `base`.
 struct IgnoreFile {
 	base:  PathBuf,
@@ -350,141 +337,6 @@ impl IgnoreFile {
 			RuleMatch::None => None,
 		}
 	}
-}
-
-impl FdIgnoreMatcher {
-	async fn new(fs: &pi_vfs::Fs, base_dir: &Path, root: &Path, cli: &FdCli) -> io::Result<Self> {
-		let root = normalize_fdignore_path(root);
-		let enabled = !no_ignore(cli);
-		let mut matcher = Self {
-			fs: fs.clone(),
-			enabled,
-			root: root.clone(),
-			global: Vec::new(),
-			states: HashMap::new(),
-		};
-		if !enabled {
-			return Ok(matcher);
-		}
-
-		for ignore_file in &cli.ignore_files {
-			let path = pi_vfs::absolute_path(base_dir, ignore_file);
-			let rules = Rules::read(fs, &path)
-				.await
-				.map_err(|err| io::Error::other(format!("{}: {err}", path.display())))?;
-			if !rules.is_empty() {
-				matcher.global.push(IgnoreFile { base: base_dir.to_path_buf(), rules });
-			}
-		}
-
-		let parent = if cli.no_ignore_parent {
-			None
-		} else {
-			build_fdignore_parent_states(fs, &root).await
-		};
-		let root_state = load_fdignore_state(fs, &root, parent).await;
-		matcher.states.insert(root, root_state);
-		Ok(matcher)
-	}
-
-	async fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
-		if !self.enabled {
-			return false;
-		}
-		let path = normalize_fdignore_path(path);
-		let state_dir = pi_vfs::parent_path(&path).unwrap_or(&self.root).to_path_buf();
-		let state = self.state_for_dir(&state_dir).await;
-		if let Some(ignored) = fdignore_state_match(&state, &path, is_dir) {
-			return ignored;
-		}
-		self
-			.global
-			.iter()
-			.find_map(|ignore| ignore.matched(&path, is_dir))
-			.unwrap_or(false)
-	}
-
-	async fn state_for_dir(&mut self, dir: &Path) -> Arc<FdIgnoreState> {
-		if let Some(state) = self.states.get(dir) {
-			return Arc::clone(state);
-		}
-		if !dir.starts_with(&self.root) {
-			return self
-				.states
-				.get(&self.root)
-				.map_or_else(|| Arc::new(FdIgnoreState { parent: None, matcher: None }), Arc::clone);
-		}
-		let mut missing = Vec::new();
-		let mut current = dir.to_path_buf();
-		let mut state = loop {
-			if let Some(state) = self.states.get(&current) {
-				break Some(Arc::clone(state));
-			}
-			let parent = pi_vfs::parent_path(&current).map(Path::to_path_buf);
-			missing.push(current);
-			match parent {
-				Some(parent) => current = parent,
-				None => break None,
-			}
-		};
-		for missing_dir in missing.into_iter().rev() {
-			let loaded = load_fdignore_state(&self.fs, &missing_dir, state).await;
-			self.states.insert(missing_dir, Arc::clone(&loaded));
-			state = Some(loaded);
-		}
-		state.unwrap_or_else(|| Arc::new(FdIgnoreState { parent: None, matcher: None }))
-	}
-}
-
-/// Load `.fdignore` state for every ancestor of `root`, outermost first.
-async fn build_fdignore_parent_states(fs: &pi_vfs::Fs, root: &Path) -> Option<Arc<FdIgnoreState>> {
-	let mut ancestors = Vec::new();
-	let mut dir = pi_vfs::parent_path(root);
-	while let Some(path) = dir {
-		ancestors.push(path);
-		dir = pi_vfs::parent_path(path);
-	}
-	let mut parent = None;
-	for ancestor in ancestors.into_iter().rev() {
-		parent = Some(load_fdignore_state(fs, ancestor, parent).await);
-	}
-	parent
-}
-
-fn normalize_fdignore_path(path: &Path) -> PathBuf {
-	// Component normalization collapses `scheme://` to `scheme:/`; virtual
-	// paths already compare component-wise, so keep their spelling intact.
-	if pi_vfs::is_virtual_path(path) {
-		path.to_path_buf()
-	} else {
-		path.components().collect()
-	}
-}
-
-async fn load_fdignore_state(
-	fs: &pi_vfs::Fs,
-	dir: &Path,
-	parent: Option<Arc<FdIgnoreState>>,
-) -> Arc<FdIgnoreState> {
-	let file = pi_vfs::join_path(dir, Path::new(".fdignore"));
-	let rules = if fs.is_file(&file).await { Rules::read(fs, &file).await.ok() } else { None };
-	let matcher = rules
-		.filter(|rules| !rules.is_empty())
-		.map(|rules| IgnoreFile { base: dir.to_path_buf(), rules });
-	Arc::new(FdIgnoreState { parent, matcher })
-}
-
-fn fdignore_state_match(state: &Arc<FdIgnoreState>, path: &Path, is_dir: bool) -> Option<bool> {
-	let mut current = Some(state.as_ref());
-	while let Some(frame) = current {
-		if let Some(matcher) = &frame.matcher
-			&& let Some(ignored) = matcher.matched(path, is_dir)
-		{
-			return Some(ignored);
-		}
-		current = frame.parent.as_deref();
-	}
-	None
 }
 
 #[derive(Clone, Default)]
@@ -537,27 +389,100 @@ struct OwnerMatcher {
 	group: Option<OwnerSide>,
 }
 
-#[derive(Clone)]
-struct SearchConfig {
-	fs:             pi_vfs::Fs,
+/// What decides, on the walk's workers, whether an entry is kept or its
+/// subtree pruned: every filter but those that need a metadata lookup.
+struct Filter {
+	fs:             pi_vfs::BlockingFs,
 	base_dir:       PathBuf,
-	absolute_roots: Vec<PathBuf>,
-	matcher:        Arc<SearchMatcher>,
+	matcher:        SearchMatcher,
 	excludes:       Excludes,
+	/// `--ignore-file` rules, consulted after the walk's own ignore files.
+	ignore_files:   Vec<IgnoreFile>,
+	/// `--ignore-contain` names.
+	markers:        Vec<OsString>,
 	types:          TypeFilter,
 	extensions:     Vec<String>,
 	sizes:          Vec<SizeFilter>,
 	changed_after:  Option<SystemTime>,
 	changed_before: Option<SystemTime>,
-	owners:         Vec<OwnerMatcher>,
+	min_depth:      usize,
 	full_path:      bool,
+	prune:          bool,
+}
+
+impl Filter {
+	/// The walk's verdict on `entry`: kept when it matches; pruned with its
+	/// subtree when an `--ignore-file` ignores it, `--exclude` matches it, it
+	/// holds an `--ignore-contain` name, or it matches under `--prune`.
+	fn decide(&self, worker: &mut Worker<'_>, entry: &Entry<'_>) -> Action {
+		let is_dir = entry.file_type == FileType::Dir;
+		let path = worker.abs(entry);
+		if self.ignored(path, is_dir) || self.excludes.matches(path, &self.base_dir) {
+			return if is_dir { Action::SkipDir } else { Action::Skip };
+		}
+		let target = match_target(path, &self.base_dir, self.full_path);
+		if is_dir && (self.holds_marker(path) || (self.prune && self.matcher.matches(&target))) {
+			return Action::SkipDir;
+		}
+		if entry.depth >= self.min_depth && self.accepts(entry, &target) {
+			Action::Continue
+		} else {
+			Action::Skip
+		}
+	}
+
+	fn ignored(&self, path: &Path, is_dir: bool) -> bool {
+		self
+			.ignore_files
+			.iter()
+			.find_map(|ignore| ignore.matched(path, is_dir))
+			.unwrap_or(false)
+	}
+
+	fn holds_marker(&self, dir: &Path) -> bool {
+		self
+			.markers
+			.iter()
+			.any(|name| self.fs.exists(pi_vfs::join_path(dir, Path::new(name))))
+	}
+
+	/// The filters the listing answers: kind, extension, the pattern
+	/// (against `target`), and, from full listings, size and mtime.
+	fn accepts(&self, entry: &Entry<'_>, target: &str) -> bool {
+		let types = &self.types;
+		if types.has_kind()
+			&& !((types.regular && entry.file_type == FileType::File)
+				|| (types.directory && entry.file_type == FileType::Dir)
+				|| (types.symlink && entry.file_type == FileType::Symlink))
+		{
+			return false;
+		}
+		(self.extensions.is_empty() || matches_extension(entry.rel_path(), &self.extensions))
+			&& self.matcher.matches(target)
+			&& (self.sizes.is_empty() || matches_size_filters(&self.sizes, entry.size))
+			&& matches_time_filters(self.changed_after, self.changed_before, entry.mtime)
+	}
+
+	/// Sizes and mtimes come with each listed entry.
+	fn needs_full_listings(&self) -> bool {
+		!self.sizes.is_empty() || self.changed_after.is_some() || self.changed_before.is_some()
+	}
+}
+
+/// What the search does with kept entries: the filters that need a metadata
+/// lookup, then printing.
+struct SearchConfig {
+	fs:             pi_vfs::Fs,
+	base_dir:       PathBuf,
+	absolute_roots: Vec<PathBuf>,
+	types:          TypeFilter,
+	owners:         Vec<OwnerMatcher>,
 	absolute_path:  bool,
 	separator:      String,
 	format:         Option<String>,
 	print0:         bool,
 	quiet:          bool,
 	show_errors:    bool,
-	prune:          bool,
 }
 
 struct SearchState {
@@ -602,6 +527,8 @@ impl AsyncUtility for FdCli {
 	}
 }
 
+/// Searches every path operand on the parallel walker, printing matches in
+/// path order as the walk settles them.
 async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<SearchState> {
 	if cli.list_details || !cli.exec.is_empty() || !cli.exec_batch.is_empty() || cli.batch_size != 0
 	{
@@ -612,110 +539,105 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 	}
 	let _ = (cli.color, cli.hyperlink, cli.strip_cwd_prefix);
 
+	let fs = host.vfs();
 	let search_paths = resolve_search_paths(&cli, &base_dir, host)?;
 	let absolute_roots = search_paths
 		.iter()
 		.filter(|path| path.original.is_absolute() || pi_vfs::is_virtual_path(&path.original))
 		.map(|path| path.resolved.clone())
 		.collect::<Vec<_>>();
-	let matcher = Arc::new(build_matcher(&cli)?);
-	let excludes = build_excludes(&cli.excludes)?;
 	let types = build_type_filter(&cli.types)?;
-	let sizes = build_size_filters(&cli.sizes)?;
-	let changed_after = cli
-		.changed_within
-		.as_deref()
-		.map(parse_time_filter)
-		.transpose()?;
-	let changed_before = cli
-		.changed_before
-		.as_deref()
-		.map(parse_time_filter)
-		.transpose()?;
-	let owners = build_owner_filters(&cli.owners)?;
-	let max_results = if cli.max_one_result {
-		Some(1)
-	} else {
-		cli.max_results
-	};
-	let separator = cli.path_separator.clone().unwrap_or_else(|| "/".to_string());
+	let filter = Arc::new(Filter {
+		fs: fs.blocking(),
+		base_dir: base_dir.clone(),
+		matcher: build_matcher(&cli)?,
+		excludes: build_excludes(&cli.excludes)?,
+		ignore_files: read_ignore_files(&fs, &base_dir, &cli).await?,
+		markers: cli.ignore_contains.clone(),
+		types: types.clone(),
+		extensions: normalize_extensions(&cli.extensions),
+		sizes: build_size_filters(&cli.sizes)?,
+		changed_after: cli
+			.changed_within
+			.as_deref()
+			.map(parse_time_filter)
+			.transpose()?,
+		changed_before: cli
+			.changed_before
+			.as_deref()
+			.map(parse_time_filter)
+			.transpose()?,
+		min_depth: cli.exact_depth.or(cli.min_depth).unwrap_or(0),
+		full_path: cli.full_path,
+		prune: cli.prune,
+	});
 	let config = SearchConfig {
-		fs: host.vfs(),
+		fs,
 		base_dir,
 		absolute_roots,
-		matcher,
-		excludes,
 		types,
-		extensions: normalize_extensions(&cli.extensions),
-		sizes,
-		changed_after,
-		changed_before,
-		owners,
-		full_path: cli.full_path,
+		owners: build_owner_filters(&cli.owners)?,
 		absolute_path: cli.absolute_path,
-		separator,
+		separator: cli.path_separator.clone().unwrap_or_else(|| "/".to_string()),
 		format: cli.format_template.clone(),
 		print0: cli.print0,
 		quiet: cli.quiet,
 		show_errors: cli.show_errors,
-		prune: cli.prune,
 	};
+	let max_results = if cli.max_one_result || cli.quiet {
+		Some(1)
+	} else {
+		cli.max_results
+	};
+	let opts = fd_walk_options(&cli, &filter);
 
-	let opts = fd_tree_options(&cli);
 	let mut out = host.stdout_writer();
 	let mut state = SearchState { matches: 0, had_error: false };
 	for search_path in &search_paths {
 		if max_results.is_some_and(|max| state.matches >= max) {
 			break;
 		}
-		let mut fd_ignores =
-			FdIgnoreMatcher::new(&config.fs, &config.base_dir, &search_path.resolved, &cli).await?;
-		let layer = pi_walker::Fs::new(&config.fs, &search_path.resolved);
-		let mut tree = match Tree::new(&layer, &search_path.resolved, &opts).await {
-			Ok(tree) => tree,
+		let root = &search_path.resolved;
+		let layer = pi_walker::Fs::new(&config.fs, root);
+		let decide = Arc::clone(&filter);
+		let walked = walk::ordered(&layer, root, &opts, move |worker, entry| decide.decide(worker, entry));
+		let mut walk = match walked.await {
+			Ok(walk) => walk,
 			Err(WalkError::Root { path, error }) => {
 				return Err(io::Error::other(format!("{}: {error}", path.display())));
 			},
 		};
 		let mut pace = host.output_pace();
-		while let Some(event) = tree.next().await {
-			match event {
-				Event::Entry(entry) => {
-					if max_results.is_some_and(|max| state.matches >= max) {
-						break;
-					}
-					let action = visit_entry(
-						&config,
-						&cli.ignore_contains,
-						&mut fd_ignores,
-						entry.abs,
-						entry.depth,
-						entry.file_type,
-						&mut out,
-						&mut state,
-					)
-					.await?;
-					if matches!(action, Action::SkipDir) {
-						tree.skip_dir();
-					}
-					// A provider tree's next listing may wait, so its output is
-					// delivered per entry.
-					let _ = if layer.is_native() {
-						host.pace_output(&mut pace).await
-					} else {
-						host.flush_output().await
-					};
-					if max_results.is_some_and(|max| state.matches >= max) {
-						break;
-					}
-				},
-				Event::Error(error) => {
-					if config.show_errors {
-						state.had_error = true;
-						let _ = writeln!(host.stderr, "fd: {}", error.error);
-						let _ = host.flush_output().await;
-					}
-				},
+		let mut complete = true;
+		let mut unflushed = false;
+		loop {
+			if max_results.is_some_and(|max| state.matches >= max) {
+				complete = false;
+				break;
+			}
+			// Printed matches wait for the next one no longer than this.
+			if unflushed && tokio::time::timeout(OUTPUT_HOLD, walk.wait()).await.is_err() {
+				let _ = host.flush_output().await;
+				unflushed = false;
+			}
+			let Some(entry) = walk.next().await else {
+				break;
+			};
+			let path = layer.join(root, entry.path);
+			if !passes_lookups(&config, &path).await {
+				continue;
+			}
+			state.matches = state.matches.saturating_add(1);
+			if !config.quiet {
+				print_match(&config, &path, &mut out)?;
+				let _ = host.pace_output(&mut pace).await;
+				unflushed = true;
+			}
+		}
+		if complete && config.show_errors {
+			for error in walk.into_errors().await {
+				state.had_error = true;
+				let _ = writeln!(host.stderr, "fd: {}: {}", error.path.display(), error.error);
 			}
 		}
 	}
@@ -724,133 +646,78 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 	Ok(state)
 }
 
-fn fd_tree_options(cli: &FdCli) -> TreeOptions {
-	TreeOptions {
+/// Longest a printed match waits for the walk before it is handed over.
+const OUTPUT_HOLD: Duration = Duration::from_millis(10);
+
+/// The `--ignore-file` rules (none under `--no-ignore`), matched relative to
+/// the base directory.
+async fn read_ignore_files(
+	fs: &pi_vfs::Fs,
+	base_dir: &Path,
+	cli: &FdCli,
+) -> io::Result<Vec<IgnoreFile>> {
+	if no_ignore(cli) {
+		return Ok(Vec::new());
+	}
+	let mut files = Vec::new();
+	for path in &cli.ignore_files {
+		let rules = Rules::read(fs, path)
+			.await
+			.map_err(|err| io::Error::other(format!("{}: {err}", path.display())))?;
+		if !rules.is_empty() {
+			files.push(IgnoreFile { base: base_dir.to_path_buf(), rules });
+		}
+	}
+	Ok(files)
+}
+
+fn fd_walk_options(cli: &FdCli, filter: &Filter) -> walk::Options {
+	let ignore = !no_ignore(cli);
+	walk::Options {
 		hidden: include_hidden(cli),
-		gitignore: !(no_ignore(cli) || no_ignore_vcs(cli)),
-		// fd walks a path operand that is itself a symlink; `-L` extends that
-		// to links found during the walk.
-		follow: if cli.follow { Follow::Always } else { Follow::Roots },
-		order: Order::Names,
-		emit_root: true,
-		min_depth: cli.exact_depth.or(cli.min_depth).unwrap_or(0),
+		gitignore: ignore && !no_ignore_vcs(cli),
+		ignore_file: ignore.then_some(".fdignore"),
+		skip_parent_ignores: cli.no_ignore_parent,
+		// The walk root is always resolved through symlinks, as fd walks a
+		// path operand that is itself a symlink; `-L` extends that to links
+		// found during the walk.
+		follow_links: cli.follow,
+		detail: if filter.needs_full_listings() {
+			Detail::Full
+		} else {
+			Detail::Minimal
+		},
 		max_depth: cli.exact_depth.or(cli.max_depth),
 		same_file_system: cli.one_file_system,
-		..TreeOptions::default()
+		workers: cli.threads,
+		..walk::Options::default()
 	}
 }
 
-/// Decides one walked entry: prunes ignored and excluded directories, prints
-/// a match.
-#[allow(clippy::too_many_arguments)]
-async fn visit_entry<W: Write + Send>(
-	config: &SearchConfig,
-	ignore_contains: &[OsString],
-	fd_ignores: &mut FdIgnoreMatcher,
-	path: &Path,
-	depth: usize,
-	file_type: FileType,
-	out: &mut W,
-	state: &mut SearchState,
-) -> io::Result<Action> {
-	let is_directory = file_type == FileType::Dir;
-	if depth == 0 && is_directory {
-		return Ok(Action::Continue);
-	}
-	if fd_ignores.is_ignored(path, is_directory).await
-		|| config.excludes.matches(path, &config.base_dir)
-	{
-		return Ok(if is_directory { Action::SkipDir } else { Action::Skip });
-	}
-	if is_directory
-		&& (contains_ignore_marker(&config.fs, path, ignore_contains).await
-			|| (config.prune
-				&& config
-					.matcher
-					.matches(&match_target(path, &config.base_dir, config.full_path))))
-	{
-		return Ok(Action::SkipDir);
-	}
-
-	if !matches_entry(config, path, file_type).await {
-		return Ok(Action::Continue);
-	}
-
-	state.matches = state.matches.saturating_add(1);
-	if config.quiet {
-		return Ok(Action::Continue);
-	}
-	let display = display_path(config, path);
-	let text = if let Some(format) = config.format.as_deref() {
-		format_path(format, path, &display)
-	} else {
-		display
-	};
-	out.write_all(text.as_bytes())?;
-	out.write_all(if config.print0 { b"\0" } else { b"\n" })?;
-	Ok(Action::Continue)
-}
-
-/// Whether an entry passes every filter: the ones the listing answers (kind,
-/// extension, the pattern) first, then, only if the command asked for one,
-/// those that need the entry's metadata, so a plain `fd foo` stats nothing.
-async fn matches_entry(config: &SearchConfig, path: &Path, file_type: FileType) -> bool {
-	let filter = &config.types;
-	if filter.has_kind()
-		&& !((filter.regular && file_type == FileType::File)
-			|| (filter.directory && file_type == FileType::Dir)
-			|| (filter.symlink && file_type == FileType::Symlink))
-	{
-		return false;
-	}
-	if !config.extensions.is_empty() && !matches_extension(path, &config.extensions) {
-		return false;
-	}
-	if !config
-		.matcher
-		.matches(&match_target(path, &config.base_dir, config.full_path))
-	{
-		return false;
-	}
-	let needs_metadata = filter.executable
-		|| filter.empty
-		|| !config.sizes.is_empty()
-		|| config.changed_after.is_some()
-		|| config.changed_before.is_some()
-		|| !config.owners.is_empty();
-	if !needs_metadata {
+/// Whether a kept entry passes the filters that need its metadata
+/// (`--type executable`/`empty`, `--owner`); a plain `fd foo` looks nothing
+/// up.
+async fn passes_lookups(config: &SearchConfig, path: &Path) -> bool {
+	let types = &config.types;
+	if !types.executable && !types.empty && config.owners.is_empty() {
 		return true;
 	}
 	let metadata = config.fs.symlink_metadata(path).await.ok();
 	let metadata = metadata.as_ref();
-	if filter.executable && !is_executable(metadata) {
-		return false;
-	}
-	if filter.empty && !is_empty_entry(&config.fs, path, metadata, filter).await {
-		return false;
-	}
-	if !config.sizes.is_empty() && !matches_size_filters(&config.sizes, metadata) {
-		return false;
-	}
-	if (config.changed_after.is_some() || config.changed_before.is_some())
-		&& !matches_time_filters(config, metadata)
-	{
-		return false;
-	}
-	if !config.owners.is_empty() && !matches_owner_filters(&config.owners, metadata) {
-		return false;
-	}
-	true
+	(!types.executable || is_executable(metadata))
+		&& (!types.empty || is_empty_entry(&config.fs, path, metadata, types).await)
+		&& (config.owners.is_empty() || matches_owner_filters(&config.owners, metadata))
 }
 
-/// Whether directory `path` contains any `--ignore-contains` marker entry.
-async fn contains_ignore_marker(fs: &pi_vfs::Fs, path: &Path, markers: &[OsString]) -> bool {
-	for name in markers {
-		if fs.exists(pi_vfs::join_path(path, Path::new(name))).await {
-			return true;
-		}
-	}
-	false
+/// Prints `path`, a match, as `--format`, the separators, and `-0` ask.
+fn print_match<W: Write>(config: &SearchConfig, path: &Path, out: &mut W) -> io::Result<()> {
+	let display = display_path(config, path);
+	let text = match config.format.as_deref() {
+		Some(format) => format_path(format, path, &display),
+		None => display,
+	};
+	out.write_all(text.as_bytes())?;
+	out.write_all(if config.print0 { b"\0" } else { b"\n" })
 }
 
 #[cfg(unix)]
@@ -888,35 +755,35 @@ fn matches_extension(path: &Path, extensions: &[String]) -> bool {
 	extensions.iter().any(|expected| extension == expected)
 }
 
-fn matches_size_filters(filters: &[SizeFilter], metadata: Option<&Metadata>) -> bool {
-	let Some(metadata) = metadata else {
+/// Size filters apply to regular files, whose listed size is known.
+fn matches_size_filters(filters: &[SizeFilter], size: Option<u64>) -> bool {
+	let Some(size) = size else {
 		return false;
 	};
-	if !metadata.is_file() {
-		return false;
-	}
 	filters.iter().all(|filter| match filter.ordering {
-		SizeOrdering::LessOrEqual => metadata.len() <= filter.bytes,
-		SizeOrdering::Equal => metadata.len() == filter.bytes,
-		SizeOrdering::GreaterOrEqual => metadata.len() >= filter.bytes,
+		SizeOrdering::LessOrEqual => size <= filter.bytes,
+		SizeOrdering::Equal => size == filter.bytes,
+		SizeOrdering::GreaterOrEqual => size >= filter.bytes,
 	})
 }
 
-fn matches_time_filters(config: &SearchConfig, metadata: Option<&Metadata>) -> bool {
-	let Some(modified) = metadata.and_then(|meta| meta.modified().ok()) else {
+/// Whether a listed mtime (Unix nanoseconds) falls in the window; an entry
+/// without one fails any bound.
+fn matches_time_filters(
+	after: Option<SystemTime>,
+	before: Option<SystemTime>,
+	mtime: Option<i64>,
+) -> bool {
+	if after.is_none() && before.is_none() {
+		return true;
+	}
+	let Some(modified) = mtime
+		.and_then(|nanos| u64::try_from(nanos).ok())
+		.map(|nanos| UNIX_EPOCH + Duration::from_nanos(nanos))
+	else {
 		return false;
 	};
-	if let Some(after) = config.changed_after
-		&& modified <= after
-	{
-		return false;
-	}
-	if let Some(before) = config.changed_before
-		&& modified >= before
-	{
-		return false;
-	}
-	true
+	after.is_none_or(|after| modified > after) && before.is_none_or(|before| modified < before)
 }
 
 /// Owner filters never match entries whose filesystem reports no owner.
@@ -1271,13 +1138,16 @@ fn parse_owner_side(value: &str) -> io::Result<Option<OwnerSide>> {
 	}))
 }
 
-fn match_target(path: &Path, base_dir: &Path, full_path: bool) -> String {
+/// The text a pattern matches for `path`: its file name (borrowed when
+/// valid UTF-8), or the full path under `--full-path`.
+fn match_target<'p>(path: &'p Path, base_dir: &Path, full_path: bool) -> Cow<'p, str> {
 	if full_path {
-		return normalize_display_path(path);
+		return Cow::Owned(normalize_display_path(path));
 	}
+	// A single name holds no separator to normalize.
 	path.file_name().map_or_else(
-		|| normalize_display_path(path.strip_prefix(base_dir).unwrap_or(path)),
-		normalize_os_str,
+		|| Cow::Owned(normalize_display_path(path.strip_prefix(base_dir).unwrap_or(path))),
+		OsStr::to_string_lossy,
 	)
 }
 
@@ -1378,15 +1248,10 @@ mod tests {
 
 	use tempfile::{Builder, TempDir};
 
-	use clap::Parser;
+	use super::FdCli;
+	use crate::host::run_async_util;
 
-	use super::{FdCli, fd_tree_options};
-	use crate::host::{Host, run_async_util};
-
-	/// Build a fresh temp directory containing a single matchable file plus a
-	/// filler file, so the walker has more than one entry to iterate. Both the
-	/// walker-level regressions below and the positive-path search test assert
-	/// against this seed.
+	/// A fresh temp directory holding a matchable file and a filler file.
 	fn seeded_tree(tag: &str) -> TempDir {
 		let tree = Builder::new()
 			.prefix(&format!("pi-fd-cancel-{tag}-"))
@@ -1399,27 +1264,42 @@ mod tests {
 		tree
 	}
 
-	// Dropping the cursor mid-walk ends the traversal; a fresh one still sees every entry.
+	/// Matches print in path order; `.fdignore` beats `.gitignore` and prunes
+	/// directories, and `-E`, `--min-depth`, and `--size` apply during the
+	/// walk.
 	#[tokio::test(flavor = "multi_thread")]
-	async fn dropping_the_walk_visits_nothing() {
-		let tree = seeded_tree("stream");
-		let (host, _) = Host::for_test("fd", "", tree.path());
-		host.cancel_for_test();
-		let cli = FdCli::try_parse_from(["fd", "-u"]).expect("fd args parse");
-		let (fs, opts) = (pi_walker::Fs::native(), fd_tree_options(&cli));
-		let mut walk = pi_walker::walk::Tree::new(&fs, tree.path(), &opts)
-			.await
-			.expect("tree opens");
-		assert!(walk.next().await.is_some(), "the root is reported");
-		drop(walk);
-		let mut walk = pi_walker::walk::Tree::new(&fs, tree.path(), &opts)
-			.await
-			.expect("tree opens");
-		let mut visited = 0_usize;
-		while walk.next().await.is_some() {
-			visited += 1;
+	async fn filters_during_the_walk_and_prints_in_path_order() {
+		let tree = Builder::new().prefix("fd-filters").tempdir().expect("tempdir");
+		for (path, contents) in [
+			(".gitignore", "*.log\n"),
+			(".fdignore", "!keep.log\nskip/\n"),
+			("a/x.txt", "12345"),
+			("a-b.txt", ""),
+			("a.txt", "1"),
+			("keep.log", ""),
+			("drop.log", ""),
+			("skip/inner.txt", ""),
+			("vendor/v.txt", ""),
+		] {
+			let path = tree.path().join(path);
+			fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+			fs::write(path, contents).expect("write");
 		}
-		assert_eq!(visited, 3, "root plus both seeded files");
+		let found = async |args: &[&str]| {
+			let (code, capture) = run_async_util::<FdCli>(args, "", tree.path()).await;
+			assert_eq!(code, 0, "{args:?}: {:?}", capture.stderr());
+			capture.out().lines().map(str::to_owned).collect::<Vec<_>>()
+		};
+		assert_eq!(found(&["-t", "f"]).await, [
+			"a-b.txt",
+			"a.txt",
+			"a/x.txt",
+			"keep.log",
+			"vendor/v.txt"
+		]);
+		assert_eq!(found(&["-t", "f", "-E", "vendor", "--min-depth", "2"]).await, ["a/x.txt"]);
+		assert_eq!(found(&["-t", "f", "--size", "+2b"]).await, ["a/x.txt"]);
+		assert_eq!(found(&["-t", "f", "-u", "log"]).await, ["drop.log", "keep.log"]);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

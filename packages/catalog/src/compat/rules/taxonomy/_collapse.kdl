@@ -68,6 +68,19 @@ collapse {
 		efforts "low" "medium" "high"
 		requires-effort #true
 	}
+	// Gemini 4 Hydrogen adds an `-xhigh` SKU for the XHIGH level Google
+	// documents for it (LOW, MEDIUM, HIGH, XHIGH; no minimal).
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+	variant-family "google-antigravity" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh"
+		route "low" "gemini-4-hydrogen-low"
+		route "medium" "gemini-4-hydrogen-medium"
+		route "high" "gemini-4-hydrogen-high"
+		route "xhigh" "gemini-4-hydrogen-xhigh"
+		mode "google-level"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
 		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
 		route "off" "gemini-3.5-flash-extra-low"
@@ -181,6 +194,41 @@ collapse {
 		route "high" "gemini-{rev}-flash-high"
 		mode "google-level"
 		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	// Gemini 4 Argon ships as `-low`/`-medium`/`-high` thinking-level SKUs,
+	// matching the three levels Google documents for the model (no minimal).
+	variant-family "google-gemini-cli" "gemini-4-argon" name="Gemini 4 Argon" {
+		members "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high"
+		route "low" "gemini-4-argon-low"
+		route "medium" "gemini-4-argon-medium"
+		route "high" "gemini-4-argon-high"
+		mode "google-level"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	// Gemini 4 Carbon ships the same `-low`/`-medium`/`-high` SKU split; Gemini 4
+	// models reject `minimal`.
+	variant-family "google-gemini-cli" "gemini-4-carbon" name="Gemini 4 Carbon" {
+		members "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high"
+		route "low" "gemini-4-carbon-low"
+		route "medium" "gemini-4-carbon-medium"
+		route "high" "gemini-4-carbon-high"
+		mode "google-level"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	// Gemini 4 Hydrogen adds an `-xhigh` SKU for the XHIGH level Google
+	// documents for it (LOW, MEDIUM, HIGH, XHIGH; no minimal).
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+	variant-family "google-gemini-cli" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh"
+		route "low" "gemini-4-hydrogen-low"
+		route "medium" "gemini-4-hydrogen-medium"
+		route "high" "gemini-4-hydrogen-high"
+		route "xhigh" "gemini-4-hydrogen-xhigh"
+		mode "google-level"
+		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
 	}
 	variant-family "google-gemini-cli" "gemini-3.5-flash" name="Gemini 3.5 Flash" {

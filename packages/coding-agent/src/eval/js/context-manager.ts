@@ -16,6 +16,7 @@ import { getEnabledEvalPreludes } from "../preludes";
 import {
 	abortReasonError,
 	attachSessionOwner,
+	type DisposeByOwnerOptions,
 	EvalKernelNotRunningError,
 	formatKernelRestartNotice,
 	type SessionOwners,
@@ -76,6 +77,8 @@ interface PendingRun {
 	runState: VmRunState;
 	toolSession: ToolSession;
 	shadowCell?: EvalShadowCellSession;
+	/** The cell's `timeout` in ms, handed to prelude calls as their default budget. */
+	cellTimeoutMs?: number;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
@@ -120,6 +123,7 @@ interface JsSession {
 }
 
 interface StartingJsSession extends SessionOwners {
+	sessionId: string;
 	promise: Promise<JsSession>;
 }
 
@@ -424,11 +428,13 @@ export async function disposeAllVmContexts(): Promise<void> {
 /**
  * Shut down retained JS contexts owned solely by `ownerId`; contexts with other
  * owners (e.g. an in-memory session keyed only by cwd) just drop the registration.
+ * Contexts for `options.keepSessionId` are left untouched.
  */
-export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
+export async function disposeVmContextsByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void> {
+	const keepSessionId = options?.keepSessionId;
 	const toKill: JsSession[] = [];
 	for (const session of Array.from(sessions.values())) {
-		if (!session.ownerIds.has(ownerId)) continue;
+		if (!session.ownerIds.has(ownerId) || session.sessionId === keepSessionId) continue;
 		if (session.ownerIds.size === 1) {
 			toKill.push(session);
 			continue;
@@ -437,7 +443,7 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	}
 	const startingToKill: StartingJsSession[] = [];
 	for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
-		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId) || starting.sessionId === keepSessionId) continue;
 		if (starting.ownerIds.size === 1) {
 			startingSessions.delete(sessionKey);
 			startingToKill.push(starting);
@@ -517,6 +523,7 @@ async function runOnce(
 		packageEnvironment?: string;
 		code: string;
 		filename: string;
+		timeoutMs?: number;
 		runState: VmRunState;
 		expectedRevision?: number;
 		expectedDigest?: string;
@@ -529,6 +536,7 @@ async function runOnce(
 		runState: options.runState,
 		toolSession: options.session,
 		shadowCell: getActiveEvalShadowCell(),
+		cellTimeoutMs: options.timeoutMs ?? 0,
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -698,6 +706,7 @@ async function acquireSession(
 	startingSession = {
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
+		sessionId: snapshot.sessionId,
 		promise: startup,
 	};
 	attachSessionOwner(startingSession, snapshot.sessionId, ownerId);
@@ -837,6 +846,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		const value = await callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
 			signal: ctrl.signal,
+			cellTimeoutMs: pending.cellTimeoutMs,
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
 			onReply: pending.runState.onReply,

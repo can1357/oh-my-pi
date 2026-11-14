@@ -9,9 +9,11 @@
 //! aliases, options, traps, jobs, child processes, the directory stack,
 //! `hash` entries and the miscellaneous scalars (cwd, umask, `$?`, `$!`,
 //! `PIPESTATUS`, positional parameters, counters, …). Only execution
-//! position (frames, partial words, pipe bytes, subshell overlays, pending
-//! calls) stays in the engine and reaches the store as the `Frames` blob
-//! of [`Shell::externalize`](crate::bash::Shell::externalize).
+//! position (frames, partial words, pipe bytes, forked vprocs' images,
+//! pending calls) stays in the engine and reaches the store as the `Frames`
+//! blob of [`Shell::externalize`](crate::bash::Shell::externalize). A forked
+//! vproc starts from [`StateStore::snapshot`], the root's records as they
+//! are at the fork.
 //!
 //! Granularity: a record is written by the engine call that changes it,
 //! before that call returns. Most are written at the change; the root
@@ -42,6 +44,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::bash::{
 	ids::{JobId, ModeId, UnitId, Vpid},
+	image::Image,
 	signal::Signal,
 	zshopt::{ZshOpt, ZshOpts},
 };
@@ -117,6 +120,32 @@ pub trait StateStore {
 	/// bumps it on every such write (a TS tool setting a variable, a heap
 	/// restore). Never bumped by [`StateStore::apply`].
 	fn epoch(&self) -> u64;
+	/// The root shell's [`Image`] as it is now (its forked records,
+	/// [`Key::forked`]): what a forked child starts from. A store that keeps
+	/// them in an [`Image`] (`MemStore`) returns a clone, O(1). The default
+	/// builds one from scans of every table, on every fork from the root: a
+	/// store that serves forking shells should override it.
+	///
+	/// # Errors
+	/// [`StoreError`] when the backend fails or a record cannot be decoded.
+	fn snapshot(&mut self) -> Result<Image, StoreError> {
+		use strum::IntoEnumIterator;
+		let mut image = Image::default();
+		self.scan(Table::Var, &mut |key, rec| {
+			if let Key::Var(name) = key {
+				image.put_var(name, rec.clone());
+			}
+		})?;
+		for table in Table::iter().filter(|t| !matches!(t, Table::Var | Table::Scope | Table::Local))
+		{
+			self.scan(table, &mut |key, rec| {
+				if key.forked() {
+					image.put(key, rec.clone());
+				}
+			})?;
+		}
+		Ok(image)
+	}
 }
 
 /// Failure of a [`StateStore`] backend.
@@ -254,6 +283,26 @@ impl Key<'_> {
 			Self::Local { .. } => Table::Local,
 			Self::ZshOpt(_) => Table::ZshOpt,
 			Self::ZshAlias { .. } => Table::ZshAlias,
+		}
+	}
+
+	/// Whether a fork copies this record into the child's
+	/// [`crate::bash::Image`] (see [`MiscKey::forked`]). The process table,
+	/// the root's job table (a field of each vproc) and the root's scopes
+	/// are not.
+	pub const fn forked(&self) -> bool {
+		match self {
+			Self::Var(_)
+			| Self::Func(_)
+			| Self::Alias(_)
+			| Self::Opt(_)
+			| Self::Trap(_)
+			| Self::DirStack
+			| Self::CmdHash(_)
+			| Self::ZshOpt(_)
+			| Self::ZshAlias { .. } => true,
+			Self::Misc(m) => m.forked(),
+			Self::Job(_) | Self::Proc(_) | Self::Scope(_) | Self::Local { .. } => false,
 		}
 	}
 
@@ -510,7 +559,7 @@ impl LossyKind {
 }
 
 /// A variable: attributes and value. The engine's own variable type too
-/// (function scopes and subshell overlays hold them).
+/// (function scopes and process images hold them).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Var {
 	/// `declare` attributes.
@@ -1153,11 +1202,11 @@ pub enum MiscKey {
 	/// `localtraps` does not bring it back.
 	ZshEntryIgnored,
 	/// The vpid of the in-engine nested shell (`bash`/`sh` run through
-	/// `Resolved::SelfShell`) whose state a vproc's overlay holds: that
+	/// `Resolved::SelfShell`) whose state a vproc's image holds: that
 	/// vproc is the nested shell itself, its children are its subshells.
 	NestedShell,
 	/// `$BASH_SUBSHELL` of a child vproc (decimal; its parent's plus one,
-	/// zero in a nested shell), kept in the vproc's overlay.
+	/// zero in a nested shell), kept in the vproc's image.
 	Subshell,
 	/// `~/.bash_logout` ran (bash's `sourced_logout`): a login shell's
 	/// `exit` sources it once.
@@ -1312,6 +1361,95 @@ pub enum MiscKey {
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);
+
+impl MiscKey {
+	/// Whether a fork copies this value into the child's
+	/// [`crate::bash::Image`]: process state, as `fork(2)` copies memory.
+	/// The others are never a forked vproc's records: kernel state every
+	/// vproc shares (the vpid and job counters, the `$RANDOM` generator, the
+	/// shell's start time, zftp's shared status files) and the root vproc's
+	/// own fields the store persists (cwd, mode, `$?`, `PIPESTATUS`, `$!`,
+	/// the job marks, `getopts` progress, `ulimit` values), which a forked
+	/// vproc keeps as fields of its own.
+	pub const fn forked(self) -> bool {
+		match self {
+			Self::Cwd
+			| Self::Status
+			| Self::LastBg
+			| Self::Mode
+			| Self::PipeStatus
+			| Self::JobCurrent
+			| Self::JobPrevious
+			| Self::ChldOwed
+			| Self::NextJob
+			| Self::NextVpid
+			| Self::Random
+			| Self::StartNs
+			| Self::Getopts
+			| Self::Rlimits
+			| Self::ZftpStatus => false,
+			Self::Umask
+			| Self::Argv0
+			| Self::ShellPid
+			| Self::LastArg
+			| Self::Positional
+			| Self::ZshTies
+			| Self::ZshDisabledAliases
+			| Self::ZshDisabledSuffixAliases
+			| Self::ZshDisabledFuncs
+			| Self::ZshDisabledReswords
+			| Self::ZshPatDisables
+			| Self::Interactive
+			| Self::Dollar0
+			| Self::RunOrigin
+			| Self::DisabledBuiltins
+			| Self::LoadedBuiltins
+			| Self::History
+			| Self::HistoryCounts
+			| Self::HistoryTimes
+			| Self::ZshHistory
+			| Self::ZshHistoryState
+			| Self::ZshHistoryLine
+			| Self::ZshHistoryStack
+			| Self::ForeignEnv
+			| Self::HardIgnored
+			| Self::ZshEntryIgnored
+			| Self::NestedShell
+			| Self::Subshell
+			| Self::LoggedOut
+			| Self::ZshNamedDirs
+			| Self::BashCommandNumber
+			| Self::ZshTxtAttr
+			| Self::ZshModules
+			| Self::ZshSigngam
+			| Self::ZshTcpSessions
+			| Self::ZshProcsubstPid
+			| Self::ZshErrno
+			| Self::ZshRlimits
+			| Self::ZshSched
+			| Self::ZshWatch
+			| Self::ZshZprof
+			| Self::ZshExample
+			| Self::ZshStyles
+			| Self::ZshCodePending
+			| Self::ZshCodeError
+			| Self::ZshPcre
+			| Self::Zftp
+			| Self::ZshCurTerm
+			| Self::ZshMapfileUnset
+			| Self::ZshCompDescribe
+			| Self::ZshCompArguments
+			| Self::ZshCompValues
+			| Self::ZshCompTags
+			| Self::ZshCompctl
+			| Self::ZshSecondsType
+			| Self::ZshStartedSh
+			| Self::ZshMathFuncs
+			| Self::ZshPathChecked
+			| Self::Profile => true,
+		}
+	}
+}
 
 /// One write-through operation ([`StateStore::apply`]).
 ///

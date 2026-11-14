@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { createSessionWorktree } from "@oh-my-pi/pi-coding-agent/session/session-worktree";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -106,7 +107,7 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 
 		// A live worktree is not removed: its session resumes in place.
 		const listed = (await pickerSessions(repo)).find(s => s.id === moved.id)!;
-		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(false);
+		expect(await SessionManager.isStrandedIn(listed, repo)).toBe(false);
 	});
 
 	it("can keep the current-folder picker isolated while all-projects still reaches other worktrees", async () => {
@@ -123,7 +124,7 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		// Choosing a narrower listing never changes relocation of a deleted worktree session.
 		await $`git worktree remove --force ${moved.worktree} && git worktree prune`.cwd(repo).quiet();
 		const listed = (await allPickerSessions()).find(session => session.id === moved.id)!;
-		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(true);
+		expect(await SessionManager.isStrandedIn(listed, repo)).toBe(true);
 	});
 
 	it("keeps a removed worktree's session listed and relocates it into the checkout on resume", async () => {
@@ -133,12 +134,32 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 
 		const listed = (await pickerSessions(repo)).find(s => s.id === moved.id);
 		expect(listed?.cwd).toBe(moved.worktree);
-		expect(await SessionManager.isFromRemovedWorktree(listed!, repo)).toBe(true);
+		expect(await SessionManager.isStrandedIn(listed!, repo)).toBe(true);
 
 		const relocated = await SessionManager.openRelocated(listed!.path, listed!.cwd, repo);
 		await relocated.close();
 		const own = await SessionManager.list(repo);
 		expect(own.map(s => [s.id, s.cwd])).toEqual([[moved.id, repo]]);
 		expect(fs.existsSync(listed!.path)).toBe(false);
+	});
+
+	it("relocates a session filed under this folder whose recorded folder was moved away", async () => {
+		const before = path.join(root, "before");
+		const after = path.join(root, "after");
+		fs.mkdirSync(before);
+		const session = await answeredSession(before);
+		await session.close();
+		// A project moved by hand along with its session bucket: headers keep the old path.
+		const bucket = path.dirname(session.getSessionFile()!);
+		fs.renameSync(before, after);
+		fs.renameSync(bucket, sessionDirForCwd(after, path.dirname(bucket)));
+
+		const listed = (await pickerSessions(after)).find(s => s.id === session.getSessionId());
+		expect(listed?.cwd).toBe(before);
+		expect(await SessionManager.isStrandedIn(listed!, after)).toBe(true);
+
+		const relocated = await SessionManager.openRelocated(listed!.path, listed!.cwd, after);
+		await relocated.close();
+		expect((await SessionManager.list(after)).map(s => [s.path, s.cwd])).toEqual([[listed!.path, after]]);
 	});
 });
