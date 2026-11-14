@@ -11,6 +11,7 @@ import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getStatsDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { format } from "@oh-my-pi/pi-utils/dates";
 import { getTimeRangeConfig } from "./aggregator";
 import { initDb } from "./db";
 import type { GainDashboardStats, GainSourceTotals, GainTimeSeriesPoint } from "./shared-types";
@@ -243,11 +244,6 @@ function emptyTotals(): GainSourceTotals {
 	};
 }
 
-/** ISO date string from epoch ms, bucketed to the day. */
-function toDateBucket(epochMs: number): string {
-	return new Date(epochMs).toISOString().slice(0, 10); // "YYYY-MM-DD"
-}
-
 // ---------------------------------------------------------------------------
 // Main aggregation function
 // ---------------------------------------------------------------------------
@@ -273,7 +269,8 @@ export async function getGainDashboardStats(
 		snapcompactTotals.savedBytes += approxBytes;
 		snapcompactTotals.hits += 1;
 
-		const date = toDateBucket(rec.ts);
+		// Local calendar day, matching the dashboard's local day buckets.
+		const date = format(rec.ts, "yyyy-MM-dd");
 		const bucket = timeMap.get(date) ?? { snapcompact: 0 };
 		bucket.snapcompact += rec.savedTokens;
 		timeMap.set(date, bucket);

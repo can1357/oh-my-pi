@@ -1,3 +1,4 @@
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -141,8 +142,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		if (signal?.aborted) return null;
 		const textBeforeCursor = (lines[cursorLine] || "").slice(0, cursorCol);
 		if (!this.#outranksModelMention(lines, cursorLine, textBeforeCursor)) {
-			const modelMention = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
-			if (modelMention.kind === "matched") return modelMention.suggestions;
+			const modelMention = await this.#modelMentionSuggestions(textBeforeCursor, signal, onPartial);
+			if (modelMention) return modelMention;
 		}
 		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) {
 			const argumentSuggestions = await this.#baseProvider.getSuggestions(
@@ -153,8 +154,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 				onPartial,
 			);
 			if (argumentSuggestions) return argumentSuggestions;
-			const modelMention = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
-			if (modelMention.kind === "matched") return modelMention.suggestions;
+			const modelMention = await this.#modelMentionSuggestions(textBeforeCursor, signal, onPartial);
+			if (modelMention) return modelMention;
 			// No slash-argument completion for this input: preserve numeric
 			// GitHub references and internal URLs while keeping prompt-action
 			// tokens such as `#copy` literal.
@@ -282,6 +283,25 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	trySyncSlashCompletion(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null {
 		return this.#baseProvider.trySyncSlashCompletion?.(textBeforeCursor) ?? null;
 	}
+	/**
+	 * `^` mention rows for the token at the cursor. While a discovery retry runs, the current
+	 * rows go out as a partial and the result is recomputed once it settles; aborts when the
+	 * editor queues a newer request.
+	 */
+	async #modelMentionSuggestions(
+		textBeforeCursor: string,
+		signal: AbortSignal | undefined,
+		onPartial: ((suggestions: { items: AutocompleteItem[]; prefix: string }) => void) | undefined,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		const mention = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
+		if (mention.kind !== "matched") return null;
+		if (!mention.pending) return mention.suggestions;
+		onPartial?.(mention.suggestions);
+		await untilAborted(signal, mention.pending);
+		const settled = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
+		return settled.kind === "matched" ? settled.suggestions : mention.suggestions;
+	}
+
 	trySyncModelMentionCompletion(lines: string[], cursorLine: number, cursorCol: number): ModelMentionCompletion {
 		const textBeforeCursor = (lines[cursorLine] || "").slice(0, cursorCol);
 		if (this.#outranksModelMention(lines, cursorLine, textBeforeCursor)) return { kind: "unhandled" };

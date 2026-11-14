@@ -6,7 +6,7 @@ the repo [`docs/`](../../docs/) tree is the authoritative reference.
 
 The long architecture walkthrough that used to live here drifted out of date faster
 than anyone re-read it. The `docs/` tree is kept current (and indexed for the
-in-agent `docs://` / `/docs` surface), so this file links there instead of
+in-agent `omp://` docs surface), so this file links there instead of
 duplicating prose that goes stale.
 
 ## Local development
@@ -82,7 +82,7 @@ registry (see `AGENTS.md` → _Worker scripts_).
 ## Source layout (`src/`)
 
 Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
-`config.ts`, `system-prompt.ts`, `thinking.ts`, `workspace-tree.ts`,
+`config.ts`, `system-prompt.ts`, `workspace-tree.ts`,
 `cli-commands.ts`, `telemetry-export.ts`.
 
 | Directory                                                | Responsibility                                               | Reference                                                                                                                                                    |
@@ -94,15 +94,15 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | `tools/`                                                 | Built-in tool implementations + render/meta helpers          | [custom-tools.md](../../docs/custom-tools.md), [`tools/`](../../docs/tools/)                                                                                 |
 | `exec/`, `eval/`, `ssh/`, `dap/`, `debug/`               | Execution backends (shell, py/js kernels, ssh, debugger)     | [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [python-repl.md](../../docs/python-repl.md)                                                         |
 | `lsp/`                                                   | Language-server client/runtime                               | [lsp-config.md](../../docs/lsp-config.md), [tools/lsp.md](../../docs/tools/lsp.md)                                                                           |
-| `task/`, `swarm/`, `irc/`, `goals/`, `plan-mode/`        | Subagent delegation, parallelism, inter-agent IRC, plan mode | [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)                                                     |
+| `task/`, `irc/`, `goals/`, `plan-mode/`                  | Subagent delegation, inter-agent IRC, plan mode              | [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)                                                     |
 | `web/`, `exa/`                                           | Fetch, browser automation, search providers, scrapers        | [tools/web_search.md](../../docs/tools/web_search.md), [tools/browser.md](../../docs/tools/browser.md)                                                       |
 | `mcp/`                                                   | MCP transport / manager / loader / tool bridge               | [mcp-config.md](../../docs/mcp-config.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md)                                                   |
 | `extensibility/`, `slash-commands/`                      | Extensions, hooks, custom tools/commands, skills, plugins    | [extensions.md](../../docs/extensions.md), [hooks.md](../../docs/hooks.md), [skills.md](../../docs/skills.md)                                                |
 | `capability/`, `discovery/`                              | Capability registry + provider discovery modules             | [extension-loading.md](../../docs/extension-loading.md), [context-files.md](../../docs/context-files.md)                                                     |
 | `advisor/`, `autolearn/`, `autoresearch/`                | Advisor/watchdog, managed skills, background research        | [advisor-watchdog.md](../../docs/advisor-watchdog.md), [autoresearch.md](../../docs/autoresearch.md)                                                         |
 | `memories/`, `memory-backend/`, `mnemopi/`, `hindsight/` | Memory subsystems and backends                               | [memory.md](../../docs/memory.md), [mnemosyne-memory-backend.md](../../docs/mnemosyne-memory-backend.md)                                                     |
-| `internal-urls/`                                         | Router + handlers (`agent://`, `docs://`, `rule://`, …)      | [tree.md](../../docs/tree.md)                                                                                                                                |
-| `tui/`, `collab/`                                        | Low-level TUI primitives, live session sharing               | [tui.md](../../docs/tui.md), [collab.md](../../docs/collab.md)                                                                                               |
+| `internal-urls/`                                         | Router + handlers (`agent://`, `omp://`, `rule://`, …)       | [tools/read.md](../../docs/tools/read.md#internal-urls), [tools/write.md](../../docs/tools/write.md#writable-internal-resources-and-tool-devices)            |
+| `collab/`                                                | Live session sharing                                         | [collab.md](../../docs/collab.md)                                                                                                                            |
 | `tts/`, `stt/`                                           | Text-to-speech / speech-to-text                              | —                                                                                                                                                            |
 | `tiny/`, `auto-thinking/`                                | Embedded tiny-model experiments, auto thinking level         | [local-models.md](../../docs/local-models.md)                                                                                                                |
 | `async/`, `lib/`, `utils/`, `prompts/`, `edit/`          | Shared plumbing, prompt assets, patch/diff engine            | [tools/edit.md](../../docs/tools/edit.md)                                                                                                                    |
@@ -113,6 +113,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 
 - [session.md](../../docs/session.md) — storage and entry model
 - [session-tree-plan.md](../../docs/session-tree-plan.md) — branch/tree architecture
+- [tree.md](../../docs/tree.md) — `/tree` session navigator and leaf switching
 - [session-switching-and-recent-listing.md](../../docs/session-switching-and-recent-listing.md)
 - [session-operations-export-share-fork-resume.md](../../docs/session-operations-export-share-fork-resume.md)
 - [compaction.md](../../docs/compaction.md) — compaction and branch summaries
@@ -167,7 +168,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 ### Discovery, context, and rules
 
 - [context-files.md](../../docs/context-files.md), [rulebook-matching-pipeline.md](../../docs/rulebook-matching-pipeline.md)
-- [advisor-watchdog.md](../../docs/advisor-watchdog.md), [fs-scan-cache-architecture.md](../../docs/fs-scan-cache-architecture.md), [tree.md](../../docs/tree.md)
+- [advisor-watchdog.md](../../docs/advisor-watchdog.md), [fs-scan-cache-architecture.md](../../docs/fs-scan-cache-architecture.md)
 
 ### TUI and theming
 
@@ -180,10 +181,9 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - [natives-text-search-pipeline.md](../../docs/natives-text-search-pipeline.md), [natives-shell-pty-process.md](../../docs/natives-shell-pty-process.md), [natives-media-system-utils.md](../../docs/natives-media-system-utils.md)
 - [natives-build-release-debugging.md](../../docs/natives-build-release-debugging.md), [natives-rust-task-cancellation.md](../../docs/natives-rust-task-cancellation.md), [porting-to-natives.md](../../docs/porting-to-natives.md)
 
-### Build, release, and porting
+### Build and release
 
 - [macos-signing-notarization.md](../../docs/macos-signing-notarization.md)
-- [porting-from-pi-mono.md](../../docs/porting-from-pi-mono.md)
 
 ## Extending omp
 
