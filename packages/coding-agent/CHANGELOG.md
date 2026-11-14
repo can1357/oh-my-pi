@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).
 - Resuming a session whose directory was deleted now continues in the current directory with a warning instead of failing.
 - Model mentions and `/switch` completions now recover discovered models after provider discovery fails at startup, retrying discovery when needed.
 - Background job results that arrive after an ACP prompt ends are now carried into the next prompt instead of starting an invisible turn.
