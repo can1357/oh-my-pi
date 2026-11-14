@@ -190,7 +190,9 @@ pub struct DiffOptions {
 	/// Unified context lines (default 3).
 	pub context:   Option<u32>,
 	/// Include binary patch blocks (`GIT binary patch`) instead of the
-	/// "Binary files differ" placeholder.
+	/// "Binary files differ" placeholder, and carry text that is not UTF-8 in
+	/// such a block too: a text hunk of it would not survive the `String`
+	/// patch, so only the block applies byte-exact.
 	pub binary:    bool,
 	/// Refuse with [`crate::Error::OutputTooLarge`] once the rendered patch
 	/// exceeds this many bytes. Rendering stops at the first change that

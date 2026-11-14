@@ -6,7 +6,10 @@ use std::{
 	path::Path,
 };
 
-use gix::bstr::{BStr, BString, ByteSlice};
+use gix::{
+	bstr::{BStr, BString, ByteSlice},
+	diff::blob::platform::prepare_diff::Operation,
+};
 
 use super::{
 	GitRepo,
@@ -742,10 +745,19 @@ fn render_change(
 	text.push_str(" b/");
 	text.push_str(&change.new_path);
 	text.push('\n');
-	let is_binary = matches!(
-		prepared.operation,
-		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
-	);
+	// Callers receive the patch as a `String`, which cannot hold a text hunk of
+	// bytes that are not UTF-8. An appliable (`binary_patch`) render carries
+	// such content as a binary block instead; `git apply` takes either form.
+	let not_utf8 =
+		|data: Option<&[u8]>| data.is_some_and(|bytes| std::str::from_utf8(bytes).is_err());
+	let is_binary = match prepared.operation {
+		Operation::SourceOrDestinationIsBinary => true,
+		Operation::InternalDiff { .. } => {
+			binary_patch
+				&& (not_utf8(prepared.old.data.as_slice()) || not_utf8(prepared.new.data.as_slice()))
+		},
+		Operation::ExternalCommand { .. } => false,
+	};
 	let similarity = if change.similarity == Some(u8::MAX) {
 		compute_similarity(&prepared)
 	} else {
@@ -753,24 +765,25 @@ fn render_change(
 	};
 	append_metadata(&mut text, change, similarity, binary_patch && is_binary);
 
+	if is_binary {
+		if binary_patch {
+			text.push_str("GIT binary patch\n");
+			let old = object_bytes(repo, change.old_id)?;
+			let new = object_bytes(repo, change.new_id)?;
+			append_binary_body(&mut text, &old, &new, budget)?;
+			append_binary_body(&mut text, &new, &old, budget)?;
+		} else {
+			text.push_str("Binary files ");
+			push_old_path(&mut text, change);
+			text.push_str(" and ");
+			push_new_path(&mut text, change);
+			text.push_str(" differ\n");
+		}
+		return Ok(Rendered { text, added: None, removed: None });
+	}
 	match prepared.operation {
-		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => {
-			if binary_patch {
-				text.push_str("GIT binary patch\n");
-				let old = object_bytes(repo, change.old_id)?;
-				let new = object_bytes(repo, change.new_id)?;
-				append_binary_body(&mut text, &old, &new, budget)?;
-				append_binary_body(&mut text, &new, &old, budget)?;
-			} else {
-				text.push_str("Binary files ");
-				push_old_path(&mut text, change);
-				text.push_str(" and ");
-				push_new_path(&mut text, change);
-				text.push_str(" differ\n");
-			}
-			Ok(Rendered { text, added: None, removed: None })
-		},
-		gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } => {
+		Operation::SourceOrDestinationIsBinary => unreachable!("binary content is rendered above"),
+		Operation::InternalDiff { algorithm } => {
 			// Tokenize with line terminators kept: git's xdiff treats the
 			// terminator as part of the line, so CRLF content diffs with
 			// literal `\r` bytes and a final line without a newline is a
@@ -803,7 +816,7 @@ fn render_change(
 			}
 			Ok(Rendered { text, added: Some(added), removed: Some(removed) })
 		},
-		gix::diff::blob::platform::prepare_diff::Operation::ExternalCommand { .. } => {
+		Operation::ExternalCommand { .. } => {
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
@@ -882,9 +895,7 @@ fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>
 fn compute_similarity(
 	prepared: &gix::diff::blob::platform::prepare_diff::Outcome<'_>,
 ) -> Option<u8> {
-	let gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } =
-		prepared.operation
-	else {
+	let Operation::InternalDiff { algorithm } = prepared.operation else {
 		return Some(50);
 	};
 	let input = gix::diff::blob::InternedInput::new(
@@ -2166,6 +2177,38 @@ mod tests {
 				])
 			);
 		}
+	}
+
+	#[test]
+	fn binary_patch_carries_non_utf8_text_byte_exact() {
+		let dir = fixture();
+		let latin1: &[u8] = b"caf\xe9\nna\xefve\n";
+		fs::write(dir.path().join("file.txt"), latin1).expect("write tracked");
+		fs::write(dir.path().join("new.txt"), latin1).expect("write untracked");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let tracked = repo
+			.diff_text(&DiffOptions {
+				files: vec!["file.txt".to_owned()],
+				binary: true,
+				..DiffOptions::default()
+			})
+			.expect("diff");
+		let untracked = repo
+			.diff_no_index(Path::new("/dev/null"), Path::new("new.txt"), true)
+			.expect("no-index diff");
+		assert!(tracked.contains("GIT binary patch\n"), "{tracked}");
+		assert!(untracked.contains("GIT binary patch\n"), "{untracked}");
+		repo
+			.apply_patch(&format!("{tracked}{untracked}"), &ApplyOptions {
+				cached: true,
+				..ApplyOptions::default()
+			})
+			.expect("apply");
+		let blob = git(dir.path(), &["hash-object", "file.txt"]);
+		assert_eq!(git(dir.path(), &["rev-parse", ":file.txt"]), blob);
+		assert_eq!(git(dir.path(), &["rev-parse", ":new.txt"]), blob);
 	}
 
 	#[cfg(unix)]
