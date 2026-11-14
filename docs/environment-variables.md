@@ -333,7 +333,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 
 | Variable                    | Default / behavior                                                                                                                                |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PI_AI_GEMINI_CLI_VERSION`  | Overrides Gemini CLI user-agent version tag (`0.46.0` if unset)                                                                                   |
+| `PI_AI_GEMINI_CLI_VERSION`  | Overrides the npm-resolved Gemini CLI user-agent version; when unset and the lookup fails, the fallback is `0.68.0`                               |
 | `PI_AI_ANTIGRAVITY_VERSION` | Overrides the auto-discovered Antigravity hub user-agent version; when unset and discovery fails, the fallback is `2.26.0`                        |
 | `PI_AI_ANTIGRAVITY_CL`      | Overrides Antigravity hub user-agent build changelist (`1005016104` if unset)                                                                     |
 | `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (unset: the native build for the host OS, `darwin`, `linux` or `windows`; other OSes report `linux`) |
@@ -367,6 +367,7 @@ therefore completes through the paste-code path.
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PI_CODEX_DEBUG`                            | `1`/`true` enables Codex provider debug logging                                                                                                                                                               |
 | `PI_CODEX_WEBSOCKET`                        | `1`/`true` enables websocket transport preference                                                                                                                                                             |
+| `PI_AI_CODEX_VERSION`                       | Overrides the Codex client version sent as `client_version` and the `version` header; when unset, the current `@openai/codex` release from npm, falling back to `0.159.0`                                     |
 | `PI_CODEX_RESPONSES_LITE`                   | `1`/`true` opts normal inference into Responses Lite; `0`/`false` forces the standard Responses body; unset defaults normal inference to full Responses                                                       |
 | `PI_OPENAI_STATEFUL`                        | Overrides the stateful-chaining default for the platform OpenAI Responses API (`previous_response_id`, forces `store: true`): on by default against api.openai.com, off elsewhere                             |
 | `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS`        | Positive integer override (default `300000`)                                                                                                                                                                  |

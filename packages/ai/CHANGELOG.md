@@ -25,6 +25,7 @@
 - Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
 - Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
 - Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
+- Fixed Codex requests reporting a stale client version that hid newly released models; the current `@openai/codex` version is now looked up from npm ([#19257](https://github.com/can1357/oh-my-pi/pull/19257) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 

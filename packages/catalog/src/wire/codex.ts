@@ -2,6 +2,9 @@
  * Constants for OpenAI Codex (ChatGPT OAuth) backend
  */
 
+import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { createVersionLookup, npmLatestVersion } from "./client-version-lookup";
+
 export const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 
 const OFFICIAL_CODEX_URL = new URL(CODEX_BASE_URL);
@@ -22,16 +25,42 @@ export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
 }
 
 /**
- * Pinned OpenAI Codex client version (corresponds to @openai/codex package version).
- * Updated from npm by `bun run check-spoofed-versions --update`.
+ * Offline fallback for the OpenAI Codex client version (corresponds to the
+ * @openai/codex package version), used until {@link ensureCodexClientVersion}
+ * resolves the current npm release. Updated from npm by
+ * `bun run check-spoofed-versions --update`.
  *
- * The backend version-gates model availability against this value on both
- * `/models?client_version=` and `/responses`, independently of a model's
+ * The backend version-gates model availability against the client version on
+ * both `/models?client_version=` and `/responses`, independently of a model's
  * declared `minimal_client_version`: GPT-6.1 Sol declares 0.153.0 yet is
- * omitted from `/models` at 0.155.1 and listed at 0.159.0. An older pin
+ * omitted from `/models` at 0.155.1 and listed at 0.159.0. An older version
  * silently hides newer SKUs from discovery.
  */
 export const CODEX_CLIENT_VERSION = "0.159.0";
+
+const codexClientVersionLookup = createVersionLookup({ resolve: npmLatestVersion("@openai/codex") });
+
+/** Version reported as the Codex client: env override → npm `latest` → pinned fallback. */
+export function getCodexClientVersion(): string {
+	return process.env.PI_AI_CODEX_VERSION || codexClientVersionLookup.current() || CODEX_CLIENT_VERSION;
+}
+
+/**
+ * Resolves the latest `@openai/codex` release from npm, so the backend lists
+ * the models a current Codex client would see. Skipped entirely when
+ * PI_AI_CODEX_VERSION is set; see {@link createVersionLookup} for caching,
+ * back-off, and `signal` semantics. Callers pass the global fetch: a provider
+ * transport only carries provider requests.
+ */
+export function ensureCodexClientVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
+	if (process.env.PI_AI_CODEX_VERSION) return Promise.resolve();
+	return codexClientVersionLookup.ensure(fetcher, signal);
+}
+
+/** Drops the resolved Codex client version and back-off; tests only. */
+export function resetCodexClientVersionForTest(): void {
+	codexClientVersionLookup.resetForTest();
+}
 
 export const OPENAI_HEADERS = {
 	BETA: "OpenAI-Beta",
