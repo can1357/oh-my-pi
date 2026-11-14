@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace and can be disabled with `commit.enabled`.
+- Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.
 - Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
 - Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
 - Added the `session_clear` hook and extension event, emitted after `/clear` resets the current session context without changing its session ID.

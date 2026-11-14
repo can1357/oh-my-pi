@@ -5,6 +5,7 @@ import commitDocumentation from "../../prompts/tools/commit.md" with { type: "te
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ToolSession } from "../../tools";
+import { resolveToCwd } from "../../tools/path-utils";
 import { cfgCommitEnabled } from "../../tools/settings";
 import { commitSelection } from "./apply";
 import { createDraft, type Draft, type ScopeSpec } from "./draft";
@@ -16,7 +17,7 @@ import commitPython from "./prelude.py" with { type: "text" };
 /** Drafts kept per session; older ones expire. */
 const MAX_DRAFTS = 8;
 
-const paramsSchema = type({ action: "'draft'", "agents?": "string | string[]", "+": "reject" })
+const paramsSchema = type({ action: "'draft'", "agents?": "string | string[]", "repo?": "string > 0", "+": "reject" })
 	.or({ action: "'show'", draft: "string > 0", "path?": "string > 0", "+": "reject" })
 	.or({
 		action: "'take' | 'drop'",
@@ -72,7 +73,7 @@ function describeCall(parameters: unknown): string | undefined {
 	if (parsed instanceof type.errors) return undefined;
 	switch (parsed.action) {
 		case "draft":
-			return `commit.draft(${parsed.agents === undefined ? "" : [parsed.agents].flat().join(", ")})`;
+			return `commit.draft(${[parsed.agents, parsed.repo && `repo=${parsed.repo}`].flat().filter(Boolean).join(", ")})`;
 		case "take":
 		case "drop":
 			return `commit.${parsed.action}(${[parsed.path, ...(parsed.units ?? []), parsed.grep && `/${parsed.grep}/`].filter(Boolean).join(" ")})`;
@@ -98,8 +99,9 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 			drafts.delete(id);
 		}
 	};
-	const context = (signal?: AbortSignal): DraftContext => ({
-		cwd: session.cwd,
+	/** Draft context in `cwd`: the session cwd unless a call targets another repository. */
+	const context = (signal?: AbortSignal, cwd = session.cwd): DraftContext => ({
+		cwd,
 		artifactsDir: session.getArtifactsDir?.() ?? null,
 		agent: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		signal,
@@ -112,7 +114,8 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 
 	const invoke = async (params: CommitParams, signal?: AbortSignal) => {
 		if (params.action === "draft") {
-			const draft = await draftFor(context(signal), params.agents);
+			const cwd = params.repo === undefined ? session.cwd : resolveToCwd(params.repo, session.cwd);
+			const draft = await draftFor(context(signal, cwd), params.agents);
 			remember(draft, params.agents);
 			return { text: draft.summary(), details: { id: draft.id, head: draft.head, scope: [...draft.scope] } };
 		}
@@ -142,7 +145,7 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 					},
 				);
 				drafts.delete(draft.id);
-				const remaining = await draftFor(context(signal), scope);
+				const remaining = await draftFor(context(signal, draft.root), scope);
 				remember(remaining, scope);
 				const lines = [
 					`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`,

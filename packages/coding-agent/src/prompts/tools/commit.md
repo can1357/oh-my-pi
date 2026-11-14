@@ -5,6 +5,7 @@ The `commit` object exists in JavaScript and Python Eval; it is not a standalone
 <instruction>
 - Your edit tools (edit, write, ast_edit, conflict resolution, isolated-subagent merges) journal every write. `commit.draft()` attributes every changed line of the repository (HEAD → worktree) to the agent that wrote it and preselects the lines in scope. Lines no journaled write explains (scripts, formatters, codegen run through bash/eval) are preselected only when they rewrote your lines during one of your own calls; files they changed otherwise are listed under Review when your call was running at the time. Decide those yourself.
 - Scope (`agents`): omitted → you plus your subagents; `"self"` → your own edits only; `"ParserFix"` or `["ParserFix", "DocsWriter"]` → those subagents, each with its own subagents; `"*"` → every agent of the session.
+- Repository (`repo`): omitted → the repository containing the session cwd; a path (relative to the cwd) inside another checkout → that repository, e.g. `commit.draft(repo="../other")`. The draft and its commit stay in that repository.
 - The summary lists Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session left out, and how many paths are not yours.
 - `show(path=None)` lists hunks. Each change line shows its unit id (`3b` = hunk 3, unit b; a unit is one actor's lines within a hunk), a mark (`✓` selected, `?` needs review, `·` left out), and its owner. Without a path: every partially selected or review file.
 - `take(path=None, *units, grep=None)` / `drop(...)`: `path` is exact, a glob (`packages/tui/**`), or a unique suffix (`CHANGELOG.md` when only one changed). No units → the whole file. `grep` → every unit with a line matching the regex, across all files unless `path` is given. `only(*globs)` deselects everything outside the globs; use it to split the work into several commits.
@@ -12,7 +13,7 @@ The `commit` object exists in JavaScript and Python Eval; it is not a standalone
 - `commit(subject, body=None, *, fixes=None, amend=False)`: one-line subject; body is a string or a list of lines; `fixes=123` appends `Fixes #123`. Builds the commit from a private index on the current HEAD: other agents' staged entries stay staged, the worktree is never touched, and a concurrent commit by someone else is never overwritten (when it changed the same lines the call fails; draft again). Prints the commit and what remains. `amend=True` only rewrites a commit this flow made in this session.
 - Review reasons: "edits lines added by X that were never committed" means your edit builds on someone's uncommitted lines, so committing yours alone commits part of theirs; "in-scope lines rewritten afterwards by …" means the file no longer holds what you wrote. Decide from what you did; ask the user only when you cannot tell.
 - Every method is async and prints its result; `silent=True` skips printing. `print(d)` repeats the current summary.
-- JavaScript: same names with an options object: `commit.draft({ agents: "self" })`, `d.take("src/a.ts", { units: ["2a"] })`, `d.commit("fix: …", { body: ["- …"], fixes: 12 })`.
+- JavaScript: same names with an options object: `commit.draft({ agents: "self", repo: "../other" })`, `d.take("src/a.ts", { units: ["2a"] })`, `d.commit("fix: …", { body: ["- …"], fixes: 12 })`.
 </instruction>
 
 <examples>

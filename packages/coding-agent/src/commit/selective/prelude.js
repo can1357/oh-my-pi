@@ -60,7 +60,7 @@
 	}
 	globalThis.commit = Object.freeze({
 		async draft(options = {}) {
-			const { text, details } = await call("draft", { agents: options.agents });
+			const { text, details } = await call("draft", { agents: options.agents, repo: options.repo });
 			log(text, options.silent);
 			return new Draft(details, text);
 		},

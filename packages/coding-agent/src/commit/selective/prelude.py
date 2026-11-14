@@ -77,8 +77,8 @@ def _make_commit():
         def __repr__(self):
             return "commit"
 
-        async def draft(self, agents=None, *, silent=False):
-            text, details = await _call("draft", {"agents": agents})
+        async def draft(self, agents=None, *, repo=None, silent=False):
+            text, details = await _call("draft", {"agents": agents, "repo": repo})
             if not silent and text:
                 print(text)
             return _Draft(details, text)
