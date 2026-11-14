@@ -265,11 +265,23 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 	};
 
 	const realRoot = await fs.realpath(root).catch(() => root);
+	// Journaled paths keep the spelling the agent used, which may run through a symlinked
+	// directory (`~/.agent` → `~/.dotfiles/agent`). Resolve the directory, not the file: the
+	// file may be a symlink itself or already deleted.
+	const realDirs = new Map<string, string>();
 	const byPath = new Map<string, ChangeRecord[]>();
 	for (const record of records) {
 		if (record.type !== "change") continue;
 		let rel = path.relative(root, record.path);
-		if (rel.startsWith("..") || path.isAbsolute(rel)) rel = path.relative(realRoot, record.path);
+		if (rel.startsWith("..") || path.isAbsolute(rel)) {
+			const dir = path.dirname(record.path);
+			let realDir = realDirs.get(dir);
+			if (realDir === undefined) {
+				realDir = await fs.realpath(dir).catch(() => dir);
+				realDirs.set(dir, realDir);
+			}
+			rel = path.relative(realRoot, path.join(realDir, path.basename(record.path)));
+		}
 		if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
 		rel = rel.split(path.sep).join("/");
 		const list = byPath.get(rel);

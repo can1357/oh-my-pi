@@ -177,6 +177,20 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["status", "--porcelain"])).toBe("?? second.txt\n");
 	});
 
+	it("attributes edits journaled through a symlinked directory", async () => {
+		const { root, journal } = await emptyRepo();
+		const alias = `${root}-alias`;
+		tempDirs.push(alias);
+		await fs.symlink(root, alias);
+		const file = path.join(alias, "notes.md");
+		await Bun.write(file, "hello\n");
+		journal.recordChange({ agent: "Main", tool: "write", path: file, before: null, after: "hello\n" });
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.summary()).toContain("✓ notes.md  +1  [Main]");
+	});
+
 	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
 		const { root, journal } = await sharedWorkspace();
 		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
