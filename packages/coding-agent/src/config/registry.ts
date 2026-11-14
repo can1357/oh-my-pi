@@ -98,9 +98,10 @@ interface DefinitionBase {
 	/**
 	 * Array entries may be objects scoping values to working-directory prefixes
 	 * (`{ path(s)/pathPrefix(es), values | items | <valuesKey> }`, see `config/settings.ts`);
-	 * `valuesKey` names the domain-specific alias for the values list (e.g. `models`).
+	 * `valuesKey` names the domain-specific alias for the values list (e.g. `models`, `patterns`),
+	 * and `itemType` selects whether unscoped/nested entries are strings (default) or rule objects.
 	 */
-	pathScoped?: { valuesKey: string };
+	pathScoped?: { valuesKey: string; itemType?: "string" | "object" };
 	/**
 	 * Protocol hosts (RPC/ACP embedders) that start from this setting's default rather than the local
 	 * user's interactive preference: at startup the default is pinned as a runtime override unless
@@ -148,10 +149,22 @@ export interface EnumDefinition<T extends readonly string[] = readonly string[]>
 	ui?: UiEnum<T>;
 }
 
+export type ArrayMergeStrategy = "replace" | "prepend" | "append";
+
 export interface ArrayDefinition<T = unknown> extends DefinitionBase {
 	type: "array";
 	default: readonly T[];
 	env?: SettingEnv<readonly T[]>;
+	/**
+	 * How higher-precedence config layers (`project`, `--config` overlay) combine with lower
+	 * layers (`global`):
+	 *  - `"replace"` (default): a configured array replaces lower layers wholesale.
+	 *  - `"prepend"`: higher-layer entries are placed before lower-layer entries.
+	 *  - `"append"`: higher-layer entries are placed after lower-layer entries.
+	 *
+	 * Runtime overrides (`Setting.override`) still replace the effective list wholesale.
+	 */
+	merge?: ArrayMergeStrategy;
 	/**
 	 * Closed vocabulary for the entries (`label` names one entry in messages, e.g. "status line
 	 * segment"). Writes naming an unknown entry are rejected; configured values that already contain
@@ -394,6 +407,37 @@ class MappedValue<S, T> extends Derived<T> {
 	compute(inputs: readonly unknown[]): T {
 		return this.#fn(inputs[0] as S);
 	}
+}
+
+class OperatorValue<T> extends Derived<T> {
+	readonly #source: Derived<T>;
+
+	constructor(source: Derived<T>) {
+		super();
+		this.#source = source;
+	}
+
+	get sources(): readonly AnySetting[] {
+		return this.#source.sources;
+	}
+
+	inputs(settings: Settings): readonly unknown[] {
+		return [this.#source.get(settings.grantAuthority())];
+	}
+
+	compute(inputs: readonly unknown[]): T {
+		return inputs[0] as T;
+	}
+}
+
+/**
+ * `source` as the operator configured it ({@link Settings.grantAuthority}: global, `--config` and
+ * runtime layers, never a project layer), for settings a repository must not control because the
+ * agent can write its settings files. Listeners and effects fire when the merged value changes, so
+ * pair it with a settings-panel condition that hides the row while a project layer supplies it.
+ */
+export function operatorValue<T>(source: Derived<T>): Derived<T> {
+	return new OperatorValue(source);
 }
 
 /** Value types of a record of derivations. */

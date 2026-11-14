@@ -191,22 +191,22 @@ export class SessionHandoff {
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
 			throwIfHandoffAborted(handoffSignal);
-			if (!handoffText || handoffText.trim().length === 0) {
-				// Empty/whitespace-only generation is a real failure, not a user
-				// cancellation. #7904 stopped masking provider errors as "Handoff
-				// cancelled"; an empty document is the remaining path that produced the
-				// same misleading, undebuggable message (#7993).
-				logger.warn("Handoff generation produced no content", {
+			const failure = !handoffText?.trim()
+				? "no content"
+				: !/^## Goal[ \t]*\r?$/m.test(handoffText)
+					? "an invalid document"
+					: undefined;
+			if (failure) {
+				logger.warn(`Handoff generation produced ${failure}`, {
 					providerSessionId: this.#host.sessionId(),
 					autoTriggered: options?.autoTriggered ?? false,
 				});
-				// Auto-handoff is best-effort: returning undefined lets maintenance fall
-				// back to the next compaction method. A user-initiated handoff must
-				// surface the failure instead of a silent, misleading "cancelled".
+				// Auto-handoff is best-effort: maintenance can try the next method
+				// without committing a document that replaces the user's goal.
 				if (options?.autoTriggered) {
 					return undefined;
 				}
-				throw new Error("Handoff generation produced no content");
+				throw new Error(`Handoff generation produced ${failure}`);
 			}
 
 			let savedPath: string | undefined;

@@ -59,7 +59,7 @@ Key integration points:
 
 User-level bases:
 
-- OMP native: `~/<PI_CONFIG_DIR>/agent` (normally `~/.omp/agent`; a named profile changes this as described below)
+- OMP native: the active agent directory, `getAgentDir()` (normally `~/.omp/agent`; `PI_CONFIG_DIR`, a named profile, or the default-profile `PI_CODING_AGENT_DIR` changes it as described below)
 - Claude's active config directory (`~/.claude` by default; `CLAUDE_CONFIG_DIR` overrides it)
 - `~/.codex`
 - `~/.gemini`
@@ -71,7 +71,7 @@ Project-level bases:
 - `<cwd>/.codex`
 - `<cwd>/.gemini`
 
-`CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root used by the generic helpers. `PI_CODING_AGENT_DIR` is different: for the default profile it changes `getAgentDir()` consumers such as native discovery, settings, and runtime state, but it does **not** change the generic `getConfigDirs()` / `findConfigFile()` OMP base. Named profiles ignore `PI_CODING_AGENT_DIR`.
+`CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root used by the generic helpers. In the default profile, `PI_CODING_AGENT_DIR` replaces the whole agent directory, so it relocates the generic `getConfigDirs()` / `findConfigFile()` OMP user base along with native discovery, settings, and runtime state. Project bases stay `<cwd>/.omp`. Named profiles ignore `PI_CODING_AGENT_DIR`.
 
 ## Profiles
 
