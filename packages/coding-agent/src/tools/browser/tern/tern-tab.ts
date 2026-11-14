@@ -45,7 +45,7 @@ import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult 
 import type { BrowserFrameInfo } from "../frames";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { loadedKnownDevices, loadPuppeteer } from "../launch";
-import { pushStateInPage, sameAddress } from "../navigation";
+import { assertUrlPattern, pushStateInPage, sameAddress } from "../navigation";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -1351,6 +1351,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Wait until the URL contains `pattern` (string) or matches it (RegExp). */
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
+		assertUrlPattern(pattern);
 		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
 		let iteration = 0;
 		return await this.#poll(

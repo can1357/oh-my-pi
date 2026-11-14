@@ -233,6 +233,7 @@ import {
 	resolveFrame,
 } from "./frames";
 import {
+	assertUrlPattern,
 	isNavigatedContextError,
 	type NavigationWaitUntil,
 	navigateMainFrame,
@@ -3061,6 +3062,7 @@ export class WorkerCore {
 				);
 			},
 			waitForUrl: (pattern, opts) => {
+				assertUrlPattern(pattern);
 				const w = waitMs(opts?.timeout);
 				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
 			},

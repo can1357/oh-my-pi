@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { getTab, releaseTab, type WebKitTabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { createFakeHost, type FakeHost } from "./webkit-fake-host";
 
 // Ambient browser env of the developer's shell (and of an omp running the suite) must not pick the backend.
@@ -216,6 +217,12 @@ describe("a tab on a server that observes pages natively", () => {
 		const detail = await tab.ternTab.request(requests[0]!.id);
 		expect(detail.status).toBe(200);
 		expect(detail.body).toBeUndefined();
+	});
+
+	it("refuses a waitForUrl pattern that is neither a string nor a RegExp", async () => {
+		// Eval code is untyped: a predicate reaches the helper as it is.
+		const predicate = ((url: string) => url.endsWith("/overview")) as unknown as RegExp;
+		await expect(tab.ternTab.waitForUrl(predicate, { timeout: 5_000 })).rejects.toBeInstanceOf(ToolError);
 	});
 
 	it("keeps the engine as the logs' source while a capture script is installed", async () => {
