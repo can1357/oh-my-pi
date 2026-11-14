@@ -125,6 +125,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
@@ -2324,6 +2325,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					{
 						settings: this.settings,
 						registry: this.#modelRegistry,
+						sessionModel: this.model,
 						sessionId: this.sessionId,
 						signal,
 						onUsage: journalJudgmentUsage(this.sessionManager),
@@ -2381,6 +2383,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				planParallel(request, {
 					settings: this.settings,
 					registry: this.#modelRegistry,
+					sessionModel: this.model,
 					sessionId: this.sessionId,
 					signal,
 					onUsage: journalJudgmentUsage(this.sessionManager),
@@ -3318,6 +3321,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		const target = resolved.model;
 		if (!target) return resolved.error ?? `model "${selector}" not found`;
+		if (cfgOffline.get(this.settings) && target.provider !== this.model?.provider) {
+			return "offline mode restricts automatic prewalk to the active provider";
+		}
 		if (cfgDisabledProviders.get(this.settings).includes(target.provider)) {
 			return `provider "${target.provider}" is disabled`;
 		}
@@ -4246,7 +4252,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	ruleJudge(): Judge | undefined {
 		const mode = cfgTtsrJudge.get(this.settings);
-		if (mode === "off" || (mode === "auto" && !hasNativeJudge(this.settings, this.#modelRegistry))) return undefined;
+		if (mode === "off" || (mode === "auto" && !hasNativeJudge(this.settings, this.#modelRegistry, this.model)))
+			return undefined;
 		return resolveJudge({
 			settings: this.settings,
 			registry: this.#modelRegistry,
@@ -4406,6 +4413,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		) {
 			return;
 		}
+		// Another live process owns the session, so this process wrote nothing to
+		// it (its first write would have moved it to a sibling it owns). Writing
+		// the marker would fork the conversation into an "open-elsewhere" copy
+		// just to say a reader exited, and any pending tool calls are the owner's.
+		if (this.sessionManager.isOwnedElsewhere()) return;
 		const kind: SessionExitData["kind"] =
 			reason === "dispose" || reason === postmortem.Reason.MANUAL
 				? "normal"

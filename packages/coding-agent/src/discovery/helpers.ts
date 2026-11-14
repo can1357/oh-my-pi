@@ -238,6 +238,9 @@ function buildRule(
 		rawMode === "never" || rawMode === "prose-only" || rawMode === "tool-only" || rawMode === "always"
 			? rawMode
 			: undefined;
+	const rawRepeat = frontmatter.repeatMode;
+	const repeatMode: Rule["repeatMode"] =
+		rawRepeat === "once" || rawRepeat === "after-gap" || rawRepeat === "always" ? rawRepeat : undefined;
 	return {
 		name: resolvedName,
 		path: filePath,
@@ -251,6 +254,7 @@ function buildRule(
 		scope,
 		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
+		repeatMode,
 		_source: source,
 	};
 }

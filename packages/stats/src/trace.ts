@@ -35,13 +35,16 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 5;
+export const TRACE_ETAG_VERSION = 6;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
 const TITLE_SCAN_BYTES = 4096;
 const LIST_FOLD_LIMIT = 300;
+
+/** Async job statuses after which no async-result delivery follows a `wait` or cancel handover. */
+const SETTLED_JOB_STATUSES: Record<string, true> = { completed: true, failed: true, cancelled: true };
 
 // ---------------------------------------------------------------------------
 // Structural entry views (journal shapes mirrored without importing coding-agent)
@@ -58,6 +61,8 @@ interface EntryView {
 	timestamp?: string;
 	customType?: string;
 	data?: Record<string, unknown>;
+	// custom_message
+	details?: Record<string, unknown>;
 	message?: MessageView;
 	// session header
 	cwd?: string;
@@ -82,7 +87,6 @@ interface MessageView {
 	toolName?: string;
 	isError?: boolean;
 	details?: Record<string, unknown>;
-	customType?: string;
 	timestamp?: number;
 	completedAt?: number;
 	duration?: number;
@@ -273,6 +277,14 @@ function argsPreview(args: unknown): string | undefined {
 	}
 }
 
+/** End the open background job with `jobId` at `at`, never before it opened; a later job may reuse the id. */
+function closeBackgroundJob(active: Map<string, PendingBackgroundJob>, jobId: string, at: number): void {
+	const job = active.get(jobId);
+	if (!job) return;
+	job.end = Math.max(job.start, at);
+	active.delete(jobId);
+}
+
 /**
  * Scan one transcript into a track: model/tool/turn/background spans plus
  * markers, and the cross-track facts (task results, request counts).
@@ -350,6 +362,18 @@ function scanTranscript(
 						kind: "session_exit",
 						label: typeof data.kind === "string" ? data.kind : "exit",
 					});
+				}
+			}
+			continue;
+		}
+
+		if (entry.type === "custom_message") {
+			// Async-result deliveries persist as `custom_message` entries carrying `details.jobs[].jobId`.
+			if (entry.customType === "async-result" && envelopeTs !== undefined && Array.isArray(entry.details?.jobs)) {
+				for (const job of entry.details.jobs) {
+					if (job && typeof job === "object" && "jobId" in job && typeof job.jobId === "string") {
+						closeBackgroundJob(activeBackgroundJobs, job.jobId, envelopeTs);
+					}
 				}
 			}
 			continue;
@@ -490,6 +514,34 @@ function scanTranscript(
 				backgroundJobs.push(job);
 				activeBackgroundJobs.set(job.jobId, job);
 			}
+			// A `wait` (`details.jobs`) or proc:// cancel (`details.proc.jobs`) that reports a settled
+			// job replaces its async-result delivery, so the job closes when it settled, or at this result.
+			const proc = details?.proc;
+			const reportedJobs =
+				details?.op === "wait"
+					? details.jobs
+					: proc && typeof proc === "object" && "op" in proc && proc.op === "cancel" && "jobs" in proc
+						? proc.jobs
+						: undefined;
+			if (Array.isArray(reportedJobs)) {
+				for (const job of reportedJobs) {
+					if (
+						job &&
+						typeof job === "object" &&
+						"id" in job &&
+						typeof job.id === "string" &&
+						"status" in job &&
+						typeof job.status === "string" &&
+						SETTLED_JOB_STATUSES[job.status] === true
+					) {
+						const settledAt =
+							"settledAtMs" in job && typeof job.settledAtMs === "number" && Number.isFinite(job.settledAtMs)
+								? Math.min(job.settledAtMs, end)
+								: end;
+						closeBackgroundJob(activeBackgroundJobs, job.id, settledAt);
+					}
+				}
+			}
 			if (msg.toolName === "task" && Array.isArray(details?.results)) {
 				for (const result of details.results) {
 					if (!result || typeof result !== "object" || !("id" in result) || typeof result.id !== "string")
@@ -503,22 +555,6 @@ function scanTranscript(
 						resultEntryId: entry.id ?? "",
 						toolSpanEnd: end,
 					});
-				}
-			}
-			continue;
-		}
-
-		if (msg.role === "custom" && msg.customType === "async-result") {
-			const closeAt =
-				typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) ? msg.timestamp : envelopeTs;
-			const jobs = msg.details?.jobs;
-			if (closeAt !== undefined && Array.isArray(jobs)) {
-				for (const job of jobs) {
-					if (!job || typeof job !== "object" || !("jobId" in job) || typeof job.jobId !== "string") continue;
-					const targetJob = activeBackgroundJobs.get(job.jobId);
-					if (!targetJob || targetJob.end !== undefined) continue;
-					targetJob.end = closeAt;
-					activeBackgroundJobs.delete(job.jobId);
 				}
 			}
 			continue;

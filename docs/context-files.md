@@ -291,7 +291,7 @@ Two everyday uses:
 - **Non-interactive runs.** A user-level context file written for your own interactive sessions is usually wrong for `-p` runs driven by another program, which arrive with their own instructions. Disabling it in a `--config` overlay keeps your interactive setup untouched.
 - **Delegated work.** When one agent drives another, the caller's own operating instructions travel into the callee's prompt as user-level context and can contradict the task it was actually given.
 
-`disabledExtensions` is not path-scoped: only `enabledModels` and `disabledProviders` accept the `path:` form. Like every array setting it is replaced, not merged, by a higher-precedence layer.
+`disabledExtensions` is not path-scoped: only `enabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` accept the `path:` form. Like other array settings it is replaced, not merged, by a higher-precedence layer.
 
 Browse the ids interactively with `/extensions`, which lists every discovered context file with its level, source, and current state, and toggles the same setting.
 

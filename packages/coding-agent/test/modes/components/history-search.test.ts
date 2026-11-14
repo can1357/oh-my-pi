@@ -22,6 +22,10 @@ function fakeStorage(entries: HistoryEntry[]): HistoryStorage {
 			.filter(Boolean);
 	return {
 		getRecent: (limit: number) => entries.slice(0, limit),
+		delete: (id: number) => {
+			const index = entries.findIndex(entry => entry.id === id);
+			if (index >= 0) entries.splice(index, 1);
+		},
 		search: (query: string, limit: number) => {
 			const tokens = tokenize(query);
 			return entries.filter(e => tokens.every(t => e.prompt.toLowerCase().includes(t))).slice(0, limit);
@@ -40,6 +44,24 @@ function type(component: HistorySearchComponent, text: string): void {
 }
 
 describe("HistorySearchComponent", () => {
+	it("deletes the selected result only when Delete is at the end of the query", () => {
+		const storage = fakeStorage([makeEntry(1, "alpha one"), makeEntry(2, "alpha two")]);
+		const component = new HistorySearchComponent(
+			storage,
+			() => {},
+			() => {},
+		);
+		type(component, "alpha");
+		component.handleInput("\x1b[D");
+		component.handleInput("\x1b[3~");
+		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["alpha one", "alpha two"]);
+		component.handleInput("a");
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[3~");
+		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["alpha one"]);
+		expect(render(component).plain).not.toContain("alpha two");
+	});
+
 	it("paints the selected row with the selectedBg highlight bar and a relative timestamp", () => {
 		const component = new HistorySearchComponent(
 			fakeStorage([makeEntry(1, "deploy the release"), makeEntry(2, "older prompt", 7200)]),
