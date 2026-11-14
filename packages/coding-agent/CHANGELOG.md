@@ -488,6 +488,7 @@
 - The shell's `ls` builtin supports macOS/BSD `-O`: a long listing gains the file-flags column (`hidden`, `compressed`, `uchg`, `restricted`, …) instead of rejecting the option, so `ls -lO` works and flags are visible again.
 - The shell ships `sd` as a builtin, so `sd FIND REPLACE [FILES]…` find-and-replace (regex or `-F` literal, in place or `-p` preview) works without the binary installed.
 - Added `omp gc --strip` (or `gc.strip`), which removes provider replay data (thinking signatures, encrypted reasoning, cached native responses, request controls) from sessions idle for `gc.stripAfterDays` (default 30, `--strip-after-days`), including subagent and archived transcripts; stripped sessions still resume on any model.
+- Added a debug log line for successful Hindsight recalls, carrying the recalled item count and the recall latency, so `hindsight.debug: true` sessions can measure how much memory was recalled and how long it took ([#16456](https://github.com/can1357/oh-my-pi/pull/16456) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -515,6 +516,9 @@
 - `omp gc` now shows a progress bar for each slow step (listing and scanning sessions, scanning transcripts for blob refs, archiving) on interactive terminals.
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
+### Added
+
+- Added a debug log line for successful Hindsight recalls, carrying the recalled item count and the recall latency, so `hindsight.debug: true` sessions can measure how much memory was recalled and how long it took ([#16456](https://github.com/can1357/oh-my-pi/pull/16456) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
