@@ -57,6 +57,7 @@ class ForwardedListeners<A extends unknown[]> {
 	}
 
 	#emit(args: A): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- Snapshot before callbacks mutate subscriptions.
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(...args);

@@ -246,16 +246,16 @@ describe("default echo/printf redirect rule", () => {
 		for (const command of [
 			"echo $(printf foo; printf bar) > out.txt",
 			"echo `date; ls` > out.txt",
-			"echo ${x:-a;b} > out.txt",
+			`echo \${x:-a;b} > out.txt`,
 			"echo $(ls > /dev/null) > out.txt",
-			"echo ${a:-${b}} > out.txt",
+			`echo \${a:-\${b}} > out.txt`,
 			"echo $(( (1 + 2) * 3 )) > out.txt",
-			"printf %s ${HOME:-${USER}} >> out.txt",
+			`printf %s \${HOME:-\${USER}} >> out.txt`,
 		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
 		}
 		expect(checkBashInterception("echo $(ls) ; ls > f", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
-		expect(checkBashInterception("echo ${a:-${b}}; ls 2>e.log", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+		expect(checkBashInterception(`echo \${a:-\${b}}; ls 2>e.log`, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
 			false,
 		);
 		expect(checkBashInterception("echo $(printf a; printf b)", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
@@ -266,7 +266,7 @@ describe("default echo/printf redirect rule", () => {
 	it("matches commands with many stderr sinks without exponential backtracking", () => {
 		const start = performance.now();
 		const echo = checkBashInterception(
-			"echo hi" + " 2>/dev/null 2>>/dev/null 2>&1 \\; <&0 $(a; b) `c; d` ${e:-f;g}".repeat(20),
+			`echo hi 2>/dev/null 2>>/dev/null 2>&1 \\; <&0 $(a; b) \`c; d\` \${e:-f;g}`.repeat(20),
 			["write"],
 			DEFAULT_BASH_INTERCEPTOR_RULES,
 		);

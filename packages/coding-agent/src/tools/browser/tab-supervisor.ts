@@ -1047,7 +1047,7 @@ async function setWebKitTabShown(tab: WebKitTabSession, shown: boolean): Promise
  */
 export async function setWebKitTabsShown(shown: boolean): Promise<void> {
 	let failure: unknown;
-	for (const tab of [...tabs.values()]) {
+	for (const tab of tabs.values()) {
 		if (tab.backend !== "webkit" || tab.state !== "alive" || !tab.browser.webkit.canShow) continue;
 		try {
 			await setWebKitTabShown(tab, shown);
