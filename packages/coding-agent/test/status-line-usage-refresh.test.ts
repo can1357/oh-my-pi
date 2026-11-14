@@ -146,7 +146,9 @@ function makeCodexSession(
 	session.model = { contextWindow: 200_000, provider: "openai-codex" };
 	session.modelRegistry = {
 		authStorage: {
-			oauth: { identity: resolveActiveIdentity },
+			oauth: {
+				accounts: () => [{ ...resolveActiveIdentity(), position: 0, credentialId: 1, active: true }],
+			},
 		},
 	};
 	return session as unknown as AgentSession;
@@ -617,11 +619,16 @@ describe("StatusLineComponent usage refresh", () => {
 		base.modelRegistry = {
 			authStorage: {
 				oauth: {
-					identity: () => ({
-						email: "shared@example.com",
-						accountId: "account-shared",
-						orgId,
-					}),
+					accounts: () => [
+						{
+							email: "shared@example.com",
+							accountId: "account-shared",
+							orgId,
+							position: 0,
+							credentialId: 1,
+							active: true,
+						},
+					],
 				},
 			},
 		};

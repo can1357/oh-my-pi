@@ -51,8 +51,10 @@ function makeComponent(
 				modelRegistry: {
 					authStorage: {
 						oauth: {
-							identity: (provider: string) =>
-								provider === options.provider ? options.activeIdentity : undefined,
+							accounts: (provider: string) =>
+								provider === options.provider && options.activeIdentity
+									? [{ ...options.activeIdentity, position: 0, credentialId: 1, active: true }]
+									: [],
 						},
 					},
 				},
@@ -300,10 +302,10 @@ describe("usage status-line segment", () => {
 			modelRegistry: {
 				authStorage: {
 					oauth: {
-						identity: (requestedProvider: string) =>
+						accounts: (requestedProvider: string) =>
 							requestedProvider === provider && provider === "openai-codex"
-								? { accountId: "active-account" }
-								: undefined,
+								? [{ accountId: "active-account", position: 0, credentialId: 1, active: true }]
+								: [],
 					},
 				},
 			},
@@ -372,8 +374,10 @@ describe("usage status-line segment", () => {
 			modelRegistry: {
 				authStorage: {
 					oauth: {
-						identity: (requestedProvider: string) =>
-							requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+						accounts: (requestedProvider: string) =>
+							requestedProvider === "openai-codex"
+								? [{ accountId: "active-account", position: 0, credentialId: 1, active: true }]
+								: [],
 					},
 				},
 			},
