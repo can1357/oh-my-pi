@@ -1476,7 +1476,14 @@ async fn freeze_control_registry(
 		.map_err(ExtHostError::protocol)?;
 	normalize_control_availability(manifest, &mut payload)?;
 	if let Some(generation) = scheme_generation {
-		fold_declared_schemes(generation, &identity, &payload)?;
+		let fetch = scheme_fetch_capability(identity.capabilities.as_ref());
+		let credentials = scheme_credentials_capability(
+			manifest
+				.static_declarations()
+				.capability_grants
+				.get("credentials.allow"),
+		);
+		fold_declared_schemes(generation, &identity, &payload, fetch, credentials)?;
 	}
 	let evidence = seal_registry_evidence(identity, session, manifest, payload)
 		.map_err(ExtHostError::protocol)?;
@@ -1484,10 +1491,32 @@ async fn freeze_control_registry(
 	Ok(Arc::new(evidence))
 }
 
+/// `fetch` at FREEZE fold: FREEZE-visible / identity capabilities contain
+/// `env.net.fetch` or the host-aligned `env.net` spelling (ADR 0050 D4 / S3).
+fn scheme_fetch_capability(capabilities: &BTreeSet<Str>) -> bool {
+	capabilities
+		.iter()
+		.any(|cap| matches!(cap.as_str(), "env.net.fetch" | "env.net"))
+}
+
+/// `credentials` at FREEZE fold: static `credentials.allow` is a non-empty
+/// provider list (string or string array).
+fn scheme_credentials_capability(allow: Option<&serde_json::Value>) -> bool {
+	match allow {
+		Some(serde_json::Value::String(value)) => !value.is_empty(),
+		Some(serde_json::Value::Array(values)) => values
+			.iter()
+			.any(|entry| entry.as_str().is_some_and(|s| !s.is_empty())),
+		_ => false,
+	}
+}
+
 fn fold_declared_schemes(
 	generation: &crate::tool_url::scheme_generation::SchemeGeneration,
 	identity: &Arc<ControlConnectionIdentity>,
 	payload: &serde_json::Value,
+	fetch: bool,
+	credentials: bool,
 ) -> Result<(), ExtHostError> {
 	use crate::tool_url::scheme_generation::SchemeClaim;
 	let Some(rows) = payload.get("schemes") else {
@@ -1505,19 +1534,21 @@ fn fold_declared_schemes(
 				ExtHostError::protocol(Str::new_static("FREEZE schemes[].name must be a string"))
 			})?;
 		claims.push(SchemeClaim {
-			scheme:      Str::new(name),
+			scheme: Str::new(name),
 			description: row
 				.get("description")
 				.and_then(serde_json::Value::as_str)
 				.map(Str::new),
-			writable:    row
+			writable: row
 				.get("writable")
 				.and_then(serde_json::Value::as_bool)
 				.unwrap_or(false),
-			immutable:   row
+			immutable: row
 				.get("immutable")
 				.and_then(serde_json::Value::as_bool)
 				.unwrap_or(false),
+			fetch,
+			credentials,
 		});
 	}
 	generation
