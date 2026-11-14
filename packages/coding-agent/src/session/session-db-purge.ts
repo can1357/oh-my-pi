@@ -109,9 +109,13 @@ export function deleteHistoryRowsForSessions(
 
 /**
  * Delete `stats.db` rows for one transcript plus nested subagent files under
- * its artifacts dir. The `instr(session_file, ?) = 1` nested match is the same
- * shape gc's archive reconciliation uses; unlike that pass there is no live
- * peer to transfer surviving rows to, so every row under the deleted root goes.
+ * its artifacts dir. Unlike gc's archive reconciliation there is no live peer
+ * to transfer surviving rows to, so every row under the deleted root goes.
+ *
+ * Nested rows match as a half-open `session_file` range rather than gc's
+ * `instr(session_file, ?) = 1`: this runs synchronously on interactive delete,
+ * and `instr` defeats the `session_file` index, full-scanning every table
+ * (tens of seconds on a multi-GB stats.db).
  */
 function deleteStatsRowsForSession(db: Database, sessionPath: string): number {
 	const sessionTables = STATS_SESSION_TABLES.filter(
@@ -122,14 +126,16 @@ function deleteStatsRowsForSession(db: Database, sessionPath: string): number {
 	const deletionStatements = sessionTables.map(table => ({
 		table,
 		statement: statements.use(
-			db.prepare(`DELETE FROM ${table} WHERE session_file = ? OR instr(session_file, ?) = 1`),
+			db.prepare(`DELETE FROM ${table} WHERE session_file = ? OR (session_file >= ? AND session_file < ?)`),
 		),
 	}));
 	let deleted = 0;
 	const tx = db.transaction(() => {
 		const nestedPrefix = `${sessionArtifactsPath(sessionPath)}${path.sep}`;
+		// Smallest string greater than every string starting with `nestedPrefix`.
+		const nestedEnd = `${nestedPrefix.slice(0, -1)}${String.fromCharCode(nestedPrefix.charCodeAt(nestedPrefix.length - 1) + 1)}`;
 		for (const { statement } of deletionStatements) {
-			const result = statement.run(sessionPath, nestedPrefix) as SqliteRunResult;
+			const result = statement.run(sessionPath, nestedPrefix, nestedEnd) as SqliteRunResult;
 			deleted += sqliteNumber(result.changes);
 		}
 	});
