@@ -204,6 +204,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 */
 	readonly aliasOf?: SupermemorySessionStateApi;
 	lastRecallSnippet?: string;
+	/**
+	 * The last block delivered into the prompt; `/memory clear` keeps it so a per-turn recall racing
+	 * the clear's prompt rebuild still removes it (removing a block no longer there is a no-op).
+	 */
+	#lastInjectedBlock?: string;
 	hasRecalledForFirstTurn = false;
 	/** User turns already covered by automatic retention documents. */
 	lastRetainedTurn = 0;
@@ -530,7 +535,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (laterTurn && !text) return undefined;
 		return {
 			context: text || undefined,
-			replaces: laterTurn ? this.lastRecallSnippet : undefined,
+			replaces: laterTurn ? this.#lastInjectedBlock : undefined,
 			commit: () => this.#commitRecall(generation, text, !laterTurn),
 		};
 	}
@@ -599,7 +604,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#commitRecall(generation: number, context: string, persist: boolean): boolean {
 		if (this.#recallGeneration !== generation) return false;
 		this.hasRecalledForFirstTurn = true;
-		if (context) this.lastRecallSnippet = context;
+		if (context) {
+			this.lastRecallSnippet = context;
+			this.#lastInjectedBlock = context;
+		}
 		if (persist) persistRecall(this.session.sessionManager, this.#recallScope(), { text: context, memories: [] });
 		return true;
 	}

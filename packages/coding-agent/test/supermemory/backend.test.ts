@@ -1545,11 +1545,15 @@ describe("supermemoryBackend", () => {
 			expect(await supermemoryBackend.beforeAgentStartPrompt!(child as never, "first", undefined)).toBeUndefined();
 			expect(search).not.toHaveBeenCalled();
 
-			(await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "first", undefined))?.commit();
+			const first = await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "first", undefined);
+			first?.commit();
 			const staged = await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "second", undefined);
 			await supermemoryBackend.clear("/tmp", "/tmp", parent as never);
 			expect(staged?.commit()).toBe(false);
 			expect(parent.getSupermemorySessionState()?.lastRecallSnippet).toBeUndefined();
+			// The next turn still names the delivered block, so a racing prompt rebuild cannot leave two copies.
+			const next = await supermemoryBackend.beforeAgentStartPrompt!(parent as never, "third", undefined);
+			expect(next?.replaces).toBe(first?.context);
 		});
 	});
 });

@@ -2238,77 +2238,86 @@ describe("AgentSession message pipeline", () => {
 		expect(contexts[1]!.systemPrompt).toEqual(firstSystemPrompt);
 	});
 
-	it("keeps one copy of a per-turn memory block that replaces the previous one, even when the base is not rebuilt", async () => {
-		const api = "test-per-turn-memory-replacement";
-		const contexts: Context[] = [];
-		let turn = 1;
-		const block = (n: number) => `<recall>turn ${n}</recall>`;
-		const fakeBackend: MemoryBackend = {
-			id: "supermemory",
-			async start() {},
-			async buildDeveloperInstructions() {
-				return "static memory instructions";
-			},
-			async clear() {},
-			async enqueue() {},
-			async beforeAgentStartPrompt() {
-				const n = turn;
-				return {
-					context: block(n),
-					replaces: n > 1 ? block(n - 1) : undefined,
-					commit: () => {
-						turn = n + 1;
-						return true;
-					},
-				};
-			},
-		};
-		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
-		registerCustomApi(api, (_model, context) => {
-			contexts.push(context);
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage("ok");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
+	it.each([false, true])(
+		"keeps one copy of a per-turn memory block that replaces the previous one, even when the base is not rebuilt (append-only %p)",
+		async appendOnly => {
+			const api = `test-per-turn-memory-replacement-${appendOnly}`;
+			const contexts: Context[] = [];
+			let turn = 1;
+			const block = (n: number) => `<recall>turn ${n}</recall>`;
+			const fakeBackend: MemoryBackend = {
+				id: "supermemory",
+				async start() {},
+				async buildDeveloperInstructions() {
+					return "static memory instructions";
+				},
+				async clear() {},
+				async enqueue() {},
+				async beforeAgentStartPrompt() {
+					const n = turn;
+					return {
+						context: block(n),
+						replaces: n > 1 ? block(n - 1) : undefined,
+						commit: () => {
+							turn = n + 1;
+							return true;
+						},
+					};
+				},
+			};
+			vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+			registerCustomApi(api, (_model, context) => {
+				contexts.push(context);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("ok");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
 			});
-			return stream;
-		});
-		const model = buildModel({
-			id: "local-model",
-			name: "Local Model",
-			api,
-			provider: "ollama",
-			baseUrl: "http://127.0.0.1:11434",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
-		const agent = new Agent({
-			initialState: { model, systemPrompt: ["base", "static memory instructions"], messages: [], tools: [] },
-		});
-		const session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-			// After the first recall the rebuild fails, so later turns compose onto the promoted base.
-			rebuildSystemPrompt: async () => {
-				if (turn > 1) throw new Error("rebuild failed");
-				return { systemPrompt: ["base", "static memory instructions"] };
-			},
-		});
-		sessions.push(session);
+			const model = buildModel({
+				id: "local-model",
+				name: "Local Model",
+				api,
+				provider: "ollama",
+				baseUrl: "http://127.0.0.1:11434",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			} as ModelSpec<Api>) as Model<Api>;
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["base", "static memory instructions"], messages: [], tools: [] },
+			});
+			if (appendOnly) agent.setAppendOnlyContext(new AppendOnlyContextManager());
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"provider.appendOnlyContext": appendOnly ? "on" : "off",
+				}),
+				modelRegistry: createModelRegistryStub() as never,
+				// After the first recall the rebuild fails, so later turns compose onto the promoted base.
+				rebuildSystemPrompt: async () => {
+					if (turn > 1) throw new Error("rebuild failed");
+					return { systemPrompt: ["base", "static memory instructions"] };
+				},
+			});
+			sessions.push(session);
 
-		await session.sendUserMessage("first");
-		await session.sendUserMessage("second");
-		await session.sendUserMessage("third");
+			await session.sendUserMessage("first");
+			await session.sendUserMessage("second");
+			await session.sendUserMessage("third");
 
-		expect(contexts).toHaveLength(3);
-		expect(contexts[2]!.systemPrompt).toEqual(["base", "static memory instructions", block(3)]);
-	});
+			expect(contexts).toHaveLength(3);
+			expect(contexts.map(context => context.systemPrompt)).toEqual(
+				[1, 2, 3].map(n => ["base", "static memory instructions", block(n)]),
+			);
+		},
+	);
 
 	it("delivers a memory note after its user message, persisted once and replayed in the prefix", async () => {
 		const api = "test-memory-note-delivery";
