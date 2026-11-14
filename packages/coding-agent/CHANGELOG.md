@@ -36,6 +36,7 @@
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
 - A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- Resuming a session or reviving a subagent that last ran on a `retry.fallbackChains` entry with a thinking suffix (e.g. `:xhigh`) now restores the primary model at its own thinking level instead of keeping the fallback entry's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273))
 
 ## [18.20.0] - 2026-11-12
 
