@@ -133,6 +133,7 @@ describe("autoresearch before_agent_start handler", () => {
 
 		const event: BeforeAgentStartEvent = {
 			type: "before_agent_start",
+			reason: "prompt",
 			prompt: "kick off",
 			systemPrompt: ["alpha block", "beta block"],
 		};

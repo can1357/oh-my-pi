@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
@@ -633,6 +634,56 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(await authStorage.keys.get(PROVIDER, "cyber-policy")).not.toBe(first);
 	});
 
+	test.each([
+		{ usageLimit: false, waitForSibling: undefined },
+		{ usageLimit: false, waitForSibling: false },
+		{ usageLimit: true, waitForSibling: undefined },
+		{ usageLimit: true, waitForSibling: false },
+	])(
+		"records blocks with usageLimit=$usageLimit and waitForSibling=$waitForSibling",
+		async ({ usageLimit, waitForSibling }) => {
+			if (!authStorage) throw new Error("test setup failed");
+			registerProvider();
+			const now = Date.now();
+			vi.spyOn(Date, "now").mockReturnValue(now);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			await authStorage.credentials.set(PROVIDER, [
+				{ type: "oauth", access: "blocked-A", refresh: "ref-A", expires: farExpiry() },
+				{ type: "oauth", access: "denied-B", refresh: "ref-B", expires: farExpiry() },
+			]);
+			const rows = authStorage.credentials.list(PROVIDER);
+			authStorage.blocks.upsert({
+				credentialId: rows[0]!.id,
+				providerKey: `${PROVIDER}:oauth`,
+				blockScope: "account-policy",
+				blockedUntilMs: now + 2_000,
+			});
+			const sessionId = "optional-sibling-wait";
+			const key = await authStorage.keys.get(PROVIDER, sessionId);
+			expect(key).toBe("denied-B");
+			const rotation = await authStorage.limits.rotate(PROVIDER, sessionId, {
+				error: usageLimit
+					? usageLimitError()
+					: "This content was flagged for possible cybersecurity risk. (code=cyber_policy)",
+				waitForSibling,
+			});
+			if (waitForSibling === false) {
+				expect(waitSpy).not.toHaveBeenCalled();
+				expect(rotation).toEqual({ switched: false });
+			} else {
+				expect(waitSpy).toHaveBeenCalledTimes(1);
+				expect(rotation).toEqual({ switched: true, afterSiblingWait: true });
+			}
+			expect(authStorage.blocks.list([rows[1]!.id])).toContainEqual(
+				expect.objectContaining({
+					credentialId: rows[1]!.id,
+					blockScope: usageLimit ? "" : "account-policy",
+					blockedUntilMs: expect.any(Number),
+				}),
+			);
+		},
+	);
+
 	test("Codex ChatGPT model denial blocks only that model and rotates to a sibling", async () => {
 		if (!store) throw new Error("test setup failed");
 		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
@@ -712,6 +763,158 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			}),
 		).toBe("daybreak-denied");
 	});
+
+	test("a sibling refused the requested model does not pace a usage-limit retry", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await codexStorage.credentials.set(
+			CODEX_PROVIDER,
+			["spent", "refused-short", "refused-quota", "quota-only"].map(access => ({
+				type: "oauth" as const,
+				access,
+				refresh: `ref-${access}`,
+				expires: farExpiry(),
+				accountId: `account-${access}`,
+			})),
+		);
+		const rows = new Map(
+			store
+				.listAuthCredentials(CODEX_PROVIDER)
+				.flatMap(row => (row.credential.type === "oauth" ? [[row.credential.access, row.id] as const] : [])),
+		);
+		const idOf = (access: string): number => {
+			const id = rows.get(access);
+			if (id === undefined) throw new Error(`missing credential ${access}`);
+			return id;
+		};
+		const providerKey = `${CODEX_PROVIDER}:oauth`;
+		const modelPolicyScope = `model-policy:${DAYBREAK_MODEL}`;
+		const now = Date.now();
+		const quotaOnlyUntil = now + 2 * 60 * 60_000;
+		// A model refusal outlives any block expiry, including a shorter quota
+		// block the same account also holds; only the quota-only sibling recovers.
+		for (const block of [
+			{ access: "refused-short", blockScope: modelPolicyScope, blockedUntilMs: now + 60_000 },
+			{ access: "refused-quota", blockScope: modelPolicyScope, blockedUntilMs: now + 60_000 },
+			{ access: "refused-quota", blockScope: "chat", blockedUntilMs: now + 30 * 60_000 },
+			{ access: "quota-only", blockScope: "chat", blockedUntilMs: quotaOnlyUntil },
+		]) {
+			codexStorage.blocks.upsert({
+				credentialId: idOf(block.access),
+				providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: block.blockedUntilMs,
+			});
+		}
+
+		const mark = await codexStorage.limits.markReached(CODEX_PROVIDER, "spent-account", {
+			credentialId: idOf("spent"),
+			modelId: DAYBREAK_MODEL,
+			retryAfterMs: 3 * 24 * 60 * 60_000,
+		});
+
+		expect(mark.switched).toBe(false);
+		expect(mark.retryAtMs).toBe(quotaOnlyUntil);
+	});
+
+	test.each([
+		["claude-mythos-5-2", "claude-opus-5-5"],
+		["CLAUDE-MYTHOS-5-2", "claude-mythos-5-2"],
+	])(
+		"Anthropic model 404 for %s blocks only that exact model and rotates to a sibling",
+		async (modelId, availableModelId) => {
+			if (!store?.listCredentialBlocks) throw new Error("test setup lacks persisted credential blocks");
+			const previousApiKey = process.env.ANTHROPIC_API_KEY;
+			const previousOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+			delete process.env.ANTHROPIC_API_KEY;
+			delete process.env.ANTHROPIC_OAUTH_TOKEN;
+			const networkRequests: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(
+					async (input: string | URL | Request) => {
+						networkRequests.push(input instanceof Request ? input.url : String(input));
+						throw new Error("OAuth refresh or network request must not run for a model 404");
+					},
+					{ preconnect: fetch.preconnect },
+				),
+			);
+			try {
+				const anthropicStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+				const sessionId = "anthropic-model-policy";
+				await anthropicStorage.credentials.set(
+					"anthropic",
+					["denied", "sibling"].map(suffix => ({
+						type: "oauth" as const,
+						access: `sk-ant-oat01-${suffix}`,
+						refresh: `test-refresh-${suffix}`,
+						expires: farExpiry(),
+						accountId: `account-${suffix}`,
+						orgId: `org-${suffix}`,
+						email: `${suffix}@example.test`,
+					})),
+				);
+				const first = await anthropicStorage.keys.get("anthropic", sessionId, { modelId });
+				expect(first).toBe("sk-ant-oat01-denied");
+				const denial = new ProviderHttpError(
+					`404 ${JSON.stringify({
+						type: "error",
+						error: { type: "not_found_error", message: `model: ${modelId}` },
+					})}`,
+					404,
+					{ code: "not_found_error" },
+				);
+				const rows = store.listAuthCredentials("anthropic");
+				const rowIds = rows.map(row => row.id);
+				const sticky = store.getCache(`session:sticky:anthropic:${sessionId}`);
+				expect(
+					await anthropicStorage.limits.rotate("anthropic", sessionId, { error: denial, apiKey: first }),
+				).toEqual({ switched: false });
+				expect(
+					await anthropicStorage.limits.rotate("anthropic", sessionId, {
+						error: denial,
+						modelId: "claude-opus-5-5",
+						apiKey: first,
+					}),
+				).toEqual({ switched: false });
+				expect(store.listCredentialBlocks(rowIds)).toEqual([]);
+				expect(store.getCache(`session:sticky:anthropic:${sessionId}`)).toBe(sticky);
+				expect(await anthropicStorage.keys.get("anthropic", sessionId, { modelId })).toBe(first);
+
+				const rotated = await anthropicStorage.limits.rotate("anthropic", sessionId, {
+					error: denial,
+					modelId,
+					apiKey: first,
+				});
+				expect(rotated.switched).toBe(true);
+				expect(await anthropicStorage.keys.get("anthropic", sessionId, { modelId })).toBe("sk-ant-oat01-sibling");
+				expect(
+					store.listCredentialBlocks(rowIds).map(block => ({
+						credentialId: block.credentialId,
+						providerKey: block.providerKey,
+						blockScope: block.blockScope,
+					})),
+				).toEqual([
+					{
+						credentialId: rows[0]!.id,
+						providerKey: "anthropic:oauth",
+						blockScope: `model-policy:${modelId}`,
+					},
+				]);
+				const otherModelStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+				await otherModelStorage.credentials.reload();
+				expect(
+					await otherModelStorage.keys.get("anthropic", "other-anthropic-model", { modelId: availableModelId }),
+				).toBe(first);
+				expect(await anthropicStorage.credentials.listDisabled("anthropic")).toEqual([]);
+				expect(networkRequests).toEqual([]);
+			} finally {
+				if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+				else process.env.ANTHROPIC_API_KEY = previousApiKey;
+				if (previousOAuthToken === undefined) delete process.env.ANTHROPIC_OAUTH_TOKEN;
+				else process.env.ANTHROPIC_OAUTH_TOKEN = previousOAuthToken;
+			}
+		},
+	);
 
 	test("Cursor plan denial blocks only that model and rotates to a sibling", async () => {
 		if (!store) throw new Error("test setup failed");

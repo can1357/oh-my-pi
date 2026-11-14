@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
-import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,10 +12,11 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
+	INTERRUPTED_TURN_ERROR,
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const zeroUsage = {
 	input: 0,
@@ -100,6 +101,17 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 	) {
 		const sessionManager = SessionManager.inMemory();
 		for (const message of persisted) sessionManager.appendMessage(message);
+		return open(model, sessionManager, tools, responses, evalToolSession);
+	}
+
+	/** A session over `sessionManager`'s transcript, its model answering from `responses`. */
+	function open(
+		model: Model,
+		sessionManager: SessionManager,
+		tools: AgentTool[],
+		responses: MockHandler[],
+		evalToolSession?: ToolSession,
+	) {
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
@@ -202,6 +214,110 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		expect(mock.calls.length).toBe(1);
 		const last = session.agent.state.messages.at(-1);
 		expect(last?.role === "assistant" && last.content).toContainEqual({ type: "text", text: "done after restore" });
+	});
+
+	it("goes on with a request its owner's shutdown cut off, not with one a normal quit stopped", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const stops: Array<{ label: string; stop: (session: AgentSession) => Promise<void>; restored: boolean }> = [
+			// Lifecycle teardown of a running revived agent: the dispose itself cuts the request off.
+			{ label: "process-exit dispose", stop: s => s.dispose({ reason: postmortem.Reason.EXIT }), restored: true },
+			// Task executor on manager shutdown: the run aborts first, then its session is released.
+			{
+				label: "shutdown abort, then process-exit dispose",
+				stop: async s => {
+					await s.abort({ reason: INTERRUPTED_TURN_ERROR });
+					await s.dispose({ reason: postmortem.Reason.EXIT });
+				},
+				restored: true,
+			},
+			{ label: "normal quit", stop: s => s.dispose(), restored: false },
+		];
+		for (const [index, { label, stop, restored }] of stops.entries()) {
+			const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), `shutdown-${index}`));
+			const requested = Promise.withResolvers<void>();
+			const first = open(
+				model,
+				sessionManager,
+				[],
+				[
+					() => {
+						requested.resolve();
+						return { delayMs: 60_000, content: ["never streamed"] };
+					},
+				],
+			).session;
+			const running = first.prompt("work").catch(() => {});
+			await requested.promise;
+			await stop(first);
+			await running;
+			session = undefined;
+
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("Expected a persisted session file");
+			const { session: second, mock } = open(
+				model,
+				await SessionManager.open(file),
+				[],
+				[{ content: ["done after restore"], stopReason: "stop" }],
+			);
+			expect({ label, restored: await second.restoreInterruptedTurn() }).toEqual({ label, restored });
+			await second.waitForIdle();
+			expect({ label, calls: mock.calls.length }).toEqual({ label, calls: restored ? 1 : 0 });
+			await second.dispose();
+			session = undefined;
+		}
+	});
+
+	it("goes on again with a restored turn a second shutdown cut off", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		let started = Promise.withResolvers<void>();
+		const hang: AgentTool<typeof probeSchema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: probeSchema,
+			async execute(_toolCallId, _params, signal) {
+				started.resolve();
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				throw new Error("probe aborted");
+			},
+		};
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "shutdown-twice"));
+		const file = sessionManager.getSessionFile();
+		if (!file) throw new Error("Expected a persisted session file");
+		const first = open(
+			model,
+			sessionManager,
+			[hang as AgentTool],
+			[{ content: [{ type: "toolCall", name: "probe", arguments: { value: "again" } }] }],
+		).session;
+		const running = first.prompt("run the probe").catch(() => {});
+		await started.promise;
+		await first.dispose({ reason: postmortem.Reason.EXIT });
+		await running;
+
+		// The restored turn replays the cut-off call (a scheduled continuation), and the next shutdown cuts it off too.
+		started = Promise.withResolvers<void>();
+		const second = open(model, await SessionManager.open(file), [hang as AgentTool], []).session;
+		await expect(second.restoreInterruptedTurn()).resolves.toBe(true);
+		await started.promise;
+		await second.dispose({ reason: postmortem.Reason.EXIT });
+
+		const executed: string[] = [];
+		const { session: third, mock } = open(
+			model,
+			await SessionManager.open(file),
+			[probeTool(executed)],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+		);
+		await expect(third.restoreInterruptedTurn()).resolves.toBe(true);
+		await third.waitForIdle();
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
 	});
 
 	it("leaves a turn the user interrupted, and one that finished, as they are", async () => {

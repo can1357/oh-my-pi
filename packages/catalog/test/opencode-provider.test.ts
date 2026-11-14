@@ -30,6 +30,49 @@ const LIVE_FREE_MODEL_IDS = [
 
 const LIVE_PAID_MODEL_IDS = ["claude-opus-4-8", "gpt-5.5"] as const;
 
+test.each([
+	["opencode-go", "https://opencode.ai/zen/go/v1"],
+	["opencode-zen", "https://opencode.ai/zen/v1"],
+])("%s offers only Step 5 Preview's documented reasoning efforts (#14987)", (provider, baseUrl) => {
+	const model = buildModel({
+		id: "step-5-preview-free",
+		name: "Step 5 Preview Free",
+		api: "openai-completions",
+		provider,
+		baseUrl,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	});
+
+	expect(model.thinking?.mode).toBe("effort");
+	expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+});
+
+test.each([
+	["opencode-go", "https://opencode.ai/zen/go"],
+	["opencode-zen", "https://opencode.ai/zen"],
+])("%s serves Claude Haiku 5.5 with Anthropic's low..max ladder and explicit Off (#19128)", (provider, baseUrl) => {
+	const model = buildModel({
+		id: "claude-haiku-5-5",
+		name: "Claude Haiku 5.5",
+		api: "anthropic-messages",
+		provider,
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	});
+
+	expect(model.thinking?.mode).toBe("anthropic-adaptive");
+	expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+	expect(model.compat?.disabledThinking).toBe("disabled");
+});
+
 function modelListResponse(ids: readonly string[]): Response {
 	return Response.json({
 		object: "list",
@@ -316,6 +359,44 @@ describe("Shared models.dev catalog fallback", () => {
 			});
 			expect(resolved.source).toBe("bundled");
 			expect(resolved.updatedAt).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("sanitizes an authoritative resolver's fallback cache when additive mode is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-additive-authoritative-cache-"));
+		try {
+			const bundledModel = getBundledModels("zai")[0];
+			if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
+			const cachedOverride = { ...bundledModel, name: "Untrusted cached override", contextWindow: 1, maxTokens: 1 };
+			const cacheDbPath = path.join(tempDir, "models.db");
+			const legacyOptions = {
+				providerId: "zai" as const,
+				cacheDbPath,
+				staticModels: [bundledModel],
+				dynamicModelsAuthoritative: true,
+				// The authoritative endpoint fails, so the snapshot is the
+				// non-authoritative models.dev merge carrying the override.
+				fetchDynamicModels: async () => {
+					throw new Error("endpoint down");
+				},
+				modelsDev: {
+					fetch: async () => [cachedOverride],
+					map: (payload: Array<typeof cachedOverride>) => payload,
+				},
+			};
+			await resolveProviderModels(legacyOptions, "online");
+
+			const additiveOptions = { ...legacyOptions, modelsDev: { ...legacyOptions.modelsDev, additiveOnly: true } };
+			for (const strategy of ["online-if-uncached", "offline"] as const) {
+				const resolved = await resolveProviderModels(additiveOptions, strategy);
+				expect(resolved.models.find(model => model.id === bundledModel.id)).toMatchObject({
+					name: bundledModel.name,
+					contextWindow: bundledModel.contextWindow,
+					maxTokens: bundledModel.maxTokens,
+				});
+			}
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -772,57 +853,69 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
-	test("routes live Go Argon to native Gemini with supported thinking levels (#15722)", async () => {
-		const id = "gemini-4-argon-contributor";
+	test("routes both Go Argon IDs to native Gemini with supported thinking levels (#17031)", async () => {
+		const ids = ["gemini-4-argon", "gemini-4-argon-contributor"] as const;
 		const baseUrl = "https://opencode.ai/inference/go/v1";
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
-		expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({ api: "google-generative-ai", baseUrl });
-
 		let requestedUrl = "";
 		const options = opencodeGoModelManagerOptions({
 			apiKey: "test-key",
 			fetch: async input => {
 				requestedUrl = String(input);
-				return modelListResponse([id]);
+				return modelListResponse(ids);
 			},
 		});
-		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
-		if (!spec) throw new Error("Go did not discover Argon");
-		const model = buildModel(spec);
+		const specs = await options.fetchDynamicModels?.();
 		expect(requestedUrl).toBe(`${baseUrl}/models`);
-		expect(model).toMatchObject({
-			api: "google-generative-ai",
-			baseUrl,
-			reasoning: true,
-			input: ["text", "image"],
-			contextWindow: 1_048_576,
-			maxTokens: 65_536,
-			thinking: {
-				mode: "google-level",
-				efforts: [Effort.Low, Effort.Medium, Effort.High],
-				requiresEffort: true,
-			},
-		});
-		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		for (const id of ids) {
+			expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({ api: "google-generative-ai", baseUrl });
+			const spec = specs?.find(model => model.id === id);
+			if (!spec) throw new Error(`Go did not discover ${id}`);
+			expect(buildModel(spec)).toMatchObject({
+				api: "google-generative-ai",
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 1_048_576,
+				maxTokens: 65_536,
+				thinking: {
+					mode: "google-level",
+					efforts: [Effort.Low, Effort.Medium, Effort.High],
+					requiresEffort: true,
+				},
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		}
 	});
 
-	test("routes live Zen Argon to the native Google endpoint (#15977)", async () => {
-		const id = "gemini-4-argon";
+	test("routes live Zen Gemini 4 models to the native Google endpoint with thinking levels (#15977)", async () => {
+		const efforts: Record<string, string[]> = {
+			"gemini-4-argon": ["low", "medium", "high"],
+			"gemini-4-carbon": ["low", "medium", "high"],
+			"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+		};
+		const ids = Object.keys(efforts);
 		const baseUrl = "https://opencode.ai/inference/google/v1beta";
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
-		expect(descriptor?.resolveApi?.(id, { tool_call: true, provider: { npm: "@ai-sdk/google" } })).toEqual({
-			api: "google-generative-ai",
-			baseUrl,
-		});
-
 		const options = opencodeZenModelManagerOptions({
 			apiKey: "test-key",
-			fetch: async () => modelListResponse([id]),
+			fetch: async () => modelListResponse(ids),
 		});
-		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
-		if (!spec) throw new Error("Zen did not discover Argon");
-		expect(spec).toMatchObject({ api: "google-generative-ai", baseUrl });
-		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		const discovered = await options.fetchDynamicModels?.();
+		for (const id of ids) {
+			expect(descriptor?.resolveApi?.(id, { tool_call: true, provider: { npm: "@ai-sdk/google" } })).toEqual({
+				api: "google-generative-ai",
+				baseUrl,
+			});
+			const spec = discovered?.find(model => model.id === id);
+			if (!spec) throw new Error(`Zen did not discover ${id}`);
+			expect(spec).toMatchObject({ api: "google-generative-ai", baseUrl });
+			expect(buildModel(spec)).toMatchObject({
+				reasoning: true,
+				thinking: { mode: "google-level", efforts: efforts[id] },
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		}
 	});
 
 	test("routes opencode-go muse-spark-1.2 to the responses API (#8957)", () => {

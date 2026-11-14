@@ -5,6 +5,72 @@
 ### Fixed
 
 - Daily charts (7d, 30d, 90d, All, Costs and Gain) now group usage by your local calendar day instead of the UTC day, so evening work west of UTC no longer shows under the previous date ([#16605](https://github.com/can1357/oh-my-pi/pull/16605) by [@GarrettShrop](https://github.com/GarrettShrop))
+- Fixed the `omp stats` Traces tab leaving every background job open to the end of the session, which hid all idle time and stretched each turn bar across the whole timeline ([#19115](https://github.com/can1357/oh-my-pi/pull/19115) by [@will-bogusz](https://github.com/will-bogusz))
+- The Frustration page's per-model table counts every answered message again; since agent notices began landing before replies, about half went uncounted ([#19114](https://github.com/can1357/oh-my-pi/pull/19114) by [@will-bogusz](https://github.com/will-bogusz))
+- The stats dashboard keeps serving its other pages and the Live status while the Spotlight view rebuilds, instead of freezing for the seconds each rebuild after a sync takes ([#19118](https://github.com/can1357/oh-my-pi/pull/19118) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Spotlight stats count a `;`/`,` path `read` once with all its parts, and count a later read of any of its files as a re-read or a needed line ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.9] - 2026-11-11
+
+### Added
+
+- The Spotlight dashboard's Overhead card breaks failed results down by cause (not signed in, timeout, rate limited, HTTP status, …) and, when results failed for lack of a Stencil sign-in, says how to sign in ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed `omp stats` re-parsing every unchanged session after a filesystem's device number changes, such as across ZFS remounts ([#14736](https://github.com/can1357/oh-my-pi/issues/14736)) ([#18536](https://github.com/can1357/oh-my-pi/pull/18536) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
+
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+- Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
+
+## [18.16.0] - 2026-11-02
+
+### Fixed
+
+- Fixed Stats staying at an empty snapshot when the final ingest update arrives during an in-flight dashboard request ([#17754](https://github.com/can1357/oh-my-pi/issues/17754)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `setStatsCloseHandler`: while a host sets one, the dashboard shows a Close button in its top bar and closes on Esc or Ctrl+C (with no text selected), for hosts that show it in place of their terminal
+
+### Fixed
+
+- Fixed tool error rates counting skipped tool calls that were explicitly marked as not executed ([#17463](https://github.com/can1357/oh-my-pi/pull/17463) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.14.0] - 2026-10-29
+
+### Changed
+
+- Improved `omp stats` session synchronization performance by approximately 2–5× on large histories. The first sync after upgrading may take up to a minute while the stats database is optimized.
+
+### Fixed
+
+- Fixed `/stats` and `omp stats` failing when another dashboard was syncing sessions or the configured port was already in use; busy dashboards are now reused, and a free port is selected when necessary.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
 
 ## [18.12.0] - 2026-10-17
 

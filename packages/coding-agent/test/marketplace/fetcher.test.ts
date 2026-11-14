@@ -167,6 +167,23 @@ describe("parseMarketplaceCatalog", () => {
 		expect(catalog.plugins[0].name).toBe("p1");
 	});
 
+	it("keeps bare-name sources only when metadata.pluginRoot is set", () => {
+		const plugins = [
+			{ name: "bare", source: "formatter" },
+			{ name: "nested", source: "team-a/formatter" },
+		];
+		const withRoot = parseMarketplaceCatalog(
+			JSON.stringify({ name: "m", owner: { name: "x" }, metadata: { pluginRoot: "./plugins" }, plugins }),
+			"/f.json",
+		);
+		expect(withRoot.plugins.map(plugin => plugin.name)).toEqual(["bare"]);
+		const withoutRoot = parseMarketplaceCatalog(
+			JSON.stringify({ name: "m", owner: { name: "x" }, plugins }),
+			"/f.json",
+		);
+		expect(withoutRoot.plugins).toHaveLength(0);
+	});
+
 	it("throws on invalid JSON", () => {
 		expect(() => parseMarketplaceCatalog("{not json", "/f.json")).toThrow(
 			"Failed to parse marketplace catalog at /f.json",
@@ -259,6 +276,40 @@ describe("fetchMarketplace", () => {
 			await expect(fetchMarketplace("kubeshark/kubeshark", tmpDir)).rejects.toThrow(
 				'Cloned repository https://github.com/kubeshark/kubeshark.git: Missing or invalid field "owner" in catalog: .claude-plugin/marketplace.json (source: kubeshark/kubeshark)',
 			);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
+
+	it("removes a partial checkout when cloning fails", async () => {
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+			fs.writeFileSync(path.join(targetDir, "partial"), "unfinished");
+			throw new Error("clone failed");
+		});
+		try {
+			await expect(fetchMarketplace("owner/repo", tmpDir)).rejects.toThrow("clone failed");
+			expect(fs.readdirSync(tmpDir)).toEqual([]);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
+
+	it("keeps simultaneous clone checkouts isolated", async () => {
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+			fs.mkdirSync(path.join(targetDir, ".omp-plugin"));
+			fs.writeFileSync(
+				path.join(targetDir, ".omp-plugin", "marketplace.json"),
+				JSON.stringify({ name: "test-marketplace", owner: { name: "Test" }, plugins: [] }),
+			);
+		});
+		try {
+			const [first, second] = await Promise.all([
+				fetchMarketplace("owner/repo", tmpDir),
+				fetchMarketplace("owner/repo", tmpDir),
+			]);
+			expect(first.clonePath).not.toBe(second.clonePath);
+			expect(fs.existsSync(path.join(first.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
+			expect(fs.existsSync(path.join(second.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
 		} finally {
 			cloneSpy.mockRestore();
 		}

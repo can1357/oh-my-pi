@@ -12,6 +12,8 @@ import {
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
 import { LspMuxServer } from "../src/lsp/mux/server";
+import { FileChangeType, type FileEvent } from "../src/lsp/types";
+import { fileToUri } from "../src/lsp/utils";
 
 interface RpcMessage {
 	jsonrpc: "2.0";
@@ -30,12 +32,8 @@ interface FakeState {
 	didChange: Record<string, number[]>;
 	didClose: string[];
 	notifications: string[];
-}
-
-interface PublishDiagnosticsParams {
-	uri: string;
-	version?: number;
-	diagnostics: Array<{ message: string; severity: number }>;
+	workspaceFolders: string[];
+	watchedFileChanges: FileEvent[];
 }
 
 class MuxTestClient {
@@ -173,15 +171,6 @@ async function state(client: MuxTestClient): Promise<FakeState> {
 	return client.request<FakeState>("test/state");
 }
 
-async function pollUntil(check: () => Promise<boolean>, description: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
-	while (Date.now() < deadline) {
-		if (await check()) return;
-		await Bun.sleep(25);
-	}
-	throw new Error(`Timed out waiting for ${description}`);
-}
-
 describe("LspMuxServer", () => {
 	let server: LspMuxServer;
 	let tmpDir: string;
@@ -223,14 +212,6 @@ describe("LspMuxServer", () => {
 		});
 	});
 
-	it("terminates a language server that declares an oversized response", async () => {
-		connectParams.args = ["run", path.join(import.meta.dir, "fixtures", "malformed-jsonrpc-peer.ts")];
-		const { client } = await link();
-		await expect(withTimeout(initialize(client), "invalid server frame")).rejects.toThrow("Mux connection closed");
-		await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "malformed server exit");
-		expect(server.sessionCount).toBe(0);
-	});
-
 	it("spawns one server per concurrent link", async () => {
 		const first = await link();
 		const second = await link();
@@ -268,77 +249,6 @@ describe("LspMuxServer", () => {
 		expect(two).toEqual({ owner: "second" });
 	}, 10_000);
 
-	it("isolates open-document overlays between concurrent sessions", async () => {
-		const first = await link();
-		const second = await link();
-		expect(second.connected.pid).not.toBe(first.connected.pid);
-		await Promise.all([initialize(first.client), initialize(second.client)]);
-		const uri = "file:///shared.ts";
-		first.client.notify("textDocument/didOpen", {
-			textDocument: { uri, languageId: "typescript", version: 1, text: "first" },
-		});
-		second.client.notify("textDocument/didOpen", {
-			textDocument: { uri, languageId: "typescript", version: 1, text: "second" },
-		});
-
-		await pollUntil(async () => {
-			const [seenByFirst, seenBySecond] = await Promise.all([
-				first.client.request<string | null>("test/documentText", { uri }),
-				second.client.request<string | null>("test/documentText", { uri }),
-			]);
-			return seenByFirst === "first" && seenBySecond === "second";
-		}, "session-specific document contents");
-	}, 10_000);
-
-	it("replays cached diagnostics when an idle server is reused", async () => {
-		const first = await link();
-		await initialize(first.client);
-		const uri = "file:///diagnostics.ts";
-		first.client.notify("textDocument/didOpen", {
-			textDocument: { uri, languageId: "typescript", version: 1, text: "x" },
-		});
-		const publication = await first.client.nextNotification<PublishDiagnosticsParams>(
-			"textDocument/publishDiagnostics",
-		);
-		expect(publication).toMatchObject({
-			uri,
-			version: 1,
-			diagnostics: [{ message: "fake", severity: 2, range: expect.any(Object) }],
-		});
-
-		first.client.destroy();
-		await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
-		const second = await link();
-		expect(second.connected.spawned).toBe(false);
-		expect(second.connected.pid).toBe(first.connected.pid);
-		await initialize(second.client);
-		const replay = await second.client.nextNotification<PublishDiagnosticsParams>("textDocument/publishDiagnostics");
-		expect(replay).toMatchObject({
-			uri,
-			diagnostics: [{ message: "fake", severity: 2, range: expect.any(Object) }],
-		});
-	}, 10_000);
-
-	it("does not hand an idle server to a link with other initialization options", async () => {
-		const first = await link({ ...connectParams, initializationOptions: { probe: "A" } });
-		await initialize(first.client, 424242, { probe: "A" });
-		first.client.destroy();
-		await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
-
-		// A reused server answers `initialize` from cache, so B must get its own process.
-		const second = await link({ ...connectParams, initializationOptions: { probe: "B" } });
-		expect(second.connected.spawned).toBe(true);
-		expect(second.connected.pid).not.toBe(first.connected.pid);
-		await initialize(second.client, 424242, { probe: "B" });
-		expect((await state(second.client)).initializationOptions).toEqual({ probe: "B" });
-
-		const third = await link({ ...connectParams, initializationOptions: { probe: "A" } });
-		expect(third.connected.spawned).toBe(false);
-		expect(third.connected.pid).toBe(first.connected.pid);
-		await initialize(third.client, 424242, { probe: "A" });
-		expect((await state(third.client)).initializationOptions).toEqual({ probe: "A" });
-	}, 10_000);
-
 	it("intercepts shutdown and exit for only the calling session", async () => {
 		const first = await link();
 		const second = await link();
@@ -371,80 +281,98 @@ describe("LspMuxServer", () => {
 		expect(replacement.connected.pid).not.toBe(second.connected.pid);
 	}, 10_000);
 
-	it("survives a language server that exits while documents are open", async () => {
-		// Regression: session teardown wrote didClose to the exited child's
-		// stdin; that rejection escaped #closeSession (invoked via `void`
-		// from the connection close handler) and killed the whole daemon.
-		const { client } = await link();
-		await initialize(client);
-		const uri = "file:///crash.ts";
-		client.notify("textDocument/didOpen", {
-			textDocument: { uri, languageId: "typescript", version: 1, text: "x" },
-		});
-		await pollUntil(async () => (await state(client)).didOpen[uri] === 1, "didOpen to reach the server");
-		const closed = client.waitForClose();
-		client.notify(MUX_RESTART_METHOD);
-		await closed;
-		await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "exited server cleanup");
-		// The daemon itself must keep serving fresh sessions.
-		const fresh = await link();
-		await initialize(fresh.client);
-		expect(await fresh.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
-	}, 10_000);
-
-	it.skipIf(process.platform === "win32")(
-		"contains write failures when a language server stops reading stdin",
-		async () => {
-			// The server closes stdin, then sends a request (signalling stdin is closed) and stays
-			// alive, so tearing down the session's open document fails with EPIPE.
-			const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "workspace/applyEdit", params: {} });
-			connectParams.command = "sh";
-			connectParams.args = [
-				"-c",
-				'exec 0<&-; printf "%s" "$1"; exec sleep 30',
-				"sh",
-				`Content-Length: ${Buffer.byteLength(request)}\r\n\r\n${request}`,
-			];
-			const first = await link();
-			first.client.notify("textDocument/didOpen", {
-				textDocument: { uri: "file:///epipe.ts", languageId: "typescript", version: 1, text: "x" },
-			});
-			await first.client.nextNotification("workspace/applyEdit");
-			first.client.destroy();
-			await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
-			// Teardown must finish and release the server for reuse instead of rejecting mid-cleanup.
-			await pollUntil(async () => {
-				const next = await link();
-				next.client.destroy();
-				return next.connected.pid === first.connected.pid;
-			}, "idle server reuse");
-		},
-		10_000,
-	);
-
-	it("finishes orphan document closes before reusing a server", async () => {
+	it("removes the workspace folders a session added before reusing its server", async () => {
 		const first = await link();
 		await initialize(first.client);
-		const uris = Array.from({ length: 128 }, (_, index) => `file:///orphan-${index}.ts`);
-		for (const uri of uris) {
-			first.client.notify("textDocument/didOpen", {
-				textDocument: { uri, languageId: "typescript", version: 1, text: "orphan" },
-			});
-		}
-		await first.client.request("test/echo", { barrier: true });
+		const added = { uri: "file:///other-checkout", name: "other-checkout" };
+		first.client.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [] } });
+		expect((await state(first.client)).workspaceFolders).toEqual([added.uri]);
 		const firstClosed = first.client.waitForClose();
 		first.client.destroy();
 		await firstClosed;
 
 		const second = await link();
 		expect(second.connected.spawned).toBe(false);
-		const uri = uris.at(-1);
-		expect(uri).toBeDefined();
 		await initialize(second.client);
-		second.client.notify("textDocument/didOpen", {
-			textDocument: { uri, languageId: "typescript", version: 1, text: "replacement" },
+		expect((await state(second.client)).workspaceFolders).toEqual([]);
+	}, 10_000);
+
+	async function registerTsWatcher(client: MuxTestClient): Promise<void> {
+		await client.request("test/serverRequest", {
+			method: "client/registerCapability",
+			params: {
+				registrations: [
+					{
+						id: "ts-files",
+						method: "workspace/didChangeWatchedFiles",
+						registerOptions: { watchers: [{ globPattern: { baseUri: fileToUri(tmpDir), pattern: "**/*.ts" } }] },
+					},
+				],
+			},
 		});
-		await second.client.request("test/echo", { barrier: true });
-		expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
+	}
+
+	/** Link a client that hands watching to the mux, register `**\/*.ts`, and return once the watch reports a write. */
+	async function watchingClient(): Promise<MuxTestClient> {
+		const { client } = await link();
+		await client.request("initialize", {
+			...initializeParams(),
+			capabilities: { workspace: { didChangeWatchedFiles: { dynamicRegistration: true } } },
+		});
+		client.notify("initialized", {});
+		await registerTsWatcher(client);
+
+		// The watch opens shortly after the registration; write new files until one is reported.
+		const written = new Set<string>();
+		const deadline = Date.now() + 5_000;
+		for (let attempt = 0; ; attempt++) {
+			const created = path.join(tmpDir, `created-${attempt}.ts`);
+			await Bun.write(created, "export {};\n");
+			written.add(fileToUri(created));
+			await Bun.sleep(200);
+			const { watchedFileChanges } = await state(client);
+			if (watchedFileChanges.some(change => change.type === FileChangeType.Created && written.has(change.uri)))
+				return client;
+			if (Date.now() > deadline) throw new Error(`no Created among ${JSON.stringify(watchedFileChanges)}`);
+		}
+	}
+
+	it("watches the files a shared server registers when the client asked it to hand watching over", async () => {
+		await watchingClient();
+	}, 10_000);
+
+	it("forwards a client's own watched-file report once, without the watcher's echo", async () => {
+		const client = await watchingClient();
+		const own = path.join(tmpDir, "own.ts");
+		await Bun.write(own, "export {};\n");
+		client.notify("workspace/didChangeWatchedFiles", {
+			changes: [{ uri: fileToUri(own), type: FileChangeType.Created }],
+		});
+		// A later outside write proves the watcher has flushed past the client's own write.
+		const marker = path.join(tmpDir, "marker.ts");
+		await Bun.write(marker, "export {};\n");
+		const deadline = Date.now() + 5_000;
+		let changes: FileEvent[] = [];
+		while (!changes.some(change => change.uri === fileToUri(marker))) {
+			if (Date.now() > deadline) throw new Error(`marker never reported: ${JSON.stringify(changes)}`);
+			await Bun.sleep(100);
+			changes = (await state(client)).watchedFileChanges;
+		}
+		// Past the batch window: an echo would have landed by now.
+		await Bun.sleep(600);
+		changes = (await state(client)).watchedFileChanges;
+		expect(changes.filter(change => change.uri === fileToUri(own))).toEqual([
+			{ uri: fileToUri(own), type: FileChangeType.Created },
+		]);
+	}, 15_000);
+
+	it("leaves watching to a shared server whose client did not ask it to hand watching over", async () => {
+		const { client } = await link();
+		await initialize(client);
+		await registerTsWatcher(client);
+
+		await Bun.write(path.join(tmpDir, "created.ts"), "export {};\n");
+		await Bun.sleep(600);
+		expect((await state(client)).watchedFileChanges).toEqual([]);
 	}, 10_000);
 });

@@ -3,14 +3,12 @@
  *
  * Handles /mcp subcommands for managing MCP servers.
  */
-import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
-import { expandEnvVarsDeep } from "../../discovery/helpers";
 import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
@@ -18,8 +16,20 @@ import {
 	loadAllMCPConfigs,
 	MCPManager,
 	OAuthIssuerMismatchError,
-	type OAuthEndpoints,
 } from "../../mcp";
+import {
+	findMcpServerForAuth,
+	MCPOAuthCancelledError,
+	persistMcpOAuthResult,
+	probeMcpConnection,
+	raceAbortSignal,
+	reauthorizeMcpServer,
+	runMcpOAuthFlow,
+	stripMcpOAuthAuth,
+	withTimeout,
+	type McpOAuthFlowPresentation,
+	type OAuthFlowResult,
+} from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
@@ -31,38 +41,14 @@ import {
 	validateServerName,
 } from "../../mcp/config-writer";
 import {
-	lookupMcpOAuthCredentialForServer,
 	mcpOAuthCredentialIdsForServerUrl,
 	removeManagedMcpOAuthCredential,
 	removeManagedMcpOAuthCredentials,
 } from "../../mcp/oauth-credentials";
-import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "../../mcp/oauth-flow";
-import {
-	clearSmitheryApiKey,
-	createSmitheryCliAuthSession,
-	getSmitheryApiKey,
-	getSmitheryLoginUrl,
-	pollSmitheryCliAuthSession,
-	type SmitheryCliPollResponse,
-	saveSmitheryApiKey,
-} from "../../mcp/smithery-auth";
-import {
-	SmitheryRegistryError,
-	type SmitherySearchResult,
-	searchSmitheryRegistry,
-	toConfigName,
-} from "../../mcp/smithery-registry";
-import type {
-	MCPAuthChallenge,
-	MCPAuthConfig,
-	MCPConfigFile,
-	MCPServerConfig,
-	MCPServerConnection,
-} from "../../mcp/types";
+import type { MCPAuthChallenge, MCPConfigFile, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
 import { copyToClipboard } from "../../utils/clipboard";
-import { isTimeoutError } from "../../utils/fetch-timeout";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "@oh-my-pi/pi-tui/chrome/chat-block";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
@@ -80,6 +66,8 @@ import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
 const MCP_TEST_ESCAPE_GRACE_MS = 5_000;
+/** MCP OAuth Esc handlers mapped to the handler each one restores when its flow unwinds. */
+const mcpOAuthEscapeOriginals = new WeakMap<() => void, (() => void) | undefined>();
 
 /**
  * Hint block for an in-flight `/mcp test`. It remains active until settlement
@@ -95,84 +83,6 @@ class MutableHintBlock extends TranscriptBlock {
 
 	seal(): void {
 		this.#sealed = true;
-	}
-}
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string, onTimeout?: () => void): Promise<T> {
-	const { promise: timeoutPromise, reject } = Promise.withResolvers<T>();
-	const timer = setTimeout(() => {
-		onTimeout?.();
-		reject(new Error(message));
-	}, timeoutMs);
-	return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
-}
-function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal, createError: () => Error): Promise<T> {
-	if (signal.aborted) return Promise.reject(createError());
-
-	const aborted = Promise.withResolvers<never>();
-	const onAbort = (): void => aborted.reject(createError());
-	signal.addEventListener("abort", onAbort, { once: true });
-	return Promise.race([promise, aborted.promise]).finally(() => {
-		signal.removeEventListener("abort", onAbort);
-	});
-}
-
-type ActiveMCPOAuthFlow = {
-	cancel: (reason: string) => void;
-	completion: Promise<void>;
-	complete: () => void;
-};
-
-type MCPOAuthFlowCoordinator = {
-	active?: ActiveMCPOAuthFlow;
-	transition: Promise<void>;
-};
-
-const mcpOAuthFlowCoordinators = new WeakMap<object, MCPOAuthFlowCoordinator>();
-const MCP_OAUTH_SUPERSEDED_REASON = "MCP OAuth flow superseded by a new login";
-
-/**
- * Serialize MCP OAuth ownership across slash-command controller instances.
- * Interactive mode creates a new controller for every command, while the
- * manual-input manager remains stable for the session and is therefore the
- * lifecycle key.
- */
-async function claimMCPOAuthFlow(owner: object, cancel: (reason: string) => void): Promise<{ release: () => void }> {
-	let coordinator = mcpOAuthFlowCoordinators.get(owner);
-	if (!coordinator) {
-		coordinator = { transition: Promise.resolve() };
-		mcpOAuthFlowCoordinators.set(owner, coordinator);
-	}
-
-	const precedingTransition = coordinator.transition;
-	const transition = Promise.withResolvers<void>();
-	coordinator.transition = transition.promise;
-	await precedingTransition;
-
-	try {
-		const active = coordinator.active;
-		if (active) {
-			active.cancel(MCP_OAUTH_SUPERSEDED_REASON);
-			await active.completion;
-		}
-
-		const completion = Promise.withResolvers<void>();
-		const flow: ActiveMCPOAuthFlow = {
-			cancel,
-			completion: completion.promise,
-			complete: () => completion.resolve(),
-		};
-		coordinator.active = flow;
-		let released = false;
-		return {
-			release: () => {
-				if (released) return;
-				released = true;
-				if (coordinator.active === flow) coordinator.active = undefined;
-				flow.complete();
-			},
-		};
-	} finally {
-		transition.resolve();
 	}
 }
 
@@ -315,35 +225,6 @@ class McpConnectingBlock extends ChatBlock {
 	}
 }
 
-/**
- * Outcome of {@link MCPCommandController}'s OAuth handler.
- *
- * `credentialId` is deterministic per server URL when the URL was supplied, so
- * every profile resolves its own credential row under the same id. Refresh
- * material (token URL, client id/secret) is embedded in the stored credential;
- * the returned `clientId` may be folded into `mcp.json` for pre-auth reuse.
- * DCR-issued client secrets stay embedded in the stored credential and are
- * deliberately not surfaced here, so they cannot leak into config files.
- */
-interface OAuthFlowResult {
-	credentialId: string;
-	clientId?: string;
-	resource?: string;
-}
-
-/**
- * Thrown by {@link MCPCommandController}'s OAuth handler when the user (or a
- * caller-supplied {@link AbortSignal}) cancels the in-flight flow. Distinct
- * from network/timeout failures so callers can surface a neutral
- * "cancelled" status instead of an error banner.
- */
-export class MCPOAuthCancelledError extends Error {
-	constructor(message = "OAuth flow cancelled") {
-		super(message);
-		this.name = "MCPOAuthCancelledError";
-	}
-}
-
 /** Reason recorded on the OAuth flow's AbortController when the user hits Esc. */
 const MCP_OAUTH_USER_CANCEL_REASON = "MCP OAuth flow cancelled by user";
 
@@ -356,14 +237,6 @@ type MCPAddParsed = {
 	quickConfig?: MCPServerConfig;
 	isCommandQuickAdd?: boolean;
 	hasAuthToken?: boolean;
-	error?: string;
-};
-
-type MCPSearchParsed = {
-	keyword: string;
-	scope: MCPAddScope;
-	limit: number;
-	semantic: boolean;
 	error?: string;
 };
 
@@ -476,15 +349,6 @@ export class MCPCommandController {
 			case "notifications":
 				await this.#handleNotifications();
 				break;
-			case "smithery-search":
-				await this.#handleSearch(text);
-				break;
-			case "smithery-login":
-				await this.#handleSmitheryLogin();
-				break;
-			case "smithery-logout":
-				await this.#handleSmitheryLogout();
-				break;
 			case "reconnect":
 				await this.#handleReconnect(serverName);
 				break;
@@ -513,10 +377,6 @@ export class MCPCommandController {
 			"  /mcp unauth <name>    Remove OAuth auth from an MCP server",
 			"  /mcp enable <name>    Enable an MCP server",
 			"  /mcp disable <name>   Disable an MCP server",
-			"  /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			"                        Search Smithery registry and deploy from picker",
-			"  /mcp smithery-login   Login to Smithery and cache API key",
-			"  /mcp smithery-logout  Remove cached Smithery API key",
 			"  /mcp reconnect <name> Reconnect to a specific MCP server",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
 			"  /mcp resources        List available resources from connected servers",
@@ -642,79 +502,6 @@ export class MCPCommandController {
 		};
 	}
 
-	#parseSearchCommand(text: string): MCPSearchParsed {
-		const prefixMatch = text.match(/^\/mcp\s+smithery-search\b\s*(.*)$/i);
-		const rest = prefixMatch?.[1]?.trim() ?? "";
-		const tokens = parseCommandArgs(rest);
-		if (tokens.length === 0) {
-			return {
-				keyword: "",
-				scope: "project",
-				limit: 20,
-				semantic: false,
-				error: "Keyword required. Usage: /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			};
-		}
-
-		const keywordParts: string[] = [];
-		let scope: MCPAddScope = "project";
-		let limit = 20;
-		let semantic = false;
-
-		for (let i = 0; i < tokens.length; i++) {
-			const token = tokens[i];
-			if (token === "--scope") {
-				const value = tokens[i + 1];
-				if (!value || (value !== "project" && value !== "user")) {
-					return { keyword: "", scope, limit, semantic, error: "Invalid --scope value. Use project or user." };
-				}
-				scope = value;
-				i++;
-				continue;
-			}
-			if (token === "--limit") {
-				const value = tokens[i + 1];
-				if (!value) {
-					return { keyword: "", scope, limit, semantic, error: "Missing value for --limit." };
-				}
-				const parsed = Number(value);
-				if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
-					return {
-						keyword: "",
-						scope,
-						limit,
-						semantic,
-						error: "Invalid --limit value. Use an integer between 1 and 100.",
-					};
-				}
-				limit = parsed;
-				i++;
-				continue;
-			}
-			if (token === "--semantic") {
-				semantic = true;
-				continue;
-			}
-			if (token.startsWith("--")) {
-				return { keyword: "", scope, limit, semantic, error: `Unknown option: ${token}` };
-			}
-			keywordParts.push(token);
-		}
-
-		const keyword = keywordParts.join(" ").trim();
-		if (!keyword) {
-			return {
-				keyword: "",
-				scope,
-				limit,
-				semantic,
-				error: "Keyword required. Usage: /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			};
-		}
-
-		return { keyword, scope, limit, semantic };
-	}
-
 	/**
 	 * Handle /mcp add - Launch interactive wizard or quick-add from args
 	 */
@@ -796,7 +583,7 @@ export class MCPCommandController {
 									stripSameOriginResource: oauthResourceIsFallback,
 								},
 							);
-							finalConfig = this.#persistOAuthResult(finalConfig, oauthResult, {
+							finalConfig = persistMcpOAuthResult(finalConfig, oauthResult, {
 								tokenUrl: oauth.tokenUrl,
 								resource: oauthResource,
 								stripSameOriginResource: oauthResourceIsFallback,
@@ -859,7 +646,10 @@ export class MCPCommandController {
 	}
 
 	/**
-	 * Handle OAuth authentication flow for MCP server
+	 * Handle OAuth authentication flow for MCP server. Thin TUI wrapper over
+	 * the shared engine (`runMcpOAuthFlow` in `mcp/oauth-reauth.ts`): supplies
+	 * the transcript-block presentation, clipboard staging, manual code input
+	 * claim, and the editor Esc hook, then leaves flow semantics to the engine.
 	 */
 	async #handleOAuthFlow(
 		authUrl: string,
@@ -887,258 +677,173 @@ export class MCPCommandController {
 			abortSignal?: AbortSignal;
 		},
 	): Promise<OAuthFlowResult> {
-		const authStorage = this.ctx.session.modelRegistry.authStorage;
-		let parsedAuthUrl: URL;
-
-		// Validate OAuth URLs
+		const { callbacks, release } = this.#oauthFlowCallbacks();
 		try {
-			parsedAuthUrl = new URL(authUrl);
-			new URL(tokenUrl);
-		} catch {
-			throw new Error(
-				`Invalid OAuth URLs. Please check:\n  Authorization URL: ${authUrl}\n  Token URL: ${tokenUrl}`,
-			);
-		}
-
-		const resolvedClientId = clientId.trim() || parsedAuthUrl.searchParams.get("client_id")?.trim() || undefined;
-		const resolvedClientSecret = clientSecret.trim() || undefined;
-
-		const manualInput = this.ctx.oauthManualInput;
-		let manualInputClaim: { promise: Promise<string>; clear: (reason?: string) => void } | undefined;
-		const oauthTimeout = new AbortController();
-		// Esc, external aborts, and a replacement MCP flow route through here;
-		// the timeout path sets its own reason and leaves this flag false so the
-		// catch can distinguish cancellation (status) from deadline failure.
-		let cancellationRequested = false;
-		const requestCancellation = (reason: string): void => {
-			cancellationRequested = true;
-			if (!oauthTimeout.signal.aborted) oauthTimeout.abort(reason);
-		};
-		const flowClaim = await claimMCPOAuthFlow(manualInput, requestCancellation);
-		const originalOnEscape = this.ctx.editor.onEscape;
-		this.ctx.editor.onEscape = () => requestCancellation(MCP_OAUTH_USER_CANCEL_REASON);
-		const externalSignal = opts?.abortSignal;
-		const onExternalAbort = (): void => {
-			const reason = externalSignal?.reason;
-			requestCancellation(typeof reason === "string" ? reason : MCP_OAUTH_USER_CANCEL_REASON);
-		};
-		if (externalSignal?.aborted) {
-			onExternalAbort();
-		} else {
-			externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
-		}
-		try {
-			if (manualInput.hasPending()) {
-				const pendingProvider = manualInput.pendingProviderId ?? "another provider";
-				throw new Error(
-					`OAuth login already in progress for ${pendingProvider}. Complete or cancel it before starting MCP OAuth.`,
-				);
-			}
-			// Create OAuth flow
-			const flow = new MCPOAuthFlow(
-				{
-					authorizationUrl: authUrl,
-					tokenUrl: tokenUrl,
+			return await this.#withOAuthEscape((escapeSignal, onClaimed) =>
+				runMcpOAuthFlow({
+					authUrl,
+					tokenUrl,
+					clientId,
+					clientSecret,
+					scopes,
+					serverUrl: opts?.serverUrl,
 					registrationUrl: opts?.registrationUrl,
 					issuerUrl: opts?.issuerUrl,
-					clientId: resolvedClientId,
-					clientSecret: resolvedClientSecret,
-					scopes: scopes || undefined,
-					prompt: opts?.prompt,
-					redirectUri: opts?.redirectUri,
-					callbackPort: opts?.callbackPort,
-					callbackPath: opts?.callbackPath,
 					resource: opts?.resource,
 					stripSameOriginResource: opts?.stripSameOriginResource,
-				},
-				{
-					onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
-						// Show auth URL prominently in chat as one block
-						const block = new TranscriptBlock();
-						this.ctx.present(block);
-						block.addChild(new Text(theme.fg("accent", "━━━ OAuth Authorization Required ━━━"), 1, 0));
-						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("muted", "Preparing browser authorization..."), 1, 0));
-						block.addChild(new Spacer(1));
-						block.addChild(
-							new Text(
-								theme.fg(
-									"muted",
-									`Waiting for authorization... (Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel, 5 minute timeout)`,
-								),
-								1,
-								0,
-							),
-						);
-						block.addChild(new Text(theme.fg("muted", MCP_MANUAL_LOGIN_TIP), 1, 0));
-						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("accent", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 1, 0));
-						// `openPath` is best-effort — it logs spawn failures but never
-						// throws, so we always render the copy-URL fallback beneath the
-						// "attempting to open browser" line and no earlier try/catch is
-						// worth keeping.
-						openPath(info.url);
-						// Stage the FULL authorization URL on the clipboard via OSC 52.
-						// The full URL works from any machine (unlike `launchUrl`, which
-						// only resolves against the OMP host), and OSC 52 is a
-						// wire-level protocol — the terminal writes it to the user's
-						// LOCAL clipboard even when OMP is on a remote SSH box.
-						// Best-effort: falls back to the visible copy-URL rows below
-						// whether or not the terminal honors OSC 52.
-						void copyToClipboard(info.url).catch(() => {});
-						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0));
-						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
-						block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
-						this.ctx.ui.requestRender();
-					},
-					onProgress: (message: string) => {
-						this.ctx.present([new Spacer(1), new Text(theme.fg("muted", message), 1, 0)]);
-					},
-					onManualCodeInput: signal => {
-						if (manualInputClaim) return manualInputClaim.promise;
-						const pendingInput = manualInput.tryClaimInput(MCP_MANUAL_INPUT_PROVIDER_ID);
-						if (!pendingInput) {
-							const pendingProvider = manualInput.pendingProviderId ?? "another provider";
-							throw new Error(
-								`OAuth login already in progress for ${pendingProvider}. Complete or cancel it before starting MCP OAuth.`,
-							);
-						}
-						const onAbort = () => pendingInput.clear("Manual MCP OAuth input cancelled");
-						if (signal?.aborted) onAbort();
-						else signal?.addEventListener("abort", onAbort, { once: true });
-						const claim = {
-							clear: pendingInput.clear,
-							promise: pendingInput.promise.finally(() => {
-								signal?.removeEventListener("abort", onAbort);
-								if (manualInputClaim === claim) manualInputClaim = undefined;
-							}),
-						};
-						manualInputClaim = claim;
-						return claim.promise;
-					},
-					signal: oauthTimeout.signal,
-				},
+					callbackPort: opts?.callbackPort,
+					callbackPath: opts?.callbackPath,
+					redirectUri: opts?.redirectUri,
+					prompt: opts?.prompt,
+					authStorage: this.ctx.session.modelRegistry.authStorage,
+					signal: opts?.abortSignal ? AbortSignal.any([escapeSignal, opts.abortSignal]) : escapeSignal,
+					flowOwner: this.ctx.oauthManualInput,
+					pendingInput: () =>
+						this.ctx.oauthManualInput.hasPending()
+							? (this.ctx.oauthManualInput.pendingProviderId ?? "another provider")
+							: undefined,
+					onClaimed,
+					...callbacks,
+				}),
 			);
-
-			const createAbortError = (): Error => {
-				const reason = String(oauthTimeout.signal.reason ?? "MCP OAuth flow aborted");
-				return cancellationRequested ? new MCPOAuthCancelledError() : new Error(reason);
-			};
-			if (oauthTimeout.signal.aborted) throw createAbortError();
-
-			// Execute OAuth flow with 5 minute timeout. Race the login itself
-			// against the abort signal because Esc/external abort may fire before
-			// MCPOAuthFlow reaches OAuthCallbackFlow.#waitForCallback, where the
-			// underlying callback server normally observes the signal.
-			const credentials = await withTimeout(
-				raceAbortSignal(flow.login(), oauthTimeout.signal, createAbortError),
-				5 * 60 * 1000,
-				"OAuth flow timed out after 5 minutes",
-				() => oauthTimeout.abort("MCP OAuth flow timed out"),
-			);
-
-			this.ctx.present([
-				new Spacer(1),
-				new Text(theme.fg("success", "✓ Authorization completed in browser."), 1, 0),
-			]);
-
-			// Deterministic per-URL id: every profile resolves its own credential row
-			// under the same key, so shared project configs stay profile-isolated.
-			// Random fallback only for flows that never knew the server URL.
-			const credentialId = opts?.serverUrl
-				? mcpOAuthCredentialId(opts.serverUrl)
-				: `mcp_oauth_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-
-			// Embed refresh material so the credential is self-contained: token
-			// refresh must work for configs that carry no auth block at all.
-			const oauthCredential: MCPStoredOAuthCredential = {
-				type: "oauth",
-				...credentials,
-				tokenUrl,
-				clientId: flow.resolvedClientId?.trim() || resolvedClientId,
-				clientSecret: flow.registeredClientSecret ?? resolvedClientSecret,
-				resource: flow.resource,
-				authorizationUrl: flow.authorizationUrl,
-			};
-
-			await authStorage.credentials.set(credentialId, oauthCredential);
-
-			return {
-				credentialId,
-				clientId: flow.resolvedClientId,
-				resource: flow.resource,
-			};
-		} catch (error) {
-			// Esc, an external abort, or a newer MCP flow are neutral
-			// cancellations. The timeout path also aborts the controller but does
-			// not set this flag, so it remains a surfaced error.
-			if (cancellationRequested) {
-				throw new MCPOAuthCancelledError();
-			}
-
-			const errorMsg = error instanceof Error ? error.message : String(error);
-
-			// Provide helpful error messages based on failure type
-			if (errorMsg.includes("timeout") || errorMsg.includes("timed out")) {
-				throw new Error("OAuth flow timed out. Please try again.");
-			} else if (errorMsg.includes("403") || errorMsg.includes("unauthorized")) {
-				throw new Error("OAuth authorization failed. Please check your client credentials.");
-			} else if (errorMsg.includes("invalid_grant")) {
-				throw new Error("OAuth authorization code is invalid or expired. Please try again.");
-			} else if (errorMsg.includes("ECONNREFUSED") || errorMsg.includes("fetch failed")) {
-				throw new Error("Could not connect to OAuth server. Please check the URLs and your network connection.");
-			} else {
-				throw new Error(`OAuth authentication failed: ${errorMsg}`);
-			}
 		} finally {
-			this.ctx.editor.onEscape = originalOnEscape;
-			externalSignal?.removeEventListener("abort", onExternalAbort);
-			manualInputClaim?.clear("Manual MCP OAuth input cleared");
-			flowClaim.release();
+			release();
 		}
 	}
 
 	/**
-	 * Fold a completed OAuth flow back into a server config. Owns the
-	 * persistence policy in one place: the auth block records the credential
-	 * pointer plus refresh material, the oauth block echoes the client id for
-	 * pre-auth reuse, and only a user-supplied client secret is ever written —
-	 * DCR-issued secrets stay embedded in the stored credential so they cannot
-	 * leak into (possibly shared/committed) config files.
+	 * TUI presentation for the shared MCP OAuth engine. The manual-input claim
+	 * taken for fallback code input is released by the returned `release` when
+	 * the flow settles, mirroring the engine's own single-flight release.
 	 */
-	#persistOAuthResult(
-		config: MCPServerConfig,
-		result: OAuthFlowResult,
-		opts: {
-			tokenUrl: string;
-			resource?: string;
-			stripSameOriginResource?: boolean;
-			clientId?: string;
-			persistOAuthClientId?: boolean;
-			userClientSecret?: string;
-		},
-	): MCPServerConfig {
-		const clientId = result.clientId?.trim() || opts.clientId?.trim() || config.oauth?.clientId?.trim();
-		const oauthClientId = opts.persistOAuthClientId === false ? undefined : clientId;
-		const resource =
-			result.resource ?? (opts.stripSameOriginResource ? undefined : opts.resource) ?? config.auth?.resource;
-		return {
-			...config,
-			auth: {
-				type: "oauth",
-				credentialId: result.credentialId,
-				tokenUrl: opts.tokenUrl,
-				clientId,
-				clientSecret: opts.userClientSecret,
-				resource,
-			},
-			oauth: {
-				...config.oauth,
-				clientId: oauthClientId,
-			},
+	#oauthFlowCallbacks(): { callbacks: McpOAuthFlowPresentation; release: () => void } {
+		const manualInput = this.ctx.oauthManualInput;
+		let manualInputClaim: { promise: Promise<string>; clear: (reason?: string) => void } | undefined;
+		let manualInputReleased = false;
+		// Idempotent: the engine releases the manual claim in its `finally`
+		// (before the single-flight release, so a superseding flow observes no
+		// pending manual input), and the controller `finally` calls it again.
+		const releaseManualInput = (): void => {
+			if (manualInputReleased) return;
+			manualInputReleased = true;
+			manualInputClaim?.clear("Manual MCP OAuth input cleared");
 		};
+		return {
+			callbacks: {
+				onAuth: info => {
+					// Show auth URL prominently in chat as one block
+					const block = new TranscriptBlock();
+					this.ctx.present(block);
+					block.addChild(new Text(theme.fg("accent", "━━━ OAuth Authorization Required ━━━"), 1, 0));
+					block.addChild(new Spacer(1));
+					block.addChild(new Text(theme.fg("muted", "Preparing browser authorization..."), 1, 0));
+					block.addChild(new Spacer(1));
+					block.addChild(
+						new Text(
+							theme.fg(
+								"muted",
+								`Waiting for authorization... (Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel, 5 minute timeout)`,
+							),
+							1,
+							0,
+						),
+					);
+					block.addChild(new Text(theme.fg("muted", MCP_MANUAL_LOGIN_TIP), 1, 0));
+					block.addChild(new Spacer(1));
+					block.addChild(new Text(theme.fg("accent", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 1, 0));
+					// `openPath` is best-effort — it logs spawn failures but never
+					// throws, so we always render the copy-URL fallback beneath the
+					// "attempting to open browser" line and no earlier try/catch is
+					// worth keeping.
+					openPath(info.url);
+					// Stage the FULL authorization URL on the clipboard via OSC 52.
+					// The full URL works from any machine (unlike `launchUrl`, which
+					// only resolves against the OMP host), and OSC 52 is a
+					// wire-level protocol — the terminal writes it to the user's
+					// LOCAL clipboard even when OMP is on a remote SSH box.
+					// Best-effort: falls back to the visible copy-URL rows below
+					// whether or not the terminal honors OSC 52.
+					void copyToClipboard(info.url).catch(() => {});
+					block.addChild(new Spacer(1));
+					block.addChild(new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0));
+					block.addChild(new Spacer(1));
+					block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
+					block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
+					this.ctx.ui.requestRender();
+				},
+				onProgress: message => {
+					this.ctx.present([new Spacer(1), new Text(theme.fg("muted", message), 1, 0)]);
+				},
+				onFlowComplete: () => {
+					this.ctx.present([
+						new Spacer(1),
+						new Text(theme.fg("success", "✓ Authorization completed in browser."), 1, 0),
+					]);
+				},
+				onManualCodeInput: signal => {
+					if (manualInputClaim) return manualInputClaim.promise;
+					const pendingInput = manualInput.tryClaimInput(MCP_MANUAL_INPUT_PROVIDER_ID);
+					if (!pendingInput) {
+						const pendingProvider = manualInput.pendingProviderId ?? "another provider";
+						throw new Error(
+							`OAuth login already in progress for ${pendingProvider}. Complete or cancel it before starting MCP OAuth.`,
+						);
+					}
+					const onAbort = () => pendingInput.clear("Manual MCP OAuth input cancelled");
+					if (signal?.aborted) onAbort();
+					else signal?.addEventListener("abort", onAbort, { once: true });
+					const claim = {
+						clear: pendingInput.clear,
+						promise: pendingInput.promise.finally(() => {
+							signal?.removeEventListener("abort", onAbort);
+							if (manualInputClaim === claim) manualInputClaim = undefined;
+						}),
+					};
+					manualInputClaim = claim;
+					return claim.promise;
+				},
+				releaseManualInput,
+			},
+			release: releaseManualInput,
+		};
+	}
+
+	/**
+	 * Install the editor Esc hook for the duration of an MCP OAuth flow: Esc
+	 * aborts the supplied signal, which the shared engine races and reclassifies
+	 * as a neutral {@link MCPOAuthCancelledError}.
+	 *
+	 * The hook installs when the flow's single-flight claim resolves (via the
+	 * engine's `onClaimed`), not when the flow starts: a flow superseded while
+	 * queued never claims, so it installs — and later restores — nothing.
+	 * Restoration resolves through any OAuth handler chain to the live default:
+	 * when a replacement flow installs while this one unwinds, the replacement
+	 * captures the session default underneath the chain rather than this flow's
+	 * already-dead handler, so unwinding either order leaves the default
+	 * (interrupt, cancel compaction) installed for the session.
+	 */
+	#withOAuthEscape<T>(run: (escapeSignal: AbortSignal, onClaimed: () => void) => Promise<T>): Promise<T> {
+		const escape = new AbortController();
+		const installed = (): void => {
+			escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
+		};
+		// Chain through any OAuth handler already installed to the session
+		// default underneath it, so unwinding in either order restores the default.
+		const current = this.ctx.editor.onEscape;
+		const original =
+			current !== undefined && mcpOAuthEscapeOriginals.has(current) ? mcpOAuthEscapeOriginals.get(current) : current;
+		mcpOAuthEscapeOriginals.set(installed, original);
+		const onClaimed = (): void => {
+			this.ctx.editor.onEscape = installed;
+		};
+		return run(escape.signal, onClaimed).finally(() => {
+			// Restore only while still owning the hook: a replacement flow
+			// installs its own handler after this one unwinds, and that
+			// handler (and the default it would restore) must survive here.
+			if (this.ctx.editor.onEscape === installed) {
+				this.ctx.editor.onEscape = original;
+			}
+		});
 	}
 
 	/**
@@ -1146,178 +851,11 @@ export class MCPCommandController {
 	 * Throws an error if connection fails (used for auto-detection).
 	 */
 	async #handleTestConnection(config: MCPServerConfig, options?: { oauth?: boolean }): Promise<void> {
-		// Create temporary connection using a test name
-		const testName = `test_${Date.now()}`;
-		let resolvedConfig: MCPServerConfig;
-		if (this.ctx.mcpManager) {
-			resolvedConfig = await this.ctx.mcpManager.prepareConfig(config, options);
-		} else {
-			const tempManager = new MCPManager(getProjectDir());
-			tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
-			resolvedConfig = await tempManager.prepareConfig(config, options);
-		}
-
-		const connection = await connectToServer(testName, resolvedConfig);
-		await disconnectServer(connection);
-	}
-
-	async #findConfiguredServer(
-		name: string,
-	): Promise<{ filePath: string; scope: "user" | "project"; config: MCPServerConfig } | null> {
-		const cwd = getProjectDir();
-		const userPath = getMCPConfigPath("user", cwd);
-		const projectPath = getMCPConfigPath("project", cwd);
-
-		const [userConfig, projectConfig] = await Promise.all([
-			readMCPConfigFile(userPath),
-			readMCPConfigFile(projectPath),
-		]);
-
-		if (userConfig.mcpServers?.[name]) {
-			return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name] };
-		}
-		if (projectConfig.mcpServers?.[name]) {
-			return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name] };
-		}
-
-		// Check standalone fallback files (mcp.json, .mcp.json) in the project root —
-		// these match the discovery paths used by the mcp-json provider. Reads run in
-		// parallel (mirroring user/project above) but precedence is preserved by the
-		// for-loop's iteration order: mcp.json wins over .mcp.json on a same-name hit.
-		const standalonePaths = [path.join(cwd, "mcp.json"), path.join(cwd, ".mcp.json")];
-		const fallbackConfigs = await Promise.all(
-			standalonePaths.map(async fallbackPath => {
-				try {
-					return await readMCPConfigFile(fallbackPath);
-				} catch {
-					// Malformed JSON in a standalone file — skip and continue lookup.
-					return null;
-				}
-			}),
-		);
-		for (const [index, fallbackConfig] of fallbackConfigs.entries()) {
-			const config = fallbackConfig?.mcpServers?.[name];
-			if (config) {
-				return { filePath: standalonePaths[index]!, scope: "project", config };
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Resolve a server for an auth/test operation.
-	 *
-	 * Unlike {@link #findConfiguredServer} (which only reads writable OMP config
-	 * files), this also recognizes runtime-discovered servers that `/mcp list`
-	 * surfaces but that live in no writable config — e.g. servers from a Claude
-	 * Code marketplace plugin (`cloudflare:cloudflare-api`), `.cursor/mcp.json`,
-	 * etc. Without this, `/mcp reauth|test|unauth` reports "not found" for a
-	 * server the list just showed.
-	 *
-	 * For a discovered server, any persisted change is written into the *user*
-	 * config under the same (namespaced) name; the native provider (priority 100)
-	 * shadows the discovered entry on the next reload, so an OAuth `auth` block
-	 * persisted by `/mcp reauth` takes effect. `discovered` lets callers tailor
-	 * messaging and skip pointless writes when there is nothing to persist.
-	 */
-	async #resolveServerForAuth(name: string): Promise<{
-		filePath: string;
-		scope: "user" | "project";
-		config: MCPServerConfig;
-		discovered: boolean;
-	} | null> {
-		const found = await this.#findConfiguredServer(name);
-		if (found) return { ...found, discovered: false };
-
-		const config = this.ctx.mcpManager?.getServerConfig(name);
-		const source = this.ctx.mcpManager?.getSource(name);
-		if (!config || !source) return null;
-
-		return {
-			filePath: getMCPConfigPath("user", getProjectDir()),
-			scope: "user",
-			config,
-			discovered: true,
-		};
-	}
-
-	#stripOAuthAuth(config: MCPServerConfig): MCPServerConfig {
-		const next = { ...config } as MCPServerConfig & { auth?: MCPAuthConfig };
-		delete next.auth;
-		return next;
-	}
-
-	async #resolveOAuthEndpointsFromServer(
-		config: MCPServerConfig,
-		authChallenge?: MCPAuthChallenge,
-	): Promise<OAuthEndpoints> {
-		// Stdio servers manage credentials inside the child process; OMP's OAuth
-		// flow only applies to http/sse transports. Without this guard the
-		// unauthenticated preflight below spawns the child, which happily reuses
-		// its own cached tokens (e.g. mcp-remote's machine-wide ~/.mcp-auth) and
-		// produces the misleading "reauthorization is not required".
-		if (config.type !== "http" && config.type !== "sse") {
-			const remoteUrl = config.args?.find(arg => /^https?:\/\//.test(arg));
-			const httpHint = `{ "type": "http", "url": ${JSON.stringify(remoteUrl ?? "<remote url>")} }`;
-			const usesMcpRemote = [config.command, ...(config.args ?? [])].some(part => part?.includes("mcp-remote"));
-			throw new Error(
-				usesMcpRemote
-					? `this server proxies OAuth through mcp-remote, which caches tokens machine-wide in ~/.mcp-auth (shared across every OMP profile). Clear ~/.mcp-auth to force a fresh login, or replace the proxy with ${httpHint} so OMP manages OAuth per profile.`
-					: `stdio servers manage their own credentials, so OMP has no OAuth to reauthorize. If the service supports OAuth over HTTP, configure it as ${httpHint} instead.`,
-			);
-		}
-		// First test if server actually needs auth by connecting without OAuth
-		let connectionSucceeded = false;
-		let connectionError: Error | undefined;
-		try {
-			await this.#handleTestConnection(this.#stripOAuthAuth(config), { oauth: false });
-			connectionSucceeded = true;
-		} catch (error) {
-			connectionError = error as Error;
-		}
-
-		// Server connected fine without auth. A tool-level challenge overrides
-		// this: servers may allow the anonymous handshake yet protect individual
-		// tool calls with `_meta["mcp/www_authenticate"]`. Even without such a
-		// challenge, a clean `initialize` is only weak evidence — per the MCP
-		// spec a server MAY permit unauthenticated `initialize` while requiring a
-		// bearer token for `tools/call`. The user explicitly asked to reauth, so
-		// honor it when the server advertises OAuth discovery metadata; only
-		// refuse when there is genuinely no OAuth endpoint to acquire.
-		if (connectionSucceeded && !authChallenge) {
-			const discovered = "url" in config && config.url ? await discoverOAuthEndpoints(config.url) : null;
-			if (!discovered) {
-				throw new Error("Server connection succeeded without OAuth; reauthorization is not required.");
-			}
-			return discovered;
-		}
-
-		// Tool calls can carry richer RFC 6750/RFC 9728 hints than the original
-		// connection error. Feed those hints through the same analyzer so
-		// resource_metadata and scope reach protected-resource discovery.
-		const authError = authChallenge
-			? new Error(`${connectionError?.message ?? "HTTP 401"}\n${authChallenge.wwwAuthenticate.join("\n")}`)
-			: connectionError!;
-		const authResult = analyzeAuthError(authError, "url" in config ? config.url : undefined);
-		let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
-
-		if (!oauth && (config.type === "http" || config.type === "sse") && config.url) {
-			oauth = await discoverOAuthEndpoints(config.url, authResult.authServerUrl, authResult.resourceMetadataUrl, {
-				protectedScopes: authResult.scopes,
-			});
-		}
-		if (oauth && !oauth.scopes && authResult.resourceMetadataUrl) {
-			// JSON-error-body path skips `discoverOAuthEndpoints`; fetch the
-			// advertised protected-resource metadata for the required scopes.
-			const scopes = await fetchResourceMetadataScopes(authResult.resourceMetadataUrl);
-			if (scopes) oauth = { ...oauth, scopes };
-		}
-
-		if (!oauth) {
-			throw new Error("Could not discover OAuth endpoints from server response.");
-		}
-
-		return oauth;
+		await probeMcpConnection(config, {
+			oauth: options?.oauth,
+			authStorage: this.ctx.session.modelRegistry.authStorage,
+			mcpManager: this.ctx.mcpManager,
+		});
 	}
 
 	async #waitForServerConnectionWithAnimation(
@@ -1396,9 +934,8 @@ export class MCPCommandController {
 				}
 			}
 
-			// refreshMCPTools preserves the prior MCP tool selection, so tools from
-			// brand-new servers are registered in the registry but never activated.
-			// Explicitly activate the newly added server's tools now.
+			// A new server's tools are enabled by refresh; explicitly selecting this
+			// server also enables tools that were registered before the wizard ran.
 			if (isConnected && this.ctx.mcpManager) {
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
 				if (serverTools.length > 0) {
@@ -1694,7 +1231,9 @@ export class MCPCommandController {
 			// (e.g. config on a network FS) must surface cancellation immediately
 			// via the catch branch below, not stay suspended until the read settles.
 			const found = await raceAbortSignal(
-				this.#resolveServerForAuth(name),
+				findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+				}),
 				abortController.signal,
 				() => new DOMException("Aborted", "AbortError"),
 			);
@@ -1836,7 +1375,9 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await this.#findConfiguredServer(name);
+			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			});
 			if (!found) {
 				// Check if this is a discovered server from a third-party config
 				const userConfigPath = getMCPConfigPath("user", getProjectDir());
@@ -1937,13 +1478,15 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await this.#resolveServerForAuth(name);
+			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			});
 			if (!found) {
 				this.ctx.showError(`Server "${name}" not found.`);
 				return;
 			}
 
-			const currentAuth = (found.config as MCPServerConfig & { auth?: MCPAuthConfig }).auth;
+			const currentAuth = found.config.auth;
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
 			if (currentAuth?.type === "oauth") {
 				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
@@ -1974,7 +1517,7 @@ export class MCPCommandController {
 				return;
 			}
 
-			const updated = this.#stripOAuthAuth(found.config);
+			const updated = stripMcpOAuthAuth(found.config);
 			await updateMCPServer(found.filePath, name, updated);
 			await this.reloadServers();
 
@@ -2001,138 +1544,70 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await this.#resolveServerForAuth(name);
+			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			});
 			if (!found) {
 				if (!options.silent) this.ctx.showError(`Server "${name}" not found.`);
 				return;
 			}
-
 			if (found.config.enabled === false) {
 				if (!options.silent) this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
 			}
 
-			const currentAuth = (found.config as MCPServerConfig & { auth?: MCPAuthConfig }).auth;
-			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const baseConfig = this.#stripOAuthAuth(found.config);
-			const runtimeBaseConfig = expandEnvVarsDeep(baseConfig);
-			// Resolve endpoints first: this fails fast for stdio transports and
-			// probes http/sse with { oauth: false }, so nothing destructive has
-			// happened yet if the server turns out not to need (or support) OAuth.
-			// Use the same env-expanded config shape runtime discovery passes to
-			// MCPManager; the raw file value may contain `${...}` placeholders.
-			const oauth = await this.#resolveOAuthEndpointsFromServer(runtimeBaseConfig, options.authChallenge);
-			const serverUrl =
-				runtimeBaseConfig.type === "http" || runtimeBaseConfig.type === "sse" ? runtimeBaseConfig.url : undefined;
-			// Client credentials drive the token exchange, so they must come from the
-			// env-expanded runtime config; `found.config`/`currentAuth` may still hold
-			// `${...}` placeholders (the wizard writes the secret to auth.clientSecret).
-			// DCR secrets are embedded in the stored credential and never echoed back
-			// into config files.
-			const runtimeAuth = currentAuth ? expandEnvVarsDeep(currentAuth) : undefined;
-			const configuredClientId = runtimeBaseConfig.oauth?.clientId?.trim() || undefined;
-			const configuredClientSecret = runtimeBaseConfig.oauth?.clientSecret;
-			const existingCredential = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, serverUrl)?.credential;
-			const persistedClientId = runtimeAuth?.clientId?.trim() || undefined;
-			const storedClientId = existingCredential?.clientId?.trim() || undefined;
-			const discoveredClientId = oauth.clientId?.trim() || undefined;
-			// A metadata-advertised client is only a fallback. Prefer DCR when the
-			// authorization server explicitly offers it, while retaining configured
-			// and previously registered client credentials above.
-			const flowClientId =
-				configuredClientId ??
-				persistedClientId ??
-				storedClientId ??
-				(oauth.registrationUrl ? undefined : discoveredClientId) ??
-				"";
-			const storedClientSecret = storedClientId === flowClientId ? existingCredential?.clientSecret : undefined;
-			const flowClientSecret =
-				(configuredClientId === flowClientId ? configuredClientSecret : undefined) ??
-				(persistedClientId === flowClientId ? runtimeAuth?.clientSecret : undefined) ??
-				storedClientSecret ??
-				"";
-			// Persisted separately below: keep the raw `${...}` placeholder in the file
-			// rather than writing the resolved secret back to (possibly shared) config.
-			const userClientSecret =
-				(configuredClientId === flowClientId ? found.config.oauth?.clientSecret : undefined) ??
-				(persistedClientId === flowClientId ? currentAuth?.clientSecret : undefined);
-			const hasConfiguredOnlySecret = configuredClientId === undefined && configuredClientSecret !== undefined;
+			const { callbacks, release } = this.#oauthFlowCallbacks();
+			try {
+				const outcome = await this.#withOAuthEscape((signal, onClaimed) =>
+					reauthorizeMcpServer(name, found, {
+						authStorage: this.ctx.session.modelRegistry.authStorage,
+						authChallenge: options.authChallenge,
+						mcpManager: this.ctx.mcpManager,
+						silent: options.silent,
+						signal,
+						// Same session-scoped single-flight owner `#handleOAuthFlow`
+						// uses: a reauth must supersede (and be superseded by) the
+						// add wizard and provider logins, and fail fast while one
+						// of them owns manual input, not join the module-global
+						// coordinator and contend for the callback port.
+						flowOwner: this.ctx.oauthManualInput,
+						pendingInput: () =>
+							this.ctx.oauthManualInput.hasPending()
+								? (this.ctx.oauthManualInput.pendingProviderId ?? "another provider")
+								: undefined,
+						onReauthorizing: () => {
+							this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
+						},
+						// Install the Esc hook once the flow's claim resolves, so a
+						// superseded flow restores nothing (see #withOAuthEscape).
+						onClaimed,
+						...callbacks,
+					}),
+				);
 
-			if (!options.silent) {
-				this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
+				if (options.reload !== false) {
+					await this.reloadServers();
+					const state = await this.#waitForServerConnectionWithAnimation(name);
+
+					const lines = [
+						"",
+						theme.fg("success", `✓ Reauthorized "${name}" (${found.scope} config)`),
+						"",
+						`  Status: ${
+							state === "connected"
+								? theme.fg("success", "connected")
+								: state === "connecting"
+									? theme.fg("muted", "connecting")
+									: theme.fg("warning", "not connected")
+						}`,
+						"",
+					];
+					this.#showMessage(lines.join("\n"));
+				}
+				return outcome.config;
+			} finally {
+				release();
 			}
-
-			const currentAuthResource = currentAuth?.resource ? expandEnvVarsDeep(currentAuth.resource) : undefined;
-			const oauthResource =
-				oauth.resource ?? currentAuthResource ?? ("url" in runtimeBaseConfig ? runtimeBaseConfig.url : undefined);
-			const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
-
-			const oauthResult = await this.#handleOAuthFlow(
-				oauth.authorizationUrl,
-				oauth.tokenUrl,
-				flowClientId,
-				flowClientSecret,
-				oauth.scopes || runtimeBaseConfig.oauth?.scope || "",
-				{
-					callbackPort: found.config.oauth?.callbackPort,
-					callbackPath: found.config.oauth?.callbackPath,
-					redirectUri: found.config.oauth?.redirectUri,
-					prompt: found.config.oauth?.prompt,
-					registrationUrl: oauth.registrationUrl,
-					issuerUrl: oauth.issuerUrl,
-					serverUrl,
-					resource: oauthResource,
-					stripSameOriginResource: oauthResourceIsFallback,
-				},
-			);
-
-			// The flow overwrote (or minted) this profile's row; a superseded
-			// pointer row from the legacy random-id era is now orphaned. GC only
-			// after success so cancelling the browser step leaves the previous
-			// session signed in.
-			if (currentAuth?.type === "oauth" && currentAuth.credentialId !== oauthResult.credentialId) {
-				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
-			}
-
-			// Definition-only entries resolve through the url-keyed binding alone;
-			// skip the write-back so a committed project mcp.json stays clean.
-			const urlKeyedId = serverUrl ? mcpOAuthCredentialId(serverUrl) : undefined;
-			const shouldPersist = currentAuth || oauthResult.credentialId !== urlKeyedId;
-			const updatedConfig = shouldPersist
-				? this.#persistOAuthResult(baseConfig, oauthResult, {
-						tokenUrl: oauth.tokenUrl,
-						// Do not turn a configured-only secret into a persisted oauth
-						// client pair by echoing the discovered client id.
-						clientId: oauth.clientId,
-						persistOAuthClientId: !hasConfiguredOnlySecret,
-						userClientSecret,
-						resource: oauthResource,
-						stripSameOriginResource: oauthResourceIsFallback,
-					})
-				: baseConfig;
-			if (shouldPersist) {
-				await updateMCPServer(found.filePath, name, updatedConfig);
-			}
-			if (options.reload !== false) {
-				await this.reloadServers();
-				const state = await this.#waitForServerConnectionWithAnimation(name);
-
-				const lines = [
-					"",
-					theme.fg("success", `✓ Reauthorized "${name}" (${found.scope} config)`),
-					"",
-					`  Status: ${
-						state === "connected"
-							? theme.fg("success", "connected")
-							: state === "connecting"
-								? theme.fg("muted", "connecting")
-								: theme.fg("warning", "not connected")
-					}`,
-					"",
-				];
-				this.#showMessage(lines.join("\n"));
-			}
-			return updatedConfig;
 		} catch (error) {
 			if (error instanceof MCPOAuthCancelledError) {
 				if (!options.silent) this.ctx.showStatus(`Reauthorization cancelled for "${name}"`);
@@ -2427,320 +1902,6 @@ export class MCPCommandController {
 			lines.push(theme.fg("muted", "No servers support notifications."));
 		}
 		this.#showReport("MCP Notifications", lines.join("\n"));
-	}
-
-	async #validateSmitheryApiKey(apiKey: string): Promise<void> {
-		await searchSmitheryRegistry("mcp", { limit: 1, apiKey });
-	}
-
-	async #promptSmitheryApiKey(promptLabel: string): Promise<string | null> {
-		for (;;) {
-			const input = await this.ctx.showHookInput(promptLabel);
-			if (input === undefined) return null;
-			const apiKey = input.trim();
-			if (!apiKey) {
-				this.ctx.showError("Smithery API key cannot be empty.");
-				continue;
-			}
-			try {
-				await this.#validateSmitheryApiKey(apiKey);
-				return apiKey;
-			} catch (error) {
-				this.ctx.showError(
-					`Smithery API key validation failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
-	}
-
-	async #handleSmitheryLoginWithApiKey(): Promise<boolean> {
-		const apiKey = await this.#promptSmitheryApiKey(
-			`Smithery API key (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
-		);
-		if (!apiKey) return false;
-		await saveSmitheryApiKey(apiKey);
-		this.ctx.showStatus("Smithery API key saved.");
-		return true;
-	}
-
-	async #waitForSmitheryCliApiKey(sessionId: string, signal: AbortSignal): Promise<string> {
-		const pollIntervalMs = 2_000;
-		const timeoutMs = 300_000;
-		const startedAt = Date.now();
-
-		while (!signal.aborted) {
-			if (Date.now() - startedAt >= timeoutMs) {
-				throw new Error("Smithery authorization timed out after 5 minutes.");
-			}
-			let response: SmitheryCliPollResponse;
-			try {
-				response = await pollSmitheryCliAuthSession(sessionId, signal);
-			} catch (error) {
-				// A single hung/slow poll aborts with TimeoutError; retry until the deadline.
-				if (isTimeoutError(error)) continue;
-				throw error;
-			}
-			if (response.status === "success" && response.apiKey) {
-				return response.apiKey;
-			}
-			if (response.status === "error") {
-				throw new Error(response.message ?? "Smithery authorization failed.");
-			}
-			await Bun.sleep(pollIntervalMs);
-		}
-
-		throw new Error("Smithery authorization cancelled.");
-	}
-
-	async #handleSmitheryBrowserLogin(): Promise<boolean> {
-		const session = await createSmitheryCliAuthSession();
-		const fallbackLoginUrl = getSmitheryLoginUrl();
-		this.#showMessage(
-			[
-				"",
-				theme.bold("Smithery Login"),
-				theme.fg("muted", "Browser authorization started. Complete auth in your browser."),
-				theme.fg("dim", "Authorize URL:"),
-				theme.fg("accent", session.authUrl),
-				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
-				"",
-			].join("\n"),
-		);
-		try {
-			openPath(session.authUrl);
-		} catch {
-			// URL is already shown above.
-		}
-
-		const apiKey = await this.#waitForSmitheryCliApiKey(session.sessionId, new AbortController().signal);
-		await this.#validateSmitheryApiKey(apiKey);
-		await saveSmitheryApiKey(apiKey);
-		this.ctx.showStatus("Smithery API key saved.");
-		return true;
-	}
-
-	async #promptSmitheryLogin(reason: string): Promise<boolean> {
-		this.#showMessage(
-			[
-				"",
-				theme.fg("muted", `Smithery authentication required (${reason}).`),
-				theme.fg("muted", "If browser auth fails, you can paste an API key."),
-				"",
-			].join("\n"),
-		);
-		try {
-			return await this.#handleSmitheryBrowserLogin();
-		} catch (error) {
-			this.ctx.showWarning(
-				`Browser authorization failed: ${error instanceof Error ? error.message : String(error)}. Falling back to API key.`,
-			);
-			return await this.#handleSmitheryLoginWithApiKey();
-		}
-	}
-
-	#getSmitheryErrorStatus(error: unknown): number | undefined {
-		if (error instanceof SmitheryRegistryError) {
-			return error.status;
-		}
-		return undefined;
-	}
-
-	#toSmitheryAuthReason(status: number): string {
-		return status === 429 ? "rate limited by Smithery" : "forbidden/unauthorized with Smithery";
-	}
-
-	async #requireSmitheryApiKey(reason: string): Promise<string> {
-		let apiKey = await getSmitheryApiKey();
-		if (apiKey) return apiKey;
-
-		const loggedIn = await this.#promptSmitheryLogin(reason);
-		if (!loggedIn) {
-			throw new Error("Smithery login cancelled. Run /mcp smithery-login, then retry /mcp smithery-search.");
-		}
-
-		apiKey = await getSmitheryApiKey();
-		if (!apiKey) {
-			throw new Error("Smithery API key not found after login.");
-		}
-		return apiKey;
-	}
-
-	async #runSmitheryOperationWithAuthRetry<T>(operation: (apiKey: string) => Promise<T>, reason: string): Promise<T> {
-		const apiKey = await this.#requireSmitheryApiKey(reason);
-		try {
-			return await operation(apiKey);
-		} catch (error) {
-			const status = this.#getSmitheryErrorStatus(error);
-			if (status === undefined || ![401, 403, 429].includes(status)) {
-				throw error;
-			}
-			const loggedIn = await this.#promptSmitheryLogin(this.#toSmitheryAuthReason(status));
-			if (!loggedIn) {
-				throw error;
-			}
-			const retryApiKey = await this.#requireSmitheryApiKey(reason);
-			return await operation(retryApiKey);
-		}
-	}
-
-	async #handleSmitheryLogin(): Promise<void> {
-		const ok = await this.#promptSmitheryLogin("login");
-		if (!ok) {
-			this.ctx.showStatus("Smithery login cancelled.");
-		}
-	}
-
-	async #handleSmitheryLogout(): Promise<void> {
-		const removed = await clearSmitheryApiKey();
-		this.ctx.showStatus(removed ? "Smithery API key removed." : "No cached Smithery API key found.");
-	}
-
-	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
-		const filePath = getMCPConfigPath(scope, getProjectDir());
-		const config = await readMCPConfigFile(filePath);
-		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
-		if (!existingNames.has(baseName)) return baseName;
-		for (let i = 2; i <= 999; i++) {
-			const candidate = `${baseName}-${i}`;
-			if (!existingNames.has(candidate)) return candidate;
-		}
-		return `${baseName}-${Date.now()}`;
-	}
-
-	async #promptDeploymentServerName(scope: MCPAddScope, defaultName: string): Promise<string | null> {
-		for (;;) {
-			const input = await this.ctx.showHookInput(`Server name for deploy (default: ${defaultName})`, defaultName);
-			if (input === undefined) return null;
-			const proposed = input.trim() || defaultName;
-			if (!proposed) {
-				this.ctx.showError("Server name cannot be empty.");
-				continue;
-			}
-			const filePath = getMCPConfigPath(scope, getProjectDir());
-			const config = await readMCPConfigFile(filePath);
-			if (config.mcpServers?.[proposed]) {
-				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);
-				continue;
-			}
-			return proposed;
-		}
-	}
-
-	async #promptRequiredRegistryInputs(result: SmitherySearchResult): Promise<Record<string, string> | null> {
-		const values: Record<string, string> = {};
-		for (const input of result.requiredInputs) {
-			const label = input.required ? `${input.key} (required)` : `${input.key} (optional)`;
-			const prompt = `${label}${input.description ? ` - ${input.description}` : ""}`;
-			const userInput = await this.ctx.showHookInput(prompt, input.defaultValue);
-			if (userInput === undefined) {
-				if (input.required) return null;
-				continue;
-			}
-			const value = userInput.trim();
-			if (!value) {
-				if (input.required) {
-					this.ctx.showError(`Missing required value for "${input.key}".`);
-					return null;
-				}
-				continue;
-			}
-			values[input.key] = value;
-		}
-		return values;
-	}
-
-	#applyRegistryInputOverrides(config: MCPServerConfig, values: Record<string, string>): MCPServerConfig {
-		if (Object.keys(values).length === 0) return config;
-		if (config.type !== "stdio") {
-			return config;
-		}
-		const args = [...(config.args ?? [])];
-		const configJson = JSON.stringify(values);
-		const index = args.indexOf("--config");
-		if (index >= 0) {
-			if (index + 1 < args.length) {
-				args[index + 1] = configJson;
-			} else {
-				args.push(configJson);
-			}
-		} else {
-			args.push("--config", configJson);
-		}
-		return { ...config, args };
-	}
-
-	async #pickRegistryResult(results: SmitherySearchResult[], keyword: string): Promise<SmitherySearchResult | null> {
-		const options = results.map((result, index) => {
-			const label = `${index + 1}. ${result.display.displayName} (${result.display.transport}, uses ${result.display.useCount})`;
-			return label.length > 120 ? `${label.slice(0, 117)}...` : label;
-		});
-		const selected = await this.ctx.showHookSelector(`Registry results for "${keyword}"`, options);
-		if (!selected) return null;
-		const prefix = selected.split(".", 1)[0];
-		const index = Number(prefix) - 1;
-		if (!Number.isInteger(index) || index < 0 || index >= results.length) return null;
-		return results[index] ?? null;
-	}
-
-	async #deployRegistryResult(result: SmitherySearchResult, scope: MCPAddScope): Promise<void> {
-		const baseName = toConfigName(result.name);
-		const defaultName = await this.#nextAvailableServerName(scope, baseName);
-		const serverName = await this.#promptDeploymentServerName(scope, defaultName);
-		if (!serverName) {
-			this.ctx.showStatus("MCP deploy cancelled.");
-			return;
-		}
-		const inputValues = await this.#promptRequiredRegistryInputs(result);
-		if (inputValues === null) {
-			this.ctx.showStatus("MCP deploy cancelled.");
-			return;
-		}
-		const config = this.#applyRegistryInputOverrides(result.config, inputValues);
-		await this.#handleWizardComplete(serverName, config, scope);
-	}
-
-	async #handleSearch(text: string): Promise<void> {
-		const parsed = this.#parseSearchCommand(text);
-		if (parsed.error) {
-			this.ctx.showError(parsed.error);
-			return;
-		}
-
-		try {
-			this.#showMessage(
-				["", theme.fg("muted", `Searching Smithery registry for "${parsed.keyword}"...`), ""].join("\n"),
-			);
-			const results = await this.#runSmitheryOperationWithAuthRetry(
-				apiKey =>
-					searchSmitheryRegistry(parsed.keyword, {
-						limit: parsed.limit,
-						apiKey,
-						includeSemantic: parsed.semantic,
-					}),
-				"required for smithery-search",
-			);
-			if (results.length === 0) {
-				this.#showMessage(
-					["", theme.fg("warning", `No Smithery results found for "${parsed.keyword}".`), ""].join("\n"),
-				);
-				return;
-			}
-
-			const selected = await this.#pickRegistryResult(results, parsed.keyword);
-			if (!selected) {
-				this.ctx.showStatus("MCP Smithery selection cancelled.");
-				return;
-			}
-
-			await this.#deployRegistryResult(selected, parsed.scope);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (/authentication was cancelled|login cancelled/i.test(message)) {
-				this.ctx.showError(`${message} Run /mcp smithery-login to authenticate first.`);
-				return;
-			}
-			this.ctx.showError(`Smithery search failed: ${message}`);
-		}
 	}
 
 	/**

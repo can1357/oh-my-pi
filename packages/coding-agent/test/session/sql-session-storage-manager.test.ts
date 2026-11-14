@@ -32,6 +32,7 @@ function fakeUsage(input: number, output: number): Usage {
 class HeldSqlClient implements SqlSessionStorageClient {
 	readonly options: SqlSessionStorageClient["options"];
 	holdNextReplace = false;
+	holdQueryPrefix = "UPDATE omp_session_files SET content";
 	readonly replaceStarted = Promise.withResolvers<void>();
 	readonly allowReplace = Promise.withResolvers<void>();
 	readonly #client: InstanceType<typeof SQL>;
@@ -42,7 +43,7 @@ class HeldSqlClient implements SqlSessionStorageClient {
 	}
 
 	unsafe(query: string, values?: unknown[]) {
-		if (this.holdNextReplace && query.startsWith("UPDATE omp_session_files SET content")) {
+		if (this.holdNextReplace && query.startsWith(this.holdQueryPrefix)) {
 			this.holdNextReplace = false;
 			this.replaceStarted.resolve();
 			return this.allowReplace.promise.then(() => this.#client.unsafe(query, values));
@@ -217,6 +218,56 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		expect(body).toContain("later turn");
 		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
 		await manager.close();
+		await client.end();
+	});
+
+	it("counts a new session as resumable only once SQL confirms its first write", async () => {
+		// The index entry appears before the backend acknowledges the write; an exit-time
+		// resume hint read in that window would advertise a session the exit then loses.
+		const client = new SQL("sqlite::memory:");
+		const heldClient = new HeldSqlClient(client);
+		const storage = await SqlSessionStorage.create({ client: heldClient });
+		const manager = SessionManager.create("/cwd", virtualDir("/sessions/unconfirmed"), storage);
+		heldClient.holdQueryPrefix = "INSERT INTO omp_session_files";
+		heldClient.holdNextReplace = true;
+
+		const firstWrite = manager.ensureOnDisk();
+		await heldClient.replaceStarted.promise;
+		expect(manager.isSessionOnDisk()).toBe(true);
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
+
+		heldClient.allowReplace.resolve();
+		await firstWrite;
+		expect(manager.isSessionConfirmedOnDisk()).toBe(true);
+		await manager.close();
+		await client.end();
+	});
+
+	it("does not confirm a new file whose atomic write a synchronous rewrite superseded", async () => {
+		// SessionManager's synchronous rewrite fails the pending atomic write's commit guard
+		// and queues its own publish; until that publish lands the store holds nothing.
+		const client = new SQL("sqlite::memory:");
+		const heldClient = new HeldSqlClient(client);
+		const storage = await SqlSessionStorage.create({ client: heldClient });
+		const sessionFile = path.join(virtualDir("/sessions/superseded"), "s.jsonl");
+		let atomicStillCurrent = true;
+
+		const atomic = storage.writeTextAtomic(sessionFile, "atomic\n", { commitGuard: () => atomicStillCurrent });
+		await Promise.resolve();
+		// The atomic write's optimistic index entry is in place, its publish not yet started.
+		expect(storage.existsSync(sessionFile)).toBe(true);
+		atomicStillCurrent = false;
+		heldClient.holdQueryPrefix = "INSERT INTO omp_session_files";
+		heldClient.holdNextReplace = true;
+		storage.writeTextSync(sessionFile, "sync\n");
+		await atomic;
+		await heldClient.replaceStarted.promise;
+		expect(storage.existsConfirmedSync(sessionFile)).toBe(false);
+
+		heldClient.allowReplace.resolve();
+		await storage.drain();
+		expect(storage.existsConfirmedSync(sessionFile)).toBe(true);
+		expect(await storage.readText(sessionFile)).toBe("sync\n");
 		await client.end();
 	});
 });

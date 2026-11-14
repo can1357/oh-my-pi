@@ -296,7 +296,7 @@ export interface DevinModelDiscoveryOptions {
 	apiKey?: string;
 	/** Optional Codeium API base URL override. */
 	baseUrl?: string;
-	/** Optional request timeout in milliseconds (default 5000). */
+	/** Optional request timeout in milliseconds (default 15000). */
 	timeoutMs?: number;
 	/** Optional caller abort signal, combined with the internal timeout. */
 	signal?: AbortSignal;
@@ -314,7 +314,10 @@ export interface DevinModelDiscoveryOptions {
 export async function fetchDevinModels(
 	options: DevinModelDiscoveryOptions,
 ): Promise<ModelSpec<"devin-agent">[] | null> {
-	const timeoutMs = options.timeoutMs ?? 5_000;
+	// `GetCliModelConfigs` returns the full per-account catalog (600+ configs)
+	// and often takes 7-15s to send headers; 5s silently fell back to the seed.
+	// 15s matches coding-agent's runtime discovery bound.
+	const timeoutMs = options.timeoutMs ?? 15_000;
 	const resolvedBaseUrl = options.baseUrl ?? DEVIN_DEFAULT_BASE_URL;
 	const requestUrl = `${resolvedBaseUrl.replace(/\/+$/, "")}${DEVIN_GET_CLI_MODEL_CONFIGS_PATH}`;
 
@@ -370,7 +373,8 @@ export async function fetchDevinModels(
  * frontier model (Claude/Gemini/GPT/Kimi) read the same field correctly.
  * Declaring text-only lets clients use their image fallback path instead of
  * silently losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
- * Remove entries if Devin ever wires SWE-1.6 vision up.
+ * Remove entries if Devin ever wires SWE-1.6 vision up. SWE-1.6 Fast is gone
+ * from Devin's own catalog but stays here for a Cascade host that still lists it.
  */
 const DEVIN_IMAGE_BLIND_UIDS = new Set(["swe-1-6", "swe-1-6-fast"]);
 
@@ -389,6 +393,9 @@ function devinModelSpec(
 	if (isAssignModelRouter) compat.modelRouter = true;
 	if (features?.supportsParallelToolCalls === true) compat.supportsParallelToolCalls = true;
 	const maxOutputTokens = config.modelInfo?.maxOutputTokens ?? 0;
+	// Current catalogs leave `ClientModelConfig.maxTokens` unset and carry each
+	// lane's context window on `ModelInfo.maxTokens` (200K vs 1M lanes differ there).
+	const contextWindow = config.maxTokens > 0 ? config.maxTokens : (config.modelInfo?.maxTokens ?? 0);
 	const spec: ModelSpec<"devin-agent"> = {
 		id: uid,
 		name: config.label.trim() || uid,
@@ -402,7 +409,7 @@ function devinModelSpec(
 		// mean tools are available.
 		supportsTools: features !== undefined ? features.supportsToolCalls : true,
 		cost: devinModelCost(config),
-		contextWindow: config.maxTokens > 0 ? config.maxTokens : DEFAULT_CONTEXT_WINDOW,
+		contextWindow: contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW,
 		maxTokens: maxOutputTokens > 0 ? maxOutputTokens : DEFAULT_MAX_TOKENS,
 		...(Object.keys(compat).length > 0 ? { compat } : {}),
 	};
@@ -419,7 +426,7 @@ function devinModelSpec(
 /**
  * Lead chat uid of a Fusion pairing `fusion-<lead>[-fast]-sidekick-<sidekick>`.
  * An exact live lead uid wins, so leads whose own uid ends in `-fast`
- * (`swe-1-6-fast`) route as written. Otherwise `-fast` selects the lead's
+ * (`claude-opus-5-5-high-fast`) route as written. Otherwise `-fast` selects the lead's
  * priority lane when the server lists one, then the standard lane.
  *
  * Returns `undefined` for uids that are not pairings and `null` for pairings

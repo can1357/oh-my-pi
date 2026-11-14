@@ -516,15 +516,9 @@ function resolveRichCursorCardCost(
 function resolveCursorCardAxes(slug: string): { patch?: ModelCost; fallback?: ModelCost } {
 	const axes = resolveCatalogAxes({
 		id: slug,
-		name: slug,
 		api: "cursor-agent",
 		provider: "cursor",
-		baseUrl: CURSOR_DEFAULT_BASE_URL,
 		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: DEFAULT_CONTEXT_WINDOW,
-		maxTokens: DEFAULT_MAX_TOKENS,
 	});
 	// Dated cards ride along as a schedule, so a lane priced from a sibling
 	// slug's card (whose own id no rule matches) still changes price on time.

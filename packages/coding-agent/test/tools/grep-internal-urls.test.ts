@@ -277,7 +277,44 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toContain("beta needle");
 	});
 
-	it("keeps a single internal URL whose name ends in a semicolon whole", async () => {
+	it("searches a mixed internal URL and local path semicolon list", async () => {
+		await Bun.write(path.join(artifactsDir, "1.python.log"), "artifact needle\n");
+		await Bun.write(path.join(tmpDir, "notes.txt"), "local needle\n");
+
+		const text = getResultText(
+			await new GrepTool(createSession()).execute("mixed-url-local", {
+				pattern: "needle",
+				path: "artifact://1;notes.txt",
+			}),
+		);
+
+		// Both targets are searched — the list is not one artifact URI.
+		expect(text).toContain("artifact://1");
+		expect(text).toContain("artifact needle");
+		expect(text).toContain("notes.txt");
+		expect(text).toContain("local needle");
+		expect(text).not.toContain("artifact://1;notes.txt");
+	});
+
+	it("globs a mixed internal URL and local path semicolon list", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "PLAN.md"), "# Plan\n");
+		await Bun.write(path.join(tmpDir, "notes.txt"), "local\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const text = getResultText(
+			await new GlobTool(createSession()).execute("glob-mixed-url-local", {
+				path: "local://PLAN.md;notes.txt",
+			}),
+		);
+
+		expect(text).toContain("PLAN.md");
+		expect(text).toContain("notes.txt");
+		expect(text).not.toContain("local://PLAN.md;notes.txt");
+	});
+
+	it("keeps a single internal URL with a semicolon in its path whole", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
 		await Bun.write(path.join(localRoot, "report;"), "semicolon needle\n");
@@ -289,6 +326,21 @@ describe("GrepTool internal URL resolution", () => {
 		);
 		expect(text).toContain("semicolon needle");
 		expect(text).not.toContain("plain needle");
+
+		registerVirtualDocs(
+			new Map([
+				["report;version:abc", "opaque needle\n"],
+				["report", "plain needle\n"],
+			]),
+		);
+		const opaqueTailText = getResultText(
+			await new GrepTool(createSession()).execute("semicolon-opaque-tail", {
+				pattern: "needle",
+				path: "virtual://report;version:abc",
+			}),
+		);
+		expect(opaqueTailText).toContain("opaque needle");
+		expect(opaqueTailText).not.toContain("plain needle");
 	});
 
 	it("searches virtual internal URL content without a backing file", async () => {
@@ -594,6 +646,20 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toMatch(/^\*\d+:.*beta needle/m);
 	});
 
+	it("searches a local:// directory listed beside a `!glob` exclusion", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "a.md"), "kept needle\n");
+		await Bun.write(path.join(localRoot, "notes", "a.test.md"), "excluded needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const result = await new GrepTool(createSession()).execute("local-exclude", {
+			pattern: "needle",
+			path: "local://notes;!*.test.md",
+		});
+		expect(result.details?.files).toEqual(["local://notes/a.md"]);
+	});
+
 	it("runs ast_grep over a local:// file", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
@@ -778,12 +844,14 @@ describe("GrepTool internal URL resolution", () => {
 		} as CapabilityResult<unknown>);
 		vi.spyOn(sshFileTransfer, "readRemoteFile").mockRejectedValue(new Error("Is a directory"));
 		vi.spyOn(sshFileTransfer, "statRemotePath").mockResolvedValue("directory");
-		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockResolvedValue([]);
+		// Unreadable directories still fail; their rendered listing text must
+		// never become a successful searchable document.
+		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockRejectedValue(new Error("Permission denied"));
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("ssh-dir-search", { pattern: "x", path: "ssh://h/etc" })).rejects.toThrow(
-			/ssh:\/\/h\/etc(: Operation not supported| lists only through the read tool)/,
+			/Permission denied|Input\/output error/i,
 		);
-		expect(listSpy).not.toHaveBeenCalled();
+		expect(listSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("searches an IPv6 ssh:// file instead of rejecting the brackets as a glob", async () => {

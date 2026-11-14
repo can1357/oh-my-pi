@@ -4,9 +4,8 @@
 //! The reported identity is the host process's, which is correct for an
 //! in-process builtin.
 
-use std::io::Write;
+use std::{fmt::NumBuffer, io::Write};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use libc::{gid_t, uid_t};
 use uucore::{
@@ -15,7 +14,7 @@ use uucore::{
 	process::{getegid, geteuid, getgid, getuid},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 mod options {
 	pub const OPT_IGNORE: &str = "ignore";
@@ -168,7 +167,7 @@ impl Printer {
 			self.errors.push(format!("cannot find name for user ID {uid}"));
 			self.ok = false;
 		}
-		self.out.extend_from_slice(uid.to_string().as_bytes());
+		self.out.extend_from_slice(uid.format_into(&mut NumBuffer::new()).as_bytes());
 	}
 
 	fn print_group(&mut self, gid: gid_t) {
@@ -180,7 +179,7 @@ impl Printer {
 			self.errors.push(format!("cannot find name for group ID {gid}"));
 			self.ok = false;
 		}
-		self.out.extend_from_slice(gid.to_string().as_bytes());
+		self.out.extend_from_slice(gid.format_into(&mut NumBuffer::new()).as_bytes());
 	}
 
 	/// The user's groups (getgrouplist) or the process's (getgroups, egid
@@ -216,7 +215,8 @@ impl Printer {
 
 	fn print_full_info(&mut self, pw: Option<&Passwd>, ids: &Ids) {
 		let field = |out: &mut Vec<u8>, label: &str, id: u32, name: Option<String>| {
-			out.extend_from_slice(format!("{label}{id}").as_bytes());
+			out.extend_from_slice(label.as_bytes());
+			out.extend_from_slice(id.format_into(&mut NumBuffer::new()).as_bytes());
 			if let Some(name) = name {
 				out.extend_from_slice(format!("({name})").as_bytes());
 			}
@@ -331,11 +331,6 @@ fn app() -> Command {
 				.value_name(options::ARG_USERS)
 				.value_hint(clap::ValueHint::Username),
 		)
-}
-
-/// Creates the `id` builtin registration.
-pub(crate) fn id_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Id, SE>()
 }
 
 #[cfg(test)]

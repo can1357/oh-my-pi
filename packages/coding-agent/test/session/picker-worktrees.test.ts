@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createSessionWorktree } from "@oh-my-pi/pi-coding-agent/session/session-worktree";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -71,6 +72,16 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		return session;
 	}
 
+	/** The resume picker's full scan for `cwd`. */
+	async function pickerSessions(cwd: string, worktreeScope?: "directory" | "repo"): Promise<SessionInfo[]> {
+		return (await SessionManager.listForPicker(cwd, undefined, undefined, worktreeScope)).complete;
+	}
+
+	/** The all-projects resume picker's full scan. */
+	async function allPickerSessions(): Promise<SessionInfo[]> {
+		return (await SessionManager.listAllForPicker()).complete;
+	}
+
 	/** Runs `/wt`'s worktree creation and session move for a fresh session in `repo`. */
 	async function sessionMovedByWt(branch: string): Promise<{ id: string; worktree: string }> {
 		const session = await answeredSession(repo);
@@ -87,15 +98,32 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		const nested = await answeredSession(path.join(repo, "pkg"));
 		await nested.close();
 
-		const ids = async (cwd: string) => (await SessionManager.listForPicker(cwd)).map(s => s.id).sort();
+		const ids = async (cwd: string) => (await pickerSessions(cwd)).map(s => s.id).sort();
 		const rootIds = [moved.id, stayed.getSessionId()].sort();
 		expect(await ids(repo)).toEqual(rootIds);
 		expect(await ids(moved.worktree)).toEqual(rootIds);
 		expect(await ids(path.join(repo, "pkg"))).toEqual([nested.getSessionId()]);
 
 		// A live worktree is not removed: its session resumes in place.
-		const listed = (await SessionManager.listForPicker(repo)).find(s => s.id === moved.id)!;
+		const listed = (await pickerSessions(repo)).find(s => s.id === moved.id)!;
 		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(false);
+	});
+
+	it("can keep the current-folder picker isolated while all-projects still reaches other worktrees", async () => {
+		const moved = await sessionMovedByWt("wt/scoped");
+		const stayed = await answeredSession(repo);
+		await stayed.close();
+
+		const directoryIds = async (cwd: string) => (await pickerSessions(cwd, "directory")).map(session => session.id);
+		expect(await directoryIds(repo)).toEqual([stayed.getSessionId()]);
+		expect(await directoryIds(moved.worktree)).toEqual([moved.id]);
+		expect((await allPickerSessions()).map(session => session.id).sort()).toEqual(
+			[moved.id, stayed.getSessionId()].sort(),
+		);
+		// Choosing a narrower listing never changes relocation of a deleted worktree session.
+		await $`git worktree remove --force ${moved.worktree} && git worktree prune`.cwd(repo).quiet();
+		const listed = (await allPickerSessions()).find(session => session.id === moved.id)!;
+		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(true);
 	});
 
 	it("keeps a removed worktree's session listed and relocates it into the checkout on resume", async () => {
@@ -103,7 +131,7 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		// `omp worktree clear` removes and prunes: git no longer knows the worktree.
 		await $`git worktree remove --force ${moved.worktree} && git worktree prune`.cwd(repo).quiet();
 
-		const listed = (await SessionManager.listForPicker(repo)).find(s => s.id === moved.id);
+		const listed = (await pickerSessions(repo)).find(s => s.id === moved.id);
 		expect(listed?.cwd).toBe(moved.worktree);
 		expect(await SessionManager.isFromRemovedWorktree(listed!, repo)).toBe(true);
 

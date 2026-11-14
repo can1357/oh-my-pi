@@ -1,9 +1,11 @@
-//! Structural analysis of a shell command using `brush-parser`.
+//! Structural analysis of a shell command using the engine's own parser.
 //!
 //! The minimizer must not corrupt downstream parsing or stitch together
 //! segments that emit interleaved output. This module parses the full
-//! command with the same shell parser the vendored brush runtime uses and
-//! classifies it into one of a few shapes the engine can reason about.
+//! command with [`crate::bash::syntax`], the bash 5.3 parser the
+//! [`crate::bash`] engine executes from, and classifies it into one of a few
+//! shapes the engine can reason about. Segments therefore split exactly where
+//! the executing engine splits the command.
 //!
 //! ## Decisions encoded here
 //!
@@ -14,30 +16,45 @@
 //! - **Safe chains are segmented, not rewritten whole.** Top-level simple
 //!   commands joined only by `&&` and `;` may be split into `ChainSegment`s for
 //!   the segmented engine path, but the whole-buffer minimizer still treats the
-//!   combined chain as opaque.
+//!   combined chain as opaque. Each segment's text is the verbatim source span
+//!   of its pipeline, redirections included, so quoting and redirect spelling
+//!   survive exactly as written. Source offsets and lengths retain that same
+//!   pipeline span in original-command bytes; execution wrappers are the
+//!   caller's responsibility.
 //! - **Other compound commands are opaque.** `a || b`, background jobs, and
 //!   compound shell syntax such as subshells or function definitions are left
-//!   unchanged.
+//!   unchanged. Here-documents, command/process substitutions and arithmetic
+//!   expansions keep a command out of segmentation as well.
 //! - **Single simple commands** are safe for the whole-buffer path; the engine
 //!   dispatches them through `detect.rs` as before.
 //!
 //! When the command fails to parse (syntax error, unsupported construct),
 //! we return `Unsupported` and the engine passes through.
 
-use brush_parser::{
-	ParserOptions,
-	ast::{
-		AndOr, Command, CommandPrefixOrSuffixItem, CompoundListItem, IoFileRedirectTarget,
-		IoRedirect, Pipeline, Program, SeparatorOperator, SimpleCommand, Word,
+use crate::bash::syntax::{
+	AndOrOp, Features, Program, Sep, Span, parse_all,
+	tree::{
+		ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, ListItem, Param, ParamOp,
+		Part, Pipeline, Redir, RedirTarget, Seq, Simple, Subscript, Word, WordPart,
 	},
 };
 
 /// One segment of a safe `&&` / `;` chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainSegment {
+	/// The segment's pipeline verbatim from the source, redirections included.
 	pub command:                   String,
+	/// First byte of the pipeline in the original command, before any run
+	/// wrapper.
+	pub source_at:                 u32,
+	/// Byte length of the pipeline in the original command, excluding run
+	/// wrappers.
+	pub source_len:                u32,
+	/// Leading command word of the segment's first stage, as written.
 	pub program:                   String,
+	/// The segment follows `&&`: it runs only when the previous one succeeded.
 	pub run_if_previous_succeeded: bool,
+	/// The segment is followed by `&&`, so its failure must not trip `errexit`.
 	pub suppress_errexit:          bool,
 }
 
@@ -45,15 +62,21 @@ pub struct ChainSegment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandPlan {
 	/// Exactly one simple command. `program` is the leading word (without
-	/// arguments), verbatim from the parsed AST.
-	Single { program: String },
+	/// arguments), verbatim from the source.
+	Single {
+		/// Leading command word as written.
+		program: String,
+	},
 	/// The command contains at least one `|` pipeline. We intentionally do
 	/// NOT identify upstream / downstream programs here — any pipe defeats
 	/// safe minimization for this engine.
 	Piped,
 	/// Top-level simple commands joined by `&&` and/or `;`. These can be
 	/// minimized segment-by-segment, but not as one combined buffer.
-	Chain { segments: Vec<ChainSegment> },
+	Chain {
+		/// The segments in execution order.
+		segments: Vec<ChainSegment>,
+	},
 	/// The command has multiple segments joined by `||`, `&`, or other
 	/// unsupported shell syntax. This shape is left unchanged; the minimizer
 	/// only rewrites whole simple command output.
@@ -63,7 +86,7 @@ pub enum CommandPlan {
 	Unsupported,
 }
 
-/// Parse `command` with `brush-parser` and classify its structure.
+/// Parse `command` with the engine's bash parser and classify its structure.
 #[must_use]
 pub fn analyze(command: &str) -> CommandPlan {
 	if command.trim().is_empty() {
@@ -72,282 +95,257 @@ pub fn analyze(command: &str) -> CommandPlan {
 	let Some(program) = parse(command) else {
 		return CommandPlan::Unsupported;
 	};
-	classify(&program)
+	classify(&program, command)
 }
 
-/// Parse `command` with the same `brush-parser` configuration the vendored
-/// runtime uses, discarding error detail. Returns `None` on any syntax error
-/// or unsupported construct.
+/// Parse `command` as plain bash 5.3 (no aliases, default shell options — the
+/// grammar a fresh engine shell runs it with), discarding error detail.
+/// Returns `None` on any syntax error.
 fn parse(command: &str) -> Option<Program> {
-	let options = ParserOptions::default();
-	let reader = std::io::Cursor::new(command.as_bytes());
-	let mut parser = brush_parser::Parser::new(reader, &options);
-	parser.parse_program().ok()
+	parse_all(command.as_bytes(), Features::NONE).ok()
 }
 
-fn classify(program: &Program) -> CommandPlan {
-	if let Some(chain) = classify_chain(program) {
+/// Source text `span` covers in `src`; `None` when it is not valid UTF-8.
+fn span_text(src: &str, span: Span) -> Option<&str> {
+	std::str::from_utf8(span.slice(src.as_bytes())).ok()
+}
+
+/// `&` (or zsh `&|`) backgrounds the item: the parent's stdout is the
+/// foreground command's, so we cannot tell which output we capture.
+const fn is_async(sep: Sep) -> bool {
+	matches!(sep, Sep::Amp | Sep::Disown)
+}
+
+fn classify(program: &Program, src: &str) -> CommandPlan {
+	// Separator-separated top-level items across all complete commands.
+	let items: Vec<ListItem<'_>> = program
+		.commands
+		.iter()
+		.flat_map(|complete| complete.list().items())
+		.collect();
+
+	if let Some(chain) = classify_chain(&items, src) {
 		return chain;
 	}
 
-	// Count separator-separated top-level items across all complete_commands.
-	let items: Vec<&CompoundListItem> = program
-		.complete_commands
-		.iter()
-		.flat_map(|cl| cl.0.iter())
-		.collect();
+	let [item] = items.as_slice() else {
+		// `a ; b` or `a & b` produces multiple list items.
+		return if items.is_empty() {
+			CommandPlan::Unsupported
+		} else {
+			CommandPlan::Compound
+		};
+	};
 
-	if items.is_empty() {
-		return CommandPlan::Unsupported;
-	}
-
-	if items.len() > 1 {
-		// `a ; b` or `a & b` produces multiple compound list items.
-		return CommandPlan::Compound;
-	}
-
-	// Exactly one CompoundListItem: check the separator and the AndOrList.
-	let CompoundListItem(and_or, separator) = items[0];
-
-	// Async separator (`&`) backgrounds the command; treat as compound since
-	// the parent shell's stdout is the foreground command's — we don't know
-	// which one we're capturing. Conservative bail.
-	if matches!(separator, SeparatorOperator::Async) {
-		return CommandPlan::Compound;
-	}
-
-	// AndOrList.additional holds the `&&` / `||` continuations.
-	if !and_or.additional.is_empty() {
+	// Conservative bail on a backgrounded command, and on `&&` / `||`
+	// continuations that did not form a safe chain.
+	if is_async(item.sep()) || item.and_or().rest().len() != 0 {
 		return CommandPlan::Compound;
 	}
 
 	// Only a single pipeline at this point.
-	classify_pipeline(&and_or.first).unwrap_or(CommandPlan::Unsupported)
+	classify_pipeline(item.and_or().first(), src).unwrap_or(CommandPlan::Unsupported)
 }
 
-fn classify_chain(program: &Program) -> Option<CommandPlan> {
-	let items: Vec<&CompoundListItem> = program
-		.complete_commands
-		.iter()
-		.flat_map(|cl| cl.0.iter())
-		.collect();
-
-	if items.is_empty() {
-		return None;
-	}
-
+fn classify_chain(items: &[ListItem<'_>], src: &str) -> Option<CommandPlan> {
 	let mut segments = Vec::new();
-	let mut run_if_previous_succeeded = false;
 
-	for (item_index, item) in items.iter().enumerate() {
-		if matches!(item.1, SeparatorOperator::Async) {
+	for item in items {
+		if is_async(item.sep()) {
 			return None;
 		}
 
-		let is_last_item = item_index + 1 == items.len();
-		let mut pipeline = &item.0.first;
-		let mut additional = item.0.additional.iter().peekable();
+		let mut run_if_previous_succeeded = false;
+		let mut pipeline = item.and_or().first();
+		let mut rest = item.and_or().rest().peekable();
 
 		loop {
-			let (command, program) = simple_segment(pipeline)?;
+			let (command, program) = simple_segment(pipeline, src)?;
 
-			let suppress_errexit = additional
-				.peek()
-				.is_some_and(|and_or| matches!(and_or, AndOr::And(_)));
+			let suppress_errexit = rest.peek().is_some_and(|(op, _)| *op == AndOrOp::And);
+			let span = pipeline.span();
 			segments.push(ChainSegment {
 				command,
+				source_at: span.lo,
+				source_len: span.hi - span.lo,
 				program,
 				run_if_previous_succeeded,
 				suppress_errexit,
 			});
 
-			let Some(and_or) = additional.next() else {
-				run_if_previous_succeeded = false;
-				break;
-			};
-
-			match and_or {
-				AndOr::And(next_pipeline) => {
+			match rest.next() {
+				None => break,
+				Some((AndOrOp::And, next_pipeline)) => {
 					run_if_previous_succeeded = true;
 					pipeline = next_pipeline;
 				},
-				AndOr::Or(_) => return None,
+				Some((AndOrOp::Or, _)) => return None,
 			}
-		}
-
-		if !is_last_item {
-			run_if_previous_succeeded = false;
 		}
 	}
 
 	(segments.len() >= 2).then_some(CommandPlan::Chain { segments })
 }
 
-fn word_has_command_substitution(word: &Word) -> bool {
-	word.value.contains("$(") || word.value.contains('`')
+fn word_is_safe(word: Word<'_>) -> bool {
+	parts_are_safe(word.parts())
 }
 
-fn command_prefix_or_suffix_item_is_safe(item: &CommandPrefixOrSuffixItem) -> bool {
-	match item {
-		CommandPrefixOrSuffixItem::IoRedirect(io) => io_redirect_is_safe(io),
-		CommandPrefixOrSuffixItem::Word(word) => !word_has_command_substitution(word),
-		CommandPrefixOrSuffixItem::AssignmentWord(_, word) => !word_has_command_substitution(word),
-		CommandPrefixOrSuffixItem::ProcessSubstitution(..) => false,
-	}
-}
-
-fn io_redirect_is_safe(io: &IoRedirect) -> bool {
-	match io {
-		IoRedirect::File(_, _, target) => match target {
-			IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
-				!word_has_command_substitution(word)
-			},
-			IoFileRedirectTarget::Fd(_) => true,
-			IoFileRedirectTarget::ProcessSubstitution(..) => false,
+fn parts_are_safe(parts: Seq<'_, WordPart<'_>>) -> bool {
+	parts.iter().all(|part| match part.get() {
+		Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote => {
+			true
 		},
-		// Here-docs are never safe to segment. The segmented runner rebuilds
-		// each chain segment from the brush AST via `pipeline.to_string()`, and
-		// that Display impl re-emits a quoted/escaped here-doc's *closing*
-		// delimiter with its quotes intact (`<<'EOF'` … `'EOF'` rather than the
-		// required bare `EOF`). The reconstructed close tag never matches, so
-		// the re-run segment fails with "unterminated here document". Leave any
-		// here-doc-bearing command to the unsegmented single path.
-		IoRedirect::HereDocument(..) => false,
-		IoRedirect::HereString(_, word) => !word_has_command_substitution(word),
-		IoRedirect::OutputAndError(word, _) => !word_has_command_substitution(word),
+		Part::DQuote(inner) | Part::Locale(inner) => parts_are_safe(inner),
+		Part::Param(param) => param_is_safe(param),
+		Part::Compound(elems) => elems.iter().all(array_elem_is_safe),
+		// Command (`$(…)`, backticks, `${ …;}`, `${| …;}`) and process
+		// substitutions run commands of their own. Arithmetic text is not
+		// parsed into the tree and may hide one. Deferred-error words fail
+		// when expanded; zsh words never appear in bash grammar. All stay
+		// with the unsegmented whole command.
+		Part::Comsub(_)
+		| Part::ProcSub(_)
+		| Part::Arith(_)
+		| Part::BadSubst(_)
+		| Part::BadComsub(_)
+		| Part::Zsh(_) => false,
+	})
+}
+
+/// Arithmetic text inside `${x:off:len}` is unparsed; any `$` or backquote in
+/// it may be a command substitution, so only expansion-free text is safe.
+fn arith_text_is_safe(text: ArithText<'_>) -> bool {
+	!text.src().iter().any(|&byte| matches!(byte, b'$' | b'`'))
+}
+
+fn param_is_safe(param: Param<'_>) -> bool {
+	let index_is_safe = match param.index() {
+		Some(Subscript::Expr(word)) => word_is_safe(word),
+		Some(Subscript::At | Subscript::Star) | None => true,
+	};
+	index_is_safe
+		&& match param.op() {
+			ParamOp::None
+			| ParamOp::Length
+			| ParamOp::Indirect
+			| ParamOp::PrefixNames { .. }
+			| ParamOp::Transform(_) => true,
+			ParamOp::Default { word, .. }
+			| ParamOp::Assign { word, .. }
+			| ParamOp::Alt { word, .. }
+			| ParamOp::Trim { pat: word, .. } => word_is_safe(word),
+			ParamOp::Error { word, .. } | ParamOp::Case { pat: word, .. } => {
+				word.is_none_or(word_is_safe)
+			},
+			ParamOp::Substr { offset, len } => {
+				arith_text_is_safe(offset) && len.is_none_or(arith_text_is_safe)
+			},
+			ParamOp::Replace { pat, rep, .. } => word_is_safe(pat) && rep.is_none_or(word_is_safe),
+		}
+}
+
+fn array_elem_is_safe(elem: ArrayElem<'_>) -> bool {
+	elem.key().is_none_or(word_is_safe) && word_is_safe(elem.value())
+}
+
+fn assign_is_safe(assign: Assign<'_>) -> bool {
+	assign.index().is_none_or(word_is_safe)
+		&& match assign.value() {
+			AssignValue::Scalar(word) => word_is_safe(word),
+			AssignValue::Array(elems) => elems.iter().all(array_elem_is_safe),
+		}
+}
+
+fn redir_is_safe(redir: Redir<'_>) -> bool {
+	match redir.target() {
+		RedirTarget::Word(word) => word_is_safe(word),
+		// Here-docs are never safe to segment: the document body follows the
+		// command's line, outside the pipeline's source span, so a segment
+		// sliced from that span would run without its body ("unterminated
+		// here document"). Leave any here-doc-bearing command to the
+		// unsegmented single path.
+		RedirTarget::HereDoc(_) => false,
 	}
 }
 
-/// True when every part of a simple command is safe to reconstruct through
-/// `brush`'s `Display` impl: no command/process substitutions and no here-doc
-/// in the command word, prefix, or suffix (those re-emit in forms that diverge
-/// from the source). The full reconstruction is still re-parse-verified by
-/// [`reconstruction_reparses_to_same_shape`] before any segment is executed.
-fn simple_command_is_safe(simple: &SimpleCommand) -> bool {
-	if let Some(prefix) = simple.prefix.as_ref()
-		&& prefix
-			.0
-			.iter()
-			.any(|item| !command_prefix_or_suffix_item_is_safe(item))
-	{
-		return false;
-	}
-	if let Some(suffix) = simple.suffix.as_ref()
-		&& suffix
-			.0
-			.iter()
-			.any(|item| !command_prefix_or_suffix_item_is_safe(item))
-	{
-		return false;
-	}
-	if let Some(word) = simple.word_or_name.as_ref()
-		&& word_has_command_substitution(word)
-	{
-		return false;
-	}
-	true
+/// The simple command `command` is, when every part of it is safe to run as a
+/// standalone segment: no command/process substitution, arithmetic expansion
+/// or here-doc in its assignments, words, or redirections.
+fn safe_simple(command: Command<'_>) -> Option<Simple<'_>> {
+	let CommandKind::Simple(simple) = command.kind() else {
+		return None;
+	};
+	let safe = simple.assigns().iter().all(assign_is_safe)
+		&& simple.words().iter().all(word_is_safe)
+		&& command.redirs().iter().all(redir_is_safe);
+	safe.then_some(simple)
 }
 
-fn simple_segment(pipeline: &Pipeline) -> Option<(String, String)> {
-	if pipeline.timed.is_some() || pipeline.bang || pipeline.seq.is_empty() {
+fn simple_segment(pipeline: Pipeline<'_>, src: &str) -> Option<(String, String)> {
+	if pipeline.time().is_some() || pipeline.bang() {
 		return None;
 	}
 
-	// Every stage must be a Display-safe simple command. Compound stages
-	// (`if` / `for` / `while` / subshells / `{ … }`) and unsafe words/redirects
-	// (here-docs, substitutions) do not round-trip through `Display`. Validating
-	// only `seq.first()` once let a compound later stage through — e.g.
-	// `git log … | while read x; do … done` — and the reconstructed segment then
-	// failed to execute with "syntax error at end of input".
-	for command in &pipeline.seq {
-		let Command::Simple(simple) = command else {
-			return None;
-		};
-		if !simple_command_is_safe(simple) {
-			return None;
-		}
+	// Every stage must be a safe simple command. Compound stages
+	// (`if` / `for` / `while` / subshells / `{ … }`) keep the whole chain
+	// unsegmented; validating only the first stage once let
+	// `git log … | while read x; do … done` through.
+	let mut stages = pipeline.stages().iter();
+	let first = safe_simple(stages.next()?)?;
+	if !stages.all(|stage| safe_simple(stage).is_some()) {
+		return None;
 	}
 
 	// Identify the segment by its first stage's program word. Multi-stage pipes
 	// are captured but never rewritten (runtime detects `CommandPlan::Piped`),
 	// keeping the chain decomposable when an inner stage pipes (e.g.
 	// `ls | head -10 && git status`).
-	let Command::Simple(first) = pipeline.seq.first()? else {
-		return None;
-	};
-	let program_word = first.word_or_name.as_ref()?;
-	let program = program_word.to_string();
+	let program = span_text(src, first.words().first()?.span())?;
 	if program.trim().is_empty() {
 		return None;
 	}
 
-	// The chain runner re-executes this reconstructed string verbatim. brush's
-	// `Display` is not a guaranteed inverse of its parser, so re-parse the
-	// reconstruction and require the same pipeline shape before committing to
-	// segmentation. Any divergence (a lossy compound terminator today, a future
-	// `Display` change tomorrow) falls back to the unsegmented whole-command
-	// path instead of failing at execution.
-	let command = pipeline.to_string();
-	if !reconstruction_reparses_to_same_shape(&command, pipeline.seq.len()) {
+	// The chain runner re-executes this text: take it verbatim from the
+	// source span (all stages and their redirections) rather than re-printing
+	// the tree, so it is exactly what the user wrote.
+	let command = span_text(src, pipeline.span())?;
+	if command.trim().is_empty() {
 		return None;
 	}
-	Some((command, program))
+	Some((command.to_owned(), program.to_owned()))
 }
 
-/// Confirm a reconstructed segment string re-parses to the *same shape* it was
-/// built from: exactly one sequential top-level pipeline with `expected_stages`
-/// commands, no `&&`/`||`/`;`/`&` continuation, and no `!`/`time` modifier.
-///
-/// This is a syntax/shape guard, not a proof of full semantic equivalence. It
-/// guarantees the chain runner never executes a reconstruction that fails to
-/// parse or that `Display` reshaped into different top-level structure. brush's
-/// `Display` is not a guaranteed inverse of its parser — compound terminators
-/// (`while … done`) and quoted here-doc close tags re-emit in forms that fail
-/// to re-parse — so a divergent segment drops back to the unsegmented
-/// whole-command path instead of blowing up at execution with
-/// "pi-natives:command: syntax error". The per-stage `simple_command_is_safe`
-/// whitelist already excludes constructs whose `Display` is value-lossy
-/// (substitutions, here-docs); words carry raw source text and round-trip
-/// verbatim.
-fn reconstruction_reparses_to_same_shape(reconstructed: &str, expected_stages: usize) -> bool {
-	let Some(program) = parse(reconstructed) else {
-		return false;
-	};
-	let mut items = program.complete_commands.iter().flat_map(|cl| cl.0.iter());
-	let Some(CompoundListItem(and_or, separator)) = items.next() else {
-		return false;
-	};
-	// A second top-level item, a trailing `&` (Async), or an `&&`/`||`
-	// continuation all mean `Display` reshaped the command.
-	if items.next().is_some()
-		|| !and_or.additional.is_empty()
-		|| matches!(separator, SeparatorOperator::Async)
-	{
-		return false;
-	}
-	let pipeline = &and_or.first;
-	!pipeline.bang && pipeline.timed.is_none() && pipeline.seq.len() == expected_stages
-}
-
-fn classify_pipeline(pipeline: &Pipeline) -> Option<CommandPlan> {
-	if pipeline.seq.len() > 1 {
+fn classify_pipeline(pipeline: Pipeline<'_>, src: &str) -> Option<CommandPlan> {
+	let stages = pipeline.stages();
+	if stages.len() > 1 {
 		return Some(CommandPlan::Piped);
 	}
-	let single = pipeline.seq.first()?;
-	match single {
-		Command::Simple(simple) => {
-			let program_word = simple.word_or_name.as_ref()?;
-			let program_text = program_word.to_string();
-			if program_text.trim().is_empty() {
+	match stages.first()?.kind() {
+		CommandKind::Simple(simple) => {
+			let program = span_text(src, simple.words().first()?.span())?;
+			if program.trim().is_empty() {
 				return None;
 			}
-			Some(CommandPlan::Single { program: program_text })
+			Some(CommandPlan::Single { program: program.to_owned() })
 		},
 		// Compound shell syntax (if / for / while / subshell / { ... }) is
 		// not something the minimizer should touch.
-		Command::Compound(..) | Command::Function(_) | Command::ExtendedTest(..) => {
-			Some(CommandPlan::Compound)
-		},
+		CommandKind::Brace(_)
+		| CommandKind::Subshell(_)
+		| CommandKind::If(_)
+		| CommandKind::While(_)
+		| CommandKind::For(_)
+		| CommandKind::ArithFor(_)
+		| CommandKind::Select(_)
+		| CommandKind::Case(_)
+		| CommandKind::Arith(_)
+		| CommandKind::Cond(_)
+		| CommandKind::FuncDef(_)
+		| CommandKind::Coproc(_)
+		| CommandKind::Repeat(_)
+		| CommandKind::Try(_)
+		| CommandKind::AnonFunc(_) => Some(CommandPlan::Compound),
 	}
 }
 
@@ -397,12 +395,16 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "git diff --stat".to_string(),
+					source_at:                 0,
+					source_len:                15,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
+					source_at:                 19,
+					source_len:                20,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
@@ -419,12 +421,16 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "git status".to_string(),
+					source_at:                 0,
+					source_len:                10,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
+					source_at:                 13,
+					source_len:                8,
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
@@ -441,18 +447,24 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "false".to_string(),
+					source_at:                 0,
+					source_len:                5,
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
+					source_at:                 9,
+					source_len:                7,
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
+					source_at:                 19,
+					source_len:                8,
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
@@ -471,8 +483,41 @@ mod tests {
 		let plan = analyze("ls -lh *.txt | head -5 && git status --short");
 		let segments = chain_of(plan).expect("expected Chain");
 		assert_eq!(segments.len(), 2);
+		assert_eq!(segments[0].command, "ls -lh *.txt | head -5");
 		assert_eq!(segments[0].program, "ls");
 		assert_eq!(segments[1].program, "git");
+	}
+
+	#[test]
+	fn segment_text_is_verbatim_source() {
+		// Segments are sliced from the source, so quoting, spacing inside
+		// quotes and redirect spelling survive exactly as written.
+		let plan = analyze("echo 'a  b' \"c\"  >/dev/null 2>&1 && FOO=\"x y\" printf '%s\\n' z");
+		let segments = chain_of(plan).expect("expected Chain");
+		assert_eq!(segments[0].command, "echo 'a  b' \"c\"  >/dev/null 2>&1");
+		assert_eq!(segments[0].program, "echo");
+		assert_eq!(segments[1].command, "FOO=\"x y\" printf '%s\\n' z");
+		assert_eq!(segments[1].program, "printf");
+	}
+
+	#[test]
+	fn repeated_segments_keep_distinct_original_byte_spans() {
+		let command = "  echo 'é' && echo 'é';\n echo 'é'";
+		let segments = chain_of(analyze(command)).expect("expected Chain");
+		assert_eq!(segments.len(), 3);
+		assert_eq!(
+			segments
+				.iter()
+				.map(|segment| (segment.source_at, segment.source_len))
+				.collect::<Vec<_>>(),
+			vec![(2, 9), (15, 9), (27, 9)],
+		);
+		for segment in segments {
+			assert_eq!(segment.command, "echo 'é'");
+			let start = segment.source_at as usize;
+			let end = start + segment.source_len as usize;
+			assert_eq!(&command[start..end], segment.command);
+		}
 	}
 
 	#[test]
@@ -480,6 +525,9 @@ mod tests {
 		for command in [
 			"echo $(pwd) ; git status",
 			"echo `pwd` ; git status",
+			"echo \"$(pwd)\" ; git status",
+			"echo ${x:-$(pwd)} ; git status",
+			"echo ${ pwd;} ; git status",
 			"cat <(printf hi) ; git status",
 			"git status > >(cat) ; bun test",
 			"! git status ; bun test",
@@ -491,11 +539,10 @@ mod tests {
 	#[test]
 	fn heredoc_chains_are_not_segmented() {
 		// Regression: a chain whose segment carries a here-doc must not be
-		// split. The segmented runner rebuilds each segment with the brush AST
-		// Display impl, which re-emits a quoted/escaped here-doc's closing
-		// delimiter with quotes (`'EOF'` rather than `EOF`); re-running that
-		// reconstructed segment fails with "unterminated here document". Both
-		// quoted and unquoted delimiters bail so the whole command runs whole.
+		// split. The document body lies outside the segment's source span, so
+		// re-running the segment alone fails with "unterminated here
+		// document". Both quoted and unquoted delimiters bail so the whole
+		// command runs whole.
 		assert_not_chain("cat <<'EOF'\nbody\nEOF\necho done");
 		assert_not_chain("cat <<\"EOF\"\nbody\nEOF\necho done");
 		assert_not_chain("cat <<EOF\nbody\nEOF\necho done");
@@ -523,18 +570,16 @@ mod tests {
 	#[test]
 	fn compound_later_pipeline_stage_is_not_segmented() {
 		// Regression: a pipeline whose *later* stage is a compound command
-		// (`while`/`for`/`if`/subshell) must never be segmented. The chain runner
-		// re-executes `pipeline.to_string()`, and brush's `Display` drops the
-		// compound terminator, so the reconstruction failed to re-parse and blew
-		// up at execution with "syntax error at end of input". Validating only
-		// `seq.first()` (a simple `git`/`seq`) let it slip through.
+		// (`while`/`for`/`if`/subshell) must never be segmented. Validating only
+		// the first stage (a simple `git`/`seq`) once let it slip through and
+		// the re-run segment failed with "syntax error at end of input".
 		assert_not_chain(
 			"echo start && git log --oneline | while read h; do echo \"$h\"; done | head -3",
 		);
 		assert_not_chain("seq 3 | while read n; do echo \"$n\"; done && echo done");
 		assert_not_chain("printf x && ls | for f in a b; do echo $f; done");
 		// The reported shape classifies as Compound, so it runs whole and
-		// unsegmented via the single path (no reconstruction, no minimization).
+		// unsegmented via the single path (no minimization).
 		assert_eq!(
 			analyze("echo a && seq 2 | while read n; do echo $n; done"),
 			CommandPlan::Compound,
@@ -543,10 +588,8 @@ mod tests {
 
 	#[test]
 	fn chain_segments_reparse_cleanly() {
-		// Every command string the chain runner will execute must itself re-parse
-		// to a single pipeline — the contract enforced by
-		// `reconstruction_reparses_to_same_shape`. A segment whose `Display`
-		// reconstruction diverges is dropped rather than emitted.
+		// Every command string the chain runner will execute must itself parse
+		// to exactly one pipeline with no `&&`/`||`/`;`/`&` continuation.
 		for command in [
 			"git diff --stat && git diff --name-only",
 			"ls -lh *.txt | head -5 && git status --short",
@@ -557,9 +600,21 @@ mod tests {
 				panic!("{command:?} should classify as Chain");
 			};
 			for segment in &segments {
+				let program = parse(&segment.command).unwrap_or_else(|| {
+					panic!("segment {:?} from {command:?} did not re-parse", segment.command)
+				});
+				let items: Vec<ListItem<'_>> = program
+					.commands
+					.iter()
+					.flat_map(|complete| complete.list().items())
+					.collect();
+				let single_pipeline = matches!(
+					items.as_slice(),
+					[item] if item.and_or().rest().len() == 0 && !is_async(item.sep())
+				);
 				assert!(
-					parse(&segment.command).is_some(),
-					"segment {:?} from {command:?} did not re-parse",
+					single_pipeline,
+					"segment {:?} from {command:?} re-parsed to a different shape",
 					segment.command,
 				);
 			}

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
 	disposeProgramStatus,
+	holdBlockedStatus,
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	setRunStatus,
+	settleStartupRun,
 } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
@@ -55,7 +57,7 @@ describe("run status OSC 7501 reporting", () => {
 	it("writes each transition as a whole root record, once, with kind only when blocked and msg as one clean line", () => {
 		setRunStatus({ state: "working" });
 		setRunStatus({ state: "working" });
-		setRunStatus({ state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" });
+		holdBlockedStatus({ state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" })();
 		setRunStatus({ state: "done" });
 		setRunStatus({ state: "error", msg: "boom" });
 		setRunStatus({ state: "error", msg: " \n " });
@@ -65,6 +67,7 @@ describe("run status OSC 7501 reporting", () => {
 			report(
 				`state=blocked:kind=question:app=omp:msg=${Buffer.from("Which branch? main or dev?").toString("base64")}`,
 			),
+			report("state=working:app=omp"),
 			report("state=done:app=omp"),
 			report(`state=error:app=omp:msg=${Buffer.from("boom").toString("base64")}`),
 			report("state=error:app=omp"),
@@ -101,22 +104,72 @@ describe("run status OSC 7501 reporting", () => {
 		writes.length = 0;
 
 		setProgramStatusEnabled(false);
-		setRunStatus({ state: "blocked", kind: "permission" });
+		holdBlockedStatus({ state: "blocked", kind: "permission" });
 		setProgramStatusEnabled(true);
 
 		expect(writes).toEqual([CLEAR, report("state=blocked:kind=permission:app=omp")]);
 	});
 
-	it("re-sends a working record after a suspend but never repeats a done result", () => {
+	it("re-sends prompt-invalidated working and blocked records but never repeats a done result", () => {
 		setRunStatus({ state: "working" });
 		resendProgramStatus();
+		const release = holdBlockedStatus({ state: "blocked", kind: "permission", msg: "Approve the command?" });
+		resendProgramStatus();
+		release();
 		setRunStatus({ state: "done" });
 		resendProgramStatus();
 
 		expect(writes).toEqual([
 			report("state=working:app=omp"),
 			report("state=working:app=omp"),
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`),
+			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`),
+			report("state=working:app=omp"),
 			report("state=done:app=omp"),
 		]);
+	});
+
+	it("reports the newest open wait over the run's own transitions, then the run's current status", () => {
+		const blocked = (msg: string) =>
+			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
+		setRunStatus({ state: "working" });
+		const first = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Use Postgres?" });
+		// The run ends under the open wait: the user is still being asked.
+		setRunStatus({ state: "done" });
+		const second = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Deploy now?" });
+		second();
+		first();
+
+		expect(writes).toEqual([
+			report("state=working:app=omp"),
+			blocked("Use Postgres?"),
+			blocked("Deploy now?"),
+			blocked("Use Postgres?"),
+			report("state=done:app=omp"),
+		]);
+	});
+
+	it("boots with a command-line prompt as working, never idle, and settles to idle only when no run reported", () => {
+		disposeProgramStatus();
+		writes.length = 0;
+
+		// The prompt runs: its own `working` and `done` replace the startup hold.
+		initProgramStatus({ startupRun: true });
+		setProgramStatusEnabled(true);
+		setRunStatus({ state: "working" });
+		setRunStatus({ state: "done" });
+		settleStartupRun();
+		expect(writes).toEqual([report("state=working:app=omp"), report("state=done:app=omp")]);
+
+		disposeProgramStatus();
+		writes.length = 0;
+
+		// The prompt fails before its turn starts: the hold goes back to idle.
+		initProgramStatus({ startupRun: true });
+		// The title separator shows the hold too, not only the record.
+		expect(titleGenerator.setTerminalTitleState).toHaveBeenLastCalledWith("working");
+		setProgramStatusEnabled(true);
+		settleStartupRun();
+		expect(writes).toEqual([report("state=working:app=omp"), report("state=idle:app=omp")]);
 	});
 });

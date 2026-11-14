@@ -74,6 +74,22 @@ impl FileLock {
 		})
 	}
 
+	/// Whether any handle, in any process including this one, holds `path`.
+	///
+	/// Observes without locking or opening the lock: a `connect(2)` probe on
+	/// Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
+	/// directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+	#[napi]
+	pub fn is_held(path: JsString) -> napi::Result<bool> {
+		let path = js::utf8(path)?;
+		platform::is_held(&path).map_err(|error| {
+			napi::Error::from_reason(format!(
+				"Failed to probe native file lock for {}: {error}",
+				&*path
+			))
+		})
+	}
+
 	/// Whether this handle owns the requested lock.
 	#[napi(getter)]
 	#[allow(clippy::missing_const_for_fn, reason = "napi method signature")]
@@ -112,5 +128,35 @@ impl Drop for FileLock {
 		if let Some(inner) = self.inner.as_mut() {
 			let _ = inner.release();
 		}
+	}
+}
+
+// Android has no probe (`unix::is_held` reports Unsupported).
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+	use std::time::{SystemTime, UNIX_EPOCH};
+
+	use super::platform::{is_held, try_acquire};
+
+	#[test]
+	fn probe_sees_holder_without_taking_the_lock() {
+		let nonce = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.expect("system clock")
+			.as_nanos();
+		let path =
+			std::env::temp_dir().join(format!("omp-file-lock-probe-{}-{nonce}", std::process::id()));
+		let path = path.to_str().expect("utf-8 temp path");
+		assert!(!is_held(path).expect("probe unlocked path"));
+		let mut lease = try_acquire(path).expect("acquire").expect("free lease");
+		assert!(is_held(path).expect("probe held path"));
+		lease.release().expect("release");
+		assert!(!is_held(path).expect("probe released path"));
+		// A probe never leaves the path held for the next acquirer.
+		let mut successor = try_acquire(path)
+			.expect("reacquire")
+			.expect("probe left the lease free");
+		successor.release().expect("release successor");
+		let _ = std::fs::remove_file(path);
 	}
 }

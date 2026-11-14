@@ -483,6 +483,35 @@ describe("AgentSession session stats", () => {
 		});
 	});
 
+	it("counts failed edits by the kind the engine recorded", () => {
+		const result = (toolName: string, isError: boolean, details?: object, timestamp = 1): Message => ({
+			role: "toolResult",
+			toolCallId: `call-${timestamp}`,
+			toolName,
+			content: [{ type: "text", text: "result" }],
+			details,
+			isError,
+			timestamp,
+		});
+		const messages: Message[] = [
+			result("edit", true, { diff: "", errorKind: "unseen_lines" }, 1),
+			result("edit", true, { diff: "", errorKind: "stale_tag" }, 2),
+			result("edit", true, { diff: "", errorKind: "unseen_lines" }, 3),
+			// Written before edits recorded a kind.
+			result("edit", true, undefined, 4),
+			result("edit", false, { diff: "+1|x" }, 5),
+			result("bash", true, { errorKind: "parse" }, 6),
+		];
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: model(), systemPrompt: ["Test"], tools: [], messages } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		expect(session.getSessionStats().editRejections).toEqual({ unseen_lines: 2, stale_tag: 1 });
+	});
+
 	it("drops anchored tool schemas after switching to a model that defers them", () => {
 		const inlineModel = { ...model(), toolSchemasInContext: true };
 		const deferredModel: Model = { ...inlineModel, toolSchemasInContext: false };

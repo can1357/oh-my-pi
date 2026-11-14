@@ -7,10 +7,12 @@ import type { ImageContent, Usage } from "../types";
 import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import type { JudgmentRequest } from "./types";
 
-/** Where one attempt posts and which bearer token it sends. */
+/** Where one attempt posts and which token it sends. */
 export interface JudgmentTarget {
 	url: string;
 	token: string;
+	/** Header that carries the bare token; unset sends `Authorization: Bearer <token>`. */
+	tokenHeader?: string;
 }
 
 /** One decoded response. */
@@ -35,7 +37,7 @@ export interface JudgmentWire {
 	 */
 	target(baseUrl: string, model: string, key: string): JudgmentTarget;
 	/** Request body for `model`, with optional asset context for dialects that preserve references. */
-	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): unknown;
+	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): Record<string, unknown>;
 	/** Headers this dialect adds to requests that carry images. */
 	imageHeaders?: Readonly<Record<string, string>>;
 	/** Image input this dialect accepts; absent means text-only. */
@@ -48,8 +50,8 @@ export interface JudgmentWire {
 	ignoresImageDetail?: boolean;
 	/** Whether this dialect forwards `box` questions; others reject them before sending. */
 	boxes?: boolean;
-	/** The response's answers and usage; `undefined` when the payload is not this API's response shape. */
-	decode(payload: unknown): DecodedJudgment | undefined;
+	/** The response's answers and usage for `request`; `undefined` when the payload is not this API's response shape. */
+	decode(payload: unknown, request: JudgmentRequest): DecodedJudgment | undefined;
 }
 
 /** `value` when it is a finite number. */

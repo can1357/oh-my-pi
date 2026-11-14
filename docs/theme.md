@@ -26,8 +26,8 @@ Top-level fields:
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
-  - `preset` (optional: `unicode | nerd | ascii`)
-  - `overrides` (optional: key/value overrides for `SymbolKey`)
+   - `preset` (optional: `unicode | nerd | ascii`)
+   - `overrides` (optional: key/value overrides for `SymbolKey`)
 
 Color values accept:
 
@@ -38,7 +38,7 @@ Color values accept:
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset/empty keeps the terminal default foreground).
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground) and `mdExtensionLink` (unset derives a muted `mdLink`).
 
 ### Core text and borders (11)
 
@@ -54,9 +54,13 @@ All tokens below are required in `colors` except `thinkingMax` (falls back to `t
 
 `assistantMessageText` colors the assistant reply's plain paragraph prose (markdown sub-elements keep their own `md*` tokens). It is the token that governs assistant prose — `text` does not: `text` is applied at explicit `theme.fg("text", …)` callsites (editor/dialog surfaces), never to assistant message bodies. When `assistantMessageText` is omitted or set to `""`, prose renders in the terminal default foreground exactly as before the token existed. An explicitly installed prose color transform (live-command output) still wins over the token.
 
-### Markdown (10)
+### Markdown (10 required, 1 optional)
 
-`mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`
+`mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`, optional `mdExtensionLink`
+
+`mdExtensionLink` colors the label of a link whose scheme an extension registered (for example a link that expands text in place). Such a link opens nothing in the browser, so its color sets it apart from `mdLink`, which colors links that open a URL. When it is omitted, omp blends `mdLink` with `text` (45% link, 55% text). A `""` in either token blends as the theme's `terminal.foreground` and a palette index 0–15 as its `terminal.ansi` slot. A theme that declares neither gets approximations: a stock palette for indices 0–15 and a guessed default foreground for `""`. Set the token explicitly when the guess looks wrong. `tui.colorfulMarkdown` does not change either link color.
+
+With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`, `*emphasis*`, inline code and table headers take their colors from the theme's `terminal.ansi` palette instead of `mdHeading`/`mdCode` and plain bold/italic: H1 magenta, H2 yellow, H3–H6 blue, strong/emphasis magenta, inline code green, table headers yellow. All hues come from one palette so they stay distinct. Turning the setting off restores `mdHeading` for every level, `mdCode`, and uncolored bold/italic.
 
 ### Tool diff + syntax highlighting (12)
 
@@ -82,6 +86,10 @@ Used for HTML export theming helpers:
 - `export.infoBg`
 
 If omitted, export code derives defaults from resolved theme colors.
+
+### `terminal` section (optional)
+
+Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors.
 
 ### `symbols` section (optional)
 
@@ -113,7 +121,7 @@ Override behavior follows from that split:
 
 Theme lookup order (`loadThemeJson`):
 
-1. built-in embedded themes (`dark.json`, `light.json`, and all `defaults/*.json` compiled into `defaultThemes`)
+1. built-in embedded themes (`dark.json`, `light.json`, and every palette in `defaults.json`)
 2. custom theme file: `<customThemesDir>/<name>.json`
 
 Custom themes directory comes from `getCustomThemesDir()`:
@@ -260,87 +268,87 @@ Minimal skeleton:
 
 ```json
 {
-  "name": "my-theme",
-  "vars": {
-    "accent": "#7aa2f7",
-    "muted": 244
-  },
-  "colors": {
-    "accent": "accent",
-    "border": "#4c566a",
-    "borderAccent": "accent",
-    "borderMuted": "muted",
-    "success": "#9ece6a",
-    "error": "#f7768e",
-    "warning": "#e0af68",
-    "muted": "muted",
-    "dim": 240,
-    "text": "",
-    "thinkingText": "muted",
+	"name": "my-theme",
+	"vars": {
+		"accent": "#7aa2f7",
+		"muted": 244
+	},
+	"colors": {
+		"accent": "accent",
+		"border": "#4c566a",
+		"borderAccent": "accent",
+		"borderMuted": "muted",
+		"success": "#9ece6a",
+		"error": "#f7768e",
+		"warning": "#e0af68",
+		"muted": "muted",
+		"dim": 240,
+		"text": "",
+		"thinkingText": "muted",
 
-    "selectedBg": "#2a2f45",
-    "userMessageBg": "#1f2335",
-    "userMessageText": "",
-    "customMessageBg": "#24283b",
-    "customMessageText": "",
-    "customMessageLabel": "accent",
-    "toolPendingBg": "#1f2335",
-    "toolSuccessBg": "#1f2d2a",
-    "toolErrorBg": "#2d1f2a",
-    "toolTitle": "",
-    "toolOutput": "muted",
+		"selectedBg": "#2a2f45",
+		"userMessageBg": "#1f2335",
+		"userMessageText": "",
+		"customMessageBg": "#24283b",
+		"customMessageText": "",
+		"customMessageLabel": "accent",
+		"toolPendingBg": "#1f2335",
+		"toolSuccessBg": "#1f2d2a",
+		"toolErrorBg": "#2d1f2a",
+		"toolTitle": "",
+		"toolOutput": "muted",
 
-    "mdHeading": "accent",
-    "mdLink": "accent",
-    "mdLinkUrl": "muted",
-    "mdCode": "#c0caf5",
-    "mdCodeBlock": "#c0caf5",
-    "mdCodeBlockBorder": "muted",
-    "mdQuote": "muted",
-    "mdQuoteBorder": "muted",
-    "mdHr": "muted",
-    "mdListBullet": "accent",
+		"mdHeading": "accent",
+		"mdLink": "accent",
+		"mdLinkUrl": "muted",
+		"mdCode": "#c0caf5",
+		"mdCodeBlock": "#c0caf5",
+		"mdCodeBlockBorder": "muted",
+		"mdQuote": "muted",
+		"mdQuoteBorder": "muted",
+		"mdHr": "muted",
+		"mdListBullet": "accent",
 
-    "toolDiffAdded": "#9ece6a",
-    "toolDiffRemoved": "#f7768e",
-    "toolDiffContext": "muted",
+		"toolDiffAdded": "#9ece6a",
+		"toolDiffRemoved": "#f7768e",
+		"toolDiffContext": "muted",
 
-    "syntaxComment": "#565f89",
-    "syntaxKeyword": "#bb9af7",
-    "syntaxFunction": "#7aa2f7",
-    "syntaxVariable": "#c0caf5",
-    "syntaxString": "#9ece6a",
-    "syntaxNumber": "#ff9e64",
-    "syntaxType": "#2ac3de",
-    "syntaxOperator": "#89ddff",
-    "syntaxPunctuation": "#9aa5ce",
+		"syntaxComment": "#565f89",
+		"syntaxKeyword": "#bb9af7",
+		"syntaxFunction": "#7aa2f7",
+		"syntaxVariable": "#c0caf5",
+		"syntaxString": "#9ece6a",
+		"syntaxNumber": "#ff9e64",
+		"syntaxType": "#2ac3de",
+		"syntaxOperator": "#89ddff",
+		"syntaxPunctuation": "#9aa5ce",
 
-    "thinkingOff": 240,
-    "thinkingMinimal": 244,
-    "thinkingLow": "#7aa2f7",
-    "thinkingMedium": "#2ac3de",
-    "thinkingHigh": "#bb9af7",
-    "thinkingXhigh": "#f7768e",
-    "thinkingMax": "#ff007c",
+		"thinkingOff": 240,
+		"thinkingMinimal": 244,
+		"thinkingLow": "#7aa2f7",
+		"thinkingMedium": "#2ac3de",
+		"thinkingHigh": "#bb9af7",
+		"thinkingXhigh": "#f7768e",
+		"thinkingMax": "#ff007c",
 
-    "bashMode": "#2ac3de",
-    "pythonMode": "#bb9af7",
+		"bashMode": "#2ac3de",
+		"pythonMode": "#bb9af7",
 
-    "statusLineBg": "#16161e",
-    "statusLineSep": 240,
-    "statusLineModel": "#bb9af7",
-    "statusLinePath": "#7aa2f7",
-    "statusLineGitClean": "#9ece6a",
-    "statusLineGitDirty": "#e0af68",
-    "statusLineContext": "#2ac3de",
-    "statusLineSpend": "#7dcfff",
-    "statusLineStaged": "#9ece6a",
-    "statusLineDirty": "#e0af68",
-    "statusLineUntracked": "#f7768e",
-    "statusLineOutput": "#c0caf5",
-    "statusLineCost": "#ff9e64",
-    "statusLineSubagents": "#bb9af7"
-  }
+		"statusLineBg": "#16161e",
+		"statusLineSep": 240,
+		"statusLineModel": "#bb9af7",
+		"statusLinePath": "#7aa2f7",
+		"statusLineGitClean": "#9ece6a",
+		"statusLineGitDirty": "#e0af68",
+		"statusLineContext": "#2ac3de",
+		"statusLineSpend": "#7dcfff",
+		"statusLineStaged": "#9ece6a",
+		"statusLineDirty": "#e0af68",
+		"statusLineUntracked": "#f7768e",
+		"statusLineOutput": "#c0caf5",
+		"statusLineCost": "#ff9e64",
+		"statusLineSubagents": "#bb9af7"
+	}
 }
 ```
 
@@ -362,7 +370,7 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset keeps the terminal default foreground).
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground) and `mdExtensionLink` (unset blends `mdLink` with `text`).
 - `export` and `symbols` are optional.
 - `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.

@@ -5,27 +5,30 @@ import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import {
 	type DefaultTextStyle,
+	endsInsideOpenFence,
 	holdPartialTableRow,
 	Markdown,
 	type MarkdownTheme,
 	rewriteMarkdownLinkDestinations,
 	speculativeStreamingSource,
 	streamingMarkdownSource,
+	type TableLocks,
 } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import type { AssistantThinkingRenderer } from "./extension-types";
+import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
-import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
 import { linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
+import { DEFAULT_SPINNER_INTERVAL_MS, spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
@@ -51,6 +54,8 @@ import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from ".
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
+/** Text renderers that threw once; each failure is logged once per renderer, not per frame. */
+const failedTextRenderers = new WeakSet<AssistantTextRenderer>();
 
 /** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
 function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
@@ -71,7 +76,7 @@ interface FastPathItem {
 }
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
 type StablePartKind = "thinking" | "text";
-type StablePart = { kind: StablePartKind; text: string } | { kind: "spacer" };
+type StablePart = { kind: StablePartKind; text: string; contentIndex: number } | { kind: "spacer" };
 
 /**
  * One published prefix of the block's finished content. Later snapshots extend
@@ -83,6 +88,8 @@ interface StableSnapshot {
 	// Earlier parts are immutable; only the final part needs a historical offset.
 	readonly partCount: number;
 	readonly lastTextLength: number;
+	/** The final part ends inside a locked table that kept streaming (see Markdown.openTableTail). */
+	readonly openTable: boolean;
 }
 
 /**
@@ -246,6 +253,19 @@ function lerpHex(from: string, to: string, t: number): string {
 }
 
 /**
+ * Drop the closing border the renderer draws for a source that ends inside an
+ * open fence. That row is not part of the message yet: the live block reaches
+ * it only when the closer arrives, so publishing it would make the settled
+ * prefix disagree with the block render and freeze mid-stream retirement.
+ */
+function trimFabricatedCloser(rows: readonly string[], source: string): readonly string[] {
+	if (!endsInsideOpenFence(source)) return rows;
+	let last = rows.length;
+	while (last > 0 && rows[last - 1]!.trim() === "") last--;
+	return last > 0 ? rows.slice(0, last - 1) : rows;
+}
+
+/**
  * Renders an assistant message; streaming content remains mutable until the
  * provider finalizes it because later deltas can revise earlier Markdown.
  * The exception is the leading run of visible thinking blocks: raw thinking
@@ -353,6 +373,9 @@ export class AssistantMessageComponent extends Container {
 	#lastTokenTime = 0;
 	/** Published width-independent stable prefixes; grows only, never retracts. */
 	#stableSnapshots: StableSnapshot[] = [];
+	// Locked table layouts per content block, shared by the Markdown streaming
+	// that block and the ones rendering its stable prefix.
+	readonly #tableLocks = new Map<number, TableLocks>();
 	#stableParts: readonly StablePart[] = [];
 	#nextStableRowId = 0;
 	#transcriptStableRows: TranscriptStableRow[] = [];
@@ -390,8 +413,10 @@ export class AssistantMessageComponent extends Container {
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
-	/** Display form of {@link #lastMessage} (reaction handled) the native description is built from. */
+	/** Display form of {@link #lastMessage} (reaction handled, extension text renderers applied) the native description is built from. */
 	#displayedMessage: AssistantMessage | undefined;
+	/** {@link #displayedMessage} before extension text renderers: the reply as written, which thinking state and the native Copy follow. */
+	#answerMessage: AssistantMessage | undefined;
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
 	#thinkingExtensions = new Map<number, Component[]>();
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
@@ -523,9 +548,65 @@ export class AssistantMessageComponent extends Container {
 		content[index] = { ...block, text };
 		return { ...message, content };
 	}
+
+	/**
+	 * Display form with the extension text renderers applied, in registration order: each gets the
+	 * previous one's output. A renderer that throws or returns a non-string leaves its input drawn;
+	 * a throw is logged once per renderer. A block whose text and `streaming` flag are unchanged
+	 * since its last render reuses that output: a block sealed at a tool call keeps receiving
+	 * updates while the call's arguments stream. {@link rerenderMessage} and
+	 * {@link setTextRenderers} drop the reused output.
+	 */
+	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
+		const rendering = this.#textRendering;
+		if (!rendering) return message;
+		// Renderers are display-only: hand them a deep copy so no edit, however nested, reaches the stored message.
+		let view: AssistantMessage | undefined;
+		let content: AssistantMessage["content"] | undefined;
+		// Blocks stream in order: only the last one can still grow.
+		const tail = message.content.length - 1;
+		for (let index = 0; index < message.content.length; index++) {
+			const block = message.content[index]!;
+			if (block.type !== "text" || block.text.length === 0) continue;
+			const blockStreaming = streaming && index === tail;
+			const cached = this.#renderedText.get(index);
+			let text: string;
+			if (cached?.input === block.text && cached.streaming === blockStreaming) {
+				text = cached.output;
+			} else {
+				view ??= structuredClone(message);
+				text = block.text;
+				for (const renderer of rendering.renderers) {
+					try {
+						const rendered = renderer({
+							message: view,
+							contentIndex: rendering.contentOffset + index,
+							text,
+							streaming: blockStreaming,
+						});
+						if (typeof rendered === "string") text = rendered;
+					} catch (error) {
+						if (failedTextRenderers.has(renderer)) continue;
+						failedTextRenderers.add(renderer);
+						logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
+					}
+				}
+				this.#renderedText.set(index, { input: block.text, streaming: blockStreaming, output: text });
+			}
+			if (text === block.text) continue;
+			content ??= message.content.slice();
+			content[index] = { ...block, text };
+		}
+		return content ? { ...message, content } : message;
+	}
 	#hideThinkingBlock: boolean;
 	readonly #onImageUpdate?: () => void;
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
+	#textRendering: AssistantTextRendering | undefined;
+	/** Index in the full reply's `content` of this component's first block, kept across renderer swaps. */
+	readonly #textContentOffset: number;
+	/** Last renderer output per content index, reused while the block's input and `streaming` flag hold; see {@link #renderText}. */
+	readonly #renderedText = new Map<number, { input: string; streaming: boolean; output: string }>();
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
@@ -539,11 +620,14 @@ export class AssistantMessageComponent extends Container {
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
+		textRendering?: AssistantTextRendering,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
 		this.#onImageUpdate = onImageUpdate;
 		this.#thinkingRenderers = thinkingRenderers;
+		this.#textRendering = textRendering?.renderers.length ? textRendering : undefined;
+		this.#textContentOffset = textRendering?.contentOffset ?? 0;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
@@ -719,17 +803,18 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#startThinkingAnimation(): void {
-		// A native terminal clocks the described starburst itself.
-		if (this.#thinkingDotsTimer || isNativeRendering()) return;
+		// A native terminal clocks the described starburst itself; a static spinner holds frame 0.
+		if (this.#thinkingDotsTimer || isNativeRendering() || !spinnerAnimated()) return;
 		this.#scheduleThinkingFrame();
 	}
 
 	/** Eased dwell (ms) for the current pulse frame: a raised cosine over the
 	 *  8-frame cycle, continuous across the wrap, so the rotation breathes rather
-	 *  than advancing at a fixed interval. */
+	 *  than advancing at a fixed interval. Scaled with `tui.spinnerInterval`. */
 	#thinkingDotsFrameDelay(): number {
 		const phase = (1 - Math.cos((2 * Math.PI * this.#thinkingDotsFrame) / THINKING_DOTS_FRAMES.length)) / 2;
-		return THINKING_DOTS_FRAME_MS_MIN + (THINKING_DOTS_FRAME_MS_MAX - THINKING_DOTS_FRAME_MS_MIN) * phase;
+		const dwell = THINKING_DOTS_FRAME_MS_MIN + (THINKING_DOTS_FRAME_MS_MAX - THINKING_DOTS_FRAME_MS_MIN) * phase;
+		return (dwell * spinnerInterval()) / DEFAULT_SPINNER_INTERVAL_MS;
 	}
 
 	/** Self-rescheduling timeout (not a fixed interval) so each frame can pick its
@@ -745,11 +830,14 @@ export class AssistantMessageComponent extends Container {
 			this.#stopThinkingAnimation();
 			return;
 		}
-		this.#thinkingDotsFrame = (this.#thinkingDotsFrame + 1) % THINKING_DOTS_FRAMES.length;
+		const animated = spinnerAnimated();
+		// Spinners went static mid-pulse: settle on frame 0 and stop.
+		if (animated) this.#thinkingDotsFrame = (this.#thinkingDotsFrame + 1) % THINKING_DOTS_FRAMES.length;
+		else this.#thinkingDotsFrame = 0;
 		if (this.#thinkingDots.setText(this.#thinkingDotsLabel())) {
 			this.#onImageUpdate?.();
 		}
-		this.#scheduleThinkingFrame();
+		if (animated) this.#scheduleThinkingFrame();
 	}
 
 	#stopThinkingAnimation(): void {
@@ -792,8 +880,9 @@ export class AssistantMessageComponent extends Container {
 		return this.#transcriptBlockFinalized;
 	}
 
-	/** Whether a figure still waits for the raster of its final source; the transcript holds retirement meanwhile. */
+	/** Hold image and figure rendering until the completed block can enter immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
+		if (this.#showImages && this.#kittyConversionsAwaited.size > 0) return true;
 		for (const block of this.#figureBlocks.values()) if (block.pending) return true;
 		return false;
 	}
@@ -815,7 +904,7 @@ export class AssistantMessageComponent extends Container {
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const media = cx?.supports("media") === true;
-		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
+		const tail = this.#answerMessage ? this.#thinkingTailIndex(this.#answerMessage) : undefined;
 		const rate =
 			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
 				? Math.round(Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed()) * 10) / 10
@@ -886,13 +975,15 @@ export class AssistantMessageComponent extends Container {
 		let answered = false;
 		if (message) {
 			const live = !this.#transcriptBlockFinalized && this.#lastUpdateTransient;
+			// Which block streams, and whether there is an answer to copy, follow the reply as written:
+			// text renderers change only how it is drawn (one may hide all of it).
+			const answer = this.#answerMessage ?? message;
 			let tailIndex = -1;
-			for (let index = 0; index < message.content.length; index++) {
-				const content = message.content[index]!;
-				if (
-					(content.type === "text" && canonicalizeMessage(content.text)) ||
-					(content.type === "thinking" && canonicalizeMessage(content.thinking))
-				) {
+			for (let index = 0; index < answer.content.length; index++) {
+				const content = answer.content[index]!;
+				const answerText = content.type === "text" && canonicalizeMessage(content.text) !== "";
+				answered ||= answerText;
+				if (answerText || (content.type === "thinking" && canonicalizeMessage(content.thinking))) {
 					tailIndex = index;
 				}
 			}
@@ -900,7 +991,6 @@ export class AssistantMessageComponent extends Container {
 				const content = message.content[index]!;
 				const streaming = live && index === tailIndex;
 				if (content.type === "text" && canonicalizeMessage(content.text)) {
-					answered = true;
 					// A native terminal sizes table columns by every row it gets: send a growing row once
 					// its line ends. Hold before trimming, which would drop the newline ending a finished row.
 					const source = (streaming ? holdPartialTableRow(content.text) : content.text).trim();
@@ -1052,7 +1142,17 @@ export class AssistantMessageComponent extends Container {
 				node("row", { role: "omp.turn.usage", gap: "xs", align: "center", title: usage.title }, line, "turn-usage"),
 			);
 		}
-		return col(children, { role: this.#rewound ? "omp.assistant.rewound" : "omp.assistant" });
+		// A phone's long press on a turn's answer lists its actions (a desktop keeps the usage line's Copy).
+		const at = this.#answerMessage?.timestamp;
+		const hold =
+			this.#turnUsage && answered && at !== undefined && !this.#rewound && hasTranscriptActions()
+				? {
+						actions: {
+							hold: turnHoldEntries("assistant", { id: "copy-answer", label: "Copy reply", icon: "copy" }),
+						},
+					}
+				: {};
+		return col(children, { role: this.#rewound ? "omp.assistant.rewound" : "omp.assistant", ...hold });
 	}
 
 	/**
@@ -1146,13 +1246,13 @@ export class AssistantMessageComponent extends Container {
 		else if (act === "copy-answer") {
 			const text = this.#answerText();
 			if (text) runTranscriptAction({ act: "copy", text });
-		}
+		} else if (this.#answerMessage) runTurnAction(act, { role: "assistant", at: this.#answerMessage.timestamp });
 	}
 
 	/** The answer as the transcript shows it: its text blocks' markdown, a blank line apart, without thinking or tool calls. */
 	#answerText(): string {
 		const blocks: string[] = [];
-		for (const content of this.#displayedMessage?.content ?? []) {
+		for (const content of this.#answerMessage?.content ?? []) {
 			if (content.type === "text" && canonicalizeMessage(content.text)) blocks.push(content.text.trim());
 		}
 		return blocks.join("\n\n");
@@ -1198,6 +1298,7 @@ export class AssistantMessageComponent extends Container {
 				snapshot.lastTextLength,
 				width,
 				"replay",
+				snapshot.openTable,
 			);
 			if (this.#recordStableRows(index, width, rows)) return rows;
 		}
@@ -1214,19 +1315,27 @@ export class AssistantMessageComponent extends Container {
 	 * every guard skips publication and nothing ever retracts it.
 	 */
 	#publishStableSnapshot(rendered: readonly string[], width: number): void {
-		if (!this.#midStreamPublication) return;
-		const parts = this.#currentStableSnapshot();
-		if (!parts) return;
+		// Extension text renderers may rewrite text they already drew, and published rows never retract.
+		if (!this.#midStreamPublication || this.#textRendering) return;
+		const current = this.#currentStableSnapshot();
+		if (!current) return;
+		const { parts, openTable } = current;
 		const last = parts.at(-1);
 		if (!last || last.kind === "spacer") return;
-		const snapshot = { partCount: parts.length, lastTextLength: last.text.length };
+		const snapshot: StableSnapshot = { partCount: parts.length, lastTextLength: last.text.length, openTable };
 		const previous = this.#stableSnapshots.at(-1);
 		// An unmoved boundary publishes nothing whether or not it still extends
 		// the last snapshot, so most frames skip the whole-document comparison.
-		if (previous?.partCount === snapshot.partCount && previous.lastTextLength === snapshot.lastTextLength) return;
+		if (
+			previous?.partCount === snapshot.partCount &&
+			previous.lastTextLength === snapshot.lastTextLength &&
+			previous.openTable === snapshot.openTable
+		) {
+			return;
+		}
 		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
 		this.#syncStableRenderInputs();
-		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head");
+		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head", openTable);
 		// The container verifies stable rows against the blank-trimmed render.
 		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
@@ -1248,12 +1357,13 @@ export class AssistantMessageComponent extends Container {
 	 * (finalized or non-transient renders, marker rows, extension components,
 	 * hidden thinking, or no frozen prefix yet).
 	 */
-	#currentStableSnapshot(): readonly StablePart[] | undefined {
+	#currentStableSnapshot(): { parts: readonly StablePart[]; openTable: boolean } | undefined {
 		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return undefined;
 		if (this.#markerSlot.children.length > 0) return undefined;
 		const items = this.#fastPathItems;
 		if (!items || items.length === 0) return undefined;
 		const parts: StablePart[] = [];
+		let openTable = false;
 		let itemIndex = 0;
 		for (const child of this.#contentContainer.children) {
 			const item = items[itemIndex];
@@ -1261,7 +1371,10 @@ export class AssistantMessageComponent extends Container {
 				const md = item.md;
 				if (md instanceof FigureMarkdown) {
 					// Plain Markdown reproduces only the prose ahead of the first figure.
-					if (md.leadingProse) parts.push({ kind: item.blockType, text: md.leadingProse });
+					if (md.leadingProse) {
+						parts.push({ kind: item.blockType, text: md.leadingProse, contentIndex: item.contentIndex });
+						openTable = md.leadingProseEndsInOpenTable;
+					}
 					break;
 				}
 				if (itemIndex === items.length - 1) {
@@ -1277,14 +1390,19 @@ export class AssistantMessageComponent extends Container {
 					let past = streamingMarkdownSource(item.lastText).slice(raw.length);
 					if (item.blockType === "thinking") past = past.replace(UNSETTLED_THINKING_TAIL, "");
 					if (frozen.length > 0 && /\S/.test(past)) {
-						parts.push({ kind: item.blockType, text: frozen });
+						parts.push({ kind: item.blockType, text: frozen, contentIndex: item.contentIndex });
+						openTable = md.lastRenderStableTextEndsInOpenTable();
 					}
 					break;
 				}
 				// Closed child: only the streaming tail may mutate in place, so
 				// everything before it is final. Same form as the frozen prefix it
 				// published while streaming, so the snapshot still extends.
-				parts.push({ kind: item.blockType, text: streamingMarkdownSource(item.lastText) });
+				parts.push({
+					kind: item.blockType,
+					text: streamingMarkdownSource(item.lastText),
+					contentIndex: item.contentIndex,
+				});
 				itemIndex++;
 				continue;
 			}
@@ -1297,7 +1415,7 @@ export class AssistantMessageComponent extends Container {
 		}
 		while (parts.at(-1)?.kind === "spacer") parts.pop();
 		if (parts.length === 0) return undefined;
-		return parts;
+		return { parts, openTable };
 	}
 
 	/**
@@ -1313,6 +1431,7 @@ export class AssistantMessageComponent extends Container {
 		lastLength: number,
 		width: number,
 		role: "head" | "replay",
+		openTable: boolean,
 	): readonly string[] {
 		const ledger = this.#stableLedger(width);
 		const rows: string[] = [];
@@ -1330,7 +1449,15 @@ export class AssistantMessageComponent extends Container {
 			if (cached?.kind === part.kind && cached.text === text) {
 				partRows = cached.rows;
 			} else {
-				partRows = this.#renderStablePart(index, part.kind, text, width, closed ? undefined : role);
+				partRows = this.#renderStablePart(
+					index,
+					part.kind,
+					part.contentIndex,
+					text,
+					width,
+					closed ? undefined : role,
+					!closed && openTable,
+				);
 				if (closed) ledger.parts[index] = { kind: part.kind, text, rows: partRows };
 			}
 			for (const row of partRows) rows.push(row);
@@ -1346,35 +1473,74 @@ export class AssistantMessageComponent extends Container {
 	#renderStablePart(
 		index: number,
 		kind: StablePartKind,
+		contentIndex: number,
 		text: string,
 		width: number,
 		role: "head" | "replay" | undefined,
+		openTable: boolean,
 	): readonly string[] {
+		const locks = this.#lockScope(contentIndex);
 		// Trim like the live children, dropping the trailing blank line a frozen
 		// prefix still carries.
 		const trimmed = text.trim();
-		if (this.#transcriptBlockFinalized) return this.#createMarkdown(kind, trimmed).render(width);
+		if (this.#transcriptBlockFinalized) {
+			const md = this.#createMarkdown(kind, trimmed, locks);
+			md.openTableTail = openTable;
+			return md.render(width);
+		}
 		const head = this.#stableHeadRenderer;
 		const replay = this.#stableReplayRenderer;
 		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
 		if (renderer?.index === index && renderer.kind === kind) {
 			renderer.md.setText(trimmed);
-			return renderer.md.render(width);
+			renderer.md.openTableTail = openTable;
+			return trimFabricatedCloser(renderer.md.render(width), trimmed);
 		}
-		const md = this.#createMarkdown(kind, trimmed);
+		const md = this.#createMarkdown(kind, trimmed, locks);
+		md.openTableTail = openTable;
 		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
 		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
-		return md.render(width);
+		return trimFabricatedCloser(md.render(width), trimmed);
 	}
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
-	#createMarkdown(kind: StablePartKind, text: string): Markdown {
-		return kind === "text"
-			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
-			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+	#createMarkdown(kind: StablePartKind, text: string, tableLocks?: TableLocks): Markdown {
+		const md =
+			kind === "text"
+				? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
+				: new Markdown(text, 1, 0, getMarkdownTheme(), {
+						color: (value: string) => theme.fg("thinkingText", value),
+						italic: true,
+					});
+		md.tableLocks = tableLocks;
+		return md;
+	}
+
+	/** The table locks of content block `contentIndex`. */
+	#lockScope(contentIndex: number): TableLocks {
+		let locks = this.#tableLocks.get(contentIndex);
+		if (locks === undefined) {
+			locks = new Map();
+			this.#tableLocks.set(contentIndex, locks);
+		}
+		return locks;
+	}
+
+	/**
+	 * Lock the column widths of a table streaming at the end of this message,
+	 * so its finished rows can leave the screen for scrollback. The transcript
+	 * calls this when rows of this block no longer fit and none of them is
+	 * stable yet. The transcript asks during a frame whose history batch is
+	 * already chosen, so a new lock requests the next frame, which publishes
+	 * and commits the table's finished rows even if the stream pauses. A block
+	 * that publishes nothing mid-stream (a revisable wire) gains nothing from a
+	 * lock, so it keeps its natural layout.
+	 */
+	lockStreamingLayout(): void {
+		if (!this.#midStreamPublication) return;
+		const items = this.#fastPathItems;
+		const md = items?.at(-1)?.md;
+		if ((md instanceof FigureMarkdown || md instanceof Markdown) && md.lockOpenTable()) this.#onImageUpdate?.();
 	}
 
 	/**
@@ -1410,13 +1576,14 @@ export class AssistantMessageComponent extends Container {
 	 * `previous` so its figures keep their rasters across rebuilds.
 	 */
 	#proseBlock(index: number, text: string, previous: ReadonlyMap<number, FigureMarkdown>): ProseBlock {
-		if (!this.#liftsFigures(text)) return this.#createMarkdown("text", text);
+		if (!this.#liftsFigures(text)) return this.#createMarkdown("text", text, this.#lockScope(index));
 		let block = previous.get(index);
 		if (block) {
 			block.setText(text);
 		} else {
 			block = new FigureMarkdown(text, {
 				markdown: value => this.#createMarkdown("text", value),
+				tableLocks: this.#lockScope(index),
 				charts: this.#showTableCharts,
 				budget: this.#imageBudget,
 				onChange: () => {
@@ -1491,17 +1658,48 @@ export class AssistantMessageComponent extends Container {
 		this.#stopThinkingAnimation();
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
+		// A sealed block's text is also complete and can retire to scrollback before the
+		// reply's final update reaches it: give the text renderers their final call now
+		// (sealed renders pass `streaming: false`).
+		const sealRenderers = this.#textRendering !== undefined && this.#lastUpdateTransient;
 		if (this.#thinkingDots) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
-			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
+		if ((this.#thinkingDots || sealRenderers) && this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/**
+	 * Swap the extension text renderers (the setting enabling them changed) and redraw with them.
+	 * Enabling them also drops rows already published as stable, since a renderer may rewrite them;
+	 * callers MUST pair this with a scrollback-clearing display reset, as for
+	 * {@link resetTranscriptStableRows}.
+	 */
+	setTextRenderers(renderers: readonly AssistantTextRenderer[]): void {
+		this.#textRendering = renderers.length ? { renderers, contentOffset: this.#textContentOffset } : undefined;
+		this.#renderedText.clear();
+		if (this.#textRendering) this.resetTranscriptStableRows();
+		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
 
 	applyRetryRecovery(retryRecovery: AssistantMessage["retryRecovery"]): void {
 		if (!this.#lastMessage || !retryRecovery) return;
 		this.setErrorPinned(false);
 		this.updateContent({ ...this.#lastMessage, retryRecovery });
+	}
+
+	/**
+	 * Draw the current message again when it is the reply sent at `timestamp`, re-running the
+	 * extension text renderers; returns whether it was. The caller schedules the frame.
+	 */
+	rerenderMessage(timestamp: number): boolean {
+		if (this.#lastMessage?.timestamp !== timestamp) return false;
+		// The renderers' state may have changed: run them again rather than reuse their last output.
+		this.#renderedText.clear();
+		this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		return true;
 	}
 
 	messagePersistenceKey(): string | undefined {
@@ -1615,6 +1813,7 @@ export class AssistantMessageComponent extends Container {
 				})
 				.catch(() => {
 					this.#kittyConversionsAwaited.delete(key);
+					this.#onImageUpdate?.();
 				});
 		}
 	}
@@ -1806,6 +2005,12 @@ export class AssistantMessageComponent extends Container {
 		// verbatim message so re-renders re-derive the reaction deterministically.
 		// Narration the provider returned as thinking renders as answer text.
 		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
+		this.#answerMessage = message;
+		// A sealed block (closed at a tool call) keeps receiving transient updates; its text is final.
+		// Thinking state below reads `answer`: renderers transform display only, so one that hides the
+		// streaming text must not make the closed thought before it look live again.
+		const answer = message;
+		message = this.#renderText(message, this.#lastUpdateTransient && !this.#transcriptBlockFinalized);
 		this.#displayedMessage = message;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
@@ -1823,7 +2028,7 @@ export class AssistantMessageComponent extends Container {
 		// Native terminals show the live rate on visible thinking too, not only the hidden pulse.
 		const isThinkingNow =
 			this.#lastUpdateTransient &&
-			(isNativeRendering() ? this.#thinkingTailIndex(message) !== undefined : this.#shouldAnimateThinking(message));
+			(isNativeRendering() ? this.#thinkingTailIndex(answer) !== undefined : this.#shouldAnimateThinking(answer));
 		if (isThinkingNow) {
 			const currentTokens = message.usage.reasoningTokens ?? message.usage.output;
 			this.#thinkingTokens = currentTokens;
@@ -1907,7 +2112,7 @@ export class AssistantMessageComponent extends Container {
 					);
 
 				// Thinking traces in thinkingText color, italic
-				const md = this.#createMarkdown("thinking", thinkingText);
+				const md = this.#createMarkdown("thinking", thinkingText, this.#lockScope(i));
 				md.transientRenderCache = this.#lastUpdateTransient;
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "thinking", lastText: thinkingText });
@@ -1926,7 +2131,7 @@ export class AssistantMessageComponent extends Container {
 			if (this.#figureBlocks.get(index) !== block) block.dispose();
 		}
 
-		if (this.#shouldAnimateThinking(message)) {
+		if (this.#shouldAnimateThinking(answer)) {
 			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));
 			this.#thinkingDots = new Text(this.#thinkingDotsLabel(), 1, 0);
 			this.#contentContainer.addChild(this.#thinkingDots);

@@ -1,0 +1,5 @@
+- Long results are shaped:
+  - `read` over 150 lines → outline; folds show `… [lines A-B]`. Closed ranges (`path:A-B,C-D`, `:raw`, `:-N`) always come back whole.
+  - Other results over ~3k chars (program output ~7.8k), and anything over ~12k → cut to the lines most relevant to the call. Lines over 400 chars are shortened.
+  - Hidden lines: `read path:A-B` for files, `read artifact://N:A-B` for the `[cut: artifact://N]` copy; asking again shows them whole.
+  - Read narrowly: tight `grep`, then ranged `read`; filter big output in the command; batch greps and ranges into one call.

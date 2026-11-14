@@ -38,7 +38,7 @@ struct CapturedFrame {
 }
 
 async fn portal_request<T>(request: impl Future<Output = Result<T, String>>) -> CoreResult<T> {
-	super::libei::cancellable(tokio::time::timeout(PORTAL_TIMEOUT, request))
+	control::cancellable(tokio::time::timeout(PORTAL_TIMEOUT, request))
 		.await?
 		.map_err(|_| DesktopError::capture_failed("Wayland ScreenCast portal timed out"))?
 		.map_err(DesktopError::capture_failed)

@@ -4,6 +4,7 @@
  * Project-specific rules from Cursor (.mdc), Windsurf (.md), and Cline formats.
  * Translated to a canonical shape regardless of source format.
  */
+import { logger } from "@oh-my-pi/pi-utils";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -38,6 +39,8 @@ export interface RuleFrontmatter {
 	agents?: string[] | string;
 	/** Per-rule TTSR interrupt mode override. */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
+	/** Per-rule TTSR repeat override (falls back to global ttsr.repeatMode). */
+	repeatMode?: "once" | "after-gap" | "always";
 	[key: string]: unknown;
 }
 
@@ -73,6 +76,8 @@ export interface Rule {
 	agents?: string[];
 	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
+	/** Per-rule TTSR repeat override (falls back to global ttsr.repeatMode); `always` is a one-turn gap, so the retry or continuation its own reminder spawns cannot re-fire it. */
+	repeatMode?: "once" | "after-gap" | "always";
 	/** Source metadata */
 	_source: SourceMeta;
 }
@@ -371,6 +376,27 @@ export function compileRuleCondition(pattern: string): RegExp {
 
 let activeRules: readonly Rule[] = [];
 
+/** Observers of {@link setActiveRules} ({@link onActiveRulesChange}). */
+const activeRulesListeners = new Set<() => void>();
+
+/** Calls `listener` after the active rule snapshot is replaced; returns the unsubscribe. */
+export function onActiveRulesChange(listener: () => void): () => void {
+	activeRulesListeners.add(listener);
+	return () => {
+		activeRulesListeners.delete(listener);
+	};
+}
+
+function notifyActiveRulesListeners(): void {
+	for (const listener of Array.from(activeRulesListeners)) {
+		try {
+			listener();
+		} catch (error) {
+			logger.warn("Rules: active-rules listener failed", { error: String(error) });
+		}
+	}
+}
+
 /**
  * Process-global snapshot of rules the active session loaded.
  * Read by internal URL protocol handlers (rule://).
@@ -382,11 +408,13 @@ export function getActiveRules(): readonly Rule[] {
 /** Replace the active rule snapshot. Called once per top-level session. */
 export function setActiveRules(value: readonly Rule[]): void {
 	activeRules = value;
+	notifyActiveRulesListeners();
 }
 
 /** Reset the active rule snapshot. Test-only. */
 export function resetActiveRulesForTests(): void {
 	activeRules = [];
+	notifyActiveRulesListeners();
 }
 
 export const ruleCapability = defineCapability<Rule>({

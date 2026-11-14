@@ -16,9 +16,7 @@ import {
 	buildNpmInstallArgs,
 	buildNpmUpdateEnv,
 	buildRenameCleanupPackages,
-	downloadVerifiedBinary,
 	type InstalledVersionVerification,
-	managedInstallName,
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
@@ -37,6 +35,7 @@ import {
 	updateViaBinaryAt,
 	updateViaManager,
 	updateViaShimTakeover,
+	verifyInstalledVersion,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -138,7 +137,7 @@ const TEST_CONFIG: CliConfig = {
 describe("update command plugin dispatch", () => {
 	it("routes -l to plugin upgrade instead of the app updater", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["-l"], TEST_CONFIG);
 		await command.run();
@@ -149,7 +148,7 @@ describe("update command plugin dispatch", () => {
 
 	it("keeps normal update flags on the app updater path", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
 		await command.run();
@@ -692,8 +691,9 @@ describe("update-cli package manager commands", () => {
 				// precedence (env outranks file). Same-source env would also mask
 				// the before/min-release-age exclusivity abort on npm 11.10-11.14.
 				const home = path.join(root, "home");
+				const prefix = path.join(root, "prefix");
 				await fs.mkdir(home, { recursive: true });
-				await fs.mkdir(path.join(root, "prefix"), { recursive: true });
+				await fs.mkdir(npmGlobalLayout(prefix).nodeModulesDir, { recursive: true });
 				await Bun.write(path.join(home, ".npmrc"), "min-release-age=365\n");
 				// Bogus proxies keep a corporate proxy from intercepting the loopback
 				// registry; NO_PROXY exempts 127.0.0.1 so the fake registry stays reachable.
@@ -703,7 +703,7 @@ describe("update-cli package manager commands", () => {
 					// npm resolves the home npmrc from USERPROFILE and the global
 					// prefix from APPDATA on Windows; pin both inside the sandbox.
 					USERPROFILE: home,
-					npm_config_prefix: path.join(root, "prefix"),
+					npm_config_prefix: prefix,
 					npm_config_cache: path.join(root, "cache"),
 					npm_config_audit: "false",
 					npm_config_fund: "false",
@@ -1072,107 +1072,6 @@ describe("update-cli bun cache pruning", () => {
 
 describe("update-cli release binary integrity", () => {
 	const binaryName = "omp-linux-x64";
-	const url = "https://r2.test/omp-linux-x64";
-	const content = "verified binary";
-	const digest = `sha256:${Bun.SHA256.hash(content, "hex")}`;
-
-	it("writes a download only after its size and digest match", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-
-		await downloadVerifiedBinary({
-			url,
-			targetPath,
-			expectedSize: Buffer.byteLength(content),
-			expectedDigest: digest,
-			fetchImpl: async () => new Response(content),
-		});
-
-		expect(await Bun.file(targetPath).text()).toBe(content);
-		// Windows has no POSIX mode bits; the executable bit is only observable elsewhere.
-		if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
-	});
-
-	it("aborts the response stream as soon as it exceeds the expected size", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-		let pulls = 0;
-		const body = new ReadableStream<Uint8Array>(
-			{
-				pull(controller) {
-					pulls++;
-					controller.enqueue(new Uint8Array(pulls === 1 ? 2 : 1));
-					if (pulls === 2) controller.close();
-				},
-			},
-			{ highWaterMark: 0 },
-		);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: 1,
-				expectedDigest: digest,
-				fetchImpl: async () => new Response(body),
-			}),
-		).rejects.toThrow("received at least 2");
-		expect(pulls).toBe(1);
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-	});
-
-	it("wraps a timeout during body streaming with a friendly message", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-		const body = new ReadableStream<Uint8Array>(
-			{
-				pull(controller) {
-					controller.enqueue(new Uint8Array(1));
-					controller.error(new DOMException("The operation timed out.", "TimeoutError"));
-				},
-			},
-			{ highWaterMark: 0 },
-		);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: Buffer.byteLength(content),
-				expectedDigest: digest,
-				fetchImpl: async () => new Response(body),
-			}),
-		).rejects.toThrow("Timed out downloading release binary after 15 minutes");
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-	});
-
-	it("removes downloads whose size or digest does not match", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-		const fetchImpl = async () => new Response(content);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: Buffer.byteLength(content) + 1,
-				expectedDigest: digest,
-				fetchImpl,
-			}),
-		).rejects.toThrow("size mismatch");
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: Buffer.byteLength(content),
-				expectedDigest: `sha256:${Bun.SHA256.hash("different binary", "hex")}`,
-				fetchImpl,
-			}),
-		).rejects.toThrow("digest mismatch");
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-	});
 
 	it("rejects an altered whole-file download and leaves the installed binary in place", async () => {
 		const dir = await makeTempDir();
@@ -1814,46 +1713,28 @@ describe("update-cli concurrent binary updates", () => {
 	});
 });
 
-describe("managedInstallName", () => {
-	async function managedRoot(): Promise<string> {
-		const root = await makeTempDir();
-		await fs.mkdir(path.join(root, "versions"));
-		await fs.mkdir(path.join(root, "bin"));
-		await Bun.write(path.join(root, "versions", "1.0.0"), "omp");
-		await Bun.write(path.join(root, "manager.json"), JSON.stringify({ manager: "tern", name: "Tern" }));
-		return root;
-	}
-
-	it.skipIf(process.platform === "win32")(
-		"names the manager through the launcher symlink and a link outside the root",
-		async () => {
-			const root = await managedRoot();
-			const launcher = path.join(root, "bin", "omp");
-			await fs.symlink(path.join("..", "versions", "1.0.0"), launcher);
-			const outside = path.join(await makeTempDir(), "omp");
-			await fs.symlink(launcher, outside);
-
-			expect(await managedInstallName(launcher)).toBe("Tern");
-			expect(await managedInstallName(outside)).toBe("Tern");
-		},
-	);
-
-	it("names the manager of a copied launcher (Windows layout)", async () => {
-		const root = await managedRoot();
-		const copy = path.join(root, "bin", "omp.exe");
-		await Bun.write(copy, "omp");
-
-		expect(await managedInstallName(copy)).toBe("Tern");
-	});
-
-	it("treats a binary without a readable manifest as unmanaged", async () => {
-		const plain = path.join(await makeTempDir(), "bin", "omp");
-		await Bun.write(plain, "omp");
-		expect(await managedInstallName(plain)).toBeUndefined();
-
-		const root = await managedRoot();
-		await Bun.write(path.join(root, "manager.json"), "{not json");
-		expect(await managedInstallName(path.join(root, "versions", "1.0.0"))).toBeUndefined();
+describe("verifyInstalledVersion", () => {
+	// A Windows shim takeover retires the launcher PATH first resolved (`omp.cmd`)
+	// for one later on PATH (`omp.exe`); the check must follow it, not a cached path.
+	it.skipIf(process.platform === "win32")("re-resolves PATH after an install moves the launcher", async () => {
+		const [first, second] = [await makeTempDir(), await makeTempDir()];
+		await Bun.write(path.join(first, "omp"), "#!/bin/sh\necho omp/1.0.0\n");
+		await Bun.write(path.join(second, "omp"), "#!/bin/sh\necho omp/2.0.0\n");
+		await fs.chmod(path.join(first, "omp"), 0o755);
+		await fs.chmod(path.join(second, "omp"), 0o755);
+		const originalPath = process.env.PATH;
+		process.env.PATH = [first, second, originalPath].join(path.delimiter);
+		try {
+			expect((await verifyInstalledVersion("2.0.0")).actual).toBe("1.0.0");
+			await fs.rm(path.join(first, "omp"));
+			expect(await verifyInstalledVersion("2.0.0")).toEqual({
+				ok: true,
+				actual: "2.0.0",
+				path: path.join(second, "omp"),
+			});
+		} finally {
+			process.env.PATH = originalPath;
+		}
 	});
 });
 

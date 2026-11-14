@@ -14,10 +14,11 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
@@ -25,8 +26,9 @@ import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
 import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
+import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 
-/** Transcript-only render state a handler write attaches to the `write` tool result. */
+/** Render state and prewalk facts a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
@@ -34,6 +36,12 @@ export interface InternalWriteDetails {
 	xdev?: XdevRenderDispatch;
 	/** Absolute file the write landed in, for the transcript card's file link (conflict://). */
 	resolvedPath?: string;
+	/**
+	 * The write changed no files (process stdin, service mode), so the prewalk gate must not read
+	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode and
+	 * device-only gates still apply.
+	 */
+	touchesNoFiles?: true;
 }
 
 /**
@@ -65,15 +73,6 @@ export type SchemeBacking = "file" | "virtual" | "remote" | "device";
  */
 export type SchemeSelectors = "lines" | "none" | "opaque";
 
-/**
- * Mutation class of a writable scheme; drives plan-mode and device-only `write` gates.
- * - `workspace`: mutates user/external state; blocked in plan mode and device-only sessions.
- * - `sandbox`: session scratch space (local://); allowed in plan mode and device-only sessions.
- * - `coordination`: peer messaging (agent://); always allowed. {@link SchemeWritePolicy.cancels} grants the same per URL.
- * - `device`: tool-device dispatch (xd://); always allowed, the device enforces its own policy.
- */
-export type SchemeWriteScope = "workspace" | "sandbox" | "coordination" | "device";
-
 /** Write policy for a writable scheme. Absent on read-only schemes. */
 export interface SchemeWritePolicy {
 	/**
@@ -90,11 +89,12 @@ export interface SchemeWritePolicy {
 	 * `verbatim`: raw payload (messages, stdin, setting values); neither transform applies.
 	 */
 	payload: "text" | "verbatim";
+	/** Mutation class; see {@link SchemeWriteScope}. */
 	scope: SchemeWriteScope;
 	/** Approval tier for `write`/`edit`/`ast_edit` targeting this URL. `session` is absent when approval is evaluated outside a tool session. */
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
-	/** True when `write` may omit `content` for this URL (`proc://<id>/kill`). */
-	contentOptional?(url: InternalUrl): boolean;
+	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
+	maxBytes?: number;
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
 	 * passes the plan-mode and device-only gates like a `coordination`-scoped write. Approval
@@ -158,6 +158,10 @@ export interface SchemeHost {
 	securityEnabled: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session). */
 	settingsApproval: boolean;
+	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
+	outReplies: boolean;
+	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
+	subagent: boolean;
 }
 
 /**
@@ -176,14 +180,14 @@ export interface InternalResource {
 	size?: number;
 	/** Underlying filesystem path (for debugging, not exposed to agent) */
 	sourcePath?: string;
+	/** First source-file line of an excerpt; selectors remain relative to `content`. */
+	sourceStartLine?: number;
 	/** Additional notes about resolution */
 	notes?: string[];
 	/** Structured snapshots used only for transcript rendering. */
 	details?: {
 		proc?: ProcReadDetails;
 		cfg?: CfgReadDetails;
-		/** Prefix-free text + gutter start for the TUI read card when `content` carries hashline/line prefixes (conflict://). */
-		display?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
 	};
 	/**
 	 * `value` marks a discrete extracted value (agent://<id>/<json-path>) that
@@ -202,9 +206,8 @@ export interface InternalResource {
 	unbounded?: boolean;
 	/**
 	 * True when the resource is a directory listing rather than file content.
-	 * `search` refuses to grep such a resource when it has no `sourcePath` — a
-	 * remote `ssh://` listing has no local path to recurse, so its listing text
-	 * must never be mistaken for the directory's contents.
+	 * Traversal needs a `sourcePath`, enumerated leaves, or the handler's
+	 * `readDirectory` hook; the rendered listing is never searched as file text.
 	 */
 	isDirectory?: boolean;
 }
@@ -279,7 +282,7 @@ export interface ResolveContext {
 	 */
 	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: Settings;
 	/** Caller's abort signal. */
@@ -309,6 +312,8 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/** Search walks may follow skill links only within the plugin root (or the local skill root). */
+	containSkillPaths?: boolean;
 	/**
 	 * Calling session's agent-scoped applicable rule set (rulebook + always-apply
 	 * + triggered TTSR rules, already bucketed by `agents` frontmatter). Prefer
@@ -325,9 +330,8 @@ export interface ResolveContext {
 	session?: ToolSession;
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
-	 * listing (e.g. the ssh:// handler draining a full remote `ls`) instead return
-	 * the directory shape (`isDirectory: true`) with empty content. `search`/`find`
-	 * reject directory resources, so they never need the listing.
+	 * listing instead return the directory shape (`isDirectory: true`) with empty
+	 * content. Filesystem consumers list through `readDirectory` when needed.
 	 */
 	skipDirectoryListing?: boolean;
 }
@@ -422,10 +426,22 @@ export interface ProtocolHandler {
 	 */
 	enumerate?(url: InternalUrl, context?: ResolveContext): Promise<Array<{ url: string; content: string }>>;
 	/**
+	 * Immediate structured children of a remote/virtual directory, without
+	 * rendering listing text or materializing a local directory. Entry names
+	 * are raw basenames; the URL filesystem encodes them when traversing.
+	 */
+	readDirectory?(url: InternalUrl, context?: ResolveContext): Promise<ShellFsDirEntry[]>;
+	/**
 	 * One-line system-prompt entry (rendered from `prompts/internal-urls/<scheme>.md`)
 	 * when the scheme is usable in the session described by `host`; `undefined`
 	 * omits the scheme. Schemes documented only by the tool that emits their URLs
 	 * (conflict://, attachment://) omit this method.
 	 */
 	promptDoc?(host: SchemeHost): string | undefined;
+	/**
+	 * Sub-path, query and limit grammar the {@link promptDoc} line leaves out
+	 * (rendered from `prompts/internal-urls/<scheme>-reference.md`), served on demand
+	 * at `xd://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
+	 */
+	promptReference?(): string | undefined;
 }

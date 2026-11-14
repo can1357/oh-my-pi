@@ -142,10 +142,11 @@ describe("/security", () => {
 		});
 	});
 
-	test("disabled command is consumed without touching session state", async () => {
+	test("disabled command is refused without touching session state", async () => {
 		cfgSecurityEnabled.override(settings, false);
 		const result = await command("scans");
-		expect(result).toEqual({ consumed: true });
+		// A refused operation is a failed builtin: print mode exits nonzero.
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output.at(-1)).toContain("disabled");
 	});
 });

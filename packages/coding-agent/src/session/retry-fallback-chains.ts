@@ -6,11 +6,12 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
+import { resolveConfiguredModelPatterns, resolveModelRoleValue, revisionSpellingKey } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
 import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
@@ -21,12 +22,16 @@ export type RetryFallbackChains = Record<string, string[]>;
 /** Policy controlling restoration of a fallback chain's primary model. */
 export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
 
-/** Parsed model selector used by retry fallback resolution. */
+/**
+ * Parsed model selector used by retry fallback resolution. `thinkingLevel`
+ * keeps the configured `auto` sentinel; `undefined` means the selector carried
+ * no suffix, so the session's configured level applies.
+ */
 export interface RetryFallbackSelector {
 	raw: string;
 	provider: string;
 	id: string;
-	thinkingLevel: ThinkingLevel | undefined;
+	thinkingLevel: ConfiguredThinkingLevel | undefined;
 }
 
 /** Minimal model lookup needed by fallback-chain resolution. */
@@ -104,11 +109,21 @@ export function parseRetryFallbackSelector(
 		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
 	});
 	if (!parsed) return undefined;
+	// Adopt the catalog id for a dotted revision spelling (`claude-sonnet-5.5` for
+	// `claude-sonnet-5-5`): the lookup that validated the key accepts it, so the
+	// key must match the live model too. Other lookup aliases (effort-tier
+	// variants, wire-route ids) carry an effort the parsed level lacks, so they
+	// keep their own id.
+	const found = modelLookup?.find(parsed.provider, parsed.id);
+	const id =
+		found && found.id !== parsed.id && revisionSpellingKey(found.id) === revisionSpellingKey(parsed.id)
+			? found.id
+			: parsed.id;
 	return {
 		raw: trimmed,
 		provider: parsed.provider,
-		id: parsed.id,
-		thinkingLevel: concreteThinkingLevel(parsed.thinkingLevel),
+		id,
+		thinkingLevel: parsed.thinkingLevel,
 	};
 }
 
@@ -180,15 +195,15 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 export interface RetryFallbackRole {
 	/** Selector the role is assigned (the chain's primary). */
 	primary: string;
-	/** Fallback selectors walked after the primary. */
+	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
 }
 
-/** Reads the primary and non-empty chain installed for `role`, if any. */
+/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
-	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
+	if (!primary || !Array.isArray(chain)) return undefined;
 	return { primary, chain };
 }
 
@@ -409,11 +424,12 @@ function selectorMatchKind(
 	}
 	if (!matchedCurrent) return "none";
 	if (level === matchedCurrent.thinkingLevel) return "exact";
-	if (level === undefined) return "base";
+	// `auto` fixes no effort, so as a key it applies at any effort, like a suffixless key.
+	if (level === undefined || level === AUTO_THINKING) return "base";
 	if (
 		currentModel &&
 		resolveThinkingLevelForModel(currentModel, level) ===
-			resolveThinkingLevelForModel(currentModel, matchedCurrent.thinkingLevel)
+			resolveThinkingLevelForModel(currentModel, concreteThinkingLevel(matchedCurrent.thinkingLevel))
 	) {
 		return "normalized";
 	}
@@ -492,12 +508,16 @@ export function resolveRetryFallbackChainKey(
 	// let yaml insertion order steal the live role's chain. Prefer the hint,
 	// then `default` when it also matches. A role assigned the live model at a
 	// different explicit effort (spawn `effort`, `/thinking`) still owns it,
-	// but only after every role whose effort matches.
+	// but only after every role whose effort matches. Model-kind roles (`web`,
+	// `judge`, ...) never match by model: a shared model assignment does not
+	// mean the chat session owns the kind role (kind chains may hold chat
+	// models too), so it must not adopt that chain. They apply only through the
+	// explicit role hint above.
 	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
 	let matchedRole: string | undefined;
 	let effortRole: string | undefined;
 	for (const key in context.chains) {
-		if (isRetryFallbackModelKey(key)) continue;
+		if (isRetryFallbackModelKey(key) || isKindRole(key)) continue;
 		const kind = selectorMatchKind(
 			getRetryFallbackPrimarySelector(context, key),
 			parsedCurrent,
@@ -579,31 +599,34 @@ function getRetryFallbackEffectiveChain(
 					context.modelLookup,
 				)
 			: undefined);
+	// Keyed by catalog identity, so a respelled entry for a model already in the chain is dropped.
 	const seen = new Set<string>();
+	const identity = (selector: RetryFallbackSelector) =>
+		`${formatRetryFallbackBaseSelector(selector)}:${selector.thinkingLevel ?? ""}`;
 	const chain: RetryFallbackSelector[] = [];
 	if (isRetryFallbackWildcardKey(chainKey)) {
 		// A wildcard key has no fixed primary: the active model is the
 		// primary, followed by the configured provider-level fallbacks.
 		if (parsedCurrent) {
 			chain.push(parsedCurrent);
-			seen.add(parsedCurrent.raw);
+			seen.add(identity(parsedCurrent));
 		}
 	} else {
 		const primarySelector = getRetryFallbackPrimarySelector(context, chainKey);
 		if (primarySelector) {
 			chain.push(primarySelector);
-			seen.add(primarySelector.raw);
+			seen.add(identity(primarySelector));
 		} else if ((chainKey === "default" || allowMissingPrimary) && parsedCurrent) {
 			chain.push(parsedCurrent);
-			seen.add(parsedCurrent.raw);
+			seen.add(identity(parsedCurrent));
 		} else if (!allowMissingPrimary) {
 			return [];
 		}
 	}
 	for (const selector of context.chains[chainKey] ?? []) {
 		const parsed = parseRetryFallbackChainEntry(context, selector, parsedCurrent);
-		if (!parsed || seen.has(parsed.raw)) continue;
-		seen.add(parsed.raw);
+		if (!parsed || seen.has(identity(parsed))) continue;
+		seen.add(identity(parsed));
 		chain.push(parsed);
 	}
 	return chain;
