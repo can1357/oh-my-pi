@@ -25,6 +25,7 @@
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
 - A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- Fixed extension-provided models briefly disappearing from the shared model catalog while a subagent starts, which could make a lookup at that moment (another subagent's model selection, RPC `get_available_models`) miss them ([#17297](https://github.com/can1357/oh-my-pi/pull/17297) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
