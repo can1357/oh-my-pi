@@ -475,4 +475,50 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		const loaded = counts.get("api-acct-loaded") ?? 0;
 		expect(fresh).toBeGreaterThan(loaded);
 	});
+
+	// `google-antigravity` declares `refresh { on-use-only #true }`, so a preflight
+	// may mint the serving account's token and no other: rotating a whole pool from
+	// one host with no request behind it is what links the accounts. Self-contained
+	// fixture, because the shared mocks above deliberately hand back stale
+	// credentials, which would make every candidate look expired again.
+	test("mints only the serving Antigravity account when every row is stale", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-on-use-only-"));
+		const scopedStore = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		const scopedStorage = new AuthStorage(scopedStore, { usageProviderResolver: () => undefined });
+		try {
+			const stale = (accountId: string): OAuthCredentials => ({
+				...createCredential(accountId, `proj-${accountId}`, `${accountId}@example.com`),
+				expires: Date.now() - HOUR_MS,
+			});
+			await scopedStorage.credentials.set("google-antigravity", [
+				{ type: "oauth", ...stale("acct-stale-a") },
+				{ type: "oauth", ...stale("acct-stale-b") },
+				{ type: "oauth", ...stale("acct-stale-c") },
+			]);
+			const minted: string[] = [];
+			vi.spyOn(oauthUtils, "getOAuthProvider").mockImplementation(
+				() =>
+					({
+						refreshToken: async (credential: OAuthCredentials) => {
+							minted.push(credential.accountId ?? "unknown");
+							return {
+								...credential,
+								access: `access-new-${credential.accountId}`,
+								expires: Date.now() + HOUR_MS,
+							};
+						},
+					}) as unknown as ReturnType<typeof oauthUtils.getOAuthProvider>,
+			);
+
+			const apiKey = await scopedStorage.keys.get("google-antigravity", "session-on-use-only", {
+				modelId: "gemini-3-flash",
+			});
+
+			expect(apiKey).toBeTypeOf("string");
+			expect(minted).toHaveLength(1);
+		} finally {
+			scopedStorage.close();
+			await removeWithRetries(dir);
+		}
+	});
 });
