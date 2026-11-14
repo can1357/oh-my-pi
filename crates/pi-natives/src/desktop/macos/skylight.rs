@@ -27,6 +27,7 @@ use super::{
 		types::DesktopFocusReturn,
 	},
 	ax, capture,
+	clicks::{Apps, ClickJournal, Reading},
 	key_reroute::KeyReroute,
 	permission, process,
 	release::Route,
@@ -590,7 +591,7 @@ impl PointerPresses {
 /// pid, as background input is, leave it unchanged.
 const HID_SYSTEM_STATE: i32 = 1;
 /// Left, right and other mouse button down and up (`CGEventType`).
-const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
+pub(super) const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
 /// Indices of the button-down counters in `MOUSE_BUTTON_EVENTS`.
 const PRESS_COUNTERS: [usize; 3] = [0, 2, 4];
 /// ⌘ and ⌃ (`kCGEventFlagMaskCommand | Control`). ⌥ is left out: it types
@@ -612,7 +613,7 @@ const PICK_WATCH: Duration = Duration::from_secs(1);
 const HOLD_POLL: Duration = Duration::from_millis(2);
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
-fn hid_buttons() -> [u32; 6] {
+pub(super) fn hid_buttons() -> [u32; 6] {
 	MOUSE_BUTTON_EVENTS.map(|event_type| {
 		// SAFETY: HIDSystemState and these public CGEventType values are
 		// defined by CGEventSource.h / CGEventTypes.h; a read-only query.
@@ -621,7 +622,7 @@ fn hid_buttons() -> [u32; 6] {
 }
 
 /// How long ago a mouse button last went down or up.
-fn since_last_click() -> Option<Duration> {
+pub(super) fn since_last_click() -> Option<Duration> {
 	MOUSE_BUTTON_EVENTS
 		.into_iter()
 		// SAFETY: as in `hid_buttons`.
@@ -636,7 +637,8 @@ fn since_last_click() -> Option<Duration> {
 /// Shift and Caps Lock pick no app, so none of them appear here.
 #[derive(Clone, Copy)]
 struct SwitchSignals {
-	/// HID counters of `MOUSE_BUTTON_EVENTS`.
+	/// HID counters of `MOUSE_BUTTON_EVENTS`, plus the user's button events
+	/// they skipped that the session's tap delivered.
 	buttons:     [u32; 6],
 	/// When a mouse button last went down or up.
 	last_click:  Option<Instant>,
@@ -646,10 +648,13 @@ struct SwitchSignals {
 	key_focus:   Option<ProcessSerialNumber>,
 	/// When the action last acted on its target ([`note_send`]).
 	last_send:   Option<Instant>,
-	/// The latest click landed on the user's own app, as [`ClickPlacer`]
+	/// The latest click landed on the user's own app, as the [`Placement`]
 	/// placed it: menus and Dock tiles over a window count as theirs, not the
 	/// window's.
 	in_user_app: bool,
+	/// The latest click landed outside the user's app, so it cannot turn out
+	/// to be theirs later; one the tap has not delivered yet is neither.
+	elsewhere:   bool,
 }
 
 impl SwitchSignals {
@@ -666,6 +671,7 @@ impl SwitchSignals {
 			key_focus,
 			last_send: None,
 			in_user_app: false,
+			elsewhere: false,
 		}
 	}
 
@@ -680,11 +686,39 @@ impl SwitchSignals {
 		Self { in_user_app: true, ..self }
 	}
 
-	/// Reads the signals at `now`, with whether `placer` has placed the latest
-	/// click in the user's own app. Nothing here waits on an AX probe.
-	fn read(spi: &ForegroundSpi, now: Instant, placer: &ClickPlacer) -> Self {
-		let buttons = hid_buttons();
-		let last_click = since_last_click().and_then(|since| now.checked_sub(since));
+	/// These signals with their latest click placed outside the user's app.
+	#[cfg(test)]
+	const fn placed_elsewhere(self) -> Self {
+		Self { elsewhere: true, ..self }
+	}
+
+	/// The signals of `reading`, with `hid_click` when the HID state last saw a
+	/// mouse button go down or up. A click the HID counters skipped, such as
+	/// a remote tool's post to the session tap, is dated by its delivery.
+	fn of(
+		reading: Reading,
+		hid_click: Option<Instant>,
+		flags: u64,
+		key_focus: Option<ProcessSerialNumber>,
+	) -> Self {
+		let mut signals =
+			Self::new(reading.buttons, hid_click.max(reading.skipped), flags, key_focus);
+		signals.in_user_app = reading.placed == Some(true);
+		signals.elsewhere = reading.placed == Some(false);
+		signals
+	}
+
+	/// Reads the signals at `now`, with where `placement` has the latest click
+	/// land. Nothing here waits on another app.
+	fn read(spi: &ForegroundSpi, now: Instant, placement: Placement<'_>) -> Self {
+		let reading = match placement {
+			Placement::Tap(clicks, apps) => clicks.place(apps),
+			Placement::HitTest(placer) => {
+				let buttons = hid_buttons();
+				Reading { buttons, placed: placer.in_user_app(buttons).then_some(true), skipped: None }
+			},
+		};
+		let hid_click = since_last_click().and_then(|since| now.checked_sub(since));
 		// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only
 		// query.
 		let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
@@ -695,8 +729,7 @@ impl SwitchSignals {
 			// which writes the 8-byte PSN and one status byte.
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
-		let mut signals = Self::new(buttons, last_click, flags, key_focus);
-		signals.in_user_app = placer.in_user_app(buttons);
+		let signals = Self::of(reading, hid_click, flags, key_focus);
 		let last_send = *LAST_SEND.lock();
 		match last_send {
 			Some(at) => signals.sent_at(at),
@@ -775,6 +808,17 @@ impl ClickPlacer {
 	}
 }
 
+/// Where a reading learns whether the latest click landed on the user's app.
+#[derive(Clone, Copy)]
+enum Placement<'a> {
+	/// The tap of the session the input belongs to, which names the process
+	/// `WindowServer` routed each click to as it delivers it; with the user's
+	/// app and the target.
+	Tap(&'a ClickJournal, Apps),
+	/// [`ClickPlacer`]'s hit-test, without a tap that sees input.
+	HitTest(&'a ClickPlacer),
+}
+
 /// How the user, rather than an app, changed the front app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserSwitch {
@@ -790,11 +834,12 @@ enum UserSwitch {
 }
 
 /// Whether [`UserSwitchWatch`]'s latest button change, counted as a click
-/// outside the user's app, may still be placed in their app.
+/// outside the user's app, may still be placed in their app: not once the
+/// [`Placement`] has placed it elsewhere.
 #[derive(Clone, Copy)]
 enum ClickPlacement {
 	Settled,
-	/// [`ClickPlacer`] may place the change in the user's app only some
+	/// The [`Placement`] may place the change in the user's app only some
 	/// readings later; `previous` is the click to put back then, and `press`
 	/// when the change pressed a button, the user's own-app click it becomes.
 	Pending {
@@ -807,8 +852,8 @@ enum ClickPlacement {
 /// action between the user's app and the `target`, whose own focus grabs are
 /// not the user's doing. It sees every reading of the switch sampler, which
 /// no AX probe blocks, so a whole ⌘-Tab or launcher pick between two of the
-/// observer's polls is still seen when it happened. Clicks are timed exactly
-/// from the HID state.
+/// observer's polls is still seen when it happened. Clicks are timed from the
+/// HID state, or by their delivery when the HID counters skipped them.
 struct UserSwitchWatch {
 	user:      ProcessSerialNumber,
 	target:    ProcessSerialNumber,
@@ -843,7 +888,7 @@ impl UserSwitchWatch {
 			click: signals
 				.last_click
 				.filter(|at| !signals.in_user_app && now.saturating_duration_since(*at) <= lookback),
-			placement: if signals.in_user_app {
+			placement: if signals.in_user_app || signals.elsewhere {
 				ClickPlacement::Settled
 			} else {
 				ClickPlacement::Pending {
@@ -879,9 +924,13 @@ impl UserSwitchWatch {
 			if signals.in_user_app {
 				if pressed {
 					self.own_click = Some(signals.last_click.unwrap_or(now));
+				} else {
+					// The release came with its press's placement.
+					self.settle_in_user_app(pending);
 				}
 			} else {
 				self.placement = match pending {
+					_ if signals.elsewhere => ClickPlacement::Settled,
 					// A release while its press still waits for placement is part
 					// of that click.
 					ClickPlacement::Pending { previous, press } if !pressed => {
@@ -894,17 +943,28 @@ impl UserSwitchWatch {
 				};
 				self.click = Some(signals.last_click.unwrap_or(now));
 			}
-		} else if signals.in_user_app
-			&& let ClickPlacement::Pending { previous, press } = self.placement
-		{
+		} else if signals.in_user_app {
 			// Placed in the user's app after a reading had counted it.
+			let pending = self.placement;
 			self.placement = ClickPlacement::Settled;
+			self.settle_in_user_app(pending);
+		} else if signals.elsewhere {
+			// Placed outside it: no later placement takes it back.
+			self.placement = ClickPlacement::Settled;
+		}
+		self.observe_held(signals, front, now);
+	}
+
+	/// Takes back the click `pending` counted outside the user's app, now
+	/// placed in it: the click before it counts again, and its press is the
+	/// user's own-app click.
+	const fn settle_in_user_app(&mut self, pending: ClickPlacement) {
+		if let ClickPlacement::Pending { previous, press } = pending {
 			self.click = previous;
 			if press.is_some() {
 				self.own_click = press;
 			}
 		}
-		self.observe_held(signals, front, now);
 	}
 
 	/// Whether a click in the user's own app, seen up to
@@ -1205,16 +1265,28 @@ pub(super) fn with_background_watch<T>(
 		|| previous.pid.and_then(restoration_key),
 		|| front_process(spi.get_front),
 	)?;
-	// A click just before the action is placed before the guard starts; later
-	// ones on the placer's own thread.
+	// The tap of the session this input belongs to places each click as it
+	// delivers it, and a click it has not delivered counts as outside the
+	// user's app. Without one that sees input, as when Input Monitoring is
+	// off for the app that launched omp, a click just before the action is
+	// placed before the guard starts, and later ones on the placer's thread.
+	let clicks = control::intervention::clicks();
 	let placer = ClickPlacer::new(previous.pid);
-	placer.place();
+	let placement = match (clicks.as_deref(), previous.pid) {
+		(Some(clicks), Some(user)) if permission::listen_events() => {
+			Placement::Tap(clicks, Apps::new(user, pid))
+		},
+		_ => {
+			placer.place();
+			Placement::HitTest(&placer)
+		},
+	};
 	let now = Instant::now();
 	let lease = Mutex::new(BackgroundFocusLease::new(
 		previous.psn,
 		target,
 		previous_key,
-		SwitchSignals::read(spi, now, &placer),
+		SwitchSignals::read(spi, now, placement),
 		now,
 	));
 	// Sends the user's keys back to their app while the target holds the
@@ -1230,9 +1302,8 @@ pub(super) fn with_background_watch<T>(
 	thread::scope(|scope| {
 		let visit = &visited;
 		let lease = &lease;
-		let placer = &placer;
 		let desktop =
-			WindowServerDesktop { spi, previous, key: previous_key, placer, stopped: &stopped };
+			WindowServerDesktop { spi, previous, key: previous_key, placement, stopped: &stopped };
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || guard_focus(lease, &desktop, visit))
@@ -1260,7 +1331,7 @@ pub(super) fn with_background_watch<T>(
 					if let Some(front) = front_process(spi.get_front) {
 						// The placement taken after the front app: one that has
 						// arrived meanwhile is used already.
-						let signals = SwitchSignals::read(spi, now, placer);
+						let signals = SwitchSignals::read(spi, now, placement);
 						sample_switches(lease, front.psn, signals, now, visit);
 					}
 					thread::sleep(SWITCH_SAMPLE);
@@ -1269,15 +1340,17 @@ pub(super) fn with_background_watch<T>(
 			.map_err(start_failed)?;
 		// Places each click for the readings, apart from the sampler, which
 		// its AX hit-test must never hold up.
-		thread::Builder::new()
-			.name("desktop-click-placer".to_string())
-			.spawn_scoped(scope, move || {
-				while !stopped.load(Ordering::Acquire) {
-					placer.place();
-					thread::sleep(SWITCH_SAMPLE);
-				}
-			})
-			.map_err(start_failed)?;
+		if let Placement::HitTest(placer) = placement {
+			thread::Builder::new()
+				.name("desktop-click-placer".to_string())
+				.spawn_scoped(scope, move || {
+					while !stopped.load(Ordering::Acquire) {
+						placer.place();
+						thread::sleep(SWITCH_SAMPLE);
+					}
+				})
+				.map_err(start_failed)?;
+		}
 		let result = run_then_settle(
 			|| {
 				let result = action(TargetVisit(&visited));
@@ -1321,13 +1394,13 @@ trait GuardedDesktop {
 }
 
 struct WindowServerDesktop<'a> {
-	spi:      &'a ForegroundSpi,
+	spi:       &'a ForegroundSpi,
 	/// The user's app.
-	previous: FrontProcess,
+	previous:  FrontProcess,
 	/// Its key window; `None` when it showed no window.
-	key:      Option<u32>,
-	placer:   &'a ClickPlacer,
-	stopped:  &'a AtomicBool,
+	key:       Option<u32>,
+	placement: Placement<'a>,
+	stopped:   &'a AtomicBool,
 }
 
 impl GuardedDesktop for WindowServerDesktop<'_> {
@@ -1344,7 +1417,7 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 	}
 
 	fn signals(&self, now: Instant) -> SwitchSignals {
-		SwitchSignals::read(self.spi, now, self.placer)
+		SwitchSignals::read(self.spi, now, self.placement)
 	}
 
 	fn event_clock(&self) -> u64 {
@@ -3542,6 +3615,36 @@ mod tests {
 	}
 
 	#[test]
+	fn a_release_placed_with_its_press_takes_the_press_back_and_a_press_elsewhere_stays() {
+		let t0 = Instant::now();
+		let down = SwitchSignals::new([1, 0, 0, 0, 0, 0], Some(t0 + ms(5)), NO_MODIFIERS, None);
+		let up = SwitchSignals::new([1, 1, 0, 0, 0, 0], Some(t0 + ms(60)), NO_MODIFIERS, None);
+		// A reading counts the user's press before the tap delivers it; their
+		// release comes with the click placed in their app: the target
+		// activating itself is sent back.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), down, t0 + ms(6)), FocusDecision::Observe);
+		let placed = up.in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(42), placed, t0 + ms(61)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(100)), FocusDecision::Restore);
+		// A press the tap placed elsewhere stays the user's pick, whatever a
+		// later reading says, whether a reading saw it unplaced first or not:
+		// dragged out of the target and dropped in the user's app, say.
+		let elsewhere = down.placed_elsewhere();
+		for readings in [&[down, elsewhere][..], &[elsewhere]] {
+			let mut guard = lease_at(t0, None);
+			for (i, &reading) in readings.iter().enumerate() {
+				let at = t0 + ms(6 + i as u64);
+				assert_eq!(guard.observe(PREVIOUS, Some(42), reading, at), FocusDecision::Observe);
+			}
+			let own = down.in_user_app();
+			assert_eq!(guard.observe(PREVIOUS, Some(42), own, t0 + ms(10)), FocusDecision::Observe);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), placed, t0 + ms(61)), FocusDecision::Observe);
+			assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(100)), FocusDecision::Disarm);
+		}
+	}
+
+	#[test]
 	fn a_hand_back_restores_the_window_the_user_clicked_as_the_target_came_forward() {
 		// The user's app, whose key window was 42 when the action began,
 		// reports 43 once handed back, and the target came forward in the same
@@ -4461,5 +4564,79 @@ mod tests {
 		let desktop = FakeHold { over_at: Some(1), ..FakeHold::new(&[]) };
 		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
 		assert!(desktop.front.get() == HOLD_BROWSER);
+	}
+
+	#[test]
+	fn a_target_pick_the_hid_counters_skip_still_picks_it() {
+		// A remote tool posts the user's click on the target to the session
+		// tap: the tap delivers it, the HID counters never count it, and the
+		// target comes forward because of it. The HID state dates the user's
+		// last click of their own seconds before.
+		let t0 = Instant::now();
+		let signals =
+			|reading| SwitchSignals::of(reading, t0.checked_sub(ms(5000)), NO_MODIFIERS, None);
+		let idle = signals(Reading { buttons: [0; 6], placed: Some(true), skipped: None });
+		let pressed = signals(Reading {
+			buttons: [1, 0, 0, 0, 0, 0],
+			placed:  Some(false),
+			skipped: Some(t0 + ms(10)),
+		});
+		let pick = |came: Duration| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), pressed, t0 + ms(10)),
+				FocusDecision::Observe
+			);
+			guard.observe(TARGET, None, pressed, t0 + ms(10) + came)
+		};
+		assert_eq!(pick(ms(40)), FocusDecision::Disarm);
+		// The target coming forward on its own once that click is past the
+		// switch window is still sent back.
+		assert_eq!(pick(ms(300)), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_press_read_once_after_a_reading_gave_up_on_it_leaves_the_target_sent_back() {
+		// The user's press at 10 ms, which `WindowServer` counts and a reading
+		// gives up on at 70 ms before the tap delivers it: the journal reads
+		// it once, whatever the tap delivers next.
+		let t0 = Instant::now();
+		let reading = |buttons, placed| Reading { buttons, placed, skipped: None };
+		let idle = SwitchSignals::of(
+			reading([0; 6], Some(true)),
+			t0.checked_sub(ms(5000)),
+			NO_MODIFIERS,
+			None,
+		);
+		let pressed = |placed| {
+			SwitchSignals::of(
+				reading([1, 0, 0, 0, 0, 0], placed),
+				Some(t0 + ms(10)),
+				NO_MODIFIERS,
+				None,
+			)
+		};
+		let lease_after = |readings: &[(Option<bool>, Duration)]| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			for &(placed, at) in [(None, ms(20)), (None, ms(70))].iter().chain(readings) {
+				let decision = guard.observe(PREVIOUS, Some(42), pressed(placed), t0 + at);
+				assert_eq!(decision, FocusDecision::Observe);
+			}
+			guard
+		};
+		// The tap delivers it in the user's app at 100 ms: the target coming
+		// forward on its own right after is sent back.
+		let mut guard = lease_after(&[(Some(true), ms(100))]);
+		let decision = guard.observe(TARGET, None, pressed(Some(true)), t0 + ms(140));
+		assert_eq!(decision, FocusDecision::Restore);
+		// The trade-off: a remapping tool swallowed it, so it stays owed, and a
+		// remote tool's press on the target at 1 s, posted to the session tap,
+		// pays it off and adds no click; the target coming forward because of
+		// it is sent back too, leaving the user's app in front.
+		let mut guard = lease_after(&[(Some(true), ms(80)), (Some(false), ms(1000))]);
+		let decision = guard.observe(TARGET, None, pressed(Some(false)), t0 + ms(1040));
+		assert_eq!(decision, FocusDecision::Restore);
 	}
 }

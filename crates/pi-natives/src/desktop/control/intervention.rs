@@ -17,7 +17,10 @@ use std::{
 use parking_lot::Mutex;
 
 use super::{DEADLINE_MARGIN, OperationToken, macos::UserInputMonitor};
-use crate::desktop::error::{CoreResult, DesktopError};
+use crate::desktop::{
+	error::{CoreResult, DesktopError},
+	macos::ClickJournal,
+};
 
 /// How long the user leaves an app alone before a read of it shows what they
 /// left there.
@@ -56,11 +59,13 @@ struct State {
 type Started = fn(libc::pid_t) -> Option<u64>;
 
 /// The user's input into each app this session has read or sent input to,
-/// shared by the tap thread and the session worker.
+/// shared by the tap thread and the session worker, with where the user's
+/// clicks went.
 pub(crate) struct UserInputs(
 	Mutex<State>,
 	/// Tells a route's process from a later one under the same id.
 	Started,
+	Arc<ClickJournal>,
 );
 
 impl Default for UserInputs {
@@ -71,7 +76,11 @@ impl Default for UserInputs {
 
 impl UserInputs {
 	fn new(started: Started) -> Self {
-		Self(Mutex::default(), started)
+		Self(Mutex::default(), started, Arc::default())
+	}
+
+	pub(super) fn clicks(&self) -> &ClickJournal {
+		&self.2
 	}
 
 	/// Starts recording the user's input into `pid`, which started at
@@ -225,6 +234,12 @@ pub(crate) fn input_goes_to(pid: libc::pid_t) {
 	});
 }
 
+/// Where the user's clicks went, as the current input call's session saw
+/// them; `None` outside an admitted input call.
+pub(in crate::desktop) fn clicks() -> Option<Arc<ClickJournal>> {
+	WATCH.with_borrow(|watch| watch.as_ref().map(|watch| Arc::clone(&watch.inputs.2)))
+}
+
 /// Before a key or pointer press, or an accessibility action or write, of the
 /// current input call: refuses once the user has pressed a key or clicked in
 /// its app since the call was admitted, so at most the press already under way
@@ -275,6 +290,7 @@ impl Listener {
 		if let Tap::Stopped(start) = self.tap
 			&& let Ok(tap) = start(Arc::clone(&self.inputs))
 		{
+			self.inputs.clicks().start();
 			self.tap = Tap::Running(tap);
 		}
 		!matches!(self.tap, Tap::Stopped(_))

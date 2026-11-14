@@ -1,5 +1,6 @@
 mod ax;
 mod capture;
+mod clicks;
 mod date;
 mod input;
 mod key_reroute;
@@ -18,6 +19,7 @@ mod spaces;
 pub(super) use ax::application_handle;
 pub(super) use ax::{ax_window_ids, has_open_window, is_standard_window, menus};
 pub(super) use capture::{application_windows, has_onscreen_window, window_titles};
+pub(super) use clicks::ClickJournal;
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;

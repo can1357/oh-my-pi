@@ -2821,7 +2821,7 @@ fn picked_up_refusal(window: &DesktopWindow) -> DesktopError {
 
 /// Change count of the drag pasteboard, which a drag source clears and
 /// writes as it begins a drag-and-drop session.
-fn drag_pasteboard_count() -> isize {
+pub(super) fn drag_pasteboard_count() -> isize {
 	// SAFETY: `NSPasteboardNameDrag` is an immutable AppKit string constant.
 	NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameDrag }).changeCount()
 }
