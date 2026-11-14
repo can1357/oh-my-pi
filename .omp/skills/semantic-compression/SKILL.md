@@ -74,7 +74,7 @@ Never invent private glyphs — a bespoke one needs a legend that costs more tha
 
 **Never delete — this is the payload:**
 
-- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word *is* the instruction.
+- Normative modals: MUST, NEVER, SHOULD, MAY. The requirement word *is* the instruction.
 - Negation and exception: not, no, never, without, none, except, unless.
 - Numbers, units, bounds, quantifiers: "at least 5", "≤100", "max 1 MiB", "1-indexed".
 - Conditionals and causality: if, unless, because, since, so.
@@ -105,7 +105,7 @@ The body compresses hard. The trigger does not.
 - A tool's or skill's `description` field is **retrieval surface**, not documentation: it is matched against the user's own phrasing. Keep natural, keyword-redundant alternatives ("compress prompt", "reduce token count", "token-efficient") even though a reader needs only one. Compress the body; NEVER compress the trigger.
 - Params — drop type, enum, or default from the prose ONLY when the *wire* schema the model actually sees exposes it, and (if you ran the `tool-prompt-optimization` probe) the probe recovered it from schema alone. Otherwise keep it. **Defaults are the trap:** wire schemas frequently omit `default` entirely, and even when present it carries no direction or semantics — `gitignore: true` does not say "respects gitignore" — which is why `tool-prompt-optimization` classes defaults-and-their-direction as content no model recovers. Absent that evidence, preserve the default, its unit, and any precedence rule (arg > env > default). Prose always keeps what no schema can express: interaction, precedence, failure mode.
 - Imperative for actions (`open before run`); label frames for facts (`Default 30s.`).
-- Scope split — this skill owns the *re-encoding mechanics* only. What belongs in a tool prompt at all (anatomy, surface-not-machinery, what stays out) → `tool-prompt-optimization`, which also measures schema/prose overlap before you cut. House style (tag vocabulary, RFC 2119 keywords, positioning) → `system-prompts`. Compress after those two have decided *what* ships.
+- Scope split — this skill owns the *re-encoding mechanics* only. What belongs in a tool prompt at all (anatomy, surface-not-machinery, what stays out) → `tool-prompt-optimization`, which also measures schema/prose overlap before you cut. House style (tag vocabulary, uppercase requirement words, positioning) → `system-prompts`. Compress after those two have decided *what* ships.
 
 ## Worked example
 

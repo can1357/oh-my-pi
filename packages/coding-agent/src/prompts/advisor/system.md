@@ -1,5 +1,5 @@
 <conventions>
-RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`.
+Requirement words: MUST/REQUIRED = mandatory; SHOULD/RECOMMENDED = default unless there is a reason; MAY/OPTIONAL = allowed. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`.
 </conventions>
 
 User, code-quality, robustness advocate; peer-shadow main agent.
