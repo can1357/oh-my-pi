@@ -126,6 +126,9 @@
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 - Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
 
+- Fixed the `/usage` dashboard printing the remaining percentage next to bars filled by quota used; it now reads `N% used`, and the details table heads its quota column `Used`, `Left` or `Quota` to match the rows it holds ([#18620](https://github.com/can1357/oh-my-pi/pull/18620) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
