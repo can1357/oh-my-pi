@@ -27,6 +27,8 @@ import { activateTodoTool, createInMemoryAuthStorage, fixedAdvisorTools } from "
 const zeroUsage = {
 	input: 0,
 	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
@@ -130,12 +132,12 @@ describe("advisor tool-call loop guard", () => {
 						role: "assistant",
 						content: [
 							advising
-							? {
-									type: "toolCall",
-									id: `tc-${turn}`,
-									name: "advise",
-									arguments: adviceArgs,
-								}
+								? {
+										type: "toolCall",
+										id: `tc-${turn}`,
+										name: "advise",
+										arguments: adviceArgs,
+									}
 								: { type: "toolCall", id: `tc-${turn}`, name: "read", arguments: { path: "missing.ts" } },
 						],
 						api: advisorMock.api,
@@ -157,8 +159,8 @@ describe("advisor tool-call loop guard", () => {
 					};
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-					stream.push({ type: "start", partial: message });
-					stream.push({ type: "done", reason: repeating ? "toolUse" : "stop", message });
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: repeating ? "toolUse" : "stop", message });
 			});
 			return stream;
 		};
@@ -238,8 +240,8 @@ describe("advisor tool-call loop guard", () => {
 					readStarted.resolve();
 					const call = (context as (AgentToolContext & { toolCall?: ToolCallContext }) | undefined)?.toolCall;
 					if (call?.earlierEffectsSettled) {
-							await call.earlierEffectsSettled;
-							result = bytes;
+						await call.earlierEffectsSettled;
+						result = bytes;
 					}
 					return { content: [{ type: "text", text: result }] };
 				},
@@ -339,30 +341,30 @@ describe("advisor tool-call loop guard", () => {
 			appendMessage: message => messages.push(message),
 			abort: () => {
 				throw new Error("Unexpected advisor abort");
-		},
+			},
 		});
 		for (let index = 0; index < 2; index++) {
 			guard.recordTurn(messages, {
 				message: {
-						role: "assistant",
-						content: [
-							{
-								type: "toolCall",
-								id: `call-${index}`,
-								name: "write",
-								arguments: { path: `xd://${device}`, content: "{}" },
-							},
-						],
-						api: "anthropic-messages",
-						provider: "anthropic",
-						model: "test",
-						usage: zeroUsage,
-						stopReason: "toolUse",
-						timestamp: Date.now(),
-					},
-					toolResults: [],
-					willContinue: true,
-				});
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: `call-${index}`,
+							name: "write",
+							arguments: { path: `xd://${device}`, content: "{}" },
+						},
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test",
+					usage: zeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				toolResults: [],
+				willContinue: true,
+			});
 		}
 		expect(messages).toHaveLength(redirects);
 		if (redirects > 0) expect(JSON.stringify(messages[0])).toContain("tool_call_loop_detected");
@@ -384,22 +386,22 @@ describe("advisor tool-call loop guard", () => {
 		const turn = (id: string): AgentTurnEndContext => {
 			const message: AssistantMessage = {
 				role: "assistant",
-			content: [{ type: "toolCall", id, name: "read", arguments: { path: "missing.ts" } }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "test",
-			usage: zeroUsage,
-			stopReason: "toolUse",
-			timestamp: Date.now(),
-		};
+				content: [{ type: "toolCall", id, name: "read", arguments: { path: "missing.ts" } }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "test",
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			};
 			const result: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: id,
-			toolName: "read",
-			content: [{ type: "text", text: "ENOENT" }],
-			isError: true,
-			timestamp: Date.now(),
-		};
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "read",
+				content: [{ type: "text", text: "ENOENT" }],
+				isError: true,
+				timestamp: Date.now(),
+			};
 			return { message, toolResults: [result], willContinue: true };
 		};
 
@@ -511,7 +513,7 @@ describe("advisor tool-call loop guard", () => {
 		const messages = session.agent.state.messages;
 		expect(messages.some(message => JSON.stringify(message).includes("hash pin still present"))).toBe(false);
 		expect(
-				messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
+			messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
 		).toHaveLength(2);
 		expect(completions(reviewStarts.at(-1)!)).toBe(2);
 	});
@@ -853,7 +855,7 @@ describe("advisor tool-call loop guard", () => {
 					content: [
 						{
 							type: "toolCall",
-						name: "advise",
+							name: "advise",
 							arguments: { note: "final review found a stale fixture", severity: "nit" },
 						},
 					],
@@ -871,10 +873,10 @@ describe("advisor tool-call loop guard", () => {
 		});
 		session = new AgentSession({
 			agent: new Agent({
-					getApiKey: () => "test-key",
-					initialState: { model: primaryMock, systemPrompt: [], tools: [] },
-					streamFn: primaryMock.stream,
-				}),
+				getApiKey: () => "test-key",
+				initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+				streamFn: primaryMock.stream,
+			}),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
@@ -931,10 +933,10 @@ describe("advisor tool-call loop guard", () => {
 		});
 		const live = new AgentSession({
 			agent: new Agent({
-					getApiKey: () => "test-key",
-					initialState: { model: primaryMock, systemPrompt: [], tools: [] },
-					streamFn: primaryMock.stream,
-				}),
+				getApiKey: () => "test-key",
+				initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+				streamFn: primaryMock.stream,
+			}),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
