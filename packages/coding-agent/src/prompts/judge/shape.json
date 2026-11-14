@@ -1,0 +1,9 @@
+{
+	"line": {
+		"instructions": "Does `lines.{{key}}` need to reach the agent for its current call? Judge it among the lines around it, against what `task`, `said` and `intent` are about; apply `criteria`.",
+		"criteria": {
+			"true": "The agent needs this line for its current call: it names, defines, reports or decides something the intent, the agent's text or the task is about — an error, the asked-for symbol, a failing assertion, a changed value, the line that explains the ones around it.",
+			"false": "Routine or incidental for this call: imports, braces and boilerplate, unrelated code, header prose, lines a passing run repeats."
+		}
+	}
+}

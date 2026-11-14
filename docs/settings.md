@@ -1114,7 +1114,7 @@ Both are unset by default and accept positive USD amounts; `--warn-cost` and `--
 
 ### Spotlight experiment
 
-Experimental tool-output shaping and `find` ranking with Stencil Spotlight (`POST https://cloud.stencil.so/v1/spotlight`, authenticated with the Stencil credential `omp token stencil` prints). With it on, every session (subagents included, helper sessions excluded) shapes its tool results and ranks `find` candidates with Spotlight, and journals what shaping did; random holdouts measure it against the unshaped (plain) result. Without a credential, shaping falls back to the unranked rules and the session warns once each time the credential goes missing.
+Experimental tool-output shaping and `find` ranking with Stencil Spotlight (`POST https://cloud.stencil.so/v1/spotlight`, authenticated with the Stencil credential `omp token stencil` prints). With it on, every session (subagents included, helper sessions excluded) shapes its tool results and ranks `find` candidates with Spotlight, and journals what shaping did; random holdouts measure it against the unshaped (plain) result. Without a credential, shaping falls back to the unranked rules and the session warns once each time the credential goes missing. `spotlight.ranker: judge` ranks with the session's [`judge` role](../packages/coding-agent/src/judgment/index.ts) instead: one `noul` question per line, 48 lines per request, so shaping needs no Stencil credential, and the entry names the ranker it used.
 
 ```yaml
 spotlight:
@@ -1123,6 +1123,7 @@ spotlight:
       holdout: 0.05
       scoreFree: 0.15
       tools: ["*"]
+   ranker: spotlight
    thinking: med
    timeoutMs: 5000
 ```
@@ -1133,6 +1134,7 @@ spotlight:
 | `spotlight.experiment.holdout`   | number  | `0.05`                                    | Share (0–1) of would-be cuts held out at random (see below). `PI_SPOTLIGHT_HOLDOUT` overrides it. |
 | `spotlight.experiment.scoreFree` | number  | `0.15`                                    | Share (0–1) of the results not held out that are shaped without Spotlight (see below). `PI_SPOTLIGHT_SCORE_FREE` overrides it. |
 | `spotlight.experiment.tools`     | array   | `["*"]`                                   | Tools whose results the experiment shapes and journals, by name; `*` is every tool. A tool left out returns its plain result and writes no journal entry. `PI_SPOTLIGHT_TOOLS` (comma-separated names) overrides it. |
+| `spotlight.ranker`               | enum    | `spotlight`                               | Which service ranks shaped output: `spotlight` (Stencil) or `judge` (the session's `judge` role, one `noul` question per line). `judge` needs no Stencil credential. |
 | `spotlight.url`                  | string  | `https://cloud.stencil.so/v1/spotlight`   | Ranking endpoint. `STENCIL_SPOTLIGHT_URL` overrides it.                                                 |
 | `spotlight.model`                | string  | `whiskers-latest`                         | Spotlight model.                                                                                        |
 | `spotlight.thinking`             | enum    | `med`                                     | `low`, `med`, `high`, or `max`: higher levels cost more.                                                |

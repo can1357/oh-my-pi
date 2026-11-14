@@ -136,7 +136,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				extraKeywords: params.grep_keywords,
 				judge,
 				verifyJudge,
-				spotlight: experiment ? { client: experiment.client, thinking: experiment.thinking } : undefined,
+				spotlight: experiment?.client ? { client: experiment.client, thinking: experiment.thinking } : undefined,
 				includeHidden: false,
 				signal,
 				deadline,

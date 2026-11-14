@@ -1,4 +1,4 @@
-import type { SpotlightRank, SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightRank, SpotlightReason, SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
 import type { SpotlightClient } from "./client";
 
 /**
@@ -70,6 +70,24 @@ export interface CallContext {
 /** Longest text one {@link CallContext} field carries. */
 export const CONTEXT_FIELD_CHARS = 2_000;
 
+/** What one ranking spent, for the session journal (`spotlight:shape`). */
+export interface ScorerUsage {
+	/** Requests sent. */
+	calls: number;
+	/** Requests that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
+	failures: number;
+	/**
+	 * Failed requests by cause, e.g. Spotlight's `no_credential`, `timeout`, `transport`, `bad_reply`, or the judge's
+	 * `no_judge`, `refused`, `provider`; absent while none failed.
+	 */
+	failureCauses?: Record<string, number>;
+	/** Wall time of the requests, summed. */
+	ms: number;
+	/** Prompt tokens the ranker billed. */
+	tokens: number;
+	costUsd: number;
+}
+
 /**
  * Ranks the items of one output (lines or groups of lines) for the agent's current call; higher is more relevant.
  * Scores compare within one call only.
@@ -82,6 +100,13 @@ export interface Scorer {
 	 * timeout, HTTP error): callers then fall back to a rule that needs no scores. Never throws for those.
 	 */
 	score(items: readonly string[], ctx: CallContext, signal?: AbortSignal): Promise<number[] | null>;
+}
+
+/** A {@link Scorer} that counts what it spent, so the result's journal entry can report it. */
+export interface ScoringScorer extends Scorer {
+	readonly usage: ScorerUsage;
+	/** What its requests sent besides the items, for the result's trace; unset when it asked no service. */
+	readonly params?: SpotlightRequestParams;
 }
 
 /** Saves the full text a shaped result hides, so markers can point at it. */
@@ -185,9 +210,15 @@ export const SPOTLIGHT_ENTRY = {
 
 export type SpotlightEntryType = (typeof SPOTLIGHT_ENTRY)[keyof typeof SPOTLIGHT_ENTRY];
 
+/** Which service ranks shaped output: Stencil Spotlight, or the session's `judge` role. */
+export type SpotlightRanker = "spotlight" | "judge";
+
 /** The experiment's handle on one session, present on the tool session only while the experiment is enabled. */
 export interface SpotlightSession {
-	client: SpotlightClient;
+	/** The Spotlight client; unset when the `judge` ranker ranks instead. */
+	client?: SpotlightClient;
+	/** The service that ranks shaped output (`spotlight.ranker`). */
+	ranker: SpotlightRanker;
 	thinking: SpotlightThinking;
 	/** Appends a journal entry; a no-op for sessions that are not persisted. */
 	log(type: SpotlightEntryType, data: Record<string, unknown>): void;
