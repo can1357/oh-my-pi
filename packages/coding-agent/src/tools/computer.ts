@@ -241,6 +241,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 	return {
 		cwd: session.cwd,
 		sessionId: session.getEvalSessionId?.() ?? session.getSessionId?.() ?? "computer",
+		agentId: session.getAgentId?.() ?? undefined,
 		captureMaxWidth: coordinateSafe
 			? Math.min(configuredMaxWidth, COORDINATE_SAFE_MAX_CAPTURE_WIDTH)
 			: configuredMaxWidth,

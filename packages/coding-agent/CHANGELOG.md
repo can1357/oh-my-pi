@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

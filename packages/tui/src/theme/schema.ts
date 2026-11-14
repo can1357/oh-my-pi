@@ -41,6 +41,12 @@ export type AnsiColor = keyof typeof ANSI_COLOR_INDEX;
 export const OPTIONAL_THEME_COLOR_RECORD = {
 	assistantMessageText: true,
 	mdExtensionLink: true,
+	subagent1: true,
+	subagent2: true,
+	subagent3: true,
+	subagent4: true,
+	subagent5: true,
+	subagent6: true,
 } satisfies Partial<Record<ThemeColor, true>>;
 
 export interface ThemeJson {
@@ -145,7 +151,13 @@ export type ThemeColor =
 	| "statusLineUntracked"
 	| "statusLineOutput"
 	| "statusLineCost"
-	| "statusLineSubagents";
+	| "statusLineSubagents"
+	| "subagent1"
+	| "subagent2"
+	| "subagent3"
+	| "subagent4"
+	| "subagent5"
+	| "subagent6";
 
 /** Set of all valid ThemeColor string values for runtime validation */
 const THEME_COLOR_RECORD = {
@@ -211,6 +223,12 @@ const THEME_COLOR_RECORD = {
 	statusLineOutput: true,
 	statusLineCost: true,
 	statusLineSubagents: true,
+	subagent1: true,
+	subagent2: true,
+	subagent3: true,
+	subagent4: true,
+	subagent5: true,
+	subagent6: true,
 } satisfies Record<ThemeColor, true>;
 
 const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));

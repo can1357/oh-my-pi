@@ -1715,6 +1715,11 @@ export interface DesktopSessionOptions {
    * count, which `desktopEscapeStops` reads after they close.
    */
   escapeStopKey?: string
+  /**
+   * The registry id of the agent this session acts for, named to other
+   * sessions that wait for its input/focus control.
+   */
+  agentId?: string
 }
 
 /** What a typing call did. */

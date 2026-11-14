@@ -58,6 +58,7 @@ import { plainText } from "../native/spans";
 import { errorText, noteText, resultText } from "./native-view";
 import { describeJsonValue } from "./json-tree";
 import { taskSummary } from "../overlays/agent-hub-renderer";
+import { agentColored } from "../overlays/agent-identity";
 import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
@@ -761,6 +762,7 @@ function renderAgentProgress(
 			status: progress.status,
 			prefix,
 			id: formatTaskId(progress.id),
+			agentId: progress.id,
 			width: maxWidth,
 			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
 			thinkingLevel: progress.resolvedThinkingLevel,
@@ -1127,11 +1129,10 @@ function renderAgentResult(
 		visibleWidth(`${indent}${icon} ${modelLead}${displayId}: ${fullDescription}${badges}`) <= maxWidth
 			? fullDescription
 			: undefined;
-	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${indent}${icon} ${modelLead}${theme.fg(
-		success && !needsWarning ? "text" : "accent",
-		titlePart,
-	)}${badges}`;
+	const titleColor = success && !needsWarning ? "text" : "accent";
+	const name = agentColored(theme, result.id, description ? theme.bold(displayId) : displayId);
+	const title = description ? `${name}${theme.fg(titleColor, `: ${description}`)}` : name;
+	let statusLine = `${indent}${icon} ${modelLead}${title}${badges}`;
 	statusLine += formatAgentStatRun(
 		{
 			requests: result.requests,

@@ -38,6 +38,7 @@ import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
+import { agentColored } from "./agent-identity";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
 import { shortenPath, truncateToWidth } from "../render/render-utils";
 import { formatLocalDateTimeWithOffset } from "../chrome/local-date";
@@ -2274,7 +2275,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			? treeBranch(ref, max, this.#treeDepthById, this.#treeParentById, this.#treeLastSiblingById)
 			: "";
 		const id = sanitizeDisplaySingleLine(ref.id);
-		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
+		const styledId = theme.bold(selected ? theme.fg("accent", id) : agentColored(theme, ref.id, id));
 		const fields: string[] = [`${cursor} ${branch}${statusGlyph(ref.status)} ${styledId}`];
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`));
