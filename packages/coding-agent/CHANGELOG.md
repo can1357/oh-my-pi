@@ -18,7 +18,11 @@
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
 
+### Changed
+
 - `grep` now shows match lines only by default (`grep.contextBefore`/`grep.contextAfter` default to `0`, was `1`/`3`) and keeps the first 10 matches per file when searching several files (was 20) and 50 in a single file (was 200), roughly halving typical grep output
+- With the Spotlight experiment on, results the agent mostly read back right after a cut are shown whole: a source `read` of at most ~12k characters is no longer outlined, a `pr://` or `issue://` thread stays whole up to ~12k characters, and CUDA, Objective-C, Luau, QML, CSS, shell and CMake files are treated as source (whole up to ~12k characters, outlined past it) instead of being cut by rank
+
 ### Fixed
 
 - Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".

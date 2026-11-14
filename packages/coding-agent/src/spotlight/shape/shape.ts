@@ -101,7 +101,10 @@ const REASK_LINES = 3;
 const VALVE_OVER = 3_900;
 /** Output of the agent's own programs triggers the valve only past twice the size. */
 const PROGRAM_SCALE = 2;
-/** Results shaped earlier, source reads, and sub-agent reports and edit results are left whole up to this size. */
+/**
+ * Results shaped earlier, source reads, sub-agent reports, edit results, and pull request and issue threads are left
+ * whole up to this size; a source read this short is not outlined either.
+ */
 const EXEMPT_MAX = 12_000;
 /**
  * A result of a tool without steps of its own this short, in characters and lines, passes whole (under every size
@@ -126,6 +129,8 @@ const VERBATIM = /[;,]\s*verbatim(?: copy)?: \S+\]$/;
  * instructions it must follow (`skill://`, `rule://`).
  */
 const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
+/** A `read` of one pull request or issue (`pr://7`, `issue://owner/repo/7?comments=0`), not a listing or a PR's diff. */
+const THREAD_READ = /^(?:pr|issue):\/\/(?:[^?#]*\/)?(?<!diff\/)\d+(?:[?#].*)?$/i;
 
 /**
  * Whether a result is shown whole besides page-backs and `:raw` reads: a {@link WHOLE_READ} target, or a `read` of
@@ -197,7 +202,7 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 	if (input.read) {
 		let recovery = false;
 		if (SOURCE_PATH.test(input.read.path)) {
-			const o = await outlineRead(run, await realPath(run.cwd, input.read.path));
+			const o = await outlineRead(run, await realPath(run.cwd, input.read.path), EXEMPT_MAX);
 			if (o.view) return { view: o.view, steps: ["outline"], recovery: false };
 			recovery = o.recovery;
 		}
@@ -444,8 +449,8 @@ function viewOrigin(run: Run, view: View): Origin | undefined {
 /**
  * The base layers, then the valve: already-seen runs collapse, lines over 400 characters keep 280, and a result over
  * 3.9k (the agent's own program output past 7.8k) is cut to ~3k, except outlines, source reads, sub-agent reports
- * (`task`, `wait`, `omp -p`) and edit results up to 12k, and pictures. Output repeating one line shape is cut to the
- * lines that differ, its ends, and a line naming the shape.
+ * (`task`, `wait`, `omp -p`), edit results and `pr://` / `issue://` threads up to 12k, and pictures. Output repeating
+ * one line shape is cut to the lines that differ, its ends, and a line naming the shape.
  * Re-asks (results up to 12k bringing back lines a cut hid) and reads of folded code come back whole.
  */
 async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; steps: string[] }> {
@@ -481,14 +486,16 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		? SOURCE_PATH.test(input.read.path)
 		: input.tool === "bash" && printsFiles(command) && namesSource(command) && !program;
 	// A sub-agent's report is read in full: cut, it came back as a read of the cut's copy (8 of 9), costing more than
-	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too.
+	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too. A
+	// pull request or issue under 12k came back 76 of 146 times, for ~1.2k tokens saved per read back.
 	const report =
 		input.tool === "task" ||
 		input.tool === "wait" ||
 		input.tool === "edit" ||
 		input.tool === "write" ||
 		input.tool === "ast_edit" ||
-		(input.tool === "bash" && runsAgent(command));
+		(input.tool === "bash" && runsAgent(command)) ||
+		(input.tool === "read" && THREAD_READ.test((input.path ?? "").trim()));
 	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4). Searches and filtered commands
 	// get no such pass: cut, 2% of `grep` results and 11% of filtered commands were read back, costing a fraction of
 	// what showing them whole up to 12k added.
