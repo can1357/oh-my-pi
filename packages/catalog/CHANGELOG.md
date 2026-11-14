@@ -6,6 +6,8 @@
 
 - Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 - Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
+- Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added `anthropic/claude-voice-stream` (`kind "stt"`, `anthropic-voice-stream` runner API): Claude subscription speech-to-text over Claude Code's `/voice` socket, OAuth only ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
@@ -36,6 +38,7 @@
 - Preserved encrypted reasoning across OpenCode Go Muse Spark tool-call turns.
 - Fixed Vertex AI Gemini 3 and newer models rejecting replayed or cross-model tool calls that lack a thought signature.
 - Fixed Cursor model listings so models available to the provider, including GLM 5.3 and Grok 4.7, are not omitted.
+- A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 

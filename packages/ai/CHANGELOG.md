@@ -5,10 +5,13 @@
 ### Added
 
 - Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added the `anthropic-voice-stream` transcription API: `transcribeAudio` streams a PCM16 WAV over Claude Code's subscription speech-to-text socket (`wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`) in 100 ms frames with `KeepAlive`/`CloseStream` and returns the final cumulative `TranscriptText`. Server `TranscriptError`/`error` frames raise `VoiceStreamTranscriptionError`, a refused upgrade raises `TranscriptionApiError` (auth-retried), and a stall raises `StreamTimeoutError`. It accepts only Anthropic OAuth tokens; API keys fail with a `ConfigurationError` before connecting ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
 - Updated Vertex AI Gemini requests to use the v1beta1 API, restoring support for long Gemini responses.
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

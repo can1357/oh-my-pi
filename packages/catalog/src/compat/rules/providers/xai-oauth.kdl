@@ -7,6 +7,7 @@ provider "xai-oauth" {
 	kind-apis {
 		image "openai-images"
 		tts "xai-tts"
+		stt "xai-stt"
 	}
 	web-search "xai"
 	// api.x.ai rejects a body over 50 MiB and counts images only against the
@@ -105,6 +106,13 @@ provider "xai-oauth" {
 			limits context=200000 max-tokens=200000
 		}
 		model "grok-tts" name="Grok TTS" api="xai-tts" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "grok-voice-transcribe-2.0" name="Grok Voice Transcribe 2.0" api="xai-stt" {
 			reasoning #false
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
