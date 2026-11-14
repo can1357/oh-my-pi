@@ -12,7 +12,9 @@ import {
 	ensureAntigravityVersion,
 	getAntigravityHeaders,
 	getAntigravityModelWireProfile,
+	getAntigravityUserAgent,
 	getGeminiCliHeaders,
+	newAntigravityTraceId,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -602,21 +604,30 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			const accountKey = isAntigravity
 				? oauthAccountKey({ accountId: parsedCredentials.accountId, email: parsedCredentials.email, projectId })
 				: undefined;
+			// The backend gates newer models on the client version; a process that
+			// skipped discovery (fresh model cache) must still send the current one.
+			// Resolved before the body is built: its `userAgent` names the version too.
+			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			let requestBody = buildRequest(model, requestContext, projectId, options, isAntigravity, accountKey);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
 			}
-			// The backend gates newer models on the client version; a process that
-			// skipped discovery (fresh model cache) must still send the current one.
-			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
-			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
+			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it). The
+			// header and body client identity come from the built envelope so they
+			// always agree. The native client also sends `x-goog-user-project` and
+			// `X-Vertex-AI-Labels`, but only on its ADC/quota-project and Vertex auth
+			// routes; with the user OAuth token used here they would be wrong.
 			const requestHeaders = {
 				Authorization: `Bearer ${accessToken}`,
 				"Content-Type": "application/json",
 				...(isAntigravity
-					? getAntigravityHeaders()
+					? {
+							...getAntigravityHeaders(requestBody.userAgent),
+							"x-cloudaicompanion-trace-id": newAntigravityTraceId(),
+							...(requestBody.requestId ? { "X-Aicode-Request-Id": requestBody.requestId } : {}),
+						}
 					: { Accept: "text/event-stream", ...getGeminiCliHeaders(model.id) }),
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
@@ -1451,7 +1462,7 @@ export function buildRequest(
 			requestId: envelope.requestId,
 			request,
 			model: wireModelId,
-			userAgent: "antigravity",
+			userAgent: getAntigravityUserAgent(),
 		};
 	}
 

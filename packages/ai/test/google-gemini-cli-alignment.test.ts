@@ -16,6 +16,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getAntigravityUserAgent, getAntigravityVersion } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 function createModel(
 	provider: "google-gemini-cli" | "google-antigravity",
@@ -278,7 +279,7 @@ describe("Google Gemini CLI alignment", () => {
 		};
 
 		expect(payload.request.sessionId).toMatch(/^-[0-9]+$/);
-		expect(payload.userAgent).toBe("antigravity");
+		expect(payload.userAgent).toBe(getAntigravityUserAgent());
 		// Structured requestId: agent/<agentId>/<ts>/<trajectoryId>/<step>.
 		expect(payload.requestId).toMatch(/^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/\d+$/);
 		// Antigravity tags its system instruction with role "user".
@@ -569,6 +570,75 @@ describe("Google Gemini CLI alignment", () => {
 		// Go net/http offers gzip only and sends no Accept of its own.
 		expect(requestHeaders!.get("Accept-Encoding")).toBe("gzip");
 		expect(requestHeaders!.get("Accept")).toBeNull();
+	});
+
+	describe("Antigravity request identity headers", () => {
+		/** Captures every generate request (headers + parsed body); manifest lookups fall through. */
+		function captureGenerateRequests() {
+			const captured: Array<{ headers: Headers; body: { requestId?: string; userAgent?: string } }> = [];
+			const fetchMock: FetchImpl = async (url, init) => {
+				if (String(url).includes(":streamGenerateContent")) {
+					captured.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+				}
+				return new Response('{"error":{"message":"bad request"}}', { status: 400 });
+			};
+			return { captured, fetchMock };
+		}
+
+		async function send(provider: "google-gemini-cli" | "google-antigravity", fetchMock: FetchImpl) {
+			await streamGoogleGeminiCli(createModel(provider), createContext(), {
+				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+				fetch: fetchMock,
+			}).result();
+		}
+
+		it("sends a trace id and the envelope's requestId as X-Aicode-Request-Id", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await send("google-antigravity", fetchMock);
+
+			expect(captured).toHaveLength(1);
+			const [{ headers, body }] = captured;
+			expect(headers.get("x-cloudaicompanion-trace-id")).toMatch(/^[0-9a-f]{32}$/);
+			expect(body.requestId).toMatch(/^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/\d+$/);
+			expect(headers.get("X-Aicode-Request-Id")).toBe(body.requestId!);
+		});
+
+		it("gives each request a fresh trace id and its own request id header", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await send("google-antigravity", fetchMock);
+			await send("google-antigravity", fetchMock);
+
+			expect(captured).toHaveLength(2);
+			const [first, second] = captured;
+			expect(second.headers.get("x-cloudaicompanion-trace-id")).toMatch(/^[0-9a-f]{32}$/);
+			expect(second.headers.get("x-cloudaicompanion-trace-id")).not.toBe(
+				first.headers.get("x-cloudaicompanion-trace-id")!,
+			);
+			expect(second.body.requestId).toBeDefined();
+			expect(second.body.requestId).not.toBe(first.body.requestId!);
+			expect(second.headers.get("X-Aicode-Request-Id")).toBe(second.body.requestId!);
+		});
+
+		it("sends the User-Agent header value as the body userAgent", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await send("google-antigravity", fetchMock);
+
+			const [{ headers, body }] = captured;
+			expect(body.userAgent).toBe(headers.get("User-Agent")!);
+			expect(body.userAgent).toContain("aidev_client; os_type=");
+			expect(body.userAgent).toStartWith(`antigravity/hub/${getAntigravityVersion()} `);
+		});
+
+		it("leaves the Gemini CLI transport without Antigravity identity headers", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await send("google-gemini-cli", fetchMock);
+
+			expect(captured).toHaveLength(1);
+			const [{ headers, body }] = captured;
+			expect(headers.get("x-cloudaicompanion-trace-id")).toBeNull();
+			expect(headers.get("X-Aicode-Request-Id")).toBeNull();
+			expect(body.userAgent).toBeUndefined();
+		});
 	});
 
 	it("filters out empty text parts at stream end but preserves terminal thought signatures", async () => {

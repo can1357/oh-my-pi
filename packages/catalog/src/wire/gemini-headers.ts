@@ -171,6 +171,17 @@ export function getAntigravityHeaders(userAgent: string = getAntigravityUserAgen
 }
 
 /**
+ * Fresh `x-cloudaicompanion-trace-id` value for one Antigravity generate
+ * request: 32 lowercase hex chars, the shape Google trace ids take. The header
+ * is inferred from the shipped 2.32.1 language server, whose `codeassistclient`
+ * package holds the literal; the exact value format the native client sends is
+ * unverified. Call once per request so no two requests share an id.
+ */
+export function newAntigravityTraceId(): string {
+	return crypto.randomUUID().replaceAll("-", "");
+}
+
+/**
  * Offline fallback for {@link Model.antigravityWireProfiles}: per-SKU request
  * constants for rows that carry no discovered profile. Keyed by the routed
  * upstream wire id (post effort-routing), not the collapsed logical id.
