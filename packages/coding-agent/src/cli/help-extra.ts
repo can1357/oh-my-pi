@@ -72,6 +72,7 @@ export function getExtraHelpText(): string {
   PERPLEXITY_API_KEY         - Perplexity web search API key (optional; anonymous fallback)
   PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
   TAVILY_API_KEY             - Tavily web search
+  SERPLY_API_KEY             - Serply web search (Google SERP)
   TINYFISH_API_KEY           - TinyFish web search
   KEENABLE_API_KEY           - Keenable web search (optional; keyless public fallback)
   SOFYA_API_KEY              - Sofya web search
