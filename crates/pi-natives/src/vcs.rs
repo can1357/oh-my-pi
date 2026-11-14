@@ -195,10 +195,14 @@ pub struct VcsStatusOptions {
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsCommitOptions {
-	pub author:      Option<VcsCommitAuthor>,
-	pub allow_empty: Option<bool>,
-	pub amend:       Option<bool>,
-	pub files:       Option<Vec<String>>,
+	pub author:        Option<VcsCommitAuthor>,
+	pub allow_empty:   Option<bool>,
+	pub amend:         Option<bool>,
+	pub files:         Option<Vec<String>>,
+	/// Build the commit from this index file instead of the repository's.
+	pub index_path:    Option<String>,
+	/// Fail with `HeadMoved` unless HEAD resolves to this revision.
+	pub expected_head: Option<String>,
 }
 /// Patch application options.
 #[napi(object)]
@@ -360,10 +364,12 @@ impl TryFrom<VcsStatusOptions> for core::StatusOptions {
 impl From<VcsCommitOptions> for core::CommitOptions {
 	fn from(v: VcsCommitOptions) -> Self {
 		Self {
-			author:      v.author.map(Into::into),
-			allow_empty: v.allow_empty.unwrap_or(false),
-			amend:       v.amend.unwrap_or(false),
-			files:       v.files.unwrap_or_default(),
+			author:        v.author.map(Into::into),
+			allow_empty:   v.allow_empty.unwrap_or(false),
+			amend:         v.amend.unwrap_or(false),
+			files:         v.files.unwrap_or_default(),
+			index_path:    v.index_path.map(PathBuf::from),
+			expected_head: v.expected_head,
 		}
 	}
 }

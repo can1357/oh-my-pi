@@ -4,8 +4,12 @@
 
 ### Added
 
-- Added `mixHex` for blending two hex colors ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Added `mixHex` for blending two hexadecimal colors.
 - Added `readBoundedJson` and `readBoundedBytes` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+
+### Fixed
+
+- Improved retry-hint extraction for Cloud Code Assist quota reset information, including compound durations and reset timestamps.
 
 ## [18.19.0] - 2026-11-12
 
