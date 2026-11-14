@@ -1437,4 +1437,48 @@ describe("AgentSession handoff", () => {
 		const result = await session.handoff(undefined, { autoTriggered: true });
 		expect(result).toBeUndefined();
 	});
+
+	it("rejects a final answer instead of committing it as a manual handoff", async () => {
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(
+			"I've read both files completely. Here are the exact texts.",
+		);
+
+		await expect(session.handoff()).rejects.toThrow("Handoff generation produced an invalid document");
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+	});
+
+	it("falls back from malformed auto-handoff to soft compaction", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(
+			"Let me find where the message was created.",
+		);
+		const lastEntryId = sessionManager.getBranch().at(-1)?.id;
+		if (!lastEntryId) throw new Error("Expected seeded history");
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: "original goal", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: compactionModule.DEFAULT_COMPACTION_SETTINGS,
+		});
+		vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "## Goal\nFollow the original read-only request",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+
+		await session.runIdleCompaction();
+
+		const compaction = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		expect(compaction).toMatchObject({ type: "compaction", method: "soft" });
+		if (compaction?.type !== "compaction") throw new Error("Expected soft compaction");
+		expect(compaction.summary).toContain("Follow the original read-only request");
+		expect(compaction.summary).not.toContain("Let me find");
+	});
 });
