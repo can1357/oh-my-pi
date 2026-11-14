@@ -7,14 +7,14 @@ import { bunShimPathEntry, bunShimScript, jsKernelEnv } from "../../src/eval/js/
 const posixOnly = process.platform === "win32" ? describe.skip : describe;
 
 posixOnly("JS eval kernel env", () => {
-	const dirs: string[] = [];
-	const shimDir = (): string => {
+	const roots: string[] = [];
+	const shimRoot = (): string => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-bun-shim-"));
-		dirs.push(dir);
+		roots.push(dir);
 		return dir;
 	};
 	afterEach(() => {
-		for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+		for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
 
 	it("marks the kernel as a tool process", () => {
@@ -22,41 +22,51 @@ posixOnly("JS eval kernel env", () => {
 	});
 
 	it("puts a bun shim at the END of a compiled kernel's PATH when none resolves, so the fallback never fires", () => {
-		const dir = shimDir();
+		const root = shimRoot();
 		const env = jsKernelEnv(
 			{ PATH: "/usr/bin:/bin" },
-			{ compiled: true, execPath: "/opt/omp/omp", shimDir: dir, which: () => null },
+			{ compiled: true, execPath: "/opt/omp/omp", shimRoot: root, which: () => null },
 		);
-		expect(env.PATH).toBe(`/usr/bin:/bin:${dir}`);
-		const shim = path.join(dir, "bun");
+		const shimDir = env.PATH.slice("/usr/bin:/bin:".length);
+		expect(env.PATH).toBe(`/usr/bin:/bin:${shimDir}`);
+		expect(path.dirname(shimDir)).toBe(root);
+		const shim = path.join(shimDir, "bun");
 		expect(fs.readFileSync(shim, "utf8")).toBe(bunShimScript("/opt/omp/omp"));
 		expect(fs.statSync(shim).mode & 0o111).toBe(0o111);
+		expect(fs.readdirSync(shimDir)).toEqual(["bun"]);
 	});
 
 	it("re-enters the executable as bun: the shim runs the exec path with BUN_BE_BUN=1 and the caller's arguments", () => {
-		const dir = shimDir();
-		const fakeExec = path.join(dir, "fake omp's exe");
+		const root = shimRoot();
+		const fakeExec = path.join(root, "fake omp's exe");
 		fs.writeFileSync(fakeExec, '#!/bin/sh\nprintf \'%s|%s\\n\' "$BUN_BE_BUN" "$*"\n', { mode: 0o755 });
-		bunShimPathEntry(
+		const shimDir = bunShimPathEntry(
 			{ PATH: "/usr/bin:/bin" },
-			{ compiled: true, execPath: fakeExec, shimDir: dir, which: () => null },
+			{ compiled: true, execPath: fakeExec, shimRoot: root, which: () => null },
 		);
-		const out = Bun.spawnSync([path.join(dir, "bun"), "--version"], { env: { PATH: "/usr/bin:/bin" } });
+		const out = Bun.spawnSync([path.join(shimDir ?? "", "bun"), "--version"], { env: { PATH: "/usr/bin:/bin" } });
 		expect(out.stdout.toString()).toBe("1|--version\n");
 	});
 
-	it("installs no shim when bun already resolves, in a source run, or on an unchanged PATH", () => {
-		const dir = shimDir();
-		expect(bunShimPathEntry({ PATH: "/x" }, { compiled: true, shimDir: dir, which: () => "/x/bun" })).toBeUndefined();
-		expect(bunShimPathEntry({ PATH: "/x" }, { compiled: false, shimDir: dir, which: () => null })).toBeUndefined();
-		expect(fs.existsSync(path.join(dir, "bun"))).toBe(false);
+	it("installs no shim when bun already resolves or in a source run", () => {
+		const root = shimRoot();
+		expect(
+			bunShimPathEntry({ PATH: "/x" }, { compiled: true, shimRoot: root, which: () => "/x/bun" }),
+		).toBeUndefined();
+		expect(bunShimPathEntry({ PATH: "/x" }, { compiled: false, shimRoot: root, which: () => null })).toBeUndefined();
+		expect(fs.readdirSync(root)).toEqual([]);
 	});
 
-	it("rewrites a shim that names another executable, so a moved binary leaves no stale shim", () => {
-		const dir = shimDir();
-		const opts = { compiled: true, shimDir: dir, which: () => null };
-		bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/old/omp" });
-		bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/new/omp" });
-		expect(fs.readFileSync(path.join(dir, "bun"), "utf8")).toBe(bunShimScript("/new/omp"));
+	it("gives each executable its own shim that never changes, so another version's live kernel keeps its target", () => {
+		const root = shimRoot();
+		const opts = { compiled: true, shimRoot: root, which: () => null };
+		const dirA = bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/a/omp" });
+		const dirB = bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/b/omp" });
+		expect(dirA).not.toBe(dirB);
+		expect(fs.readFileSync(path.join(dirA ?? "", "bun"), "utf8")).toBe(bunShimScript("/versions/a/omp"));
+		expect(fs.readFileSync(path.join(dirB ?? "", "bun"), "utf8")).toBe(bunShimScript("/versions/b/omp"));
+		const before = fs.statSync(path.join(dirA ?? "", "bun")).mtimeMs;
+		expect(bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/a/omp" })).toBe(dirA);
+		expect(fs.statSync(path.join(dirA ?? "", "bun")).mtimeMs).toBe(before);
 	});
 });

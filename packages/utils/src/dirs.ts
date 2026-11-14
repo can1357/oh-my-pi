@@ -948,7 +948,7 @@ export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
 }
 
-/** Get the directory holding a compiled omp's `bun` shim (~/.omp/cache/bun-shim). */
+/** Get the directory holding a compiled omp's `bun` shim (~/.omp/cache/bun-shim; one subdirectory per executable). */
 export function getBunShimDir(): string {
 	return dirs.rootSubdir(path.join("cache", "bun-shim"), "cache");
 }

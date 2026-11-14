@@ -24,13 +24,14 @@ export function bunShimScript(execPath: string): string {
 	return `#!/bin/sh\nBUN_BE_BUN=1 exec '${execPath.replaceAll("'", "'\\''")}' "$@"\n`;
 }
 
+/** Seams of `bunShimPathEntry` and `jsKernelEnv`; production callers pass none, tests inject a fake executable and lookup. */
 export interface BunShimOptions {
 	/** Whether this process is a compiled omp (default: detected). */
 	compiled?: boolean;
 	/** Executable the shim re-enters (default: this process). */
 	execPath?: string;
-	/** Where the shim lives (default: the agent cache). */
-	shimDir?: string;
+	/** Root under which each executable gets its own shim directory (default: the agent cache). */
+	shimRoot?: string;
 	/** `bun` lookup on a PATH (default: `$which`). */
 	which?: (command: string, PATH: string | undefined) => string | null;
 }
@@ -38,18 +39,25 @@ export interface BunShimOptions {
 /**
  * The shim directory to append to `env.PATH`, or undefined when no shim is
  * needed: a source run (plain bun, whose fallback is bun), a PATH that already
- * resolves `bun`, or Windows (no POSIX shim). The shim is written on first use
- * and rewritten when the executable path it names differs, so a moved binary
- * never leaves a stale shim behind.
+ * resolves `bun`, or Windows (no POSIX shim).
+ *
+ * Each executable path gets its own directory under the root, named by a hash
+ * of that path, and its shim's content is a pure function of the path. So a
+ * shim, once published, never changes: another omp version with a live kernel
+ * keeps re-entering its own executable, and a moved binary gets a new
+ * directory rather than a rewrite. The file is published by rename, so a
+ * kernel never sees a partial script, and concurrent first uses converge on
+ * identical bytes.
  */
 export function bunShimPathEntry(env: Record<string, string>, options: BunShimOptions = {}): string | undefined {
 	if (process.platform === "win32") return undefined;
 	if (!(options.compiled ?? isCompiledBinary())) return undefined;
 	const which = options.which ?? ((command, PATH) => $which(command, { PATH }));
 	if (which("bun", env.PATH) !== null) return undefined;
-	const shimDir = options.shimDir ?? getBunShimDir();
+	const execPath = options.execPath ?? process.execPath;
+	const shimDir = path.join(options.shimRoot ?? getBunShimDir(), Bun.hash(execPath).toString(16));
 	const shim = path.join(shimDir, "bun");
-	const script = bunShimScript(options.execPath ?? process.execPath);
+	const script = bunShimScript(execPath);
 	let current: string | undefined;
 	try {
 		current = fs.readFileSync(shim, "utf8");
@@ -58,9 +66,10 @@ export function bunShimPathEntry(env: Record<string, string>, options: BunShimOp
 	}
 	if (current !== script) {
 		fs.mkdirSync(shimDir, { recursive: true });
-		fs.writeFileSync(shim, script, { mode: 0o755 });
+		const staging = path.join(shimDir, `.bun.${process.pid}.${Date.now().toString(36)}`);
+		fs.writeFileSync(staging, script, { mode: 0o755 });
+		fs.renameSync(staging, shim);
 	}
-	fs.chmodSync(shim, 0o755);
 	return shimDir;
 }
 
