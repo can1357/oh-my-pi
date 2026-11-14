@@ -11,7 +11,9 @@
 import {
 	type Api,
 	type AuthStorage,
+	classifyCloudCodeAssistFailure,
 	type FetchImpl,
+	isUnattributedAntigravity429,
 	type Model,
 	type OAuthAccess,
 	withAuth,
@@ -98,6 +100,8 @@ export function buildGeminiRequestTools(params: GeminiToolParams): Array<Record<
 interface GeminiAuth {
 	accessToken: string;
 	projectId: string;
+	/** Catalog provider the bearer belongs to; selects how a failure status is classified. */
+	provider: string;
 	isAntigravity: boolean;
 }
 
@@ -454,15 +458,30 @@ async function callGeminiSearch(
 		maxAttempts: MAX_RETRIES + 1,
 		defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 		maxDelayMs: RATE_LIMIT_BUDGET_MS,
+		// A 429 that names no quota is a refusal of this request; replaying it only repeats the refusal.
+		shouldRetryResponse: (retryResponse, bodyText) =>
+			!isUnattributedAntigravity429(auth.provider, retryResponse.status, retryResponse.headers, bodyText),
 	});
 
 	if (!response.ok) {
 		const rawErrorText = await response.text();
 		const errorText = auth.accessToken ? rawErrorText.split(auth.accessToken).join("[redacted]") : rawErrorText;
 		const status = response.status;
+		const failure = classifyCloudCodeAssistFailure(
+			auth.provider,
+			status,
+			response.headers,
+			errorText,
+			`Gemini Cloud Code API error (${status}): ${errorText}`,
+		);
+		// The UNATTRIBUTED_REJECTION_PREFIX that `failure.message` leads with is what
+		// stops credential rotation: withOAuthAccess reads it and refuses the search on
+		// this account instead of replaying it through every pooled account. Classify
+		// before classifyProviderHttpError, whose "quota" match would hide the marker.
+		if (failure.unattributed) throw new SearchProviderError("gemini", failure.message, status);
 		const classified = classifyProviderHttpError("gemini", status, errorText);
 		if (classified) throw classified;
-		throw new SearchProviderError("gemini", `Gemini Cloud Code API error (${status}): ${errorText}`, status);
+		throw new SearchProviderError("gemini", failure.message, status);
 	}
 
 	if (!response.body) {
@@ -586,6 +605,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 					{
 						accessToken: access.accessToken,
 						projectId: access.projectId ?? seed.projectId,
+						provider: seed.provider,
 						isAntigravity,
 					},
 					selectedModel,

@@ -163,18 +163,15 @@ export async function generateAntigravityImage(
 				});
 				if (result.ok) return result;
 				const text = await result.text();
-				const unattributed = AIError.isUnattributedAntigravity429(
+				const failure = AIError.classifyCloudCodeAssistFailure(
 					model.provider,
 					result.status,
 					result.headers,
 					text,
+					`${model.provider}/${model.id} image request failed (${result.status}): ${errorMessage(text)}`,
 				);
-				lastError = new ImageApiError(
-					`${unattributed ? `${AIError.UNATTRIBUTED_REJECTION_PREFIX}. ` : ""}${model.provider}/${model.id} image request failed (${result.status}): ${errorMessage(text)}`,
-					result.status,
-					{ headers: result.headers },
-				);
-				const retryable = !unattributed && (result.status === 429 || result.status >= 500);
+				lastError = new ImageApiError(failure.message, result.status, { headers: result.headers });
+				const retryable = !failure.unattributed && (result.status === 429 || result.status >= 500);
 				if (!retryable || index === target.endpoints.length - 1) throw lastError;
 			}
 			throw lastError ?? new AIError.ProviderResponseError("Antigravity image request failed");

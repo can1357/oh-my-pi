@@ -389,12 +389,8 @@ function cloudCodeAssistHttpError(
 	body: string,
 	message: string,
 ): AIError.GeminiCliApiError {
-	const unattributed = AIError.isUnattributedAntigravity429(provider, status, headers, body);
-	return new AIError.GeminiCliApiError(
-		unattributed ? `${AIError.UNATTRIBUTED_REJECTION_PREFIX}. ${message}` : message,
-		status,
-		{ headers },
-	);
+	const failure = AIError.classifyCloudCodeAssistFailure(provider, status, headers, body, message);
+	return new AIError.GeminiCliApiError(failure.message, status, { headers });
 }
 
 export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCredentials {

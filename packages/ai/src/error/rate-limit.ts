@@ -177,6 +177,34 @@ export function isUnattributedAntigravity429(
 	);
 }
 
+/** A failed Cloud Code Assist response, as {@link classifyCloudCodeAssistFailure} reports it. */
+export interface CloudCodeAssistFailure {
+	/** Whether the failure is an {@link isUnattributedAntigravity429} refusal. */
+	unattributed: boolean;
+	/** The caller's message, led by {@link UNATTRIBUTED_REJECTION_PREFIX} when `unattributed`. */
+	message: string;
+}
+
+/**
+ * Classifies a failed Cloud Code Assist response for a caller that builds its
+ * own error from it (chat stream, image generation, web search). An
+ * {@link isUnattributedAntigravity429} refusal gets
+ * {@link UNATTRIBUTED_REJECTION_PREFIX} ahead of `message`: that prefix is the
+ * marker {@link isUnattributedRejection} reads, so the retry, rotation, and
+ * credential-block layers keep the error on the account that received it
+ * instead of replaying it through the pool.
+ */
+export function classifyCloudCodeAssistFailure(
+	provider: string | undefined,
+	status: number | undefined,
+	headers: Headers | undefined,
+	body: string,
+	message: string,
+): CloudCodeAssistFailure {
+	const unattributed = isUnattributedAntigravity429(provider, status, headers, body);
+	return { unattributed, message: unattributed ? `${UNATTRIBUTED_REJECTION_PREFIX}. ${message}` : message };
+}
+
 /** Whether an error message reports an {@link isUnattributedAntigravity429} refusal. */
 export function isUnattributedRejectionText(message: string | undefined): boolean {
 	return message?.includes(UNATTRIBUTED_REJECTION_PREFIX) === true;
