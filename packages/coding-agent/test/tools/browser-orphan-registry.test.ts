@@ -19,6 +19,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
 import {
+	closeCdpTarget,
 	closeSharedTargetUntilGone,
 	collectOrphanTargets,
 	forgetSharedTarget,
@@ -63,12 +64,11 @@ async function deadPid(): Promise<number> {
 /** Minimal puppeteer Browser stub recording closes and optionally failing selected targets. */
 function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Set()): Browser {
 	const destroyedHandlers = new Set<(event: { targetId: string }) => void>();
-	const session = {
+	const connection = {
 		send: async (method: string, params?: { targetId: string }) => {
 			if (method === "Target.getTargets") {
 				return { targetInfos: [...failTargets].map(targetId => ({ targetId })) };
 			}
-			if (method === "Target.setDiscoverTargets") return {};
 			if (!params) throw new Error(`Missing params for ${method}`);
 			if (failTargets.has(params.targetId)) throw new Error("transient CDP failure");
 			closed.push(params.targetId);
@@ -80,11 +80,11 @@ function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Se
 		},
 		on: (_event: string, handler: (event: { targetId: string }) => void) => destroyedHandlers.add(handler),
 		off: (_event: string, handler: (event: { targetId: string }) => void) => destroyedHandlers.delete(handler),
-		detach: async () => undefined,
+		createSession: async () => {
+			throw new Error("closes must not attach to targets");
+		},
 	};
-	return {
-		target: () => ({ createCDPSession: async () => session }),
-	} as unknown as Browser;
+	return { _connection: connection } as unknown as Browser;
 }
 
 /** Fake Chromium behind a puppeteer `Browser` stub; `targets` is Chromium's own view. */
@@ -92,8 +92,11 @@ interface FakeChromium {
 	browser: Browser;
 	/** Target ids Chromium still lists in `Target.getTargets`. */
 	targets: Set<string>;
-	/** `createCDPSession()` calls on the browser target; closes must never attach. */
-	sessions: number;
+	/**
+	 * Leave puppeteer as overlapping browser-target sessions do (puppeteer#15750): the connection
+	 * stays up, but `browser.target()` throws `Browser target is not found` from then on.
+	 */
+	loseBrowserTarget(): void;
 	/** Drop the connection: puppeteer then reports `connected: false` and rejects every send. */
 	disconnect(): void;
 }
@@ -104,7 +107,9 @@ interface FakeChromium {
  * sends; `rejectClose` ids reject every close (yet still go); `silentDestroy` ids go
  * without the event; the first `hangClose` sends never answer; each send waits for
  * `stall`, called as it is written (a frozen Chromium). Puppeteer's own view
- * (`targets()`) is always empty, so confirming through it would be wrong.
+ * (`targets()`) is always empty, so confirming through it would be wrong. Two
+ * `browser.target().createCDPSession()` calls in flight at once lose the browser
+ * target for the rest of the connection, as in puppeteer#15750.
  */
 function makeChromium(
 	opts: {
@@ -118,13 +123,17 @@ function makeChromium(
 	} = {},
 ): FakeChromium {
 	let connected = true;
+	let browserTargetLost = false;
+	let sessionsAttaching = 0;
 	const closeSends = new Map<string, number>();
 	const chromium: FakeChromium = {
 		browser: undefined as unknown as Browser,
 		targets: new Set(opts.targets ?? []),
-		sessions: 0,
 		disconnect: () => {
 			connected = false;
+		},
+		loseBrowserTarget: () => {
+			browserTargetLost = true;
 		},
 	};
 	const destroyedHandlers = new Set<(event: { targetId: string }) => void>();
@@ -159,17 +168,33 @@ function makeChromium(
 			throw new Error("closes must not attach to targets");
 		},
 	};
+	const session = {
+		send: async (method: string, params?: { targetId: string }) =>
+			method === "Target.setDiscoverTargets" ? {} : await connection.send(method, params),
+		on: connection.on,
+		off: connection.off,
+		detach: async () => undefined,
+	};
+	const browserTarget = {
+		createCDPSession: async () => {
+			if (++sessionsAttaching > 1) browserTargetLost = true;
+			try {
+				await Promise.resolve(); // the attach round-trip
+			} finally {
+				sessionsAttaching--;
+			}
+			return session;
+		},
+	};
 	chromium.browser = {
 		get connected() {
 			return connected;
 		},
 		_connection: connection,
-		target: () => ({
-			createCDPSession: async () => {
-				chromium.sessions++;
-				throw new Error("closes must not attach to the browser target");
-			},
-		}),
+		target: () => {
+			if (browserTargetLost) throw new Error("Browser target is not found");
+			return browserTarget;
+		},
 		targets: () => [],
 		disconnect: () => chromium.disconnect(),
 	} as unknown as Browser;
@@ -275,7 +300,7 @@ describe("orphan-registry — ownership scan", () => {
 });
 
 describe("orphan-registry — closeSharedTargetUntilGone", () => {
-	it("confirms concurrent closes only once Chromium stops listing each target, without attaching a session", async () => {
+	it("confirms concurrent closes only once Chromium stops listing each target, and keeps the browser target", async () => {
 		// Concurrent browser-target sessions made puppeteer 25.3.0 drop the browser target,
 		// so every later web search failed with `Browser target is not found`.
 		const chromium = makeChromium({
@@ -295,7 +320,7 @@ describe("orphan-registry — closeSharedTargetUntilGone", () => {
 
 		expect(results).toEqual(ids.map(() => true));
 		expect([...chromium.targets]).toEqual([]);
-		expect(chromium.sessions).toBe(0);
+		expect(() => chromium.browser.target()).not.toThrow();
 	});
 
 	it("returns false within its budget while Chromium keeps listing the target", async () => {
@@ -347,6 +372,21 @@ describe("orphan-registry — closeSharedTargetUntilGone", () => {
 
 		expect(await closing).toBe(true);
 		expect([...chromium.targets]).toEqual([]);
+	});
+});
+
+describe("orphan-registry — closeCdpTarget", () => {
+	it("confirms concurrent closes, of open and already-gone targets, and keeps the browser target", async () => {
+		// Each close attaching its own session made puppeteer lose the browser target, so
+		// closing tabs together broke every later web search with `Browser target is not found`.
+		const chromium = makeChromium({ targets: ["a", "b", "c"] });
+		const ids = ["a", "b", "c", "gone"];
+
+		const results = await Promise.all(ids.map(id => closeCdpTarget(chromium.browser, id)));
+
+		expect(results).toEqual(ids.map(() => true));
+		expect([...chromium.targets]).toEqual([]);
+		expect(() => chromium.browser.target()).not.toThrow();
 	});
 });
 
@@ -420,6 +460,20 @@ describe("orphan-registry — reap", () => {
 
 		expect(retryCount).toBe(1);
 		expect(retryClosed).toEqual(["retry-later"]);
+		expect(await Bun.file(path.join(registryDir(scope), `${dead}.json`)).exists()).toBe(false);
+	});
+
+	it("closes a dead owner's targets after puppeteer lost the browser target", async () => {
+		// The reap runs unawaited on attach: a browser-target session here rejected and exited omp.
+		const scope = trackedScope();
+		const dead = await deadPid();
+		await writeOwnershipFile(scope, { pid: dead, updatedAt: Date.now() - 60_000, targets: ["orphan-1", "orphan-2"] });
+		const chromium = makeChromium({ targets: ["orphan-1", "orphan-2"] });
+		chromium.loseBrowserTarget();
+
+		expect(await reapOrphanSharedTargets(chromium.browser, scope)).toBe(2);
+
+		expect([...chromium.targets]).toEqual([]);
 		expect(await Bun.file(path.join(registryDir(scope), `${dead}.json`)).exists()).toBe(false);
 	});
 });

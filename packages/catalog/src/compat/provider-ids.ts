@@ -15,6 +15,7 @@ export type KnownProvider =
 	| "bedrock-mantle"
 	| "cerebras"
 	| "charm-hyper"
+	| "chutes"
 	| "cline-pass"
 	| "cloudflare-ai-gateway"
 	| "cloudflare-workers-ai"

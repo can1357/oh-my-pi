@@ -601,6 +601,8 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	#lastFilterQuery = "";
 	/** Bumped whenever the visible session set may have changed (native memo key). */
 	#itemsVersion = 0;
+	/** Window start index retained across renders for edge-triggered scrolling. Unset until first render to seed centered. */
+	#scrollStartIndex: number | undefined = undefined;
 	/** Per-row line heights of the visible list for the ANSI window, reused until the set changes. */
 	#rowHeights: { items: readonly T[]; length: number; version: number; heights: readonly number[] } | undefined;
 	#itemsNative:
@@ -703,6 +705,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		this.#showCwd = showCwd;
 		if (pinnedIds !== undefined) this.#pinnedIds = pinnedIds;
 		this.#menu.setSelectedIndex(0);
+		this.#scrollStartIndex = undefined;
 		this.#filterSessions(this.#searchInput.getValue());
 		this.#selectCurrentSession();
 	}
@@ -724,6 +727,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		const queryChanged = query !== this.#lastFilterQuery;
 		this.#hadFilterQuery = tokens.length > 0;
 		this.#lastFilterQuery = query;
+		if (queryChanged) this.#scrollStartIndex = undefined;
 		if (tokens.length === 0) {
 			const items = this.#pinnedFirst(this.#allSessions);
 			const keepIndex = Math.min(this.#menu.selectedIndex, Math.max(0, items.length - 1));
@@ -1279,12 +1283,17 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		// fill-height).
 		const filtered = this.#menu.visibleItems;
 		const budget = this.#lineBudget();
+		const alignment = this.#scrollStartIndex === undefined ? "center" : "nearest";
 		const {
 			startIndex,
 			endIndex,
 			rowOffset: offsetRows,
 			totalRows: rawTotalRows,
-		} = getMenuWindow(this.#visibleRowHeights(filtered), this.#menu.selectedIndex, budget);
+		} = getMenuWindow(this.#visibleRowHeights(filtered), this.#menu.selectedIndex, budget, {
+			alignment,
+			currentStartIndex: this.#scrollStartIndex,
+		});
+		this.#scrollStartIndex = startIndex;
 
 		// Each session block is built into sessionLines, then wrapped by ScrollView
 		// so the right-edge scrollbar is proportional at the physical-line level.

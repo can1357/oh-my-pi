@@ -593,6 +593,7 @@ import {
 } from "../utils/title-settings";
 import {
 	cfgArchiveEnabled,
+	cfgCommitEnabled,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
 	cfgDevAutoqa,
@@ -1150,7 +1151,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#planReferencePath = "local://PLAN.md";
 	#planReferenceApproved = false;
 	#clientBridge: ClientBridge | undefined;
-	#allowAcpAgentInitiatedTurns = false;
 	/** Session file created by this session's `/move`; removed on dispose if it stayed empty. */
 	#movedFromEmptySessionFile?: string;
 
@@ -1415,6 +1415,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
+	/** Advances when a fresh transcript starts: `/clear` or `/new`. Resuming or reloading an
+	 *  existing session keeps it: that conversation may still have a warm provider cache, so
+	 *  prompt content snapshotted from disk (the workspace tree) must stay byte-stable for it. */
+	#transcriptEpoch = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
@@ -1441,6 +1445,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const resolve = this.#resolveSessionTransition;
 			this.#sessionTransitionSettled = undefined;
 			this.#resolveSessionTransition = undefined;
+			// Also after rollbacks: a hook may have started a kernel for the abandoned target.
+			this.#eval.releaseStaleKernels();
 			resolve?.();
 			// Deliveries held while the transcript was swapped go to whichever session it settled on.
 			this.yieldQueue.requestIdleFlush();
@@ -2549,7 +2555,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
+				if (this.#clientBridge?.deferAgentInitiatedTurns) {
 					this.#recordWithoutTurn(messages);
 					return;
 				}
@@ -2876,7 +2882,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
-			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
@@ -3124,6 +3129,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgComputerEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("computer.enabled", enabled));
 		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
 		cfgArchiveEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("archive.enabled", enabled));
+		cfgCommitEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("commit.enabled", enabled));
 		cfgBrowserIdleCloseSec.listen(this, seconds => {
 			const ownerId = this.sessionManager.getSessionId() ?? "";
 			// Any change invalidates the armed deadline: cancel first (its
@@ -3184,14 +3190,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` / `archive.enabled` change the live eval preludes; the browser toggle also
+	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` / `archive.enabled` / `commit.enabled` change the live eval preludes; the browser toggle also
 	 * re-filters its MCP tools first. An empty transcript rebuilds the system prompt to advertise
 	 * them; mid-session the cached prompt stays byte-stable and the next user prompt carries a
 	 * hidden prelude notice instead (see {@link SessionTools.takeEvalPreludeNotice}).
 	 * A failed browser switch-on reverts to off.
 	 */
 	async #reconcileEvalPreludeSetting(
-		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled",
+		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled" | "commit.enabled",
 		enabled: boolean,
 	): Promise<void> {
 		try {
@@ -4103,7 +4109,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * refusal (#3591) or an abandoned length-stop recovery. Retained until the next
 	 * run starts so post-settle readers ({@link getLastAssistantMessage}: print
 	 * mode, task executor) still see the terminal error instead of a silently
-	 * successful-looking state.
+	 * successful-looking state, and manual retry can resume the failed request.
+	 * Cleared when the conversation is replaced.
 	 */
 	#prunedTerminalFailure: AssistantMessage | undefined = undefined;
 
@@ -5223,8 +5230,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
 			if (activeGoal) {
-				// Payload rejections get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
-				if (AIError.isPayloadRejection(msg) && this.#recovery.isHardErrorFallbackEligible(msg)) {
+				// Payload rejections and overflows the chain may take get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
+				if (
+					(AIError.isPayloadRejection(msg) || AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) &&
+					this.#recovery.isHardErrorFallbackEligible(msg)
+				) {
 					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
 					if (didRetry) {
 						await emitAgentEndNotification({ willContinue: true });
@@ -7000,6 +7010,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#releaseRetainedSessionMemory(): void {
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
+		this.#prunedTerminalFailure = undefined;
 		this.#tools.releaseRestoredTranscript();
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
@@ -7100,6 +7111,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// calls, and error state. agent.reset() keeps the model and system prompt.
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
+		this.#prunedTerminalFailure = undefined;
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
@@ -7151,7 +7163,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendResetBoundary();
 
 		resetCapabilities();
+		this.#transcriptEpoch++;
 		await this.refreshBaseSystemPrompt();
+		await this.#extensionRunner?.emit({ type: "session_clear" });
 
 		return { droppedCount };
 	}
@@ -7329,6 +7343,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
 	}
 
+	/** Transcript epoch: advances on `/clear` and `/new`, never when resuming an existing session. */
+	get transcriptEpoch(): number {
+		return this.#transcriptEpoch;
+	}
+
 	/**
 	 * Fold background results into context until the next deliberate prompt instead of
 	 * waking on them. Used when the user ends a background-job wait; a plain `abort` stops
@@ -7404,21 +7423,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#advisors.waitForAdvisorCatchup(timeoutMs, options);
 	}
 
+	/**
+	 * Drain this owner's queued async deliveries; `true` when the drain made
+	 * progress. Whether a drained result starts a turn stays with the bridge's
+	 * live `deferAgentInitiatedTurns`: only an open client prompt admits one, so
+	 * a drain that outlives its prompt folds results into the next prompt.
+	 */
 	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		const before = manager.getDeliveryState(ownerFilter);
 		if (before.queued === 0 && !before.delivering) return false;
-		const previousAllowAcpAgentInitiatedTurns = this.#allowAcpAgentInitiatedTurns;
-		this.#allowAcpAgentInitiatedTurns = true;
-		try {
-			const drained = await manager.drainDeliveries({ timeoutMs: options?.timeoutMs, filter: ownerFilter });
-			const after = manager.getDeliveryState(ownerFilter);
-			return drained && (before.queued !== after.queued || before.delivering !== after.delivering);
-		} finally {
-			this.#allowAcpAgentInitiatedTurns = previousAllowAcpAgentInitiatedTurns;
-		}
+		const drained = await manager.drainDeliveries({ timeoutMs: options?.timeoutMs, filter: ownerFilter });
+		const after = manager.getDeliveryState(ownerFilter);
+		return drained && (before.queued !== after.queued || before.delivering !== after.delivering);
 	}
 
 	/**
@@ -10620,16 +10639,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// that bracket continues under the owning prompt — the client sees
 		// and can cancel it. Autonomous brackets (IRC wakes, idle injections,
 		// scheduler continuations) do not count: a drain there would be an
-		// autonomous run the client can neither see nor cancel. Explicit
-		// agent-initiated deliveries re-enable the drain via
-		// #allowAcpAgentInitiatedTurns. Inside a client bracket the ordinary
-		// gates below still apply (not streaming, user-interrupt suppression,
-		// provider-valid tail for follow-up-only resumes).
-		if (
-			this.#clientBridge?.deferAgentInitiatedTurns === true &&
-			!this.#allowAcpAgentInitiatedTurns &&
-			this.#clientPromptInFlightCount === 0
-		) {
+		// autonomous run the client can neither see nor cancel. Inside a client
+		// bracket the ordinary gates below still apply (not streaming,
+		// user-interrupt suppression, provider-valid tail for follow-up-only
+		// resumes).
+		if (this.#clientBridge?.deferAgentInitiatedTurns === true && this.#clientPromptInFlightCount === 0) {
 			return false;
 		}
 		if (this.isStreaming) return false;
@@ -11053,7 +11067,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		if (options?.deliverAs === "nextTurn") {
 			if (options?.triggerTurn) {
-				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
+				if (this.#clientBridge?.deferAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 					return false;
 				}
@@ -11093,7 +11107,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#recordWithoutTurn([normalizedAppMessage]);
 				return false;
 			}
-			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
+			if (this.#clientBridge?.deferAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
@@ -11113,7 +11127,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		if (options?.triggerTurn) {
-			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
+			if (this.#clientBridge?.deferAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
@@ -12393,6 +12407,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			try {
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
+				this.#prunedTerminalFailure = undefined;
 				this.tokenRate.reset();
 				if (options?.drop && previousSessionFile) {
 					try {
@@ -12467,6 +12482,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// directory set, not the previous session's — refresh before the next
 			// turn goes out.
 			resetCapabilities();
+			this.#transcriptEpoch++;
 			await this.refreshBaseSystemPrompt();
 
 			this.#reseedCostGate();
@@ -13509,7 +13525,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Retry the last failed assistant turn when the session is idle. */
 	async retry(): Promise<boolean> {
-		const didRetry = await this.#recovery.retry();
+		const didRetry = await this.#recovery.retry(this.#prunedTerminalFailure);
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
 		if (didRetry) this.#advisors.autoResumeSuppressed = false;
@@ -14095,6 +14111,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * only known once its file is loaded). A session created with `allowSessionModelFallback` (and
 	 * `retry.modelFallback` on) instead keeps its current model and reports a
 	 * warning. Reloading the current session keeps the current model.
+	 *
+	 * With `onCwdChange`, a target whose recorded directory is missing or cannot be
+	 * entered throws `Cannot resume session: …` and the current session stays active.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
 	async switchSession(
@@ -14239,7 +14258,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
 					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
-						throw SESSION_CWD_CHANGE_REJECTED;
+						// setSessionFile kept the current cwd because the recorded one cannot be
+						// entered; resuming here would point tools at the wrong project.
+						throw new Error(
+							`Cannot resume session: its directory ${recordedCwd} is missing or cannot be entered`,
+						);
 					}
 				}
 			}
@@ -14393,6 +14416,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#persistRebuiltEvalStateContext(this.agent.state.messages);
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
+				this.#prunedTerminalFailure = undefined;
 			}
 			this.#reconnectToAgent();
 			try {
@@ -14662,6 +14686,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
+			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
@@ -14788,6 +14813,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
 
+			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
@@ -15121,6 +15147,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			branchTransitioned = true;
+			this.#prunedTerminalFailure = undefined;
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}
