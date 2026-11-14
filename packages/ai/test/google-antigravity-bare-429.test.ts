@@ -175,7 +175,7 @@ describe("Cloud Code Assist bare 429", () => {
 	async function runPooledRequest(
 		provider: "google-antigravity" | "google-gemini-cli",
 		rejection: Rejection,
-		options: { seed?: boolean; sessionId?: string; auth?: AuthStorage } = {},
+		options: { seed?: boolean; sessionId?: string; auth?: AuthStorage; fetchImpl?: FetchImpl } = {},
 	): Promise<{ attempts: string[]; bearers: string[]; error: unknown; blockedCredentials: number }> {
 		const auth = options.auth ?? storage;
 		if (!auth) throw new Error("test setup failed");
@@ -183,7 +183,7 @@ describe("Cloud Code Assist bare 429", () => {
 		const model = cloudCodeModel(provider);
 		const attempts: string[] = [];
 		const bearers: string[] = [];
-		const fetchImpl = rejectingFetch(rejection, bearers);
+		const fetchImpl = options.fetchImpl ?? rejectingFetch(rejection, bearers);
 		let error: unknown;
 		try {
 			await withAuth(
@@ -325,6 +325,58 @@ describe("Cloud Code Assist bare 429", () => {
 		expect(result.errorMessage).toContain(AIError.UNATTRIBUTED_REJECTION_PREFIX);
 		expect(AIError.retriable(result.errorId)).toBe(false);
 		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
+	});
+
+	it("keeps a bare 429 from an empty-stream replay on one endpoint and pauses the provider", async () => {
+		const requests: { url: string; status: number }[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (requests.length === 0) {
+				requests.push({ url, status: 200 });
+				// A 200 with an empty SSE body; the replay reuses the response URL.
+				const empty = new Response("", { status: 200, headers: { "content-type": "text/event-stream" } });
+				Object.defineProperty(empty, "url", { value: url });
+				return empty;
+			}
+			requests.push({ url, status: 429 });
+			return new Response(BARE_429_BODY, { status: 429, headers: { "content-type": "application/json" } });
+		};
+
+		const { attempts, error, blockedCredentials } = await runPooledRequest(
+			"google-antigravity",
+			{ body: BARE_429_BODY },
+			{ fetchImpl },
+		);
+
+		expect(attempts).toHaveLength(1);
+		expect(requests.filter(request => request.status === 429)).toHaveLength(1);
+		// No failover: the replay and the refusal stay on the endpoint that answered first.
+		expect(new Set(requests.map(request => request.url)).size).toBe(1);
+		expect(blockedCredentials).toBe(0);
+		expect(error instanceof Error ? error.message : "").toContain(AIError.UNATTRIBUTED_REJECTION_PREFIX);
+		await expect(storage?.oauth.access("google-antigravity", "session-later")).rejects.toBeInstanceOf(
+			AIError.ProviderCooldownError,
+		);
+	});
+
+	it("keeps a bare 429 error chunk in a 200 stream on one endpoint", async () => {
+		const requests: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			requests.push(input instanceof Request ? input.url : String(input));
+			return new Response(`data: ${BARE_429_BODY}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const result = await streamGoogleGeminiCli(cloudCodeModel("google-antigravity"), context, {
+			apiKey: JSON.stringify({ token: "access-0", projectId: "project-0" }),
+			fetch: fetchImpl,
+			maxRetryDelayMs: 1,
+		}).result();
+
+		expect(requests).toHaveLength(1);
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorMessage).toContain(AIError.UNATTRIBUTED_REJECTION_PREFIX);
 	});
 });
 

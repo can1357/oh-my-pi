@@ -375,23 +375,25 @@ function normalizeExpiryMs(value: unknown): number | undefined {
 }
 
 /**
- * Typed error for a non-2xx Cloud Code Assist response. A google-antigravity
- * 429 without quota attribution is reported as a refusal of this request (see
- * {@link AIError.isUnattributedAntigravity429}), which the retry, rotation, and
- * credential-block layers all leave on the account that received it. The
- * original status, headers, and body stay on the error.
+ * Typed error for a Cloud Code Assist failure status, from a non-2xx response
+ * or an in-stream error chunk. A google-antigravity 429 without quota
+ * attribution is reported as a refusal of this request (see
+ * {@link AIError.isUnattributedAntigravity429}), which the retry, rotation,
+ * endpoint-failover, and credential-block layers all leave on the account and
+ * endpoint that received it. The original status, headers, and body stay on the error.
  */
 function cloudCodeAssistHttpError(
 	provider: string,
-	response: Response,
+	status: number,
+	headers: Headers | undefined,
 	body: string,
 	message: string,
 ): AIError.GeminiCliApiError {
-	const unattributed = AIError.isUnattributedAntigravity429(provider, response.status, response.headers, body);
+	const unattributed = AIError.isUnattributedAntigravity429(provider, status, headers, body);
 	return new AIError.GeminiCliApiError(
 		unattributed ? `${AIError.UNATTRIBUTED_REJECTION_PREFIX}. ${message}` : message,
-		response.status,
-		{ headers: response.headers },
+		status,
+		{ headers },
 	);
 }
 
@@ -820,7 +822,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							const errorText = await resumed.text();
 							throw cloudCodeAssistHttpError(
 								model.provider,
-								resumed,
+								resumed.status,
+								resumed.headers,
 								errorText,
 								`Cloud Code Assist API error (${resumed.status}) resuming a long generation: ${errorText}`,
 							);
@@ -858,7 +861,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								: "";
 						const message = `Cloud Code Assist stream error: ${detail}${residue}`;
 						throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-							? new AIError.GeminiCliApiError(message, chunk.error.code)
+							? cloudCodeAssistHttpError(
+									model.provider,
+									chunk.error.code,
+									undefined,
+									JSON.stringify({ error: chunk.error }),
+									message,
+								)
 							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
 					}
 					const responseData = chunk.response;
@@ -1033,7 +1042,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							: errorText;
 						throw cloudCodeAssistHttpError(
 							model.provider,
-							response,
+							response.status,
+							response.headers,
 							errorText,
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 						);
@@ -1068,10 +1078,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
-								throw new AIError.GeminiCliApiError(
-									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
+								throw cloudCodeAssistHttpError(
+									model.provider,
 									currentResponse.status,
-									{ headers: currentResponse.headers },
+									currentResponse.headers,
+									retryErrorText,
+									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
 								);
 							}
 						}
