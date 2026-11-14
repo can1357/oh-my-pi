@@ -5,6 +5,7 @@
 ### Added
 
 - Pasting styled text (a web page, a document, a copy from Tern's composer) into the composer keeps it as Markdown, and the images it carries attach where they stood; code copied from an editor still pastes as plain code (terminals with paste events: Tern, kitty)
+- Hooks and extensions can listen for `session_clear`, fired after `/clear` resets the context in place, to invalidate cached "already injected" instructions; it is not a `session_switch` and keeps the session id ([#17142](https://github.com/can1357/oh-my-pi/issues/17142), [#17317](https://github.com/can1357/oh-my-pi/pull/17317) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT))
 - `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
 - Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow leading `KEY=VALUE` prefixes for exactly named environment variables on `allow` rules without duplicating rules for each variable combination ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` and `bashInterceptor.patterns` now prepend ahead of global rules instead of replacing them wholesale ([#18352](https://github.com/can1357/oh-my-pi/pull/18352) by [@asuffield](https://github.com/asuffield))
