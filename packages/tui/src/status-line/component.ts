@@ -500,7 +500,9 @@ interface CachedStatusLine {
 	externalInputs: StatusLineExternalInputs;
 }
 
-/** Dot separator of the plain (borderless) layouts; carries no caps. */
+/** Dot separator of the plain (borderless) layouts; carries no caps. Kept as
+ *  the implicit default so plain layouts read unchanged unless the user sets
+ *  `statusLine.separator` explicitly. */
 const PLAIN_SEPARATOR: SeparatorDef = { left: "·", right: "·" };
 
 /** A separator style's glyphs and cell widths: theme-pure, so measured once per theme. */
@@ -3066,11 +3068,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 */
 	#separatorMetrics(plain: boolean, style: StatusLineSeparatorStyle): SeparatorMetrics {
 		const themeEpoch = getThemeEpoch();
+		const explicit = this.#settings.separator !== undefined;
 		const memo = plain ? this.#plainSeparatorMetrics : this.#styledSeparatorMetrics;
-		if (memo && memo.themeRef === theme && memo.themeEpoch === themeEpoch && (plain || memo.style === style)) {
+		if (memo && memo.themeRef === theme && memo.themeEpoch === themeEpoch && memo.style === style) {
 			return memo;
 		}
-		const def = plain ? PLAIN_SEPARATOR : getSeparator(style, theme);
+		const def = plain && !explicit ? PLAIN_SEPARATOR : getSeparator(style, theme);
 		const metrics: SeparatorMetrics = {
 			themeRef: theme,
 			themeEpoch,
@@ -3093,7 +3096,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 *   (embedded in the editor's top border).
 	 * - `band`: the box layout opened by a soft flush-left cap, for the band
 	 *   composer's frameless full-width top row.
-	 * - `plain-full`: no background, no powerline caps, dot separators, gap is
+	 * - `plain-full`: no background, no powerline caps, the configured
+	 *   separator style without caps; the gap is
 	 *   plain spaces — the standalone bottom bar for pi/borderless composers.
 	 * - `plain-left`: left segments only (claude composer; the right group
 	 *   lives in the editor's top rule).

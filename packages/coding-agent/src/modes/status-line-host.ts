@@ -38,7 +38,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		preset: cfgStatusLinePreset.get(settings),
 		leftSegments: cfgStatusLineLeftSegments.get(settings),
 		rightSegments: cfgStatusLineRightSegments.get(settings),
-		separator: cfgStatusLineSeparator.get(settings),
+		separator: cfgStatusLineSeparator.isConfigured(settings) ? cfgStatusLineSeparator.get(settings) : undefined,
 		showHookStatus: cfgStatusLineShowHookStatus.get(settings),
 		segmentOptions: cfgStatusLineSegmentOptions.get(settings),
 		sessionAccent: cfgStatusLineSessionAccent.get(settings),
