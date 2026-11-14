@@ -333,6 +333,7 @@
 
 ### Fixed
 
+- `omp plugin disable` and the Settings → Plugins toggle now say that already-running sessions keep the plugin bound until they restart, instead of reporting a clean disable while its interceptors stay live ([#9722](https://github.com/can1357/oh-my-pi/issues/9722) via [#13904](https://github.com/can1357/oh-my-pi/pull/13904) by [@STRML](https://github.com/STRML))
 - Extension prompts shown from `session_before_*` handlers no longer time out after 30 seconds while the operator is still answering ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 - A second exit request now skips pending `worktree.onExit` prompts and keeps those worktrees instead of waiting for an answer ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 - Advice that makes the agent keep working after it finished no longer comes back a second time, often as a blocker, while the agent is fixing it: advisor reviews of the earlier answer are cancelled and the advisor reviews the fix instead ([#18735](https://github.com/can1357/oh-my-pi/pull/18735) by [@H4vC](https://github.com/H4vC))
