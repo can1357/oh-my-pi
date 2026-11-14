@@ -161,6 +161,7 @@
 
 ### Fixed
 
+- Fixed a display-setting change made while an external editor was open leaving stale rows in the scrollback instead of clearing them when the editor closed ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed streaming and scrolling display issues in terminals without synchronized output, including duplicated rows and blank screens or status lines.
 - Fixed Markdown rendering while streaming list items, preserving bold text and heading formatting.
 - Fixed wrapping of long embedded Bash arguments so indentation and the gutter remain aligned.
