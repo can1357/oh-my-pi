@@ -1522,7 +1522,7 @@ fn fold_declared_schemes(
 	}
 	generation
 		.replace_owner(identity.extension.clone(), Some(Arc::clone(identity)), claims)
-		.map_err(|error| ExtHostError::protocol(Str::from(error.to_string())))
+		.map_err(ExtHostError::protocol)
 }
 
 fn evidence_availability(evidence: &SealedRegistryEvidence) -> AvailabilityBatch {
