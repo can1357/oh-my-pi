@@ -15,8 +15,11 @@ import {
 	type VariantCollapseTable,
 } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { applyPricingPeerFallback } from "../scripts/generated-policies";
 import {
 	ANTIGRAVITY_PRIMARY_ENDPOINT,
+	type AntigravityRowReference,
+	antigravityRowReference,
 	fetchAntigravityDiscoveryModels,
 } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -1633,6 +1636,139 @@ describe("antigravity discovery collapsing", () => {
 				medium: "gemini-3.7-flash-medium",
 				high: "gemini-3.7-flash-high",
 			},
+		});
+	});
+
+	describe("sparse roster rows", () => {
+		const sparseFetcherFor = (models: Record<string, Record<string, unknown>>) =>
+			Object.assign(
+				(_input: string | URL | Request, _init?: RequestInit) =>
+					Promise.resolve(new Response(JSON.stringify({ models }), { status: 200 })),
+				{ preconnect: fetch.preconnect },
+			);
+		// Antigravity serves Gemini 3.5 Flash-Lite with no capability keys at all,
+		// while other rows answer `supportsThinking`/`supportsImages: false` on purpose.
+		// Tier SKUs arrive under their wire ids and collapse into one logical row.
+		const sparseRoster = {
+			"gemini-3.5-flash-lite": { displayName: "Gemini 3.5 Flash Lite", maxTokens: 1_048_576 },
+			"claude-haiku-4-5": { displayName: "Claude Haiku 4.5", supportsThinking: false, supportsImages: false },
+			"claude-opus-5-5-low": { displayName: "Claude Opus 5.5 (Low)" },
+			"claude-opus-5-5-high": { displayName: "Claude Opus 5.5 (High)" },
+			"gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)" },
+			"gemini-3.1-pro-high": { displayName: "Gemini 3.1 Pro (High)" },
+		};
+		const fixtureCost = { input: 7, output: 70, cacheRead: 0.7, cacheWrite: 0 };
+		const fixtureReference = { reasoning: true, input: ["text", "image"] as const, cost: fixtureCost };
+		const discover = async (resolveReference?: (id: string) => AntigravityRowReference | undefined) =>
+			(
+				await fetchAntigravityDiscoveryModels({
+					token: "t",
+					endpoint: "https://cca.test",
+					userAgent: "test",
+					fetcher: sparseFetcherFor(sparseRoster),
+					resolveReference,
+				})
+			)?.models ?? [];
+
+		it("treats an omitted capability as unknown but honors an explicit denial", async () => {
+			const models = await discover(() => fixtureReference);
+
+			const lite = models.find(m => m.id === "gemini-3.5-flash-lite");
+			expect(lite?.reasoning).toBe(true);
+			expect(lite?.input).toEqual(["text", "image"]);
+			expect(lite?.cost).toEqual(fixtureCost);
+			const builtLite = buildModel(lite!);
+			expect(builtLite.thinking?.mode).toBe("google-level");
+			expect(builtLite.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+
+			const haiku = models.find(m => m.id === "claude-haiku-4-5");
+			expect(haiku?.reasoning).toBe(false);
+			expect(haiku?.input).toEqual(["text"]);
+			expect(buildModel(haiku!).thinking).toBeUndefined();
+		});
+
+		it("resolves tiered SKUs through their collapsed family id", async () => {
+			const asked: string[] = [];
+			const models = await discover(id => {
+				asked.push(id);
+				return fixtureReference;
+			});
+
+			expect(asked).not.toContain("claude-opus-5-5-low");
+			expect(asked).not.toContain("gemini-3.1-pro-high");
+			for (const id of ["claude-opus-5-5", "gemini-3.1-pro"]) {
+				expect(asked).toContain(id);
+				const family = models.find(m => m.id === id);
+				expect(family?.cost).toEqual(fixtureCost);
+				expect(family?.input).toEqual(["text", "image"]);
+			}
+			expect(models.some(m => m.id.endsWith("-low") || m.id.endsWith("-high"))).toBe(false);
+		});
+
+		it("keeps upstream behavior without a reference: absent flags are false and rows stay $0", async () => {
+			const models = await discover();
+
+			const lite = models.find(m => m.id === "gemini-3.5-flash-lite");
+			expect(lite?.reasoning).toBe(false);
+			expect(lite?.input).toEqual(["text"]);
+			for (const model of models) {
+				expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			}
+		});
+
+		it("leaves google-gemini-cli discovery rows unreferenced and unpriced", async () => {
+			const options = googleGeminiCliModelManagerOptions({
+				oauthToken: "t",
+				endpoint: "https://cca.test",
+				fetch: sparseFetcherFor({
+					"gemini-2.5-flash-lite": { displayName: "Gemini 2.5 Flash Lite" },
+					"gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true },
+					"gemini-3.1-pro-high": { displayName: "Gemini 3.1 Pro (High)", supportsThinking: true },
+				}),
+			});
+			const models = (await options.fetchDynamicModels?.()) ?? [];
+
+			const lite = models.find(m => m.id === "gemini-2.5-flash-lite");
+			expect(lite?.provider).toBe("google-gemini-cli");
+			expect(lite?.reasoning).toBe(false);
+			expect(lite?.input).toEqual(["text"]);
+			expect(models.find(m => m.id === "gemini-3.1-pro")).toBeDefined();
+			for (const model of models) {
+				expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			}
+		});
+
+		it("prices Antigravity rows through the shared pricing-peer rule", async () => {
+			const models = await discover(antigravityRowReference);
+			// The generator prices the same zero-cost logical rows from the same rule.
+			const peers = ["google", "google-vertex", "anthropic"].flatMap(provider => getBundledModels(provider));
+			const generated = applyPricingPeerFallback([
+				...peers,
+				...models.map(model => ({ ...model, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })),
+			]).slice(peers.length);
+
+			for (const id of ["claude-opus-5-5", "gemini-3.1-pro", "gemini-3.5-flash-lite"]) {
+				const discovered = models.find(m => m.id === id);
+				expect(discovered?.cost.input).toBeGreaterThan(0);
+				expect(discovered?.cost).toEqual(generated.find(m => m.id === id)!.cost);
+			}
+		});
+
+		it("keeps an explicit supportsImages: false for Flash-Lite through the build", async () => {
+			const models = (
+				await fetchAntigravityDiscoveryModels({
+					token: "t",
+					endpoint: "https://cca.test",
+					userAgent: "test",
+					fetcher: sparseFetcherFor({
+						"gemini-3.5-flash-lite": { displayName: "Gemini 3.5 Flash Lite", supportsImages: false },
+					}),
+					resolveReference: antigravityRowReference,
+				})
+			)?.models;
+			const lite = models?.find(m => m.id === "gemini-3.5-flash-lite");
+			expect(lite?.input).toEqual(["text"]);
+			expect(buildModel(lite!).input).toEqual(["text"]);
 		});
 	});
 
