@@ -25,7 +25,7 @@ Tags: authoritative, literal structural markers; meaning exactly matches name. N
 
 ## Normative Language
 
-Requirement words: full caps, no bold; all-caps form is the marker. NEVER cite "RFC 2119" in a prompt or list the six standard requirement words after it: Google Antigravity rejects that sequence with a bare 429.
+Requirement words: full caps, no bold; all-caps form is the marker. NEVER cite the IETF keyword RFC by number in a prompt or list the six standard requirement words after it: Google Antigravity rejects that sequence with a bare 429.
 
 |Keyword|Meaning|Replaces|
 |---|---|---|
