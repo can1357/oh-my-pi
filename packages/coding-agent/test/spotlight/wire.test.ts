@@ -190,6 +190,38 @@ describe("spotlight ranker", () => {
 		expect(entries(manager, SPOTLIGHT_ENTRY.session)[0]).toMatchObject({ ranker: "judge", urlHost: "", model: "" });
 	});
 
+	it("builds the Spotlight client for auto through the real session path", () => {
+		const settings = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "auto" });
+		const manager = SessionManager.inMemory("/nonexistent");
+		const experiment = startSpotlightExperiment(settings, manager);
+		expect(experiment?.client).toBeDefined();
+		expect(experiment?.ranker).toBe("auto");
+		// Auto ranks with Spotlight first, so the entry names the endpoint it will try.
+		expect(entries(manager, SPOTLIGHT_ENTRY.session)[0]).toMatchObject({ ranker: "auto" });
+	});
+
+	it("ranks standalone find with Spotlight under auto, and only skips it for judge", async () => {
+		const auto = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "auto" });
+		const judge = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
+		const { standaloneFindSpotlight } = await import("@oh-my-pi/pi-coding-agent/spotlight/session");
+		expect(standaloneFindSpotlight(auto)?.client).toBeDefined();
+		expect(standaloneFindSpotlight(judge)).toBeUndefined();
+	});
+
+	it("puts a judge fallback behind the Spotlight client in auto mode", () => {
+		const manager = SessionManager.inMemory("/nonexistent");
+		const client = new SpotlightClient({ url: "https://example.test/v1/spotlight", model: "m", timeoutMs: 10 });
+		const experiment = new SpotlightExperiment(client, "low", manager, { ranker: "auto" });
+		const scorer = experiment.makeScorer({
+			settings: Settings.isolated({}),
+			sessionManager: manager,
+		});
+		// Spotlight ranks first; the judge reranks the whole call when a chunk cannot be answered.
+		expect(scorer.fallback).toBeDefined();
+		expect(scorer.fallback!.fallback).toBeUndefined();
+		expect(scorer.scoreFree).toBeUndefined();
+	});
+
 	it("keeps the Spotlight client under the default ranker", async () => {
 		const { session } = await experimentSession();
 		expect(session.spotlight?.ranker).toBe("spotlight");

@@ -100,6 +100,12 @@ export interface Scorer {
 	 * timeout, HTTP error): callers then fall back to a rule that needs no scores. Never throws for those.
 	 */
 	score(items: readonly string[], ctx: CallContext, signal?: AbortSignal): Promise<number[] | null>;
+	/**
+	 * The ranker to rerank with when this one cannot answer. It replaces this one for **every** chunk of the call:
+	 * scores from two rankers are on different scales, so a per-chunk swap would order lines against each other
+	 * across two distributions.
+	 */
+	readonly fallback?: Scorer;
 }
 
 /** A {@link Scorer} that counts what it spent, so the result's journal entry can report it. */
@@ -211,7 +217,7 @@ export const SPOTLIGHT_ENTRY = {
 export type SpotlightEntryType = (typeof SPOTLIGHT_ENTRY)[keyof typeof SPOTLIGHT_ENTRY];
 
 /** Which service ranks shaped output: Stencil Spotlight, or the session's `judge` role. */
-export type SpotlightRanker = "spotlight" | "judge";
+export type SpotlightRanker = "spotlight" | "judge" | "auto";
 
 /** The experiment's handle on one session, present on the tool session only while the experiment is enabled. */
 export interface SpotlightSession {

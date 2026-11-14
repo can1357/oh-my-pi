@@ -174,6 +174,54 @@ describe("spotlight shaping", () => {
 		for (let j = 0; j < 6; j++) expect(out.text).toContain(`const field${j} = request.body.items[${j}].value * 42;`);
 	});
 
+	it("reranks the whole call when the primary ranker cannot answer one chunk", async () => {
+		// Two chunks: the first answers, the second does not. Mixing the two scales is the bug this guards.
+		const long = Array.from({ length: 2400 }, (_, i) => `const value${i} = ${i};`).join("\n");
+		const asked: { primary: number; fallback: number } = { primary: 0, fallback: 0 };
+		const primary: Scorer = {
+			async score(items) {
+				asked.primary++;
+				return asked.primary === 1 ? items.map(() => 0.9) : null;
+			},
+		};
+		const fallback: Scorer = {
+			async score(items) {
+				asked.fallback++;
+				return items.map(() => 0.1);
+			},
+		};
+		const scorer: Scorer = { ...primary, fallback };
+		const out = await shapeResult(
+			{ tool: "bash", command: "cat data.ts", text: long, cwd: "/nonexistent" },
+			context(),
+			scorer,
+			newShapeState(),
+			sink(),
+		);
+		// Every chunk was reranked by the fallback: no score of the first ranker survived into the ranking.
+		expect(asked.primary).toBeGreaterThan(1);
+		expect(asked.fallback).toBe(asked.primary);
+		expect(out.stats.reranked).toBeGreaterThan(0);
+		expect(out.stats.fallbacks).toBeUndefined();
+	});
+
+	it("hands the cut back to the unranked rules when no ranker answers", async () => {
+		const long = Array.from({ length: 2400 }, (_, i) => `const value${i} = ${i};`).join("\n");
+		const failing: Scorer = {
+			async score() {
+				return null;
+			},
+			fallback: { score: async () => null },
+		};
+		const out = await shapeResult(
+			{ tool: "bash", command: "cat data.ts", text: long, cwd: "/nonexistent" },
+			context(),
+			failing,
+			newShapeState(),
+			sink(),
+		);
+		expect(out.stats.fallbacks).toBeGreaterThan(0);
+	});
 	it("cuts a long outlined read in file line numbers only, recovering from the file", async () => {
 		// 100 functions of 6 body lines: the outline stays over 12k characters, so the valve cuts it.
 		const lines: string[] = [];

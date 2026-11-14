@@ -77,14 +77,14 @@ function parseShare(raw: string): number | undefined {
 }
 
 /**
- * Which service ranks shaped tool output: Stencil Spotlight, or the session's `judge` role. `judge` needs no
- * Stencil credential and sends nothing to Stencil, so it also suits sessions that shape output without an account.
+ * Which service ranks shaped tool output: Stencil Spotlight, the session's `judge` role, or `auto` (Spotlight, and
+ * the judge for the whole call when Spotlight cannot answer a chunk). `judge` needs no Stencil credential.
  */
 export const cfgSpotlightRanker = register({
 	id: "spotlight.ranker",
 	env: "PI_SPOTLIGHT_RANKER",
 	type: "enum",
-	values: ["spotlight", "judge"] as const,
+	values: ["spotlight", "judge", "auto"] as const,
 	default: "spotlight",
 });
 

@@ -189,9 +189,11 @@ export class SpotlightExperiment implements SpotlightSession {
 	 * lands on the result's own journal entry.
 	 */
 	makeScorer(session: SpotlightScorerSession): ScoringScorer {
-		if (this.ranker === "judge")
-			return judgeScorerFor(session, cfgSpotlightTimeoutMs.get(session.settings), "spotlight");
+		const budgetMs = cfgSpotlightTimeoutMs.get(session.settings);
+		if (this.ranker === "judge") return judgeScorerFor(session, budgetMs, "spotlight");
 		if (!this.client) throw new Error("spotlight: no client to rank with");
+		// `auto` ranks with Spotlight and hands the whole call to the judge when Spotlight cannot answer a chunk.
+		if (this.ranker === "auto") return new RecordingScorer(this.client, this.thinking, judgeScorerFor(session, budgetMs));
 		return new RecordingScorer(this.client, this.thinking);
 	}
 
@@ -231,7 +233,8 @@ export function startSpotlightExperiment(
 ): SpotlightExperiment | undefined {
 	if (!cfgSpotlightExperimentEnabled.get(settings)) return undefined;
 	const ranker = cfgSpotlightRanker.get(settings);
-	const client = ranker === "spotlight" ? spotlightClient(settings, getSessionProvider) : undefined;
+	// `auto` ranks with Spotlight first, so it needs the client as much as `spotlight` does.
+	const client = ranker === "judge" ? undefined : spotlightClient(settings, getSessionProvider);
 	const experiment = new SpotlightExperiment(client, cfgSpotlightThinking.get(settings), sessionManager, {
 		holdout: cfgSpotlightExperimentHoldout.get(settings),
 		scoreFree: cfgSpotlightExperimentScoreFree.get(settings),
@@ -253,7 +256,7 @@ export function standaloneFindSpotlight(
 ): { client: SpotlightClient; thinking: SpotlightThinking } | undefined {
 	if (
 		!cfgSpotlightExperimentEnabled.get(settings) ||
-		cfgSpotlightRanker.get(settings) !== "spotlight" ||
+		cfgSpotlightRanker.get(settings) === "judge" ||
 		cfgNoSpotlight.get(settings) ||
 		cfgOffline.get(settings)
 	) {

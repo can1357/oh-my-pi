@@ -92,21 +92,33 @@ export async function scoreLines(
 	});
 	chunks.push([from, index.length]);
 	const started = performance.now();
-	const answers = await Promise.all(
-		chunks.map(([a, b]) =>
-			run.scorer.score(
-				index.slice(a, b).map(i => lines[i].slice(0, ITEM_CHARS)),
-				run.ctx,
-				run.signal,
+	/** Every chunk's items, in chunk order: one `score` call per chunk, whichever ranker answers. */
+	const scoreChunks = (scorer: Scorer) =>
+		Promise.all(
+			chunks.map(([a, b]) =>
+				scorer.score(
+					index.slice(a, b).map(i => lines[i].slice(0, ITEM_CHARS)),
+					run.ctx,
+					run.signal,
+				),
 			),
-		),
-	);
+		);
+	let answers = await scoreChunks(run.scorer);
 	bump(run, "spotlightCalls", chunks.length);
 	bump(run, "spotlightItems", index.length);
-	bump(run, "spotlightMs", Math.round(performance.now() - started));
 	const failed = answers.filter(a => a === null).length;
-	if (failed) {
-		bump(run, "spotlightFailures", failed);
+	if (failed) bump(run, "spotlightFailures", failed);
+	// One ranker per call: a chunk the first ranker could not answer moves the whole call to the fallback, because
+	// its scores are not comparable with the other ranker's.
+	const fallback = failed > 0 ? run.scorer.fallback : undefined;
+	if (fallback) {
+		bump(run, "reranked");
+		answers = await scoreChunks(fallback);
+		if (answers.every(answer => answer === null)) bump(run, "spotlightFailures", chunks.length);
+	}
+	bump(run, "spotlightMs", Math.round(performance.now() - started));
+	if (answers.some(answer => answer === null)) {
+		// No ranker answered: the caller cuts by its unranked rules.
 		bump(run, "fallbacks");
 		return null;
 	}

@@ -29,12 +29,15 @@ export class RecordingScorer implements Scorer {
 	readonly usage: ScorerUsage = { calls: 0, failures: 0, ms: 0, tokens: 0, costUsd: 0 };
 	/** What its requests sent besides the items (the same for every request of one result); unset until one is sent. */
 	params: SpotlightRequestParams | undefined;
+	/** Reranks the whole call when Spotlight cannot answer one of its chunks. */
+	readonly fallback: Scorer | undefined;
 	readonly #client: SpotlightClient;
 	readonly #thinking: SpotlightThinking;
 
-	constructor(client: SpotlightClient, thinking: SpotlightThinking) {
+	constructor(client: SpotlightClient, thinking: SpotlightThinking, fallback?: Scorer) {
 		this.#client = client;
 		this.#thinking = thinking;
+		this.fallback = fallback;
 	}
 
 	async score(items: readonly string[], ctx: CallContext, signal?: AbortSignal): Promise<number[] | null> {

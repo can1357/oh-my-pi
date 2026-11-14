@@ -25,6 +25,7 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { buildCallContext, callSummary } from "./context";
 import { SCORE_FREE_SCORER } from "./scorer";
+import type { ScoringScorer } from "./types";
 import { SpotlightExperiment } from "./session";
 import { countTokens, noteCall, type ShapedBlock, shapeBlock, syncSeen, traceUnchanged } from "./shape";
 import {
@@ -248,6 +249,7 @@ export async function shapeToolBlocks(
 		ms: Math.round(performance.now() - started),
 		spotlight: { ...scorer.usage, costUsd: Number(scorer.usage.costUsd.toFixed(8)) },
 		ranker: experiment.ranker,
+		...(fallbackUsage(scorer) ?? {}),
 		stats,
 		plainChars: plainText.length,
 		plainTokens: plainTokensOrIn,
@@ -456,6 +458,16 @@ async function plainResult<TDetails>(
 }
 
 /** `result` with its text blocks replaced by one block of `text`, its other blocks after it. */
+/**
+ * The fallback ranker's spend, when it answered for this result: the journal keeps it beside the primary's, so a
+ * session comparing rankers sees both what Spotlight charged and what taking over cost.
+ */
+function fallbackUsage(scorer: ScoringScorer): Record<string, unknown> | undefined {
+	const fallback = scorer.fallback as ScoringScorer | undefined;
+	if (!fallback?.usage || fallback.usage.calls === 0) return undefined;
+	return { fallback: { ...fallback.usage, costUsd: Number(fallback.usage.costUsd.toFixed(8)) } };
+}
+
 function withShapedText<TDetails>(result: AgentToolResult<TDetails>, text: string): AgentToolResult<TDetails> {
 	const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 	for (const block of result.content) {

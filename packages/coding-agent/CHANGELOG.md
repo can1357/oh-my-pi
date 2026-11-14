@@ -9,6 +9,7 @@
 ### Added
 
 - `spotlight.ranker` (**Spotlight Ranker**) lets the Spotlight experiment rank shaped tool output with the `judge` role instead of Stencil, one `noul` question per line over chunks of 48 items, so shaping has a ranker without a Stencil credential
+- `spotlight.ranker: auto` ranks with Spotlight and moves the whole call to the `judge` role when Spotlight cannot answer a chunk, instead of mixing the two rankers' scores in one ranking
 - Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
 - Todo tool status line now displays task count for multiple targets
 - Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`. Drafts handle binary and non-UTF-8 files, symlinks, file mode changes, and a repository's first commit; `commit(…, no_verify=True)` skips the `pre-commit` and `commit-msg` hooks, and after each commit the draft holds what remains, so one draft can produce a series of commits.
