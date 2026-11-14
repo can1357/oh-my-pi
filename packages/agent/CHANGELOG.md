@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Fixed
 
-- Fixed context cost estimates for routes that omit reasoning history, ensuring thinking text is only included in billing estimates when it is actually sent or reconstructed for a tool call.
+- Corrected context cost estimates for requests that omit reasoning history, so billing estimates now include thinking text only when it is sent or reconstructed for a tool call.
 
 ## [18.20.0] - 2026-11-12
 

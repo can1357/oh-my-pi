@@ -2,29 +2,30 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Added
 
-- Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added `setUnpausedProviders()` to `@oh-my-pi/pi-ai/oauth`, allowing applications to re-enable providers paused by authentication rules; loaded credential pools and extension logins recognize the change on their next read.
 
 ### Changed
 
 - Updated Vertex AI Gemini requests to use the v1beta1 API, restoring support for long Gemini responses.
+- Improved Google Antigravity quota recovery so Gemini 4 Argon access can resume after quota or plan changes when shared Gemini capacity is available.
+- Improved Amazon Bedrock region selection to honor a configured regional endpoint before falling back to `us-east-1`.
 
 ### Fixed
 
-- Gemini 4 responses that exceed a single output segment now continue generating and are delivered as one complete reply across Google, Vertex AI, Gemini CLI, and Antigravity.
-- Fixed Cursor conversations so prompt content added by hooks remains part of the current user message and server-recorded context is replayed correctly on subsequent turns.
-- Improved Google Antigravity quota recovery so Gemini 4 Argon access can be restored after quota or plan changes when shared Gemini capacity is available.
-- Fixed Amazon Bedrock streaming so malformed event frames fail promptly and interrupted responses are retried instead of being treated as complete.
+- Fixed Gemini 4 responses that exceed a single output segment across Google, Vertex AI, Gemini CLI, and Antigravity, ensuring long responses continue generating and are delivered as one complete reply.
+- Fixed Cursor conversations so hook-added prompt content remains in the current user message and conversation context is correctly preserved across turns.
+- Fixed Amazon Bedrock streaming so malformed responses fail promptly and interrupted responses are retried rather than treated as complete.
 - Fixed Claude account recovery when usage reports contain only one shared usage window.
-- Fixed OpenRouter conversations with Kimi and DeepSeek so prior reasoning is preserved across model switches instead of being replaced with an unavailable-reasoning placeholder.
-- Fixed Xiaomi MiMo Token Plan authentication so token-plan keys use the correct regional endpoint, including for models loaded from bundled or cached configuration.
-- Improved Amazon Bedrock region selection by honoring a configured regional endpoint before falling back to us-east-1.
-- Fixed Perplexity sign-in in the login flow and setup wizard so users can sign in with an email code or choose browser-based SSO.
-- Stopped native judges from retrying gateway errors that indicate all upstream credentials for a model are exhausted, while retaining retries for other transient 502 errors.
+- Fixed OpenRouter conversations with Kimi and DeepSeek so reasoning context is preserved when switching models.
+- Fixed Xiaomi MiMo Token Plan authentication to use the correct regional endpoint, including for models loaded from bundled or cached configuration.
+- Fixed Perplexity sign-in in the login flow and setup wizard, including email-code and browser-based SSO authentication.
+- Stopped native judges from retrying gateway errors caused by exhausted upstream credentials while retaining retries for other transient 502 errors.
 - Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
-- Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
-- Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
+- Fixed Muse sessions after credential changes, key rotation, or idle resume so subsequent turns can continue normally.
 
 ## [18.20.0] - 2026-11-12
 

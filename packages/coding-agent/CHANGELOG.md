@@ -2,41 +2,45 @@
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- `/fork` and fork-from-transcript now abort a running response and fork instead of refusing with "Wait for the current response to finish".
+- The bash tool now reports when `exit` or an armed `set -e` ends a call before its remaining statements ran: the result carries an `endedByExit` flag, a notice says the rest of the call did not run and that options like `set -e` stay set in the session (a call that ran in a copy of a busy session shell gets a notice without the persistence claim), and the same flag crosses the RPC wire for `bash` results; a trailing `exit` at the end of the input is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+
+## [18.20.1] - 2026-11-14
 
 ### Added
 
-- Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
-- Todo tool status line now displays task count for multiple targets
-- Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`. Drafts handle binary and non-UTF-8 files, symlinks, file mode changes, and a repository's first commit; `commit(…, no_verify=True)` skips the `pre-commit` and `commit-msg` hooks, and after each commit the draft holds what remains, so one draft can produce a series of commits.
-- Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
-- Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
-- Added the `session_clear` hook and extension event, emitted after `/clear` resets the current session context without changing its session ID.
-- Added path-scoped entries for `bash.patterns` and `bashInterceptor.patterns`, project/config overlay precedence, and environment-variable-aware allow rules through `bash.allowedEnvVars` and per-rule `env` settings.
+- Added `/commit` to create commits containing only changes made by the agent or a selected subagent, while preserving other agents’ and the user’s work. The workflow is also available through the eval `commit` namespace, supports targeting repositories outside the session directory, handles binary and non-UTF-8 files, symlinks, file mode changes, and initial commits, and can optionally skip commit hooks with `no_verify`; use `commit.enabled` to disable it.
+- Added `auth.unpausedProviders` (the **Unpaused Providers** setting) to re-enable paused providers such as Google Antigravity at your own risk while preserving their stored login state.
+- Added configurable long-turn todo reminders through `todo.midRunNudges`, including options to disable reminders, limit them to two, or continue with increasing intervals.
+- Pasting styled content into the composer now preserves Markdown formatting and places embedded images at their original positions, while code copied from editors remains plain text.
+- Added the `session_clear` hook and extension event, emitted when `/clear` resets the current session context without changing its session ID.
+- Added path-scoped Bash allow rules, project and configuration overlay precedence, and environment-variable controls through `bash.allowedEnvVars` and per-rule `env` settings.
 - Subagents now preserve `@upstream` provider pinning when inheriting models.
-- Added deletion of selected prompts from Ctrl+R prompt history with the Delete key.
-- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict auxiliary services to the active model’s provider or disable off-provider services.
+- Added deletion of individual prompts from Ctrl+R history with the Delete key.
+- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict or disable auxiliary services outside the active model’s provider.
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
-- Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
-- The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Bash approval prompts now show compound command segments individually and identify which segments are allowed or require approval.
+- Todo `done`, `drop`, and `rm` operations now accept multiple tasks in a single request, including newline-, semicolon-, comma-, or space-separated input without splitting exact task-name matches.
+- Todo status lines now display task counts when multiple targets are involved.
 
 ### Changed
 
-- `grep` now shows match lines only by default (`grep.contextBefore`/`grep.contextAfter` default to `0`, was `1`/`3`) and keeps the first 10 matches per file when searching several files (was 20) and 50 in a single file (was 200), roughly halving typical grep output
-- `spotlight.thinking` now defaults to `med` instead of `low`: Spotlight reads deeper heads, which ranked needed lines better on the benchmark and on recorded sessions, at a higher cost per request
-- With the Spotlight experiment on, results the agent mostly read back right after a cut are shown whole: a source `read` of at most ~12k characters is no longer outlined, a `pr://` or `issue://` thread stays whole up to ~12k characters, and CUDA, Objective-C, Luau, QML, CSS, shell and CMake files are treated as source (whole up to ~12k characters, outlined past it) instead of being cut by rank
+- `/fork` and fork-from-transcript now abort an active response and fork immediately.
+- Reduced default `grep` output by showing only matching lines and limiting matches per file; configure `grep.contextBefore` and `grep.contextAfter` to include surrounding context.
+- Changed the default `spotlight.thinking` level from `low` to `med` for deeper result analysis and improved ranking, at a higher request cost.
+- When Spotlight is enabled, commonly reread source and issue or pull-request content is shown more completely before outlining, including support for additional source file types.
 
 ### Fixed
 
-- The bash tool now reports when `exit` or an armed `set -e` ends a call before its remaining statements ran: the result carries an `endedByExit` flag, a notice says the rest of the call did not run and that options like `set -e` stay set in the session (a call that ran in a copy of a busy session shell gets a notice without the persistence claim), and the same flag crosses the RPC wire for `bash` results; a trailing `exit` at the end of the input is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
-- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
-- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
-- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
-- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
-- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
-- A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).
+- Resuming a session whose directory was deleted now continues in the current directory with a warning instead of failing.
+- Model mentions and `/switch` completions now recover discovered models after provider discovery fails at startup, retrying discovery when needed.
+- Background job results that arrive after an ACP prompt ends are now carried into the next prompt instead of starting an invisible turn.
+- OpenAI server compaction failures now proceed to the next available compaction method instead of retrying server compaction on another model.
+- Language servers now recognize edits made shortly after a file is created, including on macOS.
+- Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
+- Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
 
 ## [18.20.0] - 2026-11-12
 
