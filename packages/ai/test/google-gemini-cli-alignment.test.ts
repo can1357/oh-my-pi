@@ -385,6 +385,123 @@ describe("Google Gemini CLI alignment", () => {
 		expect(resent.request.labels?.last_step_index).toBe("3");
 	});
 
+	describe("Antigravity envelope identity per account", () => {
+		type Envelope = { request: { sessionId?: string; labels?: Record<string, string> }; requestId?: string };
+		const model = createModel("google-antigravity");
+		const send = (providerSessionState: Map<string, ProviderSessionState>, accountKey?: string) => {
+			const payload = buildRequest(
+				model,
+				createContext(),
+				"proj-123",
+				{ providerSessionState },
+				true,
+				accountKey,
+			) as Envelope;
+			const [, agentId, , trajectoryId, step] = payload.requestId?.split("/") ?? [];
+			const labels = payload.request.labels ?? {};
+			return {
+				agentId,
+				trajectoryId,
+				step,
+				sessionId: payload.request.sessionId,
+				labels,
+				requestId: payload.requestId,
+				body: JSON.stringify(payload),
+			};
+		};
+
+		it("keeps one account's identity and advances its counters across requests", () => {
+			const state = new Map<string, ProviderSessionState>();
+			const first = send(state, "acct-a");
+			const second = send(state, "acct-a");
+			expect(second.agentId).toBe(first.agentId);
+			expect(second.trajectoryId).toBe(first.trajectoryId);
+			expect(second.sessionId).toBe(first.sessionId);
+			expect(first.step).toBe("1");
+			expect(second.step).toBe("2");
+			expect(first.labels.request_id).toBe(`${first.trajectoryId}-0`);
+			expect(second.labels.request_id).toBe(`${first.trajectoryId}-1`);
+		});
+
+		it("starts a fresh agent, trajectory and session when the serving account changes", () => {
+			const state = new Map<string, ProviderSessionState>();
+			const a = send(state, "acct-a");
+			const b = send(state, "acct-b");
+			expect(b.agentId).not.toBe(a.agentId);
+			expect(b.trajectoryId).not.toBe(a.trajectoryId);
+			expect(b.sessionId).not.toBe(a.sessionId);
+			expect(b.labels.request_id).toBe(`${b.trajectoryId}-0`);
+			expect(b.labels.cascade_id).toBe(b.agentId!);
+			expect(b.labels.root_cascade_id).toBe(b.agentId!);
+			expect(b.step).toBe("1");
+			for (const id of [a.agentId!, a.trajectoryId!, a.sessionId!]) {
+				expect(b.body).not.toContain(id);
+			}
+		});
+
+		it("resumes an account's own identity when the conversation switches back to it", () => {
+			const state = new Map<string, ProviderSessionState>();
+			const a1 = send(state, "acct-a");
+			const b = send(state, "acct-b");
+			const a2 = send(state, "acct-a");
+			expect(a2.agentId).toBe(a1.agentId);
+			expect(a2.trajectoryId).toBe(a1.trajectoryId);
+			expect(a2.sessionId).toBe(a1.sessionId);
+			expect(a2.step).toBe("2");
+			expect(a2.labels.request_id).toBe(`${a1.trajectoryId}-1`);
+			expect(a2.body).not.toContain(b.agentId!);
+			expect(a2.body).not.toContain(b.trajectoryId!);
+		});
+
+		it("keeps the conversation-scoped identity when no account key is known", () => {
+			const state = new Map<string, ProviderSessionState>();
+			const first = send(state);
+			const second = send(state);
+			expect(second.agentId).toBe(first.agentId);
+			expect(second.trajectoryId).toBe(first.trajectoryId);
+			expect(second.sessionId).toBe(first.sessionId);
+			expect(second.labels.request_id).toBe(`${first.trajectoryId}-1`);
+			const flat = state.get("google-antigravity-session-state") as {
+				agentId?: string;
+				identities?: Map<string, unknown>;
+			};
+			expect(flat.agentId).toBe(first.agentId);
+			expect(flat.identities).toBeUndefined();
+		});
+
+		it("echoes each account's own last response id as last_execution_id", async () => {
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const sent: Envelope[] = [];
+			let responseCount = 0;
+			const fetchMock: FetchImpl = async (_url, init) => {
+				sent.push(JSON.parse(String(init?.body)) as Envelope);
+				responseCount += 1;
+				const frame = {
+					response: {
+						responseId: `resp-${responseCount}`,
+						candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+					},
+				};
+				return new Response(`data: ${JSON.stringify(frame)}\n\n`, {
+					status: 200,
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			};
+			const run = async (email: string) => {
+				const result = await streamGoogleGeminiCli(model, createContext(), {
+					apiKey: JSON.stringify({ token: "token", projectId: "proj-123", email }),
+					fetch: fetchMock,
+					providerSessionState,
+				}).result();
+				expect(result.stopReason).toBe("stop");
+			};
+			await run("a@example.com");
+			await run("b@example.com");
+			await run("a@example.com");
+			expect(sent.map(body => body.request.labels?.last_execution_id)).toEqual([undefined, undefined, "resp-1"]);
+		});
+	});
+
 	it("marks Antigravity Claude requests as non-Gemini usage", () => {
 		const payload = buildRequest(
 			createModel("google-antigravity", "claude-sonnet-4-6", true),

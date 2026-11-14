@@ -284,23 +284,59 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 }
 
-export interface AntigravityProviderSessionState extends ProviderSessionState {
+/**
+ * Request-envelope identity that mirrors the real Antigravity client.
+ * `sessionId` is the signed-decimal session id; `agentId`/`trajectoryId` are
+ * UUIDs (`agentId` doubles as `labels.cascade_id`/`root_cascade_id`);
+ * `stepIndex` is the last requestId step (monotonic); `requestCount` counts
+ * envelopes already built for the trajectory (`labels.request_id` suffix);
+ * `lastExecutionId` is the prior response id echoed as
+ * `labels.last_execution_id`.
+ */
+export interface AntigravityEnvelopeIdentity {
+	agentId: string;
+	trajectoryId: string;
+	sessionId: string;
+	stepIndex: number;
+	requestCount: number;
+	lastExecutionId?: string;
+}
+
+export interface AntigravityProviderSessionState extends ProviderSessionState, Partial<AntigravityEnvelopeIdentity> {
 	lastGoodEndpoint?: string;
 	/**
-	 * Per-conversation request-envelope identity that mirrors the real
-	 * Antigravity client. `sessionId` is the signed-decimal session id;
-	 * `agentId`/`trajectoryId` are UUIDs (`agentId` doubles as
-	 * `labels.cascade_id`/`root_cascade_id`); `stepIndex` is the last
-	 * requestId step (monotonic); `requestCount` counts envelopes already built for the trajectory
-	 * (`labels.request_id` suffix); `lastExecutionId` is the prior response id
-	 * echoed as `labels.last_execution_id`.
+	 * Envelope identity per serving account key. A real client mints its
+	 * cascade per app instance, so one cascade seen under two accounts links
+	 * them; a credential rotation therefore starts (or resumes) the serving
+	 * account's own identity. One entry per account that served the
+	 * conversation. The flat {@link AntigravityEnvelopeIdentity} fields are the
+	 * fallback when no account key is known (direct callers/tests).
 	 */
-	agentId?: string;
-	trajectoryId?: string;
-	sessionId?: string;
-	stepIndex?: number;
-	requestCount?: number;
-	lastExecutionId?: string;
+	identities?: Map<string, AntigravityEnvelopeIdentity>;
+}
+
+/**
+ * The envelope identity a request served by `accountKey` uses: that account's
+ * entry (minted on first use), or the flat state fields without a key.
+ */
+function getAntigravityEnvelopeIdentity(
+	state: AntigravityProviderSessionState | undefined,
+	accountKey: string | undefined,
+): Partial<AntigravityEnvelopeIdentity> | undefined {
+	if (!state || accountKey === undefined) return state;
+	state.identities ??= new Map();
+	let identity = state.identities.get(accountKey);
+	if (!identity) {
+		identity = {
+			agentId: randomUUID(),
+			trajectoryId: randomUUID(),
+			sessionId: randomSignedDecimalSessionId(),
+			stepIndex: 0,
+			requestCount: 0,
+		};
+		state.identities.set(accountKey, identity);
+	}
+	return identity;
 }
 
 const ANTIGRAVITY_PROVIDER_SESSION_STATE_KEY = "google-antigravity-session-state";
@@ -1098,10 +1134,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						providerState.lastGoodEndpoint = endpoint;
 					}
 					// Commit after a fully successful attempt (content + finish reason);
-					// used as the next request's last_execution_id. Overwrite even when
-					// undefined so a response without an id can't leave a stale value.
-					if (providerState) {
-						providerState.lastExecutionId = lastResponseId;
+					// used as the next request's last_execution_id by the identity that
+					// sent this one. Overwrite even when undefined so a response without
+					// an id can't leave a stale value.
+					const envelopeIdentity = getAntigravityEnvelopeIdentity(providerState, accountKey);
+					if (envelopeIdentity) {
+						envelopeIdentity.lastExecutionId = lastResponseId;
 					}
 					break;
 				} catch (error) {
@@ -1246,15 +1284,21 @@ interface AntigravityRequestEnvelope {
  * and `labels.root_cascade_id` repeat the agentId, and `labels.request_id` is
  * `<trajectoryId>-<n>` for the n-th (0-based) request of the trajectory. Labels
  * are inserted in alphabetical key order like the real client. The step never
- * moves backwards, so a compacted or resent context still advances it. Without
- * session state (direct callers/tests) it falls back to ephemeral ids.
+ * moves backwards, so a compacted or resent context still advances it. The
+ * identity is the serving account's (see
+ * {@link AntigravityProviderSessionState.identities}), so a credential rotation
+ * never carries one cascade across accounts; without an account key it is the
+ * flat session state, and without session state (direct callers/tests) it
+ * falls back to ephemeral ids.
  */
 function buildAntigravityRequestEnvelope(
 	model: Model<"google-gemini-cli">,
 	context: Context,
 	profile: AntigravityModelWireProfile | undefined,
-	state: AntigravityProviderSessionState | undefined,
+	sessionState: AntigravityProviderSessionState | undefined,
+	accountKey: string | undefined,
 ): AntigravityRequestEnvelope {
+	const state = getAntigravityEnvelopeIdentity(sessionState, accountKey);
 	const contextSteps = Math.max(1, context.messages.length);
 	let requestIndex = 0;
 	if (state) {
@@ -1440,7 +1484,7 @@ export function buildRequest(
 			}
 		}
 		const state = getAntigravityProviderSessionState(options.providerSessionState);
-		const envelope = buildAntigravityRequestEnvelope(model, context, profile, state);
+		const envelope = buildAntigravityRequestEnvelope(model, context, profile, state, accountKey);
 		request.labels = envelope.labels;
 		if (Object.keys(generationConfig).length > 0) {
 			request.generationConfig = generationConfig;
