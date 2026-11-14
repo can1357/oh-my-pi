@@ -187,6 +187,7 @@
 
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+- Calling an `xd://` device as a top-level tool with underscores in place of `://` (`xd__recall`, as Claude models do) now runs the device instead of failing with `Tool xd__recall not found` ([#19160](https://github.com/can1357/oh-my-pi/pull/19160) by [@shgew](https://github.com/shgew))
 
 ## [18.20.0] - 2026-11-12
 
