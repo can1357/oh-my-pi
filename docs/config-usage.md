@@ -71,7 +71,7 @@ Project-level bases:
 - `<cwd>/.codex`
 - `<cwd>/.gemini`
 
-`CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root used by the generic helpers. `PI_CODING_AGENT_DIR` is different: for the default profile it changes `getAgentDir()` consumers such as native discovery, settings, and runtime state, but it does **not** change the generic `getConfigDirs()` / `findConfigFile()` OMP base. Named profiles ignore `PI_CODING_AGENT_DIR`.
+`CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root under home. In the default profile, `PI_CODING_AGENT_DIR` overrides the native agent directory used by `getConfigDirs()` and `findConfigFile()`, as well as native discovery, settings, and runtime state. Named profiles ignore `PI_CODING_AGENT_DIR` and derive their agent directory from the profile root.
 
 ## Profiles
 
