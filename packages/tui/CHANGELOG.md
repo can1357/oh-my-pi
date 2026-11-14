@@ -10,8 +10,6 @@
 
 ### Added
 
-- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
-- Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
 - Added task counts to the Todo status line when work is assigned to multiple targets.
 - Preserved pasted images when copying Composer drafts in Tern.
 - Added the ability to delete the selected prompt from history by pressing Delete at the end of the Ctrl+R search field.

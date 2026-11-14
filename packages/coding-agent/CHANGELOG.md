@@ -6,14 +6,16 @@
 
 - `/fork pane` and `/fork tab` now open native Herdr Desktop panes and tabs; in headless Herdr Core they start a background terminal and warn that no pane or tab is visible. Terminal launch requests can target a Desktop pane or space explicitly; headless launches reject explicit targets or focus. `focus: true` focuses the new surface, `focus: false` attempts to restore the previously focused pane and warns if restoration fails after launch, and an unset focus follows the Desktop default ([#19201](https://github.com/can1357/oh-my-pi/pull/19201) by [@sapran](https://github.com/sapran)).
 
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added the `antigravity-cli` provider for Google Antigravity over ACP, with managed binary installation, `/login antigravity-cli` Google sign-in, host tool execution, and retained conversations across tool steps and history changes.
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
 
-- Subagents now preserve @upstream provider pinning on inherited models
-- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
-- Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
-- Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` fires the rule again on later matching turns, at most once per turn and never on the retry or follow-up turn its own reminder started ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
 - Added `/commit` to create commits containing only changes made by the agent or a selected subagent, while preserving other agents’ and the user’s work. The workflow is also available through the eval `commit` namespace, supports targeting repositories outside the session directory, handles binary and non-UTF-8 files, symlinks, file mode changes, and initial commits, and can optionally skip commit hooks with `no_verify`; use `commit.enabled` to disable it.
 - Added `auth.unpausedProviders` (the **Unpaused Providers** setting) to re-enable paused providers such as Google Antigravity at your own risk while preserving their stored login state.
 - Added configurable long-turn todo reminders through `todo.midRunNudges`, including options to disable reminders, limit them to two, or continue with increasing intervals.
