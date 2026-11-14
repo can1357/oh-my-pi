@@ -19,7 +19,7 @@ use crate::desktop::{
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
-	linux::ax::{self, AtSpiAx, AtSpiWindow, resolve_focus},
+	linux::ax::{self, AtSpiAx, AtSpiWindow, TextRoute, resolve_focus},
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
 	},
@@ -489,24 +489,26 @@ impl Backend for WaylandBackend {
 		super::menus::select(window, path)
 	}
 
-	/// Refuses before anything reaches the element's app. The default focuses
-	/// the element and then sends through its window's keyboard path, which
-	/// Wayland always refuses, so the refused call still moved focus inside
-	/// that app (GNOME announced "… is ready").
+	/// Text goes in through the element's AT-SPI text interface, which needs
+	/// neither focus nor keys. Anything else is refused before anything
+	/// reaches the element's app: the default focuses the element and then
+	/// sends through its window's keyboard path, which Wayland always refuses,
+	/// so the refused call still moved focus inside that app (GNOME announced
+	/// "… is ready").
 	fn element_input(
 		&mut self,
-		_element: &AxHandle,
-		_input: &ElementInput,
+		element: &AxHandle,
+		input: &ElementInput,
 		_mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<ElementDelivery> {
 		token.check()?;
-		Err(DesktopError::background_unavailable(
-			"wayland-compositor-focus-only: Wayland cannot programmatically activate the element's \
-			 window, so el.type and el.press(keys) are refused before the element is focused; \
-			 nothing was sent. Use setValue, or click the field where a desktop screenshot shows it \
-			 (AX bounds are window-relative here) and then type with desktop input",
-		))
+		let route = match (input, &self.ax) {
+			(ElementInput::Text(text), Some(ax)) => Some(ax.type_text(element, text)?),
+			(ElementInput::Text(_), None) => Some(TextRoute::Absent),
+			(ElementInput::Chord(_), _) => None,
+		};
+		element_input_outcome(route)
 	}
 
 	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
@@ -520,6 +522,35 @@ impl Backend for WaylandBackend {
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		self.ax.as_mut().map(|ax| ax as &mut dyn AxBackend)
 	}
+}
+
+/// What `el.type` gets on Wayland from the element's AT-SPI text `route`, or
+/// `el.press(keys)` when there is none: only inserted text goes in, since keys
+/// need the element's window focused, which Wayland leaves to the user.
+fn element_input_outcome(route: Option<TextRoute>) -> CoreResult<ElementDelivery> {
+	Err(DesktopError::background_unavailable(match route {
+		Some(TextRoute::Inserted) => return Ok(ElementDelivery::Delivered),
+		Some(TextRoute::Declined(why)) => format!(
+			"wayland-compositor-focus-only: Wayland cannot programmatically activate the element's \
+			 window, and its accessibility text route was not used, since {why}, so el.type is \
+			 refused before the element is focused; nothing was sent. Click the field where a \
+			 desktop screenshot shows it (AX bounds are window-relative here) and then type with \
+			 desktop input"
+		),
+		Some(TextRoute::Absent) => "wayland-compositor-focus-only: Wayland cannot programmatically \
+		                            activate the element's window, and the element took no text \
+		                            through its AT-SPI text interface, so el.type is refused before \
+		                            the element is focused; nothing was sent. Use setValue, or \
+		                            click the field where a desktop screenshot shows it (AX bounds \
+		                            are window-relative here) and then type with desktop input"
+			.to_owned(),
+		None => "wayland-compositor-focus-only: Wayland cannot programmatically activate the \
+		         element's window, so el.type and el.press(keys) are refused before the element is \
+		         focused; nothing was sent. Use setValue, or click the field where a desktop \
+		         screenshot shows it (AX bounds are window-relative here) and then type with \
+		         desktop input"
+			.to_owned(),
+	}))
 }
 
 #[cfg(test)]
@@ -936,5 +967,27 @@ mod tests {
 			.expect_err("unknown position must not be cropped");
 		assert_eq!(err.code.as_str(), "CaptureFailed");
 		assert!(err.message.contains("no known screen position"), "{err}");
+	}
+
+	#[test]
+	fn element_input_goes_in_only_as_inserted_text() {
+		assert!(matches!(
+			element_input_outcome(Some(TextRoute::Inserted)),
+			Ok(ElementDelivery::Delivered)
+		));
+		let Err(declined) =
+			element_input_outcome(Some(TextRoute::Declined("it skips the validator")))
+		else {
+			panic!("a declined route reported delivery");
+		};
+		assert_eq!(declined.code.as_str(), "BackgroundUnavailable");
+		assert!(declined.message.contains("since it skips the validator"), "{declined}");
+		for route in [Some(TextRoute::Absent), None] {
+			let Err(err) = element_input_outcome(route) else {
+				panic!("{route:?} reported delivery");
+			};
+			assert_eq!(err.code.as_str(), "BackgroundUnavailable");
+			assert!(err.message.contains("nothing was sent"), "{err}");
+		}
 	}
 }

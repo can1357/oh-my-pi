@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Linux `el.type` putting the agent's text into the field the user was typing in, and reporting success, while it took over the keyboard: GTK fields and Qt multi-line text edits now take printable ASCII text through accessibility, with no keys, focus change or takeover; an unfocused GTK single-line field requires an empty or fully selected value so its selection-on-focus setting cannot cause text loss. On Wayland those fields now take text instead of refusing. Other fields keep the key path, including Qt single-line fields where an accessibility write skips validation ([#19035](https://github.com/can1357/oh-my-pi/pull/19035) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
