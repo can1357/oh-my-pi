@@ -104,6 +104,98 @@
 - Bedrock requests now use a regional `baseUrl` region after ambient and guardrail regions and before the `us-east-1` fallback ([#18573](https://github.com/can1357/oh-my-pi/pull/18573) by [@nick-maderight](https://github.com/nick-maderight))
 - Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Perplexity sign-in in `/login` and the setup wizard rejecting an email address at the first prompt with "Choose sso or email"; enter your email address for a login code, or leave the prompt blank for browser SSO ([#18625](https://github.com/can1357/oh-my-pi/pull/18625) by [@joswha](https://github.com/joswha)).
+- Fixed Gemini 4 (Argon, Carbon and Hydrogen) answers longer than one 65,536-token output segment failing with finish reason `CONTINUATION`: Google, Vertex AI, Gemini CLI and Antigravity requests now resume the generation, retrying transient failures, and stream it as one reply ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Cursor models receiving context a hook appends after the prompt (such as claude-mem's memory) as the user's message, with the real prompt moved into history; the prompt stays the run's message, and the turn's server records replay on the next turn ([#19156](https://github.com/can1357/oh-my-pi/pull/19156) by [@anzhen-tech](https://github.com/anzhen-tech))
+- Fixed a Google Antigravity Gemini 4 Argon block never healing when the quota summary reports no Argon bucket (for example after a plan change): a fresh usage report now lifts it while the shared Gemini quota has headroom, instead of leaving the account unusable for Argon until the old weekly reset ([#19123](https://github.com/can1357/oh-my-pi/pull/19123) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed a corrupt AWS event-stream frame length (Amazon Bedrock) making the decoder wait for and buffer the bogus length instead of failing the stream ([#19031](https://github.com/can1357/oh-my-pi/pull/19031) by [@Xytronix](https://github.com/Xytronix))
+- Fixed Claude accounts staying blocked after recovery when `/usage` reports only one shared usage window ([#19090](https://github.com/can1357/oh-my-pi/pull/19090) by [@jeffscottward](https://github.com/jeffscottward))
+- Fixed Xiaomi MiMo Token Plan keys (`tp-`/`ttp-`) being sent to the standard `api.xiaomimimo.com` host from bundled or cached model rows before discovery re-resolved the base URL; requests now use the provider's regional Token Plan host (SGP for the generic `xiaomi` provider), while custom endpoints stay unchanged ([#16646](https://github.com/can1357/oh-my-pi/pull/16646) by [@Komzpa](https://github.com/Komzpa))
+- Fixed Kimi and DeepSeek on OpenRouter writing "reasoning unavailable" as their own reasoning after a model switch: earlier turns now replay the previous model's thinking instead of that placeholder.
+
+## [18.20.0] - 2026-11-12
+
+### Added
+
+- Added the `google-decisions` judgment API for Google's Gemini Decisions API (`gemini-decision-1`), with text and image input ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
+- Added `apiKey` to successful `OAuthAccessResolution` results from `oauth.accessById()` and `oauth.accessAll()`: the key normal requests send for that account, which differs from `accessToken` for providers with structured credentials ([#19030](https://github.com/can1357/oh-my-pi/pull/19030) by [@Xytronix](https://github.com/Xytronix))
+- Added an optional `exemptionAlias` to `ToolCallLoopGuard` so transport calls can match the dispatched tool's name in `exemptTools` ([#18860](https://github.com/can1357/oh-my-pi/issues/18860))
+- Added the `liquid-systemone` judgment API for Liquid AI's decision models, which rejects image sets over Liquid's 10,000 32×32-patch request cap before sending ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+- Added the `nace-systemone` judgment API for Nace's Drex decision models, which sends images as Drex's top-level `images` data URLs and replaces the base64 image, audio, video and PDF data URLs that Drex rejects in judged text with a description ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
+
+### Fixed
+
+- Fixed a spent Codex account retrying every minute for days when its siblings were only refused the requested model: their short model-policy blocks no longer count as a sibling becoming available, so the usage-limit wait follows the spent account's reset and model fallback can take over ([#17637](https://github.com/can1357/oh-my-pi/issues/17637), [#19019](https://github.com/can1357/oh-my-pi/pull/19019) by [@wolfiesch](https://github.com/wolfiesch))
+- Auth-gateway client tokens (`serve --clients`) can no longer set who a request is from, who pays, or how the gateway reaches the provider: chat routes drop their request headers, `userProfileId`, `initiatorOverride`, `metadata`, `serviceTier`, `cacheRetention` and the other gateway-only options, while the gateway token keeps them ([#19067](https://github.com/can1357/oh-my-pi/pull/19067) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the auth gateway's `/v1/pi/stream` dropping `taskBudget`, `include` and `anthropicPrefixMismatchBehavior`, which its other chat routes accept ([#19067](https://github.com/can1357/oh-my-pi/pull/19067) by [@alphastorm](https://github.com/alphastorm))
+- Fixed requests to Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) failing because they were sent in Anthropic's request format ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added Gemini's `xhigh` thinking level, sent on the Gemini API and Vertex for models whose ladder exposes it (Gemini 4 Hydrogen).
+- Fixed omp failing to start with `ENOTDIR: not a directory, stat '~/.aws/credentials'` when `~/.aws` is a file instead of a directory ([#19083](https://github.com/can1357/oh-my-pi/pull/19083) by [@iamshatter](https://github.com/iamshatter))
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added the `liquid-systemone` judgment API for Liquid AI decision models, including validation that rejects image sets exceeding Liquid’s 10,000 32×32-patch request limit before submission.
+
+### Fixed
+
+- Fixed Gemini CLI and Antigravity responses losing or misordering thought signatures and reply text, including responses that follow tool calls.
+- Fixed Gemini CLI and Antigravity merging reply text around a thought signature, dropping signatures at the start of a reply or after a tool call, and placing a thought ahead of reply text that streamed before it ([#18942](https://github.com/can1357/oh-my-pi/pull/18942) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed Google Antigravity judging Gemini models by quota buckets they do not consume: Gemini 3.x requests ignore the Gemini 4 Argon weekly bucket, and Argon requests ignore `gemini-weekly`, so an exhausted or low bucket no longer blocks, reserves, or caps an account for the other models ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
+
+## [18.18.9] - 2026-11-11
+
+- Fixed Anthropic OAuth turns ending on a model-specific `404 not_found_error` instead of switching to another logged-in Anthropic account that serves the model while keeping the denied account available for other models ([#18799](https://github.com/can1357/oh-my-pi/issues/18799), [#18807](https://github.com/can1357/oh-my-pi/pull/18807) by [@alphastorm](https://github.com/alphastorm))
+
+### Added
+
+- Added `SOFYA_API_KEY` as the env key for the `sofya` provider ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
+
+### Fixed
+
+- Devin requests no longer send `temperature: 0`: the catalog's `temperature-floor` raises it to `0.0001`, so session titles and Mnemopi memory extraction work on Devin instead of failing with Cascade's opaque `invalid_argument` and silently falling back to another model ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
+- Auth-gateway `/v1/messages` now answers `400 invalid_request_error` for `output_config.format` (and the pre-GA `output_format`) instead of returning 200 with output the schema never constrained, so structured-output clients fall back to prompt-side schemas ([#18842](https://github.com/can1357/oh-my-pi/issues/18842))
+- Auth-gateway requests denied only the requested model (Codex ChatGPT account, Cursor plan) now switch to another account and keep the denied one usable for other models, instead of marking a working credential suspect; gateway rotation now follows the same rules as local sessions, including waiting out a sibling's short usage block
+
+## [18.18.8] - 2026-11-11
+
+- Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed Claude account-wide usage blocks outliving recovery when the account has no running 5-hour window: `/usage` answers `five_hour: null` with no `session` row, and healing and saved-reset clearing treated that as an incomplete report, so a stale block idled a healthy account until its weekly reset and could leave a turn with no account to switch to after a real 429 ([#18801](https://github.com/can1357/oh-my-pi/pull/18801) by [@baekjosh](https://github.com/baekjosh))
+- A usage-limited request now moves to another account whose old block live usage shows has lifted, instead of ending the turn because every other account looked blocked ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
+
+### Fixed
+
+- Fixed concurrent OAuth requests rejected as `claude_code_version_too_old` failing instead of retrying with the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))
+- Chat Completions gateway requests preserve explicit tool strict-mode choices, so Codex tools can omit optional arguments when callers set `strict: false` ([#18672](https://github.com/can1357/oh-my-pi/pull/18672) by [@0xeb](https://github.com/0xeb)).
+
+## [18.18.7] - 2026-11-10
+
+### Added
+
+- LiteLLM usage adapter (`@oh-my-pi/pi-ai/usage/litellm`) reporting a gateway's key and user USD budgets ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `UsageApi.replaceConfiguredProviders` registers configuration-sourced usage providers between runtime overrides and the built-in resolver, and `UsageProvider.usesRequestKey` makes aggregate usage probe only the key inference would send ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
+### Changed
+
+- Providers with a `login-warning` auth rule show their account risk before a new login and start it only after the user answers `yes`; any other answer or a cancel stores nothing, and their login-list entry is marked "(at your own risk)" ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
+
+### Fixed
+
+- Claude Fable launch resets now report the Fable weekly limit they clear instead of an unknown window ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+
+## [18.18.4] - 2026-11-09
+
+### Added
+
+- Added the `base64SkipThoughtSignature` compat flag so Gemini gateways that decode `thoughtSignature` as base64 (such as the Hyperspace AI LLM proxy) can receive the unsigned-tool-call bypass sentinel without rejecting the request with a 400 ([#18586](https://github.com/can1357/oh-my-pi/pull/18586) by [@tuandinh0801](https://github.com/tuandinh0801)).
+
+### Changed
+
+- Providers paused by a `disabled` auth rule (currently Google Antigravity) are left out of the built-in login list, refuse login, token refresh and usage probes, resolve no key from any source, and refuse requests and image generation with the pause reason; stored logins are kept and work again once the rule is removed, and an extension that registers its own login under the paused id takes it back ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.18.2] - 2026-11-08
 
@@ -126,8 +218,6 @@
 
 ### Fixed
 
-- Retained regional Token Plan request routing for both tp- and ttp- keys alongside current catalog authentication.
-- Token Plan routing only replaces the standard Xiaomi host; explicit regional endpoints and proxies, including URLs with Xiaomi names in their paths, remain unchanged. Generic Xiaomi login stores no region and defaults to SGP until discovery; explicit regional provider IDs select their region.
 - Cursor exec frames keep tool-batch order: a file mutation (native StrReplace and Write, `write`, `delete`, `pi_edit`, `pi_write`) waits for the calls issued before it, and the calls issued after it wait until it lands, so a Shell sent in the same batch as a StrReplace no longer runs before the edit's write ([#18434](https://github.com/can1357/oh-my-pi/pull/18434) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))
 - Cursor Shell results no longer end with `Timeout clamped to 3600s (requested 86400s; …)`: Cursor's 24 h `hard_timeout` is capped at the bash tool's 3600 s ceiling before it reaches the tool ([#18433](https://github.com/can1357/oh-my-pi/pull/18433) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
@@ -353,7 +443,6 @@
 
 ### Fixed
 
-- Fixed Xiaomi MiMo `tp-` Token Plan keys being sent to the standard `api.xiaomimimo.com` host from bundled or cached model rows before discovery re-resolved the base URL; requests now use the Token Plan cluster of the stored login region, else SGP. ([#16646](https://github.com/can1357/oh-my-pi/pull/16646) by [@Komzpa](https://github.com/Komzpa))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 - Fixed Amazon Bedrock replies that a dropped connection or gateway cut off mid-stream ending the turn as if they were finished, instead of being retried ([#16559](https://github.com/can1357/oh-my-pi/pull/16559) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 
