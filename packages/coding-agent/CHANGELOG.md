@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls approval allowed, such as deletions outside the working directory, force pushes, or uploads, and refuses those the user did not ask for. Calls that only read are never judged, a judge failure lets the call through, and personal allowances live in `tools.guard.allowances` in your global config.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

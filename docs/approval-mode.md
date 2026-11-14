@@ -133,6 +133,38 @@ Separately, provider-originated computer-use calls may carry `pendingSafetyCheck
 
 Tool approval does not authorize the underlying real-world action. On-screen text is untrusted and cannot override direct user instructions. Consequential actions still require point-of-risk confirmation of the exact target, scope, and values unless the user's direct message already authorized them.
 
+## Tool guard
+
+`tools.guard.enabled` (off by default) adds a judge-backed check after approval allows a call. It is meant for `yolo` and headless subagents, where otherwise only critical bash patterns and `bash.patterns` stop anything. A call the user just approved in a prompt skips it.
+
+The guard asks the `judge` role (see [models](./models.md)) only about calls that can do harm. These never reach the judge:
+
+- `read`-tier tools, `web_search`, and `task` (a subagent's own calls pass the guard in its session);
+- `write`-tier calls whose targets all lie inside the working directory, internal URLs (`local://`, `xd://`), and built-in `write`-tier tools without file targets (MCP tools are still judged);
+- `bash` commands made only of reading commands (`ls`, `cat`, `grep`, `find` without `-exec`/`-delete`, `sed` without `-i`, `git status`/`log`/`diff`, ...), whose redirections write only to `/dev/null` or inside the working directory. Command substitution, heredocs, and groups are judged.
+
+Everything else (`eval`, `browser`, other bash commands, writes outside the working directory, MCP tools) costs one judgment with two questions: what the call would do (`routine`, `destroys_data`, `rewrites_shared_history`, `exfiltrates`, `credentials`, `weakens_security`, `runs_untrusted_code`, `affects_others`, `unclear`) and whether the user asked for it. The judge sees a compact cut of the recent session, the user's own messages (only they count as asking; in a subagent with none, its parent's assignment does), the working directory, the call, and the contents of up to three scripts the command runs (`python x.py`, `bash x.sh`, `./x`, `source x`, `uv run x.py`; 6,000 characters each).
+
+The call is refused when the named risks together reach `tools.guard.riskThreshold` (default `0.6`) and P(asked) stays below `tools.guard.askedThreshold` (default `0.3`); `routine` and `unclear` never refuse. A refused call does not run; the model gets an error result naming the risk and the next action: find a safer way, or stop and say so. Three refusals in a row, or twenty since the last user message, stop the run.
+
+The guard fails open: no judge configured, a judge error, a 15-second timeout, or a malformed answer lets the call through.
+
+`tools.guard.allowances` is free text in your own words that the judge reads as yours: what it calls normal counts as asked, what it reserves for you does not.
+
+```yaml
+tools:
+   approvalMode: yolo
+   guard:
+      enabled: true
+      allowances: |
+         Opening pull requests and commenting on Linear issues in my team is normal.
+         Ask me before anything touches production or deletes cloud resources.
+```
+
+Allowances and thresholds are read only from your global config, `--config` overlays, and runtime overrides (`Settings.grantAuthority()`), never from project config or `AGENTS.md`: a repository the agent can write must not tell the guard what you allow. A project layer can turn the guard on but not off.
+
+The design, question wording, and thresholds are ported from [nace-ai/intern](https://github.com/nace-ai/intern)'s System 1 guard (Apache-2.0).
+
 ## Per-tool prompt details
 
 Tools can add approval-prompt body lines with `formatApprovalDetails(args)`. The standard prompt includes:
