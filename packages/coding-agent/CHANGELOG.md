@@ -1,7 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
 - `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
@@ -39,6 +38,8 @@
 - `tab.waitForUrl()` given anything but a string or a RegExp (a predicate function, say) now fails at once on every backend with an error naming what it takes, instead of an internal `pattern.test is not a function` on WebKit, Tern and cmux
 - WebKit tabs' request log: an XHR or `fetch` to a plain-http host that answers `text/html` (as many router UIs' APIs do) is `fetch`, not `subdocument`; only a frame's document request is a `subdocument`. Request body sizes, which the engine does not report, are left out (HAR `bodySize` -1) instead of 0, and a response without `Content-Length` no longer reports a body size of 0. `sizes.requestBody` is now optional in the request-record type
 - Fixed Spotlight compacted JSON views rounding 64-bit integers and rewriting number literals ([#19189](https://github.com/can1357/oh-my-pi/pull/19189) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `glob` and `grep` searches for `;`-separated lists that start with an internal URL and include host globs or missing paths ([#19193](https://github.com/can1357/oh-my-pi/pull/19193) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `glob` and `grep` treating a missing agent result field as a real file, so a list such as `agent://worker/report;README.md` searches the report and the local file instead of the word null ([#19193](https://github.com/can1357/oh-my-pi/pull/19193) by [@eggpeat](https://github.com/eggpeat))
 - `write` no longer fails with "content is required" on strict-mode providers such as Wafer and Fireworks, where models sent `content: null` for an ordinary file write
 - A seance `task` now accepts a `sourceSession` id from any project, such as the short ids `archive` lists, instead of failing preflight until given the session's `.jsonl` path; `/seance <id>` resolves cross-project ids in about a second instead of scanning every session
 - On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/` ([#19106](https://github.com/can1357/oh-my-pi/pull/19106) by [@zhivko-kocev](https://github.com/zhivko-kocev))
