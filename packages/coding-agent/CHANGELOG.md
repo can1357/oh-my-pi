@@ -15,6 +15,12 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 
+### Fixed
+
+- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
+- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
+- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
+
 ## [18.20.0] - 2026-11-12
 
 - With the Spotlight experiment on, a `read` with `:raw` returns the selected bytes instead of an outlined, compacted, collapsed or cut rendering ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
