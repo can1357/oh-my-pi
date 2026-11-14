@@ -2916,15 +2916,15 @@ async def _handle_request_async(req: dict) -> None:
         try:
             _apply_request_runtime(req)
             source = req.get("code", "")
-            transformed = transform_cell(source)
             requested_filename = req.get("filename")
             filename = (
                 requested_filename
                 if isinstance(requested_filename, str) and requested_filename
                 else f"<cell-{execution_count}>"
             )
+            transformed = transform_cell(source)
         except SyntaxError as exc:
-            _emit_error(rid, exc, filename)
+            _emit_error(rid, exc, source_filename=filename)
             _emit(
                 {
                     "type": "done",
@@ -3018,11 +3018,8 @@ async def _handle_request_async(req: dict) -> None:
             _end_exec_sigint()
 
 
-def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and (
-        exc.filename in ("<cell>", source_filename)
-        or (isinstance(exc.filename, str) and exc.filename.startswith("<cell"))
-    ):
+def _emit_error(rid: str, exc: BaseException, source_filename: str | None = None) -> None:
+    if isinstance(exc, SyntaxError) and source_filename is not None and exc.filename == source_filename:
         # Syntax error in the executed source itself: every stack frame is
         # runner machinery, so emit only the caret display, like a REPL.
         tb_lines = traceback.format_exception_only(type(exc), exc)
