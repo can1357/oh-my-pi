@@ -152,6 +152,14 @@
 - Improved working-row animation while waiting for tools or models on terminals without synchronized output, including tmux 3.6.
 - Fixed expanded IRC tool cards to show complete soft-wrapped output and added an expand hint to collapsed cards containing hidden text.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the middle of the list.
+- Fixed asynchronous Bash commands switching to the raw command line instead of remaining visible in the interpreted shell view.
+- Improved rendering when switching to a subagent, resuming a session, or rebuilding a long transcript so the newest messages appear immediately without transient placeholder blocks.
+- Fixed Markdown task lists so completed and open items display distinct checkboxes in transcripts.
+- Fixed DEC 2048 in-band resize reports inserting terminal resize data into the composer on iTerm2.
+- Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
+- Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
+- Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
+- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
@@ -303,7 +311,6 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
-- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
