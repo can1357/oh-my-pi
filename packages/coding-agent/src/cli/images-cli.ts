@@ -45,6 +45,7 @@ import {
 import { providerFileCachePath, resolveBlobBrokerConfigs } from "../blob-broker/service";
 import { createConfiguredUploader } from "../blob-broker/uploaders";
 import { Settings } from "../config/settings";
+import { applyUnpausedProviders, resolveEffectiveSettings } from "../session/auth-broker-config";
 
 import { cfgImagesUrlsBackends, cfgImagesUrlsEnabled } from "../blob-broker/settings";
 
@@ -235,6 +236,7 @@ function defaultCreateProviderFileClient(
 }
 
 async function defaultOpenAuthStorage(): Promise<AuthStorage> {
+	applyUnpausedProviders(await resolveEffectiveSettings());
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
 	await storage.credentials.reload();

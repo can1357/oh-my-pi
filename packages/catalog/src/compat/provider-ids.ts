@@ -16,6 +16,7 @@ export type KnownProvider =
 	| "bifrost"
 	| "cerebras"
 	| "charm-hyper"
+	| "chutes"
 	| "cline-pass"
 	| "cloudflare-ai-gateway"
 	| "cloudflare-workers-ai"

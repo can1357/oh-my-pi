@@ -138,6 +138,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`                     |
 | `baseten`                        | `BASETEN_API_KEY`                                                                   |
 | `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain (SigV4)                      |
+| `chutes`                         | `CHUTES_API_KEY`                                                                    |
 | `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                                  |
 | `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                         |
 | `deepinfra`                      | `DEEPINFRA_API_KEY`                                                                 |

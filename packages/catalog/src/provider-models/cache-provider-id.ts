@@ -37,6 +37,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	litellm: true,
 	// Bifrost virtual keys can restrict the gateway's /v1/models roster per key.
 	bifrost: true,
+	// OpenRouter's keyed roster is the set of models the key's workspace
+	// guardrails allow, and discovery is authoritative.
+	openrouter: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -127,10 +130,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// from the KDL rate card; v4 keys the scope on the token's stable
 			// account subject instead of the rotating JWT; v5 drops rows that still
 			// mark the account default `isProviderDefault`, which startup now honors.
+			// v6 refetches rosters written while rich variants were gated on GetUsableModels slugs, which hid models Cursor serves (GLM 5.3, Grok 4.7).
 			const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
 			const apiKey = options.apiKey ?? "";
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
-			return `cursor:rich-models-v5:${Bun.hash(scope).toString(36)}`;
+			return `cursor:rich-models-v6:${Bun.hash(scope).toString(36)}`;
 		}
 		case "charm-hyper": {
 			// Discovery is authoritative for this gateway, so a warm cache is served
@@ -236,8 +240,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "factory-droid":
 			return factoryDroidModelCacheProviderId(options);
-		case "openrouter":
-			return "openrouter:pseudo-api";
+		case "openrouter": {
+			// `pseudo-api` keeps pre-`api: "openrouter"` caches out. A keyed
+			// `/models` is filtered by the workspace guardrails and discovery is
+			// authoritative, so the namespace follows the key and endpoint: a
+			// keyless or wider-key roster never serves a guardrailed key.
+			const baseUrl = (options.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `openrouter:pseudo-api:${Bun.hash(scope).toString(36)}`;
+		}
 		case "vllm": {
 			// v2: qwen3.8 rows cached before the reasoning/template-effort upgrade
 			// carry `reasoning: false` and must be refetched.

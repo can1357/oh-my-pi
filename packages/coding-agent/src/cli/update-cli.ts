@@ -40,6 +40,7 @@ import {
 	fetchBuild,
 	type UpdateChannel,
 } from "./build-service";
+import { managedInstallName } from "./managed-install";
 import {
 	DEFAULT_NPM_REGISTRY,
 	loadNpmRegistryResolver,
@@ -326,28 +327,6 @@ function tryRealpath(p: string): string | undefined {
  */
 export function isSourceCheckout(): boolean {
 	return !isCompiledBinary() && !import.meta.dir.split(path.sep).includes("node_modules");
-}
-
-/**
- * Name of the app that manages the omp at `binaryPath`, or undefined when none does.
- *
- * A manager (Tern) keeps `manager.json` (`{"manager": "tern", "name": "Tern"}`) two
- * directories above every binary it installs (`<root>/versions/<version>`,
- * `<root>/bin/omp.exe`) and updates them itself, so `omp update` must leave them alone.
- * A missing or unreadable manifest means unmanaged.
- */
-export async function managedInstallName(binaryPath: string): Promise<string | undefined> {
-	const resolved = tryRealpath(binaryPath);
-	if (!resolved) return undefined;
-	let manifest: unknown;
-	try {
-		manifest = await Bun.file(path.join(path.dirname(path.dirname(resolved)), "manager.json")).json();
-	} catch {
-		return undefined;
-	}
-	if (!isRecord(manifest)) return undefined;
-	const name = typeof manifest.name === "string" && manifest.name ? manifest.name : manifest.manager;
-	return typeof name === "string" && name ? name : undefined;
 }
 
 /**
