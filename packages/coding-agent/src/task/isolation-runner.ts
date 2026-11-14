@@ -30,6 +30,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
@@ -836,32 +837,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				hadAnyChanges = false;
 			} else {
 				const normalized = patchText.endsWith("\n") ? patchText : `${patchText}\n`;
-				// Idempotence: declare a no-op only when the reverse patch applies AND
-				// the forward patch does not. `--reverse --check` alone can theoretically
-				// succeed if the file happens to carry the postimage at another location
-				// via git-apply's fuzz factor; requiring the forward check to fail
-				// removes that ambiguity while still catching true already-applied
-				// runs. Reads only — neither call touches the worktree, unlike
-				// `--3way --check`, which exits 0 even when the real apply would
-				// leave conflict markers and unmerged index entries.
-				const [alreadyApplied, forwardApplies] = await Promise.all([
-					repo.canApplyPatch(normalized, { reverse: true }).catch(() => false),
-					repo.canApplyPatch(normalized, {}).catch(() => false),
-				]);
-				hadAnyChanges = false;
-				if (alreadyApplied && !forwardApplies) {
-					changesApplied = true;
-				} else if (forwardApplies) {
-					changesApplied = true;
-					try {
-						await repo.applyPatch(normalized, {});
-						hadAnyChanges = true;
-					} catch {
-						changesApplied = false;
-					}
-				} else {
-					changesApplied = false;
-				}
+				({ changesApplied, hadAnyChanges } = await applyRootPatch(repo, repoRoot, normalized));
 			}
 		}
 
@@ -892,6 +868,43 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			mergedBranchForNestedPatches: false,
 		};
 	}
+}
+
+/**
+ * Check and apply one isolated run's root patch to the parent worktree.
+ *
+ * Holds the per-repo lock across the checks and the apply: `git apply`
+ * rewrites each touched file whole, so concurrent merge-backs touching the
+ * same file would otherwise read the same preimage and the last writer would
+ * silently drop the others' hunks while every caller reports success.
+ */
+async function applyRootPatch(
+	repo: natives.VcsGitRepo,
+	repoRoot: string,
+	patch: string,
+): Promise<{ changesApplied: boolean; hadAnyChanges: boolean }> {
+	return withRepoLock(repoRoot, async () => {
+		// Idempotence: declare a no-op only when the reverse patch applies AND
+		// the forward patch does not. `--reverse --check` alone can theoretically
+		// succeed if the file happens to carry the postimage at another location
+		// via git-apply's fuzz factor; requiring the forward check to fail
+		// removes that ambiguity while still catching true already-applied
+		// runs. Reads only — neither call touches the worktree, unlike
+		// `--3way --check`, which exits 0 even when the real apply would
+		// leave conflict markers and unmerged index entries.
+		const [alreadyApplied, forwardApplies] = await Promise.all([
+			repo.canApplyPatch(patch, { reverse: true }).catch(() => false),
+			repo.canApplyPatch(patch, {}).catch(() => false),
+		]);
+		if (alreadyApplied && !forwardApplies) return { changesApplied: true, hadAnyChanges: false };
+		if (!forwardApplies) return { changesApplied: false, hadAnyChanges: false };
+		try {
+			await repo.applyPatch(patch, {});
+			return { changesApplied: true, hadAnyChanges: true };
+		} catch {
+			return { changesApplied: false, hadAnyChanges: false };
+		}
+	});
 }
 
 export interface NestedPatchApplyOptions {

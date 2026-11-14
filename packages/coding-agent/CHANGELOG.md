@@ -636,6 +636,10 @@
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
 
+### Fixed
+
+- Parallel isolated tasks merging back in patch mode no longer lose each other's edits to the same file while reporting `Applied patches: yes` ([#18483](https://github.com/can1357/oh-my-pi/issues/18483))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
