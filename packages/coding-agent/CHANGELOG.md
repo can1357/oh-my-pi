@@ -410,6 +410,7 @@
 - Fixed RPC login for providers that require an at-your-own-risk confirmation; the confirmation is now presented to the host and login proceeds only after approval.
 - On Linux, language-server file watching no longer consumes excessive inotify watches in `node_modules` and `.git/objects`.
 
+- After a `computer` letter key on a macOS popup button, `ax()`, `find` and `value()` show the option the letters chose instead of the one from before the key
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes

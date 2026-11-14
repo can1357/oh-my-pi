@@ -58,6 +58,8 @@
 ### Removed
 
 - Removed the obsolete `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES` configuration variable.
+- Removed the `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES`, which only existed to pass it ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a read of a macOS popup button right after a `computer` letter key showing the option from before the key; the read now waits for the option the letters choose
 
 ## [18.22.0] - 2026-11-16
 

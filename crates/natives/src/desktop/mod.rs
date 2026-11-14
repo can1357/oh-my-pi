@@ -803,6 +803,28 @@ impl Worker {
 		}
 	}
 
+	/// Whether `request` is an element action on an element whose input may
+	/// not show yet (letters typed on a macOS popup, [`AxBackend::pending`]),
+	/// which it waits for before taking the input lease. Keys and typing never
+	/// wait: further letters join the same search.
+	fn awaits_late_input(&mut self, request: &Request) -> bool {
+		if !request.is_mutation() || matches!(request, Request::AxInput { .. }) {
+			return false;
+		}
+		let Some(handle) = request
+			.reference()
+			.and_then(|reference| self.registry.resolve(reference).ok())
+		else {
+			return false;
+		};
+		self
+			.backend
+			.as_mut()
+			.ok()
+			.and_then(|backend| backend.ax())
+			.is_some_and(|ax| ax.pending(&handle))
+	}
+
 	fn backend(&mut self) -> CoreResult<&mut Box<dyn Backend>> {
 		self.backend.as_mut().map_err(|error| error.clone())
 	}
@@ -1132,14 +1154,16 @@ impl Worker {
 		}
 		token.check()?;
 		let _scope = token.enter();
+		let awaits_input = self.awaits_late_input(request);
 		// A ref whose row the app rebuilt names the row's copy before the
-		// request reads its element or its app. That probe asks the element's
-		// app, so on macOS the user's front app is read before it, for the
-		// whole request (`EntryFront` in `macos::input`).
+		// request reads its element or its app, and an element action waits
+		// for its element's late input; both ask the element's app, so on
+		// macOS the user's front app is read before them, for the whole
+		// request (`EntryFront` in `macos::input`).
 		#[cfg(target_os = "macos")]
 		let _front = request
 			.reference()
-			.filter(|reference| self.registry.has_row(reference))
+			.filter(|reference| awaits_input || self.registry.has_row(reference))
 			.map(|_| macos::pin_entry_front());
 		self.row_read = None;
 		if let Some(reference) = request.reference() {
@@ -1162,6 +1186,15 @@ impl Worker {
 				},
 			}
 		};
+		// An element action reads its element under the input lease, where
+		// nothing may wait, so it waits for the element's late input here.
+		if awaits_input
+			&& let Some(reference) = request.reference()
+			&& let Ok(handle) = self.registry.resolve(reference)
+			&& let Some(ax) = self.backend()?.ax()
+		{
+			ax.settle(&handle)?;
+		}
 		let lease = if !request.is_mutation() {
 			None
 		} else if request.takes_over_a_window() {
@@ -3010,6 +3043,10 @@ mod capture_tests {
 		reads:             u32,
 		/// Runs as each press is delivered and as each probe asks.
 		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+		/// Elements whose input may not show yet.
+		late_input:        HashSet<u64>,
+		/// Runs as an element's late input is awaited.
+		on_settle:         Option<Box<dyn Fn() + Send>>,
 		/// A press is delivered and the app answers with an unrelated error.
 		unconfirmed:       bool,
 	}
@@ -3364,6 +3401,23 @@ mod capture_tests {
 				}
 				tree.destroyed.contains(id)
 			})
+		}
+
+		fn pending(&mut self, h: &AxHandle) -> bool {
+			let AxHandle::Test(id) = h else { return false };
+			self
+				.tree
+				.as_ref()
+				.is_some_and(|tree| tree.lock().late_input.contains(id))
+		}
+
+		fn settle(&mut self, _: &AxHandle) -> CoreResult<()> {
+			if let Some(tree) = &self.tree
+				&& let Some(on_settle) = &tree.lock().on_settle
+			{
+				on_settle();
+			}
+			Ok(())
 		}
 	}
 
@@ -4762,6 +4816,35 @@ mod capture_tests {
 			.expect("the element is gone");
 		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
 		assert!(free.load(Ordering::SeqCst), "the search held the call's input lease");
+	}
+
+	#[test]
+	fn an_element_action_waits_for_its_elements_late_input_with_input_released() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().late_input.insert(2);
+		let source = granted();
+		// Whether another call of the session could take input while the
+		// element's late input (macOS type-ahead) was awaited, and whether the
+		// user's front app was read before it.
+		let seen = Arc::new(Mutex::new(Vec::new()));
+		let (other, waits) = (source.clone(), Arc::clone(&seen));
+		tree.lock().on_settle = Some(Box::new(move || {
+			let free = InputLease::acquire(&other.token(), false).is_ok();
+			#[cfg(target_os = "macos")]
+			let pinned = macos::entry_front_pinned();
+			#[cfg(not(target_os = "macos"))]
+			let pinned = true;
+			waits.lock().push((free, pinned));
+		}));
+		call(&mut worker, press_request("e2"), &source).expect("pressed");
+		assert_eq!(
+			*seen.lock(),
+			[(true, true)],
+			"waited under the lease or with the front app unread"
+		);
+		// An element with nothing pending does not wait.
+		call(&mut worker, press_request("e3"), &source).expect("pressed");
+		assert_eq!(seen.lock().len(), 1);
 	}
 
 	#[test]

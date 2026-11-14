@@ -515,4 +515,13 @@ pub trait AxBackend {
 	fn value_settable(&mut self, _h: &AxHandle) -> Option<bool> {
 		None
 	}
+	/// Whether input already sent to `h` may not show yet (on macOS, letters
+	/// typed on a popup button), so a read of it would wait ([`Self::settle`]).
+	fn pending(&mut self, _h: &AxHandle) -> bool {
+		false
+	}
+	/// Waits until a read of `h` would show the input [`Self::pending`] names.
+	fn settle(&mut self, _h: &AxHandle) -> CoreResult<()> {
+		Ok(())
+	}
 }
