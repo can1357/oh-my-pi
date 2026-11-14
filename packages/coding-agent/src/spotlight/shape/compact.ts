@@ -4,10 +4,26 @@
  * where it makes the text shorter.
  */
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+/** A number whose source spelling `JSON.stringify` would not preserve (`9007199254740993`, `1.0`), kept as-is. */
+interface RawJson {
+	readonly rawJSON: string;
+}
 
-const isObj = (v: Json): v is { [key: string]: Json } => v !== null && typeof v === "object" && !Array.isArray(v);
-const isScalar = (v: Json) => v === null || typeof v !== "object";
+declare global {
+	interface JSON {
+		rawJSON(text: string): RawJson;
+		isRawJSON(value: unknown): value is RawJson;
+	}
+}
+
+type Scalar = null | boolean | number | string | RawJson;
+type Json = Scalar | Json[] | { [key: string]: Json };
+
+const rawJson = JSON.rawJSON;
+const isRaw = JSON.isRawJSON;
+const isObj = (v: Json): v is { [key: string]: Json } =>
+	v !== null && typeof v === "object" && !Array.isArray(v) && !isRaw(v);
+const isScalar = (v: Json): v is Scalar => v === null || typeof v !== "object" || isRaw(v);
 
 /** Appends `items` one by one: a dump's rendered tables can be too long to spread into one call. */
 function pushAll(out: string[], items: readonly string[]): void {
@@ -134,15 +150,21 @@ function pyToJson(src: string): string | undefined {
 	return out.replace(/,\s*([\]}])/g, "$1");
 }
 
+function parseJson(text: string): Json {
+	return JSON.parse(text, (_key: string, value: Json, ctx?: { source?: string }) =>
+		typeof value === "number" && ctx?.source && String(value) !== ctx.source ? rawJson(ctx.source) : value,
+	);
+}
+
 function tryParse(text: string, py: boolean): Json | undefined {
 	try {
-		return JSON.parse(text) as Json;
+		return parseJson(text);
 	} catch {
 		if (!py) return undefined;
 		const converted = pyToJson(text);
 		if (converted === undefined) return undefined;
 		try {
-			return JSON.parse(converted) as Json;
+			return parseJson(converted);
 		} catch {
 			return undefined;
 		}

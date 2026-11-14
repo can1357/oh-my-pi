@@ -626,12 +626,7 @@ fn uu_app() -> Command {
 			Arg::new(options::NO_DEREFERENCE)
 				.short('P')
 				.long(options::NO_DEREFERENCE)
-				.overrides_with_all([
-					options::DEREFERENCE,
-					options::CLI_SYMBOLIC_LINKS,
-					options::ARCHIVE,
-					options::NO_DEREFERENCE_PRESERVE_LINKS,
-				])
+				.overrides_with_all([options::DEREFERENCE, options::CLI_SYMBOLIC_LINKS])
 				// -d sets this option
 				.help("never follow symbolic links in SOURCE")
 				.action(ArgAction::SetTrue),
@@ -640,24 +635,14 @@ fn uu_app() -> Command {
 			Arg::new(options::DEREFERENCE)
 				.short('L')
 				.long(options::DEREFERENCE)
-				.overrides_with_all([
-					options::NO_DEREFERENCE,
-					options::CLI_SYMBOLIC_LINKS,
-					options::ARCHIVE,
-					options::NO_DEREFERENCE_PRESERVE_LINKS,
-				])
+				.overrides_with_all([options::NO_DEREFERENCE, options::CLI_SYMBOLIC_LINKS])
 				.help("always follow symbolic links in SOURCE")
 				.action(ArgAction::SetTrue),
 		)
 		.arg(
 			Arg::new(options::CLI_SYMBOLIC_LINKS)
 				.short('H')
-				.overrides_with_all([
-					options::DEREFERENCE,
-					options::NO_DEREFERENCE,
-					options::ARCHIVE,
-					options::NO_DEREFERENCE_PRESERVE_LINKS,
-				])
+				.overrides_with_all([options::DEREFERENCE, options::NO_DEREFERENCE])
 				.help("follow command-line symbolic links in SOURCE")
 				.action(ArgAction::SetTrue),
 		)
@@ -665,24 +650,12 @@ fn uu_app() -> Command {
 			Arg::new(options::ARCHIVE)
 				.short('a')
 				.long(options::ARCHIVE)
-				.overrides_with_all([
-					options::DEREFERENCE,
-					options::NO_DEREFERENCE,
-					options::CLI_SYMBOLIC_LINKS,
-					options::NO_DEREFERENCE_PRESERVE_LINKS,
-				])
 				.help("Same as -dR --preserve=all")
 				.action(ArgAction::SetTrue),
 		)
 		.arg(
 			Arg::new(options::NO_DEREFERENCE_PRESERVE_LINKS)
 				.short('d')
-				.overrides_with_all([
-					options::DEREFERENCE,
-					options::NO_DEREFERENCE,
-					options::CLI_SYMBOLIC_LINKS,
-					options::ARCHIVE,
-				])
 				.help("same as --no-dereference --preserve=links")
 				.action(ArgAction::SetTrue),
 		)
@@ -1056,19 +1029,41 @@ impl Options {
 			return Err(CpError::Usage("--reflink can be used only with --sparse=auto".to_string()));
 		}
 
+		// `-a` and `-d` also carry recursion and/or link preservation, so clap
+		// must keep them in the matches when `-P`, `-L`, or `-H` overrides only
+		// their `--no-dereference` part. Pick whichever link-following flag came
+		// last on the command line.
+		let dereference_flag = [
+			options::NO_DEREFERENCE,
+			options::NO_DEREFERENCE_PRESERVE_LINKS,
+			options::ARCHIVE,
+			options::CLI_SYMBOLIC_LINKS,
+			options::DEREFERENCE,
+		]
+		.into_iter()
+		.filter(|option| matches.get_flag(option))
+		.filter_map(|option| matches.index_of(option).map(|index| (index, option)))
+		.max_by_key(|&(index, _)| index)
+		.map(|(_, option)| option);
+
 		Ok(Self {
 			attributes_only: matches.get_flag(options::ATTRIBUTES_ONLY),
 			copy_contents: matches.get_flag(options::COPY_CONTENTS),
-			cli_dereference: matches.get_flag(options::CLI_SYMBOLIC_LINKS),
+			cli_dereference: dereference_flag == Some(options::CLI_SYMBOLIC_LINKS),
 			copy_mode,
 			// No dereference is set with -P, -d and --archive
-			dereference: !(matches.get_flag(options::NO_DEREFERENCE)
-				|| matches.get_flag(options::NO_DEREFERENCE_PRESERVE_LINKS)
-				|| matches.get_flag(options::ARCHIVE)
+			dereference: !(matches!(
+				dereference_flag,
+				Some(
+					options::NO_DEREFERENCE
+						| options::NO_DEREFERENCE_PRESERVE_LINKS
+						| options::ARCHIVE
+				)
+			)
 				// cp normally follows the link only when not copying recursively or when
 				// --link (-l) is used
 				|| (recursive && copy_mode != CopyMode::Link))
-				|| matches.get_flag(options::DEREFERENCE),
+				|| dereference_flag == Some(options::DEREFERENCE),
 			one_file_system: matches.get_flag(options::ONE_FILE_SYSTEM),
 			parents: matches.get_flag(options::PARENTS),
 			update: update_mode,
@@ -3816,6 +3811,82 @@ mod tests {
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "cp: -r not specified; omitting directory 'dir'\n");
 		assert!(!fixture.path().join("out").exists());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn archive_and_preserve_links_keep_other_effects_when_link_mode_follows() {
+		use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+
+		let fixture = tempdir().unwrap();
+		let path = |name: &str| fixture.path().join(name);
+		fs::create_dir_all(path("src")).unwrap();
+		fs::write(path("src/f1"), b"payload").unwrap();
+		fs::set_permissions(path("src/f1"), fs::Permissions::from_mode(0o751)).unwrap();
+		let past = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+		fs::File::options()
+			.write(true)
+			.open(path("src/f1"))
+			.unwrap()
+			.set_modified(past)
+			.unwrap();
+		fs::hard_link(path("src/f1"), path("src/f2")).unwrap();
+		symlink("f1", path("src/inner")).unwrap();
+		symlink("src", path("root-link")).unwrap();
+
+		for (flag, operand, inner_is_symlink) in [
+			("-aL", "root-link", false),
+			("-aH", "root-link", true),
+			("-aP", "src", true),
+			("-ad", "src", true),
+		] {
+			let dest = format!("out_{}", &flag[1..]);
+			let (code, capture) = run_util::<Cp>(&[flag, operand, &dest], "", fixture.path());
+			assert_eq!(code, 0, "{flag}: {}", capture.err());
+			let f1_meta = fs::metadata(path(&format!("{dest}/f1"))).unwrap();
+			let f2_meta = fs::metadata(path(&format!("{dest}/f2"))).unwrap();
+			assert_eq!(f1_meta.permissions().mode() & 0o777, 0o751, "{flag}");
+			assert_eq!(f1_meta.modified().unwrap(), past, "{flag}");
+			assert_eq!(f1_meta.ino(), f2_meta.ino(), "{flag}");
+			assert_eq!(
+				fs::symlink_metadata(path(&format!("{dest}/inner")))
+					.unwrap()
+					.file_type()
+					.is_symlink(),
+				inner_is_symlink,
+				"{flag}"
+			);
+		}
+
+		for flag in ["-La", "-Ha", "-LRd", "-HRd"] {
+			let dest = format!("sym_{}", &flag[1..]);
+			let (code, capture) = run_util::<Cp>(&[flag, "root-link", &dest], "", fixture.path());
+			assert_eq!(code, 0, "{flag}: {}", capture.err());
+			assert!(fs::symlink_metadata(path(&dest)).unwrap().file_type().is_symlink(), "{flag}");
+		}
+
+		for (flag, operand, inner_is_symlink) in [
+			("-dRL", "root-link", false),
+			("-dRH", "root-link", true),
+			("-dRP", "src", true),
+		] {
+			let dest = format!("out_{}", &flag[1..]);
+			let (code, capture) = run_util::<Cp>(&[flag, operand, &dest], "", fixture.path());
+			assert_eq!(code, 0, "{flag}: {}", capture.err());
+			assert_eq!(
+				fs::metadata(path(&format!("{dest}/f1"))).unwrap().ino(),
+				fs::metadata(path(&format!("{dest}/f2"))).unwrap().ino(),
+				"{flag}"
+			);
+			assert_eq!(
+				fs::symlink_metadata(path(&format!("{dest}/inner")))
+					.unwrap()
+					.file_type()
+					.is_symlink(),
+				inner_is_symlink,
+				"{flag}"
+			);
+		}
 	}
 
 	#[test]

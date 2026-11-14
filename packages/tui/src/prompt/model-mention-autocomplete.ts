@@ -18,11 +18,19 @@ const MAX_EFFORT_CANDIDATE_MODELS = 3;
 
 /**
  * Supplies picker-ranked model candidates for the query after `^`. `availableModelIds`
- * lists every available model's selector, in or out of the picker scope.
+ * lists every available model's selector, in or out of the picker scope. `retryDiscovery`
+ * retries failed provider discovery and returns the pass that may add candidates, if any.
  */
 export type ModelMentionCandidateSource = ((query: string) => ReadonlyArray<ModelBrowserItem>) & {
 	availableModelIds?: () => ReadonlySet<string>;
+	retryDiscovery?: () => Promise<void> | undefined;
 };
+
+/** Model catalog that can retry provider discovery which failed earlier in the session. */
+export interface DiscoveryRetryRegistry extends ModelBrowserRegistry {
+	/** Start a due discovery retry; returns the pass to wait for, or `undefined` when none is due. */
+	retryUnavailableDiscovery(): Promise<void> | undefined;
+}
 
 interface ModelBrowserModules {
 	SessionModelScopeCache: typeof SessionModelScopeCacheClass;
@@ -91,8 +99,10 @@ export function getModelMentionSuggestions(
 	if (!candidates) return { kind: "unhandled" };
 	const prefix = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE)?.[1];
 	if (!prefix) return { kind: "unhandled" };
+	// Started even without a match: the next keystroke reads whatever the retry recovers.
+	const pending = candidates.retryDiscovery?.();
 	const items = mentionRows(prefix.slice(1), candidates).slice(0, MAX_MODEL_MENTION_SUGGESTIONS);
-	return items.length > 0 ? { kind: "matched", suggestions: { items, prefix } } : { kind: "no-match" };
+	return items.length > 0 ? { kind: "matched", suggestions: { items, prefix }, pending } : { kind: "no-match" };
 }
 
 /** Replace the live mention token with the selected canonical selector and a trailing space. */
@@ -124,7 +134,7 @@ export function applyModelMentionCompletion(
  */
 export function createModelMentionSource(host: {
 	source: ModelBrowserSource;
-	registry: ModelBrowserRegistry;
+	registry: DiscoveryRetryRegistry;
 	scopedModels: () => ReadonlyArray<Model>;
 }): ModelMentionCandidateSource {
 	let scopeCache: SessionModelScopeCacheClass | undefined;
@@ -156,5 +166,8 @@ export function createModelMentionSource(host: {
 		}
 		return availableIds;
 	};
-	return Object.assign(rank, { availableModelIds });
+	return Object.assign(rank, {
+		availableModelIds,
+		retryDiscovery: () => host.registry.retryUnavailableDiscovery(),
+	});
 }
