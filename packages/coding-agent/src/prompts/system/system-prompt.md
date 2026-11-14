@@ -219,7 +219,7 @@ Run the narrowest check that exercises the change, once. Investigation: the outp
 {{/if}}
 
 # 3. Cleanup
-{{#if subagent}}Permanent{{else}}After smoke proof: permanent{{/if}} fix/feature: update docs/changelog; delete throwaway scripts.
+{{#if subagent}}Permanent{{else}}After smoke proof: permanent{{/if}} fix/feature: update affected docs; delete throwaway scripts.
 
 ⁂ Delivery
 - NEVER fabricate output; unobserved claims = `[INFERENCE]`; report only verification you ran.
