@@ -48,7 +48,7 @@ A widget is data, not code. A cheap model writes a declarative spec once per job
 ### Components and charset rules
 
 - `omp-tui` is a retained component tree with `dom!`, a differential renderer, graphics, markdown and a Tern surface protocol (`crates/tui/README.md:3-14`). Components include `progress`, `table`, `img`, `scene`, `shader`, `spinner`, `status`, `tool_card` and `todo` (directory `crates/tui/src/components`).
-- No sparkline and no chart component: a search for `spark` and `chart` in `crates/tui/src` found only colour names and Mermaid flowchart handling (`crates/tui/src/markdown/mermaid.rs:109`). The TSP wire has no chart node (same search).
+- No sparkline and no chart component: a search for `spark` and `chart` in `crates/tui/src` found only colour names and Mermaid flowchart handling (`crates/tui/src/markdown/mermaid.rs:109`). Correction (2026-11-14): the TSP wire does have `chart` and `meter` node kinds (`crates/tui/src/tsp/wire.rs:108-109`), with no typed builder and no sender yet. Two block ramps are already hardcoded outside `crates/tui`: `trend_bar` in `omp usage` (`crates/app/src/usage_cmd.rs:350-364`) and the live voice meter (`crates/chat/src/overlays/live.rs:667`).
 - `Progress` backs the `<progress>` tag and draws `██████░░` (`crates/tui/src/components/progress.rs:10`, test at `crates/tui/src/components/progress.rs:136`).
 - Charset is `Unicode`, `NerdFont` or `Ascii` and reaches every component. `AGENTS.md` bans hardcoded colours and hand-emitted glyphs; icons come from `icons.tsv` (`crates/tui/src/context.rs:41-49`, `AGENTS.md:460-462`). A block sparkline needs an ASCII fallback and a theme tone, so its glyph ramp belongs in the icon or charset layer, not in the component.
 - Graphics: terminal capability detection and image paths exist (`crates/tui/src/graphics.rs:1-6`, `crates/tui/src/sixel.rs`, `crates/tui/src/components/img.rs`). SVG rasterization exists elsewhere: `omp-tools` rasterizes SVG with `resvg` for image reads (`crates/tools/src/read/image.rs:240`, `crates/tools/src/read/image.rs:308`). `omp-tui` does not depend on `resvg` (`crates/tui/Cargo.toml:28-36`).
@@ -60,7 +60,7 @@ A widget is data, not code. A cheap model writes a declarative spec once per job
 - Job state lives in the session DOM under `<meta><jobs>` (`crates/agent/src/jobs.rs:1-6`). The `/hub` overlay reads each `<subagent>` and `<job>` row into `JobRow` with id, kind (`subagent`, `tool`, `process`), status, owner, agent, model, start time and a JSON `data` payload (`crates/chat/src/overlays/hub.rs:92-109`, `crates/chat/src/overlays/hub.rs:113`).
 - The status band has a `Jobs` chip showing a count with a job icon (`crates/chat/src/status_band.rs:1494`, `crates/chat/src/status_band.rs:1994-1997`).
 - The `wait`/`jobs` card renders job snapshots with id, kind, label, text, wall time and status (`crates/chat/src/cards/hub.rs:437-480`).
-- Live output: a running call's output frames are appended to the call's `<result>` text stream, in sequence, up to an inline byte limit, with the rest spilled to a content-addressed stage (`crates/agent/src/dispatch.rs:944-967`). So a text source for a running tool job exists in the DOM; how named `process` jobs expose live output was not traced: UNVERIFIED.
+- Live output: a running call's output frames are appended to the call's `<result>` text stream, in sequence, up to an inline byte limit, with the rest spilled to a content-addressed stage (`crates/agent/src/dispatch.rs:944-967`). Correction (2026-11-14, traced for the ADR revision): the DOM therefore holds only the head of a long output (64 KiB by default, `crates/agent/src/dispatch.rs:107`, `crates/agent/src/dispatch.rs:1048-1085`), and the spill stage is readable only after the call closes. Shell jobs (`bash` `async` and auto-backgrounded runs) and named `process` jobs are envd named processes whose output is in envd's process log, not the DOM (`crates/tools/src/shell.rs:716-746`, `crates/envd/src/tool_shell.rs:332-381`, `crates/driver/src/subagent/hub.rs:800-935`); `EnvClient::attach_output` reads that log from any offset, capped, then follows it (`crates/envd/src/exec.rs:2078-2110`). Chat can reach it through the `Services` feed, whose production implementation holds an `EnvClient` (`crates/app/src/chat_services/mod.rs:85-87`).
 - Model roles: the built-in role ids include `smol`, `tiny`, `judge` and `memory` but no `widget` (`crates/catalog/src/selection.rs:175-178`).
 
 ### Gap table
@@ -75,10 +75,10 @@ A widget is data, not code. A cheap model writes a declarative spec once per job
 | Spec author (`widget` role) | cheap model, forced `respond` | no `widget` role | add role or reuse `smol` |
 | Captions | yes | none | optional, separate |
 | Surfaces | `wait` card, HUD pill, jobs sheet | `wait` card, `Jobs` chip count, `/hub` | add widget row to each |
-| Job text sources | pipes, taps, task tool output | DOM `<result>` stream for tool calls | partial; process jobs UNVERIFIED |
+| Job text sources | pipes, taps, task tool output | envd process log for shell and process jobs; DOM `<result>` head for dispatcher-detached calls | a read feed to chat (ADR 0066 D3) |
 | Table chart planner | 5,000+ lines | none | large |
 | Chart rasterization | SVG to terminal image | `resvg` only in `omp-tools` | new dependency edge |
-| Chart on TSP | SVG fence | no chart node | out of scope |
+| Chart on TSP | SVG fence; `chart` node for job sparks | `chart` kind on the wire, no sender | out of scope |
 
 ## 3. Class
 
@@ -86,7 +86,7 @@ A widget is data, not code. A cheap model writes a declarative spec once per job
 
 **Class c, deferred** for auto-graph. It is a port, but of about 12,000 lines whose value depends on a graphics-capable terminal. A smaller local text chart is a class d proposal inside the plan.
 
-Verdict: build stages 1 and 2 of the job widgets; decide on the rest after that; defer auto-graph.
+Verdict: build stages 1 and 2 of the job widgets; decide on the rest after that; defer auto-graph. Revised 2026-11-14 after ADR 0066's review: only the model-free newest output line of the selected running shell job in the `/hub` inspector is committed; widgets, charts and model specs are deferred.
 
 ## 4. Options
 
@@ -107,6 +107,8 @@ Choice: option 1 first, then the runtime from option 2 with built-in rule sets f
 Choice: option 3 now. If wanted later, option 2, then image charts through a rasterizer callback the host supplies so `omp-tui` stays free of `resvg`. [INFERENCE]
 
 ## 5. Plan
+
+Superseded (2026-11-14): after three review rounds, ADR 0066 commits to one slice: the newest output line of the selected running shell job in the `/hub` inspector. It reads envd's process log through one live attachment from the log end plus one capped history read, behind `cl_hub_job_output`, with a real-PTY proof. Guaranteed coverage is `bash` with `async: true`; whether foreground runs reach envd before the dispatcher's 30 s limit is unverified (ADR 0066 O5). Everything else below is deferred; the ADR's "Deferred work" holds the checked facts. The ADR's `## Slices` is the plan; the list below is the original draft. Two claims in it were wrong: slice 2's "spilled output still shows the retained tail" cannot hold, because the DOM keeps only the head, and slice 1's "a constant series draws the lowest block" contradicts upstream, where a constant positive series draws the top block (`upstream:packages/tui/src/components/sparkline.ts:29-43`).
 
 ### Slice 1: sparkline component
 
@@ -147,7 +149,7 @@ Where the code goes: components and the ramp in `crates/tui`; the view model, ru
 2. **Secret leakage.** Authoring samples can contain secrets. Upstream redacts them; omp2 needs the same, with a test.
 3. **A `widget` role.** It changes the stable role vocabulary. Owner decision; aliasing `smol` avoids it.
 4. **Replay.** Whether views are journaled or recomputed on resume. Upstream rebuilds them from output after a reload (comment at `upstream:packages/tui/src/tools/job-widget.ts:126`).
-5. **Live output for named `process` jobs** was not traced (UNVERIFIED).
+5. **Live output for named `process` jobs**: traced on 2026-11-14; they are envd named processes, readable through `attach_output` (see section 2).
 6. **Where to put the runtime**: `crates/chat`, or a new crate. Check `AGENTS.md` crate rules.
 7. UNVERIFIED: `resvg` rasterization cost on large charts; whether the Tern surface needs a chart node.
 8. No locked ADR conflicts found. All additions are new convars and components; no existing tool, hook, scheme or CLI command changes.

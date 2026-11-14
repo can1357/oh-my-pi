@@ -42,6 +42,7 @@ pub mod share;
 pub mod subagent;
 pub mod telemetry_upload;
 pub mod v1_import;
+pub mod verification;
 pub mod workspace_trust;
 
 /// Renders an error cause once into model-facing fault text at this

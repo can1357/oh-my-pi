@@ -6,6 +6,10 @@ Revalidated base: `omp2` at `355a324e4c52bb473eca53925807972d6491d265`,
 the actual merge of research PR #618. This branch was created after a
 fast-forward pull. The original research source pin remains unchanged.
 
+Implementation progress: [S1 required inventory and verdict](13-required-inventory-s1.md)
+is implemented and locally tested on the later `omp2` base `374eb3a`.
+It is a pure policy contract, not the joined S4 verification milestone.
+
 ## What the research establishes
 
 There is a feasible implementation path, with substantial native reuse. OMP2
