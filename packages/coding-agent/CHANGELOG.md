@@ -928,6 +928,11 @@
 - Fixed unavailable configured default or dictation models being silently replaced; omp now warns and identifies the fallback model.
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
+- A classifier refusal no longer walks `retry.fallbackChains` at full price: the refusal ends the turn and is handed back to the agent, except for the one sanctioned retry Anthropic's fallback credit grants (redeemed only on the credit's target models). A refusal that did switch records a cooldown on the refusing model instead of pinning the fallback, so `retry.fallbackRevertPolicy: cooldown-expiry` restores the primary once that window ends — before, one refusal could leave a session on its fallback model for the rest of the run.
+- A provider content-filter stop, including Amazon Bedrock `content_filtered` message stops and Anthropic's "Output blocked by content filtering policy", is now classified as a content block and neither retries the same model nor walks the fallback chain; the next chain entry re-filters identical content, and one unattended run spent $2.19 on seven such filtered retries of a single refused request. Bedrock `guardrail_intervened` stops keep their distinct wording.
+- Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
+- A failed Hindsight memory recall (for example `recall request timed out after 30s`) now shows a warning instead of silently sending the prompt without memories; `omp -p` writes it, and Hindsight retain failures, to stderr ([#17278](https://github.com/can1357/oh-my-pi/pull/17278) by [@enieuwy](https://github.com/enieuwy))
+- Fixed cancelling an MCP OAuth login or `/mcp` auth lookup at the wrong moment crashing the session with an unhandled rejection ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 
 ## [18.13.3] - 2026-10-28
 
