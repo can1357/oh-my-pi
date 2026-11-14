@@ -10,6 +10,7 @@ import {
 	type ResizedImage,
 	resizeImage,
 	type ScreenshotArea,
+	setImageResizeLimits,
 } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 
@@ -304,6 +305,57 @@ function makeNoisePng(width: number, height: number): Uint8Array {
 		chunk("IEND", Buffer.alloc(0)),
 	]);
 }
+
+describe("resizeImage configurable limits", () => {
+	afterEach(() => {
+		// Module-level state: restore the built-in defaults so other tests are unaffected.
+		setImageResizeLimits({});
+	});
+
+	it("keeps an image the built-in cap would shrink once images.maxDimension is raised", async () => {
+		// 1600px wide: downscaled under the default 1568 cap. Failure mode: users who raise the
+		// limit (e.g. for OCR) still get 1568px images sent to the model.
+		setImageResizeLimits({ maxDimension: 2000 });
+		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(false);
+		expect(result.width).toBe(1600);
+		expect(result.height).toBe(400);
+	});
+
+	it("lets explicit per-call caps win over the configured limits", async () => {
+		// Browser screenshots pass their own 1024px cap; a raised global limit must not loosen it.
+		setImageResizeLimits({ maxDimension: 4000 });
+		const result = await resizeImage(
+			{ type: "image", data: oversizedPng, mimeType: "image/png" },
+			{ maxWidth: 1024, maxHeight: 1024 },
+		);
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBeLessThanOrEqual(1024);
+		expect(result.height).toBeLessThanOrEqual(1024);
+	});
+
+	it("restores the built-in cap when the configured limit is not a positive number", async () => {
+		// A 0 or negative value in config.yml must not disable resizing or produce a zero-size target.
+		setImageResizeLimits({ maxDimension: 4000 });
+		setImageResizeLimits({ maxDimension: 0, maxBytes: -1 });
+		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBe(1568);
+	});
+
+	it("treats a fractional limit that rounds down to zero as unset", async () => {
+		// 0.5 is positive but floors to 0. Failure mode: a typo in config.yml yields a 0x0 image
+		// sent to the provider instead of falling back to the default cap.
+		setImageResizeLimits({ maxDimension: 0.5 });
+		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBe(1568);
+	});
+});
 
 describe("resizeImage tight budget fallback", () => {
 	const maxBytes = 20 * 1024;
