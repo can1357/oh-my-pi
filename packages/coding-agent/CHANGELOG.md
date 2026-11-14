@@ -17,6 +17,7 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Added `gitBranch` to session headers: the Git branch of the session working directory, recorded for new, forked, and branched session files and re-resolved when a session moves. It is omitted outside a Git checkout, on a detached `HEAD`, and in pure Jujutsu workspaces, and is redacted in shared exports ([#12225](https://github.com/can1357/oh-my-pi/pull/12225) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
