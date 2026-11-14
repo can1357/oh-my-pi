@@ -1,5 +1,6 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { HiddenFrame } from "./relay/protocol";
 
 export type Transferable = Bun.Transferable;
 
@@ -148,6 +149,8 @@ export interface ReadyInfo {
 	title?: string;
 	viewport: { width: number; height: number; deviceScaleFactor?: number };
 	targetId: string;
+	/** Other extensions' frames the omp relay hid in the tab before this worker adopted it. */
+	hiddenFrames?: HiddenFrame[];
 }
 
 export interface RunResultOk {
@@ -157,6 +160,14 @@ export interface RunResultOk {
 	/** The run finished but tab-scoped browser state was not restored; the tab must be recycled. */
 	recoverTab?: boolean;
 }
+
+/**
+ * How a run ended, with the other extensions' frames the omp relay hid in the tab while it or an earlier run went on,
+ * which the supervisor holds for the tab whether the run succeeded or not.
+ */
+export type RunOutcome = ({ ok: true; payload: RunResultOk } | { ok: false; error: RunErrorPayload }) & {
+	hiddenFrames?: HiddenFrame[];
+};
 
 export interface RunErrorPayload {
 	name: string;
@@ -199,8 +210,7 @@ export type WorkerOutbound =
 	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
-	| { type: "result"; id: string; ok: true; payload: RunResultOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| ({ type: "result"; id: string } & RunOutcome)
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
 	| { type: "closed" };

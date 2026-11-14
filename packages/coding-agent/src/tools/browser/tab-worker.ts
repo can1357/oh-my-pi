@@ -243,6 +243,7 @@ import {
 	waitForMainFrameDocument,
 } from "./navigation";
 
+import { type HiddenFrame, isHiddenFrame } from "./relay/protocol";
 import { cloneSafe, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
@@ -252,6 +253,7 @@ import {
 	ownsPage,
 	type ReadyInfo,
 	type RunErrorPayload,
+	type RunOutcome,
 	type ScreenshotResult,
 	type SessionSnapshot,
 	type ToolReply,
@@ -289,6 +291,15 @@ declare module "puppeteer-core" {
 		readonly backendNodeId?: number;
 		/** Loader of the frame's document when the snapshot was taken (`@internal` upstream, stripped from published types). */
 		readonly loaderId: string;
+	}
+}
+
+declare module "devtools-protocol/types/protocol-mapping" {
+	namespace ProtocolMapping {
+		interface Commands {
+			/** The omp relay's own command: the other extensions' frames it hid in the tab, for the worker driving it. */
+			"OMP.takeHiddenFrames": { paramsType: []; returnType: { frames?: unknown } };
+		}
 	}
 }
 
@@ -1914,7 +1925,7 @@ export class WorkerCore {
 		this.#unanswered = null;
 		run.ac.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser tab's renderer crashed")));
 		const error = new RendererCrashedError("Browser tab's renderer crashed during this run");
-		this.#transport.send({ type: "result", id: run.id, ok: false, error: errorPayload(error) });
+		this.#sendResult({ id: run.id, ok: false, error: errorPayload(error) });
 	};
 
 	/**
@@ -1933,8 +1944,34 @@ export class WorkerCore {
 		this.#unanswered = null;
 		run.ac.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Chrome detached omp from this tab")));
 		const error = new DebuggerDetachedError(reason, run.codeStarted ? "during" : "before");
-		this.#transport.send({ type: "result", id: run.id, ok: false, error: errorPayload(error) });
+		this.#sendResult({ id: run.id, ok: false, error: errorPayload(error) });
 	};
+
+	/** Other extensions' frames taken from the omp relay that no ready report or run result has carried yet. */
+	#hiddenFrames: HiddenFrame[] = [];
+	/** The relay holds more such frames for this worker to take: it sent `OMP.foreignFramesHidden` since the last take. */
+	#hiddenFramesWaiting = false;
+	readonly #onForeignFramesHidden = (): void => {
+		this.#hiddenFramesWaiting = true;
+	};
+
+	/** Take what the omp relay hid in the tab and holds for the worker driving it (`OMP.takeHiddenFrames`). */
+	async #takeHiddenFrames(page: Page): Promise<void> {
+		this.#hiddenFramesWaiting = false;
+		// A relay of an older omp forwards the unknown method to Chrome, which rejects it. The reply crosses a socket,
+		// so only well-formed frames are kept.
+		const reply = await page
+			.mainFrame()
+			.client.send("OMP.takeHiddenFrames")
+			.catch(() => undefined);
+		if (Array.isArray(reply?.frames)) this.#hiddenFrames.push(...reply.frames.filter(isHiddenFrame));
+	}
+
+	/** Answer run `id`, handing over what the relay hid, which the supervisor reports whether the run failed or not. */
+	#sendResult(result: { id: string } & RunOutcome): void {
+		const hiddenFrames = this.#hiddenFrames.splice(0);
+		this.#transport.send({ type: "result", ...result, ...(hiddenFrames.length > 0 ? { hiddenFrames } : {}) });
+	}
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -2100,6 +2137,7 @@ export class WorkerCore {
 			client.on("Page.javascriptDialogOpening", this.#onDialogOpening);
 			client.on("Page.javascriptDialogClosed", this.#onDialogClosed);
 			client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
+			client.on("OMP.foreignFramesHidden", this.#onForeignFramesHidden);
 			this.#page.on("error", this.#onPageCrashed);
 			if (this.#ownsPage || (payload.mode === "attach" && payload.userDriven)) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
@@ -2144,7 +2182,12 @@ export class WorkerCore {
 					deviceScaleFactor: payload.viewport.deviceScaleFactor ?? 0,
 				});
 			}
-			const info = await this.#currentReadyInfo();
+			if (payload.mode === "attach" && payload.relay === true) await this.#takeHiddenFrames(this.#page);
+			const hiddenFrames = this.#hiddenFrames.splice(0);
+			const info: ReadyInfo = {
+				...(await this.#currentReadyInfo()),
+				...(hiddenFrames.length > 0 ? { hiddenFrames } : {}),
+			};
 			this.#started = true;
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
@@ -2300,17 +2343,16 @@ export class WorkerCore {
 			const error = new RendererCrashedError(
 				"Browser tab's renderer had crashed before this run, so its code did not run",
 			);
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(error) });
+			this.#sendResult({ id: msg.id, ok: false, error: errorPayload(error) });
 			return;
 		}
 		if (this.#debuggerDetached !== undefined) {
 			const error = new DebuggerDetachedError(this.#debuggerDetached, "before");
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(error) });
+			this.#sendResult({ id: msg.id, ok: false, error: errorPayload(error) });
 			return;
 		}
 		if (this.#active) {
-			this.#transport.send({
-				type: "result",
+			this.#sendResult({
 				id: msg.id,
 				ok: false,
 				error: errorPayload(new ToolError("Tab worker is busy")),
@@ -2469,7 +2511,10 @@ export class WorkerCore {
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
-		// A renderer crash or a debugger detach answers the run itself.
+		// A renderer crash or a debugger detach answers the run itself; what the relay hid stays with it for the next
+		// worker. Otherwise what it hid during the run goes out with the run's result.
+		if (this.#unanswered === active && this.#hiddenFramesWaiting && this.#page)
+			await this.#takeHiddenFrames(this.#page);
 		if (this.#unanswered !== active) return;
 		if (failure) {
 			// Chrome ends a cross-site frame's session the moment it detaches omp from a relay tab, ahead of the
@@ -2487,15 +2532,14 @@ export class WorkerCore {
 				if (this.#unanswered !== active) return;
 			}
 			this.#unanswered = null;
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
+			this.#sendResult({ id: msg.id, ok: false, error: errorPayload(failure.error) });
 			return;
 		}
 		if (completed) {
 			await this.#postReadyInfo();
 			if (this.#unanswered !== active) return;
 			this.#unanswered = null;
-			this.#transport.send({
-				type: "result",
+			this.#sendResult({
 				id: msg.id,
 				ok: true,
 				payload: {

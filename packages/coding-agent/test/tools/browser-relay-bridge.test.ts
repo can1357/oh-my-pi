@@ -3257,3 +3257,38 @@ describe("RelayBridge download paths", () => {
 		});
 	});
 });
+
+describe("RelayBridge hidden frames", () => {
+	it("holds what the extension hid for the worker driving the tab, and past a Chrome detach for the next one", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const take = async (cdp: FakeCdpSocket, connId: number, sessionId: string) => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method: "OMP.takeHiddenFrames" }));
+			await flush();
+			return cdp.messages.find(m => m.id === id)?.result;
+		};
+		const menu = { extensionId: "a".repeat(32), path: "inline/menu/menu.html", title: "Vault" };
+		const card = { extensionId: "a".repeat(32), path: "inline/notification/notification.html" };
+		const first = new FakeCdpSocket();
+		const firstConn = bridge.cdpConnected(first, pageId(1));
+		const firstSession = await attachPage(bridge, ext, first, firstConn, 1);
+		const told = () => first.messages.filter(m => m.method === "OMP.foreignFramesHidden");
+		// The worker driving the tab is told, and takes the frames once.
+		bridge.extMessage(ext, JSON.stringify({ t: "framesHidden", tabId: 1, frames: [menu] }));
+		await flush();
+		expect(told()).toEqual([{ sessionId: firstSession, method: "OMP.foreignFramesHidden", params: {} }]);
+		expect(await take(first, firstConn, firstSession)).toEqual({ frames: [menu] });
+		expect(await take(first, firstConn, firstSession)).toEqual({ frames: [] });
+		// Once Chrome has dropped omp from the tab, what the extension hides waits for the worker that re-adopts it.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		bridge.extMessage(ext, JSON.stringify({ t: "framesHidden", tabId: 1, frames: [card] }));
+		await flush();
+		expect(told()).toHaveLength(1);
+		const next = new FakeCdpSocket();
+		const nextConn = bridge.cdpConnected(next, pageId(1));
+		const nextSession = await attachPage(bridge, ext, next, nextConn, 1);
+		expect(await take(next, nextConn, nextSession)).toEqual({ frames: [card] });
+	});
+});
