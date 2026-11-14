@@ -11,7 +11,6 @@ import taskSummaryTemplate from "../../coding-agent/src/prompts/tools/task-summa
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { type CoordinationDetails, createIrcMessageCard, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
 import { renderAgentWrite } from "@oh-my-pi/pi-tui/tools/proc-render";
-import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { decodeBench } from "./fixtures/job-widget-views";
 
 /** Every described node under `children`, depth first. */
@@ -506,6 +505,14 @@ describe("IRC body wrapping", () => {
 		expect(words).toHaveLength(40);
 	});
 
+	it("shows every line of an incoming message when expanded", () => {
+		const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n");
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => true, theme);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		for (let index = 0; index < 30; index++) expect(output).toContain(`line ${index}`);
+		expect(output).not.toContain("more line");
+	});
+
 	it("shows an expand hint on a collapsed card with hidden lines", () => {
 		const body = ["line one", "line two", "line three", "line four"].join("\n");
 		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => false, theme);
@@ -530,8 +537,8 @@ describe("IRC body wrapping", () => {
 	});
 
 	it("wraps an expanded outgoing agent write in full at render(120)", () => {
-		// Twenty long lines: the expanded budget keeps twelve, and each kept
-		// line soft-wraps to the card width instead of clipping at the fixed cap.
+		// Twenty long lines: expanded shows every one, each soft-wrapped to the
+		// card width instead of clipped at the fixed cap, with no elision row.
 		const body = Array.from({ length: 20 }, (_, index) => `${"word ".repeat(30)}END-${index}`).join("\n");
 		const component = renderAgentWrite(
 			"peer",
@@ -542,11 +549,7 @@ describe("IRC body wrapping", () => {
 			theme,
 		);
 		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-		expect(output).toContain(`+${20 - PREVIEW_LIMITS.EXPANDED_LINES} more lines`);
-		// The tail sentinel of the first kept line survives the wrap; the
-		// thirteenth source line is outside the budget.
-		expect(output).toContain("END-0");
-		expect(output).toContain("END-11");
-		expect(output).not.toContain("END-12");
+		for (let index = 0; index < 20; index++) expect(output).toContain(`END-${index}`);
+		expect(output).not.toContain("more lines");
 	});
 });

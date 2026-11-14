@@ -689,10 +689,8 @@ function bodyLines(
 	const quote = theme.fg("dim", theme.md.quoteBorder);
 	const prefix = `${indent}${quote} `;
 	const source = body.split("\n").filter(line => line.trim());
-	// Expanded keeps its own, larger budget: a body with thousands of lines would
-	// otherwise push the transcript off the screen.
-	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : (options.collapsedLines ?? BODY_LINES_COLLAPSED);
-	const shown = cappedHeadLines(source, limit).lines;
+	// Expanded (Ctrl+O) shows the complete message; collapsed is a short preview.
+	const shown = expanded ? source : cappedHeadLines(source, options.collapsedLines ?? BODY_LINES_COLLAPSED).lines;
 	const hidden = source.length - shown.length;
 	const contentWidth = Math.max(1, width - visibleWidth(prefix));
 	// A row is cut when either the fixed cap or the card's own width clips it.

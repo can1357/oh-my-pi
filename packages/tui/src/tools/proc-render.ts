@@ -53,10 +53,13 @@ function preview(
 	const quote = theme.fg("dim", theme.md.quoteBorder);
 	const prefix = `  ${quote} `;
 	const source = body.split("\n").filter(line => line.trim());
-	// Expanded keeps its own, larger budget: a job log with thousands of lines
-	// would otherwise push the transcript off the screen.
+	// An expanded IRC card (the only caller passing a width) shows the whole
+	// message. Without a width this is a proc/job card, whose expanded view
+	// keeps a budget: a job log with thousands of lines would push the
+	// transcript off the screen.
+	const ircExpanded = expanded && width !== undefined;
 	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
-	const shown = cappedHeadLines(source, limit).lines;
+	const shown = ircExpanded ? source : cappedHeadLines(source, limit).lines;
 	const hidden = source.length - shown.length;
 	// Each row is clipped to the card width, so the text budget is that width
 	// minus the quote rail; with no card width the fixed cap stands.
@@ -68,7 +71,7 @@ function preview(
 		const text = safe(line.trim());
 		// IRC cards pass the card width: an expanded body soft-wraps instead of
 		// being cut. Collapsed rows keep the fixed cap, narrowed to the card.
-		if (expanded && width !== undefined) {
+		if (ircExpanded) {
 			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${prefix}${theme.fg(tone, row)}`);
 			continue;
 		}
