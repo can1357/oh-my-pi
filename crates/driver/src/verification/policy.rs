@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use omp_core::{FastHashMap, Hash32, Str};
+use serde::{Deserialize, Serialize};
 
 /// Immutable identities a host binds to every observation in one assessment.
 ///
@@ -10,7 +11,7 @@ use omp_core::{FastHashMap, Hash32, Str};
 /// input digest must cover source, dependencies, tools, test inputs and
 /// execution environment; the policy digest must cover the complete selected
 /// policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerificationScope {
 	/// Digest of the complete captured input and execution-environment closure.
 	pub inputs: Hash32,
@@ -28,7 +29,7 @@ pub struct CheckRequirement {
 }
 
 /// Why a check cannot establish a current passing or failing result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InconclusiveReason {
 	/// The declared check has no observation.
 	MissingResult,
@@ -51,7 +52,7 @@ pub enum InconclusiveReason {
 }
 
 /// A host-observed result; a model's completion claim is not an observation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CheckOutcome {
 	/// The host established successful completion and required coverage.
 	Passed,

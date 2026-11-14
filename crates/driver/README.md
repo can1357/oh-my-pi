@@ -17,8 +17,11 @@ presentation adapter.
   Native snapshot capture binds CAS source bytes and host-admitted dependency,
   toolchain, environment, test and policy identities into applicability keys.
   Unknown inputs and observed drift refuse capture. Two matching captures do not
-  prove an atomic live worktree. Evidence validation, check execution, durable
-  receipts and a commit gate are not connected yet.
+  prove an atomic live worktree. The evidence adapter imports source/evidence
+  bytes into the session CAS, publishes their complete retention closure through
+  keyed session patches, and validates integrity, live ancestry and exact
+  applicability on read. Result truth and producer provenance remain trusted
+  host admissions. Check execution and a joined commit gate are not connected yet.
 - `headless::kernel` constructs the production kernel, `.oms` session,
   inference route, environment authority, and session-owned `task`/`hub`
   tools reused by chat, print, RPC, and ACP.

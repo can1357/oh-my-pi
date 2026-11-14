@@ -15,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 use super::{CheckRequirement, PolicyError, VerificationPolicy, VerificationScope};
 use crate::exec_composer::EnvironmentInputs;
 
-const KEY_VERSION: u32 = 1;
+pub(super) const KEY_VERSION: u32 = 1;
+pub(super) const SNAPSHOT_DOMAIN: &str = "omp.verification.snapshot";
 
 /// A required category of host-admitted verification inputs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
@@ -207,7 +208,7 @@ impl TryFrom<&SnapshotContext> for ClosedContext {
 	}
 }
 
-fn valid_path(path: &str) -> bool {
+pub(super) fn valid_path(path: &str) -> bool {
 	!path.contains(['\\', '\0'])
 		&& !path.contains(':')
 		&& path.split('/').all(|part| !matches!(part, "" | "." | ".."))
@@ -474,7 +475,7 @@ async fn capture(
 	let after = repository_identity(&repository(environment).await?)?;
 	admit_stable_capture(&first, &second, &before, &after)?;
 	let canonical: Arc<[u8]> = serde_json::to_vec(&SnapshotKey {
-		domain: "omp.verification.snapshot",
+		domain: SNAPSHOT_DOMAIN,
 		version: KEY_VERSION,
 		repository: &before,
 		manifest,

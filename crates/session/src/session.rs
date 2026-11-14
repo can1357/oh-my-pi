@@ -404,6 +404,17 @@ impl Session {
 		self.entries.iter()
 	}
 
+	/// Iterates the selected head's journal ancestry, excluding abandoned
+	/// branches. An in-memory rewind is reflected before its next durable
+	/// append.
+	pub fn live_entries(&self) -> impl Iterator<Item = &Entry> {
+		let end = self
+			.head
+			.and_then(|id| self.entry_index.get(&id))
+			.map_or(0, |index| index + 1);
+		omp_journal::live_chain(&self.entries[..end])
+	}
+
 	/// Number of materialized journal entries (the durable event index).
 	#[must_use]
 	pub const fn entry_count(&self) -> usize {
