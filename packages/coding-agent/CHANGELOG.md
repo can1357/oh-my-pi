@@ -17,6 +17,7 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Eval cells can call activatable MCP tools and discoverable devices without activating or mounting them first, while preserving tool restrictions and approvals ([#17464](https://github.com/can1357/oh-my-pi/pull/17464) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
