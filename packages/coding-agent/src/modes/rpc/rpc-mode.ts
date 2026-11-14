@@ -912,6 +912,66 @@ export async function handleRpcSessionChange(
 	throw new Error("Unsupported RPC session change command");
 }
 
+/**
+ * Host-owned session state the {@link runRpcChangeSession} bracket needs.
+ * Kept structural (no `Rpc*` controller imports) so slash-command callers stay
+ * decoupled from the mode's controllers.
+ */
+export interface RpcChangeSessionDeps {
+	stopDictation: () => Promise<void>;
+	closeBtw: () => Promise<void>;
+	goalController: Pick<RpcGoalController, "beginSessionChange" | "endSessionChange" | "settled">;
+	subagentRegistry?: RpcSubagentResetRegistry;
+	/** Invalidate input accepted before this change (the host's serial command). */
+	commitSessionChange: () => void;
+	abortOpenPrompts: () => void;
+	recheckSettlement: () => void;
+	emitAvailableCommandsUpdate: () => Promise<void>;
+	/** Serialize against concurrent session changes (the mode's guard counter). */
+	runExclusive: <T>(change: () => Promise<T>) => Promise<T>;
+}
+
+/**
+ * Run a slash-command-initiated session change inside the same bracket the
+ * `new_session` host command uses: dictation stop, btw close, goal quiesce and
+ * reconcile, subagent registry reset, input-gate commit, open-prompt abort,
+ * settlement re-check, and command-list refresh. A change that throws may have
+ * already detached the run, so it counts as detached for goal purposes while
+ * skipping the post-change notifications. Wired to
+ * `SlashCommandRuntime.changeSession` by RPC mode; other hosts omit the hook.
+ */
+export async function runRpcChangeSession<T>(
+	deps: RpcChangeSessionDeps,
+	change: () => Promise<T>,
+	options: { detachesRun: boolean; isCancelled: (result: T | undefined) => boolean },
+): Promise<T> {
+	return deps.runExclusive(async () => {
+		await deps.stopDictation();
+		await deps.closeBtw();
+		await deps.goalController.beginSessionChange();
+		let result: T | undefined;
+		let threw = false;
+		try {
+			result = await change();
+			return result;
+		} catch (err) {
+			threw = true;
+			throw err;
+		} finally {
+			const cancelled = !threw && options.isCancelled(result);
+			await deps.goalController.endSessionChange({ detachedRun: options.detachesRun && !cancelled });
+			await deps.goalController.settled();
+			if (!threw && !cancelled) {
+				deps.subagentRegistry?.clear();
+				deps.commitSessionChange();
+				if (options.detachesRun) deps.abortOpenPrompts();
+				deps.recheckSettlement();
+				await deps.emitAvailableCommandsUpdate();
+			}
+		}
+	});
+}
+
 export type RpcOpenSessionSession = Pick<
 	AgentSession,
 	"newSession" | "switchSession" | "sessionFile" | "sessionId" | "messages" | "model" | "setModel"
@@ -1972,6 +2032,26 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					notifyConfigChanged: async () => {
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
+					// Headless `/session delete` detaches the live session inside
+					// the same bracket the host's session-change commands use, so
+					// the deleted transcript's subagents, goal, and btw request
+					// do not survive into the successor session.
+					changeSession: async (change, options) =>
+						runRpcChangeSession(
+							{
+								stopDictation: stopDictationForSessionChange,
+								closeBtw: () => btw.close(),
+								goalController,
+								subagentRegistry,
+								commitSessionChange: () => inputGate.commitSessionChange(command),
+								abortOpenPrompts: () => promptResults.abortOpen(),
+								recheckSettlement: () => void settleWatcher.check(),
+								emitAvailableCommandsUpdate,
+								runExclusive: withSessionChange,
+							},
+							change,
+							options,
+						),
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
 				if (!isCurrent()) return "cancelled";

@@ -275,27 +275,38 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				if (runtime.session.isStreaming) return usage("Cannot delete the session while streaming.", runtime);
 				const sessionFile = runtime.sessionManager.getSessionFile();
 				if (!sessionFile) return usage("No session file to delete (in-memory session).", runtime);
-				// Detach the live agent before deleting its file; the next prompt must
-				// belong to a fresh session with a valid header and no old history.
-				// `drop` deletes the old file and keeps the successor lazy, so deleting
-				// never leaves an empty session behind.
+				// Detach the live session before deleting its file (mirrors the
+				// TUI's `/delete`, which moves to a fresh session first). Deleting
+				// through the SessionManager alone leaves the running session
+				// pointed at the deleted path, so the next turn resurrects a
+				// headerless file that resume rejects as malformed. `drop: true`
+				// deletes the file and leaves the successor lazy: no empty header
+				// lands on disk until the new session has content.
 				try {
-					if (!(await runtime.session.newSession({ drop: true })))
-						return usage("Session deletion cancelled.", runtime);
-				} catch (err) {
-					return usage(`Failed to start a new session: ${errorMessage(err)}`, runtime);
-				}
-				try {
-					// `drop` only logs a failed delete; retry here to report it (ENOENT is success).
-					await runtime.sessionManager.dropSession(sessionFile);
+					// RPC runs the detach inside its session-change bracket (goal
+					// quiesce/reconcile, subagent reset, btw close); other headless
+					// hosts call through directly.
+					const change = () => runtime.session.newSession({ drop: true });
+					const deleted = runtime.changeSession
+						? await runtime.changeSession(change, { detachesRun: true, isCancelled: result => result !== true })
+						: await change();
+					if (!deleted) return usage("Delete cancelled.", runtime);
 				} catch (err) {
 					return usage(
 						`Started new session ${runtime.session.sessionId}, but failed to delete ${sessionFile}: ${errorMessage(err)}`,
 						runtime,
 					);
 				}
+				// The drop swallows storage failures (the successor already
+				// exists), so confirm the file is actually gone instead of
+				// claiming a success the disk contradicts.
+				const dropError = runtime.session.consumeSessionDropError();
+				if (dropError !== undefined) {
+					return usage(`Failed to delete session: ${errorMessage(dropError)}`, runtime);
+				}
+				await runtime.notifyTitleChanged?.();
 				await runtime.output(
-					`Session deleted: ${sessionFile}. New session: ${runtime.session.sessionId} (${runtime.session.sessionFile}).`,
+					`Session deleted: ${sessionFile}. Started a new session (${runtime.sessionManager.getSessionId()}).`,
 				);
 				return commandConsumed();
 			}

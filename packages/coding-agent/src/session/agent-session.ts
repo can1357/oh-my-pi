@@ -12300,12 +12300,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Start a new session, optionally with initial messages and parent tracking.
-	 * Clears all messages and starts a new session.
-	 * Listeners are preserved and will continue receiving events.
-	 * @param options - Optional initial messages and parent session path
-	 * @returns true if completed, false if cancelled by hook
+	 * Error from the last `newSession({ drop: true })` file deletion, if it
+	 * failed. Deleting through the storage backend can fail (EACCES, EBUSY)
+	 * after the successor session already exists, so the failure is recorded
+	 * instead of thrown; {@link consumeSessionDropError} surfaces it to the
+	 * caller that requested the drop.
 	 */
+	#sessionDropError: unknown = undefined;
+
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		const queued = this.#enterSessionTransition(() => this.newSession(options));
 		if (queued) return queued;
@@ -12341,10 +12343,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.agent.reset();
 				this.tokenRate.reset();
 				if (options?.drop && previousSessionFile) {
+					// A stale failure must not outlive its attempt: reset first so a
+					// reader after this transition sees only this drop's outcome.
+					this.#sessionDropError = undefined;
 					try {
 						await this.sessionManager.dropSession(previousSessionFile);
 					} catch (err) {
 						logger.error("Failed to delete session during /delete", { err });
+						this.#sessionDropError = err;
 					}
 				} else {
 					await this.sessionManager.flush();
@@ -12432,6 +12438,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				else this.#advisors.reattachRecorderFeeds();
 			}
 		}
+	}
+
+	/**
+	 * Take the error recorded by the last `newSession({ drop: true })` file
+	 * deletion, if it failed; reading clears it. Lets a drop caller (headless
+	 * `/session delete`) report the failure instead of claiming success while
+	 * the file is still on disk. Never throws.
+	 */
+	consumeSessionDropError(): unknown {
+		const error = this.#sessionDropError;
+		this.#sessionDropError = undefined;
+		return error;
 	}
 
 	/**
