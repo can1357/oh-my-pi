@@ -387,6 +387,21 @@ describe("skill description failure caching and shutdown", () => {
 		expect(elapsed).toBeLessThan(5_000);
 		expect(storedDescriptions(store.path)).toEqual([]);
 	}, 6_000);
+
+	it("renders descriptions within the 100-character preview budget verbatim without model compression (#18973)", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const shortDescription = "Run unit tests; not running existing integration or end-to-end tests.";
+		const entry = { ...skill(), description: `  \n  ${shortDescription}  \n  ` };
+		const compress = vi.fn(async () => "Run unit tests.");
+		const catalog = new SkillDescriptionCatalog({ store, compress: fast(compress) });
+
+		const rendered = catalog.render([entry]);
+		expect(rendered[0].description).toBe(shortDescription);
+		await catalog.waitForPending();
+
+		expect(compress).toHaveBeenCalledTimes(0);
+		expect(storedDescriptions(store.path)).toEqual([]);
+	});
 });
 
 describe("previewSkillDescription", () => {

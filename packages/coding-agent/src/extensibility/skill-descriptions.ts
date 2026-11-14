@@ -424,14 +424,19 @@ export class SkillDescriptionCatalog {
 			const key = keyFor(skill);
 			let description = this.#snapshot.get(key);
 			if (description === undefined) {
-				try {
-					description = store?.get(key);
-				} catch (error) {
-					logger.warn("Skill description cache read failed", { error: String(error) });
-				}
-				if (description === undefined) {
-					description = previewSkillDescription(skill.description);
-					misses.set(key, skill);
+				const text = skill.description.replace(/\s+/g, " ").trim();
+				if (text.length <= MAX_PREVIEW_CHARS) {
+					description = text;
+				} else {
+					try {
+						description = store?.get(key);
+					} catch (error) {
+						logger.warn("Skill description cache read failed", { error: String(error) });
+					}
+					if (description === undefined) {
+						description = previewSkillDescription(skill.description);
+						misses.set(key, skill);
+					}
 				}
 				this.#snapshot.set(key, description);
 			}
