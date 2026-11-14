@@ -637,4 +637,31 @@ describe("settings registry", () => {
 			await dir.remove();
 		}
 	});
+
+	it("keeps built-in interceptor rules when a project rule joins a global list of only path-scoped entries", async () => {
+		const dir = TempDir.createSync("@omp-settings-scoped-layer-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const projectDir = path.join(dir.path(), "project");
+			const scopedRule = { pattern: "^\\s*scoped\\s+", tool: "read", message: "Use read." };
+			const projectRule = { pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." };
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({ bashInterceptor: { patterns: [{ path: projectDir, patterns: [scopedRule] }] } }),
+			);
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ bashInterceptor: { patterns: [projectRule] } }),
+			);
+
+			const settings = await Settings.loadReadOnly({ cwd: projectDir, agentDir });
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
+				projectRule,
+				scopedRule,
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+		} finally {
+			await dir.remove();
+		}
+	});
 });

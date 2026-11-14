@@ -557,7 +557,20 @@ function pathScopePrefixes(entry: Record<string, unknown>): string[] {
 }
 
 /**
- * Appends the object `entries` that apply at `cwd` to `resolved`; returns whether any entry is unscoped.
+ * Default entries an object-item path-scoped `list` keeps: a non-empty list of only scoped entries
+ * adds to the setting's default (the built-in interceptor rules) rather than replacing it, so this
+ * returns that default; any unscoped entry makes the list replace it, so this returns `[]`.
+ * Read by {@link resolvePathScopedArray} and by layered merges, which must keep that meaning once a
+ * higher layer prepends unscoped entries onto a scoped-only lower list.
+ */
+function scopedListDefault(setting: AnySetting, list: readonly unknown[]): readonly unknown[] {
+	const { definition } = setting;
+	if (definition.type !== "array" || definition.pathScoped?.itemType !== "object" || list.length === 0) return [];
+	return list.some(entry => isRecord(entry) && pathScopePrefixes(entry).length === 0) ? [] : definition.default;
+}
+
+/**
+ * Appends the object `entries` that apply at `cwd` to `resolved`.
  * An entry naming no path prefix (none of the scope keys, or only unusable values such as YAML's
  * `path: ~` = null) is unscoped and passes through unchanged. A scoped entry whose prefix covers `cwd`
  * contributes its remaining fields as an inline rule, then its nested `values`/`items`/`valuesKey`
@@ -568,13 +581,11 @@ function resolvePathScopedObjects(
 	valuesKey: string,
 	cwd: string,
 	resolved: unknown[],
-): boolean {
-	let hasUnscopedEntry = false;
+): void {
 	for (const entry of entries) {
 		if (!isRecord(entry)) continue;
 		const prefixes = pathScopePrefixes(entry);
 		if (prefixes.length === 0) {
-			hasUnscopedEntry = true;
 			resolved.push(entry);
 			continue;
 		}
@@ -595,7 +606,6 @@ function resolvePathScopedObjects(
 			if (Array.isArray(list)) resolvePathScopedObjects(list, valuesKey, cwd, resolved);
 		}
 	}
-	return hasUnscopedEntry;
 }
 
 /** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
@@ -611,11 +621,8 @@ function resolvePathScopedArray(setting: AnySetting, value: unknown, cwd: string
 
 	const resolved: unknown[] = [];
 	if (scope.itemType === "object") {
-		const hasUnscopedEntry = resolvePathScopedObjects(value, scope.valuesKey, cwd, resolved);
-		// A list of only scoped entries adds to the default (the built-in interceptor rules) rather than replacing it.
-		if (value.length > 0 && !hasUnscopedEntry && setting.definition.type === "array") {
-			resolved.push(...setting.definition.default);
-		}
+		resolvePathScopedObjects(value, scope.valuesKey, cwd, resolved);
+		resolved.push(...scopedListDefault(setting, value));
 		return resolved;
 	}
 
@@ -4411,7 +4418,12 @@ export class Settings {
 					setting?.definition.type === "array"
 						? setting.default
 						: undefined;
-				const effectiveBase = Array.isArray(baseVal) ? baseVal : fallbackBase;
+				// A scoped-only lower list stands for its entries plus the default; keep that once higher entries join it.
+				const effectiveBase = Array.isArray(baseVal)
+					? setting
+						? [...baseVal, ...scopedListDefault(setting, baseVal)]
+						: baseVal
+					: fallbackBase;
 				if (override.length > 0 && strategy === "prepend" && Array.isArray(effectiveBase)) {
 					setOwn(result, key, [...override, ...effectiveBase]);
 				} else if (override.length > 0 && strategy === "append" && Array.isArray(effectiveBase)) {
