@@ -25,6 +25,7 @@ import {
 	type ExtensionAskDialogQuestion,
 	type ExtensionAskDialogResult,
 	type ExtensionAskDialogSubmitResult,
+	type ExtensionFormDialogResult,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -41,6 +42,16 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import {
+	choiceValue,
+	defaultFormData,
+	fieldError,
+	type HtmlFormData,
+	type HtmlFormValue,
+	isArrayChoice,
+	textValue,
+} from "@oh-my-pi/pi-tui/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -1195,6 +1206,119 @@ export async function requestRpcAskDialog(
 	return timedOut ? timedOutAskDialogResult(questions) : result;
 }
 
+/**
+ * Value a choice field's submitted entry gives: each string must be one of the
+ * field's enabled option values, except one free-text entry when the field
+ * offers "Other". Checkbox groups and multi-selects take an array; every other
+ * choice takes one string.
+ */
+function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | undefined {
+	const label = JSON.stringify(field.name);
+	// An omitted field means nothing checked: an empty array for array choices, as `choiceValue` gives everywhere else.
+	if (value === undefined) return choiceValue(field, new Set());
+	const entries = isArrayChoice(field) ? value : [value];
+	if (!Array.isArray(entries)) throw new Error(`Form field ${label} must carry an array of strings`);
+
+	// Map each entry to an option index, keeping at most one unmatched entry as the "Other" text.
+	const checked = new Set<number>();
+	let other: string | undefined;
+	for (const entry of entries) {
+		if (typeof entry !== "string") throw new Error(`Form field ${label} must carry strings`);
+		// Prefer an enabled option, so a disabled duplicate of the same value earlier in the group cannot shadow it.
+		const enabled = field.options.findIndex(option => !option.disabled && option.value === entry);
+		const index = enabled >= 0 ? enabled : field.options.findIndex(option => option.value === entry);
+		if (index >= 0 && field.options[index]!.disabled) {
+			throw new Error(`Form field ${label} carries disabled option ${JSON.stringify(entry)}`);
+		}
+		if (index >= 0 && !checked.has(index)) {
+			checked.add(index);
+		} else if (index < 0 && field.other && other === undefined) {
+			other = entry;
+		} else {
+			throw new Error(`Form field ${label} carries unexpected value ${JSON.stringify(entry)}`);
+		}
+	}
+	return choiceValue(field, checked, other);
+}
+
+/** Value a text field's submitted entry gives: a string, or a number for `number`/`range` inputs; absent counts as empty. */
+function parseFormText(field: TextField, value: unknown): HtmlFormValue {
+	if (value === undefined) return textValue(field, "");
+	const numeric = field.type === "number" || field.type === "range";
+	if (typeof value === "string" || (numeric && typeof value === "number" && Number.isFinite(value))) {
+		return textValue(field, String(value));
+	}
+	throw new Error(`Form field ${JSON.stringify(field.name)} must carry a string${numeric ? " or a number" : ""}`);
+}
+
+/** Validates submitted `form` data against the parsed form; any mismatch throws instead of guessing. */
+function parseFormDialogResponse(
+	response: RpcExtensionUIResponse,
+	form: HtmlForm,
+	dialogOptions: ExtensionUIDialogOptions,
+): ExtensionFormDialogResult | undefined {
+	if ("cancelled" in response && response.cancelled) {
+		if (response.timedOut) dialogOptions.onTimeout?.();
+		return undefined;
+	}
+	const submitted: unknown = "data" in response ? response.data : undefined;
+	if (!isRecord(submitted)) throw new Error("Form dialog response must carry a data object");
+
+	// Reject names the form does not have; hidden inputs may be echoed but keep the form's own values.
+	const named = form.fields.filter(field => field.name);
+	const names = new Set([...named.map(field => field.name), ...form.hidden.map(([name]) => name)]);
+	for (const name of Object.keys(submitted)) {
+		if (!names.has(name)) throw new Error(`Form dialog data carries unknown field ${JSON.stringify(name)}`);
+	}
+
+	// Check the value against every field of its name, enforcing the same rules the form dialogs apply on submit.
+	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
+	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
+	for (const field of named) {
+		const entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
+		const value = field.kind === "choice" ? parseFormChoice(field, entry) : parseFormText(field, entry);
+		const problem = fieldError(field, value);
+		if (problem) throw new Error(`Form field ${JSON.stringify(field.name)}: ${problem}`);
+		if (value !== undefined) data[field.name] = value;
+	}
+	return { data };
+}
+
+/**
+ * Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the form's defaults.
+ * Fails without sending when the frame exceeds `maxFrameBytes`, the largest frame the negotiated protocol delivers intact.
+ */
+export async function requestRpcFormDialog(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	maxFrameBytes: number,
+	html: string,
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<ExtensionFormDialogResult | undefined> {
+	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
+	const request = { method: "form", html, timeout: dialogOptions?.timeout };
+	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
+	if (bytes > maxFrameBytes) {
+		throw new Error(
+			`Form is too large for the RPC host (${bytes} bytes, limit ${maxFrameBytes}); use fewer or smaller images, or split the form`,
+		);
+	}
+
+	const form = parseHtmlForm(html);
+	let timedOut = false;
+	const opts: ExtensionUIDialogOptions = {
+		...dialogOptions,
+		onTimeout: () => {
+			timedOut = true;
+			dialogOptions?.onTimeout?.();
+		},
+	};
+	const result = await requestRpcDialog(pendingRequests, output, opts, undefined, request, response =>
+		parseFormDialogResponse(response, form, opts),
+	);
+	return timedOut ? { data: defaultFormData(form), timedOut: true } : result;
+}
+
 export function requestRpcEditor(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
@@ -1520,7 +1644,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	 */
 	class RpcExtensionUIContext implements ExtensionUIContext {
 		readonly supportsEditor = true;
-		/** Set by `set_ask_dialog`; hosts that never opt in keep the select/editor ask fallback. */
+		/** Set by `set_ask_dialog`; extension ask dialogs use select/editor until the host opts in. */
 		askDialogEnabled = false;
 
 		constructor(
@@ -1532,6 +1656,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			if (!this.askDialogEnabled) return undefined;
 			return (questions, dialogOptions) =>
 				requestRpcAskDialog(this.pendingRequests, this.output, questions, dialogOptions);
+		}
+
+		get formDialog(): ExtensionUIContext["formDialog"] {
+			return (html, dialogOptions) =>
+				requestRpcFormDialog(this.pendingRequests, this.output, frameEncoder.maxResponseBytes, html, dialogOptions);
 		}
 
 		select(
@@ -1732,8 +1861,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		output(error(id, command, promptError.message));
 
 	// Read stdin from now on: `session_start` may be waiting on a dialog only the client can answer. Until the
-	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every other
-	// frame is held, in arrival order, for that loop.
+	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every
+	// other frame is held, in arrival order, for that loop.
 	let heldFrames: unknown[] | undefined = [];
 	const receiveFrame = (parsed: unknown): void => {
 		if (!heldFrames) {

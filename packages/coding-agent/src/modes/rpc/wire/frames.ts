@@ -207,6 +207,10 @@ export const frameDefs = {
 		{ type: UI, id: "string", method: "'ask'", questions: "AskQuestion[]", "timeout?": "number.integer" },
 		"Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.",
 	),
+	FormUiRequest: doc(
+		{ type: UI, id: "string", method: "'form'", html: "string", "timeout?": "number.integer" },
+		"The HTML `<form>` of one `ask` tool call; no opt-in is required.",
+	),
 	CancelUiRequest: doc(
 		{ type: UI, id: "string", method: "'cancel'", targetId: "string" },
 		"Close the dialog opened by request `targetId`; a later answer to it is ignored.",
@@ -244,7 +248,7 @@ export const frameDefs = {
 		"instructions?": "string",
 	},
 	ExtensionUiRequest: doc(
-		"SelectUiRequest | ConfirmUiRequest | InputUiRequest | EditorUiRequest | AskUiRequest | CancelUiRequest | NotifyUiRequest | SetStatusUiRequest | SetWidgetUiRequest | SetTitleUiRequest | SetEditorTextUiRequest | OpenUrlUiRequest",
+		"SelectUiRequest | ConfirmUiRequest | InputUiRequest | EditorUiRequest | AskUiRequest | FormUiRequest | CancelUiRequest | NotifyUiRequest | SetStatusUiRequest | SetWidgetUiRequest | SetTitleUiRequest | SetEditorTextUiRequest | OpenUrlUiRequest",
 		"Extension UI request, discriminated by `method`.",
 	),
 	AskAnswer: doc(
@@ -261,14 +265,22 @@ export const frameDefs = {
 	),
 	CancelUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", cancelled: "true", "timedOut?": "boolean" },
-		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).",
+		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).",
 	),
 	AnswersUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", answers: "AskAnswer[]" },
 		"Answers an `ask` request: one `AskAnswer` per question, in question order.",
 	),
+	DataUiResponse: doc(
+		{
+			type: "'extension_ui_response'",
+			id: "string",
+			data: doc(JSON_OBJECT, "Submitted values by control `name`: a string, a number, or a string array."),
+		},
+		"Answers a `form` request with the submitted form data.",
+	),
 	ExtensionUiResponse: doc(
-		"ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse",
+		"ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse | DataUiResponse",
 		"Host reply to an extension UI request; variants share `type` and differ by their payload key.",
 	),
 

@@ -603,6 +603,9 @@ FAKE_SERVER = textwrap.dedent(
                     flush=True,
                 )
                 continue
+            if message == "needs form":
+                print(json.dumps({"type": "extension_ui_request", "id": "ui-form", "method": "form", "html": "<form></form>"}), flush=True)
+                continue
             if message == "side frames":
                 print(json.dumps({"type": "available_commands_update", "commands": [{"name": "plan", "source": "builtin"}]}), flush=True)
                 print(json.dumps({"type": "subagent_lifecycle", "payload": {"id": "Worker", "agent": "task", "agentSource": "bundled", "status": "started", "index": 0}}), flush=True)
@@ -1182,6 +1185,47 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(
                 client.request_raw("debug_last_ui_response"),
                 {"type": "extension_ui_response", "id": "ui-ask", "cancelled": True},
+            )
+
+    def test_form_data_reaches_the_wire_as_json_values(self) -> None:
+        with self.make_client() as client:
+            client.prompt("needs form")
+            request = client.next_ui_request(timeout=2.0)
+            self.assertTrue(request.requires_response())
+            client.send_ui_data(request.id, {"target": "prod", "checks": ("lint", "smoke"), "replicas": 3})
+            client.wait_for_idle(timeout=2.0)
+            self.assertEqual(
+                client.request_raw("debug_last_ui_response"),
+                {
+                    "type": "extension_ui_response",
+                    "id": "ui-form",
+                    "data": {"target": "prod", "checks": ["lint", "smoke"], "replicas": 3},
+                },
+            )
+
+    def test_form_data_rejects_booleans_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(TypeError):
+                client.send_ui_data("ui-form", {"agree": True})
+
+    def test_form_data_rejects_non_finite_numbers_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(ValueError):
+                client.send_ui_data("ui-form", {"replicas": float("nan")})
+
+    def test_form_data_rejects_non_string_list_members_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(TypeError):
+                client.send_ui_data("ui-form", {"checks": ["lint", float("nan")]})
+
+    def test_headless_ui_cancels_form_so_the_prompt_completes(self) -> None:
+        with self.make_client() as client:
+            client.install_headless_ui()
+            turn = client.prompt_and_wait("needs form", timeout=2.0)
+            self.assertEqual(turn.assistant_text, "ui acknowledged")
+            self.assertEqual(
+                client.request_raw("debug_last_ui_response"),
+                {"type": "extension_ui_response", "id": "ui-form", "cancelled": True},
             )
 
     def test_null_command_data_is_distinct_from_an_empty_result(self) -> None:

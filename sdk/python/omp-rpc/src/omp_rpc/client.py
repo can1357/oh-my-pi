@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import os
 import queue
 import signal
@@ -915,7 +916,7 @@ class RpcClient(WireClient):
                 else:
                     self.cancel_ui_request(request.id)
                 return
-            if request.method == "ask":
+            if request.method in ("ask", "form"):
                 self.cancel_ui_request(request.id)
 
         return self.on_ui_request(handle)
@@ -951,6 +952,31 @@ class RpcClient(WireClient):
             wire_answers.append(entry)
         self._send_notification(
             {"type": "extension_ui_response", "id": request_id, "answers": wire_answers}
+        )
+
+    def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
+        """Answer a `form` request with the submitted values by control `name`.
+
+        Raises `TypeError` for a `bool` (forms submit option values, never booleans)
+        or a list member that is not a string, and `ValueError` for a non-finite float,
+        which JSON cannot carry.
+        """
+        wire_data: JsonObject = {}
+        for name, value in data.items():
+            if isinstance(value, bool):
+                raise TypeError(f"form field {name!r} must be a string, a number or a list of strings, not a bool")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"form field {name!r} must be a finite number, not {value!r}")
+            if isinstance(value, (str, int, float)):
+                wire_data[name] = value
+                continue
+            # Members are checked too: a NaN inside a list would write invalid JSON the server cannot parse.
+            members = list(value)
+            if not all(isinstance(member, str) for member in members):
+                raise TypeError(f"form field {name!r} must be a list of strings, not {members!r}")
+            wire_data[name] = members
+        self._send_notification(
+            {"type": "extension_ui_response", "id": request_id, "data": wire_data}
         )
 
     def cancel_ui_request(self, request_id: str, *, timed_out: bool = False) -> None:

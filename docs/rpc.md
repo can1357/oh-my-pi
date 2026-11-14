@@ -736,12 +736,7 @@ The corresponding `get_state` result reports the same computed state:
 
 ### `set_ask_dialog` payload
 
-`set_ask_dialog` opts the host in to the `ask` extension UI request (see
-[Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default
-for every process; until a host enables it, the `ask` tool keeps prompting with
-one `select` (plus `editor` for free text) per choice. Builds without the
-command answer with a failed `response`, so hosts should keep the `select`
-fallback when enabling fails.
+`set_ask_dialog` opts the host in to the `ask` extension UI request for extension `ui.askDialog` calls (see [Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default; until enabled, those calls use `select` and `editor`. This setting does not affect the `ask` tool, which always sends a whole `form`. Builds without the command answer with a failed `response`, so hosts should keep handling extension dialogs through `select` and `editor` when enabling fails.
 
 ```json
 { "id": "req_ask", "type": "set_ask_dialog", "enabled": true }
@@ -1303,7 +1298,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 
 `--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
 
-- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`. Each `ask` prompt's `title` can span several lines: the form's context text for that field (paragraphs, lists, `<pre>` blocks, tables) separated by blank lines, then the field's question on the last line.
+- The `ask` tool sends one `form` request carrying the complete HTML form, without an enable command. Hosts must render the form and reply with submitted `data` or cancellation; the tool no longer walks fields through `select`, `input` or `editor` over RPC.
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
@@ -1315,7 +1310,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
 
 `RpcExtensionUIRequest` (`type: "extension_ui_request"`) methods:
 
-- `select`, `confirm`, `input`, `editor`, `ask`, `cancel`
+- `select`, `confirm`, `input`, `editor`, `ask`, `form`, `cancel`
    - `select` keeps labels in `options: string[]` and, when any option has a
      description, emits a positionally aligned
      `optionDetails: Array<{ description?: string }>` array. Hosts that do not
@@ -1324,23 +1319,18 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      (option to focus first), `selectionMarker?: "radio" | "checkbox"`,
      `checkedIndices?: number[]` (options currently checked in a checkbox
      list) and `markableCount?: number` (leading options that get a marker;
-     trailing ones are actions, such as the `ask` tool's "Done selecting";
-     absent means every option when `selectionMarker` is set). The `ask`
-     tool's "Other" row is marked and appears in `checkedIndices` once a custom
-     answer is entered.
-     The `ask` tool's checkbox fallback re-sends `select` after
-     every toggle, so `checkedIndices` is the authoritative checked state; a
-     host that ignores it cannot show which options are already checked.
+     trailing ones are actions; absent means every option when
+     `selectionMarker` is set). `checkedIndices` is the authoritative checked state.
    - `input` carries `title: string` and optional `placeholder?: string`,
      `timeout?: number`, and `secret?: boolean`. `secret` is an unnegotiated
      host hint from `ExtensionUIDialogOptions.secret`; hosts that support
      masked input should hide typed characters when `secret: true`.
    - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
-     question of one extension `ui.askDialog` call (the `ask` tool instead walks
-     its HTML form field by field through `select`, `input` and `editor`):
+     question of one extension `ui.askDialog` call (the `ask` tool instead sends a `form` request):
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -1372,6 +1362,7 @@ Example:
 - `{ type: "extension_ui_response", id: string, confirmed: boolean }`
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 - `{ type: "extension_ui_response", id: string, answers: Array<{ id: string, selectedOptions: string[], customInput?: string }> }` (answers an `ask` request)
+- `{ type: "extension_ui_response", id: string, data: Record<string, string | number | string[]> }` (answers a `form` request)
 
 `select` and `input` resolve to `undefined`, and `confirm` to `false`, on
 cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
@@ -1387,6 +1378,18 @@ option, else its first.
 `selectedOptions` holds exact option labels without duplicates; a multi-select may be empty. A single-select
 (`multi` absent or false) takes at most one option and not both an option and `customInput`. `customInput`
 is trimmed and ignored when empty. Any other shape fails the `ask` tool call instead of guessing.
+
+`data` holds the submitted values by control `name`, as an HTML form submits them. A radio group, a single
+`<select>` or a lone checkbox gives one option `value` (omitted when nothing is chosen); a checkbox group or a
+multi-select of two or more options gives an array of option values without duplicates (empty when omitted), while one with a single
+option gives that one value like a lone checkbox; a text field gives its text, or a number for a
+`number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options
+takes one extra string that is not an option value as its "Other" answer. Hidden inputs keep the form's own values.
+Unknown names, disabled options, wrong types, and answers that break `required`, `min`/`max`,
+`minlength`/`maxlength`, `email`/`url` or `pattern` fail the `ask` tool call instead of guessing. A `form` timeout
+(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame
+exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
+call without being sent, instead of reaching the host truncated.
 
 ```json
 {

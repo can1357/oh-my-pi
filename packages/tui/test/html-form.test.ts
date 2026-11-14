@@ -477,6 +477,13 @@ describe("html form", () => {
 			]);
 		});
 
+		it("keeps a control named __proto__ as an ordinary key of the defaults", () => {
+			const form = parseHtmlForm(`<form><input type="hidden" name="__proto__" value="x">
+				<label>Target <input name="target" value="prod"></label></form>`);
+			// The model reads the data as JSON, so the key must survive serialization.
+			expect(JSON.stringify(defaultFormData(form))).toBe('{"__proto__":"x","target":"prod"}');
+		});
+
 		it("validates required, numeric bounds and anchored patterns; ignores an invalid pattern", () => {
 			const form = parseHtmlForm(`<form>
 				<input name="n" type="number" min="1" max="8" required>

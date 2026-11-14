@@ -833,6 +833,8 @@ export type RpcExtensionUIRequest =
 			questions: RpcAskDialogQuestion[];
 			timeout?: number;
 	  }
+	/** The whole HTML form of an `ask` tool call; no opt-in is required. */
+	| { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
 			type: "extension_ui_request";
@@ -988,7 +990,9 @@ export type RpcExtensionUIResponse =
 			type: "extension_ui_response";
 			id: string;
 			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
-	  };
+	  }
+	/** Submitted data of a `form` request, by control `name`; validated against the form. */
+	| { type: "extension_ui_response"; id: string; data: Record<string, unknown> };
 
 // ============================================================================
 // Helper type for extracting command types
