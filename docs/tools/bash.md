@@ -127,6 +127,7 @@ bash:
 - `deny` and `prompt` check the complete command and each shell command segment (first matching restriction per segment, with `deny` taking precedence over `prompt` across segments). A rule such as `match: "rm -rf *"` therefore catches `cd /tmp && rm -rf build` and `curl http://example.com; rm -rf build` even when `curl *` matches an earlier `prompt` rule. Operator `deny` rules in `Settings.grantAuthority()` also outrank project-layer rules.
 - Both `bash.patterns` and `bashInterceptor.patterns` support [path-scoped entries](../settings.md#path-scoped-arrays) (`{ path, patterns: [...] }`), allowing repository-specific command rules to live directly in `~/.omp/agent/config.yml`.
 - Leading `KEY=VALUE` assignments on `allow` rules are stripped only when the variable name exactly matches an entry in `bash.allowedEnvVars` or the rule's optional `env: [...]` list (no wildcards). `deny` and `prompt` rules check segments with and without leading bare `KEY=VALUE` assignments, so `FOO=1 rm -rf build` still hits `match: "rm -rf *"`. Wrapper commands such as `env FOO=1 rm -rf build` are not unwrapped.
+- Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` lists are prepended ahead of the global `config.yml` list, so repository-local rules extend your global policy without replacing it.
 
 Use this setting for safety and user control. It remains useful for commands with no appropriate replacement tool, such as destructive removal, network access, deployment scripts, or project-specific scripts.
 
@@ -148,7 +149,7 @@ bashInterceptor:
 
 An interceptor rule only applies when its `tool` is available in the current session. If `read` is disabled, a `cat` rule targeting `read` does not block the Bash call. This makes the interceptor a best-effort capability preference rather than an execution-security boundary.
 
-The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list.
+The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list. Project and `--config` overlay `bashInterceptor.patterns` entries are prepended ahead of the global list (or `DEFAULT_BASH_INTERCEPTOR_RULES` when the global config leaves `bashInterceptor.patterns` unset).
 
 For compatibility with existing custom regexes, the interceptor always checks the complete original command first. It then checks raw, flat command fragments separated by unquoted and unescaped `&&`, `||`, `;`, `|`, `&`, or newlines. It also checks fragments after leading environment assignments are removed:
 

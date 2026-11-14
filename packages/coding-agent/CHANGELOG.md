@@ -6,6 +6,7 @@
 
 - `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
 - Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow leading `KEY=VALUE` prefixes for exactly named environment variables on `allow` rules without duplicating rules for each variable combination ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
+- Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` and `bashInterceptor.patterns` now prepend ahead of global rules instead of replacing them wholesale ([#18352](https://github.com/can1357/oh-my-pi/pull/18352) by [@asuffield](https://github.com/asuffield))
 - Subagents now preserve @upstream provider pinning on inherited models
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.

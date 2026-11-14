@@ -165,7 +165,7 @@ Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, env
 Layers are combined with a deep merge:
 
 - **Objects are deep-merged** — keys present only in a lower layer are kept; keys present in a higher layer override.
-- **Scalars and arrays are replaced wholesale** by the higher-precedence layer. A higher layer's array does not append to a lower layer's array.
+- **Scalars and most arrays are replaced wholesale** by the higher-precedence layer. Rule-list arrays configured with `merge: "prepend"` (`bash.patterns` and `bashInterceptor.patterns`) are the exception: project and `--config` overlay entries prepend ahead of global entries (or the schema default when the global layer leaves the list unset), while a configured `null` or empty `[]` resets the list and runtime overrides still replace it wholesale.
 - **A configured `null` counts as unset at read time**, so the schema default (or a fallback env var) applies rather than a lower-layer value. Project `modelRoles` entries are an exception: cleared/null project roles fall back to global roles.
 - **Named model presets are resolved whole**, not deep-merged across layers. A project preset of the same name replaces the global preset. Runtime/overlay `null` entries can hide a lower-layer preset.
 
@@ -186,6 +186,8 @@ tools:
 ### Bash command approval patterns
 
 `tools.approval` is a record keyed by tool name; dotted forms such as `tools.approval.eval` and `tools.approval.computer` identify entries in that record, not separate setting ids. Each entry sets that tool's default policy. One entry is not a tool: the literal key `computer.control` (`tools.approval["computer.control"]`, written `computer.control: allow` in YAML, never nested under `computer`) answers the `computer` tool's requests for foreground control; see [computer use](./computer-use.md#menus-held-input-and-task-control). For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard. Whitespace is the exception: before matching, every run of spaces, tabs, or newlines in both the pattern and the command collapses to a single space, and leading/trailing whitespace is trimmed. A newline in a pattern therefore matches any whitespace: `match: "*\n*"` behaves like `"* *"` and matches every command containing a space. A newline-specific rule is unnecessary to catch dangerous commands in a newline-separated list: `deny` and `prompt` rules check each segment (see below). `allow` rules reject unquoted newline command separators, but can approve commands containing quoted or escaped literal newlines when the full command matches.
+
+Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` entries are **prepended** ahead of global `~/.omp/agent/config.yml` rules rather than replacing them, so repository-specific build or lint allowances can be declared locally without duplicating global rules.
 
 Leading `KEY=VALUE` environment assignments do not match an `allow` rule unless the pattern includes them explicitly or the variable name exactly matches an entry in `bash.allowedEnvVars` (or a per-rule `env` list); entries are literal names, not wildcards:
 
@@ -285,7 +287,7 @@ disabledProviders:
    - groq # project array REPLACES the global array
 ```
 
-Array replacement is the most common surprise: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every other array-typed setting.
+Array replacement is the most common surprise for non-merged lists: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every array setting other than `bash.patterns` and `bashInterceptor.patterns` (which prepend project entries ahead of global ones).
 
 ## Project-local config
 
@@ -1216,7 +1218,7 @@ Selected migrations applied whenever raw settings are loaded (global, project, o
 
 ### A global array disappeared in a project
 
-Arrays replace; they do not append. If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or any other array, include the **complete** desired value in the project layer — the global array is fully replaced.
+Most arrays replace rather than append (`bash.patterns` and `bashInterceptor.patterns` prepend project entries ahead of global entries). If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or another replacing array, include the **complete** desired value in the project layer — the global array is fully replaced.
 
 ### A provider is still available after editing config
 

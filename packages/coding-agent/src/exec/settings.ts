@@ -170,6 +170,7 @@ export const cfgBashPatterns = register({
 	type: "array",
 	default: EMPTY_BASH_PATTERNS,
 	pathScoped: { valuesKey: "patterns", itemType: "object" },
+	merge: "prepend",
 	ui: {
 		tab: "shell",
 		group: "Bash",
@@ -210,6 +211,7 @@ export const cfgBashInterceptorPatterns = register({
 	type: "array",
 	default: DEFAULT_BASH_INTERCEPTOR_RULES,
 	pathScoped: { valuesKey: "patterns", itemType: "object" },
+	merge: "prepend",
 });
 
 export const cfgBashDirenv = register({
