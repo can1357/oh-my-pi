@@ -81,10 +81,10 @@ import { refreshAgentDiscovery } from "../../task";
 import { sumSubagentTreeCost } from "../agent-hub-runtime";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import {
-	blockText,
 	choiceValue,
 	defaultFormData,
 	fieldQuestions,
+	formContext,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
@@ -659,24 +659,6 @@ async function elicitFromAcpClient(
 }
 
 /**
- * The elicitation message for an HTML form: its section titles and context
- * blocks (paragraphs, lists, preformatted text, tables) as plain text, the
- * fields themselves being schema properties.
- */
-function formElicitationMessage(form: HtmlForm): string {
-	const parts: string[] = [];
-	for (const section of form.sections) {
-		const title = spansText(section.title).trim();
-		if (title) parts.push(title);
-		for (const block of section.blocks) {
-			const text = blockText(block);
-			if (text) parts.push(text);
-		}
-	}
-	return parts.filter(part => part.trim()).join("\n\n") || "Fill in the form";
-}
-
-/**
  * Property holding each "Other" choice field's free-text answer:
  * `<name>__other` ({@link OTHER_SUFFIX}), with more underscores while another
  * control already uses it.
@@ -965,7 +947,8 @@ export function createAcpExtensionUiContext(
 				connection,
 				getSessionId(),
 				"formDialog",
-				formElicitationMessage(form),
+				// Section titles and captions already title the field properties ({@link formContext}).
+				formContext(form).join("\n\n") || "Fill in the form",
 				properties,
 				required.length > 0 ? required : undefined,
 				{

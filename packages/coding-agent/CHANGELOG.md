@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- ACP form elicitations no longer repeat each field's question (section title or caption) in the elicitation message ([#19305](https://github.com/can1357/oh-my-pi/issues/19305))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
