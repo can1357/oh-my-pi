@@ -4,6 +4,7 @@
 
 ### Added
 
+- Todo tool status line now shows count for multiple task targets
 - Composer image tokens now preserve pasted image blobs when copying drafts in Tern.
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Markdown links handled by registered extension schemes now use a distinct `mdExtensionLink` theme color, with a muted fallback for themes that do not define it.
