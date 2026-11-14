@@ -1,3 +1,4 @@
+pub(super) mod drag_control;
 mod enablement;
 pub(crate) mod menus;
 pub(super) mod open_menu;

@@ -1654,6 +1654,12 @@ export interface DesktopDragResult {
    * [`DesktopFocusReturn`].
    */
   focusReturn?: DesktopFocusReturn
+  /**
+   * What the drag found about its outcome that it does not show by itself:
+   * on macOS, the value a web slider was left at when it differs from the
+   * straight-line value under the path's end, or that steps set it there.
+   */
+  note?: string
 }
 
 /**

@@ -167,6 +167,12 @@ enum Response {
 	Input(Option<DesktopFocusReturn>),
 	/// A typing call's result; see [`control::take_text_unconfirmed`].
 	Typed(DesktopTypeResult),
+	/// A drag call posted as input: what it noted about its outcome (see
+	/// [`control::take_drag_note`]) and its takeover focus report.
+	Dragged {
+		note:         Option<String>,
+		focus_return: Option<DesktopFocusReturn>,
+	},
 	Nodes(Vec<AxNode>),
 	Node(Option<AxNode>),
 	Attributes(Vec<(String, String)>),
@@ -1121,6 +1127,7 @@ impl Worker {
 			.frame_target()
 			.and_then(|target| self.frames.remove(target.key()));
 		control::take_focus_return();
+		control::take_drag_note();
 		// An element action goes only to an element that still reads with the
 		// role and label its ref was read with ([`ax::require_read_as`]).
 		#[cfg(any(target_os = "macos", test))]
@@ -1556,7 +1563,10 @@ impl Worker {
 				}
 				refuse_menu_press(backend.as_mut(), options.refuse_menu, mode, target, &event)?;
 				backend.pointer(target, event, &frame, mode, token)?;
-				Ok(Response::Input(control::take_focus_return()))
+				Ok(Response::Dragged {
+					note:         control::take_drag_note(),
+					focus_return: control::take_focus_return(),
+				})
 			},
 			Request::Scroll { target, x, y, dx, dy, takeover, .. } => {
 				let (x, y, frame) = self.map_point(target, *x, *y)?;
@@ -2446,11 +2456,13 @@ impl DesktopSession {
 		let token = c.cancellation.token();
 		Ok(task::blocking("desktop.drag", (), move |_| {
 			match c.call(token, |reply| Request::Drag { target, path, options: o, reply })? {
-				Response::TextSelection(v) => {
-					Ok(DesktopDragResult { selection: Some(v), focus_return: None })
-				},
-				Response::Input(report) => {
-					Ok(DesktopDragResult { selection: None, focus_return: report })
+				Response::TextSelection(v) => Ok(DesktopDragResult {
+					selection:    Some(v),
+					focus_return: None,
+					note:         None,
+				}),
+				Response::Dragged { note, focus_return } => {
+					Ok(DesktopDragResult { selection: None, focus_return, note })
 				},
 				_ => Err(DesktopError::internal("unexpected desktop worker response")),
 			}
@@ -5166,7 +5178,10 @@ mod capture_tests {
 		let backend = FakeWaylandBackend::new();
 		let clicks = Arc::clone(&backend.clicks);
 		let mut worker = worker_with(backend);
-		assert!(matches!(drag(&mut worker), Response::Input(None)));
+		assert!(matches!(drag(&mut worker), Response::Dragged {
+			note:         None,
+			focus_return: None,
+		}));
 		assert_eq!(*clicks.lock(), [WAYLAND_ID]);
 	}
 

@@ -1221,6 +1221,7 @@ class Win {
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
 		refuseMenuPress(this.#session, context, native);
 		let selection: AxTextSelection | undefined;
+		let note: string | undefined;
 		await sendInput(
 			this.#session,
 			context,
@@ -1233,10 +1234,13 @@ class Win {
 					{ ...native, ...fallback },
 				);
 				selection = result?.selection;
+				note = result?.note ?? undefined;
 				return result?.focusReturn;
 			},
 			this.pid,
 		);
+		// What the drag found about its outcome, such as the value a slider was left at.
+		if (note) context.output.push({ type: "text", text: note });
 		if (!selection) return undefined;
 		// The returned selection keeps the whole text; the output line quotes its start.
 		const quoted = truncate(JSON.stringify(selection.text).slice(1, -1), DRAG_SELECTION_PREVIEW_CHARS);
