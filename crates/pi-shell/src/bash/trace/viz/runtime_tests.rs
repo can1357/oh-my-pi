@@ -138,6 +138,15 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 	assert_eq!(shown.len(), 2, "{p}");
 	assert_ne!(shown[0].1["role"], "raw", "{p}");
 	assert_eq!(shown[1].0, "for f in");
+
+	// Escape parity: after `\\` the `|` is a pipe awaiting its next stage,
+	// after `\` it is part of the word.
+	for script in ["echo x\\\\|", "echo x\\|"] {
+		let p = present(&RunTrace::new(script), &Options::default());
+		let shown = rows(&p);
+		assert_eq!(shown.len(), 1, "{script:?}: {p}");
+		assert_ne!(shown[0].1["role"], "raw", "{script:?}: {p}");
+	}
 }
 
 #[tokio::test(flavor = "multi_thread")]

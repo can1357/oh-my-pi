@@ -2639,12 +2639,7 @@ fn close_tail(text: &[u8], mut error: ParseErrorKind, mut pristine: bool) -> Opt
 			ParseErrorKind::Unmatched(close) => {
 				// A streamed `\` would escape the appended quote: hide it
 				// until what it escapes arrives.
-				let backslashes = repaired
-					.iter()
-					.rev()
-					.take_while(|&&byte| byte == b'\\')
-					.count();
-				if pristine && matches!(close, "\"" | "`") && backslashes % 2 == 1 {
+				if pristine && matches!(close, "\"" | "`") && escaped(&repaired) {
 					shown -= 1;
 					repaired.truncate(shown);
 				}
@@ -2745,7 +2740,13 @@ fn dangling_operator(text: &[u8]) -> Option<usize> {
 	};
 	let at = end - width;
 	// An escaped `\|` is a word, not an operator.
-	(at == 0 || text[at - 1] != b'\\').then_some(at)
+	(!escaped(&text[..at])).then_some(at)
+}
+
+/// Whether the byte after `text` is escaped: `text` ends in an odd number
+/// of backslashes (`\\` is an escaped backslash).
+fn escaped(text: &[u8]) -> bool {
+	text.iter().rev().take_while(|&&byte| byte == b'\\').count() % 2 == 1
 }
 
 /// Start of the redirection operator ending `text` before blanks, awaiting
@@ -2761,7 +2762,7 @@ fn dangling_redirection(text: &[u8]) -> Option<usize> {
 		.rposition(|byte| !matches!(byte, b'<' | b'>' | b'&' | b'|'))
 		.map_or(0, |at| at + 1);
 	let operator = text[at..end].iter().any(|byte| matches!(byte, b'<' | b'>'));
-	(operator && (at == 0 || text[at - 1] != b'\\')).then_some(at)
+	(operator && !escaped(&text[..at])).then_some(at)
 }
 
 /// Start of the command name ending `text` when it is so far a prefix of a
