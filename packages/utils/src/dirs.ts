@@ -807,6 +807,11 @@ export function getPythonGatewayDir(): string {
 	return dirs.agentSubdir(undefined, "python-gateway", "state");
 }
 
+/** Get the managed Antigravity CLI directory (~/.omp/antigravity-cli): the `agy` binary and its isolated state. */
+export function getAntigravityCliDir(): string {
+	return dirs.rootSubdir("antigravity-cli", "data");
+}
+
 /** Get the puppeteer sandbox directory (~/.omp/puppeteer). */
 export function getPuppeteerDir(): string {
 	return dirs.rootSubdir("puppeteer", "cache");
