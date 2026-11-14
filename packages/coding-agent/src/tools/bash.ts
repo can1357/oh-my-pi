@@ -386,6 +386,12 @@ type BashPatternDecision =
 	| { kind: "allow" }
 	| { kind: "unmatched" };
 
+/** One `bash.patterns` view: its rules plus the env names its `allow` rules may strip. */
+interface BashPatternPolicy {
+	rules: BashApprovalPatternRule[];
+	allowedEnvVars: string[];
+}
+
 function resolveBashPatternDecision(
 	command: string,
 	compoundSegments: readonly LiteralShellCommandSegment[] | null,
@@ -654,31 +660,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
-		const rawPatterns = cfgBashPatterns.get(this.session.settings);
-		const patternRules = getBashApprovalPatternRules(rawPatterns);
-		const rawAllowedEnvVars = cfgBashAllowedEnvVars.get(this.session.settings);
-		const allowedEnvVars = normalizeBashAllowedEnvList(rawAllowedEnvVars);
+		const { session: policy, authority } = this.#patternPolicies();
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
 			: undefined;
 		const compoundSegments = shell && isPosixShell(shell) ? extractLiteralAndChainSegments(command) : null;
-		const decision = resolveBashPatternDecision(command, compoundSegments, patternRules, allowedEnvVars);
+		const decision = resolveBashPatternDecision(command, compoundSegments, policy.rules, policy.allowedEnvVars);
 		// Project layers may tighten the operator's `bash.patterns`, never loosen
 		// them: an operator deny or prompt still applies under a project allow.
-		const authoritySettings = this.session.settings.grantAuthority?.();
-		const rawAuthorityPatterns = authoritySettings ? cfgBashPatterns.get(authoritySettings) : rawPatterns;
-		const rawAuthorityAllowedEnvVars = authoritySettings
-			? cfgBashAllowedEnvVars.get(authoritySettings)
-			: rawAllowedEnvVars;
 		const authorityDecision =
-			rawAuthorityPatterns === rawPatterns && rawAuthorityAllowedEnvVars === rawAllowedEnvVars
+			authority === policy
 				? decision
-				: resolveBashPatternDecision(
-						command,
-						compoundSegments,
-						getBashApprovalPatternRules(rawAuthorityPatterns),
-						normalizeBashAllowedEnvList(rawAuthorityAllowedEnvVars),
-					);
+				: resolveBashPatternDecision(command, compoundSegments, authority.rules, authority.allowedEnvVars);
 		const denied =
 			authorityDecision.kind === "deny" ? authorityDecision : decision.kind === "deny" ? decision : undefined;
 		if (denied) {
@@ -714,6 +707,35 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	};
+	/**
+	 * `bash.patterns` rules and env allowlist for the session (`session`) and for the operator layers
+	 * alone (`authority`, from `Settings.grantAuthority()`); `authority` is `session` when they agree.
+	 * Shared by {@link approval} and the compound approval rows so both judge segments alike.
+	 */
+	#patternPolicies(): { session: BashPatternPolicy; authority: BashPatternPolicy } {
+		const settings = this.session.settings;
+		const rawPatterns = cfgBashPatterns.get(settings);
+		const rawAllowedEnvVars = cfgBashAllowedEnvVars.get(settings);
+		const session: BashPatternPolicy = {
+			rules: getBashApprovalPatternRules(rawPatterns),
+			allowedEnvVars: normalizeBashAllowedEnvList(rawAllowedEnvVars),
+		};
+		const authoritySettings = settings.grantAuthority?.();
+		if (!authoritySettings) return { session, authority: session };
+		const rawAuthorityPatterns = cfgBashPatterns.get(authoritySettings);
+		const rawAuthorityAllowedEnvVars = cfgBashAllowedEnvVars.get(authoritySettings);
+		if (rawAuthorityPatterns === rawPatterns && rawAuthorityAllowedEnvVars === rawAllowedEnvVars) {
+			return { session, authority: session };
+		}
+		return {
+			session,
+			authority: {
+				rules: getBashApprovalPatternRules(rawAuthorityPatterns),
+				allowedEnvVars: normalizeBashAllowedEnvList(rawAuthorityAllowedEnvVars),
+			},
+		};
+	}
+
 	#formatCompoundApprovalDetails(command: string): string[] | null {
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
@@ -721,14 +743,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (!shell || !isPosixShell(shell)) return null;
 		const segments = extractAndChainSegments(command);
 		if (!segments) return null;
-		const rawPatterns = cfgBashPatterns.get(this.session.settings);
-		const patternRules = getBashApprovalPatternRules(rawPatterns);
-		const authoritySettings = this.session.settings.grantAuthority?.();
-		const rawAuthorityPatterns = authoritySettings ? cfgBashPatterns.get(authoritySettings) : rawPatterns;
-		const authorityRules =
-			rawAuthorityPatterns === rawPatterns ? patternRules : getBashApprovalPatternRules(rawAuthorityPatterns);
+		const { session: policy, authority } = this.#patternPolicies();
 		// Whole-chain restrictions apply to the complete chain rather than individual segments.
-		for (const rules of authorityRules === patternRules ? [patternRules] : [authorityRules, patternRules]) {
+		for (const rules of authority === policy ? [policy.rules] : [authority.rules, policy.rules]) {
 			for (const rule of rules) {
 				if (
 					rule.approval !== "allow" &&
@@ -756,9 +773,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i]!;
 			const isCritical = segmentCritical[i]!;
-			const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
+			const segmentRule = findBashApprovalPatternRule(segment.text, policy.rules, policy.allowedEnvVars);
 			const authorityRule =
-				authorityRules === patternRules ? segmentRule : findBashApprovalPatternRule(segment.text, authorityRules);
+				authority === policy
+					? segmentRule
+					: findBashApprovalPatternRule(segment.text, authority.rules, authority.allowedEnvVars);
 			const promptRule =
 				authorityRule?.approval === "prompt"
 					? authorityRule
