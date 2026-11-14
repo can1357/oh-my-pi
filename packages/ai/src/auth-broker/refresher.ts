@@ -10,23 +10,11 @@
  * compare-and-set disable — only when no peer/login rotated the row first — so
  * the next snapshot pull surfaces a clean delete on the client.
  */
+import { providerRefreshesOnUseOnly } from "@oh-my-pi/pi-catalog/compat/auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "../auth-storage";
 import { isDefinitiveOAuthFailure } from "../error/auth-classify";
 import { DEFAULT_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_SKEW_MS } from "./types";
-
-/**
- * Providers whose OAuth accounts refresh only when a request is about to use
- * them (`AuthStorage.oauth.access`), never in the background sweep. Refreshing
- * every pooled Google Antigravity account from one host within a couple of
- * minutes, with no inference behind it, links those accounts to each other.
- */
-const LAZY_REFRESH_PROVIDERS: Record<string, true> = { "google-antigravity": true };
-
-/** Whether the background sweep leaves this provider's accounts to on-use refresh. */
-function refreshesOnUseOnly(provider: string): boolean {
-	return Object.hasOwn(LAZY_REFRESH_PROVIDERS, provider);
-}
 
 export interface AuthBrokerRefresherOptions {
 	storage: AuthStorage;
@@ -106,7 +94,8 @@ export class AuthBrokerRefresher {
 			const targets: number[] = [];
 			for (const entry of snapshot.credentials) {
 				if (entry.credential.type !== "oauth") continue;
-				if (refreshesOnUseOnly(entry.provider)) continue;
+				// `refresh { on-use-only #true }`: left to the on-use refresh in `AuthStorage.oauth.access`.
+				if (providerRefreshesOnUseOnly(entry.provider)) continue;
 				const expires = entry.credential.expires;
 				if (typeof expires !== "number" || !Number.isFinite(expires)) continue;
 				if (expires > deadline) continue;

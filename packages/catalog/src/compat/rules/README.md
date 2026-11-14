@@ -397,6 +397,7 @@ auth "anthropic" {
         require "projectId"
         credential { … }                        // defaults to the login map
         after-refresh hook="…"
+        on-use-only #true                       // refresh an account only when a request is about to use it
     }
     store-as "openai-codex"                      // persist under another provider id
     callback-port 54545                          // defaults to the oauth-code callback port
@@ -422,6 +423,8 @@ auth "anthropic" {
 `disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice, as does listing the id in the coding agent's `auth.unpausedProviders` setting (`setUnpausedProviders` in `@oh-my-pi/pi-ai/oauth`). Delete the line to turn it back on for everyone — stored logins come back as they were.
 
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
+
+`refresh { on-use-only #true }` refreshes an OAuth account only when a request is about to use it (`AuthStorage.oauth.access` / `accessById`). The auth broker's background sweep skips the provider, and online model discovery refreshes no stored account: it reads the accounts whose access token is still valid plus the one the discovery preflight resolved, and leaves expired ones alone. Discovery that left an account out is partial: it adds models without pruning and is cached non-authoritative, so it retries after the short backoff instead of replacing the catalog for the cache TTL. Absent or `#false` keeps the background sweep and refreshes every account at discovery. The directive is independent of `disabled`.
 
 Login kinds:
 

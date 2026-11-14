@@ -6,6 +6,7 @@ import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
+import { providerRefreshesOnUseOnly } from "../src/compat/auth";
 import { cursorModelParameters } from "../src/compat/behavior";
 import committed from "../src/compat/rules.json";
 
@@ -357,6 +358,16 @@ describe("auth grammar", () => {
 			order(),
 		]);
 		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
+	});
+
+	test("refresh on-use-only compiles to a boolean and is exposed for google-antigravity only", () => {
+		const text = (flag: string) =>
+			`auth "x" {\n\tname "X"\n\tlogin "oauth-code" {\n\t\tauthorize-url "https://a"\n\t\tcallback port=1\n\t\ttoken url="https://t"\n\t}\n\trefresh {\n\t\ton-use-only ${flag}\n\t}\n}`;
+		const refresh = compileAuth([{ file: "auth/x.kdl", text: text("#true") }, order("x")]).providers[0]?.refresh;
+		expect(refresh?.kind === "request" && refresh.onUseOnly).toBe(true);
+		expect(() => compileAuth([{ file: "auth/x.kdl", text: text('"yes"') }, order("x")])).toThrow(/auth\/x\.kdl:9/);
+		expect(providerRefreshesOnUseOnly("google-antigravity")).toBe(true);
+		expect(providerRefreshesOnUseOnly("openai-codex")).toBe(false);
 	});
 
 	test("a disabled provider keeps its reason, and a blank reason is rejected", () => {

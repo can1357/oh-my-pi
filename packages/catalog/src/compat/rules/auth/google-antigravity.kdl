@@ -26,6 +26,8 @@ auth "google-antigravity" {
 	refresh {
 		require "projectId"
 		after-refresh hook="google-antigravity-project"
+		// Refreshing every pooled account from one host with no request behind it links the accounts.
+		on-use-only #true
 	}
 	api-key-format "structured"
 }
