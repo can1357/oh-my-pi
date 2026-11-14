@@ -69,7 +69,7 @@ const checks: VersionCheck[] = [
 	{
 		name: "Gemini CLI",
 		file: "packages/catalog/src/wire/gemini-headers.ts",
-		sourcePattern: /PI_AI_GEMINI_CLI_VERSION\s*\|\|\s*"(\d+\.\d+\.\d+)"/,
+		sourcePattern: /DEFAULT_GEMINI_CLI_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/,
 		fetchLatest: () => fetchLatestGitHubRelease("google-gemini/gemini-cli"),
 	},
 	{
