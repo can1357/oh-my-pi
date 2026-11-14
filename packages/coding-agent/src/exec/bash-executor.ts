@@ -41,6 +41,20 @@ import {
 	type ShellMinimizerSettings,
 } from "./settings";
 
+/**
+ * Test-only seam: replaces the native `Shell.run` call so result-shaping
+ * behavior (notices, exit handling) can be asserted against a fixed native
+ * result no matter which addon version is loaded. Production code never
+ * sets it.
+ */
+export const __test: {
+	run?: (
+		shell: Shell,
+		request: Parameters<Shell["run"]>[0],
+		onChunk: Parameters<Shell["run"]>[1],
+	) => Promise<ShellRunResult>;
+} = {};
+
 export interface BashExecutorOptions {
 	cwd?: string;
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
@@ -149,6 +163,19 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/**
+	 * True when `exit` or an armed `set -e` cut the run short with commands
+	 * still left to run (whatever followed the abort did not run); a trailing
+	 * `exit` at the end of the input is not reported. Only set by the
+	 * embedded-shell path; PTY runs never set it.
+	 */
+	endedByExit?: boolean;
+	/**
+	 * True when the run did not own the session's persistent shell (an
+	 * overlapping call's fork, or a fresh shell after the persistent one was
+	 * quarantined): its state changes do not persist to later calls.
+	 */
+	ephemeralShell?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 }
@@ -916,23 +943,24 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	};
 
 	try {
-		const runPromise = executionShell.run(
-			{
-				command: finalCommand,
-				cwd: commandCwd,
-				env: commandEnv,
-				timeoutMs: nativeTimeoutMs,
-				signal: runAbortController.signal,
-				filesystem: options?.filesystem,
-				streams: options?.streams,
-				trace: runTrace,
-			},
-			(err, chunk) => {
-				if (!err) {
-					enqueueChunk(chunk);
-				}
-			},
-		);
+		const runRequest = {
+			command: finalCommand,
+			cwd: commandCwd,
+			env: commandEnv,
+			timeoutMs: nativeTimeoutMs,
+			signal: runAbortController.signal,
+			filesystem: options?.filesystem,
+			streams: options?.streams,
+			trace: runTrace,
+		};
+		const onRunChunk = (err: unknown, chunk: string) => {
+			if (!err) {
+				enqueueChunk(chunk);
+			}
+		};
+		const runPromise = __test.run
+			? __test.run(executionShell, runRequest, onRunChunk)
+			: executionShell.run(runRequest, onRunChunk);
 		options?.onStart?.(() => executionShell.pids());
 
 		const winner = await Promise.race<
@@ -1033,11 +1061,23 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 
-		// Normal completion
+		// Normal completion. A shell the settle path drops — a per-job
+		// `:async:` shell, one whose agent session was left or switched
+		// while the call ran (`isSessionCurrent` false), or one a release
+		// already replaced in the map — never carries its options to a
+		// later call: report it as the ephemeral shell it is (the notice
+		// then makes no persistence claim).
+		const ephemeralShell =
+			shellSession === undefined ||
+			options?.sessionKey?.includes(":async:") === true ||
+			options?.isSessionCurrent?.() === false ||
+			shellSessions.get(sessionKey) !== shellSession;
 		return {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			endedByExit: winner.result.endedByExit === true,
+			ephemeralShell,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await dump()),

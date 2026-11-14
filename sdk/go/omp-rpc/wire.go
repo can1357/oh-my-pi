@@ -2639,7 +2639,11 @@ type BashResult struct {
 	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
 	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
 	WorkingDir    *string                    `json:"workingDir,omitempty"`
-	Images        []ImageContent             `json:"images,omitempty"`
+	// Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.
+	EndedByExit *bool `json:"endedByExit,omitempty"`
+	// Whether the run did not own the session's persistent shell (an overlapping call's fork, or a fresh shell after the persistent one was quarantined): its state changes do not persist to later calls.
+	EphemeralShell *bool          `json:"ephemeralShell,omitempty"`
+	Images         []ImageContent `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	Trace map[string]json.RawMessage `json:"trace,omitempty"`
 }
@@ -2671,6 +2675,8 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("artifactError", &out.ArtifactError)
 	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
+	d.optional("endedByExit", &out.EndedByExit)
+	d.optional("ephemeralShell", &out.EphemeralShell)
 	d.optional("images", &out.Images)
 	d.optional("trace", &out.Trace)
 	if d.err != nil {

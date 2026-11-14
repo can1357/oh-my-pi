@@ -565,6 +565,17 @@ const NO_PIDS = (): readonly number[] => [];
 /** Shown when a call overlapped another one (parallel or backgrounded) and ran in a fork of the session's shell. */
 const SESSION_SHELL_BUSY_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
 
+/** Shown when `exit` or an armed `set -e` ended the run before its input was exhausted. */
+const ENDED_BY_EXIT_NOTICE =
+	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run, and options like `set -e` stay set in this session until unset.";
+
+/**
+ * The forked variant of {@link ENDED_BY_EXIT_NOTICE}: a forked run's options
+ * die with it, so the notice must not promise they stay set in the session.
+ */
+const ENDED_BY_EXIT_EPHEMERAL_NOTICE =
+	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run.";
+
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
 }
@@ -970,6 +981,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			for (const notice of options.notices) {
 				if (notice) notices.push(notice);
 			}
+		}
+		// `exit`/errexit ending the run early looks like an ordinary non-zero
+		// exit from its output alone; say that the remaining input never ran.
+		// A forked/one-off shell's options die with it: no persistence promise.
+		if ("endedByExit" in result && result.endedByExit) {
+			notices.push(
+				"ephemeralShell" in result && result.ephemeralShell ? ENDED_BY_EXIT_EPHEMERAL_NOTICE : ENDED_BY_EXIT_NOTICE,
+			);
 		}
 		if (notices.length > 0) outputLines.push("", ...notices);
 		// Shaped output already leads with its exit status.
