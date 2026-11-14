@@ -318,6 +318,7 @@
 
 ### Fixed
 
+- Fixed OpenCode Zen free models rejecting requests with HTTP 429 FreeUsageLimitError ([#17075](https://github.com/can1357/oh-my-pi/pull/17075) by [@Naster17](https://github.com/Naster17))
 - Anthropic-compatible endpoints that require a `thinking` block on every turn of the current turn no longer replay a 400 when the history holds a turn an upstream answered without reasoning; the serializer pads those turns ([#16739](https://github.com/can1357/oh-my-pi/pull/16739) by [@lz37](https://github.com/lz37))
 - Fixed an Anthropic stream that a gateway or proxy cuts after `message_start`, substituting an in-band `error` frame, being reported as a completed-turn provider failure instead of a retryable stream truncation ([#16990](https://github.com/can1357/oh-my-pi/pull/16990) by [@Maziar123](https://github.com/Maziar123))
 - Fixed Kimi Code, Z.AI, and ClinePass usage polls logging a warning every poll for accounts without a metered plan ([#17057](https://github.com/can1357/oh-my-pi/pull/17057) by [@trukhinyuri](https://github.com/trukhinyuri))

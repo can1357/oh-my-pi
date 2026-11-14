@@ -2,7 +2,8 @@
 
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { APP_NAME, APP_URL, prompt, USER_AGENT } from "@oh-my-pi/pi-utils";
+import openCodeEnvTemplate from "./opencode-env.md" with { type: "text" };
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -28,6 +29,8 @@ export interface InferenceHeaderOptions {
 	 * protocol-native session headers and every other backend keep `sessionId`.
 	 */
 	cacheAffinity?: string;
+	/** Whether the model route requires OpenCode client headers and session format. */
+	requiresOpenCodeClient?: boolean;
 }
 
 /**
@@ -89,6 +92,63 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
 	headers[name] = value;
 }
 
+export const OPENCODE_USER_AGENT = "opencode/1.19.3";
+const OPENCODE_SESSION_ID_REGEX = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+export function formatOpenCodeSessionId(sessionId?: string): string {
+	if (sessionId && OPENCODE_SESSION_ID_REGEX.test(sessionId)) {
+		return sessionId;
+	}
+	const hex = sessionId?.replace(/[^0-9a-fA-F]/g, "").toLowerCase() ?? "";
+	let current: bigint;
+	const bytes = new Uint8Array(14);
+	if (hex.length >= 12) {
+		current = BigInt(`0x${hex.slice(0, 12)}`) * 0x1000n + 1n;
+		for (let i = 0; i < 14; i++) {
+			const idx = 12 + ((i * 2) % (hex.length - 12 || 1));
+			bytes[i] = Number.parseInt(hex.slice(idx, idx + 2) || "a5", 16);
+		}
+	} else if (sessionId) {
+		let h1 = 0xdeadbeef;
+		let h2 = 0x41c6ce57;
+		for (let i = 0; i < sessionId.length; i++) {
+			const ch = sessionId.charCodeAt(i);
+			h1 = Math.imul(h1 ^ ch, 2654435761);
+			h2 = Math.imul(h2 ^ ch, 1597334677);
+		}
+		current = BigInt(Math.abs(h1)) * 0x1000n + 1n;
+		for (let i = 0; i < 14; i++) {
+			h1 = Math.imul(h1 ^ (h2 >>> 5), 2246822507);
+			h2 = Math.imul(h2 ^ (h1 >>> 3), 3266489909);
+			bytes[i] = (h1 ^ (h2 >>> (i % 8))) & 0xff;
+		}
+	} else {
+		const timestamp = Date.now();
+		current = BigInt(timestamp) * 0x1000n + 1n;
+		crypto.getRandomValues(bytes);
+	}
+	const value = ~current;
+	const time = Array.from({ length: 6 }, (_, index) =>
+		Number((value >> BigInt(40 - 8 * index)) & 0xffn)
+			.toString(16)
+			.padStart(2, "0"),
+	).join("");
+	return `ses_${time}${Array.from(bytes, byte => BASE62_CHARS[byte % 62]).join("")}`;
+}
+
+/** Ensures the system prompt contains the environment working directory block required by OpenCode gateway. */
+export function ensureOpenCodeSystemPrompt(prompts: string[], cwd?: string): string[] {
+	if (prompts.some(p => p.includes("<env>") && p.includes("Working directory:"))) {
+		return prompts;
+	}
+	const envBlock = prompt.render(openCodeEnvTemplate, { cwd: cwd ?? process.cwd() }).trim();
+	if (prompts.length === 0) {
+		return [envBlock];
+	}
+	return [...prompts, envBlock];
+}
+
 /**
  * Project omp's identity and authoritative conversation id onto the headers
  * understood by the active inference protocol and host.
@@ -103,14 +163,10 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		setHeaderIfAbsent(headers, "http-referer", APP_URL);
 		setHeaderIfAbsent(headers, "x-title", APP_NAME);
 	}
-
 	const isOpenCode = backend === "opencode-go" || backend === "opencode-zen";
 	const sessionId = options.sessionId;
-	// The conversation id and the explicit cache key are independently
-	// optional: a Go sibling lane can carry its family affinity with no
-	// conversation session in hand (V1 compaction, direct client-options
-	// builds), while every other lane still needs the conversation id.
-	if (!sessionId && !options.cacheAffinity) return;
+	const requiresClient = isOpenCode && backend === "opencode-zen" && options.requiresOpenCodeClient;
+	if (!sessionId && !options.cacheAffinity && !requiresClient) return;
 
 	if (sessionId) {
 		if (options.protocol === "anthropic") {
@@ -122,12 +178,17 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	}
 
 	if (isOpenCode) {
-		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
-		// Go's session header doubles as the gateway's cache-affinity handle:
-		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
-		// task cache key there; every other lane keeps the conversation id.
-		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
-		if (goSession) setHeader(headers, "x-opencode-session", goSession);
+		if (backend === "opencode-zen" && options.requiresOpenCodeClient) {
+			if (!headers["User-Agent"] || !headers["User-Agent"].startsWith("claude-cli/")) {
+				setHeaderIfAbsent(headers, "User-Agent", `${OPENCODE_USER_AGENT} (${USER_AGENT})`);
+			}
+			setHeader(headers, "x-opencode-client", "cli");
+			setHeader(headers, "x-opencode-session", formatOpenCodeSessionId(sessionId));
+		} else {
+			setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+			const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
+			if (goSession) setHeader(headers, "x-opencode-session", goSession);
+		}
 	}
 }
 

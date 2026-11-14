@@ -17,8 +17,12 @@ provider "opencode-zen" {
 		allows-synthetic-reasoning-content-for-tool-calls #false
 		reasoning-content-field "reasoning_content"
 	}
+	// The gateway's free-tier gate requires an `<env>` working directory block
+	// and OpenCode client headers on free models.
+	models "*free" "big-pickle" {
+		requires-opencode-environment #true
+	}
 	// Replaces the Anthropic request-builder exclusion: Zen rejects the
-	// context_management field on several Claude families (#6510).
 	supports-context-management #false
 	class "anthropic" {
 		revision ">=4 <4.6" {

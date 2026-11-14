@@ -93,6 +93,10 @@ export function createApiKeyLogin(
 			if (rule.emptyFallback !== undefined) return rule.emptyFallback;
 			throw new AIError.ApiKeyRequiredError();
 		}
+		const lowerTrimmed = trimmed.toLowerCase();
+		if (lowerTrimmed.startsWith("http://") || lowerTrimmed.startsWith("https://")) {
+			throw new AIError.ApiKeyRequiredError(`Received a URL instead of an API key for ${label}`);
+		}
 		if (rule.validate) {
 			options.onProgress?.(rule.validate.optional ? "Validating API key (optional)..." : "Validating API key...");
 			try {

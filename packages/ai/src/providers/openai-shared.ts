@@ -169,7 +169,10 @@ export interface OpenAIStrictToolsState {
 export interface OpenAIRequestSetupModel extends OpenAIModelIdentity, CatalogPolicyInputs {
 	headers?: Record<string, string>;
 	premiumMultiplier?: number;
-	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "sessionHeader">;
+	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "sessionHeader"> & {
+		requiresOpenCodeEnvironment?: boolean;
+	};
+	cost?: { input?: number; output?: number };
 }
 
 /** Cache identity controls shared by OpenAI-family transports. */
@@ -247,14 +250,26 @@ export function resolveOpenAIRequestSetup(
 	options: OpenAIRequestSetupOptions,
 ): OpenAIRequestSetup {
 	let apiKey = options.apiKey;
+	const isOpenCode = model.provider === "opencode-zen" || model.provider === "opencode-go";
+	const isFreeModel = !model.cost?.input || model.cost.input === 0;
 	if (!apiKey) {
-		if (!$env.OPENAI_API_KEY) {
+		if (isOpenCode && isFreeModel) {
+			apiKey = "public";
+		} else if (!$env.OPENAI_API_KEY) {
 			throw new AIError.MissingApiKeyError(
-				undefined,
-				"OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.",
+				isOpenCode ? model.provider : undefined,
+				isOpenCode
+					? `${model.provider} API key is required for paid model ${model.id}`
+					: "OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.",
 			);
+		} else {
+			apiKey = $env.OPENAI_API_KEY;
 		}
-		apiKey = $env.OPENAI_API_KEY;
+	} else if (isOpenCode && !isFreeModel && apiKey === "public") {
+		throw new AIError.MissingApiKeyError(
+			model.provider,
+			`${model.provider} API key is required for paid model ${model.id}`,
+		);
 	}
 	const rawApiKey = apiKey;
 	let headers = mergeHeaders(
@@ -361,6 +376,7 @@ export function resolveOpenAIRequestSetup(
 		protocol: "openai",
 		sessionId,
 		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
+		requiresOpenCodeClient: model.compat?.requiresOpenCodeEnvironment,
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
@@ -382,7 +398,10 @@ export function resolveOpenAIRequestSetup(
 	// guards in google-vertex / amazon-bedrock and send no Authorization here
 	// (#6188). A caller-supplied Authorization in `model.headers` still wins.
 	if (apiKey !== NO_AUTH_SENTINEL) {
-		headers.Authorization ??= `Bearer ${apiKey}`;
+		const effectiveApiKey = (!apiKey || apiKey === "") && isOpenCode && isFreeModel ? "public" : apiKey;
+		if (effectiveApiKey) {
+			headers.Authorization ??= `Bearer ${effectiveApiKey}`;
+		}
 	}
 	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders, copilotCacheKey, copilotCacheSnapshot };
 }

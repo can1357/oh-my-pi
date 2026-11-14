@@ -605,6 +605,8 @@ export interface OpenAICompat {
 	clampOutputToModelMax?: boolean;
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */
 	stripImageInput?: boolean;
+	/** Whether the gateway requires an `<env>` working directory block in the system prompt. */
+	requiresOpenCodeEnvironment?: boolean;
 }
 
 /**
@@ -793,6 +795,8 @@ export interface AnthropicCompat {
 	injectClaudeCodeInstruction?: boolean;
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */
 	stripImageInput?: boolean;
+	/** Whether the gateway requires an `<env>` working directory block in the system prompt. */
+	requiresOpenCodeEnvironment?: boolean;
 	/**
 	 * Largest width or height a single image block may carry. The canonical
 	 * Anthropic API rejects anything larger with `At least one of the image
@@ -1026,6 +1030,8 @@ export interface ResolvedOpenAISharedCompat {
 	toolSchemaFlavor?: OpenAICompat["toolSchemaFlavor"];
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */
 	stripImageInput: boolean;
+	/** Whether the gateway requires an `<env>` working directory block in the system prompt. */
+	requiresOpenCodeEnvironment?: boolean;
 	/** Flatten/reject leftover root `anyOf`/`oneOf` unions in strict tool schemas (xAI's function-calling validator 400s on them). */
 	rejectRootObjectUnion: boolean;
 	/** Retry without strict tools when the host rejects a strict grammar as too large (OpenRouter-Anthropic compiled-grammar overflow). */
@@ -1108,6 +1114,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsConfigurationUpdate"
 			| "supportsSteering"
 			| "stripImageInput"
+			| "requiresOpenCodeEnvironment"
 			| "whenThinking"
 		>
 	> & {
@@ -1117,6 +1124,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
 		streamIdleTimeoutMs?: number;
 		stripThinkingHistory?: boolean;
+		/** Whether the gateway requires an `<env>` working directory block in the system prompt. */
+		requiresOpenCodeEnvironment?: OpenAICompat["requiresOpenCodeEnvironment"];
 		/** The configured `baseUrl` is the official OpenAI API (provider `openai`); unset otherwise. */
 		officialEndpoint?: boolean;
 		toolStrictMode: ResolvedToolStrictMode;
@@ -1226,6 +1235,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "fastMode"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
+		| "requiresOpenCodeEnvironment"
 	>
 > & {
 	/** Effort-beta override; undefined keeps the transport's legacy heuristic. */
@@ -1240,6 +1250,7 @@ export type ResolvedAnthropicCompat = Required<
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
+	requiresOpenCodeEnvironment?: boolean;
 	/**
 	 * Largest width or height a single image block may carry. Undefined defers
 	 * to the canonical Anthropic API limit applied by the request builder.

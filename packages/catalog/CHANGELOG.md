@@ -320,6 +320,7 @@
 
 ### Fixed
 
+- Fixed OpenCode Zen free models rejecting requests by adding `requires-opencode-environment` wire compat ([#17075](https://github.com/can1357/oh-my-pi/pull/17075) by [@Naster17](https://github.com/Naster17))
 - Fixed OpenCode Go `gemini-4-argon` requests failing with an unsupported protocol; discovered models now use native Gemini routing and low, medium, or high thinking ([#17031](https://github.com/can1357/oh-my-pi/issues/17031))
 - Fixed DeepSeek V4 Pro cost estimates using Flash rates after September 14 despite Pro billing remaining unchanged ([#16875](https://github.com/can1357/oh-my-pi/issues/16875)).
 - Anthropic refusal fallbacks from Claude Opus 5.5, Opus 5 and Sonnet 5.5 to their documented target models (Opus 4.8 and Opus 5, Opus 4.8, and Sonnet 5) now redeem fallback credit: the retry is no longer billed as a full cache write, and it is no longer skipped when the conversation holds signed thinking ([#17034](https://github.com/can1357/oh-my-pi/pull/17034) by [@sjawhar](https://github.com/sjawhar))

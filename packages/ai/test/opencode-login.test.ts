@@ -56,4 +56,25 @@ describe("OpenCode login prompt (#8738)", () => {
 		};
 		await expect(loginOpenCodeGo(callbacks)).rejects.toThrow();
 	});
+
+	it("rejects a pasted URL case-insensitively before validation", async () => {
+		// A pasted console URL (any scheme casing) is never an API key: reject it
+		// instead of sending the URL to the provider's validation endpoint.
+		for (const pasted of ["HTTP://opencode.ai/auth", "https://opencode.ai/auth"]) {
+			const callbacks: OAuthLoginCallbacks = {
+				onAuth: () => {},
+				onPrompt: async () => pasted,
+			};
+			await expect(loginOpenCodeZen(callbacks)).rejects.toThrow(/URL instead of an API key/);
+		}
+	});
+
+	it("falls back to public key on empty prompt for OpenCode Zen", async () => {
+		const callbacks: OAuthLoginCallbacks = {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		};
+		const key = await loginOpenCodeZen(callbacks);
+		expect(key).toBe("public");
+	});
 });
