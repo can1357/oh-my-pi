@@ -14,7 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost, Usage } from "@oh-my-pi/pi-catalog/types";
-import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, mulberry32 } from "@oh-my-pi/pi-utils";
 
 export const RATCHET_ROOT = path.join(".omp", "ratchet");
 export const RATCHET_STAGES = ["inputs", "grader", "plan"] as const;
@@ -293,18 +293,6 @@ export function applyPlan(state: RatchetState, options: PlanOptions): void {
 	if (options.prices) state.prices = { ...state.prices, ...options.prices };
 }
 
-/** Seeded PRNG (mulberry32) so a recorded seed reproduces the split. */
-function seededRandom(seed: number): () => number {
-	let value = seed >>> 0;
-	return () => {
-		value = (value + 0x6d2b79f5) >>> 0;
-		let t = value;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
-
 /** Random train/test split stratified by primary tag; frozen once a baseline exists. */
 export function splitCases(
 	state: RatchetState,
@@ -320,7 +308,7 @@ export function splitCases(
 			"The split is frozen once the baseline is gated; re-splitting would invalidate every round",
 		);
 	}
-	const random = seededRandom(seed);
+	const random = mulberry32(seed);
 	const byTag = new Map<string, string[]>();
 	for (const id of ids.sort()) {
 		const tag = cases[id] ?? "";

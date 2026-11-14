@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -306,6 +307,69 @@ export function loadFastembed(): Promise<FastembedModule> {
 		throw error;
 	});
 	return fastembedLoad;
+}
+
+/** Versions of the packages a fastembed installation loads; `undefined` for one that cannot be found. */
+export type FastembedVersions = {
+	fastembed: string | undefined;
+	onnxruntime: string | undefined;
+	tokenizers: string | undefined;
+};
+
+/** The `version` of the package.json at `manifestPath` when it is the manifest of `name`. */
+function manifestVersion(manifestPath: string, name: string): string | undefined {
+	try {
+		const manifest: { name?: unknown; version?: unknown } = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+		return manifest.name === name && typeof manifest.version === "string" ? manifest.version : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The version of package `name` as `from` resolves it, the way the loader itself finds it: through the resolution
+ * graph, so a package nested under one `node_modules` and hoisted to another resolves alike. A package whose `exports`
+ * hide `package.json` is found from its main entry, walking up to the nearest manifest that names it. `undefined`
+ * when `from` cannot resolve it or no such manifest exists.
+ */
+export function resolvedPackageVersion(from: NodeRequire, name: string): string | undefined {
+	try {
+		const version = manifestVersion(from.resolve(`${name}/package.json`), name);
+		if (version !== undefined) return version;
+	} catch {
+		// `package.json` is not exported or not resolvable: fall back to the entry point.
+	}
+	try {
+		let dir = path.dirname(from.resolve(name));
+		for (let parent = path.dirname(dir); ; dir = parent, parent = path.dirname(dir)) {
+			const version = manifestVersion(path.join(dir, "package.json"), name);
+			if (version !== undefined) return version;
+			if (parent === dir) return undefined;
+		}
+	} catch {
+		return undefined;
+	}
+}
+
+/** The versions of `fastembed`, its ORT and its tokenizers as `fastembedRequire` (fastembed's own `require`) resolves them. */
+export function fastembedVersionsFrom(fastembedRequire: NodeRequire): FastembedVersions {
+	return {
+		fastembed: resolvedPackageVersion(fastembedRequire, "fastembed"),
+		onnxruntime: resolvedPackageVersion(fastembedRequire, "onnxruntime-node"),
+		tokenizers: resolvedPackageVersion(fastembedRequire, "@anush008/tokenizers"),
+	};
+}
+
+/**
+ * Versions of the installation {@link loadFastembed} resolved: `fastembed`, the `onnxruntime-node` paired with it and
+ * the `@anush008/tokenizers` its tokenizer loads. The workspace lockfile and the on-demand runtime install pin different
+ * tokenizers ({@link TOKENIZERS_SPEC}), so the package manifest alone does not say which one produced a vector. A
+ * version that cannot be found is `undefined`, never an error: this runs after a benchmark has finished.
+ */
+export async function loadedFastembedVersions(): Promise<FastembedVersions> {
+	await loadFastembed();
+	if (loadedFastembed === null) throw new Error("fastembed is not loaded");
+	return fastembedVersionsFrom(loadedFastembed.require);
 }
 
 async function loadFastembedOnce(): Promise<FastembedModule> {

@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $whichAll, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { $env, $whichAll, getPythonEnvDir, normalizeEnvKey } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_ENV_ALLOWLIST = new Set([
 	"PATH",
@@ -85,19 +85,11 @@ const DEFAULT_ENV_ALLOW_PREFIXES = ["LC_", "XDG_", "PI_"];
 const CASE_INSENSITIVE_ENV = process.platform === "win32";
 const BASE_ENV_ALLOWLIST = new Set([...DEFAULT_ENV_ALLOWLIST, ...WINDOWS_ENV_ALLOWLIST]);
 
-const NORMALIZED_ALLOWLIST = new Set(
-	Array.from(BASE_ENV_ALLOWLIST, key => (CASE_INSENSITIVE_ENV ? key.toUpperCase() : key)),
-);
-const NORMALIZED_DENYLIST = new Set(
-	Array.from(DEFAULT_ENV_DENYLIST, key => (CASE_INSENSITIVE_ENV ? key.toUpperCase() : key)),
-);
+const NORMALIZED_ALLOWLIST = new Set(Array.from(BASE_ENV_ALLOWLIST, normalizeEnvKey));
+const NORMALIZED_DENYLIST = new Set(Array.from(DEFAULT_ENV_DENYLIST, normalizeEnvKey));
 const NORMALIZED_ALLOW_PREFIXES = CASE_INSENSITIVE_ENV
 	? DEFAULT_ENV_ALLOW_PREFIXES.map(prefix => prefix.toUpperCase())
 	: DEFAULT_ENV_ALLOW_PREFIXES;
-
-function normalizeEnvKey(key: string): string {
-	return CASE_INSENSITIVE_ENV ? key.toUpperCase() : key;
-}
 
 function resolvePathKey(env: Record<string, string | undefined>): string {
 	if (!CASE_INSENSITIVE_ENV) return "PATH";
@@ -109,11 +101,18 @@ function resolveManagedPythonEnv(): string {
 	return getPythonEnvDir();
 }
 
+function venvBinDir(venvPath: string): string {
+	return process.platform === "win32" ? path.join(venvPath, "Scripts") : path.join(venvPath, "bin");
+}
+
+/** Interpreter inside a virtualenv: Scripts/python.exe on native Windows, bin/python on POSIX. */
+export function venvPython(venvPath: string): string {
+	return path.join(venvBinDir(venvPath), process.platform === "win32" ? "python.exe" : "python");
+}
+
 function resolveManagedPythonCandidate(): { venvPath: string; pythonPath: string } {
 	const venvPath = resolveManagedPythonEnv();
-	const binDir = process.platform === "win32" ? path.join(venvPath, "Scripts") : path.join(venvPath, "bin");
-	const pythonPath = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
-	return { venvPath, pythonPath };
+	return { venvPath, pythonPath: venvPython(venvPath) };
 }
 
 export interface PythonRuntime {
@@ -179,10 +178,6 @@ function applyVenvEnv(
 	return env;
 }
 
-function venvBinDir(venvPath: string): string {
-	return process.platform === "win32" ? path.join(venvPath, "Scripts") : path.join(venvPath, "bin");
-}
-
 function detectExplicitVenv(pythonPath: string): { venvPath: string; binDir: string } | undefined {
 	const binDir = path.dirname(pythonPath);
 	const venvPath = path.dirname(binDir);
@@ -246,7 +241,7 @@ export function enumeratePythonRuntimes(cwd: string, baseEnv: Record<string, str
 	const venvPath = baseEnv.VIRTUAL_ENV ?? resolveVenvPath(cwd);
 	if (venvPath) {
 		const binDir = venvBinDir(venvPath);
-		const pythonCandidate = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
+		const pythonCandidate = venvPython(venvPath);
 		if (fs.existsSync(pythonCandidate)) {
 			push({ pythonPath: pythonCandidate, env: applyVenvEnv(baseEnv, venvPath, binDir), venvPath });
 		}

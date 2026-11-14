@@ -20,7 +20,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, mean, nearestRank, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelStringWithRouting } from "../config/model-resolver";
@@ -405,19 +405,13 @@ function asNonNegativeNumber(value: unknown): number {
 /** Nearest-rank distribution summary; `values` MUST be non-empty. */
 function metricStats(values: number[]): MetricStats {
 	const sorted = [...values].sort((a, b) => a - b);
-	const at = (q: number): number =>
-		sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1))]!;
 	return {
 		mean: sorted.reduce((sum, value) => sum + value, 0) / sorted.length,
 		min: sorted[0]!,
-		p50: at(0.5),
-		p95: at(0.95),
+		p50: nearestRank(sorted, 0.5),
+		p95: nearestRank(sorted, 0.95),
 		max: sorted[sorted.length - 1]!,
 	};
-}
-
-function mean(values: number[]): number {
-	return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function captureUsage(message: AssistantMessage): BenchCacheUsage {
