@@ -521,7 +521,7 @@ describe("selector navigation keybindings", () => {
 		setKeybindings(KeybindingsManager.inMemory({ "app.interrupt": "ctrl+c", "tui.select.cancel": "escape" }));
 		vi.useFakeTimers();
 		try {
-			const entries = [{ prompt: "deploy release", created_at: 1 }];
+			const entries = [{ id: 1, prompt: "deploy release", created_at: 1 }];
 			let canceled = 0;
 			let renders = 0;
 			const selector = new HistorySearchComponent(
@@ -529,6 +529,10 @@ describe("selector navigation keybindings", () => {
 					{
 						label: "folder",
 						getRecent: () => entries,
+						delete: id => {
+							const index = entries.findIndex(entry => entry.id === id);
+							if (index >= 0) entries.splice(index, 1);
+						},
 						search: query => entries.filter(entry => entry.prompt.includes(query)),
 					},
 				],
@@ -558,6 +562,7 @@ describe("selector navigation keybindings", () => {
 				{
 					label: "all projects",
 					getRecent: limit => storage.getRecent(limit),
+					delete: (id: number) => storage.delete(id),
 					search: (query, limit) => storage.search(query, limit),
 				},
 			],
@@ -580,6 +585,7 @@ describe("selector navigation keybindings", () => {
 				{
 					label: "all projects",
 					getRecent: limit => storage.getRecent(limit),
+					delete: (id: number) => storage.delete(id),
 					search: (query, limit) => storage.search(query, limit),
 				},
 			],

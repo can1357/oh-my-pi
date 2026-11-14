@@ -6,6 +6,14 @@
 
 - Added `pathIdentityKey()` to group filesystem aliases without merging distinct-case directories on case-sensitive filesystems. It follows symlinks/junctions through device/inode identity and falls back to a case-preserving resolved path when identity is unavailable; existing path-spelling and containment normalization is unchanged ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved retry-hint extraction for Cloud Code Assist quota reset information, including compound durations and reset timestamps.
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

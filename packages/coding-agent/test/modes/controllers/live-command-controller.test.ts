@@ -258,6 +258,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		const phases: string[] = [];
 		const agentSession = {
 			modelRegistry: { authStorage: {} },
+			settings: Settings.isolated(),
 			sessionId: "s1",
 			subscribe: () => () => {},
 			sendCustomMessage: async (message: { content: string }) => {

@@ -1,6 +1,27 @@
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Page, WaitForOptions } from "puppeteer-core";
 import { puppeteerTimeoutError } from "./launch";
+
+/** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
+export function sameAddress(requested: string, current: string): boolean {
+	if (requested === current) return true;
+	try {
+		return new URL(requested).href === new URL(current).href;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Throw a {@link ToolError} unless `pattern` is what `tab.waitForUrl()` takes on every backend: a string the URL
+ * contains, or a RegExp it matches. A predicate function, among others, is refused before anything waits.
+ */
+export function assertUrlPattern(pattern: unknown): asserts pattern is string | RegExp {
+	if (typeof pattern === "string" || pattern instanceof RegExp) return;
+	const given = pattern === null ? "null" : typeof pattern === "function" ? "a function" : typeof pattern;
+	throw new ToolError(`tab.waitForUrl() takes a string the URL contains or a RegExp it matches, not ${given}`);
+}
 
 declare module "puppeteer-core" {
 	interface Frame {

@@ -505,7 +505,7 @@ pub fn sync_signal(
 	let TrapKey::Signal(sig) = key else {
 		return Ok(true);
 	};
-	if vp.overlay.is_some() || matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld) {
+	if vp.image.is_some() || matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld) {
 		return Ok(true);
 	}
 	let handler = effective(cx.store, vp, key, k.engine.config().platform)?;
@@ -636,7 +636,7 @@ fn function_disposition(
 		return Ok(true);
 	};
 	let accepted =
-		if vp.overlay.is_none() && !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld) {
+		if vp.image.is_none() && !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld) {
 			let action = caught.then(|| BStr::new(b"catch"));
 			let disposition = crate::bash::vm::jobctl::trap_disposition(k, sig, action);
 			match cx.host.set_signal_trap(sig, disposition) {
@@ -904,7 +904,7 @@ fn zsh_change(
 	let platform = ctx.k.engine.config().platform;
 	save_local(&mut ctx.k.root, ctx.cx.store, ctx.vp, key, platform, FunctionSave::Current)?;
 	let mut effective = action;
-	if ctx.vp.overlay.is_none()
+	if ctx.vp.image.is_none()
 		&& let TrapKey::Signal(sig) = key
 		&& !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld)
 	{
@@ -1099,7 +1099,7 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			}
 			((first.as_slice() != b"-").then(|| first.clone()), specs)
 		};
-	let hard_ignored = match ctx.vp.overlay {
+	let hard_ignored = match ctx.vp.image {
 		Some(_) => match ctx.record(Key::Misc(MiscKey::HardIgnored))? {
 			Some(Record::Words(names)) => names,
 			_ => Vec::new(),
@@ -1136,7 +1136,7 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			continue;
 		}
 		let mut effective = action.clone();
-		if ctx.vp.overlay.is_none()
+		if ctx.vp.image.is_none()
 			&& let TrapKey::Signal(sig) = key
 			// `CHLD` comes from the engine (one per reaped child), not the OS.
 			&& !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld)

@@ -4,6 +4,7 @@ Drive real browser tabs.
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
 - Python: same names and awaits; keyword arguments become the trailing options object (`await browser.open(name=…, url=…)`).
 - `timeout`: seconds on `open`, `close`, `run` (default 30, clamped to 1–300, capped by `tools.maxTimeout` when set); milliseconds on `waitFor*`.
+- A `run` without `timeout`, and each direct helper call such as `tab.evaluate(…)`, gets the Eval cell's `timeout` when that is longer; for long page work, raise the cell's `timeout`.
 
 ```
 await browser.open({name, url, app, argv, target, viewport, wait_until, dialogs, allowed_domains, init_scripts, downloads, user_agent, insecure, headed, timeout, persist}) → BrowserTab
@@ -37,6 +38,8 @@ close()
 selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… placeholder/… testid/… alt/… title/… role/<role>[name="…"] (append " exact" inside the role name filter for exact matching)
 ```
 
+  - `console({level?, since?, limit?, clear?})` and `errors({since?, limit?, clear?})` return `{entries, nextSeq, dropped}`, not a list: read its `entries` field (`r.entries` in JavaScript, `r["entries"]` in Python), and pass `nextSeq` as `since` to read only later entries.
+
 - `targets` resolves the browser like `open` (pass the same `app`, e.g. `"relay"`) and lists pages `target` can adopt:
   - a Tern window's browser blocks (`tab`: the omp tab holding one), or
   - the relay's Chrome pages (`shown`: the active tab).
@@ -45,7 +48,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once. `<select>` elements: `select`, not `fill`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
 - Navigation and re-renders invalidate observed ids and refs: re-observe, then act in the same cell. `pushState(url)`: SPA navigation without a document load.
-- No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`.
+- No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`, and page calls fail naming them until answered.
 - `emulate` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides.
 - `devices()` lists valid device names.
 - Cookie imports accept objects, raw `Cookie:` headers, DevTools cURL dumps, or JSON arrays.

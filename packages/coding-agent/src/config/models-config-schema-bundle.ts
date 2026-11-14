@@ -1,6 +1,26 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
+import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
+
+/**
+ * Input modalities the catalog can express (`input-modalities` axis). A
+ * models.yml may name others; the file normalizer drops those before this
+ * schema runs, so the schema and the normalizer have to read the same list.
+ */
+export function supportedInputModalities(): readonly string[] {
+	const declared = AXES["input-modalities"].values;
+	const modalities: string[] = [];
+	if (declared) {
+		for (const value of declared) {
+			if (typeof value === "string") modalities.push(value);
+		}
+	}
+	if (modalities.length === 0) {
+		throw new Error("catalog input-modalities axis declares no modalities");
+	}
+	return modalities;
+}
 
 function validateMaxContextWindow(
 	value: { maxContextWindow?: number; contextWindow?: number },
@@ -118,7 +138,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "workers-ai-systemone" | "liquid-systemone" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -128,6 +148,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
 	);
 	const ModelKindSchema = type.enumerated(...MODEL_KINDS.filter(kind => kind !== "search"));
+	const ModelInputSchema = type.enumerated(...supportedInputModalities()).array();
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
@@ -219,7 +240,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
@@ -279,7 +300,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,

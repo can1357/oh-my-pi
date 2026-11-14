@@ -101,7 +101,10 @@ const REASK_LINES = 3;
 const VALVE_OVER = 3_900;
 /** Output of the agent's own programs triggers the valve only past twice the size. */
 const PROGRAM_SCALE = 2;
-/** Results shaped earlier, source reads, and sub-agent reports and edit results are left whole up to this size. */
+/**
+ * Results shaped earlier, source reads, sub-agent reports, edit results, and pull request and issue threads are left
+ * whole up to this size; a source read this short is not outlined either.
+ */
 const EXEMPT_MAX = 12_000;
 /**
  * A result of a tool without steps of its own this short, in characters and lines, passes whole (under every size
@@ -126,10 +129,12 @@ const VERBATIM = /[;,]\s*verbatim(?: copy)?: \S+\]$/;
  * instructions it must follow (`skill://`, `rule://`).
  */
 const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
+/** A `read` of one pull request or issue (`pr://7`, `issue://owner/repo/7?comments=0`), not a listing or a PR's diff. */
+const THREAD_READ = /^(?:pr|issue):\/\/(?:[^?#]*\/)?(?<!diff\/)\d+(?:[?#].*)?$/i;
 
 /**
- * Whether a result is shown whole besides page-backs: a {@link WHOLE_READ} target, or a `read` of Markdown or of
- * line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:raw:5-40`, `:-30`): the agent named the
+ * Whether a result is shown whole besides page-backs and `:raw` reads: a {@link WHOLE_READ} target, or a `read` of
+ * Markdown or of line ranges that all end (`file.ts:120-180`, `:5+30`, `:1-10,40-60`, `:-30`): the agent named the
  * lines it wants, and cuts of them were mostly read back. An open-ended range (`:120`, `:120-`) pages the file and is
  * shaped.
  */
@@ -197,7 +202,7 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 	if (input.read) {
 		let recovery = false;
 		if (SOURCE_PATH.test(input.read.path)) {
-			const o = await outlineRead(run, await realPath(run.cwd, input.read.path));
+			const o = await outlineRead(run, await realPath(run.cwd, input.read.path), EXEMPT_MAX);
 			if (o.view) return { view: o.view, steps: ["outline"], recovery: false };
 			recovery = o.recovery;
 		}
@@ -444,8 +449,8 @@ function viewOrigin(run: Run, view: View): Origin | undefined {
 /**
  * The base layers, then the valve: already-seen runs collapse, lines over 400 characters keep 280, and a result over
  * 3.9k (the agent's own program output past 7.8k) is cut to ~3k, except outlines, source reads, sub-agent reports
- * (`task`, `wait`, `omp -p`) and edit results up to 12k, and pictures. Output repeating one line shape is cut to the
- * lines that differ, its ends, and a line naming the shape.
+ * (`task`, `wait`, `omp -p`), edit results and `pr://` / `issue://` threads up to 12k, and pictures. Output repeating
+ * one line shape is cut to the lines that differ, its ends, and a line naming the shape.
  * Re-asks (results up to 12k bringing back lines a cut hid) and reads of folded code come back whole.
  */
 async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; steps: string[] }> {
@@ -481,14 +486,16 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		? SOURCE_PATH.test(input.read.path)
 		: input.tool === "bash" && printsFiles(command) && namesSource(command) && !program;
 	// A sub-agent's report is read in full: cut, it came back as a read of the cut's copy (8 of 9), costing more than
-	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too.
+	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too. A
+	// pull request or issue under 12k came back 76 of 146 times, for ~1.2k tokens saved per read back.
 	const report =
 		input.tool === "task" ||
 		input.tool === "wait" ||
 		input.tool === "edit" ||
 		input.tool === "write" ||
 		input.tool === "ast_edit" ||
-		(input.tool === "bash" && runsAgent(command));
+		(input.tool === "bash" && runsAgent(command)) ||
+		(input.tool === "read" && THREAD_READ.test((input.path ?? "").trim()));
 	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4). Searches and filtered commands
 	// get no such pass: cut, 2% of `grep` results and 11% of filtered commands were read back, costing a fraction of
 	// what showing them whole up to 12k added.
@@ -681,17 +688,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 }
 
 /**
- * Shapes one tool result and records what the agent was shown in `state`. A changed text reports what became of its
- * subject's lines: scores, kept lines, the reasons its steps recorded and the ranking of the last cut by rank. Never
- * throws for a scorer that cannot answer.
- *
- * A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against the input is dropped (`stats.reverted`).
- * `plain` is the unshaped text for the call (default: the input), which can be far less than the full output shaping
- * reads. A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against it is capped: the outcome keeps the
- * would-be text, adds the `plain-cap` step and sets `capped`. A `plain` whose lines the sink cut to its column cap
- * (`widthCut`) lost text only a read of the saved output brings back, so a cut up to {@link VALVE_OVER} characters is
- * applied even when longer than it. With `holdout`, a changed text is the cut shaping would make. Either way, and for
- * a text shaping keeps, the agent is shown `plain`'s text: `state` records that, not what the cut hid.
+ * Shapes one tool result and records what the agent was shown in `state`: {@link noteCall}, {@link shapeBlock}, and
+ * the block settled at once.
  */
 export async function shapeResult(
 	input: ShapeInput,
@@ -703,18 +701,59 @@ export async function shapeResult(
 	holdout = false,
 	plain?: { text: string; tokens: number; widthCut?: boolean },
 ): Promise<ShapeOutcome> {
+	noteCall(state, ctx, input.tool, input.command ?? "", input.toolCallId);
+	const block = await shapeBlock(input, ctx, scorer, state, sink, signal, holdout, plain);
+	block.settle();
+	return block.outcome;
+}
+
+/** One block of a call's text shaped: its outcome, and the step that records it in the session. */
+export interface ShapedBlock {
+	outcome: ShapeOutcome;
+	/**
+	 * Records what the block hid and folded (when its cut is applied) and what the agent was shown. A call's blocks are
+	 * settled once all are shaped, so no block of a call is collapsed as seen against another of the same call.
+	 */
+	settle(): void;
+}
+
+/**
+ * Shapes one block of a call's text (the call's whole result, or one part of a `;`/`,` path `read`); the caller has
+ * noted the call ({@link noteCall}) and settles the block. A changed text reports what became of its subject's lines:
+ * scores, kept lines, the reasons its steps recorded and the ranking of the last cut by rank. Never throws for a
+ * scorer that cannot answer.
+ *
+ * A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against the input is dropped (`stats.reverted`).
+ * `plain` is the unshaped text for the block (default: the input), which can be far less than the full output shaping
+ * reads. A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against it is capped: the outcome keeps the
+ * would-be text, adds the `plain-cap` step and sets `capped`. A `plain` whose lines the sink cut to its column cap
+ * (`widthCut`) lost text only a read of the saved output brings back, so a cut up to {@link VALVE_OVER} characters is
+ * applied even when longer than it. With `holdout`, a changed text is the cut shaping would make. Either way, and for
+ * a text shaping keeps, the agent is shown `plain`'s text: settling records that, not what the cut hid.
+ */
+export async function shapeBlock(
+	input: ShapeInput,
+	ctx: CallContext,
+	scorer: Scorer,
+	state: ShapeState,
+	sink: ShapeSink,
+	signal?: AbortSignal,
+	holdout = false,
+	plain?: { text: string; tokens: number; widthCut?: boolean },
+): Promise<ShapedBlock> {
 	const stats: Record<string, number> = { charsIn: input.text.length };
 	const inTokens = countTokens(input.text);
 	// Another tool's command is its arguments as JSON, which may name an artifact in passing: its `path` decides.
 	const target = shapesItself(input.tool) ? (input.command ?? input.path) : input.path;
 	const pageBack = isPageBack(target ?? "");
-	const wholeRead = !pageBack && isWholeRead(input);
+	const rawRead = !pageBack && input.raw === true;
+	const wholeRead = !pageBack && !rawRead && isWholeRead(input);
 	const short =
 		!pageBack &&
 		!shapesItself(input.tool) &&
 		input.text.length <= SHORT_CHARS &&
 		countNewlines(input.text) < SHORT_LINES;
-	const subject = pageBack || wholeRead ? undefined : subjectOf(input);
+	const subject = pageBack || rawRead || wholeRead ? undefined : subjectOf(input);
 	const own = subject ? (input.read?.lines ?? subject.view.lines) : [];
 	const run: Run = {
 		input,
@@ -731,10 +770,10 @@ export async function shapeResult(
 		hid: new Set(),
 		folds: new Map(),
 	};
-	noteCall(state, ctx, input.tool, input.command ?? "", input.toolCallId);
 	let text = input.text;
 	let steps: string[] = [];
 	if (pageBack) bump(run, "pageBacks");
+	else if (rawRead) bump(run, "rawReads");
 	else if (wholeRead) bump(run, "wholeReads");
 	else if (short) {
 		bump(run, "short");
@@ -778,9 +817,6 @@ export async function shapeResult(
 		if (run.copy === input.text) textUrl ??= url;
 	}
 	const applied = text !== input.text && !holdout && !capped;
-	// What the cut hid and folded joins the session only now: a failed save above throws before the state changes.
-	if (applied) commit(run);
-	noteShown(state, applied ? text : (plain?.text ?? input.text), input.toolCallId);
 	stats.charsOut = text.length;
 	const outcome: ShapeOutcome = { text, steps: steps.length ? steps : ["none"], stats, inTokens, outTokens };
 	if (capped) outcome.capped = true;
@@ -788,7 +824,31 @@ export async function shapeResult(
 		outcome.lines = traceLines(run, text);
 		if (textUrl) outcome.textUrl = textUrl;
 	}
-	return outcome;
+	return {
+		outcome,
+		settle: () => {
+			// What the cut hid and folded joins the session only now: a failed save above threw before the state changed.
+			if (applied) commit(run);
+			noteShown(state, applied ? text : (plain?.text ?? input.text), input.toolCallId);
+		},
+	};
+}
+
+/**
+ * The trace of a block shown as `shown` though shaping did not cut it (kept whole, capped, or shown plain beside cut
+ * blocks of the same call): its base lines (a read's window, else its text) with no scores, matched to `shown`.
+ */
+export function traceUnchanged(input: ShapeInput, shown: string): ShapedLines {
+	const base = input.read?.lines ?? input.text.split("\n");
+	return traceLines(
+		{
+			input,
+			base,
+			heat: Array.from<number | null>({ length: base.length }).fill(null),
+			why: Array.from<SpotlightReason | undefined>({ length: base.length }),
+		},
+		shown,
+	);
 }
 
 /** A gap marker: a line of shaping standing for a hidden run (`… [lines A-B]`, `… [N lines: …]`, `… [A-B]`). */
@@ -819,7 +879,7 @@ function gapRun(marker: string): { count: number; range?: [number, number]; targ
  * next shaped line is the line after the run (or another marker, or no base line), so no shown line is matched to a
  * line inside it. A marker that names nothing fitting stands for the lines between the matches around it.
  */
-function traceLines(run: Run, text: string): ShapedLines {
+function traceLines(run: Pick<Run, "input" | "base" | "heat" | "why" | "rank">, text: string): ShapedLines {
 	const read = run.input.read;
 	const lines = read?.shown ?? run.base;
 	const index = lineIndex(lines);

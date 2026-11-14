@@ -297,7 +297,7 @@ describe("compaction queue conversation ownership", () => {
 
 	it("restores repeated Alt+Up dequeues of session-queue follow-ups in submission order", async () => {
 		const h = await harness(pi => {
-			pi.on("provider_request", () => new Promise<void>(() => {}));
+			pi.on("before_provider_request", () => new Promise<void>(() => {}));
 		});
 		const running = h.session.prompt("streaming turn");
 		try {

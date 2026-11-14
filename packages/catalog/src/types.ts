@@ -53,8 +53,10 @@ export const RUNNER_APIS = [
 	"typesafe",
 	"openrouter-decisions",
 	"openai-decisions",
+	"google-decisions",
 	"workers-ai-systemone",
 	"liquid-systemone",
+	"nace-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -70,8 +72,10 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
 	"openai-decisions": "judge",
+	"google-decisions": "judge",
 	"workers-ai-systemone": "judge",
 	"liquid-systemone": "judge",
+	"nace-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -1568,7 +1572,7 @@ export interface AntigravityModelWireProfile {
 	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
 	maxOutputTokens?: number;
 	/** SKU thinking level; the native client sends it in preference to a budget. */
-	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
+	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
 	thinkingBudget?: number;
 }

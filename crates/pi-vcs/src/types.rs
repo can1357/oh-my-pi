@@ -230,13 +230,21 @@ pub struct StatusOptions {
 #[derive(Debug, Clone, Default)]
 pub struct CommitOptions {
 	/// Author override; committer stays the repo identity.
-	pub author:      Option<CommitAuthor>,
+	pub author:        Option<CommitAuthor>,
 	/// Permit an empty commit.
-	pub allow_empty: bool,
+	pub allow_empty:   bool,
 	/// Amend HEAD instead of appending.
-	pub amend:       bool,
+	pub amend:         bool,
 	/// Commit only these paths (pathspec commit).
-	pub files:       Vec<String>,
+	pub files:         Vec<String>,
+	/// Build the commit from this index file instead of the repository's
+	/// index. The file must exist; the repository's index is neither read nor
+	/// written, and hooks run with `GIT_INDEX_FILE` pointing here.
+	pub index_path:    Option<PathBuf>,
+	/// Compare-and-swap guard: fail with [`crate::Error::HeadMoved`]
+	/// unless HEAD (the commit being amended, for `amend`) resolves to this
+	/// revision.
+	pub expected_head: Option<String>,
 }
 
 /// Which hunks of a file a selection covers.

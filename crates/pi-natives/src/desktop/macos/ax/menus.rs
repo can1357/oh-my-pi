@@ -16,7 +16,9 @@ use super::{
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
-	menus::{DesktopMenuItem, match_index, require_command, require_enabled, validate_path},
+	menus::{
+		DesktopMenuItem, match_index, match_offered, require_command, require_enabled, validate_path,
+	},
 	types::DesktopWindow,
 };
 
@@ -31,7 +33,7 @@ const MENU_SETTLE_POLL: Duration = Duration::from_millis(100);
 pub(crate) fn items(window: &DesktopWindow, path: &[String]) -> CoreResult<Vec<DesktopMenuItem>> {
 	validate_path(path, true)?;
 	with_window_menu(window, MenuAccess::Read, |app, pid, _, activated| {
-		let (menu, actual_path) = resolve_menu(app, path, pid)?;
+		let (menu, actual_path) = resolve_menu(app, path, pid, activated)?;
 		let read = || children(&menu, &actual_path, pid).map(|(_, items)| items);
 		let first = read()?;
 		if !may_be_stale(activated, &first) {
@@ -60,10 +62,13 @@ fn may_be_stale(activated: bool, items: &[DesktopMenuItem]) -> bool {
 
 pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> {
 	validate_path(path, false)?;
-	with_window_menu(window, MenuAccess::Dispatch, |app, pid, context_holds, _| {
-		let (menu, actual_path) = resolve_menu(app, &path[..path.len() - 1], pid)?;
-		let (elements, items) = children(&menu, &actual_path, pid)?;
-		let index = match_index(&items, &path[path.len() - 1])?;
+	with_window_menu(window, MenuAccess::Dispatch, |app, pid, context_holds, activated| {
+		let (menu, actual_path) = resolve_menu(app, &path[..path.len() - 1], pid, activated)?;
+		let read = || children(&menu, &actual_path, pid);
+		let (elements, items, index) =
+			match_level(read()?, &path[path.len() - 1], activated, MENU_SETTLE_TIMEOUT, read, || {
+				control::wait(MENU_SETTLE_POLL)
+			})?;
 		let element = &elements[index];
 		let reread = || {
 			describe(element, &actual_path, pid)?.ok_or_else(|| {
@@ -135,6 +140,40 @@ fn settle<T>(
 		last = Some(now);
 	}
 	Ok(last.unwrap_or(first))
+}
+
+/// A miss after activation must not advertise the application's old disabled
+/// state. Successful matches keep their existing command revalidation path.
+fn match_level<T>(
+	first: (Vec<T>, Vec<DesktopMenuItem>),
+	label: &str,
+	activated: bool,
+	timeout: Duration,
+	read: impl FnMut() -> CoreResult<(Vec<T>, Vec<DesktopMenuItem>)>,
+	wait: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<(Vec<T>, Vec<DesktopMenuItem>, usize)> {
+	if let Ok(index) = match_index(&first.1, label) {
+		return Ok((first.0, first.1, index));
+	}
+	let (elements, items) = if may_be_stale(activated, &first.1) {
+		settle(
+			first,
+			timeout,
+			read,
+			|first, now| {
+				first
+					.1
+					.iter()
+					.map(|item| item.enabled)
+					.ne(now.1.iter().map(|item| item.enabled))
+			},
+			wait,
+		)?
+	} else {
+		first
+	};
+	let index = match_offered(&items, label)?;
+	Ok((elements, items, index))
 }
 
 fn window_menu_context(
@@ -275,14 +314,18 @@ fn resolve_menu(
 	app: &AXUIElement,
 	path: &[String],
 	pid: libc::pid_t,
+	activated: bool,
 ) -> CoreResult<(CFRetained<AXUIElement>, Vec<String>)> {
 	let mut menu = copy_element(app, "AXMenuBar")
 		.ok_or_else(|| DesktopError::ax_failed("application does not expose AXMenuBar"))?;
 	let mut actual_path = Vec::with_capacity(path.len());
 	for label in path {
 		control::check()?;
-		let (elements, items) = children(&menu, &actual_path, pid)?;
-		let index = match_index(&items, label)?;
+		let read = || children(&menu, &actual_path, pid);
+		let (elements, items, index) =
+			match_level(read()?, label, activated, MENU_SETTLE_TIMEOUT, read, || {
+				control::wait(MENU_SETTLE_POLL)
+			})?;
 		require_enabled(&items[index])?;
 		menu = submenu(&elements[index])?.ok_or_else(|| {
 			DesktopError::ax_failed(format!(
@@ -536,6 +579,40 @@ mod tests {
 				.code,
 			ErrorCode::Cancelled
 		);
+	}
+
+	#[test]
+	fn a_missing_label_lists_revalidated_states_after_activation() {
+		let level = |enabled| {
+			(vec![()], vec![DesktopMenuItem {
+				title: "Save".into(),
+				path: vec!["Save".into()],
+				enabled,
+				checked: false,
+				has_submenu: false,
+				shortcut: None,
+			}])
+		};
+		let reads = Cell::new(0);
+		let read = || {
+			reads.set(reads.get() + 1);
+			Ok(level(reads.get() >= 3))
+		};
+		let error = match_level(level(false), "Nope", true, Duration::from_secs(1), read, || Ok(()))
+			.unwrap_err();
+		assert!(error.message.contains("Save"));
+		assert!(!error.message.contains("disabled"));
+		assert_eq!(reads.get(), 3);
+		let no_read = || -> CoreResult<_> { panic!("a current state must not be reread") };
+		let error =
+			match_level(level(false), "Nope", false, Duration::ZERO, no_read, || Ok(())).unwrap_err();
+		assert!(error.message.contains("disabled"));
+		assert!(match_level(level(false), "Save", true, Duration::ZERO, no_read, || Ok(())).is_ok());
+		let error = match_level(level(false), "Nope", true, Duration::from_secs(1), no_read, || {
+			Err(DesktopError::cancelled("cancelled"))
+		})
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
 	}
 
 	#[test]

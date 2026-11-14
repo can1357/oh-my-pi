@@ -5670,7 +5670,15 @@ type SelectUiRequest struct {
 	Title         string               `json:"title"`
 	Options       []string             `json:"options"`
 	OptionDetails []SelectOptionDetail `json:"optionDetails,omitempty"`
-	Timeout       *int64               `json:"timeout,omitempty"`
+	// Index into `options` to focus first.
+	InitialIndex *int64 `json:"initialIndex,omitempty"`
+	// Marker style for the first `markableCount` options.
+	SelectionMarker *SelectUiRequestSelectionMarker `json:"selectionMarker,omitempty"`
+	// For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option.
+	CheckedIndices []int64 `json:"checkedIndices,omitempty"`
+	// Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.
+	MarkableCount *int64 `json:"markableCount,omitempty"`
+	Timeout       *int64 `json:"timeout,omitempty"`
 }
 
 func (v *SelectUiRequest) UnmarshalJSON(data []byte) error {
@@ -5686,6 +5694,10 @@ func (v *SelectUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("title", &out.Title)
 	d.required("options", &out.Options)
 	d.optional("optionDetails", &out.OptionDetails)
+	d.optional("initialIndex", &out.InitialIndex)
+	d.optional("selectionMarker", &out.SelectionMarker)
+	d.optional("checkedIndices", &out.CheckedIndices)
+	d.optional("markableCount", &out.MarkableCount)
 	d.optional("timeout", &out.Timeout)
 	if d.err != nil {
 		return d.err
@@ -5697,6 +5709,26 @@ func (v *SelectUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 func (v SelectUiRequest) MarshalJSON() ([]byte, error) {
 	type plain SelectUiRequest
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"select"`, nil)
+}
+
+type SelectUiRequestSelectionMarker string
+
+const (
+	SelectUiRequestSelectionMarkerRadio    SelectUiRequestSelectionMarker = "radio"
+	SelectUiRequestSelectionMarkerCheckbox SelectUiRequestSelectionMarker = "checkbox"
+)
+
+func (v *SelectUiRequestSelectionMarker) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SelectUiRequestSelectionMarker")
+	if err != nil {
+		return err
+	}
+	switch value := SelectUiRequestSelectionMarker(s); value {
+	case SelectUiRequestSelectionMarkerRadio, SelectUiRequestSelectionMarkerCheckbox:
+		*v = value
+		return nil
+	}
+	return unknownValue("SelectUiRequestSelectionMarker", s)
 }
 
 type ConfirmUiRequest struct {

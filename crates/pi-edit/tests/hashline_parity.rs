@@ -253,9 +253,9 @@ fn compact_diff_preview_matches_all_diff_preview_cases() {
 			0,
 		),
 		(
-			"dedupes blank gap rows left adjacent by omitted removed lines and trims edge separators",
+			"marks hunk gaps left adjacent by omitted removed lines once and trims edge separators",
 			"\n 1|alpha\n\n-5|beta\n\n 9|gamma\n\n-12|omitted",
-			"1:alpha\n\n8:gamma",
+			"1:alpha\n…\n8:gamma",
 			0,
 			2,
 		),
@@ -1155,6 +1155,49 @@ async fn edit_of_first_line_with_prior_read_applies() {
 	assert_eq!(
 		workspace.read("a.txt").as_deref(),
 		Some(source.replacen("line1\n", "LINE1\n", 1).as_str())
+	);
+}
+
+#[tokio::test]
+async fn edit_result_after_a_formatting_write_shows_the_written_lines() {
+	const SOURCE: &str = "const x = { a: 1 };\nlet y = \"q\";\n";
+	const FORMATTED: &str = "const x = { a: 1 };\nlet z = { b: 3 };\nlet w = [1, 2];\n";
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("zz.ts", SOURCE);
+	let tag = workspace.snapshot("zz.ts", SOURCE, Some(&[1, 2]));
+	let writer = common::DiskWriter {
+		rewrite: Some(Box::new(|_| FORMATTED.to_owned())),
+		..Default::default()
+	};
+
+	let outcome = workspace
+		.apply_json(
+			&json!({ "input": format!("[zz.ts#{tag}]\nPUT 2.=2:\n+let z={{b:3}};;\n+let w=[1,\n+2];") }),
+			&writer,
+		)
+		.await
+		.expect("applies the edit");
+	let text = &outcome.text;
+	let tag = file_hash(FORMATTED);
+	assert!(text.starts_with(&format!("[zz.ts#{tag}]")), "{text}");
+	assert!(text.contains("2:let z = { b: 3 };\n3:let w = [1, 2];"), "{text}");
+	assert!(!text.contains("let z={b:3};;"), "result shows sent lines: {text}");
+	assert!(!text.contains("4:"), "result shows a line the written file lacks: {text}");
+	assert!(!text.contains("editor/IDE"), "blames an editor: {text}");
+
+	// The displayed rows are anchorable under the returned tag.
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[zz.ts#{tag}]\nPUT 3.=3:\n+let w = [3];") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("edits a line shown by the formatted result");
+	assert_eq!(
+		workspace.read("zz.ts").as_deref(),
+		Some("const x = { a: 1 };\nlet z = { b: 3 };\nlet w = [3];\n")
 	);
 }
 

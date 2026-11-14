@@ -61,14 +61,14 @@ function target(url: InternalUrl): ProcTarget {
 	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
 }
 
-/** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
+/** `proc://<id>/kill`: cancels a job, agent, or service; ignores content and touches no files. */
 function isKill(url: InternalUrl): boolean {
 	return (url.rawPathname ?? url.pathname).endsWith("/kill");
 }
 
 /** The write call that cancels `id`, as error messages quote it. */
 function killCall(id: string): string {
-	return `call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed)`;
+	return `call write with ${JSON.stringify({ path: `proc://${id}/kill`, content: "" })}`;
 }
 
 /** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
@@ -148,7 +148,6 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			payload: "verbatim",
 			scope: "workspace",
 			tier: () => "exec",
-			contentOptional: isKill,
 			cancels: isKill,
 		},
 	};
@@ -316,7 +315,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await modeService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
-				details: { proc: { action: "mode", daemon: updated, mode: content } },
+				details: { proc: { action: "mode", daemon: updated, mode: content }, touchesNoFiles: true },
 			};
 		}
 		if (action === "stdin") {
@@ -324,7 +323,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],
-				details: { proc: { action: "stdin", daemon: updated, input: content } },
+				details: { proc: { action: "stdin", daemon: updated, input: content }, touchesNoFiles: true },
 			};
 		}
 		if (service) {

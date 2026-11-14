@@ -280,6 +280,33 @@ fn binary_buffers_have_no_matches_and_late_nul_lines_end_the_scan() {
 	// A NUL in a context line about to be reported ends the scan too.
 	let ctx = SearchOptions { before: 1, ..SearchOptions::default() };
 	assert_eq!(lines(&doc, "match 2", false, ctx), Vec::<String>::new());
+	let Engine::Rust(matcher) = &engine else {
+		panic!("rust matcher")
+	};
+	// Skipped content is reported only when it holds a match: not for a
+	// match-free binary buffer, nor for a NUL in context after the last match.
+	let params = scan::ScanParams { content: true, after: 1, ..Default::default() };
+	for (input, binary_match, count) in [
+		(b"match\x00\nmatch\n".to_vec(), true, 0),
+		(b"\x00\x01\x02 no hit\n".to_vec(), false, 0),
+		// Match 1's context NUL hides match 2.
+		(doc.clone().into_bytes(), true, 1),
+		(format!("{pad}match 1\nnul \x00 here\n").into_bytes(), false, 1),
+	] {
+		let outcome = scan::Scanner::default()
+			.scan(matcher, false, false, &input, &params, &mut Vec::new())
+			.expect("scan");
+		assert_eq!((outcome.binary_match, outcome.count), (binary_match, count));
+	}
+	// Buffered and streamed explicit text searches retain NUL lines and context.
+	let params =
+		scan::ScanParams { text: true, content: true, before: 1, after: 1, ..Default::default() };
+	for (outcome, matches) in scan_both(matcher, b"before\0\nmatch\0\nafter\0\n", &params) {
+		assert!(!outcome.binary_match);
+		assert_eq!(matches[0].text, "match\0");
+		assert_eq!(matches[0].before[0].text, "before\0");
+		assert_eq!(matches[0].after[0].text, "after\0");
+	}
 }
 
 #[test]
@@ -408,6 +435,7 @@ fn scanner_matches_grep_searcher_in_line_mode() {
 		for pattern in ["ab", "^ab", "b$", "a.c", r"ab(?=\s)", "x*", r"\bab\b"] {
 			let engine = compile(pattern);
 			let params = scan::ScanParams {
+				text:        false,
 				content:     next(4) != 0,
 				before:      next(3),
 				after:       next(3),
@@ -426,6 +454,77 @@ fn scanner_matches_grep_searcher_in_line_mode() {
 }
 
 // ----- file roots -----------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_nul_file_finds_text_before_and_after_nul() {
+	let dir = TempDir::new();
+	let file = dir.write("f.md", b"needle\n\0\nneedle after\n");
+	let res = run(&file, &options(&needle())).await;
+	assert_eq!(res.total_matches, 2, "an explicitly selected file is searched as text");
+	assert_eq!(res.matches.iter().map(|m| m.line).collect::<Vec<_>>(), [1, 3]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_nul_files_search_buffered_and_streamed_content_in_every_output_mode() {
+	let dir = TempDir::new();
+	let engine = needle();
+	for size in [0, 70 << 10, MAX_FILE_BYTES as usize + 1024] {
+		for early in [false, true] {
+			let mut content = String::from(if early {
+				"needle\0 head\n"
+			} else {
+				"needle head\n"
+			});
+			while content.len() < size {
+				content.push_str("padding line\n");
+			}
+			content.push_str("needle\0 tail\nneedle after\n");
+			let file = dir.write("nul.txt", content);
+			for mode in [Mode::Content, Mode::Count, Mode::FilesWithMatches] {
+				let result = run(&file, &GrepOptions { mode, ..options(&engine) }).await;
+				assert_eq!(result.files_with_matches, 1, "size={size} early={early} mode={mode:?}");
+				if mode != Mode::FilesWithMatches {
+					assert_eq!(result.total_matches, 3, "size={size} early={early} mode={mode:?}");
+				}
+				if mode == Mode::Content {
+					assert_eq!(result.matches[1].text, "needle\0 tail");
+				}
+			}
+		}
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_nul_files_find_multiline_matches_in_the_search_window() {
+	let dir = TempDir::new();
+	let engine = Arc::new(Engine::compile("needle\\n\\x00\\nend", false, true).expect("compile"));
+	for size in [0, MAX_FILE_BYTES as usize + 1024] {
+		let content = format!("needle\n\0\nend\n{}", "padding\n".repeat(size / 8));
+		let file = dir.write("nul.txt", content);
+		let result = run(&file, &GrepOptions { multiline: true, ..options(&engine) }).await;
+		assert_eq!(result.total_matches, 1);
+		assert_eq!(result.matches[0].text, "needle\n\0\nend");
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_results_list_only_binary_files_that_hide_matches() {
+	let dir = TempDir::new();
+	dir.write("early.md", b"needle\n\0\n");
+	dir.write("late.md", format!("{}needle\0\n", "padding\n".repeat(9000)));
+	dir.write("image.png", b"\x89PNG\0\0 no hit");
+	let engine = needle();
+	// Unbounded and budgeted walks.
+	for max_count in [None, Some(20)] {
+		let result = run(dir.path(), &GrepOptions { max_count, ..options(&engine) }).await;
+		assert_eq!(result.total_matches, 0);
+		assert_eq!(result.binary_matches, ["early.md", "late.md"]);
+	}
+	dir.write("text.md", "needle text\n");
+	let (result, batches) = run_sunk(dir.path(), options(&engine)).await;
+	assert_eq!(result.expect("stream").binary_matches, ["early.md", "late.md"]);
+	assert_eq!(batches.into_iter().flatten().count(), 1);
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn single_file_count_mode_reports_every_match() {

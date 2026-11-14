@@ -135,6 +135,9 @@ impl FsErr {
 
 /// The C `errno` of `err` (0: unknown).
 fn errno_of(err: &io::Error, text: &[u8]) -> i32 {
+	// Off Unix a raw code is a host (Win32) code, not an errno: only the
+	// kind says which POSIX errno the error stands for.
+	#[cfg(unix)]
 	if let Some(code) = err.raw_os_error() {
 		return code;
 	}
@@ -157,6 +160,7 @@ fn errno_of(err: &io::Error, text: &[u8]) -> i32 {
 			K::Interrupted => libc::EINTR,
 			K::TooManyLinks => libc::EMLINK,
 			K::OutOfMemory => libc::ENOMEM,
+			K::BrokenPipe => libc::EPIPE,
 			_ if text == b"Input/output error" => libc::EIO,
 			_ if text == b"Too many levels of symbolic links" => libc::ELOOP,
 			_ if text == b"Bad file descriptor" => libc::EBADF,
@@ -165,8 +169,205 @@ fn errno_of(err: &io::Error, text: &[u8]) -> i32 {
 	}
 	#[cfg(not(unix))]
 	{
-		let _ = text;
-		0
+		use io::ErrorKind as K;
+		match err.kind() {
+			K::NotFound => posix::ENOENT,
+			K::PermissionDenied => posix::EACCES,
+			K::AlreadyExists => posix::EEXIST,
+			K::IsADirectory => posix::EISDIR,
+			K::NotADirectory => posix::ENOTDIR,
+			K::DirectoryNotEmpty => posix::ENOTEMPTY,
+			K::InvalidInput => posix::EINVAL,
+			K::Unsupported => posix::ENOTSUP,
+			K::CrossesDevices => posix::EXDEV,
+			K::ReadOnlyFilesystem => posix::EROFS,
+			K::StorageFull => posix::ENOSPC,
+			K::WouldBlock => posix::EAGAIN,
+			K::Interrupted => posix::EINTR,
+			K::TooManyLinks => posix::EMLINK,
+			K::OutOfMemory => posix::ENOMEM,
+			K::NotSeekable => posix::ESPIPE,
+			K::BrokenPipe => posix::EPIPE,
+			_ if text == b"Input/output error" => posix::EIO,
+			_ if text == b"Bad file descriptor" => posix::EBADF,
+			// A host error of a kind the table lacks (a sharing violation, an
+			// invalid name): still an error, not errno 0 (`Success`).
+			_ if err.raw_os_error().is_some() => posix::EIO,
+			_ => 0,
+		}
+	}
+}
+
+/// The Linux `errno` numbers (what `$errnos` names off Unix) of the errors
+/// the engine reports.
+#[cfg(not(unix))]
+pub mod posix {
+	pub const ENOENT: i32 = 2;
+	pub const EINTR: i32 = 4;
+	pub const EIO: i32 = 5;
+	pub const EBADF: i32 = 9;
+	pub const EAGAIN: i32 = 11;
+	pub const ENOMEM: i32 = 12;
+	pub const EACCES: i32 = 13;
+	pub const EEXIST: i32 = 17;
+	pub const EXDEV: i32 = 18;
+	pub const ENOTDIR: i32 = 20;
+	pub const EISDIR: i32 = 21;
+	pub const EINVAL: i32 = 22;
+	pub const ENOSPC: i32 = 28;
+	pub const ESPIPE: i32 = 29;
+	pub const EROFS: i32 = 30;
+	pub const EMLINK: i32 = 31;
+	pub const EPIPE: i32 = 32;
+	pub const ENOTEMPTY: i32 = 39;
+	pub const ENOTSUP: i32 = 95;
+
+	/// glibc's `strerror` texts by Linux errno number (0 is "Success"):
+	/// every number `$errnos` names, as the Linux build prints it.
+	const TEXTS: [&str; 134] = [
+		"Success",
+		"Operation not permitted",
+		"No such file or directory",
+		"No such process",
+		"Interrupted system call",
+		"Input/output error",
+		"No such device or address",
+		"Argument list too long",
+		"Exec format error",
+		"Bad file descriptor",
+		"No child processes",
+		"Resource temporarily unavailable",
+		"Cannot allocate memory",
+		"Permission denied",
+		"Bad address",
+		"Block device required",
+		"Device or resource busy",
+		"File exists",
+		"Invalid cross-device link",
+		"No such device",
+		"Not a directory",
+		"Is a directory",
+		"Invalid argument",
+		"Too many open files in system",
+		"Too many open files",
+		"Inappropriate ioctl for device",
+		"Text file busy",
+		"File too large",
+		"No space left on device",
+		"Illegal seek",
+		"Read-only file system",
+		"Too many links",
+		"Broken pipe",
+		"Numerical argument out of domain",
+		"Numerical result out of range",
+		"Resource deadlock avoided",
+		"File name too long",
+		"No locks available",
+		"Function not implemented",
+		"Directory not empty",
+		"Too many levels of symbolic links",
+		"Unknown error 41",
+		"No message of desired type",
+		"Identifier removed",
+		"Channel number out of range",
+		"Level 2 not synchronized",
+		"Level 3 halted",
+		"Level 3 reset",
+		"Link number out of range",
+		"Protocol driver not attached",
+		"No CSI structure available",
+		"Level 2 halted",
+		"Invalid exchange",
+		"Invalid request descriptor",
+		"Exchange full",
+		"No anode",
+		"Invalid request code",
+		"Invalid slot",
+		"Unknown error 58",
+		"Bad font file format",
+		"Device not a stream",
+		"No data available",
+		"Timer expired",
+		"Out of streams resources",
+		"Machine is not on the network",
+		"Package not installed",
+		"Object is remote",
+		"Link has been severed",
+		"Advertise error",
+		"Srmount error",
+		"Communication error on send",
+		"Protocol error",
+		"Multihop attempted",
+		"RFS specific error",
+		"Bad message",
+		"Value too large for defined data type",
+		"Name not unique on network",
+		"File descriptor in bad state",
+		"Remote address changed",
+		"Can not access a needed shared library",
+		"Accessing a corrupted shared library",
+		".lib section in a.out corrupted",
+		"Attempting to link in too many shared libraries",
+		"Cannot exec a shared library directly",
+		"Invalid or incomplete multibyte or wide character",
+		"Interrupted system call should be restarted",
+		"Streams pipe error",
+		"Too many users",
+		"Socket operation on non-socket",
+		"Destination address required",
+		"Message too long",
+		"Protocol wrong type for socket",
+		"Protocol not available",
+		"Protocol not supported",
+		"Socket type not supported",
+		"Operation not supported",
+		"Protocol family not supported",
+		"Address family not supported by protocol",
+		"Address already in use",
+		"Cannot assign requested address",
+		"Network is down",
+		"Network is unreachable",
+		"Network dropped connection on reset",
+		"Software caused connection abort",
+		"Connection reset by peer",
+		"No buffer space available",
+		"Transport endpoint is already connected",
+		"Transport endpoint is not connected",
+		"Cannot send after transport endpoint shutdown",
+		"Too many references: cannot splice",
+		"Connection timed out",
+		"Connection refused",
+		"Host is down",
+		"No route to host",
+		"Operation already in progress",
+		"Operation now in progress",
+		"Stale file handle",
+		"Structure needs cleaning",
+		"Not a XENIX named type file",
+		"No XENIX semaphores available",
+		"Is a named type file",
+		"Remote I/O error",
+		"Disk quota exceeded",
+		"No medium found",
+		"Wrong medium type",
+		"Operation canceled",
+		"Required key not available",
+		"Key has expired",
+		"Key has been revoked",
+		"Key was rejected by service",
+		"Owner died",
+		"State not recoverable",
+		"Operation not possible due to RF-kill",
+		"Memory page has hardware error",
+	];
+
+	/// The `strerror` text of Linux errno `num`, glibc's `Unknown error N`
+	/// for a number outside the table.
+	pub fn text(num: i32) -> std::borrow::Cow<'static, str> {
+		match usize::try_from(num).ok().and_then(|i| TEXTS.get(i)) {
+			Some(t) => std::borrow::Cow::Borrowed(t),
+			None => std::borrow::Cow::Owned(format!("Unknown error {num}")),
+		}
 	}
 }
 
@@ -506,5 +707,14 @@ impl FsPending<FsAns> for WriteAll {
 
 	fn reissuable(&self) -> bool {
 		false
+	}
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+	#[test]
+	fn unmapped_host_errors_are_eio() {
+		let sharing_violation = std::io::Error::from_raw_os_error(32);
+		assert_eq!(super::errno_of(&sharing_violation, b""), super::posix::EIO);
 	}
 }

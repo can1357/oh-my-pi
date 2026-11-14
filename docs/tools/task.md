@@ -153,6 +153,7 @@ Artifacts and side channels:
    - On demand — a worker boots ahead of time only when the spawns being streamed (the in-flight count plus the `tasks[]` items of the streaming `task` call seen so far, or 1; an `eval` call whose code calls `agent(`/`workpool(` counts as 1) reach a bracket whose worker slot is empty; otherwise the placement that needs it starts it. A worker lives while it runs a subagent or holds a live (idle, kept-alive) subagent session, and exits 60 s after it has neither, releasing its memory; when `n` drops, existing workers are not stopped early.
    - Main — fewer than 9 concurrent subagents, `task.workerThreads: 0`, SDK embedding, and `bun test` run subagents on the main thread.
    - Shared state stays single-owned on the main thread and reaches workers by RPC: agent registry, lifecycle, IRC bus, async jobs, cost gate, event buses, artifact ids, agent storage, auth storage (pins, account pools, OAuth refresh), MCP connections, Hindsight/Mnemopi state, telemetry spans, and logs. Workers get live mirrors of the parent settings and build their own model catalog over main's auth storage. The main thread sees a worker-homed subagent as a mirrored session that the Agent Hub, focus view, `agent://`, `history://`, `proc://`, and RPC mode use like a local one.
+   - Extensions — workers re-import file-backed prepared extensions; inline factories (`<inline-N>`) cannot cross threads, so worker-hosted subagents run without them and the main thread logs a warning ([Extension loading](../extension-loading.md#restricted-children-and-revival)).
    - A worker that exits mid-run fails that run with an error naming the worker; its agents are detached as `parked` (with a transcript) or `aborted`, and a revival is placed like a fresh spawn.
 - Batch mode (`task.batch`, default on)
    - on — `{ context, tasks[] }`: one independent spawn per item, required `context` shared across the call's spawns, with `agent`, `outputSchema`, and `schemaMode` per item. `effort` appears only when its setting enables it; `isolated` also requires plan mode to be disabled. Lifecycle, revival, and concurrency semantics match N parallel single calls.
@@ -185,7 +186,7 @@ Artifacts and side channels:
    - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
    - Shares the parent `local://` root and `ArtifactManager` with subagents.
 - Background work / cancellation
-   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
+   - `write proc://<jobId>/kill` (empty `content`) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
    - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
 
 ## Limits & Caps

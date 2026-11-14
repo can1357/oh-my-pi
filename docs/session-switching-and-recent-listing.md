@@ -133,7 +133,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 - Tab toggles current-folder / all-projects scope; the all-projects list is loaded lazily or supplied preloaded
 - search combines session metadata/prefix text with prompt-history matches from `history.db` after a short debounce
 - mouse wheel changes selection and left click selects in the fullscreen picker
-- Delete, or Backspace with an empty search, opens confirmation and deletes the JSONL plus session artifacts
+- `app.session.delete` (Backspace or Delete by default) opens confirmation and deletes the JSONL plus session artifacts; a bound key that also deletes backward edits a typed search first
 
 ## Interactive in-session picker (`SelectorController.showSessionSelector`)
 
@@ -154,7 +154,7 @@ Flow:
 
 - Up/Down and Page Up/Page Down navigation (clamped, not wrapped)
 - Enter to select
-- Delete, or Backspace on an empty search, to delete after confirmation
+- `app.session.delete` (Backspace or Delete by default; Backspace edits a typed search first) to delete after confirmation
 - Esc to cancel; Ctrl+C to exit
 - Tab to toggle current-folder / all-projects scope
 - mouse wheel/click in the fullscreen picker

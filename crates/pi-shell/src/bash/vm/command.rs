@@ -166,6 +166,14 @@ fn pool_words(pool: &mut Vec<BString>, words: &mut Vec<BString>) {
 	}
 }
 
+/// A command name the engine runs as a path rather than looking up: it has
+/// a `/`, or, on Windows, a `\`.
+fn names_path(k: &Kernel, name: &[u8]) -> bool {
+	name.contains(&b'/')
+		|| (k.engine.config().platform == crate::bash::ids::Platform::Windows
+			&& name.contains(&b'\\'))
+}
+
 /// The current command's expanded words, borrowed shared: lookups that also
 /// read `vp` use it instead of copying a word out of [`st`].
 fn current_argv(vp: &Vproc) -> &[BString] {
@@ -520,7 +528,7 @@ fn plain_statement(
 			_ => return None,
 		}
 	}
-	if name.contains(&b'/')
+	if names_path(k, &name)
 		|| xtrace::on(k, cx, vp)
 		|| state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix).unwrap_or(true)
 		|| state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Keyword)
@@ -1841,9 +1849,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
 			let name = &current_argv(vp)[0];
-			let has_slash = name.contains(&b'/')
-				|| (k.engine.config().platform == crate::bash::ids::Platform::Windows
-					&& name.contains(&b'\\'));
+			let has_slash = names_path(k, name);
 			// zsh's reserved `typeset`, `local`, …: their builtin even when
 			// disabled, before any function of the name (`execcmd_exec`
 			// with `WC_TYPESET`).
@@ -2612,7 +2618,7 @@ fn spawned_external(
 			// bash names the file it tried: the PATH (or hash table)
 			// result, a name with `/` as written.
 			let name = st(vp).argv[0].clone();
-			let name = if name.contains(&b'/') { name } else { path };
+			let name = if names_path(k, &name) { name } else { path };
 			let (diag, status) = spawn_error(name, err);
 			k.diag(cx, vp, line, diag);
 			let s = st(vp);
@@ -4202,7 +4208,7 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		// (then the shell exits); only `posixbuiltins` limits it to
 		// externals.
 		None
-	} else if name.contains(&b'/') {
+	} else if names_path(k, &name) {
 		Some(Target::External(absolute(&vp.cwd, &name)))
 	} else {
 		Some(Target::Search)
@@ -4863,7 +4869,7 @@ fn run_script_file(
 	// `$0` is the file bash tried: a name with `/` as written, else the
 	// PATH (or hash table) result.
 	let name = st(vp).argv[0].clone();
-	let file = if name.contains(&b'/') { name } else { path };
+	let file = if names_path(k, &name) { name } else { path };
 	super::nested::start_script(k, vp, cx, &env, &file, &text)
 }
 
@@ -5023,7 +5029,7 @@ fn refused(
 	// with `/` as written.
 	let name = {
 		let n = st(vp).argv[0].clone();
-		if n.contains(&b'/') { n } else { path.clone() }
+		if names_path(k, &n) { n } else { path.clone() }
 	};
 	let enoent = err.kind() == ErrorKind::NotFound;
 	let mut status = if enoent { 127 } else { 126 };
@@ -5091,7 +5097,7 @@ fn zsh_refused(
 	let enoexec = is_enoexec(&err);
 	let status = if enoexec { 126 } else { 127 };
 	let name = st(vp).argv[0].clone();
-	let pth = if name.contains(&b'/') {
+	let pth = if names_path(k, &name) {
 		name.clone()
 	} else {
 		path.clone()
@@ -5143,7 +5149,7 @@ fn zsh_refused(
 	} else if enoexec {
 		st(vp).target = Some(Target::Script(path.clone()));
 		return None;
-	} else if name.contains(&b'/') {
+	} else if names_path(k, &name) {
 		format!("{}: {name}", super::redir::zsh_errno(&err))
 	} else {
 		format!("command not found: {name}")

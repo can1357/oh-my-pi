@@ -22,6 +22,8 @@ import {
 
 /** Prompt history fields displayed in search results. */
 export interface HistorySearchEntry {
+	/** Stable identifier of the stored prompt. */
+	id: number;
 	prompt: string;
 	created_at: number;
 	/** Project folder the prompt was typed in. */
@@ -32,6 +34,8 @@ export interface HistorySearchEntry {
 export interface HistorySource {
 	search(query: string, limit: number): HistorySearchEntry[];
 	getRecent(limit: number): HistorySearchEntry[];
+	/** Remove a prompt from history. */
+	delete(id: number): void;
 }
 
 import { boundKeys, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
@@ -239,6 +243,7 @@ export class HistorySearchComponent extends OverlayPanel {
 				{
 					label: "",
 					getRecent: limit => historySource.getRecent(limit),
+					delete: id => historySource.delete(id),
 					search: (query, limit) => historySource.search(query, limit),
 				},
 			];
@@ -296,7 +301,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.title = label ? `History (${label})` : "History";
 		const dot = theme.fg("dim", theme.sep.dot);
 		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
-		const hints = [navigate, rawKeyHint("enter", "select")];
+		const hints = [navigate, rawKeyHint("enter", "select"), rawKeyHint("delete", "delete at end")];
 		// A one-scope ring cannot cycle, so advertising Tab would promise a no-op.
 		if (this.#scopes.length > 1) hints.push(rawKeyHint("tab", this.#scopeAt(this.#scopeIndex + 1).label));
 		hints.push(keyHint("tui.select.cancel", "cancel"));
@@ -369,6 +374,16 @@ export class HistorySearchComponent extends OverlayPanel {
 		if (matchesKey(keyData, "end")) {
 			this.#flushPendingSearch();
 			this.#menu.moveToBoundary("last");
+			return;
+		}
+
+		if (matchesKey(keyData, "delete") && this.#searchInput.getCursor() === this.#searchInput.getValue().length) {
+			this.#flushPendingSearch();
+			const selected = this.#menu.selectedItem;
+			if (selected) {
+				this.#scopeAt(this.#scopeIndex).delete(selected.id);
+				this.#updateResults();
+			}
 			return;
 		}
 
@@ -454,6 +469,7 @@ export class HistorySearchComponent extends OverlayPanel {
 						{ keys: ["shift+tab" as const], label: this.#scopeAt(this.#scopeIndex - 1).label },
 					]
 				: []),
+			{ keys: ["delete"], label: "delete at end" },
 			actionHint("tui.select.cancel", "cancel"),
 		]);
 		const root = overlayCard(this.nativeRole, this.title, [this.#searchInput, list, this.#nativeHints]);

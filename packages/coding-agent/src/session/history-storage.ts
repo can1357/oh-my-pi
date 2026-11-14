@@ -94,6 +94,11 @@ function readableRowClause(table: string): string {
 	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
 }
 
+/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
+function ftsTokens(term: string): string[] {
+	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
+}
+
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
 function escapeLikePattern(text: string): string {
@@ -184,7 +189,10 @@ export class HistoryStorage {
 
 	CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
 	INSERT INTO history_fts(rowid, prompt) VALUES (new.id, new.prompt);
-	END;
+END;
+CREATE TRIGGER IF NOT EXISTS history_ad AFTER DELETE ON history BEGIN
+	INSERT INTO history_fts(history_fts, rowid, prompt) VALUES ('delete', old.id, old.prompt);
+END;
 		`);
 
 		if (rebuilt || !hadFts) {
@@ -315,6 +323,11 @@ export class HistoryStorage {
 		return Promise.resolve();
 	}
 
+	/** Deletes a stored prompt and its search index entry. */
+	delete(id: number): void {
+		this.#db.query("DELETE FROM history WHERE id = ?").run(id);
+	}
+
 	/** Returns recent unique prompts, degrading to no results when storage is unavailable. */
 	getRecent(limit: number, scope?: HistoryScope | HistoryFilter): HistoryEntry[] {
 		try {
@@ -345,13 +358,13 @@ export class HistoryStorage {
 		return JSON.stringify(this.#scopeDirs(kind, target).sort());
 	}
 
-	/** Finds unique prompts matching every query token, newest first, restricted to a scope or exact metadata filter. */
+	/** Finds unique prompts matching every whitespace-delimited query term, newest first, restricted to a scope or exact metadata filter. */
 	search(query: string, limit: number, scope?: HistoryScope | HistoryFilter): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		const tokens = this.#tokenize(query);
-		if (tokens.length === 0) return [];
+		const terms = this.#terms(query);
+		if (terms.length === 0) return [];
 
 		// Resolved before the query paths, like `getRecent`: a scope that cannot be rendered
 		// means an unusable handle, and reading unscoped is never an option — fail closed.
@@ -363,10 +376,11 @@ export class HistoryStorage {
 			return [];
 		}
 
-		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
-		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
-		//    indexed the stored text, so "git-commit" -> "git"* "commit"*.
-		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
+		// 1. FTS5 prefix match (term AND). Each term is one phrase of its letter
+		//    and digit runs, split the way the unicode61 tokenizer indexed the
+		//    stored text, so "git-commit" -> "git commit"*: the runs must be
+		//    adjacent tokens, not two words anywhere in the prompt.
+		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
 			ftsRows = this.#prepare(
@@ -377,12 +391,13 @@ export class HistoryStorage {
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
 		}
 
-		// 2. Substring fallback (token-AND LIKE). Catches infix matches FTS5's
-		//    prefix-only wildcard cannot reach (e.g. "mit" -> "commit"). Bounded
-		//    by safeLimit, ordered by recency - no full-table load into JS.
+		// 2. Substring fallback (term-AND LIKE, each term literal). Catches infix
+		//    matches FTS5's prefix-only wildcard cannot reach (e.g. "mit" ->
+		//    "commit"). Bounded by safeLimit, ordered by recency - no full-table
+		//    load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit, clause);
+			subRows = this.#searchSubstring(terms, safeLimit, clause);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -590,19 +605,18 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Split on non-alphanumeric runs, mirroring FTS5's `unicode61` tokenizer so
-	 * query tokens align with how stored prompts were indexed. Lowercases for
-	 * stable substring matching.
+	 * Whitespace-delimited query terms, lowercased for stable substring matching.
+	 * A term without a letter or digit matches nothing and is dropped.
 	 */
-	#tokenize(query: string): string[] {
+	#terms(query: string): string[] {
 		return query
 			.toLowerCase()
-			.split(/[^\p{L}\p{N}]+/u)
-			.filter(tok => tok.length > 0);
+			.split(/\s+/u)
+			.filter(term => /[\p{L}\p{N}]/u.test(term));
 	}
 
-	#searchSubstring(tokens: string[], limit: number, clause: ScopeClause): HistoryRow[] {
-		const whereClause = tokens.map(() => "prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
+	#searchSubstring(terms: string[], limit: number, clause: ScopeClause): HistoryRow[] {
+		const whereClause = terms.map(() => "prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
 		// One LIKE term per token, so this text — and any cache key built from it — grows with the
 		// query. Prepared per call and finalized right after: measured 8-34 us against the 1.5-29 ms
 		// this scan already costs, so caching it bought nothing and retained a statement per token
@@ -611,7 +625,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ${clause.and} ORDER BY created_at DESC, id DESC LIMIT ?`,
 		);
 		try {
-			const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+			const params: SQLQueryBindings[] = terms.map(term => `%${escapeLikePattern(term)}%`);
 			params.push(...clause.params, limit);
 			return stmt.all(...params) as HistoryRow[];
 		} finally {

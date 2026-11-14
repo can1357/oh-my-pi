@@ -31,6 +31,7 @@ import {
 } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
 import {
+	assertUrlPattern,
 	historyBackInPage,
 	historyForwardInPage,
 	locationHrefInPage,
@@ -1133,8 +1134,6 @@ export class CmuxTab implements InProcessRunTab {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: "viewport", scale: cssWidth && resized.originalWidth / cssWidth },
@@ -1191,6 +1190,7 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
+		assertUrlPattern(pattern);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
 		if (typeof pattern === "string") {
@@ -1694,8 +1694,14 @@ export class CmuxTab implements InProcessRunTab {
 		signal: AbortSignal | undefined = this.#runContext?.signal,
 	): Promise<Record<string, unknown>> {
 		throwIfAborted(signal);
-		const result = await untilAborted(signal, () =>
-			this.#client.request(method, { surface_id: this.#surfaceId, ...params }, { timeoutMs }),
+		if (this.#runContext) {
+			const remainingMs = Math.max(1, this.#runContext.deadline - Date.now());
+			timeoutMs = Math.min(timeoutMs ?? remainingMs, remainingMs);
+		}
+		const result = await this.#client.request(
+			method,
+			{ surface_id: this.#surfaceId, ...params },
+			{ timeoutMs, signal },
 		);
 		throwIfAborted(signal);
 		return result;
