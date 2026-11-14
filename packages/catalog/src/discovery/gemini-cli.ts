@@ -83,7 +83,8 @@ export interface FetchGeminiCliQuotaModelsOptions {
 export async function fetchGeminiCliQuotaModels(
 	options: FetchGeminiCliQuotaModelsOptions,
 ): Promise<ModelSpec<"google-gemini-cli">[] | null> {
-	await ensureGeminiCliVersion(options.fetcher ?? fetch, options.signal);
+	// The npm registry is not Cloud Code Assist: the injected transport only carries provider requests.
+	await ensureGeminiCliVersion(fetch, options.signal);
 	const fetcher = discoveryFetch(options.fetcher);
 	const endpoint = (options.endpoint?.trim() || DEFAULT_ENDPOINT).replace(/\/+$/, "");
 	const headers = {

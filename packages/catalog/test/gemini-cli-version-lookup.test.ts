@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { fetchGeminiCliQuotaModels } from "@oh-my-pi/pi-catalog/discovery/gemini-cli";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import {
 	DEFAULT_GEMINI_CLI_VERSION,
@@ -67,5 +68,40 @@ describe("Gemini CLI version lookup", () => {
 
 		expect(urls).toHaveLength(0);
 		expect(getGeminiCliUserAgent()).toStartWith("GeminiCLI/0.1.2/");
+	});
+
+	it("resolves the version through the global fetch, never the injected discovery transport", async () => {
+		const globalFetch = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(async () => new Response(JSON.stringify({ latest: "0.99.2" }), { status: 200 }), {
+				preconnect: fetch.preconnect,
+			}),
+		);
+		const transportUrls: string[] = [];
+		const userAgents: (string | null)[] = [];
+		// A backend-only transport: it serves Cloud Code Assist and rejects any other host.
+		const backendOnly = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				transportUrls.push(url);
+				if (!url.startsWith("https://cloudcode-pa.googleapis.com/")) throw new Error(`blocked: ${url}`);
+				userAgents.push(new Headers(init?.headers).get("User-Agent"));
+				if (url.includes(":loadCodeAssist")) return new Response("{}", { status: 200 });
+				return new Response(JSON.stringify({ buckets: [{ modelId: "gemini-3.5-flash" }] }), { status: 200 });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		try {
+			const models = await fetchGeminiCliQuotaModels({ token: "t", projectId: "p", fetcher: backendOnly });
+
+			expect(models?.map(m => m.id)).toEqual(["gemini-3.5-flash"]);
+			expect(globalFetch.mock.calls.map(([input]) => String(input))).toEqual([
+				"https://registry.npmjs.org/-/package/@google/gemini-cli/dist-tags",
+			]);
+			expect(transportUrls.every(url => url.startsWith("https://cloudcode-pa.googleapis.com/"))).toBe(true);
+			expect(userAgents[0]).toStartWith("GeminiCLI/0.99.2/");
+		} finally {
+			globalFetch.mockRestore();
+		}
 	});
 });
