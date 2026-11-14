@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed a usage-limited OAuth account so the next request uses a signed-in API key for the same provider instead of failing while that key sits idle ([#19203](https://github.com/can1357/oh-my-pi/issues/19203)).
 - Gemini 4 responses that exceed a single output segment now continue generating and are delivered as one complete reply across Google, Vertex AI, Gemini CLI, and Antigravity.
 - Fixed Cursor conversations so prompt content added by hooks remains part of the current user message and server-recorded context is replayed correctly on subsequent turns.
 - Improved Google Antigravity quota recovery so Gemini 4 Argon access can be restored after quota or plan changes when shared Gemini capacity is available.

@@ -1,3 +1,4 @@
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -45,6 +46,18 @@ import {
 const SIBLING_UNBLOCK_WAIT_MAX_MS = 5_000;
 /** Slack past a sibling's deadline so the post-wait resolve sees the block expired. */
 const SIBLING_UNBLOCK_SLACK_MS = 25;
+
+/** A deliberate `/login` API key, not a keyless-mode marker or a broker-migrated copy. */
+function isDeliberateLoginApiKey(provider: string, credential: AuthCredential): boolean {
+	if (credential.type !== "api_key" || credential.source !== "login" || credential.key.length === 0) return false;
+	const login = authPolicyFor(provider)?.login;
+	return !(
+		login?.kind === "api-key" &&
+		login.emptyFallback !== undefined &&
+		login.emptyFallback !== "" &&
+		credential.key === login.emptyFallback
+	);
+}
 
 /** Routing scope and strategy for one failed credential. */
 export type CredentialBlockRouting = {
@@ -203,6 +216,16 @@ export class RateLimits implements LimitsApi {
 		if (!availability.free && (await this.#probeHealableSiblings(provider, routing, remainingCredentials, probe))) {
 			availability = this.#siblingAvailability(provider, routing, remainingCredentials);
 		}
+		// Same-type pool exhausted. A login api_key is a different row, not a
+		// lesser oauth account: without this, a usage-limited oauth row reports
+		// no sibling and the turn model-falls-back while that key sits idle (#19203).
+		if (
+			!availability.free &&
+			credentialType === "oauth" &&
+			this.#hasUnblockedLoginApiKey(provider, sessionId, routing)
+		) {
+			return { switched: true, blockedUntilMs: mergedBlockedUntil, priorBlockedUntilMs, priorBlockedUntilTimed };
+		}
 		return availability.free
 			? { switched: true, blockedUntilMs: mergedBlockedUntil, priorBlockedUntilMs, priorBlockedUntilTimed }
 			: {
@@ -212,6 +235,18 @@ export class RateLimits implements LimitsApi {
 					priorBlockedUntilMs,
 					priorBlockedUntilTimed,
 				};
+	}
+
+	/** Unblocked same-provider login api_key, under that row's provider key rather than the failed oauth key. */
+	#hasUnblockedLoginApiKey(provider: string, sessionId: string | undefined, routing: CredentialBlockRouting): boolean {
+		const providerKey = providerTypeKey(provider, "api_key");
+		const blockScope = routing.strategy?.blockScope?.(routing.rankingContext);
+		const scopes = credentialBlockScopesForRequest(routing.strategy, routing.rankingContext, blockScope);
+		return this.#deps.pool.credentials(provider).some((credential, index) => {
+			if (!isDeliberateLoginApiKey(provider, credential)) return false;
+			if (!this.#deps.affinity.allows(provider, sessionId, credential)) return false;
+			return !this.#deps.blocks.isBlocked(provider, providerKey, index, scopes);
+		});
 	}
 
 	/**

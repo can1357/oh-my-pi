@@ -5,7 +5,9 @@ import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
 import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
+import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
+import { credentialBlockScopesForRequest, providerTypeKey, type CredentialBlocks } from "./blocks";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
 import type {
@@ -148,6 +150,8 @@ export interface KeyCascadeDeps {
 	affinity: SessionAffinity;
 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
 	rotate: LimitsApi["rotate"];
+	blocks: CredentialBlocks;
+	strategies: RankingStrategyResolver;
 	sourceLabel?: string;
 }
 
@@ -175,6 +179,36 @@ export class KeyCascade implements KeysApi {
 		if (login?.kind !== "api-key") return false;
 		const fallback = login.emptyFallback;
 		return fallback !== undefined && fallback !== "" && credential.key === fallback;
+	}
+
+	#returnOAuthKey(
+		resolved: OAuthResolutionResult,
+		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
+	): string {
+		if (onCredentialId && resolved.credentialId !== undefined) {
+			const { orgId, region, inferenceRegion } = resolved.credential;
+			onCredentialId(resolved.credentialId, { orgId, region, inferenceRegion }, resolved.credential.access);
+		}
+		return resolved.apiKey;
+	}
+
+	#requestBlockScopes(provider: string, modelId: string | undefined): readonly string[] {
+		const rankingContext = { modelId };
+		const strategy = this.#deps.strategies(provider);
+		return credentialBlockScopesForRequest(strategy, rankingContext, strategy?.blockScope?.(rankingContext));
+	}
+
+	/** True when the oauth row handed back is usage-blocked under the scopes selection reads. */
+	#resolvedOAuthIsBlocked(provider: string, resolved: OAuthResolutionResult, modelId: string | undefined): boolean {
+		if (resolved.credentialId === undefined) return false;
+		const index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === resolved.credentialId);
+		if (index < 0) return false;
+		return this.#deps.blocks.isBlocked(
+			provider,
+			providerTypeKey(provider, "oauth"),
+			index,
+			this.#requestBlockScopes(provider, modelId),
+		);
 	}
 
 	/** Stored credentials that carry real auth — keyless-fallback markers excluded. */
@@ -423,13 +457,17 @@ export class KeyCascade implements KeysApi {
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			oauthRefreshFailure = error;
 		}
-		if (oauthResolved) {
-			if (onCredentialId && oauthResolved.credentialId !== undefined) {
-				const { orgId, region, inferenceRegion } = oauthResolved.credential;
-				const identity = { orgId, region, inferenceRegion };
-				onCredentialId(oauthResolved.credentialId, identity, oauthResolved.credential.access);
-			}
-			return oauthResolved.apiKey;
+		// resolveOAuth's last resort returns a usage-blocked oauth row so the
+		// caller sees the provider error instead of a missing key. That hides a
+		// healthy login api_key on the same provider (#19203). Yield only then;
+		// an unblocked oauth row still wins, and a restricted session never
+		// leaves its oauth pool.
+		const yieldBlockedOAuth =
+			oauthResolved !== undefined &&
+			!restricted &&
+			this.#resolvedOAuthIsBlocked(provider, oauthResolved, options?.modelId);
+		if (oauthResolved && !yieldBlockedOAuth) {
+			return this.#returnOAuthKey(oauthResolved, onCredentialId);
 		}
 		if (restricted) {
 			if (oauthRefreshFailure) throw oauthRefreshFailure;
@@ -444,7 +482,18 @@ export class KeyCascade implements KeysApi {
 			options,
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
-		if (loginApiKeySelection) {
+		if (
+			loginApiKeySelection &&
+			!(
+				yieldBlockedOAuth &&
+				this.#deps.blocks.isBlocked(
+					provider,
+					providerTypeKey(provider, "api_key"),
+					loginApiKeySelection.index,
+					this.#requestBlockScopes(provider, options?.modelId),
+				)
+			)
+		) {
 			if (options?.recordAffinity !== false) {
 				this.#deps.affinity.record(provider, sessionId, "api_key", loginApiKeySelection.index);
 			}
@@ -455,6 +504,7 @@ export class KeyCascade implements KeysApi {
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
 			return apiKey;
 		}
+		if (oauthResolved) return this.#returnOAuthKey(oauthResolved, onCredentialId);
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
 		// env/api_key, not OAuth, so clear it now so getOAuthAccountId() correctly

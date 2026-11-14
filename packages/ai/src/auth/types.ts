@@ -802,8 +802,9 @@ export type RotateCredentialOptions = {
 /**
  * Outcome of {@link LimitsApi.rotate}.
  *
- * `switched` is `true` when a usable same-type sibling credential is available,
- * so the caller's next resolve hands it out. `afterSiblingWait` is `true` when
+ * `switched` is `true` when a usable same-type sibling, or a login api_key after
+ * an oauth failure, is available, so the caller's next resolve hands it out.
+ * `afterSiblingWait` is `true` when
  * no sibling was free at the failure but rotation slept out a sibling's short
  * block (e.g. a Cloud Code Assist capacity 429 that resets in under a second);
  * the freed credential may be one the caller already sent in this request, so
