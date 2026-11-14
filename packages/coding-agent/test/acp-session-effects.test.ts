@@ -122,4 +122,78 @@ describe("concurrent ACP sessions", () => {
 			AgentStorage.close();
 		}
 	});
+
+	it("redacts provider-visible credentials for a session with no secrets setting", async () => {
+		using defaultDir = TempDir.createSync("@pi-acp-default-");
+		using optOutDir = TempDir.createSync("@pi-acp-optout-");
+		await Bun.write(optOutDir.join(".omp/config.yml"), "secrets:\n  enabled: false\n");
+		const requests: Array<{ marker: string; context: string }> = [];
+		registerCustomApi(API, (_model, context) => {
+			const serialized = JSON.stringify(context.messages);
+			const marker = serialized.includes("from the default project")
+				? "default"
+				: serialized.includes("from the opt-out project")
+					? "opt-out"
+					: "other";
+			requests.push({ marker, context: serialized });
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const launchSettings = await Settings.loadIsolated({
+			cwd: defaultDir.path(),
+			agentDir: defaultDir.join("agent"),
+		});
+		const releaseLaunch = bindEffects(launchSettings);
+		const factory = createAcpSessionFactory({
+			baseOptions: {
+				agentDir: defaultDir.join("agent"),
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				rules: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+			},
+			settings: launchSettings,
+			sessionDir: defaultDir.join("sessions"),
+			authStorage,
+			modelRegistry,
+			parsedArgs: { invalidFlagValues: [] },
+			rawArgs: [],
+			createSession: createAgentSession,
+		});
+		const sessions: AgentSession[] = [];
+		try {
+			const defaultSession = (await factory(defaultDir.path())).session;
+			sessions.push(defaultSession);
+			const optOutSession = (await factory(optOutDir.path())).session;
+			sessions.push(optOutSession);
+
+			await defaultSession.sendUserMessage(`from the default project: ${GITHUB_TOKEN}`);
+			await optOutSession.sendUserMessage(`from the opt-out project: ${GITHUB_TOKEN}`);
+
+			const defaultContext = requests.find(request => request.marker === "default")?.context;
+			expect(defaultContext).toBeDefined();
+			// No secrets setting: the stock default redacts credential-shaped text before the provider sees it.
+			expect(defaultContext).not.toContain(GITHUB_TOKEN);
+			expect(defaultContext).toMatch(/\$\$[^$]+\$\$/);
+			// Explicit opt-out stays plain.
+			expect(requests.find(request => request.marker === "opt-out")?.context).toContain(GITHUB_TOKEN);
+		} finally {
+			for (const session of sessions.reverse()) {
+				if (!session.isDisposed) await session.dispose();
+			}
+			releaseLaunch();
+			launchSettings.cancelPendingSaves();
+			AgentStorage.close();
+		}
+	});
 });
