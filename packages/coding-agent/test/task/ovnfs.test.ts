@@ -54,7 +54,7 @@ describe("ovnfs checkout recovery", () => {
 	});
 
 	function mockDaemon(handle: (op: DaemonOp) => unknown): void {
-		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: "/tmp/ovnfs-test.sock", mount: "/mnt/ovnfs" });
+		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: "/tmp/ovnfs-test.sock" });
 		vi.spyOn(client, "callSocket").mockImplementation(
 			async <T>(_socket: string, op: string, args: object): Promise<T> => {
 				const record = args as { checkout?: unknown; name?: unknown; base?: unknown };

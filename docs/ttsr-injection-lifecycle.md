@@ -204,6 +204,18 @@ A rule can re-trigger only when:
 
 `messageCount` increments on `turn_end`, so gap is measured in completed turns, not stream chunks.
 
+### Per-rule override and `repeatMode: "always"`
+
+A rule's own `repeatMode` frontmatter key (`once`, `after-gap`, or `always`) overrides the global setting for that rule; the gap is still the global `repeatGap`.
+
+`always` is rule-level only and is the gap check with `repeatGap = 1`: the rule fires at most once per turn and is eligible again once the turn its reminder landed in has ended. The record is the turn the reminder lands in, never earlier than the current turn:
+
+- Tool reminders (`afterToolCall`) and bridged blocks land in the triggering turn, so the next turn can fire the rule again.
+- An interrupt's reminder lands in the `ttsr-interrupt` retry. The coordinator captures that turn (current turn + 1) when it aborts, so the retry stays exempt even if the timer-driven retry task records it before the aborted turn's `turn_end` is processed.
+- Deferred reminders and judged warnings are recorded again when their message is delivered, which is after the triggering turn ends; the `ttsr-injection` continuation or aside turn they start is that turn.
+
+A turn spawned by a reminder therefore cannot re-fire the same rule: each firing starts at most one extra turn, and a model that repeats the match while answering the reminder is not interrupted or prompted again.
+
 ## 6. Event emission and extension/hook surfaces
 
 ### Session event
@@ -249,7 +261,7 @@ Current runtime wiring:
 - non-interrupting tool-source matches are marked in memory when bucketed, then persisted from `afterToolCall` (or the bridged-call postflight) only when the matched tool's result is produced
 - `createAgentSession()` restores `existingSession.injectedTtsrRules` into the manager
 
-Injected-rule suppression is therefore restored from the current branch path. Persistence stores names, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload.
+Injected-rule suppression is therefore restored from the current branch path. Persistence stores names, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload; a resumed `repeatMode: "always"` rule likewise sits out the first turn after resume and is eligible from the second.
 
 ## 8. Race boundaries and ordering guarantees
 

@@ -35,10 +35,12 @@ export type AnsiColor = keyof typeof ANSI_COLOR_INDEX;
  * Tokens a theme is allowed to omit. They resolve to the terminal default
  * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
  * never declared (e.g. a `modelTags.<role>.color` reference) while
- * `Theme.hasColor()` still reports them as unset.
+ * `Theme.hasColor()` still reports them as unset. `mdExtensionLink` is the
+ * exception: `createTheme` derives it from `mdLink` and `text` when omitted.
  */
 export const OPTIONAL_THEME_COLOR_RECORD = {
 	assistantMessageText: true,
+	mdExtensionLink: true,
 } satisfies Partial<Record<ThemeColor, true>>;
 
 export interface ThemeJson {
@@ -101,6 +103,7 @@ export type ThemeColor =
 	| "toolOutput"
 	| "mdHeading"
 	| "mdLink"
+	| "mdExtensionLink"
 	| "mdLinkUrl"
 	| "mdCode"
 	| "mdCodeBlock"
@@ -165,6 +168,7 @@ const THEME_COLOR_RECORD = {
 	toolOutput: true,
 	mdHeading: true,
 	mdLink: true,
+	mdExtensionLink: true,
 	mdLinkUrl: true,
 	mdCode: true,
 	mdCodeBlock: true,

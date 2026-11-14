@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a web guest going live with the agents, tool cards and working state from before a rejoin when the rejoin's welcome failed to apply; the guest now says hello again within the auto-rejoin budget ([#19182](https://github.com/can1357/oh-my-pi/pull/19182) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.19.0] - 2026-11-12
 
 ### Fixed

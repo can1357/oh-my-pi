@@ -143,6 +143,21 @@ class "gemini" {
 		}
 	}
 
+	// Gemini 4 Hydrogen: $1.50/$7.50, cache read $0.075 on the Gemini API and
+	// Vertex; Antigravity discovery reports $0, so the collapsed row is pinned to
+	// the same card.
+	// https://aistudio.google.com/docs/whats-new-gemini-4-hydrogen
+	on "google-antigravity" {
+		models "gemini-4-hydrogen" {
+			cost-patch {
+				input 1.5
+				output 7.5
+				cache-read 0.075
+				cache-write 0
+			}
+		}
+	}
+
 	revision ">=3" {
 		// Replaces the Google multimodal function-response baseline.
 		multimodal-function-response #true
