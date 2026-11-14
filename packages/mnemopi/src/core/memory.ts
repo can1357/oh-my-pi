@@ -495,6 +495,13 @@ export class Mnemopi {
 		return this.#withRuntimeOptions("mnemopi.recall", () => this.beam.recall(query, topK, toRecallOptions(options)));
 	}
 
+	/** Warms `beam`'s recall cache under this instance's embedding model, so it holds the vectors `recall()` reads. */
+	warmRecallCache(options: RecallFacadeOptions = {}, signal?: AbortSignal): Promise<void> {
+		return this.#withRuntimeOptions("mnemopi.warmRecallCache", () =>
+			this.beam.warmRecallCache(toRecallOptions(options), signal),
+		);
+	}
+
 	recallEnhanced(
 		query: string,
 		topK = 5,
