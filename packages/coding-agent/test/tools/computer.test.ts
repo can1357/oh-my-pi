@@ -3688,10 +3688,7 @@ describe("expanded computer APIs", () => {
 		const native = new ArgumentSession();
 		new ComputerWorkerCore(transport, () => native);
 		for (const [code, message] of [
-			[
-				'await desktop.ref("e1").setValue()',
-				"setValue(value) requires a string or a finite number, got undefined",
-			],
+			['await desktop.ref("e1").setValue()', "setValue(value) requires a string or a finite number, got undefined"],
 			['await desktop.ref("e1").setValue(NaN)', "setValue(value) requires a string or a finite number, got NaN"],
 			[
 				'await desktop.ref("e1").setValue(Infinity)',
@@ -3701,10 +3698,7 @@ describe("expanded computer APIs", () => {
 				'await desktop.ref("e1").setValue(true)',
 				"setValue(value) requires a string or a finite number, got boolean",
 			],
-			[
-				'await desktop.ref("e1").setValue({})',
-				"setValue(value) requires a string or a finite number, got object",
-			],
+			['await desktop.ref("e1").setValue({})', "setValue(value) requires a string or a finite number, got object"],
 			['await desktop.ref("e1").selectText()', "selectText(text) requires a string, got undefined"],
 			['await desktop.ref("e1").selectText(["cat"])', "selectText(text) requires a string, got an array"],
 			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
@@ -3795,7 +3789,11 @@ describe("expanded computer APIs", () => {
 			const result = await runWorker(transport, `value-${code}`, code);
 			expect(result.ok ? undefined : result.error).toBeUndefined();
 		}
-		const refused = await runWorker(transport, "value-element-boolean", 'await (await desktop.ref("e1")).setValue(true)');
+		const refused = await runWorker(
+			transport,
+			"value-element-boolean",
+			'await (await desktop.ref("e1")).setValue(true)',
+		);
 		expect(refused.ok ? undefined : refused.error).toMatchObject({
 			isToolError: true,
 			message: "setValue(value) requires a string or a finite number, got boolean",
