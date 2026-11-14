@@ -26,6 +26,9 @@
 - Stopped native judges from retrying gateway errors caused by exhausted upstream credentials while retaining retries for other transient 502 errors.
 - Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
 - Fixed Muse sessions after credential changes, key rotation, or idle resume so subsequent turns can continue normally.
+- Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
+- Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
+- Fixed Google Antigravity request identity so a pooled-account switch mid-conversation starts a fresh agent, trajectory and session under the new account instead of reusing the previous account's, which linked the accounts ([#19276](https://github.com/can1357/oh-my-pi/pull/19276) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
