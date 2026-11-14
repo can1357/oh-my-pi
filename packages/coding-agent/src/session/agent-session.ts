@@ -627,13 +627,19 @@ const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
 
+/** Session-level lease acquired by the task executor while driving a follow-up or restored subagent turn. */
 export interface DrivenTurnLease {
+	/** Opaque ownership token carried through AsyncLocalStorage and scheduled work for this lease. */
 	readonly token: object;
+	/** Marks the lease closing when the session and all lease-owned tasks are quiescent. */
 	tryClose(): boolean;
+	/** Aborts the lease's owned work and waits for its scheduled tasks to settle before release. */
 	cancel(): Promise<void>;
+	/** Releases the lease and resumes any independent prompts, wakes, or flushes parked behind it. */
 	release(): void;
 }
 
+/** Factory invoked for a required child IRC continuation during an owned join to collect and relay its reply without starting an autonomous run. */
 export type IrcTurnReplyFactory = (
 	records: AgentMessage[],
 	acceptEvent: () => boolean,
@@ -4012,6 +4018,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		state.invalidated.resolve();
 	}
 
+	/** Acquires exclusive driven-turn ownership when the session has no active or pending turn work. */
 	tryAcquireDrivenTurn(): DrivenTurnLease | undefined {
 		if (
 			this.#isDisposed ||
@@ -4095,6 +4102,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
+	/** Waits until any active driven turn, admitted submission, transition, or turn observation has settled. */
 	async waitForDrivenTurnAvailability(): Promise<void> {
 		const state = this.#drivenTurn;
 		if (state) await state.released.promise;
@@ -4107,11 +4115,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Runs `work` inside the AsyncLocalStorage scope for an active driven-turn lease token. */
 	runWithDrivenTurn<T>(token: object, work: () => T): T {
 		if (this.#drivenOrigin(token) !== "owned") throw new Error("Driven turn is no longer active.");
 		return drivenTurnScope.run({ session: this, token }, work);
 	}
 
+	/** Returns whether the current execution context belongs to the active driven-turn lease identified by `token`. */
 	isDrivenTurnEvent(token: object): boolean {
 		const scope = drivenTurnScope.getStore();
 		return scope?.session === this && scope.token === token && this.#drivenOrigin(token) === "owned";
