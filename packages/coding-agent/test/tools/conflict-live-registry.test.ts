@@ -114,6 +114,7 @@ describe("registered conflicts follow live marker blocks", () => {
 		await Bun.write(file, `\uFEFFshifted\r\n${[...lines, ">>>>>>> topic"].join("\r\n")}`);
 
 		const history = session.state?.conflictHistory;
+		if (!history) throw new Error("Expected registered conflict history");
 		await reconcileRegisteredConflicts(history);
 
 		expect(history.entries().map(entry => [entry.id, entry.startLine, entry.endLine])).toEqual([[1, 2, 8]]);
