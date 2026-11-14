@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
