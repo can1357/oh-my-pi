@@ -7705,7 +7705,7 @@ mod tests {
 			"{}",
 			error.message
 		);
-		assert!(error.message.contains("still open after Escape"), "{}", error.message);
+		assert!(error.message.contains("that is still open"), "{}", error.message);
 	}
 
 	#[test]
