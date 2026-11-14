@@ -29,7 +29,7 @@ mod printf;
 pub mod strftime;
 mod test;
 pub mod trap;
-mod vars;
+pub(super) mod vars;
 pub mod zsh_args;
 pub(crate) mod zsh_dir;
 pub mod zsh_jobs;

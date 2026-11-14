@@ -80,7 +80,11 @@ rust_test(
         "src/bash/pattern/zsh/testdata/**",
         "src/bash/vm/zle/testdata/**",
         "src/testkit/fixtures/**",
-    ]),
+    ]) + [
+        # `src/bash/vm/fatal_sites.rs` (`#[cfg(test)]` module) reads this
+        # fixture at compile time via `include_str!`.
+        "tests/fatal-site-matrix.json",
+    ],
     crate = ":pi-shell",
     data = glob(["src/testkit/fixtures/**"]),
     edition = "2024",
@@ -112,5 +116,20 @@ rust_test(
     data = glob(["tests/fixtures/minimizer/**"]),
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [":pi-shell"],
+)
+
+# The fatal-site matrix: runs every row of tests/fatal-site-matrix.json
+# through the engine and compares the baseline answer.
+rust_test(
+    name = "fatal_site_matrix_test",
+    srcs = ["tests/fatal_site_matrix.rs"],
+    compile_data = ["tests/fatal-site-matrix.json"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_flags = select({
+        "//bazel:fastbuild": ["-Copt-level=1"],
+        "//conditions:default": [],
+    }),
     deps = all_crate_deps(normal_dev = True) + [":pi-shell"],
 )
