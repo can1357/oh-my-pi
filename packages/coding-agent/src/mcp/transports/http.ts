@@ -24,6 +24,7 @@ import {
 	mcpTraceIdFromHeaders,
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
+	parseMCPRetryAfterMs,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
@@ -513,9 +514,11 @@ export class HttpTransport implements MCPTransport {
 					stage,
 					failure: "http_status",
 					message: `HTTP ${response.status}: ${text}${suffix}`,
-					retryable: response.status === 404 || response.status === 502 || response.status === 503,
-					code: response.status,
-					traceId,
+				retryable:
+					response.status === 404 || response.status === 429 || response.status === 502 || response.status === 503,
+				code: response.status,
+				retryAfterMs: parseMCPRetryAfterMs(response.headers.get("Retry-After")),
+				traceId,
 				});
 			}
 
@@ -824,9 +827,11 @@ export class HttpTransport implements MCPTransport {
 					stage,
 					failure: "http_status",
 					message: `HTTP ${response.status}: ${text}`,
-					retryable: response.status === 404 || response.status === 502 || response.status === 503,
-					code: response.status,
-					traceId,
+				retryable:
+					response.status === 404 || response.status === 429 || response.status === 502 || response.status === 503,
+				code: response.status,
+				retryAfterMs: parseMCPRetryAfterMs(response.headers.get("Retry-After")),
+				traceId,
 				});
 			}
 

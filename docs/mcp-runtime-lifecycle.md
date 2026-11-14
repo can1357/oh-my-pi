@@ -195,9 +195,9 @@ Current runtime behavior is connection-event driven:
 
 - **No autonomous polling health monitor** in manager/client.
 - **Automatic reconnect is wired to `transport.onClose`** for managed connections.
-- Reconnect retries with backoff (`500`, `1000`, `2000`, `4000` ms), reloads tools, and notifies consumers on success. A crash-storm circuit breaker suspends automatic reconnects for a server after more than 5 reconnect attempts within 30s; manual `/mcp reconnect` resets that history.
-- If a previously connected HTTP/SSE server remains unavailable after the retry ladder, quiet scheduled probes continue after 15s, doubling up to 5 minutes until recovery, explicit disconnect, or reconfiguration. Scheduled probes make one full connection attempt and concurrent reconnect callers share it. Stdio and remote servers that never connected stop at the ladder.
-- Initial connection timeouts trigger a reconnect attempt; print-mode readiness includes these attempts.
+- Reconnect retries with backoff (`500`, `1000`, `2000`, `4000` ms), reloads tools, and notifies consumers on success. A server-stated `Retry-After` (seconds or HTTP-date, capped at 5 minutes) outranks the backoff: each wait is `max(backoff, Retry-After)`. A crash-storm circuit breaker suspends automatic reconnects for a server after more than 5 reconnect attempts within 30s; manual `/mcp reconnect` resets that history.
+- If a previously connected HTTP/SSE server remains unavailable after the retry ladder, quiet scheduled probes continue after 15s, doubling up to 5 minutes until recovery, explicit disconnect, or reconfiguration. A remote server that never connected but failed its initial handshake with a transient status (429, or 502/503) joins the same schedule: the failure proves the server exists and asked to be retried. Scheduled probes make one full connection attempt and concurrent reconnect callers share it. Each scheduled wait is `max(schedule delay, Retry-After)` when the last failure carried one. Stdio servers, and remote servers whose initial failure was permanent (a typo'd URL, an auth rejection), stop at the ladder.
+- Initial connection timeouts trigger a reconnect attempt; a transient initial failure (429, or 502/503) does too, and also joins the quiet background schedule. Print-mode readiness includes these attempts.
 - Tool calls that see retriable connection errors also attempt one reconnect + retry; calls already dispatched under the boundaries above are not replayed after connection loss.
 - Reconnect is also explicit via `/mcp reconnect <name>` or broader `/mcp reload`.
 
@@ -242,6 +242,7 @@ Top-level sessions own managers they create. `AgentSession.dispose()` disconnect
 | Late background tool-load failure                                       | Logged after startup gate                                                                                                 | Best-effort logging             |
 | Runtime dropped transport                                               | Manager attempts reconnect; stale tools remain while reconnecting and future calls may retry once or fail with MCP errors | Best-effort automatic recovery  |
 | Previously connected remote server still unavailable after retry ladder | Quiet single-attempt probes continue from 15s up to 5-minute intervals until recovery/disconnect/reconfiguration          | Best-effort background recovery |
+| Remote server never connected but initially failed transiently (429/502/503) | Same quiet schedule as a lost server; each wait is `max(schedule delay, Retry-After)` when the failure carried one | Best-effort background recovery |
 | More than 5 reconnect invocations within 30s                            | Circuit breaker closes/removes the stale connection but leaves tools registered; manual reconnect resets the history      | Automatic reconnect suspended   |
 | Owning session disposal                                                 | Owned manager disconnect is awaited for up to 3s; failure is logged                                                       | Bounded best-effort cleanup     |
 

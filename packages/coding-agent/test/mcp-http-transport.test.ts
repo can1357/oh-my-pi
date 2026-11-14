@@ -384,6 +384,99 @@ describe("MCP Streamable HTTP failure diagnostics", () => {
 		}
 	});
 
+	it("classifies a 429 with Retry-After as retryable and carries the capped delay", async () => {
+		// A 429 capacity answer is transient: the server tells the client when
+		// to retry (RFC 9110 section 15.5.13), so the transport marks it
+		// retryable and carries the parsed Retry-After for the reconnect path.
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response('{"error":"rate_limited"}', {
+					status: 429,
+					headers: { "Retry-After": "2", "Content-Type": "application/json" },
+				});
+			},
+		});
+		const transport = await connectedTransport();
+
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+		expect(error).toMatchObject({
+			transport: "http",
+			stage: "receive",
+			failure: "http_status",
+			code: 429,
+			retryable: true,
+			retryAfterMs: 2_000,
+		});
+	});
+
+	it("caps an absurd Retry-After instead of parking reconnects", async () => {
+		// A server-stated wait longer than MAX_MCP_RETRY_AFTER_MS still marks
+		// the failure retryable, but the carried delay is clamped so one
+		// header cannot park the reconnect schedule for hours.
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response("slow down", {
+					status: 429,
+					headers: { "Retry-After": "3600" },
+				});
+			},
+		});
+		const transport = await connectedTransport();
+
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+		expect(error).toMatchObject({ code: 429, retryable: true });
+		expect(error.retryAfterMs).toBeLessThanOrEqual(5 * 60_000);
+	});
+
+	it("parses an HTTP-date Retry-After into a bounded delay", async () => {
+		const date = new Date(Date.now() + 5_000).toUTCString();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response("slow down", { status: 429, headers: { "Retry-After": date } });
+			},
+		});
+		const transport = await connectedTransport();
+
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+		expect(error).toMatchObject({ code: 429, retryable: true });
+		expect(error.retryAfterMs).toBeGreaterThan(0);
+		expect(error.retryAfterMs).toBeLessThanOrEqual(5 * 60_000);
+	});
+
+	it("keeps a 401 without Retry-After non-retryable", async () => {
+		// Permanent failures stay one-shot: a 401 without credentials cannot
+		// be retried into success, with or without a Retry-After header.
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response("unauthorized", { status: 401 });
+			},
+		});
+		const transport = await connectedTransport();
+
+		await expect(transport.request("tools/list")).rejects.toMatchObject({
+			transport: "http",
+			failure: "http_status",
+			code: 401,
+			retryable: false,
+		});
+	});
+
 	it("distinguishes connection refusal from a reset", async () => {
 		const unused = Bun.listen({
 			hostname: "127.0.0.1",

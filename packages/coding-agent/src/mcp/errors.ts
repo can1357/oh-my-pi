@@ -24,11 +24,21 @@ interface MCPTransportErrorOptions {
 	stage: MCPFailureStage;
 	failure: MCPFailureClass;
 	message: string;
+	/** Whether reconnecting and replaying follows the existing safe-retry policy. */
 	retryable: boolean;
+	/** Transport, HTTP, subprocess, or JSON-RPC error code when available. */
 	code?: string | number;
+	/** Bounded, credential-redacted JSON-RPC error data. */
 	data?: string;
+	/** Safe server trace or request identifier. */
 	traceId?: string;
 	cause?: unknown;
+	/**
+	 * Server-stated wait before retrying, parsed from `Retry-After` (seconds or
+	 * HTTP-date) and capped at {@link MAX_MCP_RETRY_AFTER_MS}. Present only on
+	 * HTTP-status failures whose response carried the header.
+	 */
+	retryAfterMs?: number;
 }
 
 const MAX_MESSAGE_CHARS = 1_000;
@@ -61,6 +71,12 @@ export class MCPTransportError extends Error {
 	readonly data: string | undefined;
 	/** Safe server trace or request identifier. */
 	readonly traceId: string | undefined;
+	/**
+	 * Server-stated wait before retrying, parsed from `Retry-After` (seconds or
+	 * HTTP-date) and capped at {@link MAX_MCP_RETRY_AFTER_MS}. Present only on
+	 * HTTP-status failures whose response carried the header.
+	 */
+	readonly retryAfterMs: number | undefined;
 
 	constructor(options: MCPTransportErrorOptions) {
 		super(
@@ -75,8 +91,16 @@ export class MCPTransportError extends Error {
 		this.code = options.code;
 		this.data = options.data;
 		this.traceId = options.traceId;
+		this.retryAfterMs = options.retryAfterMs;
 	}
 }
+
+/**
+ * Cap on a server-stated `Retry-After` wait the MCP reconnect path honors.
+ * A longer hint still classifies the failure as retryable, but the wait is
+ * clamped so one header cannot park reconnects or tool calls for hours.
+ */
+export const MAX_MCP_RETRY_AFTER_MS = 5 * 60_000;
 
 /** Prevent replay once a request may have reached the server. */
 export function nonRetryableMCPTransportError(error: MCPTransportError): MCPTransportError {
@@ -90,6 +114,7 @@ export function nonRetryableMCPTransportError(error: MCPTransportError): MCPTran
 		code: error.code,
 		data: error.data,
 		traceId: error.traceId,
+		retryAfterMs: error.retryAfterMs,
 		cause: error,
 	});
 }
@@ -177,6 +202,61 @@ function findTraceId(value: unknown, depth = 0): string | undefined {
 	return undefined;
 }
 
+/**
+ * Parse a `Retry-After` header value (delay seconds or HTTP-date) into a wait
+ * capped at {@link MAX_MCP_RETRY_AFTER_MS}. Returns `undefined` for a missing,
+ * unparsable, or already-elapsed value.
+ */
+export function parseMCPRetryAfterMs(value: string | null | undefined, now = Date.now()): number | undefined {
+	if (value === null || value === undefined) return undefined;
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	const numeric = Number(trimmed);
+	if (Number.isFinite(numeric)) {
+		if (numeric <= 0) return undefined;
+		return Math.min(Math.ceil(numeric * 1000), MAX_MCP_RETRY_AFTER_MS);
+	}
+	const targetMs = Date.parse(trimmed);
+	if (Number.isNaN(targetMs)) return undefined;
+	const delayMs = targetMs - now;
+	if (delayMs <= 0) return undefined;
+	return Math.min(Math.ceil(delayMs), MAX_MCP_RETRY_AFTER_MS);
+}
+
+/** Extract a capped `Retry-After` wait from an error's headers, when present. */
+function parseMCPRetryAfterMsFromError(error: unknown): number | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const record = error as {
+		headers?: unknown;
+		response?: { headers?: unknown };
+		cause?: unknown;
+	};
+	const candidates = [record.headers, record.response?.headers, record.cause];
+	for (const candidate of candidates) {
+		const headers = extractRetryAfterHeaders(candidate);
+		if (!headers) continue;
+		const delay = parseMCPRetryAfterMs(getRetryAfterHeaderValue(headers, "retry-after"));
+		if (delay !== undefined) return delay;
+	}
+	return undefined;
+}
+
+function extractRetryAfterHeaders(value: unknown): Headers | Record<string, string | undefined> | undefined {
+	if (!value) return undefined;
+	if (value instanceof Headers) return value;
+	if (typeof value === "object") return value as Record<string, string | undefined>;
+	return undefined;
+}
+
+function getRetryAfterHeaderValue(headers: Headers | Record<string, string | undefined>, name: string): string | null {
+	if (headers instanceof Headers) return headers.get(name);
+	const target = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === target && typeof value === "string") return value;
+	}
+	return null;
+}
+
 /** Extract a safe request or trace identifier from MCP HTTP response headers. */
 export function mcpTraceIdFromHeaders(headers: Headers): string | undefined {
 	for (const name of ["traceparent", "x-request-id", "x-trace-id", "x-correlation-id", "cf-ray"]) {
@@ -214,6 +294,7 @@ export function normalizeMCPTransportError(
 	let code = errorCode(error);
 	const normalizedCode = typeof code === "string" ? code.toUpperCase() : code;
 	const httpStatusMatch = /^HTTP (\d{3}):/i.exec(message);
+	const retryAfterMs = parseMCPRetryAfterMsFromError(error);
 	let failure: MCPFailureClass = "unknown";
 	let retryable = false;
 
@@ -248,7 +329,7 @@ export function normalizeMCPTransportError(
 	} else if (httpStatusMatch) {
 		code = Number(httpStatusMatch[1]);
 		failure = "http_status";
-		retryable = code === 404 || code === 502 || code === 503;
+		retryable = code === 404 || code === 429 || code === 502 || code === 503;
 	} else if (/not connected|connection failed|fetch failed/i.test(message)) {
 		failure = "connect";
 		retryable = true;
@@ -261,9 +342,33 @@ export function normalizeMCPTransportError(
 		message: message || "Unknown MCP transport failure",
 		retryable,
 		code,
+		retryAfterMs,
 		traceId: safeTraceId(options.traceId),
 		cause: error,
 	});
+}
+
+/**
+ * Whether an initial handshake failure is transient and worth a reconnect.
+ * Covers retryable HTTP statuses (a 429 capacity answer, a 502/503 blip during
+ * a redeploy, a 404 while routes propagate) as classified by the transports
+ * and {@link normalizeMCPTransportError}. Permanent failures (a 401 without
+ * credentials, a 400 for a bad URL, a declined auth challenge, a JSON-RPC
+ * rejection) stay one-shot: retrying them on a timer cannot help, and the
+ * burst guard exists to stop hot loops, not to bless them.
+ */
+export function isTransientMCPInitialFailure(error: unknown): boolean {
+	if (error instanceof MCPTransportError) {
+		return (
+			error.retryable &&
+			error.failure === "http_status" &&
+			(error.code === 404 || error.code === 429 || error.code === 502 || error.code === 503)
+		);
+	}
+	if (error instanceof Error) {
+		return /^HTTP (404|429|502|503):/i.test(error.message);
+	}
+	return false;
 }
 
 function nextStep(error: MCPTransportError): string {

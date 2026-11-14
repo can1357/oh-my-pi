@@ -34,6 +34,14 @@ export function startFlakyHttpMcpServer(
 		log?: (line: string) => void;
 		/** When set, MCP requests whose `Authorization` header differs from its current value get 401. */
 		authorization?: () => string;
+		/**
+		 * When set, POSTs answered while down use this status (default 503) and
+		 * carry `Retry-After: <downRetryAfterSeconds>` when that is also set.
+		 * Lets tests reproduce a 429 capacity answer instead of a restart blip.
+		 */
+		downStatus?: number;
+		/** `Retry-After` seconds sent with down-status POST answers. */
+		downRetryAfterSeconds?: number;
 	} = {},
 ): FlakyHttpMcpServer {
 	const log = options.log ?? (() => {});
@@ -58,7 +66,12 @@ export function startFlakyHttpMcpServer(
 			}
 			if (state.down) {
 				if (request.method === "POST") state.refusals += 1;
-				return new Response("restarting", { status: 503 });
+				const status = options.downStatus ?? 503;
+				const headers =
+					options.downRetryAfterSeconds !== undefined
+						? { "Retry-After": String(options.downRetryAfterSeconds) }
+						: undefined;
+				return new Response("restarting", { status, headers });
 			}
 			if (options.authorization && request.headers.get("Authorization") !== options.authorization()) {
 				return new Response("unauthorized", { status: 401 });

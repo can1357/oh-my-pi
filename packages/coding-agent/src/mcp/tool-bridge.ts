@@ -77,11 +77,12 @@ export function isRetriableConnectionError(error: unknown): boolean {
 		) {
 			return error.retryable;
 		}
-		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+	return error.failure === "http_status" && (error.code === 404 || error.code === 429 || error.code === 502 || error.code === 503);
 	}
 	const msg = error.message.toLowerCase();
-	// Stale session (server restarted, old session ID is gone)
-	if (/^http (404|502|503):/.test(msg)) return true;
+	// Stale session (server restarted, old session ID is gone) or a transient
+	// capacity answer: a 429 tells the client when to retry (RFC 9110 §15.5.13).
+	if (/^http (404|429|502|503):/.test(msg)) return true;
 	return RETRIABLE_PATTERNS.some(p => msg.includes(p));
 }
 

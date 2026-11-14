@@ -150,6 +150,7 @@ describe("isRetriableConnectionError", () => {
 		"Transport not connected",
 		"network error",
 		"HTTP 404: Not Found",
+		"HTTP 429: Too Many Requests",
 		"HTTP 502: Bad Gateway",
 		"HTTP 503: Service Unavailable",
 		"Transport closed",
@@ -213,6 +214,43 @@ describe("isRetriableConnectionError", () => {
 				}),
 			),
 		).toBe(false);
+	});
+
+	it("retries a 429 tool call via reconnect and honors the typed status code", () => {
+		// A 429 capacity answer on a tool call reconnects instead of failing
+		// the run: the server is alive and asked to be retried.
+		const error = new MCPTransportError({
+			transport: "http",
+			stage: "receive",
+			failure: "http_status",
+			message: "HTTP 429: rate limited",
+			retryable: true,
+			code: 429,
+			retryAfterMs: 1_000,
+		});
+		expect(isRetriableConnectionError(error)).toBe(true);
+	});
+
+	it("classifies 429 as retryable and carries a capped Retry-After", () => {
+		const error = normalizeMCPTransportError(
+			Object.assign(new Error("HTTP 429: rate limited"), {
+				headers: new Headers({ "Retry-After": "30" }),
+			}),
+			{ transport: "http", stage: "receive" },
+		);
+		expect(error).toMatchObject({ failure: "http_status", code: 429, retryable: true, retryAfterMs: 30_000 });
+		expect(isRetriableConnectionError(error)).toBe(true);
+	});
+
+	it("caps an absurd Retry-After while keeping the 429 retryable", () => {
+		const error = normalizeMCPTransportError(
+			Object.assign(new Error("HTTP 429: rate limited"), {
+				headers: new Headers({ "Retry-After": "86400" }),
+			}),
+			{ transport: "http", stage: "receive" },
+		);
+		expect(error.retryable).toBe(true);
+		expect(error.retryAfterMs).toBeLessThanOrEqual(5 * 60_000);
 	});
 
 	it("returns false for non-Error values", () => {

@@ -40,6 +40,7 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
+import { isTransientMCPInitialFailure, MCPTransportError } from "./errors";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
@@ -160,6 +161,9 @@ const RECONNECT_BURST_LIMIT = 5;
  * `ladderMs` are the sleeps between the attempts one `reconnectServer` call
  * makes before giving up; every caller that awaits a reconnect (tool calls,
  * `/mcp reconnect`, {@link MCPManager.waitForConnection}) is bounded by it.
+ * A server-stated `Retry-After` (seconds or HTTP-date, capped at
+ * `MAX_MCP_RETRY_AFTER_MS`) outranks both the ladder and the schedule: each
+ * wait is `max(ladder-or-schedule delay, Retry-After)`.
  *
  * When the ladder fails for an `http`/`sse` server that was connected and
  * then lost, the manager keeps trying on its own: one quiet attempt after
@@ -169,11 +173,14 @@ const RECONNECT_BURST_LIMIT = 5;
  * comes back on its own schedule, and until it does the manager's resource
  * subscriptions are dead while nothing else would reconnect them: without the
  * schedule the server stays "not connected" until a tool call happens to hit
- * it or the user notices. Each scheduled attempt is a full connect — auth
- * resolution included — lasting up to the server's `timeout`; a reconnect
- * requested meanwhile shares it, and the server reads `connecting` for that
- * long. Stdio servers stop at the ladder: a process that exited is not
- * brought back by waiting, and re-spawning it on a timer is the fork storm
+ * it or the user notices. A remote server that never connected but failed its
+ * initial handshake with a transient status (429, or 502/503) joins the same
+ * schedule: the failure proves the server exists and asked to be retried.
+ * Each scheduled attempt is a full connect — auth resolution included —
+ * lasting up to the server's `timeout`; a reconnect requested meanwhile
+ * shares it, and the server reads `connecting` for that long. Stdio servers
+ * stop at the ladder: a process that exited is not brought back by waiting,
+ * and re-spawning it on a timer is the fork storm
  * {@link RECONNECT_BURST_LIMIT} exists to stop.
  */
 export interface MCPReconnectPolicy {
@@ -462,6 +469,8 @@ export class MCPManager implements MCPManagerApi {
 	 * attempt is pending.
 	 */
 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
+	/** Last server-stated `Retry-After` wait observed for a server, consumed by the lost-server schedule. */
+	#pendingRetryAfterMs = new Map<string, number>();
 	/** Views opened so far; never forgotten, so a revived session reopens its own. */
 	#toolScopes = new Set<MCPToolScope>();
 	/** Scope of each attributed tool call still running, by tool-call id. */
@@ -1079,16 +1088,16 @@ export class MCPManager implements MCPManagerApi {
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
-					if (error instanceof MCPConnectionTimeoutError) {
+					if (error instanceof MCPConnectionTimeoutError || isTransientMCPInitialFailure(error)) {
 						notify({ type: "reconnecting", serverName: name });
 						const stopForwarding = onStatus
-							? this.addConnectionStatusListener(event => {
-									if ((event.type === "connected" || event.type === "failed") && event.serverName === name) {
-										onStatus(event);
-									}
-								})
-							: undefined;
-						const retry = this.reconnectServer(name);
+								? this.addConnectionStatusListener(event => {
+											if ((event.type === "connected" || event.type === "failed") && event.serverName === name) {
+												onStatus(event);
+											}
+										})
+								: undefined;
+						const retry = this.reconnectServer(name, { allowLostSchedule: true });
 						if (stopForwarding) void retry.then(stopForwarding, stopForwarding);
 						else void retry;
 					}
@@ -1687,7 +1696,7 @@ export class MCPManager implements MCPManagerApi {
 	 */
 	async reconnectServer(
 		name: string,
-		options?: { manual?: boolean; authChallenge?: MCPAuthChallenge },
+		options?: { manual?: boolean; authChallenge?: MCPAuthChallenge; allowLostSchedule?: boolean },
 	): Promise<MCPServerConnection | null> {
 		if (options?.manual) {
 			this.#reconnectHistory.delete(name);
@@ -1700,7 +1709,13 @@ export class MCPManager implements MCPManagerApi {
 			return null;
 		}
 
-		return this.#trackReconnect(name, this.#doReconnect(name, { authChallenge: options?.authChallenge }));
+		return this.#trackReconnect(
+			name,
+			this.#doReconnect(name, {
+				authChallenge: options?.authChallenge,
+				allowLostSchedule: options?.allowLostSchedule,
+			}),
+		);
 	}
 
 	/**
@@ -1718,12 +1733,23 @@ export class MCPManager implements MCPManagerApi {
 			})
 			.then(
 				connection => {
-					if (connection) this.#forgetLostServer(name);
-					else if (this.#lostRemoteServers.has(name)) this.#scheduleLostServerRetry(name);
+					if (connection) {
+						this.#forgetLostServer(name);
+						this.#pendingRetryAfterMs.delete(name);
+					} else if (this.#lostRemoteServers.has(name)) {
+						const retryAfterMs = this.#pendingRetryAfterMs.get(name) ?? 0;
+						this.#pendingRetryAfterMs.delete(name);
+						this.#scheduleLostServerRetry(name, retryAfterMs);
+					}
 					return connection;
 				},
 				error => {
-					if (this.#lostRemoteServers.has(name)) this.#scheduleLostServerRetry(name);
+					if (this.#lostRemoteServers.has(name)) {
+						const thrownMs = error instanceof MCPTransportError ? (error.retryAfterMs ?? 0) : 0;
+						const stashedMs = this.#pendingRetryAfterMs.get(name) ?? 0;
+						this.#pendingRetryAfterMs.delete(name);
+						this.#scheduleLostServerRetry(name, Math.max(thrownMs, stashedMs));
+					}
 					throw error;
 				},
 			);
@@ -1735,11 +1761,11 @@ export class MCPManager implements MCPManagerApi {
 	 * first takes the usual path; the timer then finds it pending and stands
 	 * down, and that reconnect's outcome settles the schedule instead.
 	 */
-	#scheduleLostServerRetry(name: string): void {
+	#scheduleLostServerRetry(name: string, retryAfterMs = 0): void {
 		const state = this.#lostRemoteServers.get(name);
 		if (!state) return;
 		clearTimeout(state.timer);
-		const delayMs = state.delayMs;
+		const delayMs = Math.max(state.delayMs, retryAfterMs);
 		state.delayMs = Math.min(delayMs * 2, this.reconnectPolicy.retryMaxMs);
 		state.timer = setTimeout(() => {
 			state.timer = undefined;
@@ -1756,6 +1782,7 @@ export class MCPManager implements MCPManagerApi {
 		if (!state) return;
 		clearTimeout(state.timer);
 		this.#lostRemoteServers.delete(name);
+		this.#pendingRetryAfterMs.delete(name);
 	}
 
 	/**
@@ -1804,7 +1831,7 @@ export class MCPManager implements MCPManagerApi {
 
 	async #doReconnect(
 		name: string,
-		options: { authChallenge?: MCPAuthChallenge; scheduled?: boolean },
+		options: { authChallenge?: MCPAuthChallenge; scheduled?: boolean; allowLostSchedule?: boolean },
 	): Promise<MCPServerConnection | null> {
 		const { authChallenge, scheduled = false } = options;
 		const oldConnection = this.#connections.get(name);
@@ -1846,18 +1873,35 @@ export class MCPManager implements MCPManagerApi {
 			// until a reconnect succeeds, and the schedule outlives this attempt.
 			// Stdio stops at the ladder (see MCPReconnectPolicy). A server that
 			// never connected is not lost — a startup timeout or a typo'd URL
-			// stays a one-shot failure.
+			// stays a one-shot failure — unless its failure was transient (a 429
+			// capacity answer or a 502/503 blip): the server exists and said
+			// when to retry, so the quiet background schedule applies.
 			if ((config.type === "http" || config.type === "sse") && !this.#lostRemoteServers.has(name)) {
 				this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
 			}
 			void this.#discardConnection(name, oldConnection).catch(() => {});
+		} else if (
+			options.allowLostSchedule &&
+			(config.type === "http" || config.type === "sse") &&
+			!this.#lostRemoteServers.has(name)
+		) {
+			// A startup-time reconnect for a transient failure (armed by
+			// connectServers when the initial handshake hit a 429/502/503):
+			// the server never connected, but the failure proves it exists and
+			// is rate-limiting us, so the quiet background schedule applies.
+			// Guarded by the transient check at the arming site — a typo'd URL
+			// or an auth rejection still stays a one-shot failure.
+			this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
 		}
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 
 		// Retry with backoff — the server may still be starting up. A scheduled
-		// attempt is a single quiet probe; its pacing is the schedule itself.
+		// attempt is a single quiet probe; its pacing is the schedule itself. A
+		// server-stated `Retry-After` outranks both: it is the server telling us
+		// exactly how long to wait (RFC 9110 section 15.5.13).
 		const delays = scheduled ? [] : this.reconnectPolicy.ladderMs;
+		let retryAfterMs = 0;
 		for (let attempt = 0; attempt <= delays.length; attempt++) {
 			if (this.#epoch !== reconnectEpoch || this.#serverConfigs.get(name) !== config) {
 				logger.debug("MCP reconnect aborted before attempt after configuration changed", {
@@ -1866,6 +1910,15 @@ export class MCPManager implements MCPManagerApi {
 					currentEpoch: this.#epoch,
 				});
 				return null;
+			}
+			// Honor a server-stated wait observed on the previous attempt before
+			// the next ladder probe. The first attempt runs immediately: the
+			// startup-time reconnect that armed this call already spaced us out.
+			if (retryAfterMs > 0 && attempt > 0) {
+				const waitMs = Math.max(delays[attempt - 1] ?? 0, retryAfterMs);
+				logger.debug("MCP reconnect honoring server Retry-After", { path: `mcp:${name}`, waitMs });
+				await Bun.sleep(waitMs);
+				retryAfterMs = 0;
 			}
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
@@ -1883,18 +1936,30 @@ export class MCPManager implements MCPManagerApi {
 				}
 
 				const msg = error instanceof Error ? error.message : String(error);
+				retryAfterMs = error instanceof MCPTransportError ? (error.retryAfterMs ?? 0) : 0;
 				if (attempt < delays.length) {
 					logger.debug("MCP reconnect attempt failed, retrying", {
 						path: `mcp:${name}`,
 						attempt: attempt + 1,
 						error: msg,
 					});
-					await Bun.sleep(delays[attempt]);
+					// A bare ladder sleep is skipped when a server-stated wait
+					// applies: the top of the next iteration sleeps
+					// max(ladder, Retry-After) instead, so the server's timing
+					// is never undercut and never double-counted.
+					if (retryAfterMs <= 0) await Bun.sleep(delays[attempt]);
 				} else if (scheduled) {
 					logger.debug("MCP scheduled reconnect attempt failed", { path: `mcp:${name}`, error: msg });
+					// A scheduled probe that meets a 429 restates the wait: carry
+					// it so the next schedule honors max(schedule, Retry-After).
+					if (retryAfterMs > 0) this.#pendingRetryAfterMs.set(name, retryAfterMs);
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
 					this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg });
+					// The ladder is exhausted but the server told us when to retry:
+					// stash the wait so the quiet background schedule honors
+					// max(schedule, Retry-After) instead of its own backoff alone.
+					if (retryAfterMs > 0) this.#pendingRetryAfterMs.set(name, retryAfterMs);
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
