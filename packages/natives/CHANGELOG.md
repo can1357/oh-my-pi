@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Breaking Changes
 
 - Changed lsTree() to return { path, mode } entries instead of bare paths; mode matches git ls-tree output (for example, 100755 or 120000).

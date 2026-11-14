@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Added
 
 - Added `setUnpausedProviders()` to `@oh-my-pi/pi-ai/oauth`, allowing applications to re-enable providers paused by authentication rules; loaded credential pools and extension logins recognize the change on their next read.

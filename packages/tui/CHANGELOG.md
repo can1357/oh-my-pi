@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Added
 
 - Added task counts to the Todo status line when work is assigned to multiple targets.

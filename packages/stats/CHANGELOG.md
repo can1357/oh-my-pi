@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Fixed
 
 - Fixed Traces tab timing so background jobs show their actual completion times, including accurate idle periods and turn durations.
