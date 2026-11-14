@@ -4,7 +4,11 @@ import {
 	fetchAntigravityImageModel,
 } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import {
+	getAntigravityHeaders,
+	getAntigravityUserAgent,
+	newAntigravityTraceId,
+} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -101,7 +105,7 @@ function buildRequest(request: ImageGenerationRequest, model: string, projectId:
 			],
 		},
 		requestId: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-		userAgent: "antigravity",
+		userAgent: getAntigravityUserAgent(),
 	};
 }
 
@@ -149,6 +153,9 @@ export async function generateAntigravityImage(
 			}
 			const target = await resolveTarget(model, credentials, fetchImpl, options.signal);
 			const body = buildRequest(request, target.model, credentials.projectId);
+			// One trace id per logical request: an endpoint failover resends the same
+			// body, so it must not look like a new request.
+			const traceId = newAntigravityTraceId();
 			let lastError: ImageApiError | undefined;
 			for (let index = 0; index < target.endpoints.length; index++) {
 				const result = await fetchImpl(`${target.endpoints[index]}/v1internal:streamGenerateContent?alt=sse`, {
@@ -156,7 +163,10 @@ export async function generateAntigravityImage(
 					headers: {
 						Authorization: `Bearer ${credentials.accessToken}`,
 						"Content-Type": "application/json",
-						...getAntigravityHeaders(),
+						...getAntigravityHeaders(String(body.userAgent)),
+						// Per-request identity the shipped client sends; see `getAntigravityHeaders`.
+						"x-cloudaicompanion-trace-id": traceId,
+						"X-Aicode-Request-Id": String(body.requestId),
 					},
 					body: JSON.stringify(body),
 					signal: options.signal,
