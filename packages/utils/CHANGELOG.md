@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Improved retry-hint extraction for Cloud Code Assist quota reset information, including compound durations and reset timestamps.
+- Improved extraction of Cloud Code Assist quota reset information, including compound durations and reset timestamps, to provide more accurate retry guidance.
 
 ## [18.19.0] - 2026-11-12
 
