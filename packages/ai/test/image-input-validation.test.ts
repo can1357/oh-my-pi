@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { ValidationError } from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
+import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { generateAntigravityImage } from "../src/images/google-antigravity";
 import { generateGoogleImage } from "../src/images/google-generative-ai";
 import { generateOpenAIImage } from "../src/images/openai-images";
@@ -293,4 +294,23 @@ it("does not tag Antigravity image requests with the requestType that draws fals
 	if (!call) throw new Error("Expected the Antigravity image request");
 	const body = jsonBody(call);
 	expect(body !== null && typeof body === "object" && "requestType" in body).toBe(false);
+});
+
+it("sends the Antigravity image transport the same client identity as the stream transport", async () => {
+	const calls: FetchCall[] = [];
+	await generateAntigravityImage(
+		antigravityModel,
+		{ prompt: "draw a cat" },
+		{ apiKey: ANTIGRAVITY_KEY, fetch: createFetch(calls) },
+	);
+	const call = calls.find(item => item.url.includes(":streamGenerateContent"));
+	if (!call) throw new Error("Expected the Antigravity image request");
+	const body = jsonBody(call) as { requestId?: string; userAgent?: string };
+	const headers = new Headers(call.init?.headers);
+	// The shipped client names the same client in the body and on the wire.
+	expect(body.userAgent).toBe(getAntigravityUserAgent());
+	expect(headers.get("user-agent")).toBe(body.userAgent);
+	// Per-request identity headers; `Headers` lowercases the names.
+	expect(headers.get("x-cloudaicompanion-trace-id")).toMatch(/^[0-9a-f]{32}$/);
+	expect(headers.get("x-aicode-request-id")).toBe(String(body.requestId));
 });

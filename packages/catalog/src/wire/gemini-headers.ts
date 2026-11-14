@@ -34,9 +34,19 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * stamped into the header (macOS darwin/arm64, Linux linux/amd64, Windows
  * windows/amd64; no other OS/arch builds exist); see
  * {@link getAntigravityPlatform}. The changelist is identical across those
- * builds. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
+ * builds. The 2.32.1 language server assembles the same header from the
+ * format literals `%s/%s/%s (%s)` and `cl=%d`, the `cl` being the build
+ * changelist the host client supplies at runtime; the offline fallback cannot
+ * know it, so it sends the 2.26.0 capture (see {@link getAntigravityUserAgent}).
+ * Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
+ *
+ * Deliberate divergence: the real client sets `request_type` on
+ * `google.internal.cloud.code.v1internal.GenerateContentRequest` (field and
+ * enum values such as `CHAT_MESSAGE_REQUEST_TYPE_CASCADE` / `..._GENERAL` are
+ * in the binary's protobuf descriptor), but omp omits it because tagging
+ * requests with it drew false 429 quota errors (f1fb41a968).
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.26.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.32.1";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
@@ -137,7 +147,8 @@ export function getAntigravityUserAgent(): string {
 	const version = getAntigravityVersion();
 	// The backend does not validate `cl` (verified live: stale, zero, and absent
 	// cl all pass model gating on daily-cloudcode-pa; only the version gates).
-	// The update manifest carries no changelist, so the captured value stays.
+	// The update manifest carries no changelist (the shipped client fills
+	// `cl=%d` from its own build at runtime), so the 2.26.0 capture stays.
 	const cl = process.env.PI_AI_ANTIGRAVITY_CL || "1005016104";
 	const host = getAntigravityPlatform();
 	const os = process.env.PI_AI_ANTIGRAVITY_OS || host.os;
@@ -157,6 +168,17 @@ export function getAntigravityHeaders(userAgent: string = getAntigravityUserAgen
 	"Accept-Encoding": string;
 } {
 	return { "User-Agent": userAgent, "Accept-Encoding": "gzip" };
+}
+
+/**
+ * Fresh `x-cloudaicompanion-trace-id` value for one Antigravity generate
+ * request: 32 lowercase hex chars, the shape Google trace ids take. The header
+ * is inferred from the shipped 2.32.1 language server, whose `codeassistclient`
+ * package holds the literal; the exact value format the native client sends is
+ * unverified. Call once per request so no two requests share an id.
+ */
+export function newAntigravityTraceId(): string {
+	return crypto.randomUUID().replaceAll("-", "");
 }
 
 /**
