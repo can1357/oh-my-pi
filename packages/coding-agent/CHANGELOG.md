@@ -4,7 +4,7 @@
 
 ### Added
 
-- `/fork pane` and `/fork tab` now open native Herdr Desktop panes and tabs; in headless Herdr Core they start a background terminal and warn that no pane or tab is visible ([#19201](https://github.com/can1357/oh-my-pi/pull/19201) by [@sapran](https://github.com/sapran)).
+- `/fork pane` and `/fork tab` now open native Herdr Desktop panes and tabs; in headless Herdr Core they start a background terminal and warn that no pane or tab is visible. Terminal launch requests can target a Desktop pane or space explicitly; headless launches reject explicit targets or focus. `focus: true` focuses the new surface, `focus: false` attempts to restore the previously focused pane and warns if restoration fails after launch, and an unset focus follows the Desktop default ([#19201](https://github.com/can1357/oh-my-pi/pull/19201) by [@sapran](https://github.com/sapran)).
 
 ## [18.20.1] - 2026-11-14
 

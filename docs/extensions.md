@@ -1071,12 +1071,14 @@ Targets are provider-native IDs/refs, with different meanings by placement:
 - Legacy Herdr (`herdr`) pane placement targets a pane ID and defaults to
   `HERDR_PANE_ID`; tab placement targets a workspace ID and defaults to
   `HERDR_WORKSPACE_ID`. The destination must be in an active Herdr pane or workspace.
-- Herdr Core (`herdr-core`) is detected by a nonempty `HC_TERMINAL_ID`. At launch,
-  Desktop membership is determined by matching that exact terminal ID in
-  `herdr-app ls`, not by the focused pane. A Desktop member opens a native pane or
-  tab; a headless Core terminal starts the command through `hc` and returns a
-  warning that no pane or tab is visible. Herdr Core and Desktop launches are
-  supported only on Unix; Windows is not supported.
+- Herdr Core (`herdr-core`) is detected by a nonempty `HC_TERMINAL_ID`. Without an
+  explicit target, Desktop membership is determined by matching that terminal ID in
+  `herdr-app ls`, not by the focused pane. A pane target is a local Desktop pane ID;
+  a window/tab target is a local Desktop space ID. An explicit target can address
+  Desktop even when the source terminal has no pane. Without an available Desktop
+  destination, an explicit target or focus is rejected; otherwise a headless Core
+  terminal starts the command through `hc` and warns that no pane or tab is visible.
+  Herdr Core and Desktop launches are supported only on Unix.
 - Orca pane splits resolve `ORCA_PANE_KEY` to the current terminal handle;
   detection requires both `ORCA_PANE_KEY` and `ORCA_WORKTREE_ID`. Tab creation
   defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
@@ -1091,8 +1093,12 @@ Targets are provider-native IDs/refs, with different meanings by placement:
 Unsupported target combinations fail rather than being ignored. Capability checks
 use provider identity markers or a native target, not `TERM` alone. `focus` controls
 apply only where a placement supports them: tmux uses `-d` when false, Zellij uses
-`--no-focus` (Zellij 0.45.0 or newer), Herdr uses `--focus`/`--no-focus`, and CMUX
-passes `--focus true|false` to both split and workspace creation. Orca tab creation
+`--no-focus` (Zellij 0.45.0 or newer), legacy Herdr uses `--focus`/`--no-focus`,
+and CMUX passes `--focus true|false` to both split and workspace creation. Herdr
+Core Desktop launches focus the new surface when `focus` is true; when false, they
+try to restore the previously focused pane without overriding a detected intervening
+focus change. Restoration is not atomic and returns a warning if it fails or is
+skipped. If unset, focus follows Desktop's default. Orca tab creation
 maps `focus: true` to `--focus`; otherwise focus follows Orca's default. Orca pane
 splits have no focus option. When Orca cannot show a new tab, it starts the command
 in a background terminal, and the result's `warning` says so.

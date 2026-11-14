@@ -651,6 +651,18 @@ describe("terminal launch dispatcher", () => {
 			],
 			recent: [],
 		});
+		const createdListing = JSON.stringify({
+			spaces: [
+				{
+					id: "source-space",
+					machine: null,
+					tabs: [
+						{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] },
+						{ id: "new-tab", terminals: [{ terminal: "t8", pane: "new-pane" }] },
+					],
+				},
+			],
+		});
 		const cwd = "/repo with spaces/$(not-a-command)";
 		const command = ["omp", "--resume", "", "quotes ' and \"", "$(touch injected)", "line\nbreak"];
 
@@ -797,6 +809,486 @@ describe("terminal launch dispatcher", () => {
 				argv: ["herdr-app", "do", "tab.new", JSON.stringify({ space: "source-space", folder: cwd, argv: command })],
 				cwd,
 			});
+		});
+
+		it("splits the explicitly targeted Desktop pane instead of the source pane", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{
+					stdout:
+						'{"spaces":[{"id":"target-space","machine":null,"tabs":[{"id":"target-tab","terminals":[{"terminal":"t9","pane":"target-pane"}]}]}]}',
+					exitCode: 0,
+				},
+				{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command,
+				cwd,
+				target: "target-pane",
+			} as TerminalLaunchRequest);
+
+			expect(result.id).toBe("new-pane");
+			expect(calls).toHaveLength(2);
+			expect(calls[1]!.argv.slice(0, 3)).toEqual(["herdr-app", "do", "pane.split"]);
+			expect(JSON.parse(calls[1]!.argv[3]!)).toMatchObject({ pane: "target-pane", direction: "right" });
+		});
+
+		it("creates a tab in the explicitly targeted Desktop space instead of the source space", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{
+					stdout:
+						'{"spaces":[{"id":"target-space","machine":null,"tabs":[{"id":"target-tab","terminals":[{"terminal":"t9","pane":"target-pane"}]}]}]}',
+					exitCode: 0,
+				},
+				{ stdout: '{"tab":"new-tab","terminal":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({
+				multiplexer: "herdr-core",
+				placement: "window",
+				command,
+				cwd,
+				target: "target-space",
+			} as TerminalLaunchRequest);
+
+			expect(result.id).toBe("new-tab");
+			expect(calls).toHaveLength(2);
+			expect(calls[1]).toEqual({
+				argv: ["herdr-app", "do", "tab.new", JSON.stringify({ space: "target-space", folder: cwd, argv: command })],
+				cwd,
+			});
+		});
+
+		it.each([
+			{
+				name: "remote pane",
+				placement: "pane",
+				target: "remote-pane",
+				listing: {
+					spaces: [
+						{
+							id: "source-space",
+							machine: null,
+							tabs: [{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] }],
+						},
+						{
+							id: "remote-space",
+							machine: "server",
+							tabs: [{ id: "remote-tab", terminals: [{ terminal: "server/t9", pane: "remote-pane" }] }],
+						},
+					],
+				},
+			},
+			{
+				name: "remote space",
+				placement: "window",
+				target: "remote-space",
+				listing: {
+					spaces: [
+						{
+							id: "source-space",
+							machine: null,
+							tabs: [{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] }],
+						},
+						{
+							id: "remote-space",
+							machine: "server",
+							tabs: [{ id: "remote-tab", terminals: [{ terminal: "server/t9", pane: "remote-pane" }] }],
+						},
+					],
+				},
+			},
+			{
+				name: "unknown pane",
+				placement: "pane",
+				target: "missing-pane",
+				listing: {
+					spaces: [
+						{
+							id: "source-space",
+							machine: null,
+							tabs: [{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] }],
+						},
+					],
+				},
+			},
+			{
+				name: "unknown space",
+				placement: "window",
+				target: "missing-space",
+				listing: {
+					spaces: [
+						{
+							id: "source-space",
+							machine: null,
+							tabs: [{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] }],
+						},
+					],
+				},
+			},
+			{
+				name: "duplicate pane",
+				placement: "pane",
+				target: "duplicate-pane",
+				listing: {
+					spaces: [
+						{
+							id: "source-space",
+							machine: null,
+							tabs: [
+								{
+									id: "source-tab",
+									terminals: [
+										{ terminal: "t7", pane: "source-pane" },
+										{ terminal: "t8", pane: "duplicate-pane" },
+									],
+								},
+							],
+						},
+						{
+							id: "other-space",
+							machine: null,
+							tabs: [{ id: "other-tab", terminals: [{ terminal: "t9", pane: "duplicate-pane" }] }],
+						},
+					],
+				},
+			},
+			{
+				name: "duplicate space",
+				placement: "window",
+				target: "duplicate-space",
+				listing: {
+					spaces: [
+						{
+							id: "source-space",
+							machine: null,
+							tabs: [{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] }],
+						},
+						{
+							id: "duplicate-space",
+							machine: null,
+							tabs: [{ id: "first-tab", terminals: [{ terminal: "t8", pane: "first-pane" }] }],
+						},
+						{
+							id: "duplicate-space",
+							machine: null,
+							tabs: [{ id: "second-tab", terminals: [{ terminal: "t9", pane: "second-pane" }] }],
+						},
+					],
+				},
+			},
+		] as const)(
+			"rejects an explicit $name target before creating a terminal",
+			async ({ placement, target, listing: desktop }) => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: JSON.stringify(desktop), exitCode: 0 },
+					{ stdout: '{"pane":"new-pane","tab":"new-tab","terminal":"t10"}', exitCode: 0 },
+				]);
+				await expect(
+					launch({ multiplexer: "herdr-core", placement, command, cwd, target } as TerminalLaunchRequest),
+				).rejects.toThrow();
+				expect(calls).toEqual([{ argv: ["herdr-app", "ls"], cwd }]);
+			},
+		);
+
+		it.each(["pane", "window"] as const)(
+			"rejects an explicit %s target when Desktop is absent without starting a headless terminal",
+			async placement => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: '{"spaces":[]}', exitCode: 0 },
+					{ stdout: '{"address":"t8"}', exitCode: 0 },
+				]);
+				await expect(
+					launch({
+						multiplexer: "herdr-core",
+						placement,
+						command,
+						cwd,
+						target: "target-id",
+					} as TerminalLaunchRequest),
+				).rejects.toThrow();
+				expect(calls).toEqual([{ argv: ["herdr-app", "ls"], cwd }]);
+			},
+		);
+
+		it.each([
+			["pane", false],
+			["pane", true],
+			["window", false],
+			["window", true],
+		] as const)("rejects explicit focus %s=%s without Desktop before invoking hc", async (placement, focus) => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: '{"spaces":[]}', exitCode: 0 },
+				{ stdout: '{"address":"t8"}', exitCode: 0 },
+			]);
+			await expect(
+				launch({ multiplexer: "herdr-core", placement, command, cwd, focus } as TerminalLaunchRequest),
+			).rejects.toThrow();
+			expect(calls).toEqual([{ argv: ["herdr-app", "ls"], cwd }]);
+		});
+
+		function focusHarness(focusResult: TerminalLaunchCliResult = { stdout: "{}", exitCode: 0 }) {
+			const calls: CliCall[] = [];
+			let created = false;
+			const runCli: TerminalLaunchCliRunner = async (argv, callCwd, env) => {
+				calls.push({ argv: [...argv], cwd: callCwd, env });
+				if (argv[0] === "herdr-app" && argv[1] === "ls") {
+					return { stdout: created ? createdListing : listing, exitCode: 0 };
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "status") {
+					return {
+						stdout: created
+							? '{"space":"source-space","tab":"new-tab","focused_pane":"new-pane"}'
+							: '{"space":"other-space","tab":"other-tab","focused_pane":"previous-pane"}',
+						exitCode: 0,
+					};
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "pane.split") {
+					created = true;
+					return { stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 };
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "tab.new") {
+					created = true;
+					return { stdout: '{"tab":"new-tab","terminal":"t8"}', exitCode: 0 };
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "pane.focus") return focusResult;
+				throw new Error(`unexpected CLI call: ${argv.join(" ")}`);
+			};
+			return {
+				calls,
+				launch: createTerminalLauncher({
+					environment: () => ({ HC_TERMINAL_ID: "t7" }),
+					platform: "darwin",
+					runCli,
+				}),
+			};
+		}
+
+		it.each(["pane", "window"] as const)(
+			"restores the previously focused pane, not the source, after a background %s launch",
+			async placement => {
+				const { calls, launch } = focusHarness();
+				const result = await launch({
+					multiplexer: "herdr-core",
+					placement,
+					command,
+					cwd,
+					focus: false,
+				} as TerminalLaunchRequest);
+				expect(result.id).toBe(placement === "pane" ? "new-pane" : "new-tab");
+				const status = calls.findIndex(call => call.argv[1] === "status");
+				const creation = calls.findIndex(
+					call => call.argv[2] === (placement === "pane" ? "pane.split" : "tab.new"),
+				);
+				const focus = calls.findIndex(call => call.argv[2] === "pane.focus");
+				expect(status).toBeGreaterThanOrEqual(0);
+				expect(creation).toBeGreaterThan(status);
+				expect(focus).toBeGreaterThan(creation);
+				expect(JSON.parse(calls[focus]!.argv[3]!)).toEqual({ pane: "previous-pane" });
+			},
+		);
+
+		it("does not restore focus when the user selects another pane during a background launch", async () => {
+			const calls: CliCall[] = [];
+			let statusCount = 0;
+			const runCli: TerminalLaunchCliRunner = async (argv, callCwd, env) => {
+				calls.push({ argv: [...argv], cwd: callCwd, env });
+				if (argv[0] === "herdr-app" && argv[1] === "ls") return { stdout: listing, exitCode: 0 };
+				if (argv[0] === "herdr-app" && argv[1] === "status") {
+					const focusedPane = statusCount++ === 0 ? "previous-pane" : "user-selected-pane";
+					return {
+						stdout: JSON.stringify({ space: "other-space", tab: "other-tab", focused_pane: focusedPane }),
+						exitCode: 0,
+					};
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "pane.split") {
+					return { stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 };
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "pane.focus") {
+					return { stdout: "{}", exitCode: 0 };
+				}
+				throw new Error(`unexpected CLI call: ${argv.join(" ")}`);
+			};
+			const launch = createTerminalLauncher({
+				environment: () => ({ HC_TERMINAL_ID: "t7" }),
+				platform: "darwin",
+				runCli,
+			});
+			const result = await launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command,
+				cwd,
+				focus: false,
+			} as TerminalLaunchRequest);
+
+			expect(result.id).toBe("new-pane");
+			expect(calls.filter(call => call.argv[1] === "status")).toHaveLength(2);
+			expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(0);
+			expect(result.warning).toMatch(/focus.*chang/i);
+			expect(result.warning).toMatch(/restor.*skip|skip.*restor/i);
+		});
+
+		it.each(["pane", "window"] as const)(
+			"keeps focus unchanged when the previous pane is still focused after a background %s launch",
+			async placement => {
+				const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+					{ stdout: listing, exitCode: 0 },
+					{ stdout: '{"tab":"previous-tab","focused_pane":"previous-pane"}', exitCode: 0 },
+					{ stdout: '{"pane":"new-pane","tab":"new-tab","terminal":"t8"}', exitCode: 0 },
+					...(placement === "window" ? [{ stdout: createdListing, exitCode: 0 }] : []),
+					{ stdout: '{"tab":"previous-tab","focused_pane":"previous-pane"}', exitCode: 0 },
+				]);
+				const result = await launch({ multiplexer: "herdr-core", placement, command, cwd, focus: false });
+				expect(result.id).toBe(placement === "pane" ? "new-pane" : "new-tab");
+				expect(result.warning).not.toMatch(/focus/i);
+				expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(0);
+			},
+		);
+
+		it.each([
+			{ name: "failed status", result: { stdout: "", stderr: "secret-status-value", exitCode: 1 } },
+			{ name: "malformed status", result: { stdout: "not JSON", exitCode: 0 } },
+			{ name: "missing focused pane", result: { stdout: '{"tab":"new-tab"}', exitCode: 0 } },
+			{ name: "invalid focused pane", result: { stdout: '{"focused_pane":"bad pane"}', exitCode: 0 } },
+		])("returns the created tab and warns on $name after creation", async ({ result: status }) => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"tab":"previous-tab","focused_pane":"previous-pane"}', exitCode: 0 },
+				{ stdout: '{"tab":"new-tab","terminal":"t8"}', exitCode: 0 },
+				{ stdout: createdListing, exitCode: 0 },
+				status,
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "window", command, cwd, focus: false });
+			expect(result.id).toBe("new-tab");
+			expect(result.warning).toMatch(/inspect.*(layout|logs)/i);
+			expect(result.warning).not.toContain("secret-status-value");
+			expect(calls.filter(call => call.argv[2] === "tab.new")).toHaveLength(1);
+			expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(0);
+		});
+
+		it("returns the created pane when the post-creation status command throws", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"focused_pane":"previous-pane"}', exitCode: 0 },
+				{ stdout: '{"pane":"new-pane","terminal":"t8"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "pane", command, cwd, focus: false });
+			expect(result.id).toBe("new-pane");
+			expect(result.warning).toMatch(/inspect.*(layout|logs)/i);
+			expect(calls.filter(call => call.argv[2] === "pane.split")).toHaveLength(1);
+			expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(0);
+		});
+
+		it("preserves a third tab selected during a background window launch", async () => {
+			const { calls, launch } = createHarness({ HC_TERMINAL_ID: "t7" }, [
+				{ stdout: listing, exitCode: 0 },
+				{ stdout: '{"tab":"previous-tab","focused_pane":"previous-pane"}', exitCode: 0 },
+				{ stdout: '{"tab":"new-tab","terminal":"t8"}', exitCode: 0 },
+				{ stdout: createdListing, exitCode: 0 },
+				{ stdout: '{"tab":"selected-tab","focused_pane":"selected-pane"}', exitCode: 0 },
+			]);
+			const result = await launch({ multiplexer: "herdr-core", placement: "window", command, cwd, focus: false });
+			expect(result.id).toBe("new-tab");
+			expect(result.warning).toMatch(/focus.*chang/i);
+			expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(0);
+		});
+
+		it("preserves a different pane selected inside a newly created background tab", async () => {
+			const calls: CliCall[] = [];
+			let created = false;
+			const createdListing = JSON.stringify({
+				spaces: [
+					{
+						id: "source-space",
+						machine: null,
+						tabs: [
+							{ id: "source-tab", terminals: [{ terminal: "t7", pane: "source-pane" }] },
+							{
+								id: "new-tab",
+								terminals: [
+									{ terminal: "t8", pane: "new-pane" },
+									{ terminal: "t9", pane: "selected-pane" },
+								],
+							},
+						],
+					},
+				],
+				recent: [],
+			});
+			const runCli: TerminalLaunchCliRunner = async (argv, callCwd, env) => {
+				calls.push({ argv: [...argv], cwd: callCwd, env });
+				if (argv[0] === "herdr-app" && argv[1] === "ls") {
+					return { stdout: created ? createdListing : listing, exitCode: 0 };
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "status") {
+					return {
+						stdout: created
+							? '{"tab":"new-tab","focused_pane":"selected-pane"}'
+							: '{"tab":"previous-tab","focused_pane":"previous-pane"}',
+						exitCode: 0,
+					};
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "tab.new") {
+					created = true;
+					return { stdout: '{"tab":"new-tab","terminal":"t8"}', exitCode: 0 };
+				}
+				if (argv[0] === "herdr-app" && argv[1] === "do" && argv[2] === "pane.focus") {
+					return { stdout: "{}", exitCode: 0 };
+				}
+				throw new Error(`unexpected CLI call: ${argv.join(" ")}`);
+			};
+			const launch = createTerminalLauncher({
+				environment: () => ({ HC_TERMINAL_ID: "t7" }),
+				platform: "darwin",
+				runCli,
+			});
+
+			const result = await launch({ multiplexer: "herdr-core", placement: "window", command, cwd, focus: false });
+
+			expect(result.id).toBe("new-tab");
+			expect(result.warning).toMatch(/focus.*chang/i);
+			expect(result.warning).toMatch(/restor.*skip|skip.*restor/i);
+			expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(0);
+		});
+
+		it.each(["pane", "window"] as const)(
+			"focuses the created terminal after a foreground %s launch",
+			async placement => {
+				const { calls, launch } = focusHarness();
+				const result = await launch({
+					multiplexer: "herdr-core",
+					placement,
+					command,
+					cwd,
+					focus: true,
+				} as TerminalLaunchRequest);
+				expect(result.id).toBe(placement === "pane" ? "new-pane" : "new-tab");
+				const creation = calls.findIndex(
+					call => call.argv[2] === (placement === "pane" ? "pane.split" : "tab.new"),
+				);
+				const focus = calls.findIndex(call => call.argv[2] === "pane.focus");
+				expect(creation).toBeGreaterThanOrEqual(0);
+				expect(focus).toBeGreaterThan(creation);
+				expect(JSON.parse(calls[focus]!.argv[3]!)).toEqual({ terminal: "t8" });
+			},
+		);
+
+		it("reports failed focus restoration without failing or retrying the created launch", async () => {
+			const { calls, launch } = focusHarness({ stdout: "", stderr: "secret-focus-value", exitCode: 1 });
+			const result = await launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command,
+				cwd,
+				focus: false,
+			} as TerminalLaunchRequest);
+			expect(result.id).toBe("new-pane");
+			expect(result.warning?.toLowerCase()).toContain("focus");
+			expect(result.warning).toMatch(/inspect.*(layout|logs)/i);
+			expect(result.warning).not.toContain("secret-focus-value");
+			expect(calls.filter(call => call.argv[2] === "pane.split")).toHaveLength(1);
+			expect(calls.filter(call => call.argv[2] === "pane.focus")).toHaveLength(1);
 		});
 
 		it.each(["pane", "window"] as const)(
