@@ -6,6 +6,24 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
+## Antigravity CLI
+
+`antigravity-cli` runs Google's `agy acp` locally. It is separate from the paused direct-OAuth `google-antigravity` provider.
+
+1. Run `/login antigravity-cli` or `omp login antigravity-cli`.
+2. Complete agy's Google sign-in and paste the authorization code or callback URL.
+3. Select, for example, `antigravity-cli/gemini-4-carbon` or `antigravity-cli/claude-sonnet-5-5`.
+
+omp downloads agy from Google's release manifests, checks SHA-512, and keeps versioned executables under its data directory (normally `~/.omp/antigravity-cli/bin`). It checks for updates at most daily without changing your shell profiles. `PI_AGY_PATH` selects an existing executable instead. The CLI's IDE-tool transport requires `nc` (netcat) on `PATH`.
+
+Login exports the resulting OAuth grant into omp's credential store so normal refresh and broker distribution can manage it. The ACP child uses a private, account-scoped native credential file rather than modifying your ordinary agy login. A child-only headless-auth environment selects agy's file storage. Do not copy access tokens into `--api-key`: the transport expects the structured OAuth credential produced by login.
+
+omp supplies the system prompt and tool schemas through ACP and an IDE MCP bridge. Tool names remain bare in omp; agy presents them to the model as `mcp_ide-tools_<name>`. The built-in agent prompt and coding tools are removed, but agy's `manage_task` and MCP resource tools remain internal to agy. Tool execution and approvals for the supplied tools stay with omp.
+
+The transport retains agy's conversation between model steps, including while omp executes a tool. Edits, branches and changed context restore a matching saved turn boundary when possible; otherwise the retained transcript is supplied to a fresh conversation. Native conversations and credentials are local to the machine running inference. agy's three-minute MCP timeout means longer tool operations require cancelling its waiting turn and delivering the completed result as a subsequent message.
+
+The bundled roster follows agy 1.5.9's model picker; availability still depends on the signed-in account. ACP supports model and thinking-level selection, but not caller-specified temperature, stop sequences or output-token caps. Token totals arrive at native turn end; intermediate steps report occupied context rather than invented per-step billing. Google's account-policy warning is shown before sign-in.
+
 ## Factory Droid
 
 The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.
