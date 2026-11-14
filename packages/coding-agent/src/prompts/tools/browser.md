@@ -1,4 +1,4 @@
-Drive real browser tabs.
+Drive real browser tabs; start with `const tab = await browser.open({ name, url })`.
 
 <instruction>
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
@@ -17,7 +17,7 @@ BrowserTab, every helper awaited:
 navigation: url title goto back forward reload pushState
 inspection: observe({selector?, compact?, viewportOnly?, includeAll?}) ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?}) a11y extract(format?, {selector?, outline?, filter?}) text html value attr count box styles isVisible isEnabled isChecked
 capture: screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?}) diffScreenshot(baselinePath, {threshold?, output?}) pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})
-interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt wheel scroll drag highlight scrollIntoView select uploadFile
+interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type(selector, text) fill(selector, text) press(key, {selector?}) keyDown keyUp mouseMove mouseDown mouseUp clickAt(x, y) wheel scroll(dx, dy) drag(from, to) highlight scrollIntoView select(selector, …values) uploadFile(selector, …paths)
 waiting: waitFor waitForSelector waitForUrl waitForText
 frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector screenshot
 dialogs: dialog handleDialog setDialogs
@@ -31,7 +31,7 @@ recording: recordStart(path, options?) recordStop recordRestart(path, options?) 
 vitals, React: vitals reactEnable reactTree reactInspect reactRenders reactSuspense
 network: route unroute routes requests request clearRequests harStart harStop allowedDomains
 WebMCP (experimental, Chromium only): webmcpList webmcpInvoke webmcpEvents
-execution: evaluate run(fnOrCode, {args?, timeout?})
+execution: evaluate(fnOrExpression) run(fnOrCode, {args?, timeout?})
 elements: id(n) ref("e5") → BrowserElement with click dblclick check uncheck highlight type fill press hover focus select uploadFile scrollIntoView boundingBox isVisible isHidden text html value attr styles isEnabled isChecked evaluate
 close()
 
@@ -117,18 +117,7 @@ Relay (`app: "relay"`: the user's Chrome through the omp relay):
 - `target` borrows an existing tab by URL/title substring. Reopening an open name keeps its tab.
 - `app: "auto"` skips the relay however it is enabled; the next default applies.
 - It is the user's real logged-in browser: sites attribute actions to the user. NEVER navigate a borrowed tab without authorization.
-{{#if linux}}
-- On Linux under X11, Chrome 150 and later raises its window, taking the user's next keystrokes,
-  when a mouse or touch press lands in a tab its window shows (`shown` in the relay's `browser.targets()`) while another window is in front.
-  - Presses: `click`, `dblclick`, `tap`, `drag`, `mouseDown`, `clickAt`,
-    `check`/`uncheck` unless already in the requested state (a refused change still presses; unchecking a native radio does not),
-    `uploadFile` on anything but an `<input type=file>`.
-  - A control that opens a new tab or popup may raise Chrome however it is activated.
-  - Not presses: keys (`type`, `fill`, `press`), `focus`, `select`, `hover`, scrolling, screenshots.
-  - A tab its window is not showing never comes forward.
-  - When the user must keep their app in front, on a shown tab use
-    `focus()` then `press("Enter")` for a button, `press("Space")` for a checkbox, `uploadFile` on the file input itself.
-{{/if}}
+{{{x11Guidance}}}
 
 Tern:
 

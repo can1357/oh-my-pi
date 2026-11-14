@@ -27,6 +27,10 @@
 - Changed the default `spotlight.thinking` level from `low` to `med` for deeper result analysis and improved ranking, at a higher request cost.
 - When Spotlight is enabled, commonly reread source and issue or pull-request content is shown more completely before outlining, including support for additional source file types.
 
+### Changed
+
+- Browser tasks start without reading `xd://eval/browser`: a short guide follows the first browser call as a hidden session message, outside cell output limits and shaping. Compaction or a rewind that drops or shortens it sends it again. Advisors keep reading the full guide first; real-session, borrowed-tab and page-integrity safety rules arrive before the first call ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).

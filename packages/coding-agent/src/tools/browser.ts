@@ -320,10 +320,11 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 		status: describeBrowserCall,
 		// The documentation promises omp's own browser for an open without `app`; while
 		// the relay takes that open, the prompt names where `app: "auto"` goes instead.
-		relayFallback:
-			resolveBrowserKind({ action: "open" }, session).kind === "relay"
+		get relayFallback() {
+			return resolveBrowserKind({ action: "open" }, session).kind === "relay"
 				? resolveBrowserKind({ action: "open", app: "auto" }, session)
-				: undefined,
+				: undefined;
+		},
 	});
 }
 
