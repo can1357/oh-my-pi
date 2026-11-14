@@ -34,13 +34,20 @@ import {
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
+import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
-import { combine, type ScopeLike } from "../config/registry";
+import type { ModelRegistry } from "../config/model-registry";
+import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
-import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
+import {
+	cfgAuthAccountPolicies,
+	cfgAuthBrokerToken,
+	cfgAuthBrokerUrl,
+	cfgOperatorUnpausedProviders,
+} from "../config/model-settings";
 import { cfgRetryUsageReservePct } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
@@ -130,7 +137,21 @@ const cfgAuthStorageSettings = combine({
 	brokerToken: cfgAuthBrokerToken,
 	accountPolicies: cfgAuthAccountPolicies,
 	usageReservePct: cfgRetryUsageReservePct,
+	unpausedProviders: cfgOperatorUnpausedProviders,
 });
+
+/**
+ * Applies the operator's `auth.unpausedProviders` (never a project layer's) to this process.
+ * The pause set is process-wide: while a settings instance drives effects (`bindEffects`), its
+ * effect owns it and other instances leave it alone. Commands that build auth storage from
+ * read-only or resolved settings, with nothing bound, call this themselves, or the providers
+ * stay paused there. Loaded credential pools refilter on their next read, so order does not matter.
+ */
+export function applyUnpausedProviders(settings: Settings): void {
+	const owner = effectsSettings();
+	if (owner !== undefined && owner !== settings) return;
+	setUnpausedProviders(cfgOperatorUnpausedProviders.get(settings));
+}
 
 /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
 export interface AuthStorageSettingsSync {
@@ -143,15 +164,22 @@ export interface AuthStorageSettingsSync {
 /**
  * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
  * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
+ * - `auth.unpausedProviders` (operator layers only) re-applies which paused providers are back
+ *   on — loaded credential pools refilter on their next read — and refreshes `modelRegistry`'s
+ *   catalog for each newly unpaused provider, as a login does.
  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
  *   broker with startup precedence (env → config.yml → token file; project layers
  *   never redirect credentials), and swap the credential store in place when the
  *   effective connection changed — the next credential resolution uses it.
  *
- * Changes apply in order (broker before policies within one change); a failing
+ * Changes apply in order (broker, then policies, then paused providers within one change); a failing
  * change is logged and leaves the current configuration active.
  */
-export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: AuthStorage): AuthStorageSettingsSync {
+export function createAuthStorageSettingsSync(
+	scope: ScopeLike,
+	authStorage: AuthStorage,
+	modelRegistry?: Pick<ModelRegistry, "refreshProvider">,
+): AuthStorageSettingsSync {
 	const settings = "settings" in scope ? scope.settings : scope;
 	const agentDir = settings.getAgentDir();
 	const resolveOptions = { agentDir, configValueResolver: resolveConfigValue };
@@ -190,14 +218,27 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
 		}
 	};
 
+	const applyUnpaused = async (added: readonly string[]) => {
+		applyUnpausedProviders(settings);
+		if (!modelRegistry) return;
+		try {
+			await Promise.all(added.map(provider => modelRegistry.refreshProvider(provider, "online")));
+		} catch (error) {
+			logger.warn("Model list refresh after unpausing a provider failed", { error: String(error) });
+		}
+	};
+
 	const stop = cfgAuthStorageSettings.listen(scope, (next, previous) => {
 		const brokerChanged = next.brokerUrl !== previous.brokerUrl || next.brokerToken !== previous.brokerToken;
 		const policiesChanged =
 			next.usageReservePct !== previous.usageReservePct ||
 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
+		const unpausedChanged = !Bun.deepEquals(next.unpausedProviders, previous.unpausedProviders);
+		const unpausedAdded = next.unpausedProviders.filter(provider => !previous.unpausedProviders.includes(provider));
 		pending = pending.then(async () => {
 			if (brokerChanged) await applyBroker();
 			if (policiesChanged) await applyPolicies();
+			if (unpausedChanged) await applyUnpaused(unpausedAdded);
 		});
 		return pending;
 	});

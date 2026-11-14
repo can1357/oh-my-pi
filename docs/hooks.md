@@ -40,14 +40,11 @@ A hook module must default-export a factory:
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function hook(pi: HookAPI): void {
-  pi.on("tool_call", async (event, ctx) => {
-    if (
-      event.toolName === "bash" &&
-      String(event.input.command ?? "").includes("rm -rf")
-    ) {
-      return { block: true, reason: "blocked by policy" };
-    }
-  });
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName === "bash" && String(event.input.command ?? "").includes("rm -rf")) {
+			return { block: true, reason: "blocked by policy" };
+		}
+	});
 }
 ```
 
@@ -118,6 +115,7 @@ Hook events are strongly typed in `types.ts`.
 - `session_start`
 - `session_before_switch` → can return `{ cancel?: boolean }`
 - `session_switch`
+- `session_clear`
 - `session_before_branch` → can return `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_branch`
 - `session_before_compact` → can return `{ cancel?: boolean; compaction?: CompactionResult }`
@@ -128,6 +126,12 @@ Hook events are strongly typed in `types.ts`.
 - `session_shutdown`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_clear` is a non-cancellable notification after `/clear` (or
+`AgentSession.resetSessionContext()`) successfully resets context in place.
+Use it to invalidate cached "already injected" instructions; handlers finish
+before the reset returns. It also fires for an empty successful clear, never
+for a busy/rejected reset, and does not change the session id, file, or history.
 
 ### Agent/context events
 
@@ -330,15 +334,15 @@ The extension runner has separate handler-timeout and cancellation behavior.
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") return;
-    const cmd = String(event.input.command ?? "");
-    if (!cmd.includes("rm -rf")) return;
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "bash") return;
+		const cmd = String(event.input.command ?? "");
+		if (!cmd.includes("rm -rf")) return;
 
-    if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
-    const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
-    if (!ok) return { block: true, reason: "user denied command" };
-  });
+		if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
+		const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
+		if (!ok) return { block: true, reason: "user denied command" };
+	});
 }
 ```
 
@@ -348,19 +352,19 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("tool_result", async (event) => {
-    if (event.toolName !== "read" || event.isError) return;
+	pi.on("tool_result", async event => {
+		if (event.toolName !== "read" || event.isError) return;
 
-    const redacted = event.content.map((chunk) => {
-      if (chunk.type !== "text") return chunk;
-      return {
-        ...chunk,
-        text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
-      };
-    });
+		const redacted = event.content.map(chunk => {
+			if (chunk.type !== "text") return chunk;
+			return {
+				...chunk,
+				text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
+			};
+		});
 
-    return { content: redacted };
-  });
+		return { content: redacted };
+	});
 }
 ```
 
@@ -370,12 +374,10 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("context", async (event) => {
-    const filtered = event.messages.filter(
-      (msg) => !(msg.role === "custom" && msg.customType === "debug-only"),
-    );
-    return { messages: filtered };
-  });
+	pi.on("context", async event => {
+		const filtered = event.messages.filter(msg => !(msg.role === "custom" && msg.customType === "debug-only"));
+		return { messages: filtered };
+	});
 }
 ```
 
@@ -385,24 +387,22 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.registerCommand("handoff", {
-    description: "Create a new session with setup message",
-    handler: async (_args, ctx) => {
-      await ctx.waitForIdle();
-      await ctx.newSession({
-        parentSession: ctx.sessionManager.getSessionFile(),
-        setup: async (sm) => {
-          sm.appendMessage({
-            role: "user",
-            content: [
-              { type: "text", text: "Continue from prior session summary." },
-            ],
-            timestamp: Date.now(),
-          });
-        },
-      });
-    },
-  });
+	pi.registerCommand("handoff", {
+		description: "Create a new session with setup message",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			await ctx.newSession({
+				parentSession: ctx.sessionManager.getSessionFile(),
+				setup: async sm => {
+					sm.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: "Continue from prior session summary." }],
+						timestamp: Date.now(),
+					});
+				},
+			});
+		},
+	});
 }
 ```
 

@@ -9,7 +9,11 @@ const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
 const CURSOR_REFRESH_URL = "https://api2.cursor.sh/oauth/token";
 /** OAuth client the Cursor IDE renews its login session with. */
 const CURSOR_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
-const CURSOR_PROFILE_URL = "https://cursor.com/api/auth/me";
+/**
+ * The account profile the Cursor IDE and CLI read (Connect RPC, bearer auth). cursor.com's
+ * `/api/auth/me` resolves only WorkOS user ids, so it answers 404 for GitHub/Google logins.
+ */
+const CURSOR_GET_ME_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe";
 const CURSOR_PROFILE_TIMEOUT_MS = 3_000;
 
 const POLL_MAX_ATTEMPTS = 150;
@@ -177,23 +181,38 @@ export function cursorSessionHeaders(userId: string, accessToken: string): Recor
 	};
 }
 
+/** Unary Connect RPC call with an empty message, authenticated by `accessToken` as a bearer token. */
+export function cursorConnectRequest(accessToken: string, signal?: AbortSignal): RequestInit {
+	return {
+		method: "POST",
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${accessToken}`,
+			"Connect-Protocol-Version": "1",
+			"Content-Type": "application/json",
+		},
+		body: "{}",
+		signal,
+	};
+}
+
 /**
- * Email of the Cursor account that owns `accessToken`, read from its cursor.com
- * profile. Undefined when the token names no user or the profile names another.
+ * Email of the Cursor account that owns `accessToken`, read from Cursor's account profile.
+ * Undefined when the token names no subject or the profile names another.
  */
 export async function fetchCursorAccountEmail(
 	accessToken: string,
 	fetchImpl: FetchImpl = fetch,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	const userId = extractCursorAccessTokenUserId(accessToken);
-	if (!userId) return undefined;
-	const response = await fetchImpl(CURSOR_PROFILE_URL, { headers: cursorSessionHeaders(userId, accessToken), signal });
+	const subject = cursorAccessTokenSubject(accessToken);
+	if (!subject) return undefined;
+	const response = await fetchImpl(CURSOR_GET_ME_URL, cursorConnectRequest(accessToken, signal));
 	if (!response.ok) {
 		throw new AIError.ProviderHttpError(`Cursor profile request failed: ${response.status}`, response.status);
 	}
 	const payload: unknown = await response.json();
-	if (!isRecord(payload) || payload.sub !== userId || typeof payload.email !== "string") return undefined;
+	if (!isRecord(payload) || payload.authId !== subject || typeof payload.email !== "string") return undefined;
 	return payload.email.trim() || undefined;
 }
 
@@ -221,19 +240,24 @@ function decodeCursorAccessTokenPayload(token: string): unknown | undefined {
 	return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
 }
 
-export function extractCursorAccessTokenUserId(accessToken: string): string | undefined {
+/** Full `sub` claim of a Cursor access token, such as `github|1245379` or `auth0|user_…`. */
+function cursorAccessTokenSubject(accessToken: string): string | undefined {
 	try {
 		const payload = decodeCursorAccessTokenPayload(accessToken);
 		if (!payload || typeof payload !== "object" || !("sub" in payload) || typeof payload.sub !== "string") {
 			return undefined;
 		}
-		const { sub } = payload;
-		const parts = sub.split("|");
-		const userId = (parts.length > 1 ? parts[1] : sub).trim();
-		return userId || undefined;
+		return payload.sub.trim() || undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+export function extractCursorAccessTokenUserId(accessToken: string): string | undefined {
+	const sub = cursorAccessTokenSubject(accessToken);
+	if (!sub) return undefined;
+	const parts = sub.split("|");
+	return (parts.length > 1 ? parts[1] : sub).trim() || undefined;
 }
 
 function getTokenExpiry(token: string): number {

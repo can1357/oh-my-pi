@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
-import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	type ArchiveReader,
@@ -13,7 +13,7 @@ import {
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
-import { getEditStore, recordFullySeenRows } from "../edit/store";
+import { getEditStore, NO_FULL_LINE, recordFullySeenRows } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
@@ -52,6 +52,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
+import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
 import {
 	APPROVAL_ROOT_DELIMITERS,
 	approvalRootCandidates,
@@ -389,12 +390,6 @@ interface SnapshotStamp {
 }
 
 const SNAPSHOT_STAMP_MAX = 256;
-/**
- * Stats younger than this are never memoized (git's racy-clean rule): on
- * coarse-timestamp filesystems a same-size rewrite inside one timestamp
- * granule leaves the stamp unchanged.
- */
-const RACY_STAMP_WINDOW_NS = 2_000_000_000n;
 const snapshotStampsByStore = new WeakMap<EditStore, LRUCache<string, SnapshotStamp>>();
 
 /**
@@ -429,7 +424,7 @@ async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly stri
 		}
 		const tag = store.recordSnapshotFile(filePath);
 		const changedNs = st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs;
-		if (tag && BigInt(Date.now()) * 1_000_000n - changedNs >= RACY_STAMP_WINDOW_NS) {
+		if (tag && BigInt(Date.now() - RACY_STAMP_WINDOW_MS) * 1_000_000n >= changedNs) {
 			stamps.set(filePath, { size: st.size, mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs, ino: st.ino, tag });
 		} else {
 			stamps.delete(filePath);
@@ -676,8 +671,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
+			const resolveContext = sessionResolveContext(this.session, { signal });
+			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: resolveContext,
+				tier: resolveToolTier(this, params),
+			});
 			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
 				exclusionParts: true,
+				mixedLocalPaths: urlFilesystem,
 			});
 			// `!glob` entries exclude; the rest are what to search (all of cwd when only exclusions were given).
 			// A file or folder whose name really starts with `!` is still searched.
@@ -689,12 +691,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
-			const resolveContext = sessionResolveContext(this.session, { signal });
-			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
-			const urlFilesystem = new InternalUrlFilesystem({
-				context: resolveContext,
-				tier: resolveToolTier(this, params),
-			});
 			const filesystem = urlFilesystem.shellFilesystem();
 			const materializedExternalPaths = new Map<string, string>();
 			const materializeExternalUrlForSearch = async (rawPath: string) => {
@@ -821,6 +817,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				let binaryMatches: string[] = [];
 				// Native sets `limitReached` for the per-file cap too; only the total cap
 				// stops the walk before every file has been surfaced.
 				let totalCapReached = false;
@@ -865,6 +862,10 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								undefined,
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
+							for (const binaryPath of targetResult.binaryMatches ?? []) {
+								const absolute = resolveSearchResultPath(target.basePath, binaryPath);
+								binaryMatches.push(relativeSearchResultPath(searchPath, absolute));
+							}
 							limitReached = limitReached || Boolean(targetResult.limitReached);
 							totalCapReached ||= targetResult.matches.length >= nativeMaxCount;
 							totalMatches += targetResult.totalMatches;
@@ -915,6 +916,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
+						binaryMatches = result.binaryMatches ?? [];
 						totalCapReached = result.matches.length >= nativeMaxCount;
 					}
 				} catch (err) {
@@ -928,6 +930,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}
 					throw err;
 				}
+				// A cross-line match is kept by its first line alone, so it carries its file's
+				// ranges to the renderer, which hides the continuation rows they exclude.
+				const rangesByMatch = new Map<GrepMatch, LineRange[]>();
 				if (rangesByAbsPath.size > 0) {
 					const filteredMatches: GrepMatch[] = [];
 					for (const match of result.matches) {
@@ -944,11 +949,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						// otherwise leak content the caller explicitly excluded.
 						const trimBefore = match.contextBefore?.filter(c => isLineInRanges(c.lineNumber, ranges));
 						const trimAfter = match.contextAfter?.filter(c => isLineInRanges(c.lineNumber, ranges));
-						filteredMatches.push({
+						const kept: GrepMatch = {
 							...match,
 							contextBefore: trimBefore && trimBefore.length > 0 ? trimBefore : undefined,
 							contextAfter: trimAfter && trimAfter.length > 0 ? trimAfter : undefined,
-						});
+						};
+						filteredMatches.push(kept);
+						rangesByMatch.set(kept, ranges);
 					}
 					result = {
 						matches: filteredMatches,
@@ -1083,6 +1090,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					!oversizedNote && skippedOversizedCount > 0
 						? `Skipped ${skippedOversizedCount} unreadable large file(s); target them directly with \`read\``
 						: undefined;
+				// Binary files are skipped unless named; native lists only those whose content matches.
+				const binaryMatchPaths = binaryMatches.map(filePath =>
+					formatResultPath(filePath, true, searchPath, this.session.cwd),
+				);
+				const binaryMatchNote =
+					binaryMatchPaths.length > 0
+						? `Binary files also match (name one as \`path\` to search it as text): ${formatCappedFiles(binaryMatchPaths)}`
+						: undefined;
 				const archiveNote =
 					archiveUnreadable.length > 0
 						? `Skipped archive entries (search supports text members only): ${archiveUnreadable.join(", ")}`
@@ -1094,7 +1109,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const missingPathsNote =
 					missingPathsForNote.length > 0 ? `Skipped missing paths: ${missingPathsForNote.join(", ")}` : undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote]
+					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote, binaryMatchNote]
 						.filter((s): s is string => Boolean(s))
 						.join("\n") || undefined;
 				if (selectedMatches.length === 0) {
@@ -1106,6 +1121,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						fileCount: 0,
 						files: [],
 						truncated: false,
+						binaryMatches: binaryMatchPaths.length > 0 ? binaryMatchPaths : undefined,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
 					const skipPastEnd = canPaginate && normalizedSkip > 0 && totalFiles > 0 && skipFiles >= totalFiles;
@@ -1113,7 +1129,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
 						: oversizedNote
 							? `No matches in searched content (multiline search limited large files to their first ${limitMb}MB)`
-							: "No matches found";
+							: binaryMatchNote
+								? "No matches in text files"
+								: "No matches found";
 					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
 					// Zero matches is useless regardless of warnings: by the time
 					// compaction runs, the follow-up call has already corrected course.
@@ -1156,15 +1174,25 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						if (tag) hashContexts.set(editable[index].relativePath, { tag, path: editable[index].snapshotPath });
 					}
 				}
+				// Rows count as seen only once the byte cap below has kept them.
+				const seenSections: Array<{
+					relativePath: string;
+					path: string;
+					tag: string;
+					rows: string[];
+					cutLines: Set<number> | undefined;
+				}> = [];
 				const renderMatchesForFile = (relativePath: string): FileMatchSection => {
 					const modelOut: string[] = [];
 					const displayOut: string[] = [];
 					let cutLines: Set<number> | undefined;
 					const fileMatches = matchesByFile.get(relativePath) ?? [];
+					// A cross-line match arrives as one block; give each line it spans its own numbered row.
+					const matchRows = fileMatches.map(match => match.line.split(/\r?\n/));
 					const hashContext = hashContexts.get(relativePath);
 					const useHashLines = hashContext !== undefined;
-					const lineNumberWidth = fileMatches.reduce((width, match) => {
-						let nextWidth = Math.max(width, String(match.lineNumber).length);
+					const lineNumberWidth = fileMatches.reduce((width, match, index) => {
+						let nextWidth = Math.max(width, String(match.lineNumber + matchRows[index].length - 1).length);
 						for (const ctx of match.contextBefore ?? []) {
 							nextWidth = Math.max(nextWidth, String(ctx.lineNumber).length);
 						}
@@ -1175,8 +1203,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}, 0);
 					let lastEmittedLine: number | undefined;
 					const gutterPad = " ".repeat(lineNumberWidth + 1);
-					for (const match of fileMatches) {
+					for (const [index, match] of fileMatches.entries()) {
 						const pushLine = (lineNumber: number, line: string, isMatch: boolean) => {
+							line = sanitizeText(line);
 							if (lastEmittedLine !== undefined && lineNumber > lastEmittedLine + 1) {
 								modelOut.push("...");
 								displayOut.push(`${gutterPad}│...`);
@@ -1193,11 +1222,21 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								pushLine(ctx.lineNumber, ctx.line, false);
 							}
 						}
+						const rows = matchRows[index];
 						// A cut line shows a window around its first match; name where that match sits.
-						const matchLine = match.column === undefined ? match.line : `${match.line} [col ${match.column}]`;
-						if (match.truncated) (cutLines ??= new Set()).add(match.lineNumber);
-						pushLine(match.lineNumber, matchLine, true);
-						if (match.truncated) linesTruncated = true;
+						if (match.column !== undefined) rows[0] = `${rows[0]} [col ${match.column}]`;
+						if (match.truncated) {
+							linesTruncated = true;
+							// The cut window is contiguous, so only the block's first and last rows may be partial.
+							(cutLines ??= new Set()).add(match.lineNumber).add(match.lineNumber + rows.length - 1);
+						}
+						const ranges = rangesByMatch.get(match);
+						for (let row = 0; row < rows.length; row++) {
+							const lineNumber = match.lineNumber + row;
+							// Like context lines, rows outside the selected ranges are neither shown nor recorded as seen.
+							if (ranges && !isLineInRanges(lineNumber, ranges)) continue;
+							pushLine(lineNumber, rows[row], row === 0);
+						}
 						if (match.contextAfter) {
 							for (const ctx of match.contextAfter) {
 								pushLine(ctx.lineNumber, ctx.line, false);
@@ -1206,13 +1245,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
 					}
 					if (hashContext?.tag) {
-						recordFullySeenRows(
-							getEditStore(this.session),
-							hashContext.path,
-							hashContext.tag,
-							modelOut.join("\n"),
+						seenSections.push({
+							relativePath,
+							path: hashContext.path,
+							tag: hashContext.tag,
+							rows: modelOut,
 							cutLines,
-						);
+						});
 					}
 					return { model: modelOut, display: displayOut, tag: hashContext?.tag };
 				};
@@ -1242,13 +1281,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					.filter(relativePath => fileMatchCounts.get(relativePath) === perFileMatchCap);
 				let suffix = trailer(cappedCandidates);
 				let truncation: TruncationResult;
+				let keptLines: number;
 				for (;;) {
 					const reserved = Buffer.byteLength(suffix);
 					truncation = truncateHead(rawOutput, {
 						maxLines: Number.MAX_SAFE_INTEGER,
 						maxBytes: DEFAULT_MAX_BYTES - reserved,
 					});
-					const keptLines = truncation.truncated ? (truncation.outputLines ?? 0) : outputLines.length;
+					keptLines = truncation.truncated ? (truncation.outputLines ?? 0) : outputLines.length;
 					const shownCapped = isMultiScope
 						? cappedCandidates.filter(
 								relativePath => (matchOutput.modelEnds.get(relativePath) ?? Infinity) <= keptLines,
@@ -1257,6 +1297,22 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					suffix = trailer(shownCapped);
 					// Fewer files named can still mean longer names; re-cut until the notice fits its room.
 					if (Buffer.byteLength(suffix) <= reserved) break;
+				}
+				// The byte cap keeps whole lines from the top: record only the rows of each file it kept.
+				const editStore = getEditStore(this.session);
+				for (const section of seenSections) {
+					const end = matchOutput.modelEnds.get(section.relativePath);
+					if (end === undefined) continue;
+					const firstRow = end - section.rows.length;
+					// Dropped with its header: this output never showed the tag.
+					if (keptLines < firstRow) continue;
+					const keptRows = section.rows.slice(0, keptLines - firstRow);
+					if (keptRows.length === 0) {
+						// Only the header survived: it shows the tag, so record provenance that anchors no line.
+						editStore.recordSeenLines(section.path, section.tag, [NO_FULL_LINE]);
+					} else {
+						recordFullySeenRows(editStore, section.path, section.tag, keptRows.join("\n"), section.cutLines);
+					}
 				}
 				const output = truncation.content + suffix;
 				const displayText = displayLines.join("\n");
@@ -1290,6 +1346,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						count: fileMatchCounts.get(path) ?? 0,
 					})),
 					truncated,
+					binaryMatches: binaryMatchPaths.length > 0 ? binaryMatchPaths : undefined,
 					fileLimitReached: fileLimitReached ? fileWindow : undefined,
 					perFileLimitReached: totalMatchLimitReached
 						? this.#totalMatchLimit

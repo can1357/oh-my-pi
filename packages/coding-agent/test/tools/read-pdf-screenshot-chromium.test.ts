@@ -5,6 +5,12 @@ import * as path from "node:path";
 import { deflateSync } from "node:zlib";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	acquireBrowser,
+	type BrowserHandle,
+	holdBrowser,
+	releaseBrowser,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { decodePng } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { renderPdfPageScreenshot } from "@oh-my-pi/pi-coding-agent/tools/read-pdf";
@@ -15,7 +21,7 @@ const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Before the fix each page came back blank about half the time, so eight
 // pages fail it on nearly every run.
 const PAGE_COUNT = 8;
-// Each render has its own 30 s deadline; they take about 3 s.
+// Each render has its own 30 s deadline; on a running browser they take about 1 s.
 const TEST_TIMEOUT_MS = PAGE_COUNT * 30_000;
 const IMAGE_SIZE = 1600;
 
@@ -100,6 +106,7 @@ async function countPagePixels(file: string): Promise<{ light: number; dark: num
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("PDF page screenshots in Chromium", () => {
 	let testDir: string;
+	let browser: BrowserHandle | undefined;
 
 	beforeEach(async () => {
 		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-pdf-chromium-"));
@@ -108,6 +115,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("PDF page screenshots in Chromium", () => {
 	afterEach(async () => {
 		// Close the viewer before deleting the PDF it holds open.
 		await releaseAllTabs({ kill: true });
+		if (browser) await releaseBrowser(browser, { kill: true });
+		browser = undefined;
 		await removeWithRetries(testDir);
 	});
 
@@ -123,6 +132,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("PDF page screenshots in Chromium", () => {
 				getSessionSpawns: () => "*",
 				settings: Settings.isolated({ "browser.headless": true, "browser.cmux": false, "browser.tern": false }),
 			} as ToolSession;
+			// Production renders on the long-lived project-shared Chromium; under `bun test` the
+			// registry launches a process-local one instead and closes it once its last tab goes.
+			// Hold it so each render opens its own tab on a running browser, as in production,
+			// rather than launching and closing a Chromium per page.
+			browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: testDir });
+			holdBrowser(browser);
 
 			for (let page = 1; page <= PAGE_COUNT; page++) {
 				const screenshot = await renderPdfPageScreenshot(session, pdfPath, page);

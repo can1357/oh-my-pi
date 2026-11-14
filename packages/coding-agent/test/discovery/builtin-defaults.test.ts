@@ -419,7 +419,11 @@ describe("builtin-defaults rule provider", () => {
 		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
 		return (...deltas) => {
 			manager.resetBuffer();
-			return deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(r => r.name));
+			const names = deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(r => r.name));
+			// The stream ends with a final check, as the TTSR coordinator sends: matches on a long
+			// unterminated line may be deferred until then.
+			names.push(...manager.checkDelta("", ctx, { final: true }).map(r => r.name));
+			return [...new Set(names)];
 		};
 	}
 

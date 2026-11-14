@@ -25,7 +25,12 @@ const NATIVE_SHEET_INSET_COLS = 8;
 // Action id of the native Force kill button (mirrors Esc).
 const KILL_ACTION = "kill";
 
-function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
+/**
+ * Translates a TUI key event into the bytes a terminal would send to a PTY
+ * child; key releases encode to "". Shared by the agent `pty` console and
+ * `!` commands (`BashExecutionComponent.encodePtyInput`).
+ */
+export function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
 	const kitty = parseKittySequence(data);
 	if (kitty?.eventType === 3) {
 		return "";

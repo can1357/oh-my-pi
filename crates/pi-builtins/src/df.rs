@@ -13,7 +13,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::{
 	display::Quotable,
@@ -23,7 +22,7 @@ use uucore::{
 
 use crate::{
 	block_size::{BlockSize, Scale},
-	host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno},
 	locale::{NumericSymbols, ctype_is_utf8, numeric_symbols},
 };
 
@@ -249,11 +248,6 @@ fn app() -> Command {
 		)
 }
 
-/// Creates the `df` builtin registration.
-pub(crate) fn df_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Df, SE>()
-}
-
 /// The values of a repeatable option with their command-line positions.
 fn indexed<'m, T: Clone + Send + Sync + 'static>(
 	matches: &'m ArgMatches,
@@ -282,9 +276,9 @@ fn block_header(bytes: u64, symbols: NumericSymbols) -> String {
 	let (mut q1000, mut q1024) = (bytes, bytes);
 	let (mut by_1000, mut by_1024);
 	loop {
-		by_1000 = q1000 % 1000 == 0;
+		by_1000 = q1000.is_multiple_of(1000);
 		q1000 /= 1000;
-		by_1024 = q1024 % 1024 == 0;
+		by_1024 = q1024.is_multiple_of(1024);
 		q1024 /= 1024;
 		if !(by_1000 && by_1024) {
 			break;
@@ -304,7 +298,7 @@ fn block_header(bytes: u64, symbols: NumericSymbols) -> String {
 		text.push('B');
 	}
 	if symbols.decimal_point != b'.' {
-		text = text.replace('.', char::from(symbols.decimal_point).encode_utf8(&mut [0; 4]));
+		text = text.replace('.', char::from(symbols.decimal_point).encode_utf8(&mut [0; char::MAX_LEN_UTF8]));
 	}
 	text
 }
@@ -485,7 +479,7 @@ fn unescape_octal(text: &str) -> String {
 			i += 1;
 		}
 	}
-	String::from_utf8_lossy(&out).into_owned()
+	String::from_utf8_lossy_owned(out)
 }
 
 /// Reads the mount table; `Err` carries the error text, if any, for GNU's
@@ -742,7 +736,7 @@ fn percent(v: &Values) -> Vec<u8> {
 		&& (sum < v.used) == v.negate_available
 	{
 		let u100 = v.used * 100;
-		pct = (u100 / sum + u64::from(u100 % sum != 0)) as f64;
+		pct = u100.div_ceil(sum) as f64;
 	} else {
 		let u = if v.negate_used {
 			-(v.used.wrapping_neg() as f64)
@@ -793,7 +787,7 @@ fn replace_problematic(cell: &[u8], tty: bool, utf8: bool) -> Vec<u8> {
 			if c.is_control() {
 				out.push(b'?');
 			} else {
-				let mut buf = [0; 4];
+				let mut buf = [0; char::MAX_LEN_UTF8];
 				out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 			}
 		}
@@ -1648,7 +1642,7 @@ fn run_df(host: &mut Host, matches: &ArgMatches) -> Result<(), Early> {
 				|| !state.select.is_empty()
 				|| !state.exclude.is_empty();
 			let prefix = if fatal { "" } else { "Warning: " };
-			let suffix = error.map(|text| format!(": {text}")).unwrap_or_default();
+			let suffix = error.map_or_default(|text| format!(": {text}"));
 			host.error(format!("{prefix}cannot read table of mounted file systems{suffix}"), 1);
 			if fatal {
 				return Err(Early::Exit(1));

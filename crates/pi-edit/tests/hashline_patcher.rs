@@ -147,6 +147,70 @@ async fn mismatch_reply_keeps_the_provenance_of_recorded_content() {
 		.expect("the earlier read displayed line 20");
 }
 
+/// The tag an edit response header hands back.
+fn response_tag(text: &str) -> String {
+	let at = text.find('#').expect("response header carries a tag") + 1;
+	text[at..at + 4].to_owned()
+}
+
+#[tokio::test]
+async fn rows_an_edit_wrote_are_displayed_for_the_next_edit() {
+	// #19091: an eight-row insert used to collapse to `…` and hide line 7.
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = numbered_lines(6);
+	workspace.write("h.txt", &text);
+	let tag = workspace.snapshot("h.txt", &text, Some(&(1..=6).collect::<Vec<_>>()));
+	let body = ('a'..='h')
+		.map(|c| format!("+new {c}\n"))
+		.collect::<Vec<_>>()
+		.concat();
+	let writer = common::DiskWriter::default();
+	let outcome = workspace
+		.apply_json(&json!({ "input": format!("[h.txt#{tag}]\nPUT >3:\n{body}") }), &writer)
+		.await
+		.expect("insert applies");
+	assert!(outcome.text.contains("\n7:new d\n"), "{}", outcome.text);
+	let tag = response_tag(&outcome.text);
+	workspace
+		.apply_json(&json!({ "input": format!("[h.txt#{tag}]\nPUT 7.=7:\n+new D\n") }), &writer)
+		.await
+		.expect("the response displayed line 7");
+	assert!(
+		workspace
+			.read("h.txt")
+			.unwrap()
+			.contains("new c\nnew D\nnew e\n")
+	);
+}
+
+#[tokio::test]
+async fn lines_read_before_an_outside_change_stay_seen_where_unchanged() {
+	// #19092: a formatter or other writer changes line 50; a partial re-read
+	// must not forget line 5, which kept its number and content.
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = numbered_lines(60);
+	workspace.write("f.txt", &text);
+	workspace.snapshot("f.txt", &text, Some(&(1..=60).collect::<Vec<_>>()));
+	let changed = text.replace("line 50\n", "line FIFTY\n");
+	workspace.write("f.txt", &changed);
+	let tag = workspace.snapshot("f.txt", &changed, Some(&(47..=55).collect::<Vec<_>>()));
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[f.txt#{tag}]\nPUT 5.=5:\n+line FIVE\n") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("line 5 was read and is unchanged");
+	assert!(
+		workspace
+			.read("f.txt")
+			.unwrap()
+			.contains("line 4\nline FIVE\nline 6\n")
+	);
+}
+
 #[tokio::test]
 async fn each_mismatch_reply_adds_the_rows_it_displayed() {
 	let mut workspace = common::Workspace::new(EditMode::Hashline);
@@ -567,4 +631,119 @@ async fn head_insert_still_applies_across_a_stale_tag() {
 	assert_eq!(workspace.read("a.txt"), None);
 	assert_eq!(workspace.read("b.txt").as_deref(), Some("head\ncurrent\n"));
 	assert!(outcome.text.contains("despite a stale snapshot tag"), "{}", outcome.text);
+}
+
+/// A body that restates both neighbouring lines and is too short for its
+/// range: `PUT 3.=5:` restates `alive = true;` above and the `isAlive()`
+/// header below, with one blank row between them for three range rows. Its
+/// repair used to drop only the trailing echo, writing `alive = true;` twice
+/// and deleting `constructor() {}` while reporting success. It is refused,
+/// the file is left as it was, and the resend the refusal asks for applies.
+#[tokio::test]
+async fn refuses_a_short_body_that_restates_both_neighbours_and_applies_the_resend() {
+	const PROBE: &str = "class Probe {\n\talive = true;\n\n\tconstructor() {}\n\n\tisAlive(): \
+	                     boolean {\n\t\treturn this.alive;\n\t}\n}\n";
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("probe.ts", PROBE);
+	let tag = workspace.snapshot("probe.ts", PROBE, None);
+	let error = workspace
+		.apply_json(
+			&json!({
+				"input": format!(
+					"[probe.ts#{tag}]\nPUT 3.=5:\n+\talive = true;\n+\n+\tisAlive(): boolean {{\n"
+				)
+			}),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("a body too short between two echoes must not apply")
+		.to_string();
+	assert!(
+		error.contains("`PUT 3.=5:` rejected: the body restates both")
+			&& error.contains("they leave out lines 4-5"),
+		"{error}"
+	);
+	assert_eq!(workspace.read("probe.ts").as_deref(), Some(PROBE));
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[probe.ts#{tag}]\nPUT 3.=5:\n+\n") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("the resend covers exactly the changed lines");
+	assert_eq!(
+		workspace.read("probe.ts").as_deref(),
+		Some(
+			"class Probe {\n\talive = true;\n\n\tisAlive(): boolean {\n\t\treturn \
+			 this.alive;\n\t}\n}\n"
+		)
+	);
+}
+
+/// Shapes that lost a range row while reporting success, each refused with
+/// the file left as it was:
+/// - a body that restates the line above twice, in a file with no parser (the
+///   first copy was dropped as an echo and the second written as content,
+///   deleting `z = 3`);
+/// - a one-sided too-short group in a patch whose other group's repair made the
+///   file parse (the short group was applied as written, writing `const a = 1;`
+///   twice and deleting `const c = 3;`).
+#[tokio::test]
+async fn refuses_echo_shapes_that_lost_rows_and_leaves_the_file_unchanged() {
+	const ROWS: &str = "x = 1\ny = 2\nz = 3\nw = 4\n";
+	const MULTI: &str =
+		"const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nfunction f() {\n\treturn 1;\n}\n";
+	let cases = [
+		("r.txt", ROWS, "PUT 2.=3:\n+x = 1\n+x = 1\n+Y = 2\n", "`PUT 2.=3:` rejected"),
+		(
+			"m.ts",
+			MULTI,
+			"PUT 2.=3:\n+const a = 1;\n+const B = 2;\nPUT 6.=6:\n+\treturn 1;\n+}\n",
+			"`PUT 2.=3:` rejected",
+		),
+	];
+	for (path, text, ops, refusal) in cases {
+		let workspace = common::Workspace::new(EditMode::Hashline);
+		workspace.write(path, text);
+		let tag = workspace.snapshot(path, text, None);
+		let error = workspace
+			.apply_json(
+				&json!({ "input": format!("[{path}#{tag}]\n{ops}") }),
+				&common::DiskWriter::default(),
+			)
+			.await
+			.expect_err(path)
+			.to_string();
+		assert!(error.contains(refusal), "{path}: {error}");
+		assert_eq!(workspace.read(path).as_deref(), Some(text), "{path}");
+	}
+}
+
+/// A repair that keeps a source row outside the restated copy: the copy then
+/// sits inside the rows the patch writes, where a check at their edges does
+/// not see it. This `PUT 2.=4:` restates the `{children}` line just below the
+/// range and is a row short of it. The repair kept the range's `>` row, so
+/// the result wrote `{children}` twice and deleted the `style=` attribute,
+/// and it parsed, so only this check stops it.
+#[tokio::test]
+async fn refuses_a_repair_whose_kept_row_hides_a_restated_copy() {
+	const GRID: &str = "\t\t<div\n\t\t\tclassName=\"stat-grid \
+	                    rise\"\n\t\t\tstyle={min}\n\t\t>\n\t\t\t{children}\n\t\t</div>\n";
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("Stat.tsx", GRID);
+	let tag = workspace.snapshot("Stat.tsx", GRID, None);
+	let error = workspace
+		.apply_json(
+			&json!({
+				"input": format!(
+					"[Stat.tsx#{tag}]\nPUT 2.=4:\n+\t\t\tclassName=\"stat-grid rise\"\n+\t\t\t{{children}}\n"
+				)
+			}),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("a repair that keeps a row must not hide the restated copy")
+		.to_string();
+	assert!(error.contains("`PUT 2.=4:` rejected"), "{error}");
+	assert_eq!(workspace.read("Stat.tsx").as_deref(), Some(GRID));
 }

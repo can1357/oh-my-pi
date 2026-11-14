@@ -526,8 +526,8 @@ mod tests {
 			assert_eq!(error.code, super::super::error::ErrorCode::Unsupported);
 			assert!(error.message.contains("on macOS only"), "{}", error.message);
 		}
-		// A URL routes to the document path, which refuses; `open` reaches it only
-		// after an inventory listing, which some hosts cannot produce.
+		// A URL routes to the document path, which refuses; `open` reaches it
+		// only after an inventory listing, which some hosts cannot produce.
 		let url = ApplicationOpenOptions::default();
 		assert_eq!(route(&[], "https://example.com", &url), Route::Document);
 		let error = open_document(&[], "https://example.com", &url).unwrap_err();

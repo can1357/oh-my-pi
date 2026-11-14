@@ -14,6 +14,11 @@ export const HL_FILE_SUFFIX = "]";
 export const HL_FILE_HASH_SEP = "#";
 /** Number of characters in a displayed file hash. */
 export const HL_FILE_HASH_LENGTH = 4;
+/**
+ * A trailing `#TAG` file hash exactly as the hashline store writes it (uppercase
+ * hex), so a name's own `#dead` or `#v2` ending survives stripping.
+ */
+export const HASHLINE_TAG_SUFFIX_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-F]{${HL_FILE_HASH_LENGTH}}$`);
 /** Keyword identifying a file move operation. */
 export const HL_MOVE_KEYWORD = "MV";
 /** Keyword identifying a file removal operation. */

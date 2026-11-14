@@ -201,7 +201,7 @@ function findCdpPortInArgs(args: string[]): number | null {
 	return null;
 }
 
-function findUserDataDirInArgs(args: string[] | undefined): string | null {
+export function findUserDataDirInArgs(args: string[] | undefined): string | null {
 	if (!args) return null;
 	let result: string | null = null;
 	const inlinePrefix = "--user-data-dir=";
@@ -231,6 +231,11 @@ const CHROMIUM_FLATPAK_IDS: Record<string, true> = {
 	"org.chromium.Chromium": true,
 	"io.github.ungoogled_software.ungoogled_chromium": true,
 };
+/** Whether an app executable is a Chromium browser rather than an Electron application. */
+export function isChromiumBrowserExecutable(exe: string): boolean {
+	const base = path.basename(exe).replace(/\.exe$/i, "");
+	return CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
+}
 
 /**
  * Launch argv for a spawned executable. Chrome 136+ silently ignores
@@ -251,8 +256,7 @@ const CHROMIUM_FLATPAK_IDS: Record<string, true> = {
  */
 export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
 	const args = appArgs ?? [];
-	const base = path.basename(exe).replace(/\.exe$/i, "");
-	if (!CHROMIUM_BROWSER_BASENAME.test(base) && !Object.hasOwn(CHROMIUM_FLATPAK_IDS, base)) return args;
+	if (!isChromiumBrowserExecutable(exe)) return args;
 	const requestedProfile = findUserDataDirInArgs(args);
 	if (requestedProfile !== null) {
 		// Chromium accepts switch values as --name=value, not a separate argv
@@ -269,7 +273,11 @@ export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd
 		launchArgs.push(`--user-data-dir=${path.resolve(cwd, requestedProfile)}`);
 		return launchArgs;
 	}
-	const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+	const slug = path
+		.basename(exe)
+		.replace(/\.exe$/i, "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-");
 	const hash = Bun.hash.wyhash(exe).toString(16).padStart(16, "0");
 	const launchArgs = [...args];
 	// A fresh profile otherwise opens the welcome tour and default-browser
@@ -380,8 +388,7 @@ export async function findReusableCdp(
 	// wrapper script defeats realpath, so resolve through the wrapper exec target
 	// for Chromium-family browsers on Linux.
 	const executablePath = await fs.realpath(exe).catch(() => exe);
-	const base = path.basename(exe).replace(/\.exe$/i, "");
-	const isChromium = CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
+	const isChromium = isChromiumBrowserExecutable(exe);
 	const wrapperTarget = process.platform === "linux" && isChromium ? await resolveWrapperTarget(executablePath) : null;
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,
@@ -427,7 +434,7 @@ export async function findReusableCdp(
 	if (!canLaunchIsolatedProfile && candidates.length > 0) {
 		const name = path.basename(exe);
 		throw new ToolError(
-			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass app.cdp_url for an existing endpoint.`,
+			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass its CDP endpoint URL as app.`,
 		);
 	}
 	return null;
@@ -541,7 +548,7 @@ async function fetchRelayEntries(
 	}
 }
 
-/** A relay page `app.target` may pick: not discarded by Chrome, and not internal (devtools, service workers…). */
+/** A relay page `target` may pick: not discarded by Chrome, and not internal (devtools, service workers…). */
 function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
 	return (
 		entry.discarded !== "true" &&
@@ -550,9 +557,9 @@ function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
 	);
 }
 
-/** One of the user's Chrome tabs as `browser.targets()` lists it: `app.target` adopts it by `target` (its URL). */
+/** One of the user's Chrome tabs as `browser.targets()` lists it: its `target` (the URL) adopts it. */
 export interface RelayTarget {
-	/** The page URL, as `app.target` takes it (a URL/title substring). */
+	/** The page URL, as `target` takes it (a URL/title substring). */
 	target: string;
 	title: string;
 	url: string;
@@ -585,7 +592,7 @@ export function describeRelayTargets(targets: readonly RelayTarget[]): string {
 	const list = targets
 		.map(entry => `- ${JSON.stringify(entry.title)} ${entry.url}${entry.shown ? " (active)" : ""}`)
 		.join("\n");
-	return `Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n${list}`;
+	return `Chrome pages via the relay (adopt one with target set to its URL or a title substring):\n${list}`;
 }
 
 /** The pages of the user's Chrome the relay at `relayJson` can adopt. */
@@ -616,7 +623,7 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 		}
 		const summary = entries.map(e => `- ${e.id}  ${e.title || "(untitled)"}  ${e.url}`).join("\n");
 		throw new ToolError(
-			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target id, URL or title substring (browser.targets() lists URLs before adopting), or omit it to use the active tab. Available pages:\n${summary}`,
+			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target id, URL or title substring (browser.targets() lists URLs before adopting), or omit target to open omp's own tab, with url to load the page there. Available pages:\n${summary}`,
 		);
 	}
 	const usable = entries.filter(isAdoptableRelayEntry);

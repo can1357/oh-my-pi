@@ -5,6 +5,7 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -12,10 +13,24 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
 import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
-import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
+import {
+	cfgTodoEager,
+	cfgTodoEnabled,
+	cfgTodoMidRunNudges,
+	cfgTodoReminders,
+	cfgTodoRemindersMax,
+} from "../tools/settings";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
+/** `todo.midRunNudges: capped` — unanswered nudges allowed before going silent until the next reset. */
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+/**
+ * `todo.midRunNudges: backoff` — how many times the threshold may double while
+ * nudges go unanswered. A model that keeps working without touching `todo`
+ * still gets reminded — at 12, 24, 48, 96, then every 192 mutating results —
+ * instead of falling silent after the second reminder for the rest of the turn.
+ */
+const MID_RUN_NUDGE_BACKOFF_DOUBLINGS = 4;
 const MUTATING_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
@@ -108,6 +123,10 @@ export class TodoTracker {
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
 		this.#phases = this.#clonePhases(phases);
+		// Every state write lands here — the native tool, a Cursor sync, or a
+		// bridged call — so the nudge budget re-arms on the progress it
+		// rations. Views, failed batches, and unchanged reads never arrive.
+		this.#midRunNudgeCount = 0;
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -323,8 +342,16 @@ export class TodoTracker {
 
 	/** Takes the next hidden mid-run reconciliation nudge, if its budget and guards allow. */
 	takeMidRunNudge(): AgentMessage | null {
-		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
-		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		const mode = cfgTodoMidRunNudges.get(this.#host.settings);
+		if (mode === "off") return null;
+		if (mode === "capped" && this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		// Backoff: an ignored nudge doubles the runway before the next one, capped
+		// so a long turn still gets a reminder without nudging on every threshold.
+		const threshold =
+			mode === "backoff"
+				? MID_RUN_NUDGE_MUTATION_THRESHOLD * 2 ** Math.min(this.#midRunNudgeCount, MID_RUN_NUDGE_BACKOFF_DOUBLINGS)
+				: MID_RUN_NUDGE_MUTATION_THRESHOLD;
+		if (this.#mutationsSinceLastTouch < threshold) return null;
 		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases
@@ -354,12 +381,9 @@ export class TodoTracker {
 	}
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
-		const wireName = (name: string): string => {
-			const tool = this.#host.toolRegistry().get(name);
-			return typeof tool?.customWireName === "string" ? tool.customWireName : name;
-		};
+		const registry = this.#host.toolRegistry();
 		return {
-			toolRefs: { task: wireName("task"), todo: wireName("todo") },
+			toolRefs: { task: toolWireName(registry, "task"), todo: toolWireName(registry, "todo") },
 			taskBatch: cfgTaskBatch.get(this.#host.settings),
 		};
 	}
@@ -367,11 +391,7 @@ export class TodoTracker {
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
 		}));
 	}
 }

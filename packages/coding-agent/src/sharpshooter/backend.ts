@@ -3,7 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { MemoryBackend, MemoryBackendSearchItem, MemoryBackendStatus } from "../memory-backend/types";
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
-import { runSharpshooterConsolidation } from "./consolidate";
+import { runSharpshooterConsolidation, sharpshooterNextConsolidationAt } from "./consolidate";
 import { maybeStartSharpshooterExtraction, resolveSharpshooterModel } from "./extract";
 import {
 	readSharpshooterState,
@@ -88,6 +88,7 @@ export const sharpshooterBackend: MemoryBackend = {
 				settings,
 				modelRegistry,
 				sessionId: session.sessionId,
+				getSessionProvider: () => session.model?.provider,
 			});
 			try {
 				const unsubscribe = session.subscribe(event => {
@@ -148,6 +149,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			settings: session.settings,
 			modelRegistry: session.modelRegistry,
 			sessionId: session.sessionId,
+			getSessionProvider: () => session.model?.provider,
 			force: true,
 		});
 	},
@@ -201,9 +203,10 @@ export const sharpshooterBackend: MemoryBackend = {
 		const intervalMinutes = session
 			? cfgSharpshooterIntervalMinutes.get(session.settings)
 			: cfgSharpshooterIntervalMinutes.default;
-		const intervalMs = Math.max(0, intervalMinutes) * 60_000;
-		const dueInMs = Math.max(0, state.lastConsolidatedAt + intervalMs - Date.now());
-		const model = session ? await resolveSharpshooterModel(session.settings, session.modelRegistry) : undefined;
+		const dueInMs = Math.max(0, sharpshooterNextConsolidationAt(state, intervalMinutes) - Date.now());
+		const model = session
+			? await resolveSharpshooterModel(session.settings, session.modelRegistry, session.model?.provider)
+			: undefined;
 		return [
 			"# Sharpshooter Diagnostics",
 			"",

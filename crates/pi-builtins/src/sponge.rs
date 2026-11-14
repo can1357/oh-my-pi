@@ -6,16 +6,18 @@
 //! not opened or truncated until its former contents have reached EOF.
 
 use std::{
-	ffi::{OsStr, OsString},
+	ffi::OsString,
 	io::{self, Read, Write},
-	path::{Path, PathBuf},
+	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
+use pi_vfs::{BlockingFs, OpenOptions};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	atomic_write,
+	host::{Host, Utility, format_usage, matches_parser},
+};
 
 const OPT_APPEND: &str = "append";
 const ARG_FILE: &str = "file";
@@ -56,12 +58,12 @@ impl Utility for Sponge {
 		let result = if self.matches.get_flag(OPT_APPEND) {
 			append_to(fs, &target, &buffer)
 		} else {
-			replace_atomically(fs, &target, &buffer)
+			atomic_write::replace(fs, &target, &buffer, Self::NAME)
 		};
 		match result {
 			Ok(()) => 0,
 			Err(err) => {
-			host.error(format_args!("{}: {err}", file.to_string_lossy()), 1);
+			host.error(format_args!("{}: {err}", file.display()), 1);
 				1
 			},
 		}
@@ -123,59 +125,6 @@ fn append_to(fs: &BlockingFs, target: &Path, buffer: &[u8]) -> io::Result<()> {
 	let mut file = fs.open_with(target, OpenOptions::new().append(true).create(true))?;
 	file.write_all(buffer)?;
 	file.close()
-}
-
-/// Writes `buffer` to a fresh temporary file beside `target`, copies the
-/// existing target's permissions onto it, then renames it over the target so
-/// readers never observe a truncated file.
-fn replace_atomically(fs: &BlockingFs, target: &Path, buffer: &[u8]) -> io::Result<()> {
-	let (temp_path, temp) = create_sibling_temp(fs, target)?;
-	let result = write_and_swap(fs, target, &temp_path, temp, buffer);
-	if result.is_err() {
-		// The operation filesystem may be cancelled; cleanup must still run.
-		let _ = fs.for_cleanup().remove_file(&temp_path);
-	}
-	result
-}
-
-fn write_and_swap(
-	fs: &BlockingFs,
-	target: &Path,
-	temp_path: &Path,
-	mut temp: File,
-	buffer: &[u8],
-) -> io::Result<()> {
-	let written = temp.write_all(buffer);
-	// Close before the rename so providers that commit on close publish the
-	// complete contents under the final name, and report their errors. Also
-	// close after a failed write so the handle is released before cleanup.
-	let closed = temp.close();
-	written.and(closed)?;
-	if let Ok(metadata) = fs.metadata(target) {
-		fs.set_permissions(temp_path, metadata.permissions())?;
-	}
-	fs.rename(temp_path, target)
-}
-
-/// Creates a uniquely named `.<basename>.sponge.<random>` file next to
-/// `target` with `create_new`, retrying on collision. The temp file gets the
-/// default creation mode so a new target ends up with ordinary permissions.
-fn create_sibling_temp(fs: &BlockingFs, target: &Path) -> io::Result<(PathBuf, File)> {
-	let dir = pi_vfs::parent_path(target)
-		.filter(|p| !p.as_os_str().is_empty())
-		.unwrap_or_else(|| Path::new("."));
-	let base = pi_vfs::file_name(target);
-	let base = base.as_deref().unwrap_or(OsStr::new("sponge")).to_string_lossy();
-	let options = TempOptions::new()
-		.prefix(format!(".{base}.sponge."))
-		.random_len(16)
-		.mode(0o666);
-	fs.create_temp(dir, &options)
-}
-
-/// Creates the `sponge` builtin registration.
-pub(crate) fn sponge_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sponge, SE>()
 }
 
 #[cfg(test)]

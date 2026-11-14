@@ -193,7 +193,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(write).toBeDefined();
 			await expect(
 				write!.execute("device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 		} finally {
 			await session.dispose();
 		}
@@ -216,7 +216,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					path: path.join(tempDir, "before.txt"),
 					content: "x",
 				}),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 
 			await session.setActiveToolsByName(session.getEnabledToolNames());
 
@@ -225,7 +225,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					path: path.join(tempDir, "after.txt"),
 					content: "x",
 				}),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 		} finally {
 			await session.dispose();
 		}
@@ -517,7 +517,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			if (!write) throw new Error("expected dormant write transport");
 			await expect(
 				write.execute("late-device-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 		} finally {
 			await session.dispose();
 		}
@@ -1846,7 +1846,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(write).toBeDefined();
 			await expect(
 				write!.execute("device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 		} finally {
 			await session.dispose();
 		}
@@ -1923,6 +1923,38 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(session.getToolByName(name)).toBeUndefined();
 			}
 			expect(session.getActiveToolNames()).toEqual(previousActiveToolNames);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps MCP refreshes out of the vibe director toolset and applies them on exit", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+		const previousEnabledToolNames = session.getEnabledToolNames();
+		const mcpTool = {
+			name: "mcp__vibe_refresh_lookup",
+			label: "vibe_refresh/lookup",
+			description: "MCP tool connected while vibe mode is active.",
+			parameters: type({}),
+			mcpServerName: "vibe_refresh",
+			mcpToolName: "lookup",
+			async execute() {
+				return { content: [{ type: "text", text: "mcp" }] };
+			},
+		} satisfies CustomTool;
+
+		try {
+			await session.activateVibeTools(["read"]);
+			const directorToolNames = session.getEnabledToolNames();
+			await session.refreshMCPTools([mcpTool]);
+			expect(session.getToolByName(mcpTool.name)).toBeDefined();
+			expect(session.getEnabledToolNames()).toEqual(directorToolNames);
+
+			await session.deactivateVibeTools(previousEnabledToolNames);
+			expect(session.getEnabledToolNames()).toEqual(
+				expect.arrayContaining([...previousEnabledToolNames, mcpTool.name]),
+			);
 		} finally {
 			await session.dispose();
 		}
@@ -2583,6 +2615,63 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(result?.isError).toBeFalsy();
 				expect(JSON.stringify(result?.content)).toContain("bank contents");
 				expect(executed).toBe(1);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it.each([
+		// Anthropic tool names cannot carry `://`, so Claude substitutes one
+		// underscore per dropped character, or fewer.
+		["xd_probe_only", "probe_only"],
+		["xd__probe", "probe"],
+		["xd___probe", "probe"],
+		// A device whose real name starts with `xd_` keeps its exact dispatch
+		// instead of being read as the alias of `probe`.
+		["xd_probe", "xd_probe"],
+	])("dispatches a %s call to the mounted %s device", async (callName, device) => {
+		const tempDir = makeTempDir();
+		const executed: string[] = [];
+		const devices: ExtensionFactory = pi => {
+			for (const name of ["probe", "probe_only", "xd_probe"]) {
+				pi.registerTool({
+					name,
+					label: name,
+					description: `Device ${name}`,
+					parameters: type({}),
+					async execute() {
+						executed.push(name);
+						return { content: [{ type: "text", text: name }] };
+					},
+				});
+			}
+		};
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({ ...baseOptions(tempDir), extensions: [devices] });
+			try {
+				expect(session.getMountedXdevToolNames()).toEqual(
+					expect.arrayContaining(["probe", "probe_only", "xd_probe"]),
+				);
+
+				const toolCallId = "xd-underscore-spelling-1";
+				const mock = createMockModel({
+					responses: [
+						{ content: [{ type: "toolCall", id: toolCallId, name: callName, arguments: {} }] },
+						{ content: [{ type: "text", text: "done" }] },
+					],
+				});
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+
+				await session.prompt("hi");
+
+				const result = session.messages.find(
+					(message): message is ToolResultMessage =>
+						message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				expect(result?.isError).toBeFalsy();
+				expect(executed).toEqual([device]);
 			} finally {
 				await session.dispose();
 			}

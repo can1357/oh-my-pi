@@ -11,6 +11,10 @@
  *  - `x-amz-security-token` (only when credentials carry a sessionToken)
  *  - `authorization`
  */
+import { asStrictBytes } from "@oh-my-pi/pi-utils/bytes";
+
+/** @deprecated Use `asStrictBytes` from `@oh-my-pi/pi-utils`. */
+export { asStrictBytes as asStrict } from "@oh-my-pi/pi-utils/bytes";
 
 export interface AwsCredentials {
 	accessKeyId: string;
@@ -57,18 +61,6 @@ const UNSIGNABLE: Record<string, true> = {
 	"x-amzn-trace-id": true,
 };
 
-/** Coerce a possibly-ArrayBufferLike-backed `Uint8Array` into one over a fresh
- * `ArrayBuffer`, which is what `crypto.subtle.{digest,sign,importKey}` requires
- * under the strict TS DOM typings. No-op when already strict.
- */
-export function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-		return bytes as Uint8Array<ArrayBuffer>;
-	}
-	const copy = new Uint8Array(bytes.byteLength);
-	copy.set(bytes);
-	return copy;
-}
 const subtle = globalThis.crypto.subtle;
 
 const HEX = "0123456789abcdef";
@@ -82,7 +74,7 @@ export function toHex(bytes: Uint8Array): string {
 }
 
 export async function sha256(data: Uint8Array | string): Promise<Uint8Array> {
-	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrict(data);
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrictBytes(data);
 	const digest = await subtle.digest("SHA-256", bytes);
 	return new Uint8Array(digest);
 }
@@ -92,8 +84,10 @@ export async function sha256Hex(data: Uint8Array | string): Promise<string> {
 }
 
 async function hmac(key: Uint8Array, data: string | Uint8Array): Promise<Uint8Array> {
-	const cryptoKey = await subtle.importKey("raw", asStrict(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrict(data);
+	const cryptoKey = await subtle.importKey("raw", asStrictBytes(key), { name: "HMAC", hash: "SHA-256" }, false, [
+		"sign",
+	]);
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrictBytes(data);
 	const sig = await subtle.sign("HMAC", cryptoKey, bytes);
 	return new Uint8Array(sig);
 }

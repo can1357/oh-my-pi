@@ -11,7 +11,7 @@ import type { FetchImpl, Model } from "../types";
 const gzip = promisify(zlib.gzip);
 
 /** Bodies below one TCP segment gain nothing from compression; skip them. */
-const MIN_COMPRESSED_BODY_BYTES = 1024;
+export const MIN_COMPRESSED_BODY_BYTES = 1024;
 
 /**
  * zlib's default level: on multi-MB transcripts ~35% smaller than level 1 for

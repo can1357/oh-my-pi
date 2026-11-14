@@ -26,7 +26,7 @@ use super::{
 	GitRepo,
 	filter::WorktreeFilter,
 	mutate::update_reference,
-	open::{load_index_or_head, status_with_index},
+	open::{load_index_at, load_index_or_head, status_with_index},
 };
 use crate::{
 	error::{Error, Result},
@@ -1350,29 +1350,6 @@ fn index_map_at(
 	Ok(load_index_at(repo, index_path)?.map_or_default(|index| index_state_map(&index)))
 }
 
-/// The index at `index_path`, or the repository's when `None`; `None` when an
-/// alternate index does not exist yet.
-fn load_index_at(
-	repo: &gix::Repository,
-	index_path: Option<&Path>,
-) -> Result<Option<gix::index::File>> {
-	let Some(path) = index_path else {
-		return load_index_or_head(repo, "git read index").map(Some);
-	};
-	match fs::metadata(path) {
-		Ok(_) => gix::index::File::at(
-			path,
-			repo.object_hash(),
-			false,
-			gix::index::decode::Options::default(),
-		)
-		.map(Some)
-		.map_err(|err| Error::backend("git read alternate index", err)),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-		Err(err) => Err(err.into()),
-	}
-}
-
 fn index_state_map(index: &gix::index::State) -> BTreeMap<String, FileEntry> {
 	let mut map = BTreeMap::new();
 	for entry in index.entries() {
@@ -2692,8 +2669,9 @@ mod tests {
 
 	/// Superproject tracking gitlink `module` at the first of two module
 	/// commits: checked out there when `initialized`, an empty directory
-	/// otherwise. Module commits carry fixed dates, so every fixture shares the
-	/// same `(old, new)` commit ids.
+	/// otherwise. Module commits carry fixed dates and no signature (a user's
+	/// `commit.gpgsign` stamps the signing time into the id), so every fixture
+	/// shares the same `(old, new)` commit ids.
 	fn gitlink_fixture(initialized: bool) -> (TempDir, String, String) {
 		let temp = init(&[("file.txt", b"base\n")]);
 		let module = temp.path().join("module");
@@ -2711,6 +2689,8 @@ mod tests {
 					"user.name=Patch Test",
 					"-c",
 					"user.email=patch@example.com",
+					"-c",
+					"commit.gpgsign=false",
 					"commit",
 					"-qm",
 					"module",

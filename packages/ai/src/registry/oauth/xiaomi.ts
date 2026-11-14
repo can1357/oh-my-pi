@@ -4,12 +4,14 @@
  * Xiaomi MiMo provides OpenAI-compatible models via
  * https://api.xiaomimimo.com/v1.
  *
- * Standard Xiaomi login accepts both pay-as-you-go keys and regional `tp-...`
- * keys, probing the regional Token Plan clusters in fallback order.
+ * Standard Xiaomi login accepts both pay-as-you-go keys and regional Token Plan
+ * (`tp-...`/`ttp-...`) keys, probing the regional Token Plan clusters in fallback order.
  */
 
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { isXiaomiTokenPlanKey } from "@oh-my-pi/pi-catalog/wire/xiaomi-token-plan";
+import { toError } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import type { OAuthController } from "./types";
@@ -18,10 +20,34 @@ const PROVIDER_ID = "xiaomi";
 const PROVIDER_NAME = "Xiaomi MiMo";
 const STANDARD_AUTH_URL = "https://platform.xiaomimimo.com/#/console/api-keys";
 const STANDARD_API_BASE_URL = "https://api.xiaomimimo.com/v1";
-const TOKEN_PLAN_KEY_PREFIX = "tp-";
-
-function isTokenPlanKey(apiKey: string): boolean {
-	return apiKey.startsWith(TOKEN_PLAN_KEY_PREFIX);
+/**
+ * Request-time base URL for a Xiaomi `tp-`/`ttp-` key. Bundled and cached generic
+ * Xiaomi rows pin the standard host, which rejects Token Plan keys. Only that
+ * standard host (or a missing URL) is redirected. Explicit regional providers
+ * select their region; generic Xiaomi login stores no region and defaults to SGP.
+ * Every deliberate custom or regional endpoint and every ordinary key is kept.
+ */
+export function resolveXiaomiRequestBaseUrl(
+	model: { provider?: string; baseUrl?: string },
+	apiKey: string | undefined,
+): string | undefined {
+	const provider = model.provider ?? "";
+	const region = /^xiaomi-token-plan-(sgp|ams|cn)$/.exec(provider)?.[1];
+	if (provider !== PROVIDER_ID && region === undefined) return model.baseUrl;
+	if (apiKey === undefined || !isXiaomiTokenPlanKey(apiKey)) return model.baseUrl;
+	if (model.baseUrl !== undefined) {
+		let hostname: string;
+		try {
+			hostname = new URL(model.baseUrl).hostname;
+		} catch {
+			return model.baseUrl;
+		}
+		if (hostname !== "api.xiaomimimo.com") return model.baseUrl;
+	}
+	// Each regional Token Plan host lives once, in its auth policy; reuse it instead of a second table.
+	const login = authPolicyFor(`xiaomi-token-plan-${region ?? "sgp"}`)?.login;
+	if (login?.kind !== "api-key" || login.validate?.kind !== "chat-completions") return model.baseUrl;
+	return login.validate.baseUrl;
 }
 
 const VALIDATION_TIMEOUT_MS = 15_000;
@@ -29,7 +55,7 @@ const VALIDATION_TIMEOUT_MS = 15_000;
 async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchOverride?: FetchImpl): Promise<void> {
 	const fetchImpl = fetchOverride ?? fetch;
 	// Generic Xiaomi login keeps the historical SGP → AMS → CN fallback.
-	const endpoints = isTokenPlanKey(apiKey)
+	const endpoints = isXiaomiTokenPlanKey(apiKey)
 		? ["xiaomi-token-plan-sgp", "xiaomi-token-plan-ams", "xiaomi-token-plan-cn"].map(provider => {
 				const login = authPolicyFor(provider)?.login;
 				if (login?.kind !== "api-key" || login.validate?.kind !== "chat-completions") {
@@ -47,8 +73,9 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 		// abort the AMS fetch.
 		const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
 		const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		let response: Response;
 		try {
-			const response = await fetchImpl(`${ep.baseUrl}/chat/completions`, {
+			response = await fetchImpl(`${ep.baseUrl}/chat/completions`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -61,43 +88,6 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 				}),
 				signal: requestSignal,
 			});
-
-			if (response.ok) {
-				return;
-			}
-
-			// 401 means this endpoint didn't accept the key; try the next one
-			if (response.status === 401) {
-				let details = "";
-				try {
-					details = (await response.text()).trim();
-				} catch {
-					// ignore body parse errors, status is enough
-				}
-				lastError = new AIError.OAuthError(
-					details
-						? `${PROVIDER_NAME} API key validation failed (${response.status}): ${details}`
-						: `${PROVIDER_NAME} API key validation failed (${response.status})`,
-					{ kind: "validation", provider: PROVIDER_ID, status: response.status },
-				);
-				continue;
-			}
-
-			// Non-auth errors are real failures
-			let details = "";
-			try {
-				details = (await response.text()).trim();
-			} catch {
-				// ignore body parse errors, status is enough
-			}
-			const message = details
-				? `${PROVIDER_NAME} API key validation failed (${response.status}): ${details}`
-				: `${PROVIDER_NAME} API key validation failed (${response.status})`;
-			throw new AIError.OAuthError(message, {
-				kind: "validation",
-				provider: PROVIDER_ID,
-				status: response.status,
-			});
 		} catch (e) {
 			// Only re-throw AbortError when the caller explicitly cancelled.
 			// Timeout aborts (from AbortSignal.timeout) should fall through to
@@ -105,8 +95,33 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 			if (e instanceof DOMException && e.name === "AbortError" && signal?.aborted) {
 				throw e;
 			}
-			lastError = e instanceof Error ? e : new Error(String(e));
+			lastError = toError(e);
+			continue;
 		}
+
+		if (response.ok) {
+			return;
+		}
+
+		let details = "";
+		try {
+			details = (await response.text()).trim();
+		} catch {
+			// ignore body read errors, status is enough
+		}
+		const error = new AIError.OAuthError(
+			details
+				? `${PROVIDER_NAME} API key validation failed (${response.status}): ${details}`
+				: `${PROVIDER_NAME} API key validation failed (${response.status})`,
+			{ kind: "validation", provider: PROVIDER_ID, status: response.status },
+		);
+		// 401 means this endpoint didn't accept the key; try the next one. Any other
+		// status means the endpoint accepted the key but the probe failed, so surface
+		// it instead of letting later regions replace it with their 401.
+		if (response.status !== 401) {
+			throw error;
+		}
+		lastError = error;
 	}
 	throw (
 		lastError ??
@@ -133,8 +148,8 @@ export async function loginXiaomi(options: OAuthController): Promise<string> {
 		instructions: "Copy your API key from the Xiaomi MiMo console",
 	});
 	const apiKey = await options.onPrompt({
-		message: "Paste your Xiaomi API key (sk-... or token-plan tp-...)",
-		placeholder: "sk-... or tp-...",
+		message: "Paste your Xiaomi API key (sk-... or Token Plan tp-... / ttp-...)",
+		placeholder: "sk-..., tp-..., or ttp-...",
 	});
 	if (options.signal?.aborted) {
 		throw new AIError.LoginCancelledError();

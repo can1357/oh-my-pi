@@ -63,12 +63,16 @@ async function drainAllTabs(): Promise<void> {
 }
 
 let prevSocketPath: string | undefined;
+let prevTerminalOwner: string | undefined;
 
 beforeEach(() => {
 	prevSocketPath = process.env.CMUX_SOCKET_PATH;
 	// Unique per test so the module-global browsers map (keyed by socket path)
 	// never carries a handle across tests.
 	process.env.CMUX_SOCKET_PATH = `/tmp/omp-open-lease-${process.pid}-${Math.random().toString(36).slice(2)}.sock`;
+	// Run from an interactive omp's bash tool, the tests inherit its claim on the terminal, which skips cmux.
+	prevTerminalOwner = process.env.PI_TERMINAL_OWNER_PID;
+	delete process.env.PI_TERMINAL_OWNER_PID;
 });
 
 afterEach(async () => {
@@ -77,13 +81,16 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	if (prevSocketPath === undefined) delete process.env.CMUX_SOCKET_PATH;
 	else process.env.CMUX_SOCKET_PATH = prevSocketPath;
+	if (prevTerminalOwner !== undefined) process.env.PI_TERMINAL_OWNER_PID = prevTerminalOwner;
 });
 
 describe("browser open — requested timeout bounds the whole acquisition (#6365)", () => {
 	it("rejects with a timeout ToolError when browser acquisition stays pending past the deadline", async () => {
 		vi.useFakeTimers();
 		const connectGate = Promise.withResolvers<void>();
+		const connectEntered = Promise.withResolvers<void>();
 		spyOn(CmuxSocketClient.prototype, "connect").mockImplementation(async () => {
+			connectEntered.resolve();
 			await connectGate.promise;
 		});
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
@@ -98,7 +105,9 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 		// The requested 1s deadline elapses while `acquireBrowser` is still
 		// blocked on the (never-resolving) socket connect. Bun's fake timers fire
 		// `AbortSignal.timeout` synchronously on advance; awaiting `settled` below
-		// flushes the rejection.
+		// flushes the rejection. The deadline starts only once pre-open setup
+		// (engine/Chromium installs) settles, so advance after the connect began.
+		await connectEntered.promise;
 		vi.advanceTimersByTime(1000);
 
 		const outcome = await settled;
@@ -152,12 +161,15 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 describe("browser open — caller cancellation rolls back the fresh browser (#6365)", () => {
 	it("aborting before tab publication rejects with ToolAbortError and leaves both maps empty", async () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
-		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		const browserClosed = Promise.withResolvers<void>();
+		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => browserClosed.resolve());
 		const openSplitGate = Promise.withResolvers<void>();
+		const openSplitEntered = Promise.withResolvers<void>();
 		const surfaceClosed: string[] = [];
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
 			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
 				if (method === "browser.open_split") {
+					openSplitEntered.resolve();
 					await openSplitGate.promise;
 					return { surface_id: "surface-abort", url: "about:blank" };
 				}
@@ -179,7 +191,7 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 
 		// Browser acquisition has resolved; tab acquisition is parked in
 		// `open_split`. Cancel here — before any tab is published.
-		await Promise.resolve();
+		await openSplitEntered.promise;
 		controller.abort();
 
 		const outcome = await settled;
@@ -187,24 +199,29 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 		if (outcome.ok) throw new Error("unreachable");
 		expect(outcome.err).toBeInstanceOf(ToolAbortError);
 
-		// The open-acquisition lease rollback disposes the fresh browser exactly
-		// once and leaves nothing owned solely by the failed open.
+		expect(getTabsMapForTest().has("fresh")).toBe(false);
+
+		// The tab acquisition holds the browser until its in-flight `open_split`
+		// unwinds; then the late surface is closed and the fresh browser is
+		// disposed exactly once, leaving nothing owned solely by the failed open.
+		openSplitGate.resolve();
+		await browserClosed.promise;
+		expect(surfaceClosed).toEqual(["surface-abort"]);
 		expect(getTabsMapForTest().has("fresh")).toBe(false);
 		expect(registry.getBrowsersMapForTest().size).toBe(0);
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-
-		// Let the orphaned acquisition unwind so it does not leak past the test.
-		openSplitGate.resolve();
-		await Promise.resolve();
 	});
 });
 
 describe("browser open — an abandoned browser acquisition does not hold up the next one", () => {
 	it("starts a fresh connect for the next open instead of waiting out a timed-out one", async () => {
 		const stalledConnect = Promise.withResolvers<void>();
+		const stalledEntered = Promise.withResolvers<void>();
 		let connects = 0;
 		spyOn(CmuxSocketClient.prototype, "connect").mockImplementation(async () => {
-			if (++connects === 1) await stalledConnect.promise;
+			if (++connects !== 1) return;
+			stalledEntered.resolve();
+			await stalledConnect.promise;
 		});
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
@@ -215,6 +232,7 @@ describe("browser open — an abandoned browser acquisition does not hold up the
 
 		vi.useFakeTimers();
 		const first = rejectionOf(invokeBrowser({ action: "open", name: "retry", timeout: 1 }));
+		await stalledEntered.promise;
 		vi.advanceTimersByTime(1000);
 		expect(await first).toBeInstanceOf(ToolError);
 		vi.useRealTimers();
@@ -296,7 +314,11 @@ describe("browser open — an abandoned browser acquisition does not hold up the
 			process.kill(pid, "SIGKILL");
 			events.push("kill-end");
 		});
-		const browser = { connected: true, disconnect: () => undefined } as unknown as Browser;
+		const browser = {
+			connected: true,
+			disconnect: () => undefined,
+			wsEndpoint: () => "ws://127.0.0.1/devtools/browser/test",
+		} as unknown as Browser;
 
 		const owner = new AbortController();
 		const first = rejectionOf(registry.acquireBrowser(kind, { cwd, signal: owner.signal }));
@@ -321,10 +343,10 @@ describe("browser open — failed spawned-app acquisition reaps its owned proces
 			key: "spawned:/tmp/chrome-headless-shell",
 			kind: { kind: "spawned", path: "/tmp/chrome-headless-shell" },
 			refCount: 0,
+			wsEndpoint: "ws://127.0.0.1/devtools/browser/test",
 			browser: {
 				connected: true,
 				disconnect: disconnectSpy,
-				wsEndpoint: () => "ws://127.0.0.1/devtools/browser/test",
 				targets: () => [],
 				pages: async () => [],
 				waitForTarget: async () => {
@@ -343,7 +365,7 @@ describe("browser open — failed spawned-app acquisition reaps its owned proces
 			invokeBrowser({
 				action: "open",
 				name: "failed-open",
-				app: { path: "/tmp/chrome-headless-shell" },
+				app: "/tmp/chrome-headless-shell",
 				timeout: 1,
 			}),
 		).rejects.toBeInstanceOf(ToolError);
@@ -452,7 +474,7 @@ describe("browser open — a cancel during the relay extension read", () => {
 		return surfaces;
 	}
 
-	const relayOpen = { action: "open", name: "relay-read", app: { relay: true }, timeout: 30 };
+	const relayOpen = { action: "open", name: "relay-read", app: "relay", timeout: 30 };
 
 	it("opens no tab", async () => {
 		const surfaces = relayOpensOnCmux();
