@@ -1,4 +1,3 @@
-import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
 import { slugify } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type EffortVariantFamily, reviewedVariantFamilyId } from "../compat/collapse";
@@ -228,6 +227,11 @@ async function fetchViaHttp2(
 	timeoutMs: number,
 ): Promise<Uint8Array | null> {
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
+	// Lazily loaded: `node:http2` costs ~860ms to initialize on slow hosts and
+	// this transport is only needed when Cursor discovery actually fires, so a
+	// top-level import would drag it onto the critical startup path of every
+	// session (the catalog package is imported by the model registry).
+	const http2 = await import("node:http2");
 	const client = http2.connect(baseUrl);
 	let settled = false;
 	const finish = (value: Uint8Array | null): void => {
