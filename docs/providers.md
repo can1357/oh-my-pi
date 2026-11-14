@@ -50,6 +50,8 @@ Availability is a fast configuration check, not a credential validation request:
 
 `disabledProviders` is checked _before_ credentials. If a provider ID is disabled, no stored key, OAuth session, environment variable, `.env` entry, or `models.yml` `apiKey` will make it selectable — the provider's models are dropped from availability regardless of credentials. Removing the ID from the effective list restores them.
 
+A provider can also be paused in omp's own auth rules (`disabled "<reason>"` in `packages/catalog/src/compat/rules/auth/<id>.kdl`), independently of your settings. A paused provider keeps its stored logins but resolves no models or keys. `omp models` and `omp models <paused-provider>` list it with that reason instead of dropping it silently, and `omp token <paused-provider>` prints the same reason. This is not `disabledProviders`: removing the ID from that list does not re-enable it. An extension that registers its own OAuth login under the paused ID takes the ID back.
+
 Implicit `ollama` and `lm-studio` discovery is keyless by default; implicit `llama.cpp` is keyless when no authentication is configured. Apple Foundation Models is also keyless on supported Apple Silicon systems. See [Built-in local engines](#built-in-local-engines).
 
 ## Credentials and precedence

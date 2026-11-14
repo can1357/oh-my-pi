@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- `omp models` names providers paused by their auth rules with the rule's reason instead of answering `No models matching`, and `omp token` on a paused provider prints that reason as a one-line error instead of an internal stack trace ([#18697](https://github.com/can1357/oh-my-pi/issues/18697), [#18872](https://github.com/can1357/oh-my-pi/pull/18872) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 

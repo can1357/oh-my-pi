@@ -88,6 +88,17 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 }
 
 /**
+ * One provider paused by its auth rules (`disabled "<reason>"`), with the
+ * reason to show the user. They keep their stored logins but resolve no
+ * models or keys, so listing surfaces report them — and the reason — instead
+ * of dropping them silently (issue #18697).
+ */
+export interface PausedProviderInfo {
+	provider: string;
+	reason: string;
+}
+
+/**
  * Why `provider` is paused by its auth rules (`disabled "<reason>"`), or
  * undefined when it may be reached. An extension that registers its own OAuth
  * login under the paused id, or listing it in {@link setUnpausedProviders},
@@ -96,6 +107,20 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 export function providerPauseReason(provider: string): string | undefined {
 	if (customOAuthProviders.has(provider) || unpausedProviders.has(provider)) return undefined;
 	return providerDisabledReason(provider);
+}
+
+/**
+ * Every provider paused by its auth rules, with the reason to show the user.
+ * Iterates the full provider registry so a paused provider is distinguishable
+ * from one that was never configured.
+ */
+export function pausedProviders(): PausedProviderInfo[] {
+	const paused: PausedProviderInfo[] = [];
+	for (const provider of PROVIDER_REGISTRY) {
+		const reason = providerPauseReason(provider.id);
+		if (reason !== undefined) paused.push({ provider: provider.id, reason });
+	}
+	return paused;
 }
 
 /** Throws {@link AIError.ProviderDisabledError} when {@link providerPauseReason} pauses `provider`. */
