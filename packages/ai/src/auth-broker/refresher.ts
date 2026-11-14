@@ -10,6 +10,7 @@
  * compare-and-set disable — only when no peer/login rotated the row first — so
  * the next snapshot pull surfaces a clean delete on the client.
  */
+import { providerRefreshesOnUseOnly } from "@oh-my-pi/pi-catalog/compat/auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "../auth-storage";
 import { isDefinitiveOAuthFailure } from "../error/auth-classify";
@@ -93,6 +94,8 @@ export class AuthBrokerRefresher {
 			const targets: number[] = [];
 			for (const entry of snapshot.credentials) {
 				if (entry.credential.type !== "oauth") continue;
+				// `refresh { on-use-only #true }`: left to the on-use refresh in `AuthStorage.oauth.access`.
+				if (providerRefreshesOnUseOnly(entry.provider)) continue;
 				const expires = entry.credential.expires;
 				if (typeof expires !== "number" || !Number.isFinite(expires)) continue;
 				if (expires > deadline) continue;

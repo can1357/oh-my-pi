@@ -516,6 +516,12 @@ export type AuthApiKeyOptions = {
 	rejectedAccessToken?: string;
 	/** When false, select as `sessionId` would without recording the choice as that session's sticky credential. */
 	recordAffinity?: boolean;
+	/**
+	 * `"valid-only"` (`oauth.accessAll` only): return accounts whose stored access
+	 * token is still valid and skip, without refreshing, the ones that would need
+	 * a refresh. Each skipped account resolves as `{ ok: false, skipped: "expired" }`.
+	 */
+	refresh?: "valid-only";
 };
 
 /**
@@ -589,6 +595,8 @@ export interface OAuthAccessFailure {
 	orgId?: string;
 	orgName?: string;
 	error: string;
+	/** Set when `accessAll(…, { refresh: "valid-only" })` left the account alone because its token needs a refresh. */
+	skipped?: "expired";
 }
 
 /**
@@ -1126,7 +1134,8 @@ export interface OAuthApi {
 	 * Refreshes credentials through the same broker/local path as
 	 * {@link AuthStorage.oauth.access}, but does not rank, round-robin, or
 	 * stop after the first usable account. Intended for diagnostics that must
-	 * exercise each stored account exactly once.
+	 * exercise each stored account exactly once. With `refresh: "valid-only"`
+	 * no account is refreshed; one that would need it is reported as skipped.
 	 */
 	accessAll(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]>;
 	/**

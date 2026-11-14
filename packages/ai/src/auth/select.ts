@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { providerRefreshesOnUseOnly } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -794,6 +795,15 @@ export class CredentialSelector {
 		const forceRefreshIndex = options?.forceRefresh
 			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
 			: undefined;
+		// An on-use-only provider (`refresh { on-use-only #true }`) mints a token
+		// only behind a request that is about to use it. The preflight cannot know
+		// which candidate the final pass will reach — filters, blocks and failed
+		// attempts move it — and a preflight for an account nothing uses is exactly
+		// the request-less rotation that links a pool, so it refreshes none of them.
+		// `tryOAuth` still refreshes the credential it actually serves with, and a
+		// forced recovery keeps the preflight because that path must re-mint a token
+		// that still looks fresh.
+		const onUseOnlyPreflight = providerRefreshesOnUseOnly(provider);
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
@@ -819,6 +829,8 @@ export class CredentialSelector {
 					(rejectedAccess === undefined || candidate.selection.credential.access !== rejectedAccess);
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
 				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
+				// On-use-only: no request is about to use any of these yet; see above.
+				if (onUseOnlyPreflight && !force) return;
 				const latestCredential = this.#deps.pool.credentials(provider)[candidate.selection.index];
 				if (
 					!force &&

@@ -6,7 +6,7 @@ import { providerEntry } from "../compat/providers";
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
-import type { ModelManagerOptions } from "../model-manager";
+import { markPartialDynamicModels, type ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { unionAccountCatalogs } from "./account-access";
 
@@ -37,6 +37,17 @@ export interface GoogleAntigravityAccount {
 	projectId?: string;
 }
 
+/** The Antigravity accounts discovery reads this time. */
+export interface GoogleAntigravityAccountSet {
+	accounts: readonly GoogleAntigravityAccount[];
+	/**
+	 * Some stored accounts were left out on purpose (an expired token that only
+	 * on-use refresh may renew). The union then covers only part of the
+	 * catalog: it adds models without pruning and is cached non-authoritative.
+	 */
+	partial?: boolean;
+}
+
 export interface GoogleAntigravityModelManagerConfig {
 	/**
 	 * Resolves every configured Antigravity account at discovery time. Rosters
@@ -49,7 +60,7 @@ export interface GoogleAntigravityModelManagerConfig {
 	 * refresh), keeping the previous/bundled catalog instead of caching a
 	 * partial one.
 	 */
-	resolveAccounts?: () => Promise<readonly GoogleAntigravityAccount[] | null>;
+	resolveAccounts?: () => Promise<GoogleAntigravityAccountSet | null>;
 	endpoint?: string;
 	fetch?: FetchImpl;
 }
@@ -106,8 +117,9 @@ export function googleAntigravityModelManagerOptions(
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {
-						const accounts = await resolveAccounts();
-						if (!accounts || accounts.length === 0) return null;
+						const resolved = await resolveAccounts();
+						if (!resolved || resolved.accounts.length === 0) return null;
+						const { accounts } = resolved;
 						const fetcher = toDiscoveryFetch(config?.fetch);
 						const rosters = await Promise.all(
 							accounts.map(async account => ({
@@ -140,7 +152,7 @@ export function googleAntigravityModelManagerOptions(
 						}
 						if (catalogs.length === 0) return null;
 						const tagAccess = catalogs.every(catalog => catalog.accountKey !== undefined);
-						return unionAccountCatalogs(
+						const union = unionAccountCatalogs(
 							catalogs.map(({ accountKey, models }) =>
 								tagAccess && accountKey !== undefined
 									? models.map(model => ({
@@ -155,6 +167,7 @@ export function googleAntigravityModelManagerOptions(
 									: models,
 							),
 						);
+						return resolved.partial ? markPartialDynamicModels(union) : union;
 					},
 				}
 			: undefined),

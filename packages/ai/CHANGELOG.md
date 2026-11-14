@@ -7,6 +7,8 @@
 ### Added
 
 - Added `setUnpausedProviders()` to `@oh-my-pi/pi-ai/oauth`, allowing applications to re-enable providers paused by authentication rules; loaded credential pools and extension logins recognize the change on their next read.
+- Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added `refresh: "valid-only"` to `oauth.accessAll()`: it refreshes no account and reports one whose token needs a refresh as `{ ok: false, skipped: "expired" }` ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
@@ -26,6 +28,9 @@
 - Stopped native judges from retrying gateway errors caused by exhausted upstream credentials while retaining retries for other transient 502 errors.
 - Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
 - Fixed Muse sessions after credential changes, key rotation, or idle resume so subsequent turns can continue normally.
+- Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
+- Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
+- Fixed the auth broker's background refresh sweep refreshing every pooled Google Antigravity account together with no request behind it, which links the accounts; Antigravity accounts now refresh only when a request is about to use one, including through the selector preflight and usage probes ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 

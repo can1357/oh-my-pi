@@ -8,6 +8,8 @@
 
 - Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 - Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
+- Added the `refresh { on-use-only #true }` auth directive (`providerRefreshesOnUseOnly`), set for Google Antigravity: its accounts refresh only when a request is about to use one ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
+- Added `markPartialDynamicModels()`: a model manager merges a dynamic result marked partial without pruning and caches it non-authoritative ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

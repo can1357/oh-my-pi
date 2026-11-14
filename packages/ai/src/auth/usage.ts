@@ -1,4 +1,4 @@
-import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor, providerRefreshesOnUseOnly } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
@@ -246,7 +246,12 @@ export class UsageService implements UsageApi {
 			signal: timeoutSignal,
 		};
 
+		// A usage probe is not a request: for a provider that mints tokens only
+		// behind one (`refresh { on-use-only #true }`), refreshing here would rotate
+		// the pool from a host with nothing to send, which is what links the accounts.
+		const probeRefreshable = !providerRefreshesOnUseOnly(request.provider);
 		if (
+			probeRefreshable &&
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
 			Date.now() + OAUTH_REFRESH_SKEW_MS >= request.credential.expiresAt
