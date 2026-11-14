@@ -979,6 +979,8 @@ export interface ParsedShellScript {
 	pipelines: ShellCommand[][];
 	/** Source text of every nested script (`bash -c` and `eval` strings, shell heredocs, substitution bodies). */
 	scripts: string[];
+	/** True when a script nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels was not parsed. */
+	truncated: boolean;
 }
 
 /** Where a parsed script runs: its starting directory and the home `~` and `$HOME` expand to. */
@@ -1214,12 +1216,19 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 class ShellScriptParser {
 	#count = 0;
 	readonly scripts: string[] = [];
+	/** Set when a script nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} was left unparsed. */
+	truncated = false;
 	constructor(readonly home: string) {}
 
 	parse(source: string, startCwd: string, depth: number): ShellCommand[][] {
-		if (depth > SHELL_SCRIPT_MAX_DEPTH) return [];
+		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
+			this.truncated = true;
+			return [];
+		}
 		if (depth > 0) this.scripts.push(source);
 		let cwd = startCwd;
+		// A `( )` subshell's `cd` ends with the group: the directory is restored at its `)`.
+		const subshellCwds: string[] = [];
 		const { text, bodies } = splitHeredocs(source);
 		const subs = new Map<string, ShellCommand[][]>();
 		const segments = this.#segments(this.#tokens(text, cwd, depth, subs));
@@ -1229,14 +1238,17 @@ class ShellScriptParser {
 		for (const segment of segments) {
 			const command = this.#command(segment, cwd, subs, depth, nested);
 			if (command) pipeline.push(command);
-			if (Object.hasOwn(SHELL_PIPES, segment.operator) || pipeline.length === 0) continue;
-			pipelines.push(pipeline);
-			const only = pipeline.length === 1 ? pipeline[0] : undefined;
-			if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
-				const target = shellPositionalArgs(only.argv)[0];
-				cwd = target === undefined ? this.home : (resolveShellWordPath(target, cwd, this.home) ?? cwd);
+			if (!Object.hasOwn(SHELL_PIPES, segment.operator) && pipeline.length > 0) {
+				pipelines.push(pipeline);
+				const only = pipeline.length === 1 ? pipeline[0] : undefined;
+				if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
+					const target = shellPositionalArgs(only.argv)[0];
+					cwd = target === undefined ? this.home : (resolveShellWordPath(target, cwd, this.home) ?? cwd);
+				}
+				pipeline = [];
 			}
-			pipeline = [];
+			if (segment.operator === "(") subshellCwds.push(cwd);
+			else if (segment.operator === ")") cwd = subshellCwds.pop() ?? cwd;
 		}
 		for (const { before, body } of bodies) {
 			if (SHELL_BEFORE_HEREDOC_RE.test(before)) nested.push(...this.parse(body, cwd, depth + 1));
@@ -1430,5 +1442,5 @@ class ShellScriptParser {
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
 	const pipelines = parser.parse(command, scope.cwd, 0);
-	return { pipelines, scripts: parser.scripts };
+	return { pipelines, scripts: parser.scripts, truncated: parser.truncated };
 }

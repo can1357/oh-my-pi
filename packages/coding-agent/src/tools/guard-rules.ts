@@ -17,7 +17,13 @@ import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-uti
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "./path-utils";
-import { type ShellCommand, parseShellScript, resolveShellWordPath, shellPositionalArgs } from "./shell-tokenize";
+import {
+	parseShellScript,
+	resolveShellWordPath,
+	SHELL_SCRIPT_MAX_DEPTH,
+	type ShellCommand,
+	shellPositionalArgs,
+} from "./shell-tokenize";
 
 /**
  * Bash patterns flagged as safety critical for approval policy.
@@ -78,7 +84,13 @@ export const CRITICAL_BASH_PATTERNS = [
 /** Reason the bash tool reports for a {@link CRITICAL_BASH_PATTERNS} match. */
 export const CRITICAL_PATTERN_REASON = "Critical pattern detected";
 
-export type GuardRule = "critical_pattern" | "credential_read" | "secret_send" | "discard_changes" | "kills_harness";
+export type GuardRule =
+	| "critical_pattern"
+	| "nesting_limit"
+	| "credential_read"
+	| "secret_send"
+	| "discard_changes"
+	| "kills_harness";
 
 /** A fixed rule a call breaks. */
 export interface GuardHit {
@@ -354,13 +366,50 @@ function secretSend(pipeline: readonly ShellCommand[], scope: GuardScope): Guard
 // -- probes ------------------------------------------------------------------------------------------
 
 const PROBE_TIMEOUT_MS = 3_000;
+/**
+ * How long a probe's answer is reused. One bash call resolves approval on several paths within
+ * milliseconds (`resolveApproval`, the extension wrapper before and after `tool_call` hooks,
+ * speculation, the approval prompt details), and a compound prompt asks the same question per
+ * segment; each must see one probe, not spawn its own. Kept short so a later call, after the
+ * agent has changed the tree, probes again.
+ */
+const PROBE_CACHE_TTL_MS = 1_000;
+const PROBE_CACHE_MAX = 64;
+const probeCache = new Map<string, { at: number; output: string | undefined }>();
+
+/** Forgets every memoized probe answer; tests that change a repository between calls use it. */
+export function clearGuardProbeCache(): void {
+	probeCache.clear();
+}
+
+/**
+ * The probe environment: every inherited `GIT_*` variable dropped (`GIT_DIR`, `GIT_WORK_TREE`,
+ * `GIT_INDEX_FILE`, `GIT_CONFIG*`, `GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, ...), so the probe sees
+ * the repository the command names and runs no program an ambient variable points at.
+ */
+function probeEnv(): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = {};
+	for (const [key, value] of Object.entries(Bun.env)) {
+		if (!key.startsWith("GIT_")) env[key] = value;
+	}
+	env.GIT_TERMINAL_PROMPT = "0";
+	env.GIT_OPTIONAL_LOCKS = "0";
+	env.LC_ALL = "C";
+	return env;
+}
 
 /**
  * Runs a read-only probe synchronously (approval resolution is synchronous) and returns its
- * stdout, or `undefined` when it cannot run, fails, or times out.
+ * stdout, or `undefined` when it cannot run, fails, or times out. Answers are memoized per
+ * argv and cwd for {@link PROBE_CACHE_TTL_MS}.
  */
 function runProbe(argv: string[], cwd?: string): string | undefined {
 	if (argv.some(arg => arg.includes("\0"))) return undefined;
+	const key = [cwd ?? "", ...argv].join("\0");
+	const now = Date.now();
+	const cached = probeCache.get(key);
+	if (cached && now - cached.at < PROBE_CACHE_TTL_MS) return cached.output;
+	let output: string | undefined;
 	try {
 		const result = Bun.spawnSync(argv, {
 			cwd,
@@ -368,12 +417,50 @@ function runProbe(argv: string[], cwd?: string): string | undefined {
 			stdout: "pipe",
 			stderr: "ignore",
 			timeout: PROBE_TIMEOUT_MS,
-			env: { ...Bun.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" },
+			env: probeEnv(),
 		});
-		return result.success ? result.stdout.toString() : undefined;
+		output = result.success ? result.stdout.toString() : undefined;
 	} catch {
-		return undefined;
+		output = undefined;
 	}
+	probeCache.delete(key);
+	probeCache.set(key, { at: now, output });
+	for (const [oldest, entry] of probeCache) {
+		if (probeCache.size <= PROBE_CACHE_MAX && now - entry.at < PROBE_CACHE_TTL_MS) break;
+		probeCache.delete(oldest);
+	}
+	return output;
+}
+
+/** Config pins that keep a git probe from running repository-configured programs. */
+const GIT_PROBE_PINS = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
+const FILTER_DRIVER_KEY_RE = /^filter\.([^=\s]+)\.(?:clean|smudge|process|required)$/i;
+
+/**
+ * Runs `git <args>` in `where` without executing anything the repository configures: the
+ * `core.fsmonitor` hook and untracked cache are pinned off (as `pi-vcs` pins its write path),
+ * every configured filter driver is blanked so `git status` cannot run a clean filter on a
+ * stat-dirty file, and submodules are not entered (the caller passes `--ignore-submodules`
+ * where the subcommand takes it). Reading the filter list with `git config` runs no program.
+ */
+function runGitProbe(where: string, args: readonly string[]): string | undefined {
+	const base = ["git", "--no-optional-locks", ...GIT_PROBE_PINS, "-C", where];
+	const drivers = new Set<string>();
+	for (const line of (runProbe([...base, "config", "--name-only", "--get-regexp", "^filter\\."], where) ?? "").split("\n")) {
+		const name = FILTER_DRIVER_KEY_RE.exec(line.trim())?.[1];
+		if (name) drivers.add(name);
+	}
+	const blanked = [...drivers].flatMap(name => [
+		"-c",
+		`filter.${name}.clean=`,
+		"-c",
+		`filter.${name}.smudge=`,
+		"-c",
+		`filter.${name}.process=`,
+		"-c",
+		`filter.${name}.required=false`,
+	]);
+	return runProbe(["git", "--no-optional-locks", ...GIT_PROBE_PINS, ...blanked, "-C", where, ...args], where);
 }
 
 // -- discard_changes ---------------------------------------------------------------------------------
@@ -414,7 +501,7 @@ function discardProbe(sub: string, rest: readonly string[]): { args: string[]; w
 		.join("");
 	const massPath = rest.some(arg => !arg.startsWith("-") && Object.hasOwn(MASS_PATHSPECS, arg));
 	const status = {
-		args: ["status", "--porcelain", "--untracked-files=no"],
+		args: ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"],
 		what: `\`git ${sub}\` would discard uncommitted changes; keep them recoverable instead, e.g. with \`git stash\``,
 	};
 	if (sub === "reset" && (flags.includes("--hard") || flags.includes("--merge"))) return status;
@@ -453,7 +540,7 @@ function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | un
 	if (!probe) return undefined;
 	const where = directory === undefined ? command.cwd : resolveShellWordPath(directory, command.cwd, scope.home);
 	if (where === undefined) return undefined;
-	const output = runProbe(["git", "--no-optional-locks", "-C", where, ...probe.args], where);
+	const output = runGitProbe(where, probe.args);
 	return output?.trim() ? hit("discard_changes", probe.what) : undefined;
 }
 
@@ -535,14 +622,28 @@ function killsHarness(command: ShellCommand): GuardHit | undefined {
 
 // -- entry points ------------------------------------------------------------------------------------
 
+/** Options for {@link findShellGuardHit}. */
+export interface ShellGuardOptions {
+	/**
+	 * Whether `discard_changes` and `kills_harness` may run their probes. Without probes those
+	 * rules never fire; callers turn them off when the answer cannot change the decision.
+	 */
+	probe?: boolean;
+}
+
 /**
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
- * command it runs. Probing rules run only after every cheap rule has passed.
+ * command it runs. A command nested deeper than the parser follows fails closed
+ * (`nesting_limit`). Probing rules run only after every cheap rule has passed.
  */
-export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
+export function findShellGuardHit(
+	command: string,
+	scope: GuardScope,
+	options: ShellGuardOptions = {},
+): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
-	const { pipelines, scripts } = parseShellScript(command, scope);
+	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
 	// The raw line, each nested script, and each simple command in canonical quoting (plain words
 	// bare, others single-quoted), so `bash -c "eval '\"rm\" -rf /'"` matches like `rm -rf /` while
 	// `git commit -m "reboot fix"` stays a quoted argument.
@@ -557,10 +658,17 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 	if (CRITICAL_BASH_PATTERNS.some(pattern => texts.some(text => pattern.test(text)))) {
 		return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
 	}
+	if (truncated) {
+		return hit(
+			"nesting_limit",
+			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep, past what the guard can check`,
+		);
+	}
 	for (const pipeline of pipelines) {
 		const found = secretSend(pipeline, scope) ?? pipeline.map(c => credentialRead(c, scope)).find(Boolean);
 		if (found) return found;
 	}
+	if (options.probe === false) return undefined;
 	for (const pipeline of pipelines) {
 		for (const simple of pipeline) {
 			const found = discardChanges(simple, scope) ?? killsHarness(simple);
