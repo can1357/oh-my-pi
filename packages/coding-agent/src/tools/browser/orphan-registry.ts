@@ -222,10 +222,14 @@ export async function collectOrphanTargets(
 const CLOSE_CONFIRM_TIMEOUT_MS = 5_000;
 
 /**
- * Close a page target by id through a fresh CDP session. Returns true only
+ * Close a page target by id on the browser's root connection. Returns true only
  * when CDP reports the target destroyed or confirms it no longer exists; a
  * dropped connection or transient protocol failure returns false so durable
- * ownership remains available for a later retry.
+ * ownership remains available for a later retry. Never throws.
+ *
+ * A browser-target session per call would race: overlapping ones make puppeteer
+ * lose the browser target (puppeteer#15750). Puppeteer enables target discovery
+ * on the root connection when it connects, so `Target.targetDestroyed` arrives there.
  *
  * `Target.closeTarget` answers `success` once Chromium has started closing the
  * page, not once it is gone: the target stays listed until its renderer has
@@ -241,22 +245,21 @@ export async function closeCdpTarget(
 	targetId: string,
 	confirmTimeoutMs = CLOSE_CONFIRM_TIMEOUT_MS,
 ): Promise<boolean> {
-	const session = await browser
-		.target()
-		.createCDPSession()
-		.catch(() => null);
-	if (!session) return false;
+	let connection: Connection;
+	try {
+		connection = browserConnection(browser);
+	} catch {
+		return false;
+	}
 	const destroyed = Promise.withResolvers<boolean>();
 	const onDestroyed = (event: { targetId: string }): void => {
 		if (event.targetId === targetId) destroyed.resolve(true);
 	};
-	session.on("Target.targetDestroyed", onDestroyed);
+	connection.on("Target.targetDestroyed", onDestroyed);
 	let timer: NodeJS.Timeout | undefined;
 	try {
 		try {
-			// Discovery is on before the close, so its `targetDestroyed` cannot be missed.
-			await session.send("Target.setDiscoverTargets", { discover: true });
-			const result = await session.send("Target.closeTarget", { targetId });
+			const result = await connection.send("Target.closeTarget", { targetId });
 			if (result.success) {
 				timer = setTimeout(() => destroyed.resolve(false), confirmTimeoutMs);
 				if (await destroyed.promise) return true;
@@ -266,15 +269,14 @@ export async function closeCdpTarget(
 			// target. Confirm absence before treating the cleanup as complete.
 		}
 		try {
-			const { targetInfos } = await session.send("Target.getTargets");
+			const { targetInfos } = await connection.send("Target.getTargets");
 			return !targetInfos.some(info => info.targetId === targetId);
 		} catch {
 			return false;
 		}
 	} finally {
 		clearTimeout(timer);
-		session.off("Target.targetDestroyed", onDestroyed);
-		await session.detach().catch(() => undefined);
+		connection.off("Target.targetDestroyed", onDestroyed);
 	}
 }
 
@@ -309,9 +311,7 @@ interface CloseUntilGoneOptions {
 }
 
 /**
- * Confirms a close like {@link closeCdpTarget} (#16680), but on the root connection instead of a
- * browser-target session per call: overlapping sessions make puppeteer lose the browser target,
- * so concurrent closes (web search pages) broke the connection. Chromium can answer
+ * Confirms a web search page's close like {@link closeCdpTarget} (#16680). Chromium can answer
  * `success: true` and keep the page, so the close is re-sent every `intervalMs` while the target
  * is listed. Returns false once `budgetMs` elapses or the connection drops; never throws.
  */

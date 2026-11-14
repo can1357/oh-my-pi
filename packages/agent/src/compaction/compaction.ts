@@ -262,7 +262,12 @@ export function shouldUseProviderNativeCompaction(
  * components. Provider-side orchestration tokens are billable but never replay
  * into the conversation prefix, so they are excluded from context sizing.
  */
-export function calculateContextTokens(usage: Usage): number {
+export function calculateContextTokens(
+	usage: Pick<
+		Usage,
+		"input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens" | "contextTokens" | "orchestration"
+	>,
+): number {
 	if (usage.contextTokens !== undefined) {
 		return Math.max(0, usage.contextTokens);
 	}

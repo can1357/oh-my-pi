@@ -1,9 +1,9 @@
 //! `MemFs`: an in-memory [`Fs`] with seeded latency (`Pending` answers that
 //! resolve on a timer thread) and fault injection (EIO, EAGAIN, ENOSPC).
 //!
-//! `MemFs::with_latency(seed, 1.0, max_ms)` makes every operation `Pending`,
-//! which checks that no engine path expects a synchronous filesystem answer
-//!.
+//! `MemFs::with_latency(seed, 1.0, max_ms)` makes every operation `Pending`
+//! (on its first poll too, however soon its timer fires), which checks that
+//! no engine path expects a synchronous filesystem answer.
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -112,7 +112,8 @@ impl MemFs {
 	}
 
 	/// Empty filesystem whose operations return `Pending` with probability
-	/// `p_pending`, resolving after 0..=`max_ms` ms (seeded).
+	/// `p_pending`, resolving after 0..=`max_ms` ms (seeded) but never on
+	/// their first poll.
 	pub fn with_latency(seed: u64, p_pending: f64, max_ms: u64) -> Self {
 		let mut nodes = BTreeMap::new();
 		nodes.insert(BString::from("/"), Node::Dir { mode: 0o755 });
@@ -350,11 +351,16 @@ const fn trim(path: &[u8]) -> &[u8] {
 	}
 }
 
-/// A `Pending` answer that becomes ready on a timer thread.
+/// A `Pending` answer that becomes ready on a timer thread, and never on its
+/// first poll: whether the timer already fired then (a 0 ms delay, a
+/// descheduled poller) is the threads' timing, which must not decide whether
+/// the operation finished at once.
 struct Delayed<T> {
-	res:   Option<io::Result<T>>,
-	ready: Arc<AtomicBool>,
-	waker: Arc<Mutex<Option<Waker>>>,
+	res:    Option<io::Result<T>>,
+	ready:  Arc<AtomicBool>,
+	waker:  Arc<Mutex<Option<Waker>>>,
+	/// Whether the first poll answered `Pending` yet.
+	polled: bool,
 }
 
 impl<T> Delayed<T> {
@@ -370,12 +376,21 @@ impl<T> Delayed<T> {
 				waker.wake();
 			}
 		});
-		Self { res: Some(res), ready, waker }
+		Self { res: Some(res), ready, waker, polled: false }
 	}
 }
 
 impl<T: Send> FsPending<T> for Delayed<T> {
 	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
+		if !self.polled {
+			self.polled = true;
+			*self.waker.lock() = Some(cx.waker().clone());
+			if self.ready.load(Ordering::Acquire) {
+				// The timer may have fired with no waker to take: come back.
+				cx.waker().wake_by_ref();
+			}
+			return Poll::Pending;
+		}
 		if !self.ready.load(Ordering::Acquire) {
 			*self.waker.lock() = Some(cx.waker().clone());
 			if !self.ready.load(Ordering::Acquire) {
@@ -885,6 +900,31 @@ mod tests {
 			io::ErrorKind::NotFound
 		);
 		assert_eq!(fs.pending_count(), 4);
+	}
+
+	#[test]
+	fn an_answer_is_pending_on_its_first_poll_though_its_timer_fired() {
+		struct Count(AtomicU64);
+
+		impl Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let mut p = Delayed::start(Ok(()), 0);
+		// The timer thread is gone: it marked the answer ready, with no waker
+		// to take.
+		while Arc::strong_count(&p.waker) > 1 {
+			thread::yield_now();
+		}
+		std::sync::atomic::fence(Ordering::Acquire);
+		let wakes = Arc::new(Count(AtomicU64::new(0)));
+		let waker = Waker::from(Arc::clone(&wakes));
+		let mut cx = Context::from_waker(&waker);
+		assert!(p.poll(&mut cx).is_pending());
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "the poller is told to come back");
+		assert!(matches!(p.poll(&mut cx), Poll::Ready(Ok(()))));
 	}
 
 	#[test]

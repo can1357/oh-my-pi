@@ -1007,7 +1007,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			expect(result.output).toContain("ValueError");
 			expect(result.output).toContain("boom");
 			// Traceback starts at user code; runner-internal frames stay hidden.
-			expect(result.output).toContain('File "<cell>"');
+			expect(result.output).toMatch(/File "<cell(-\d+)?>"/);
 			expect(result.output).not.toContain("_exec_source_async");
 		} finally {
 			await kernel.shutdown();
@@ -1021,7 +1021,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const result = await executePythonWithKernel(kernel, 'echo "hi"');
 			expect(result.exitCode).toBe(1);
 			expect(result.output).toContain("SyntaxError");
-			expect(result.output).toContain('File "<cell>"');
+			expect(result.output).toMatch(/File "<cell(-\d+)?>"/);
 			// Caret display only — no stack header, no runner machinery.
 			expect(result.output).not.toContain("Traceback (most recent call last");
 			expect(result.output).not.toContain("_compile_source");
