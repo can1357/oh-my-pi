@@ -534,6 +534,9 @@
 - Isolated task sandboxes now finish cleanup after a SIGHUP or other signal even when releasing them takes longer than the agent shutdown grace period ([#18519](https://github.com/can1357/oh-my-pi/issues/18519)).
 - Non-interrupting TTSR rules no longer report "Output interrupted" after the reply was produced; the deferred notice now states that the rule did not interrupt the output ([#18613](https://github.com/can1357/oh-my-pi/pull/18613) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+- Custom command packages, custom tools, and extension manifests that are symlinked into their discovery directory are now discovered instead of being dropped silently ([#18492](https://github.com/can1357/oh-my-pi/pull/18492))
+
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
