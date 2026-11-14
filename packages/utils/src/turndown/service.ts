@@ -243,25 +243,32 @@ export default class TurndownService {
 	#convertNode(node: TurndownNode): string {
 		if (node.nodeType === 3) {
 			const text = node.textContent ?? "";
-			if (node.parentNode?.nodeName === "PRE") return text;
+			for (let parent = node.parentNode; parent; parent = parent.parentNode)
+				if (parent.nodeName === "PRE") return text;
 			let collapsed = text.replace(/[\t\r\n\f ]+/g, " ");
 			if (this.#previousSourceWhitespace && collapsed.startsWith(" ")) collapsed = collapsed.slice(1);
-			this.#previousSourceWhitespace = collapsed.endsWith(" ");
+			if (collapsed) this.#previousSourceWhitespace = collapsed.endsWith(" ");
 			return node.parentNode?.nodeName === "CODE" ? collapsed : this.escape(collapsed);
 		}
 		if (node.nodeType !== 1) return this.#convertChildren(node);
+		const block = Boolean(BLOCK_ELEMENTS[node.nodeName]);
+		// Text after a block drops its leading space.
+		if (block) this.#previousSourceWhitespace = true;
+		const name = node.nodeName.toLowerCase();
 		if (!hasNonWhitespaceText(node) && !NONBLANK_EMPTY_ELEMENTS[node.nodeName] && !hasNonblankDescendant(node)) {
+			// Blank inline elements still separate words (and indent code inside `<pre>`) unless keep() or remove() claims them.
+			const filtered =
+				this.#keepFilters.some(filter => matchesFilter(filter, node, name, this.options)) ||
+				this.#removeFilters.some(filter => matchesFilter(filter, node, name, this.options));
 			return (
-				this.options.blankReplacement?.("", node, this.options) ?? (BLOCK_ELEMENTS[node.nodeName] ? "\n\n" : "")
+				this.options.blankReplacement?.("", node, this.options) ??
+				(block ? "\n\n" : filtered ? "" : this.#convertChildren(node))
 			);
 		}
 
-		const name = node.nodeName.toLowerCase();
 		const custom = this.#rules.find(entry => matchesFilter(entry.filter, node, name, this.options));
-		const block = Boolean(BLOCK_ELEMENTS[node.nodeName]);
-		if (block) this.#previousSourceWhitespace = false;
 		const content = custom?.rule.skipContent ? "" : this.#convertChildren(node);
-		if (block) this.#previousSourceWhitespace = false;
+		if (block) this.#previousSourceWhitespace = true;
 		if (node.nodeName === "CODE" || INLINE_VOID_ELEMENTS[node.nodeName]) this.#previousSourceWhitespace = false;
 		if (custom) return custom.rule.replacement(content, node, this.options);
 		if (this.#keepFilters.some(filter => matchesFilter(filter, node, name, this.options))) {

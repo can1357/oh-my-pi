@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pasting HTML into the composer keeps the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Hello world`) and code indentation inside `<pre>` ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
