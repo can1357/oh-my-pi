@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -38,6 +39,7 @@ import {
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+import { enforceWriteRootsAbsolute, writeRoots } from "./write-roots-guard";
 
 const astEditOpSchema = type({
 	pat: type("string").describe("ast pattern"),
@@ -343,6 +345,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
 				return toolResult(baseDetails).text(`No replacements made${parseMessage}${grammarMessage}`).done();
 			}
+			// Per-file confinement: resolve every would-be-written file to its backing
+			// absolute (a `local://` result binds to its file) and refuse escapes —
+			// e.g. a symlinked directory under an inside scope pointing outside.
+			if (writeRoots(this.session) !== undefined) {
+				for (const relativePath of fileList) {
+					const backing = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
+					if (backing === undefined) continue;
+					await enforceWriteRootsAbsolute(this.session, backing, { authored: relativePath });
+				}
+			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
 			const hashContexts = new Map<string, { tag: string }>();
@@ -453,13 +465,47 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								if (absolute !== undefined && before) journaled.push({ path: absolute, before });
 							}
 						}
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
-							rewrites: normalizedRewrites,
-							dryRun: false,
-							maxFiles,
-							failOnParseError: false,
-							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
-						});
+						// Apply-time confinement, checked BEFORE the real write runs: the
+						// preview's file list is re-checked against the live setting, so a
+						// `tools.writeRoots` change between preview and apply cannot smuggle
+						// a write outside. A ToolError here keeps the preview pending.
+						if (writeRoots(this.session) !== undefined) {
+							for (const relativePath of fileList) {
+								const backing = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+								if (backing === undefined) continue;
+								await enforceWriteRootsAbsolute(this.session, backing, { authored: relativePath });
+							}
+						}
+						// Constrain the apply run to the preview's verified file set: the
+						// dry run's glob would otherwise re-discover files added after the
+						// preview (or newly outside narrowed roots) and rewrite them
+						// unchecked. Each verified file runs as its own directory-plus-
+						// exact-basename target — a file path as basePath would rebase
+						// the native basename result into a doubled path. Unconfined runs
+						const confined = writeRoots(this.session) !== undefined;
+						const applyTargets = confined
+							? fileList.map(relativePath => {
+									const absolute = resolveSearchResultPath(resolvedSearchPath, relativePath);
+									return {
+										basePath: path.dirname(absolute),
+										// Exact-name glob (metachars bracketed, mirroring
+										// `escapeGlobMetachars` in path-utils).
+										glob: path.basename(absolute).replace(/[*?[{]/g, "[$&]"),
+									};
+								})
+							: multiTargets;
+						const applyResult = await runAstEditOnce(
+							applyTargets,
+							resolvedSearchPath,
+							confined ? undefined : globFilter,
+							{
+								rewrites: normalizedRewrites,
+								dryRun: false,
+								maxFiles,
+								failOnParseError: false,
+								filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+							},
+						);
 						for (const { path: file, before } of journaled) {
 							const after = await readSnapshot(file);
 							if (!after || after.text === before.text) continue;

@@ -69,6 +69,7 @@ import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { enforcePlanModeWrite, resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
+import { enforceWriteRoots, enforceWriteRootsAbsolute, resolveWriteTargetAbsolute } from "./write-roots-guard";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 import {
@@ -1025,6 +1026,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					if (policy?.scope !== "device") {
 						if (!touchesNoFiles) {
 							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
+							// A `via: "file"` scheme lands in the file pipeline below (second
+							// roots check); handler-owned writes with a workspace scope
+							// (cfg://, conflict://) resolve to a backing file here.
+							const backing = await resolveWriteTargetAbsolute(this.session, path, signal);
+							if (backing !== undefined) {
+								await enforceWriteRootsAbsolute(this.session, backing, { authored: path, signal });
+							}
 						}
 						emitWriteProgress(onUpdate, cleanBytes, path);
 					}
@@ -1066,6 +1074,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					op: resolvedArchivePath.exists ? "update" : "create",
 					signal,
 				});
+				await enforceWriteRootsAbsolute(this.session, resolvedArchivePath.absolutePath, {
+					authored: path,
+					signal,
+				});
 
 				emitWriteProgress(
 					onUpdate,
@@ -1097,6 +1109,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
 			if (resolvedSqlitePath) {
 				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update", signal });
+				await enforceWriteRootsAbsolute(this.session, resolvedSqlitePath.absolutePath, {
+					authored: path,
+					signal,
+				});
 
 				emitWriteProgress(onUpdate, cleanBytes, path, resolvedSqlitePath.absolutePath);
 				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
@@ -1115,6 +1131,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
 			await enforcePlanModeWrite(this.session, path, { op: "create", signal });
 			const absolutePath = await resolvePlanPath(this.session, path, signal);
+			await enforceWriteRootsAbsolute(this.session, absolutePath, { authored: path, signal });
+			// The absolute path above is lexically normalized, but the filesystem
+			// resolves `..` after symlinks — check the authored form too, or a
+			// `link/../outside` write passes the check and lands outside it.
+			await enforceWriteRoots(this.session, [path], signal);
 			// A located URL write keeps its URL identity in progress, results, and the hashline header.
 			const displayPath = target ? path : formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);

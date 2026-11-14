@@ -372,6 +372,32 @@ export const cfgToolsRestrictedFolders = register({
 	},
 });
 
+// Opt-in confinement for write-capable file tools. Empty (default) disables
+// the check; any entry enables it. Entries resolve like tool paths (relative
+// to the session cwd, `~` expands); containment is physical (see
+// write-roots-guard.ts). Checked at tool execution, so it holds in every
+// approval mode (including yolo), in headless sessions, and for subagents —
+// never as an approval prompt.
+export const cfgToolsWriteRoots = register({
+	id: "tools.writeRoots",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Writable Roots",
+		editor: "json",
+		description:
+			'Opt-in: confine write, edit (incl. rename/delete) and ast_edit to these folders. A JSON list of paths, e.g. ["."]. Relative entries resolve against the session cwd. Empty (default) leaves writes unrestricted. Reads are never restricted.',
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string" || entry.trim().length === 0)) {
+			throw new Error("tools.writeRoots must be a list of folder paths");
+		}
+	},
+});
+
 // Todo tool
 // Todo settings deliberately have no `protocolDefault`: protocol embedders need project-level opt-outs
 // for reminder/prelude prompt injection.
