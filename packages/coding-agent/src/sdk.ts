@@ -5130,7 +5130,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// write transport), so xd:// devices are unreachable. Images are inlined,
 			// and the provider boundary handles text-only advisor models.
 			xdev: undefined,
-			isToolActive: name => toolSession.isToolActive?.(name) === true,
+			// Each slate binds its own predicate in `create`. The primary's active
+			// set, and the callback that mutates it, are not advisor state.
+			isToolActive: undefined,
+			setActiveToolNames: undefined,
 		});
 		// Advisor rosters build synchronously; `task` is the one built-in that
 		// discovers asynchronously, so resolve its agents once up front.
@@ -5153,18 +5156,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			create: granted => {
 				const advisorSession = createAdvisorToolSession();
+				// Descriptions, schemas, and execute-time gates read this live. A name
+				// is active only once its factory returns a tool, so a grant for an
+				// unavailable built-in (lsp with language servers off) is not advertised.
+				const activeToolNames = new Set<string>();
+				advisorSession.isToolActive = name => activeToolNames.has(name);
 				const tools: Tool[] = [];
 				for (const name of advisorBuiltinNames) {
 					if (!granted.has(name)) continue;
+					// Visible to this tool while it builds: bash reads its own launch gate live.
+					activeToolNames.add(name);
 					const tool = buildAdvisorTool(name, advisorSession);
+					if (!tool) {
+						activeToolNames.delete(name);
+						continue;
+					}
 					// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
 					// approval mode, per-tool `tools.approval.<tool>` policies and
 					// `autoApprove` are enforced. The advisor's loop and its Cursor exec
 					// bridge both run these instances directly, so a raw one would execute a
 					// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 					// first, matching the registry's wrap order.
-					if (tool)
-						tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
+					tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
 				}
 				return {
 					tools,
