@@ -143,6 +143,10 @@ pub struct Options {
 	pub selected_node:  Option<NodeKey>,
 	/// Native source identities whose inspection detail is expanded.
 	pub expanded_nodes: Vec<NodeKey>,
+	/// The script is a command still streaming in, not yet run: its
+	/// unfinished end is drawn as it will most likely continue.
+	#[serde(skip_serializing)]
+	pub streaming:      bool,
 }
 impl Default for Options {
 	fn default() -> Self {
@@ -156,6 +160,7 @@ impl Default for Options {
 			speed:          1.0,
 			selected_node:  None,
 			expanded_nodes: Vec::new(),
+			streaming:      false,
 		}
 	}
 }

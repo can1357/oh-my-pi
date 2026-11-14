@@ -55,7 +55,7 @@ import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
-import type { ConfigError, ConfigFile } from "./config-file";
+import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
 	buildCustomModelOverlay,
 	type CustomModelDefinitionLike,
@@ -164,6 +164,8 @@ const BUILT_IN_LIVE_ONLY_PROVIDER_IDS: ReadonlySet<string> = new Set(
 		descriptor => descriptor.dynamicModelsAuthoritative === true && !isGeneratedProvider(descriptor.providerId),
 	).map(descriptor => descriptor.providerId),
 );
+/** Minimum spacing of {@link ModelRegistry.retryUnavailableDiscovery} passes. */
+const DISCOVERY_RETRY_INTERVAL_MS = 60_000;
 /** `scheme://user:pass@` in free text (e.g. a fetch error echoing the request URL). */
 const URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
 const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
@@ -384,6 +386,10 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
+	/** Cached models.yml load last copied into {@link #configWarnings}. */
+	#publishedModelsLoad?: LoadResult<ModelsConfig>;
+	/** Findings copied from {@link #publishedModelsLoad}, replaced when a new load is published. */
+	#publishedModelsFileWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -391,6 +397,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#discoveryRetry?: Promise<void>;
+	#lastDiscoveryRetryAt = Number.NEGATIVE_INFINITY;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
 	#initialRefreshSettled = false;
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
@@ -1077,6 +1085,45 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Re-run discovery for providers whose last attempt left them `unavailable`,
+	 * so a long-lived session recovers discovered models (Codex rosters, local
+	 * servers) after a startup failure instead of serving the bundled catalog
+	 * until restart. Views that list models (`^` mentions) call this as they
+	 * read the catalog. Single-flight and spaced by
+	 * {@link DISCOVERY_RETRY_INTERVAL_MS}; while the initial background refresh
+	 * runs it stands in for the retry.
+	 *
+	 * Returns the pass to wait for before re-reading the catalog, or `undefined`
+	 * when none is due. The pass never rejects.
+	 */
+	retryUnavailableDiscovery(): Promise<void> | undefined {
+		if (this.#discoveryRetry) return this.#discoveryRetry;
+		const now = Date.now();
+		if (now - this.#lastDiscoveryRetryAt < DISCOVERY_RETRY_INTERVAL_MS) return undefined;
+		const providers: string[] = [];
+		for (const state of this.#providerDiscoveryStates.values()) {
+			if (state.status === "unavailable") providers.push(state.provider);
+		}
+		if (providers.length === 0) return undefined;
+		this.#lastDiscoveryRetryAt = now;
+		const pass = this.isBackgroundRefreshPending()
+			? this.awaitBackgroundRefresh()
+			: this.refreshDiscoverableProviders(providers);
+		const retry = pass
+			.catch(error => {
+				logger.debug("model discovery retry failed", {
+					providers,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				this.#discoveryRetry = undefined;
+			});
+		this.#discoveryRetry = retry;
+		return retry;
+	}
+
+	/**
 	 * True when the provider's models expose context metadata that only appears
 	 * after a lazy load — llama.cpp's `meta.n_ctx` once a cold instance spins up
 	 * (#3310/#3311), LM Studio's `loaded_context_length` once it JIT-loads the
@@ -1321,6 +1368,28 @@ export class ModelRegistry {
 		const warnings = this.#configWarnings;
 		this.#configWarnings = [];
 		return warnings;
+	}
+
+	#publishModelsFileWarnings(result: LoadResult<ModelsConfig>): void {
+		// The same cached load is what every registry in the process reads.
+		// Publish when that object changes, and replace the findings copied
+		// from the previous one: `omp models refresh` force-reparses before
+		// anything drains #configWarnings, and a second registry must still
+		// see the modality warning the first one already published.
+		if (result === this.#publishedModelsLoad) return;
+		this.#publishedModelsLoad = result;
+		if (this.#publishedModelsFileWarnings.length > 0) {
+			const published = new Set(this.#publishedModelsFileWarnings);
+			this.#configWarnings = this.#configWarnings.filter(warning => !published.has(warning));
+			this.#publishedModelsFileWarnings = [];
+		}
+		if (result.status !== "ok") return;
+		const prefix = `${this.#modelsConfigFile.path()}: `;
+		for (const warning of result.warnings) {
+			const message = `${prefix}${warning}`;
+			this.#publishedModelsFileWarnings.push(message);
+			this.#configWarnings.push(message);
+		}
 	}
 
 	#loadModels() {
@@ -2095,7 +2164,9 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
+		const loaded = this.#modelsConfigFile.tryLoad();
+		this.#publishModelsFileWarnings(loaded);
+		const { value, error, status } = loaded;
 
 		if (status === "error") {
 			return {

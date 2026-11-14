@@ -1838,6 +1838,8 @@ function mapOptionsForApi<TApi extends Api>(
 		presencePenalty: options?.presencePenalty,
 		frequencyPenalty: options?.frequencyPenalty,
 		repetitionPenalty: options?.repetitionPenalty,
+		stopSequences: options?.stopSequences,
+		frequencyPenalty: options?.frequencyPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,
 		maxHttpAttempts: options?.maxHttpAttempts,

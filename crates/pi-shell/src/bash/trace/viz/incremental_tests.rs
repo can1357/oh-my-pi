@@ -30,6 +30,10 @@ fn syntax_becoming_available_at_same_count_is_not_cached_as_raw() {
 		available: bool,
 	}
 	impl VizSource for Availability<'_> {
+		fn streaming(&self) -> bool {
+			self.fixture.streaming()
+		}
+
 		fn script(&self) -> &BStr {
 			self.fixture.script()
 		}
