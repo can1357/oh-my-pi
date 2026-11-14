@@ -175,6 +175,13 @@ export const AstMatchStrictness = {
 	Signature: "signature",
 	Template: "template",
 };
+export const DesktopKeyboardReturn = {
+	HandedBack: "handedBack",
+	LeftAsChosen: "leftAsChosen",
+	Kept: "kept",
+	FrontOnly: "frontOnly",
+	NotSent: "notSent",
+};
 export const DiffSide = {
 	Old: "Old",
 	New: "New",

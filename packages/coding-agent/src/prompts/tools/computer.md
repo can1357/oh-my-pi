@@ -165,8 +165,8 @@ await win.click(120, 48, button="right")
 - Window input runs in the background without moving the user's pointer or activating the target, with or without acquired control.
   Pass `takeover` only in the one case below.
   - When a background route is unavailable, the tool decides:
-    - it reruns that call in takeover, hands focus back to the user's app and says so in the output
-      (`… ran in takeover because …; the input was delivered, and focus returned to …`), or,
+    - it reruns that call in takeover, hands the keyboard back to the user's window and says what it did in the output
+      (`… ran in takeover because …; the input was delivered, and handed the keyboard back to …'s window`), or,
     - when the user's setting refuses, throws `BackgroundUnavailable` with nothing taken over; then use AX or another route.
   - Only when a screenshot proves a background call did nothing and AX cannot do it, repeat that call with `{ takeover: true }`.
   - OS acceptance alone does not prove the application acted.
