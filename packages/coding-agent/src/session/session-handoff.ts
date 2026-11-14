@@ -8,7 +8,11 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	generateHandoffFromContext,
+	renderHandoffPrompt,
+	SummaryNumberCheck,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -18,7 +22,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
 
-import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
+import { cfgCompactionHandoffSaveToDisk, cfgCompactionNumberCheck } from "./context-settings";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -171,6 +175,9 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
+			// Checked in the provider's (obfuscated) text space: the document and its
+			// input are compared before deobfuscation.
+			const numberCheck = cfgCompactionNumberCheck.get(this.#host.settings) ? new SummaryNumberCheck() : undefined;
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -186,6 +193,7 @@ export class SessionHandoff {
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
+					numberCheck,
 				},
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
@@ -228,7 +236,11 @@ export class SessionHandoff {
 				}
 			}
 
-			return { document: handoffText, savedPath };
+			return {
+				document: handoffText,
+				savedPath,
+				...(numberCheck?.report ? { numberCheck: numberCheck.report } : {}),
+			};
 		} catch (error) {
 			// Only a genuine cancellation (user Esc or an unreasoned source-signal
 			// abort) maps to "Handoff cancelled". A harness-provided abort reason and

@@ -7,6 +7,7 @@ import type {
 	ThinkingLevel,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
+import type { NumberCheckReport } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	Context,
@@ -544,6 +545,8 @@ export interface SendUserMessageOptions {
 export interface HandoffResult {
 	document: string;
 	savedPath?: string;
+	/** Numbers the document gave that its input never showed, when `compaction.numberCheck` found any. */
+	numberCheck?: NumberCheckReport;
 }
 
 /** Options controlling handoff generation. */

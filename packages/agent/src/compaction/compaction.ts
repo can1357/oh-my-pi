@@ -66,6 +66,7 @@ import {
 	defaultConvertToLlm,
 	getMessageFromEntry,
 } from "./messages";
+import { type NumberCheckReport, numbersSeenInContext, SummaryNumberCheck } from "./number-check";
 import {
 	assertRemoteCompactionInputFits,
 	buildOpenAiNativeHistory,
@@ -102,6 +103,8 @@ import {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	/** Numbers the summary gave that its input never showed, when `compaction.numberCheck` found any. */
+	numberCheck?: NumberCheckReport;
 }
 
 /**
@@ -188,6 +191,12 @@ export interface CompactionSettings {
 	remoteEndpoint?: string;
 	remoteStreamingV2Enabled?: boolean;
 	v2RetainedMessageBudget?: number;
+	/**
+	 * Check every number a locally generated summary or handoff document writes
+	 * against the input its writer was sent; unseen numbers get one fix round in
+	 * the same request fork, then any still unseen become `?`.
+	 */
+	numberCheck?: boolean;
 }
 
 /** Reserve applied when {@link CompactionSettings.reserveTokens} is unset. */
@@ -791,6 +800,12 @@ export interface SummaryOptions {
 	 * stacks on top of the inner backoff.
 	 */
 	oneshotRetry?: OneshotRetryOptions | false;
+	/**
+	 * Enables the numeric faithfulness check on local summaries
+	 * (`generateSummary`, the split-turn prefix) and accumulates its findings.
+	 * Remote summarizer endpoints are not checked: they offer no request fork.
+	 */
+	numberCheck?: SummaryNumberCheck;
 }
 
 /**
@@ -1054,29 +1069,26 @@ async function summarizeConversationWindow(
 		return remote.summary;
 	}
 
-	const response = await instrumentedCompleteSimple(
-		model,
-		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
-		{
-			maxTokens,
-			signal,
-			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
-			initiatorOverride: options?.initiatorOverride,
-			metadata: options?.metadata,
-			fetch: options?.fetch,
-			sessionId: options?.sessionId,
-			promptCacheKey: options?.promptCacheKey,
-			providerSessionState: options?.providerSessionState,
-			codexCompaction: localCodexCompaction(options),
-		},
-		{
-			telemetry: options?.telemetry,
-			oneshotKind: "compaction_summary",
-			completeImpl: options?.completeImpl,
-			retry: summaryOneshotRetry(options),
-		},
-	);
+	const requestOptions: SimpleStreamOptions = {
+		maxTokens,
+		signal,
+		apiKey,
+		reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+		initiatorOverride: options?.initiatorOverride,
+		metadata: options?.metadata,
+		fetch: options?.fetch,
+		sessionId: options?.sessionId,
+		promptCacheKey: options?.promptCacheKey,
+		providerSessionState: options?.providerSessionState,
+		codexCompaction: localCodexCompaction(options),
+	};
+	const context: Context = { systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages };
+	const response = await instrumentedCompleteSimple(model, context, requestOptions, {
+		telemetry: options?.telemetry,
+		oneshotKind: "compaction_summary",
+		completeImpl: options?.completeImpl,
+		retry: summaryOneshotRetry(options),
+	});
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Summarization failed", response);
@@ -1085,12 +1097,61 @@ async function summarizeConversationWindow(
 		throw new Error(incompleteOutputError("Summarization failed"));
 	}
 
-	const textContent = response.content
+	return verifySummaryNumbers(options?.numberCheck, responseText(response), context, response, model, requestOptions, {
+		telemetry: options?.telemetry,
+		completeImpl: options?.completeImpl,
+	});
+}
+
+function responseText(response: AssistantMessage): string {
+	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
 		.join("\n");
+}
 
-	return textContent;
+/**
+ * Run `check` on a summary `response` gave for `context`. The fix question goes
+ * out as the next user turn after `response`, with the same request options, so
+ * the provider reuses the cached prefix of the summary request. Without a check,
+ * the summary is returned as written.
+ */
+function verifySummaryNumbers(
+	check: SummaryNumberCheck | undefined,
+	summary: string,
+	context: Context,
+	response: AssistantMessage,
+	model: Model,
+	requestOptions: SimpleStreamOptions,
+	span: Pick<HandoffFromContextOptions, "telemetry" | "completeImpl">,
+): Promise<string> {
+	if (!check) return Promise.resolve(summary);
+	return check.verify(
+		summary,
+		numbersSeenInContext(context),
+		async fixPrompt => {
+			const fork: Context = {
+				...context,
+				messages: [
+					...context.messages,
+					response,
+					{
+						role: "user",
+						content: [{ type: "text", text: fixPrompt }],
+						attribution: "agent",
+						timestamp: Date.now(),
+					},
+				],
+			};
+			const fix = await instrumentedCompleteSimple(model, fork, requestOptions, {
+				telemetry: span.telemetry,
+				oneshotKind: "compaction_number_fix",
+				completeImpl: span.completeImpl,
+			});
+			return fix.stopReason === "stop" ? responseText(fix) : undefined;
+		},
+		requestOptions.signal,
+	);
 }
 
 // ============================================================================
@@ -1148,6 +1209,8 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** Enables the numeric faithfulness check on the document and accumulates its findings. */
+	numberCheck?: SummaryNumberCheck;
 }
 
 /**
@@ -1168,10 +1231,10 @@ export async function generateHandoffFromContext(
 	model: Model,
 	options: HandoffFromContextOptions,
 ): Promise<string> {
-	const requestOptions = {
+	let requestOptions: SimpleStreamOptions = {
 		...options.streamOptions,
 		reasoning: resolveCompactionEffort(model, options.thinkingLevel),
-		toolChoice: "none" as const,
+		toolChoice: "none",
 	};
 	let response = await instrumentedCompleteSimple(model, context, requestOptions, {
 		telemetry: options.telemetry,
@@ -1180,12 +1243,13 @@ export async function generateHandoffFromContext(
 		retry: {},
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
-		response = await instrumentedCompleteSimple(
-			model,
-			context,
-			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
-		);
+		requestOptions = { ...requestOptions, toolChoice: "auto" };
+		response = await instrumentedCompleteSimple(model, context, requestOptions, {
+			telemetry: options.telemetry,
+			oneshotKind: "handoff",
+			completeImpl: options.completeImpl,
+			retry: {},
+		});
 	}
 
 	if (response.stopReason === "error") {
@@ -1195,10 +1259,10 @@ export async function generateHandoffFromContext(
 		throw new Error(incompleteOutputError("Handoff generation failed"));
 	}
 
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map(c => c.text)
-		.join("\n");
+	return verifySummaryNumbers(options.numberCheck, responseText(response), context, response, model, requestOptions, {
+		telemetry: options.telemetry,
+		completeImpl: options.completeImpl,
+	});
 }
 
 export async function generateHandoff(
@@ -1789,6 +1853,7 @@ export async function compact(
 
 	const reserveTokens = settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
 
+	const numberCheck = settings.numberCheck ? new SummaryNumberCheck() : undefined;
 	const summaryOptions: SummaryOptions = {
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
@@ -1823,6 +1888,7 @@ export async function compact(
 		// The caller's opt-out must reach every summarization oneshot, otherwise
 		// an outer retry loop multiplies with the inner one (see SummaryOptions).
 		oneshotRetry: options?.oneshotRetry,
+		numberCheck,
 	};
 	let extraContextLoaded = false;
 	const ensureExtraContext = async (): Promise<void> => {
@@ -2428,7 +2494,11 @@ export async function compact(
 		...(shortSummary !== undefined ? { shortSummary } : {}),
 		firstKeptEntryId: nativeSummary !== undefined ? nativeFirstKeptEntryId : firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details: {
+			readFiles,
+			modifiedFiles,
+			...(numberCheck?.report ? { numberCheck: numberCheck.report } : {}),
+		} as CompactionDetails,
 		preserveData: finalPreserveData,
 		...(remoteReplayThroughEntryId ? { providerReplayThroughEntryId: remoteReplayThroughEntryId } : {}),
 	};
@@ -2462,29 +2532,26 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
-	const response = await instrumentedCompleteSimple(
-		model,
-		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
-		{
-			maxTokens,
-			signal,
-			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
-			initiatorOverride: options?.initiatorOverride,
-			metadata: options?.metadata,
-			fetch: options?.fetch,
-			sessionId: options?.sessionId,
-			promptCacheKey: options?.promptCacheKey,
-			providerSessionState: options?.providerSessionState,
-			codexCompaction: localCodexCompaction(options),
-		},
-		{
-			telemetry: options?.telemetry,
-			oneshotKind: "compaction_turn_prefix",
-			completeImpl: options?.completeImpl,
-			retry: summaryOneshotRetry(options),
-		},
-	);
+	const requestOptions: SimpleStreamOptions = {
+		maxTokens,
+		signal,
+		apiKey,
+		reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+		initiatorOverride: options?.initiatorOverride,
+		metadata: options?.metadata,
+		fetch: options?.fetch,
+		sessionId: options?.sessionId,
+		promptCacheKey: options?.promptCacheKey,
+		providerSessionState: options?.providerSessionState,
+		codexCompaction: localCodexCompaction(options),
+	};
+	const context: Context = { systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages };
+	const response = await instrumentedCompleteSimple(model, context, requestOptions, {
+		telemetry: options?.telemetry,
+		oneshotKind: "compaction_turn_prefix",
+		completeImpl: options?.completeImpl,
+		retry: summaryOneshotRetry(options),
+	});
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Turn prefix summarization failed", response);
@@ -2493,8 +2560,8 @@ async function generateTurnPrefixSummary(
 		throw new Error(incompleteOutputError("Turn prefix summarization failed"));
 	}
 
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map(c => c.text)
-		.join("\n");
+	return verifySummaryNumbers(options?.numberCheck, responseText(response), context, response, model, requestOptions, {
+		telemetry: options?.telemetry,
+		completeImpl: options?.completeImpl,
+	});
 }

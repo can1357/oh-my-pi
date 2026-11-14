@@ -388,13 +388,13 @@ function mergeLlmCompactionPreserveData(
 
 /** Wrap a handoff document as a compaction summary: append the cumulative file-operations tag and derive entry details. */
 function handoffSummaryFromDocument(
-	document: string,
+	handoff: HandoffResult,
 	preparation: CompactionPreparation,
 ): { summary: string; details: CompactionDetails } {
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(preparation.fileOps);
 	return {
-		summary: snapcompact.upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
-		details: { readFiles, modifiedFiles },
+		summary: snapcompact.upsertFileOperations(handoff.document, readFiles, modifiedFiles, preparation.fileOps.read),
+		details: { readFiles, modifiedFiles, ...(handoff.numberCheck ? { numberCheck: handoff.numberCheck } : {}) },
 	};
 }
 
@@ -2267,7 +2267,7 @@ export class SessionMaintenance {
 		try {
 			const result = await this.#host.generateHandoffDocument(customInstructions, options);
 			if (!result) return undefined;
-			const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
+			const { summary, details } = handoffSummaryFromDocument(result, preparation);
 			await this.#commitCompactionEntry({
 				summary,
 				shortSummary: undefined,
@@ -2456,7 +2456,7 @@ export class SessionMaintenance {
 				signal,
 			});
 			if (!generated) return clear();
-			const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
+			const { summary, details } = handoffSummaryFromDocument(generated, preparation);
 			armed = {
 				result: {
 					summary,
@@ -5914,7 +5914,7 @@ export class SessionMaintenance {
 				preserveData = compactionPrep.preserveData;
 				providerReplayThroughEntryId = compactionPrep.providerReplayThroughEntryId;
 			} else if (handoffDocument) {
-				const handoffSummary = handoffSummaryFromDocument(handoffDocument.document, preparation);
+				const handoffSummary = handoffSummaryFromDocument(handoffDocument, preparation);
 				summary = handoffSummary.summary;
 				shortSummary = undefined;
 				firstKeptEntryId = preparation.firstKeptEntryId;
