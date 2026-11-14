@@ -39,6 +39,7 @@ import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-select
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
+import { getModelRuleDirs, loadModelRules } from "../../extensibility/model-rules";
 import { createPluginSettingsHost } from "../../extensibility/plugins/settings-host";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -114,6 +115,7 @@ import { COPY_SELECTOR_OVERLAY_OPTIONS, CopySelectorComponent } from "@oh-my-pi/
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
+import { ModelRulesSelectorComponent } from "../components/model-rules-selector";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
@@ -2603,6 +2605,30 @@ export class SelectorController {
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
 			return { component: selector, focus: selector };
+		});
+	}
+
+	/** Open the `/model-rules` selector over the global and project model-rules directories. */
+	async showModelRulesSelector(): Promise<void> {
+		const dirs = getModelRuleDirs(this.ctx.sessionManager.getCwd());
+		const rules = await loadModelRules(dirs);
+		if (rules.length === 0) {
+			this.ctx.showStatus(`No model rules found in ${dirs.map(entry => shortenPath(entry.dir)).join(" or ")}`);
+			return;
+		}
+		const model = this.ctx.session.model;
+		this.showSelector(done => {
+			const selector = new ModelRulesSelectorComponent({
+				rules,
+				settings: this.ctx.settings,
+				modelKey: model ? `${model.provider}/${model.id}` : undefined,
+				requestRender: () => this.ctx.ui.requestRender(),
+				onClose: () => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			});
+			return { component: selector, focus: selector.getSelectList() };
 		});
 	}
 

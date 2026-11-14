@@ -474,8 +474,13 @@ export class SessionTools {
 	 * drop it before the request. Cleared when the turn ends.
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
-	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
+	/** The latest per-turn prompt (hook override or model-rules composition) and the base it was built on; kept after the turn ends. */
 	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
+	/**
+	 * The `<model-rules>` block of the running turn. Without a hook override it is appended to the base on every
+	 * apply, so mid-turn base rebuilds keep it; with one it lives inside the override. Cleared when the turn ends.
+	 */
+	#turnModelRulesBlock: string | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Roster {@link #baseSystemPrompt} rendered; captured only for prefix-bound models. */
 	#basePromptRoster: PromptRoster | undefined;
@@ -655,34 +660,69 @@ export class SessionTools {
 	 * Pushes `base` to the agent as the effective system prompt, unless an active
 	 * per-turn {@link #turnSystemPromptOverride} takes precedence. Every base
 	 * rebuild applies its result through here so a mid-turn rebuild preserves the
-	 * override.
+	 * override and the turn's model-rules block.
 	 */
 	#applyAgentSystemPrompt(base: string[]): void {
-		this.#host.agent.setSystemPrompt(this.#turnSystemPromptOverride ?? base);
-	}
-
-	/**
-	 * Registers the per-turn `before_agent_start` system-prompt override and
-	 * applies it to the agent. Base rebuilds during the turn preserve it until
-	 * {@link clearTurnSystemPromptOverride}.
-	 */
-	setTurnSystemPromptOverride(prompt: string[], base: string[]): void {
-		this.#turnSystemPromptOverride = prompt;
+		if (this.#turnSystemPromptOverride) {
+			this.#host.agent.setSystemPrompt(this.#turnSystemPromptOverride);
+			return;
+		}
+		const block = this.#turnModelRulesBlock;
+		if (block === undefined) {
+			this.#host.agent.setSystemPrompt(base);
+			return;
+		}
+		const prompt = [...base, block];
 		this.#lastTurnSystemPromptOverride = { prompt, base };
 		this.#host.agent.setSystemPrompt(prompt);
 	}
 
 	/**
-	 * The base prompt a system prompt the agent sent was built from: the hook's input when it is a
-	 * per-turn override, else the prompt itself, since every other prompt applied to the agent is a base.
+	 * Registers the per-turn `before_agent_start` system-prompt override and
+	 * applies it to the agent. Base rebuilds during the turn preserve it until
+	 * {@link clearTurnSystemPromptOverride}. `modelRulesBlock` is the block the hook was given inside its input.
+	 */
+	setTurnSystemPromptOverride(prompt: string[], base: string[], modelRulesBlock?: string): void {
+		this.#turnSystemPromptOverride = prompt;
+		this.#lastTurnSystemPromptOverride = { prompt, base };
+		this.#turnModelRulesBlock = modelRulesBlock;
+		this.#host.agent.setSystemPrompt(prompt);
+	}
+
+	/**
+	 * Replaces the running turn's model-rules block, e.g. after a mid-turn model switch. An unchanged block touches
+	 * nothing, so the prompt bytes (and the provider's prompt cache) stay intact. Inside a hook override the previous
+	 * block is swapped where it sits (appended when there was none); an override that dropped it is left as is.
+	 */
+	setTurnModelRulesBlock(block: string | undefined): void {
+		const previous = this.#turnModelRulesBlock;
+		if (previous === block) return;
+		this.#turnModelRulesBlock = block;
+		const override = this.#turnSystemPromptOverride;
+		if (!override) {
+			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+			return;
+		}
+		const index = previous === undefined ? -1 : override.indexOf(previous);
+		if (previous !== undefined && index === -1) return;
+		let next: string[];
+		if (index === -1) next = block === undefined ? override : [...override, block];
+		else next = block === undefined ? override.toSpliced(index, 1) : override.with(index, block);
+		this.setTurnSystemPromptOverride(next, this.#lastTurnSystemPromptOverride?.base ?? this.#baseSystemPrompt, block);
+	}
+
+	/**
+	 * The base prompt a system prompt the agent sent was built from: the hook's input when it is a per-turn
+	 * override, the base without its model-rules block when it is a rules composition, else the prompt itself.
 	 */
 	baseOfSystemPrompt(prompt: string[]): string[] {
 		return prompt === this.#lastTurnSystemPromptOverride?.prompt ? this.#lastTurnSystemPromptOverride.base : prompt;
 	}
 
-	/** Drops the active per-turn override; later rebuilds fall back to the base prompt. */
+	/** Drops the active per-turn override and model-rules block; later rebuilds fall back to the base prompt. */
 	clearTurnSystemPromptOverride(): void {
 		this.#turnSystemPromptOverride = undefined;
+		this.#turnModelRulesBlock = undefined;
 	}
 
 	/** The live skill registry: what `skill://` and `/skill:` resolve. */

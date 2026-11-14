@@ -266,6 +266,7 @@
 
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
+- Model rules: markdown files in `~/.omp/agent/model-rules/` and `<project>/.omp/model-rules/` whose `models:` globs match `provider/model-id` are added to the system prompt for that model on every prompt and follow model switches within a turn (`/switch`, `/model`, retry fallback); a project rule with the same `name:` overrides the global one, and `/model-rules` toggles rules on or off (saved in the global or project config) with a markdown preview ([docs](https://github.com/can1357/oh-my-pi/blob/main/docs/model-rules.md)) ([#18769](https://github.com/can1357/oh-my-pi/pull/18769) by [@TheAifam5](https://github.com/TheAifam5))
 
 ### Changed
 

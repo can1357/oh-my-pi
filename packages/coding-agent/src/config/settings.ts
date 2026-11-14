@@ -344,6 +344,7 @@ export type SettingsMirrorWrite =
 	| { readonly op: "writeValue"; readonly id: string; readonly value: unknown; readonly layer: "global" | "override" }
 	| { readonly op: "unsetGlobalValue"; readonly id: string }
 	| { readonly op: "writeEntry"; readonly id: string; readonly key: string; readonly value: unknown }
+	| { readonly op: "writeProjectEntry"; readonly id: string; readonly key: string; readonly value: unknown }
 	| { readonly op: "writeMember"; readonly id: string; readonly item: string; readonly member: boolean }
 	| { readonly op: "pinDefaultValue"; readonly id: string }
 	| { readonly op: "clearOverrideValue"; readonly id: string }
@@ -757,8 +758,8 @@ export class Settings {
 	 * `JSON.stringify(segments)`: a record entry key may itself contain dots.
 	 */
 	#modified = new Map<string, readonly string[]>();
-	/** Individual project model roles modified during this session */
-	#modifiedProjectModelRoles = new Set<string>();
+	/** Project-layer paths modified during this session, keyed by JSON.stringify(segments) */
+	#modifiedProjectPaths = new Map<string, readonly string[]>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
 	/** On-disk generations and prior values observed before each pending global mutation, keyed like {@link #modified}. */
@@ -1252,6 +1253,31 @@ export class Settings {
 	}
 
 	/**
+	 * Registry plumbing behind `Setting.setProjectEntry`: writes `value` as the `key` entry of record `setting`
+	 * in the project layer (`undefined` removes the entry) and persists only that entry to the project config.
+	 *
+	 * @throws Error when `setting` is not a record or the entry fails the definition's `validate` check.
+	 */
+	writeProjectEntry(setting: AnySetting, key: string, value: unknown): void {
+		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeProjectEntry", id: setting.id, key, value });
+		if (value !== undefined) setting.assertWritable({ [key]: value });
+		const segments = [...setting.segments, key];
+		if (getByPath(this.#project, segments) === value) return;
+		const prev = setting.get(this);
+		const record = getByPath(this.#project, setting.segments);
+		// Replace rather than mutate the record: the merged view and cached reads may share it.
+		if (isRecord(record)) setByPath(this.#project, setting.segments, { ...record });
+		if (value === undefined) deleteByPath(this.#project, segments);
+		else setByPath(this.#project, segments, value);
+		this.#modifiedProjectPaths.set(JSON.stringify(segments), segments);
+		this.#persistedMutationGeneration++;
+		this.#rebuildMerged();
+		this.#fireIfChanged(setting, prev);
+		this.#queueProjectSave();
+	}
+
+	/**
 	 * Registry plumbing behind `Setting.setMember`: adds (`member`) or removes `item` in list `setting`
 	 * of the global layer, seeded from the default when that layer has no list, so the persisted list
 	 * changes by that item only; otherwise like a global {@link writeValue}.
@@ -1570,7 +1596,7 @@ export class Settings {
 		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
 			await this.#chainSave();
 		}
-		if (this.#modifiedProjectModelRoles.size > 0) {
+		if (this.#modifiedProjectPaths.size > 0) {
 			await this.#saveProjectNow();
 		}
 	}
@@ -2063,7 +2089,8 @@ export class Settings {
 		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
 		current[role] = modelId;
 		setByPath(this.#project, ["modelRoles"], current);
-		this.#modifiedProjectModelRoles.add(role);
+		const segments = ["modelRoles", role];
+		this.#modifiedProjectPaths.set(JSON.stringify(segments), segments);
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
 		this.#fireIfChanged(cfgModelRoles, prev);
@@ -4248,11 +4275,12 @@ export class Settings {
 		}
 	}
 
-	/** Re-applies every project model role still pending a save onto `target`, a project layer read from disk. */
+	/** Re-applies every project path still pending a save onto `target`, a project layer read from disk. */
 	#applyPendingProjectWrites(target: RawSettings): void {
-		const liveRoles = getByPath(this.#project, ["modelRoles"]);
-		for (const role of this.#modifiedProjectModelRoles) {
-			setByPath(target, ["modelRoles", role], isRecord(liveRoles) ? liveRoles[role] : undefined);
+		for (const segments of this.#modifiedProjectPaths.values()) {
+			const value = getByPath(this.#project, segments);
+			if (value === undefined) deleteByPath(target, segments);
+			else setByPath(target, segments, value);
 		}
 	}
 
@@ -4277,11 +4305,11 @@ export class Settings {
 	}
 
 	async #saveProjectNow(): Promise<void> {
-		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
+		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectPaths.size === 0) return;
 
 		const projectConfigPath = path.join(getProjectAgentDir(this.#cwd), "config.yml");
-		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
-		this.#modifiedProjectModelRoles.clear();
+		const modifiedPaths = [...this.#modifiedProjectPaths];
+		this.#modifiedProjectPaths.clear();
 
 		try {
 			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
@@ -4291,10 +4319,10 @@ export class Settings {
 					loaded.settings ??
 					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
 
-				const projectRoles = getByPath(this.#project, ["modelRoles"]);
-				for (const role of modifiedModelRoles) {
-					const value = isRecord(projectRoles) ? projectRoles[role] : undefined;
-					setByPath(projectSettings, ["modelRoles", role], value);
+				for (const [, segments] of modifiedPaths) {
+					const value = getByPath(this.#project, segments);
+					if (value === undefined) deleteByPath(projectSettings, segments);
+					else setByPath(projectSettings, segments, value);
 				}
 
 				await this.#writeYamlAtomically(writePath, stringifyYamlConfig(projectSettings));
@@ -4303,8 +4331,8 @@ export class Settings {
 			});
 			invalidateCapabilityFsCache(projectConfigPath);
 		} catch (error) {
-			for (const role of modifiedModelRoles) {
-				this.#modifiedProjectModelRoles.add(role);
+			for (const [key, segments] of modifiedPaths) {
+				this.#modifiedProjectPaths.set(key, segments);
 			}
 			throw error;
 		}

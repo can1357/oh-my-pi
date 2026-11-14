@@ -565,7 +565,8 @@ import { cfgFollowUpMode } from "../modes/settings";
 import { cfgSteeringMode } from "../modes/settings";
 import { cfgDisabledProviders, cfgModelRoles } from "../config/model-settings";
 import { cfgEvalJs, cfgEvalPy, cfgEvalToolsEnabled, cfgEvalWorkpoolFreshAgents } from "../eval/settings";
-import { cfgExtensions, type SkillsSettings } from "../extensibility/settings";
+import { getModelRuleDirs, loadModelRules, type ModelRule, modelRulesBlock } from "../extensibility/model-rules";
+import { cfgExtensions, cfgModelRules, type SkillsSettings } from "../extensibility/settings";
 import {
 	cfgImagesAutoResize,
 	cfgMagicKeyword,
@@ -1002,6 +1003,13 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
+/** The model rules a turn loaded at its start, and its rendered `<model-rules>` block per model key. */
+interface TurnModelRules {
+	rules: readonly ModelRule[];
+	overrides: Readonly<Record<string, unknown>>;
+	blocks: Map<string, string | undefined>;
+}
+
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
@@ -1297,6 +1305,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** In-flight vision descriptions that gate prompt admission; abort() cancels them. */
 	#imageDescriptionAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
+	/** The running turn's model rules; a mid-turn model change re-renders the block from these. */
+	#turnModelRules: TurnModelRules | undefined;
 	#modeExitDrainSuppressionDepth = 0;
 	#usagePreflightReadyForNextModelCall = false;
 	#usagePreflightReadyModel: Model | undefined;
@@ -2345,7 +2355,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterModelChange: async previousEditMode => {
+				await this.#tools.syncAfterModelChange(previousEditMode);
+				this.#syncTurnModelRules();
+			},
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
 				await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
@@ -2415,8 +2428,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: (previousEditMode, options) =>
-				this.#tools.syncAfterModelChange(previousEditMode, options),
+			syncAfterModelChange: async (previousEditMode, options) => {
+				await this.#tools.syncAfterModelChange(previousEditMode, options);
+				this.#syncTurnModelRules();
+			},
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, options) =>
@@ -9393,6 +9408,39 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return message.role === "custom" && isUserInvokedSkillPrompt(message);
 	}
 
+	/** Loads the model rules and toggles a turn renders its `<model-rules>` blocks from; failures load none. */
+	async #loadTurnModelRules(): Promise<TurnModelRules> {
+		const overrides = cfgModelRules.get(this.settings);
+		try {
+			return {
+				rules: await loadModelRules(getModelRuleDirs(this.sessionManager.getCwd())),
+				overrides,
+				blocks: new Map(),
+			};
+		} catch (error) {
+			logger.warn("Model rules failed to load", { error: String(error) });
+			return { rules: [], overrides, blocks: new Map() };
+		}
+	}
+
+	/**
+	 * The turn's `<model-rules>` block for the current model, memoized per model key so a turn that switches back to
+	 * a model renders byte-identical bytes for it (its provider prompt cache stays valid).
+	 */
+	#turnModelRulesBlock(turn: TurnModelRules): string | undefined {
+		const model = this.model;
+		if (!model) return undefined;
+		const key = `${model.provider}/${model.id}`;
+		if (!turn.blocks.has(key)) turn.blocks.set(key, modelRulesBlock(turn.rules, key, turn.overrides));
+		return turn.blocks.get(key);
+	}
+
+	/** After a mid-turn model change, swap the running turn's `<model-rules>` block for the new model's. */
+	#syncTurnModelRules(): void {
+		const turn = this.#turnModelRules;
+		if (turn) this.#tools.setTurnModelRulesBlock(this.#turnModelRulesBlock(turn));
+	}
+
 	/**
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
 	 *
@@ -9435,7 +9483,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const sourceBase = this.#tools.baseSystemPrompt;
 			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
 			if (!isCurrent()) return cancelled;
-			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
+			const turnModelRules = await this.#loadTurnModelRules();
+			if (!isCurrent()) return cancelled;
+			const modelRulesPrompt = this.#turnModelRulesBlock(turnModelRules);
+			// Extensions see the model rules: they are part of the prompt the hook receives.
+			const startSystemPrompt = modelRulesPrompt
+				? [...basePreparation.systemPrompt, modelRulesPrompt]
+				: basePreparation.systemPrompt;
+			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, startSystemPrompt);
 			if (!isCurrent()) return cancelled;
 			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
 			// against the winning base; discard this attempt's returned context and staged memory.
@@ -9492,11 +9547,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
 					if (basePreparation.commit?.() === false) return undefined;
+					this.#turnModelRules = turnModelRules;
 					if (result?.systemPrompt !== undefined) {
-						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
+						this.#tools.setTurnSystemPromptOverride(
+							result.systemPrompt,
+							basePreparation.systemPrompt,
+							modelRulesPrompt,
+						);
 					} else {
 						this.#tools.clearTurnSystemPromptOverride();
 						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+						this.#tools.setTurnModelRulesBlock(modelRulesPrompt);
 					}
 					return messages;
 				},
@@ -9808,6 +9869,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} finally {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
+			this.#turnModelRules = undefined;
 			this.#usagePreflightReadyForNextModelCall = false;
 			// Client ownership is released by #prompt's bracket, which settles
 			// after this frame returns; its wake re-checks parked steers
@@ -10745,6 +10807,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} finally {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
+			this.#turnModelRules = undefined;
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);

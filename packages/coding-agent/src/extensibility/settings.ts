@@ -6,10 +6,14 @@ import { combine, register, type SettingValueOf } from "../config/registry";
 import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_BOOLEAN_RECORD: Readonly<Record<string, boolean>> = {};
 
 export const cfgExtensions = register({ id: "extensions", type: "array", default: EMPTY_STRING_ARRAY });
 
 export const cfgDisabledExtensions = register({ id: "disabledExtensions", type: "array", default: EMPTY_STRING_ARRAY });
+
+/** Model-rule toggles keyed by rule file name; global rules write the global layer, project rules the project layer. */
+export const cfgModelRules = register({ id: "modelRules", type: "record", default: EMPTY_BOOLEAN_RECORD });
 
 // Skill registry (omp skill)
 export const cfgSkillsRegistryUrl = register({
