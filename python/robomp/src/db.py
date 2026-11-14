@@ -17,6 +17,19 @@ from robomp.github_client import IssueIndexEntry
 EventState = Literal["queued", "running", "done", "failed", "skipped"]
 INACTIVE_EVENT_STATES: tuple[EventState, ...] = ("done", "failed", "skipped")
 
+# last_error marker the dispatcher stamps on review events superseded by a
+# newer queued same-key sibling. New rows carry the survivor's delivery id as a
+# suffix (see `coalesced_error_for`) so `list_coalesced_siblings` can tell which
+# survivor a skipped finding actually fed; the bare constant stays in use as the
+# legacy form written before that association existed.
+COALESCED_ERROR = "coalesced: superseded by newer review event"
+
+
+def coalesced_error_for(survivor_delivery: str) -> str:
+    """`last_error` marker tying a skipped review event to the survivor it was coalesced into."""
+    return f"{COALESCED_ERROR} {survivor_delivery}"
+
+
 IssueState = Literal[
     "new",
     "reproducing",
@@ -776,6 +789,105 @@ class Database:
                 (error, _utc_after(delay_seconds), delivery_id),
             )
             return cur.rowcount > 0
+
+    def list_newer_queued_events(
+        self, *, issue_key: str, exclude_delivery: str, after_received_at: str
+    ) -> list[EventRow]:
+        """Queued events for `issue_key` received strictly after `after_received_at` (excluding one delivery)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at, state, attempts, last_error
+                FROM events
+                WHERE issue_key = ? AND delivery_id != ? AND state = 'queued' AND received_at > ?
+                ORDER BY received_at
+                """,
+                (issue_key, exclude_delivery, after_received_at),
+            ).fetchall()
+        return [_event_row_from_db_row(row) for row in rows]
+
+    def list_coalesced_siblings(
+        self, *, issue_key: str, exclude_delivery: str, before_received_at: str
+    ) -> list[EventRow]:
+        """Review events coalesced — directly or transitively — into `exclude_delivery`.
+
+        New markers name their survivor, allowing this query to follow a chain:
+        if A was folded into B and B was later folded into C, C's run still sees
+        A's finding. This prevents old findings from resurfacing on unrelated
+        later same-key events after their survivor has finished.
+
+        Backward compatibility for rows written with the old bare marker: they
+        are included only when no non-skipped same-key event ran between that row
+        and this survivor (the immediately-preceding group). Once a run has
+        completed, legacy findings from before it are not attributed to a later
+        event because their original survivor cannot be determined.
+
+        Returns rows ordered oldest first. The inverse of
+        `list_newer_queued_events`.
+        """
+        select_cols = "delivery_id, event_type, repo, issue_key, payload_json, received_at, state, attempts, last_error"
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                WITH RECURSIVE siblings(delivery_id) AS (
+                  SELECT delivery_id
+                  FROM events
+                  WHERE issue_key = ? AND state = 'skipped' AND received_at < ?
+                    AND last_error = ? || ' ' || ?
+                  UNION
+                  SELECT child.delivery_id
+                  FROM events AS child
+                  JOIN siblings AS parent
+                    ON child.last_error = ? || ' ' || parent.delivery_id
+                  WHERE child.issue_key = ? AND child.state = 'skipped' AND child.received_at < ?
+                )
+                SELECT {select_cols}
+                FROM events
+                WHERE delivery_id IN (SELECT delivery_id FROM siblings)
+                  AND delivery_id != ?
+                """,
+                (
+                    issue_key,
+                    before_received_at,
+                    COALESCED_ERROR,
+                    exclude_delivery,
+                    COALESCED_ERROR,
+                    issue_key,
+                    before_received_at,
+                    exclude_delivery,
+                ),
+            ).fetchall()
+            legacy_rows = self._conn.execute(
+                f"""
+                SELECT {select_cols}
+                FROM events AS old
+                WHERE old.issue_key = ? AND old.state = 'skipped' AND old.last_error = ?
+                  AND old.delivery_id != ? AND old.received_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM events AS mid
+                    WHERE mid.issue_key = old.issue_key
+                      AND mid.state <> 'skipped'
+                      AND mid.delivery_id <> old.delivery_id
+                      AND mid.delivery_id <> ?
+                      AND mid.received_at > old.received_at
+                      AND mid.received_at < ?
+                  )
+                ORDER BY old.received_at
+                """,
+                (
+                    issue_key,
+                    COALESCED_ERROR,
+                    exclude_delivery,
+                    before_received_at,
+                    exclude_delivery,
+                    before_received_at,
+                ),
+            ).fetchall()
+        siblings_by_id = {row["delivery_id"]: _event_row_from_db_row(row) for row in rows}
+        for row in legacy_rows:
+            siblings_by_id.setdefault(row["delivery_id"], _event_row_from_db_row(row))
+        return sorted(siblings_by_id.values(), key=lambda r: (r.received_at, r.delivery_id))
 
     # ---- releases ----
     def upsert_release(

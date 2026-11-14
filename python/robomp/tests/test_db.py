@@ -4,7 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from robomp.db import Database, iso_seconds_ago, issue_key
+from robomp.db import COALESCED_ERROR, Database, coalesced_error_for, iso_seconds_ago, issue_key
 
 
 def test_record_event_dedupes_by_delivery(db: Database) -> None:
@@ -138,6 +138,208 @@ def test_requeue_event_can_be_restricted_by_source_state(db: Database) -> None:
 
     assert not db.requeue_event("running-event", from_states=("done", "failed", "skipped"))
     assert db.get_event("running-event").state == "running"
+
+
+def test_list_coalesced_siblings_returns_only_marked_older_rows(db: Database) -> None:
+    key = issue_key("octo/widget", 5)
+    other_key = issue_key("octo/widget", 6)
+    t0 = "2026-05-02T10:00:00.000000Z"  # coalesced-1
+    t1 = "2026-05-02T10:00:01.000000Z"  # other-skipped + survivor cutoff
+    t2 = "2026-05-02T10:00:02.000000Z"  # later
+    db.record_event(
+        delivery_id="coalesced-1",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "older finding"}},
+        state="skipped",
+        last_error=COALESCED_ERROR,
+    )
+    # Same key but NOT marked as coalesced.
+    db.record_event(
+        delivery_id="other-skipped",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "nope"}},
+        state="skipped",
+        last_error="issues.labeled ignored",
+    )
+    # Same marker, same key, but received AFTER the survivor — not a sibling.
+    db.record_event(
+        delivery_id="later",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "later"}},
+        state="skipped",
+        last_error=COALESCED_ERROR,
+    )
+    # Same marker, older, but a DIFFERENT key.
+    db.record_event(
+        delivery_id="other-key",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=other_key,
+        payload={"comment": {"body": "elsewhere"}},
+        state="skipped",
+        last_error=COALESCED_ERROR,
+    )
+    db.record_event(
+        delivery_id="survivor",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "survivor"}},
+        state="running",
+    )
+    # record_event stamps the real current time on every row; pin explicit
+    # timestamps so the `received_at < ?` boundary is deterministic.
+    for delivery_id, ts in (("coalesced-1", t0), ("other-skipped", t1), ("later", t2)):
+        db._conn.execute("UPDATE events SET received_at=? WHERE delivery_id=?", (ts, delivery_id))
+
+    rows = db.list_coalesced_siblings(issue_key=key, exclude_delivery="survivor", before_received_at=t1)
+    assert [r.delivery_id for r in rows] == ["coalesced-1"]
+    assert rows[0].payload["comment"]["body"] == "older finding"
+
+    # Excluding a coalesced row (e.g. re-dispatched survivor reusing the id) removes it.
+    assert db.list_coalesced_siblings(issue_key=key, exclude_delivery="coalesced-1", before_received_at=t1) == []
+
+
+def test_list_coalesced_siblings_tracks_actual_survivor(db: Database) -> None:
+    key = issue_key("octo/widget", 5)
+    t0 = "2026-05-02T10:00:00.000000Z"
+    t1 = "2026-05-02T10:00:01.000000Z"
+    t2 = "2026-05-02T10:00:02.000000Z"
+    db.record_event(
+        delivery_id="A",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from A"}},
+        state="skipped",
+        last_error=coalesced_error_for("B"),
+    )
+    db.record_event(
+        delivery_id="B",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from B"}},
+        state="done",
+    )
+    db.record_event(
+        delivery_id="C",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from C"}},
+        state="running",
+    )
+    for delivery_id, ts in (("A", t0), ("B", t1), ("C", t2)):
+        db._conn.execute("UPDATE events SET received_at=? WHERE delivery_id=?", (ts, delivery_id))
+
+    # B's run receives A's stored finding, but a later C run does not resurface it.
+    assert [
+        r.delivery_id for r in db.list_coalesced_siblings(issue_key=key, exclude_delivery="B", before_received_at=t1)
+    ] == ["A"]
+    assert db.list_coalesced_siblings(issue_key=key, exclude_delivery="C", before_received_at=t2) == []
+
+
+def test_list_coalesced_siblings_follows_multi_hop_chain(db: Database) -> None:
+    """A→B→C: C's run receives BOTH A and B's stored findings, and a later D
+    receives none of A/B/C — the chain terminates at the survivor that ran."""
+    key = issue_key("octo/widget", 5)
+    t0 = "2026-05-02T10:00:00.000000Z"
+    t1 = "2026-05-02T10:00:01.000000Z"
+    t2 = "2026-05-02T10:00:02.000000Z"
+    t3 = "2026-05-02T10:00:03.000000Z"
+    db.record_event(
+        delivery_id="A",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from A"}},
+        state="skipped",
+        last_error=coalesced_error_for("B"),
+    )
+    db.record_event(
+        delivery_id="B",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from B"}},
+        state="skipped",
+        last_error=coalesced_error_for("C"),
+    )
+    db.record_event(
+        delivery_id="C",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from C"}},
+        state="running",
+    )
+    db.record_event(
+        delivery_id="D",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "finding from D"}},
+        state="running",
+    )
+    for delivery_id, ts in (("A", t0), ("B", t1), ("C", t2), ("D", t3)):
+        db._conn.execute("UPDATE events SET received_at=? WHERE delivery_id=?", (ts, delivery_id))
+
+    # C's run sees the whole transitive chain, oldest first, with the
+    # survivors' stored finding bodies intact.
+    rows = db.list_coalesced_siblings(issue_key=key, exclude_delivery="C", before_received_at=t2)
+    assert [r.delivery_id for r in rows] == ["A", "B"]
+    assert [r.payload["comment"]["body"] for r in rows] == ["finding from A", "finding from B"]
+
+    # D's run must NOT receive A, B, or C: nothing was coalesced into D and the
+    # recursive attribution stops at C, the last survivor that ran.
+    assert db.list_coalesced_siblings(issue_key=key, exclude_delivery="D", before_received_at=t3) == []
+
+
+def test_list_coalesced_siblings_does_not_resurface_legacy_rows_after_a_run(db: Database) -> None:
+    key = issue_key("octo/widget", 5)
+    t0 = "2026-05-02T10:00:00.000000Z"
+    t1 = "2026-05-02T10:00:01.000000Z"
+    t2 = "2026-05-02T10:00:02.000000Z"
+    db.record_event(
+        delivery_id="legacy-A",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"comment": {"body": "legacy finding"}},
+        state="skipped",
+        last_error=COALESCED_ERROR,
+    )
+    db.record_event(
+        delivery_id="legacy-B",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={},
+        state="done",
+    )
+    db.record_event(
+        delivery_id="legacy-C",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={},
+        state="running",
+    )
+    for delivery_id, ts in (("legacy-A", t0), ("legacy-B", t1), ("legacy-C", t2)):
+        db._conn.execute("UPDATE events SET received_at=? WHERE delivery_id=?", (ts, delivery_id))
+
+    assert [
+        r.delivery_id
+        for r in db.list_coalesced_siblings(issue_key=key, exclude_delivery="legacy-B", before_received_at=t1)
+    ] == ["legacy-A"]
+    assert db.list_coalesced_siblings(issue_key=key, exclude_delivery="legacy-C", before_received_at=t2) == []
 
 
 def test_latest_issue_events_ignore_skipped_noise(db: Database) -> None:
