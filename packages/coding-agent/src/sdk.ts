@@ -2599,6 +2599,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get costGate() {
 				return currentCostGate();
 			},
+			// `cd` moves the process and the project scope, which every in-process
+			// session shares: a subagent that ran it would drag the parent's workspace
+			// out from under the turn that spawned it, so only the root session offers
+			// it and a subagent's tool reports the host as unable to change directory.
+			changeWorkingDirectory:
+				resolvedAgentId === MAIN_AGENT_ID
+					? newCwd => {
+							if (!hasSession)
+								return Promise.reject(new Error("The session is not ready to change directory yet"));
+							return session.changeWorkingDirectory(newCwd);
+						}
+					: undefined,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,

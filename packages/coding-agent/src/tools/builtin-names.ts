@@ -3,6 +3,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
+	"cd",
 	"edit",
 	"ast_grep",
 	"ast_edit",

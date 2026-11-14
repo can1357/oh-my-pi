@@ -2118,6 +2118,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		subagentEventBus?: EventBus,
 	) {
 		this.session = session;
+		// A tool-driven move (`cd`) relocates the session itself; only the mode
+		// knows about the status line, the terminal title, and the todo panel.
+		session.onCwdChanged = async newCwd => {
+			setSessionTerminalTitle(session.sessionManager.getSessionName(), newCwd);
+			this.statusLine.applyCwdChange();
+			this.updateEditorBorderColor();
+			await this.reloadTodos();
+			this.ui.requestRender();
+		};
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
 		const preferences = {
