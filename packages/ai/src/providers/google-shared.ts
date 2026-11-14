@@ -29,6 +29,7 @@ import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -1148,6 +1149,15 @@ export interface GoogleGenAIRequestPlan {
 	fallbackUrl?: string;
 }
 
+/** Request id from a Google or Vertex HTTP response, if the host sent one. */
+export function googleStreamRequestId(response: Response): string | null {
+	return (
+		response.headers.get("x-goog-request-id") ??
+		response.headers.get("x-request-id") ??
+		response.headers.get("request-id")
+	);
+}
+
 export function streamGoogleGenAI<T extends "google-generative-ai" | "google-vertex">(args: {
 	model: Model<T>;
 	options: GoogleSharedStreamOptions | undefined;
@@ -1246,6 +1256,11 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				} finally {
 					clearWatchdog?.();
 				}
+				// Accepted headers are in and the pre-response watchdog is already cleared,
+				// so a slow observer cannot abort the connected stream. Notify before the
+				// body is read. Rejections throw above and are not reported here. Initial,
+				// regional-fallback, empty-retry, and continuation requests all enter here.
+				await notifyProviderResponse(options, response, model, googleStreamRequestId(response));
 				if (!response.body) {
 					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
 						provider: model.provider,
