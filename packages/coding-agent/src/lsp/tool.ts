@@ -350,7 +350,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
-			let totalServerFailures = 0;
+			let totalServerSuccesses = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -385,6 +385,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
+							totalServerSuccesses++;
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
@@ -446,11 +447,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						}
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;
+						totalServerSuccesses++;
 					} catch (err) {
 						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);
-						totalServerFailures++;
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
@@ -499,18 +500,24 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				if (!detailed) {
 					return {
 						content: [{ type: "text", text: lines.join("\n") }],
-						// Unverified is not failed: success unless every server errored.
+						// A file no server judged is unverified, and an unverified file
+						// must not be reported as a clean one: only a server that
+						// answered makes this a success (issue #15408).
 						details: {
 							action,
 							serverName: Array.from(allServerNames).join(", "),
-							success: succeededServers > 0 || unreportedServers.length > 0,
+							success: succeededServers > 0,
 						},
 					};
 				}
 				results.push(...lines);
 			}
 
-			const allServersFailed = totalServerAttempts > 0 && totalServerFailures === totalServerAttempts;
+			// A batch is a failure unless some server judged at least one file: servers
+			// that stayed silent count as attempts that produced no verdict, so
+			// `failures === attempts` alone would call an unverified batch a success
+			// (issue #15408).
+			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },

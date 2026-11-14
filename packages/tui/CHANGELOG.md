@@ -20,6 +20,7 @@
 - Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
 - Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
+- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
