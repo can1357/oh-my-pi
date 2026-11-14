@@ -27,7 +27,7 @@ pub struct ReplaceEngine {
 }
 
 impl ReplaceEngine {
-	fn replace(
+	pub(crate) fn replace(
 		&self,
 		content: &str,
 		old_string: &str,

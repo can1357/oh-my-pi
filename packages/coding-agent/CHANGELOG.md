@@ -457,6 +457,7 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
+- Fixed the edit tool failing to match a line written with fullwidth characters, the match error now names the differing codepoints instead of printing two lines that look identical, a whitespace-only patch keeps the file's own body when the width fold leaves a residual difference, and a line that holds nothing but whitespace keeps its whitespace once ([#16113](https://github.com/can1357/oh-my-pi/issues/16113), [#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
