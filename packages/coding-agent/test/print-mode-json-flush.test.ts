@@ -48,6 +48,7 @@ function createFlushHarness(dispose: () => Promise<void> = async () => {}): Flus
 			subscriber = listener;
 			return () => {};
 		},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		prompt: async () => {
 			markPromptStarted();
 			await promptReleased;

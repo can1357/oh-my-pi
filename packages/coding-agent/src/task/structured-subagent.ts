@@ -678,7 +678,7 @@ export async function resolveEffectiveSubagentPolicy(
 			!planMode &&
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
-					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0, request.session.agentRegistry))),
 		effort: userTaggedEffort ? undefined : request.effort,
 	};
 }
@@ -796,6 +796,7 @@ function buildExecutorOptions(
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+		agentRegistry: session.agentRegistry,
 		agent: policy.effectiveAgent,
 		// A stepped spawn starts on its first step prompt; the executor sends the rest.
 		task: renderSubagentUserPrompt(steps ? steps[0] : request.assignment),
