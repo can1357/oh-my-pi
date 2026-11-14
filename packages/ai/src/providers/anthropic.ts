@@ -169,6 +169,7 @@ import {
 	isClaudeCloakingUserId,
 	readAnthropicMetadataAccountId,
 	readAnthropicMetadataString,
+	rebindAnthropicMetadataUserId,
 	resolveAnthropicMetadataUserId,
 	stripClaudeToolPrefix,
 } from "./anthropic-identity";
@@ -5240,16 +5241,19 @@ function buildParams(
 		tools = [];
 	}
 
-	// Pre-compute metadata. Explicit caller metadata wins; otherwise a first-party
-	// Anthropic OAuth request binds its device identity to the serving account, so
-	// pooled accounts rotated within one session never share a `device_id`.
-	const metadataAccountId =
-		readAnthropicMetadataAccountId(options?.metadata) ??
-		(model.provider === "anthropic" ? options?.oauthIdentity?.accountId : undefined);
+	// Pre-compute metadata. For a first-party Anthropic OAuth request the serving
+	// credential owns the device identity: a caller resolves metadata once per
+	// model call, so a rotation inside one stream would otherwise pair the new
+	// account's bearer with the previous account's `account_uuid`/`device_id`.
+	const servingAccountId = model.provider === "anthropic" ? options?.oauthIdentity?.accountId : undefined;
+	const metadataAccountId = readAnthropicMetadataAccountId(options?.metadata) ?? servingAccountId;
 	const metadataUserId = resolveAnthropicMetadataUserId(
-		readAnthropicMetadataString(options?.metadata, "user_id") ??
-			// Deliberately share the normalized affinity identity across Kimi's two transports.
-			(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
+		rebindAnthropicMetadataUserId(
+			readAnthropicMetadataString(options?.metadata, "user_id") ??
+				// Deliberately share the normalized affinity identity across Kimi's two transports.
+				(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
+			isOAuthToken ? servingAccountId : undefined,
+		),
 		isOAuthToken,
 		options?.sessionId,
 		metadataAccountId,

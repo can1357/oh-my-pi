@@ -381,14 +381,47 @@ describe("Anthropic pooled OAuth metadata identity", () => {
 		);
 	});
 
-	it("sends caller-supplied metadata.user_id verbatim over the serving account", async () => {
+	it("keeps a caller-supplied metadata.user_id that already names the serving account", async () => {
 		await seed(ACCOUNTS);
 		const userId = JSON.stringify({
-			device_id: "a".repeat(64),
-			account_uuid: "33333333-3333-4333-8333-333333333333",
+			device_id: deriveClaudeDeviceId(getInstallId(), ACCOUNTS[0]),
+			account_uuid: ACCOUNTS[0],
 			session_id: "caller-session",
 		});
 		expect((await turn("caller-metadata-session", undefined, { user_id: userId })).stopReason).toBe("stop");
 		expect(rawUserId(requests[0]!)).toBe(userId);
+	});
+
+	it("rebinds caller metadata that names another account once a rotation serves the request", async () => {
+		await seed(ACCOUNTS);
+		// The caller resolved its metadata for account A, as coding-agent's
+		// `buildSessionMetadata` does once per model call. A model-not-found denial
+		// then rotates the attempt to account B inside the same call.
+		const callerUserId = JSON.stringify({
+			device_id: deriveClaudeDeviceId(getInstallId(), ACCOUNTS[0]),
+			account_uuid: ACCOUNTS[0],
+			session_id: "caller-session",
+		});
+		const rotated = await turn(
+			"caller-rotation-session",
+			index => (index === 0 ? rejection(modelNotFoundBody()) : undefined),
+			{ user_id: callerUserId },
+		);
+		expect(rotated.stopReason).toBe("stop");
+		expect(requests.map(request => request.headers.authorization)).toEqual([
+			`Bearer ${TOKENS[0]}`,
+			`Bearer ${TOKENS[1]}`,
+		]);
+		expect(JSON.parse(rawUserId(requests[0]!))).toEqual({
+			device_id: deriveClaudeDeviceId(getInstallId(), ACCOUNTS[0]),
+			account_uuid: ACCOUNTS[0],
+			session_id: "caller-session",
+		});
+		// Account B's bearer must not carry account A's identity.
+		expect(JSON.parse(rawUserId(requests[1]!))).toEqual({
+			device_id: deriveClaudeDeviceId(getInstallId(), ACCOUNTS[1]),
+			account_uuid: ACCOUNTS[1],
+			session_id: "caller-session",
+		});
 	});
 });
