@@ -803,7 +803,12 @@ export class Settings {
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
 
-	private constructor(options: SettingsOptions = {}) {
+	/**
+	 * `projection`: a derived read-only view of another instance ({@link grantAuthority}), not a
+	 * session's settings; it stays out of the registry so legacy {@link findScopedSettings}
+	 * lookups never resolve to it.
+	 */
+	private constructor(options: SettingsOptions = {}, { projection = false }: { projection?: boolean } = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
@@ -811,7 +816,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
-		liveSettingsInstances.add(new WeakRef(this));
+		if (!projection) liveSettingsInstances.add(new WeakRef(this));
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
 	}
 
@@ -911,7 +916,7 @@ export class Settings {
 		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
 		const revision = this.revision;
 		if (this.#grantView?.revision === revision) return this.#grantView.view;
-		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
 		view.#storage = this.#storage;
 		view.#global = this.#operatorLayers();
 		inheritWarnings(view, this);
@@ -4443,9 +4448,10 @@ export class Settings {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Weak registry of every constructed instance so `resetSettingsForTest` can
- * disarm stray background saves on isolated instances too. WeakRefs never
- * retain instances; the set is cleared on every test reset.
+ * Weak registry of every constructed instance except in-memory projections, so
+ * `resetSettingsForTest` can disarm stray background saves on isolated
+ * instances too and {@link findScopedSettings} can resolve a session by scope.
+ * WeakRefs never retain instances; the set is cleared on every test reset.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
 
