@@ -44,6 +44,7 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import { adoptExtensionLoad } from "./url-schemes";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
@@ -877,6 +878,10 @@ export class ExtensionRunner {
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
+		// Process-wide registrations (URL schemes) route calls by the session that adopted the load.
+		for (const { registrations } of extensions) {
+			if (registrations) adoptExtensionLoad(registrations, () => this.sessionId);
+		}
 		// A load suspended by a failed startup (see `createAgentSession`) acts again once a session
 		// adopts it (what the session builds next, its system prompt, may read them), but its own
 		// `onSuspensionChange` listeners hear of it only from `initialize`, which wires the actions
@@ -1254,6 +1259,9 @@ export class ExtensionRunner {
 		// Presenters their factories registered before they joined.
 		if (added.some(extension => extension.transcriptPresenters.length > 0)) {
 			notifyTranscriptPresentersChanged();
+		}
+		for (const { registrations } of added) {
+			if (registrations) adoptExtensionLoad(registrations, () => this.sessionId);
 		}
 		if (this.#initialized) {
 			for (const extension of added) this.#installFileFallbacks(extension);
