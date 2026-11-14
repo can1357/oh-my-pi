@@ -234,7 +234,7 @@ pub struct HoldOptions {
 /// the window server reports it; other backends and background delivery
 /// resolve to `null`.
 #[napi(object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DesktopFocusReturn {
 	/// Whether the takeover handed focus back to the app front before it.
 	pub handed_back:  bool,

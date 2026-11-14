@@ -252,10 +252,7 @@ mod tests {
 	};
 
 	use super::*;
-	use crate::desktop::{
-		control::{self, CancellationSource},
-		types::DesktopFocusReturn,
-	};
+	use crate::desktop::control::{self, CancellationSource};
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
@@ -437,8 +434,8 @@ mod tests {
 			// Both windows belong to the window host.
 			let pid = Some(windows.host.id());
 			assert_eq!(
-				control::take_focus_return(),
-				Some(DesktopFocusReturn { handed_back: true, previous_pid: pid, front_pid: pid }),
+				control::take_focus_return().map(|r| (r.handed_back, r.previous_pid, r.front_pid)),
+				Some((true, pid, pid)),
 				"after {input:?}"
 			);
 		}
@@ -458,8 +455,8 @@ mod tests {
 			.unwrap();
 		let pid = Some(windows.host.id());
 		assert_eq!(
-			control::take_focus_return(),
-			Some(DesktopFocusReturn { handed_back: false, previous_pid: pid, front_pid: pid })
+			control::take_focus_return().map(|r| (r.handed_back, r.previous_pid, r.front_pid)),
+			Some((false, pid, pid))
 		);
 	}
 

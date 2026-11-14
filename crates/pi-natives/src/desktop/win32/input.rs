@@ -997,13 +997,18 @@ mod foreground {
 		/// activated and restoring the user's window succeeded; the front
 		/// process is read afterwards, so a window the user switched to since
 		/// shows as front.
+		#[allow(
+			clippy::needless_update,
+			reason = "fields only other backends fill stay at their default"
+		)]
 		fn report(&self, restored: bool) {
 			// SAFETY: GetForegroundWindow has no preconditions.
 			let front = unsafe { GetForegroundWindow() };
 			control::report_focus_return(DesktopFocusReturn {
-				handed_back:  restored && self.previous != self.target,
+				handed_back: restored && self.previous != self.target,
 				previous_pid: window::process_id(self.previous),
-				front_pid:    window::process_id(front),
+				front_pid: window::process_id(front),
+				..Default::default()
 			});
 		}
 
