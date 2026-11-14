@@ -1,3 +1,4 @@
+import { clamp } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -214,10 +215,6 @@ interface PreviewSegment {
 }
 
 type PreviewRenderCache = Map<string, Map<number, readonly string[]>>;
-
-function clamp(value: number, min: number, max: number): number {
-	return Math.max(min, Math.min(value, max));
-}
 
 /** Full tab label; the ANSI tab strip and review list clip it to a chip. */
 function questionTabName(question: ExtensionAskDialogQuestion, index: number): string {

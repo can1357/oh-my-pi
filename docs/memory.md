@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-omp supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+omp supports six memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                                               | Guide                                                   |
 | ---------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -8,6 +8,7 @@ omp supports five memory modes. Memory is disabled by default; select one backen
 | `local`          | Project-scoped summaries and lessons generated from persisted sessions                             | This page                                               |
 | `hindsight`      | Remote, bank-scoped Hindsight memory                                                               | [Hindsight](#hindsight-remote-backend)                  |
 | `mnemopi`        | Local Mnemopi SQLite memory                                                                        | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `supermemory`    | Remote Supermemory memory, one opaque namespace per repository (or global)                         | [Supermemory](#supermemory-remote-backend)              |
 | `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | [Sharpshooter](#sharpshooter-backend)                   |
 
 Enable the local summary pipeline:
@@ -33,17 +34,17 @@ If startup consolidation finishes after the first prompt build, the active sessi
 
 The agent can read memory files directly using `memory://` URLs with the `read` tool:
 
-| URL                                    | Content                                                                                                                                  |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory://root`                        | Compact summary injected at startup                                                                                                      |
-| `memory://root/MEMORY.md`              | Full long-term memory document                                                                                                           |
-| `memory://root/learned.md`             | Lessons captured by the `learn` tool                                                                                                     |
-| `memory://root/skills/<name>/SKILL.md` | A generated skill playbook                                                                                                               |
-| `memory://<memory-id>`                 | Full Mnemopi memory row (working or episodic) with a YAML frontmatter metadata header; only available when `memory.backend` is `mnemopi` |
+| URL                                    | Content                                                                                                                            |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `memory://root`                        | Compact summary injected at startup                                                                                                |
+| `memory://root/MEMORY.md`              | Full long-term memory document                                                                                                     |
+| `memory://root/learned.md`             | Lessons captured by the `learn` tool                                                                                               |
+| `memory://root/skills/<name>/SKILL.md` | A generated skill playbook                                                                                                         |
+| `memory://<memory-id>`                 | Full Mnemopi row (`mnemopi`) or Supermemory memory with versions, links and source (`supermemory`), with a YAML frontmatter header |
 
-The `memory://<memory-id>` form returns the full stored row rather than the clipped recall preview (recall content that exceeds the preview cap ends with a trailing `…`); agents are instructed to read it before any `memory_edit update`.
+The `memory://<memory-id>` form returns the full stored row rather than the clipped recall preview (recall content that exceeds the preview cap ends with a trailing `…`); agents are instructed to read it before any `memory_edit update`. Under `supermemory` it resolves in the calling session's namespace and adds the memory's earlier and later versions, linked memories and source document.
 
-The `memory://root[/…]` rows are file-backed and only exist with `memory.backend: local`, which populates the on-disk memory root via the consolidation pipeline. Under `hindsight` or `mnemopi` the root is never written, so those URLs do not resolve — use `recall`/`reflect` (and `read memory://<memory-id>` on `mnemopi`) instead.
+The `memory://root[/…]` rows are file-backed and only exist with `memory.backend: local`, which populates the on-disk memory root via the consolidation pipeline. Under `hindsight`, `mnemopi` or `supermemory` the root is never written, so those URLs do not resolve — use `recall`/`reflect` (and `read memory://<memory-id>` on `mnemopi` and `supermemory`) instead.
 
 ### `/memory` slash command
 
@@ -156,6 +157,35 @@ Tool-initiated `retain` and `learn` writes go through a durable outbox: each mem
 Recall is injected as background context, not instructions, and recalled memory is also available as extra context during compaction. The first-turn recall is stored in the session file, so resuming, switching to, or forking the session sends it unchanged instead of recalling again; a context reset, a different bank or tag filter, or a branch that edits the first prompt recalls afresh. Hindsight memories cannot be looked up by id, so changes to them since the recall are not reported. Mental models are still reloaded when a new process starts. Selecting Hindsight exposes `recall`, `retain`, and `reflect`; `memory_edit` is not available because upstream Hindsight memories are not edited through this backend.
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
+
+## Supermemory remote backend
+
+Select `memory.backend: supermemory` and supply the API key through the environment. The backend uses the Supermemory v5 namespace API (`/ns/{namespace}/…`). The key, the API origin and the namespace override are environment-only (unlike Hindsight's `hindsight.apiUrl`/`apiToken`), so a repository's project config cannot send your key to another origin, swap in another account, or choose an arbitrary namespace of your account (say, a personal one); `supermemory.scoping` only switches between `omp-global` and the per-repository namespace:
+
+```sh
+export SUPERMEMORY_API_KEY=sm_...
+# optional: SUPERMEMORY_BASE_URL=https://api.supermemory.ai
+# optional: SUPERMEMORY_NAMESPACE=my-namespace   # overrides supermemory.scoping
+```
+
+```yaml
+memory:
+   backend: supermemory
+supermemory:
+   scoping: per-project # or global
+```
+
+- **Scoping**: `per-project` (default) stores memories in the namespace `omp-project-<24 hex>`, a SHA-256 of the primary repository root (falling back to the cwd outside a repository), so subdirectories and linked worktrees share one namespace. `global` uses `omp-global`. `SUPERMEMORY_NAMESPACE`, when set, is the namespace for every session and overrides both; it must be 1–100 characters of `A-Z a-z 0-9 _ : -`, otherwise the backend stays inert (it warns without echoing the value) and the memory tools are absent.
+- **Privacy**: Derived namespaces never contain local paths; transcript text, prompts and retained items are sent as written (after secret redaction). The namespace hashes the absolute primary checkout root, so a moved or re-cloned checkout, or another machine, starts a new namespace.
+- **Recall**: with `supermemory.autoRecall` (default on), the first turn of a transcript fetches the namespace profile and searches for the prompt (`supermemory.searchMode`, `supermemory.recallLimit`, `supermemory.threshold`, all sent explicitly; query rewriting is off). The escaped results are added to the system prompt as `<supermemory_profile>`/`<supermemory_recall>` and replayed unchanged on resume. Profile facts carry `(id: …)` for `memory_edit`, except synthesized `aggregated_` summaries, which are no single memory; `<supermemory_recall>` items use the `recall` tool's markers: memories carry `(id: …)` and `[inferred]` when Supermemory inferred rather than read them as stated, document chunks are marked `[document chunk]` without an id. The `recall` tool searches the same namespace.
+- **Compaction**: when a compaction summary is written, the primary session searches the namespace once with the latest user turn of the summarized messages (redacted, same search settings) and adds the matching memories to the summary prompt, so a compacted session keeps its recall. It follows `supermemory.autoRecall`, never runs for a subagent, and any failure yields no context rather than holding up compaction.
+- **Recall timeout**: `supermemory.recallTimeoutMs` (default 4000, clamped to 500–60000) bounds each request of automatic first-turn and compaction recall, like `hindsight.recallTimeoutMs`, so a server that hangs holds a turn only that long. The `recall`, `retain`, `learn` and `memory_edit` tools keep the 15 s request timeout. When both first-turn requests fail (a hung server, say), the `Memory recall failed` notice appears and the recall does not count, so the next turn tries again.
+- **Retain**: with `supermemory.autoRetain` (default on), every `supermemory.retainEveryNTurns` (default 3) user turns the window is sent as one document with a stable document `id`; Supermemory adds content sent again under the same `id` to that document, so a retry or a grown window extends the same document and later windows never touch earlier ones. Windows over 60,000 characters keep their newest part and record the truncation in metadata. After each complete window the session file records a `supermemory_retention` cursor (for this server, account and namespace); a resumed or switched-to session continues from it, so a window that failed or that the 2 s shutdown flush cut off is retried under the same `id`. When the transcript's latest cursor belongs to another server, account or namespace, retention starts at the current turn and records a cursor at once, so turns made under one namespace are never sent to another. A window the server refuses for good (HTTP 400, 404, 410, 413 or 422) is skipped with a warning instead of blocking later windows. A session file without any cursor (written before cursors existed) restarts at its last complete-window boundary instead, so resuming it never bulk-uploads old windows. `/memory enqueue` stores every due complete window (advancing the cursor), then the unretained partial tail as one document without advancing it, so a resumed process's next window may add to that tail's document. `retain` and `learn` queue items in a durable outbox under `<agentDir>/supermemory-outbox/` (the same machinery, limits, quarantine and notices as Hindsight's; see [retain](tools/retain.md)) and deliver each under its event id as the document `id`, so retries never duplicate. v5 treats content that is only a URL as a link to fetch, so retain such a fact with surrounding text. Subagents can use the tools but never auto-recall or auto-retain.
+- **Base URL**: must be a plain `https:` origin, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, with no credentials, query or fragment; redirects are refused. Anything else leaves the backend inert.
+- **Clear**: `/memory clear` waits for pending writes and drops the cached recall; the backend stays active. Server-side memories are untouched; delete them from the Supermemory console.
+- **Edit**: `memory_edit` edits memories by the `(id: …)` that `recall` or the profile block shows, in the session namespace. Supermemory v5 has no memory update: `update` stores the corrected content (redacted) as a new document with instant processing (one extra billed Supermemory operation), then forgets the old memory; Supermemory forms the new memory from that document asynchronously, so it may take a moment and may be worded differently. If the forget fails the error names the stored document and the reason. `importance` is unsupported. `invalidate` and `forget` both soft-forget (`DELETE /ns/{namespace}/memories`): the memory leaves search but stays on the server; an already-forgotten memory counts as done. v5 keeps no forget reason, so `invalidate` accepts `replacement_id` but does not record it; unlike Mnemopi, `forget` is not a hard delete. Forgetting a memory leaves its source documents (including retained conversation windows), so with the default `hybrid` search mode their old text can still be recalled as `[document chunk]` results; delete those documents from the Supermemory console. Document-chunk results have no editable id. `preview_forget` with a natural-language `query` lists what a semantic forget would match (a dry run, never applied); the model then forgets the reviewed ids one by one. `read memory://<id>` shows a memory's versions, links and source document.
+- **Subagents** alias the parent session's state, in-process or on a worker thread: their `recall`, `retain`, `learn` and `memory_edit` calls and `memory://<id>` reads run on the parent's namespace and land in the parent's outbox (its notices included). Their prompt does not carry the parent's recall; they use `recall` themselves. They never auto-recall, auto-retain or write retention cursors; `/memory clear` or disposing a subagent leaves the parent's state alone. A subagent whose parent has no Supermemory state gets its own tool-only state. A subagent started before a `supermemory.*` settings change keeps the old parent state, so its writes are refused (not lost) until it restarts.
+- `reflect` is not available with this backend.
 
 ## Sharpshooter backend
 

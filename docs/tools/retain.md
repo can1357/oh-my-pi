@@ -8,7 +8,8 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/retain.md`
 - Hindsight collaborators:
    - `packages/coding-agent/src/hindsight/state.ts` — per-session queue, flush scheduling, auto-retain.
-   - `packages/coding-agent/src/hindsight/outbox.ts` — durable on-disk outbox for tool retains and its delivery.
+   - `packages/coding-agent/src/hindsight/outbox.ts` — Hindsight event shape and `retainBatch` delivery for the shared outbox.
+   - `packages/coding-agent/src/memory-backend/outbox.ts` — durable on-disk outbox and retry queue shared by Hindsight and Supermemory.
    - `packages/coding-agent/src/hindsight/backend.ts` — session bootstrap, prompt injection, subagent aliasing.
    - `packages/coding-agent/src/hindsight/bank.ts` — bank id derivation, tag scoping, first-use bank/mission setup.
    - `packages/coding-agent/src/hindsight/client.ts` — HTTP `retain` / `retainBatch` calls.
@@ -25,7 +26,7 @@
 ## Registration / Visibility
 
 - Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
@@ -67,7 +68,7 @@ Mnemopi:
 4. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
    - if any item has `scope: "global"`, it calls `state.assertGlobalRetainAvailable()` first, which throws `Hindsight global scope is off; set hindsight.globalScope to true to enable it.` while `hindsight.globalScope` is off and `Hindsight global scope requires global or per-project-tagged scoping.` under `per-project` scoping; either way nothing in the batch is queued;
-   - the whole call is handed to `HindsightSessionState.enqueueRetain(toolCallId, items)`; `HindsightRetainQueue.enqueue(...)` runs the same `global` check (the exported queue enforces it too, not only the tool), then `HindsightOutbox.enqueue(...)` writes one event file per item under `<agentDir>/hindsight-outbox/<destination>/`, all or none: each file is synced and atomically renamed into place, then the directory is synced (except on Windows). Event content, context, tags and session id are stripped of terminal controls, the bearer token, and recognizable secrets first;
+   - the whole call is handed to `HindsightSessionState.enqueueRetain(toolCallId, items)`; the state's `retainQueue.enqueue(...)` runs the same `global` check (the queue enforces it too, not only the tool), then `MemoryOutbox.enqueue(...)` writes one event file per item under `<agentDir>/hindsight-outbox/<destination>/`, all or none: each file is synced and atomically renamed into place, then the directory is synced (except on Windows). Event content, context, tags and session id are stripped of terminal controls, the bearer token, and recognizable secrets first;
    - each event id hashes the session id, tool call id, item index, scope, context and content. It becomes the server `document_id` with `update_mode: "replace"`, so a retried call or a resend after an ambiguous response replaces the same document, while a reused tool call id with different content is a new one;
    - the queue flushes immediately once 16 new events are pending, otherwise after a `RETAIN_FLUSH_INTERVAL_MS` debounce; primary-state installation also flushes, delivering events earlier processes left for the same API URL and bank;
    - a flush takes the destination's drain lease (an OS lock released when its process exits; a busy lease defers to the holder and retries after the debounce), best-effort ensures the bank exists, and sends async `retainBatch(...)` requests of up to 16 events per tag set in publication order: project items carry their captured tags, global items none. Each tag set gets its own request, because Hindsight tags a request's generated documents with the union of its items' tags and document-level re-tags cascade to every memory in it. A 2xx response deletes the events; it means server acceptance, not completed extraction.
@@ -90,6 +91,14 @@ Mnemopi:
    - persisted Hindsight memories are cross-session server-side bank data;
    - persisted Mnemopi memories are local SQLite data;
    - subagents alias parent memory state for both supported backends.
+
+### Supermemory
+
+- Reads `session.getSupermemorySessionState()`; throws `Supermemory backend is not initialised for this session.` when it is missing. `scope` is never offered.
+- The whole call goes through the same durable outbox as Hindsight, under `<agentDir>/supermemory-outbox/<destination>/` (destination = hash of the base URL origin and path, a hash of the API key, and the namespace; the key itself is never stored, and writes queued under one key are delivered only by a session using that key), all or none, before the tool returns `N memories queued.`. Content and `context` are stripped of terminal controls, the API key, and recognizable secrets; metadata records `source: "coding-agent-retain"`, the transcript id, and optional `context`.
+- Each event is delivered as one `POST /ns/{namespace}/document` whose document `id` is the event id (hash of transcript id, tool call id, item index, content and metadata); Supermemory adds a resend under the same `id` to the same document, so a retried call or a resend never duplicates it. Delivery starts right after enqueue and also runs at top-level session start and agent end; disposal waits up to 2 s for a delivery still running, and starts none when none is. HTTP 400/404/410/413/422 quarantine the event; every other failure keeps it for the same backoff retry, with the same notices, as Hindsight. Capacity, TTL and quarantine limits match Hindsight's.
+- v5 treats content that is only a URL as a link to fetch, so retain such a fact with surrounding text.
+- Subagents write to the same namespace. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
 

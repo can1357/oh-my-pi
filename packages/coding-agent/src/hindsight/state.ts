@@ -1,6 +1,6 @@
-import { logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { MemoryOutboxQueue, noticeErrorText } from "../memory-backend/outbox";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
@@ -22,19 +22,11 @@ import {
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
 import { countUserTurns, extractMessages } from "./transcript";
-import { type DrainResult, HindsightOutbox, type RetainInput } from "./outbox";
+import { createHindsightOutbox, hindsightRetainEvents, type OutboxEvent, type RetainInput } from "./outbox";
 
 /** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
 export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
-
-/** Error text for a failure notice: it can carry server response text, so strip terminal controls and bound it. */
-function noticeErrorText(errorText: string): string {
-	return truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
-}
-
 const RETAIN_FLUSH_BATCH_SIZE = 16;
-const RETAIN_FLUSH_INTERVAL_MS = 5_000;
-const RETAIN_RETRY_MAX_MS = 30 * 60 * 1000;
 const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
 
 interface RecallOutcome {
@@ -81,150 +73,6 @@ export interface HindsightSessionStateOptions {
 	 * tools resolve via the alias so they persist to the same bank as the parent.
 	 */
 	aliasOf?: HindsightSessionStateApi;
-}
-
-/**
- * Debounced delivery of tool-initiated `retain` calls owned by one Hindsight
- * session state. Items are persisted in the {@link HindsightOutbox} before
- * `enqueue` resolves; flushes deliver every pending event for this destination,
- * including ones earlier processes left behind.
- *
- * Auto-retain (`HindsightSessionState.retainSession`) is intentionally not
- * routed through this queue — it submits a full transcript as one large item
- * and already runs `async: true` server-side.
- */
-export class HindsightRetainQueue {
-	readonly #state: HindsightSessionState;
-	readonly #agentDir: string;
-	#outbox?: HindsightOutbox;
-	#timer?: NodeJS.Timeout;
-	#flushing?: Promise<void>;
-	#closed = false;
-	/** Events this queue published since its last drain started. */
-	#pending = 0;
-	/** Consecutive drains stopped by a retryable failure; drives the retry backoff. */
-	#failures = 0;
-
-	constructor(state: HindsightSessionState, agentDir: string) {
-		this.#state = state;
-		this.#agentDir = agentDir;
-	}
-
-	/** Created on first use: states that never retain touch no disk. */
-	#getOutbox(): HindsightOutbox {
-		const state = this.#state;
-		this.#outbox ??= new HindsightOutbox({
-			agentDir: this.#agentDir,
-			apiUrl: state.config.hindsightApiUrl!,
-			bankId: state.bankId,
-			apiToken: state.config.hindsightApiToken,
-			client: state.client,
-			ensureBank: () => ensureBankExists(state.client, state.bankId, state.config, state.banksSet),
-		});
-		return this.#outbox;
-	}
-
-	/** Resolves once every item is durable; rejects, queueing nothing, when it cannot be. */
-	async enqueue(toolCallId: string, items: RetainInput[]): Promise<void> {
-		if (this.#closed) {
-			throw new Error("Hindsight retain queue is closed.");
-		}
-		const state = this.#state;
-		if (items.some(item => item.scope === "global")) state.assertGlobalRetainAvailable();
-		this.#pending += await this.#getOutbox().enqueue(
-			{ sessionId: state.sessionId, toolCallId, context: state.config.retainContext, tags: state.retainTags },
-			items,
-		);
-		if (this.#pending >= RETAIN_FLUSH_BATCH_SIZE) {
-			void this.flush();
-			return;
-		}
-		this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
-	}
-
-	#schedule(delay: number): void {
-		if (!this.#closed && !this.#timer) {
-			this.#timer = setTimeout(() => {
-				this.#timer = undefined;
-				void this.flush();
-			}, delay);
-			// Don't pin the event loop alive just for a pending retain flush.
-			this.#timer.unref?.();
-		}
-	}
-
-	async flush(): Promise<void> {
-		if (this.#timer) {
-			clearTimeout(this.#timer);
-			this.#timer = undefined;
-		}
-
-		if (this.#flushing) {
-			// Coalesce: wait for the in-flight drain, then drain anything that
-			// landed after it started so we don't strand items.
-			await this.#flushing;
-			if (this.#pending > 0) await this.flush();
-			return;
-		}
-
-		this.#pending = 0;
-		this.#flushing = this.#drain();
-		try {
-			await this.#flushing;
-		} finally {
-			this.#flushing = undefined;
-		}
-	}
-
-	async #drain(): Promise<void> {
-		const notice = (message: string) => this.#state.session.emitNotice("warning", message, HINDSIGHT_NOTICE_SOURCE);
-		let outbox: HindsightOutbox;
-		let result: DrainResult;
-		try {
-			outbox = this.#getOutbox();
-			result = await outbox.drain();
-		} catch (err) {
-			const errorText = err instanceof Error ? err.message : String(err);
-			logger.warn("Hindsight outbox drain failed", { bankId: this.#state.bankId, error: errorText });
-			notice(`Hindsight outbox unavailable: ${noticeErrorText(errorText)}. Undelivered memories stay on disk.`);
-			this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
-			return;
-		}
-		if (result.quarantined > 0) {
-			notice(
-				`${result.quarantined} Hindsight ${result.quarantined === 1 ? "memory" : "memories"} moved to ${shortenPath(outbox.quarantineDir)} (refused by the server, malformed, or undelivered for 7 days); review within 30 days.`,
-			);
-		}
-		if (result.error === undefined) {
-			this.#failures = 0;
-			// Another holder owns this destination (draining it, or enqueueing a batch
-			// that may still roll back); events it did not list wait for us.
-			if (result.busy) this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
-			return;
-		}
-		logger.warn("Hindsight retain delivery failed", {
-			bankId: this.#state.bankId,
-			kept: result.kept,
-			error: result.error,
-		});
-		// One notice per outage, not per retry.
-		if (++this.#failures === 1) {
-			notice(
-				`Memory retention failed; ${result.kept} ${result.kept === 1 ? "memory" : "memories"} kept in the Hindsight outbox for retry: ${noticeErrorText(result.error)}`,
-			);
-		}
-		// Exponential backoff from the debounce interval; ±20% jitter spreads processes sharing an outage.
-		const backoff = Math.min(RETAIN_RETRY_MAX_MS, RETAIN_FLUSH_INTERVAL_MS * 2 ** (this.#failures - 1));
-		this.#schedule(Math.round(backoff * (0.8 + Math.random() * 0.4)));
-	}
-
-	dispose(): void {
-		this.#closed = true;
-		if (this.#timer) {
-			clearTimeout(this.#timer);
-			this.#timer = undefined;
-		}
-	}
 }
 
 /**
@@ -283,7 +131,8 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	unsubscribe?: () => void;
 	/** Alias states delegate persistence config to a primary parent state. */
 	aliasOf?: HindsightSessionStateApi;
-	readonly retainQueue: HindsightRetainQueue;
+	/** Tool-initiated retains; durable before `enqueueRetain` resolves, delivered by later flushes. */
+	readonly retainQueue: MemoryOutboxQueue<OutboxEvent, RetainInput>;
 
 	constructor(options: HindsightSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -301,7 +150,31 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		this.#lastRetainedPrefixKey = "";
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
-		this.retainQueue = new HindsightRetainQueue(this, options.agentDir ?? getAgentDir());
+		const agentDir = options.agentDir ?? getAgentDir();
+		this.retainQueue = new MemoryOutboxQueue({
+			label: "Hindsight",
+			destination: this.bankId,
+			flushBatchSize: RETAIN_FLUSH_BATCH_SIZE,
+			notice: message => this.session.emitNotice("warning", message, HINDSIGHT_NOTICE_SOURCE),
+			toEvents: (toolCallId, items) => {
+				if (items.some(item => item.scope === "global")) this.assertGlobalRetainAvailable();
+				const call = {
+					sessionId: this.sessionId,
+					toolCallId,
+					context: this.config.retainContext,
+					tags: this.retainTags,
+				};
+				return hindsightRetainEvents(call, items, this.config.hindsightApiToken);
+			},
+			createOutbox: () =>
+				createHindsightOutbox({
+					agentDir,
+					apiUrl: this.config.hindsightApiUrl!,
+					bankId: this.bankId,
+					client: this.client,
+					ensureBank: () => ensureBankExists(this.client, this.bankId, this.config, this.banksSet),
+				}),
+		});
 	}
 
 	setSessionId(sessionId: string): void {

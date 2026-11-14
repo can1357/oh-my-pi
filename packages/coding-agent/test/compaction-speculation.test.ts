@@ -13,6 +13,7 @@ import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-co
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { hindsightBackend } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backend";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
 import {
@@ -281,6 +282,28 @@ describe("async speculative compaction", () => {
 		await waitForState("armed");
 
 		expect(recallSpy).not.toHaveBeenCalled();
+	});
+
+	it("passes Supermemory recall to the summarizer at threshold compaction", async () => {
+		cfgMemoryBackend.override(maintenanceSettings, "supermemory");
+		const recallSpy = vi.spyOn(supermemoryBackend, "preCompactionContext").mockResolvedValue("fresh memory");
+		let summarizerContext: string[] | undefined;
+		vi.spyOn(compactionModule, "compact").mockImplementation(
+			async (preparation, _model, _key, _custom, _signal, options) => {
+				summarizerContext = await options?.loadExtraContext?.();
+				return {
+					summary: "summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+				};
+			},
+		);
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		expect(recallSpy).toHaveBeenCalledTimes(1);
+		expect(summarizerContext).toEqual(["fresh memory"]);
 	});
 
 	it("commits an armed summary at threshold without paying for another summarizer call", async () => {

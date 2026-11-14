@@ -239,6 +239,34 @@ describe("Hindsight tool factories", () => {
 	});
 });
 
+describe("Supermemory tools", () => {
+	const SUPERMEMORY_ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL"] as const;
+	const savedSupermemoryEnv = new Map(SUPERMEMORY_ENV.map(name => [name, Bun.env[name]]));
+	const supermemorySession = () => makeSession(Settings.isolated({ "memory.backend": "supermemory" }));
+	beforeEach(() => {
+		Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-key";
+		Bun.env.SUPERMEMORY_BASE_URL = "http://127.0.0.1:1";
+	});
+	afterEach(() => {
+		for (const [name, value] of savedSupermemoryEnv) {
+			if (value === undefined) delete Bun.env[name];
+			else Bun.env[name] = value;
+		}
+	});
+
+	it("factories offer recall/retain/memory_edit but never reflect, and only once configured", () => {
+		const configured = supermemorySession();
+		expect(MemoryRetainTool.createIf(configured)).toBeInstanceOf(MemoryRetainTool);
+		expect(MemoryRecallTool.createIf(configured)).toBeInstanceOf(MemoryRecallTool);
+		expect(MemoryEditTool.createIf(configured)).toBeInstanceOf(MemoryEditTool);
+		expect(MemoryReflectTool.createIf(configured)).toBeNull();
+
+		Bun.env.SUPERMEMORY_BASE_URL = "http://sm.test";
+		expect(MemoryRecallTool.createIf(supermemorySession())).toBeNull();
+		expect(MemoryEditTool.createIf(supermemorySession())).toBeNull();
+	});
+});
+
 describe("Mnemopi tool factories", () => {
 	beforeEach(() => {
 		resetSettingsForTest();
@@ -2174,6 +2202,33 @@ describe("memory_edit.execute (Mnemopi backend)", () => {
 
 		expect(result.details).toEqual({ status: "not_found" });
 		expect((result.content[0] as { text: string }).text).toContain("not found");
+	});
+
+	it("rejects id-less forget, invalidate and update before touching the banks", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const edit = vi.spyOn(registerMnemopiState(), "editScopedMemory");
+		const tool = MemoryEditTool.createIf(makeSession(settings))!;
+		for (const op of ["forget", "invalidate", "update"] as const) {
+			await expect(tool.execute("call-memory-edit-no-id", { op, content: "x" })).rejects.toThrow(
+				`memory_edit ${op} requires id.`,
+			);
+		}
+		expect(edit).not.toHaveBeenCalled();
+	});
+
+	it("rejects preview_forget, naming recall then forget by id, and changes nothing", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		registerMnemopiState();
+		await retainAndRecallId(settings, "old build server runs on port 9000", "build server");
+
+		await expect(
+			MemoryEditTool.createIf(makeSession(settings))!.execute("call-memory-edit-preview", {
+				op: "preview_forget",
+				query: "old build server",
+			}),
+		).rejects.toThrow("preview_forget is only available with Supermemory. Use `recall` to find the memories");
+		const recalled = await registeredMnemopiState!.recallResultsScoped("build server");
+		expect(recalled.map(memory => memory.content)).toContain("old build server runs on port 9000");
 	});
 
 	it("throws when no per-session Mnemopi state is registered", async () => {

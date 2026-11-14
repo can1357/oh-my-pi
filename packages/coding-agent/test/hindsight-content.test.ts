@@ -42,6 +42,13 @@ describe("stripMemoryTags", () => {
 		expect(stripped).toContain("end");
 	});
 
+	it("removes Supermemory profile and recall blocks", () => {
+		const stripped = stripMemoryTags(
+			"keep <supermemory_profile>\nfact\n</supermemory_profile> and <supermemory_recall>\nold\n</supermemory_recall> end",
+		);
+		expect(stripped).toBe("keep  and  end");
+	});
+
 	it("strips multiple sequential blocks", () => {
 		const text = "<memories>a</memories><memories>b</memories>tail";
 		expect(stripMemoryTags(text)).toBe("tail");
