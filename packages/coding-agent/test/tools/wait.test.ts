@@ -27,11 +27,15 @@ function session(
 	manager?: AsyncJobManager,
 	agentId = "Main",
 	launch = false,
+	waitMaxMs?: number,
 	extra: Partial<ToolSession> = {},
 ): ToolSession {
 	return {
 		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": launch }),
+		settings: Settings.isolated({
+			"launch.enabled": launch,
+			...(waitMaxMs === undefined ? {} : { "wait.maxMs": waitMaxMs }),
+		}),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
@@ -163,7 +167,7 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn("read") }));
+		const tool = new WaitTool(session(manager, "Main", false, undefined, { getContextMessages: latestTurn("read") }));
 		const first = await elapse(tool, 5_000);
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
@@ -208,7 +212,7 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn() }));
+		const tool = new WaitTool(session(manager, "Main", false, undefined, { getContextMessages: latestTurn() }));
 		// The first wait of a streak keeps the floor: the agent has not yet shown it has nothing else to do.
 		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
 		const top = await elapse(tool, 240_000);
@@ -222,7 +226,7 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
+		const interactive = new WaitTool(session(manager, "Main", false, undefined, { tuiTranscript: true }));
 		expect(interactive.description).toContain("End your turn instead");
 		expect(report(await elapse(interactive, 5_000))).toContain(
 			"End your turn: results and messages start your next one.",
@@ -950,5 +954,44 @@ describe("wait", () => {
 			expect(await idleText(waiting)).toContain("`Main` is waiting on the user");
 			closeDialog();
 		});
+	});
+
+	test("wait.maxMs bounds a wait on still-running work", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const id = manager.register("bash", "long", async () => new Promise<string>(() => {}), { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager, "Main", false, 60_000)).execute("wait-capped", {});
+		vi.advanceTimersByTime(60_000);
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
+		manager.cancel(id);
+	});
+
+	test("the default wait.maxMs still caps a wait at 30 minutes", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const id = manager.register("bash", "long", async () => new Promise<string>(() => {}), { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager)).execute("wait-default-cap", {});
+		vi.advanceTimersByTime(30 * 60_000);
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
+		manager.cancel(id);
+	});
+
+	test("wait.maxMs 0 keeps waiting past the default cap until the job settles", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const { promise, resolve } = Promise.withResolvers<string>();
+		const id = manager.register("bash", "long", async () => promise, { ownerId: "Main" });
+		let settled = false;
+		const waiting = new WaitTool(session(manager, "Main", false, 0)).execute("wait-uncapped", {}).finally(() => {
+			settled = true;
+		});
+		vi.advanceTimersByTime(2 * 60 * 60_000);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		resolve("done after two hours");
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "done after two hours" });
 	});
 });
