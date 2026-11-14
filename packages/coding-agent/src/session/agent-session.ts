@@ -163,6 +163,7 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
+import type { ExpectedReplies, ExpectedRepliesRange } from "../extensibility/extensions/expected-replies";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
@@ -1259,6 +1260,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#adoptedResetMarkers = new Map<string, number>();
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
+	#expectedReplies: ExpectedReplies | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
@@ -1458,6 +1460,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Last `skillful` value applied to this session; dedupes {@link setSkillful} and its setting watch. */
 	#skillfulApplied = false;
 	#checkpointState: CheckpointState | undefined = undefined;
+	/** Where expected replies stood when each live checkpoint was taken (see `#applyRewind`). */
+	readonly #checkpointRepliesMarks = new WeakMap<CheckpointState, number>();
+	/** Where expected replies stood when the latest assistant message ended, before its tool calls ran. */
+	#batchRepliesMark: number | undefined;
 	#pendingRewindReport: string | undefined = undefined;
 	#lastCompletedRewind: CompletedRewindState | undefined = undefined;
 	#rewoundToolResultIds = new Set<string>();
@@ -2368,6 +2374,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#expectedReplies = config.expectedReplies;
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -3929,7 +3936,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#emitRunState(state: "running" | "idle"): void {
 		if (state === "idle") this.#runStartedAt = undefined;
-		else this.#runStartedAt ??= Date.now();
+		else if (this.#runStartedAt === undefined) {
+			this.#runStartedAt = Date.now();
+			// The same boundary scopes expected replies, by run rather than by clock.
+			this.#expectedReplies?.beginRun();
+		}
 		for (const listener of this.#runStateListeners) {
 			try {
 				listener(state);
@@ -4653,6 +4664,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A run resumed from an unpaired assistant tail (retry of a failed tool
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
+			// A run resumed from an unpaired tail executes that batch with no `message_end` to mark it.
+			this.#batchRepliesMark = this.#expectedReplies?.mark();
 			this.#prunedTerminalFailure = undefined;
 			this.#advisors.onPrimaryAgentStart();
 			this.#runEpoch++;
@@ -4782,6 +4795,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					(checkpointReminder.details && stringProperty(checkpointReminder.details, "startedAt")) ??
 					new Date().toISOString(),
 			};
+			const repliesMark = this.#expectedReplies?.mark();
+			if (repliesMark !== undefined) this.#checkpointRepliesMarks.set(this.#checkpointState, repliesMark);
 			this.#pendingRewindReport = undefined;
 			this.#lastCompletedRewind = undefined;
 			this.agent.steer(checkpointReminder);
@@ -4794,6 +4809,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			event.message.completedAt = Date.now();
 			this.#tools.bindReplyToCapturedPrompt(event.message);
+			// Its tool calls run next; a rewind among them keeps the expectations its siblings record.
+			this.#batchRepliesMark = this.#expectedReplies?.mark();
 		}
 		// Turn-boundary maintenance awaits this commit before draining steering;
 		// extension notifications must not own or delay the persistence work.
@@ -7128,6 +7145,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// newSession()).
 		this.#clearCheckpointRuntimeState();
 		this.#clearSessionScopedToolState();
+		this.#clearExpectedReplies();
 
 		// Rotate provider-side session state so a provider that keeps conversation
 		// history server-side starts a brand-new exchange rather than resuming the
@@ -8281,6 +8299,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * The conversation was replaced or cut back: replies extensions expected for it
+	 * (`pi.replies.expect`) and recorded in `range` (all by default) are no longer owed.
+	 */
+	#clearExpectedReplies(range?: ExpectedRepliesRange): void {
+		this.#expectedReplies?.clear(range);
+	}
+
+	/**
 	 * Rebuild checkpoint/rewind runtime state from the current branch. Handles two
 	 * cases surfaced by session resume, `switchSession()` reloading the same file,
 	 * and tree navigation:
@@ -8293,6 +8319,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *     checkpoint instead of failing with "No active checkpoint".
 	 */
 	#rehydrateCheckpointRewindState(): void {
+		const previous = this.#checkpointState;
 		this.#clearCheckpointRuntimeState();
 		let completed: CompletedRewindState | undefined;
 		let pending: { entryId: string; startedAt: string; messageCount: number } | undefined;
@@ -8320,6 +8347,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				startedAt: pending.startedAt,
 				checkpointMessageCount: pending.messageCount,
 			};
+			// The same checkpoint, rebuilt (an unchanged reload): rewind still drops only what came after it.
+			const repliesMark =
+				previous?.checkpointEntryId === pending.entryId ? this.#checkpointRepliesMarks.get(previous) : undefined;
+			if (repliesMark !== undefined) this.#checkpointRepliesMarks.set(this.#checkpointState, repliesMark);
 			return;
 		}
 		this.#lastCompletedRewind = completed;
@@ -12379,6 +12410,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 
 			this.#clearSessionScopedToolState();
+			this.#clearExpectedReplies();
 			this.#clearCheckpointRuntimeState();
 			this.setTodoPhases([]);
 			this.#freshProviderSessionId = undefined;
@@ -13112,6 +13144,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
+		});
+		// Replies expected since the checkpoint was taken were asked on the branch the rewind just cut
+		// away, except those its own tool batch recorded: those calls are re-parented below and stay
+		// in the conversation. A checkpoint rebuilt from the transcript (after a reload) carries no
+		// mark: drop all of the rest.
+		this.#clearExpectedReplies({
+			recordedFrom: this.#checkpointRepliesMarks.get(checkpointState),
+			recordedBefore: turn?.message.role === "assistant" ? this.#batchRepliesMark : undefined,
 		});
 
 		const rewoundAt = new Date().toISOString();
@@ -14178,6 +14218,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
+		// Where expected replies stood as the switch was announced (see below); unset when it keeps them.
+		let outgoingRepliesBefore: number | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -14267,6 +14309,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// so jobs they start belong to the resumed session. Deliveries are held until now.
 			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
 
+			// A resumed or changed conversation owes none of the replies expected in the outgoing one.
+			// They go once nothing can roll the switch back any more; a rollback instead drops any a
+			// handler of the announcement below recorded for the target.
+			outgoingRepliesBefore =
+				switchingToDifferentSession || didReloadConversationChange ? this.#expectedReplies?.mark() : undefined;
 			this.#reseedCostGate();
 			// Emit session_switch event to hooks
 			if (this.#extensionRunner) {
@@ -14409,8 +14456,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			if (outgoingRepliesBefore !== undefined) this.#clearExpectedReplies({ recordedBefore: outgoingRepliesBefore });
 			return true;
 		} catch (error) {
+			if (outgoingRepliesBefore !== undefined) this.#clearExpectedReplies({ recordedFrom: outgoingRepliesBefore });
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -14634,6 +14683,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
+			// A hook that keeps the live conversation (`skipConversationRestore`) keeps what it owes too.
+			if (!skipConversationRestore) this.#clearExpectedReplies();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
@@ -14761,6 +14812,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
+			this.#clearExpectedReplies();
 
 			this.#rehydrateCheckpointRewindState();
 			if (imageDescriptionNotice) this.sessionManager.appendMessage(imageDescriptionNotice);
@@ -15110,6 +15162,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// The active conversation now follows another path of the tree, and nothing records which
+		// path an expectation was asked on: drop them all, before `session_tree` handlers run.
+		if (newLeafId !== oldLeafId) this.#clearExpectedReplies();
 
 		this.#branchSummaryAbortController = undefined;
 
