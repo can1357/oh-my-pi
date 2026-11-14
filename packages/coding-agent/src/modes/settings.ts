@@ -989,6 +989,18 @@ export const cfgTuiVimModeDisplay = register({
 	},
 });
 
+export const cfgTuiSelectVimKeys = register({
+	id: "tui.select.vimKeys",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Selector Navigation",
+		description: "Use j/k for up/down navigation in selectors (model picker, settings, ask dialogs). When enabled, j/k move selection instead of typing into search. Enable only if you prefer vim-style navigation over type-to-search.",
+	},
+});
+
 export const cfgLoopMode = register({
 	id: "loop.mode",
 	type: "enum",

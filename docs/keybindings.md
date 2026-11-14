@@ -104,6 +104,16 @@ Off by default. Turn it on with **Vim Editing Mode** in `/settings` (Interaction
 tui.vimMode: true
 ```
 
+## Vim selector navigation
+
+When **Vim Selector Navigation** (`tui.select.vimKeys`) is enabled, `j` and `k` move the selection up/down in selectors (model picker, settings, ask dialogs, etc.) instead of typing into the search field. Off by default to preserve type-to-search. Enable it if you prefer vim-style navigation:
+
+```yaml
+tui.select.vimKeys: true
+```
+
+Note: with this enabled, you cannot type `j` or `k` into selector search fields — they become navigation keys. Use other characters for search.
+
 The prompt starts in Insert mode. `Escape` switches to Normal mode; the prompt border changes color to show the mode (bash/python mode colors take precedence). The software cursor underlines the current character in Insert mode and uses a block in Normal mode; at line end Insert uses a bar, and Visual mode highlights the selection. The terminal cursor shape is set via DECSCUSR to a bar in Insert and a block in Normal/Visual, and restored on exit. This is a useful subset of Vim, not a full implementation.
 
 The status line also shows the mode, pending command, and multi-line Visual selection size. **Vim Mode Indicator** (`tui.vimModeDisplay`) selects `text` (default), `icon`, or `none` (hides the whole Vim status segment).
@@ -121,7 +131,8 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                                                                                                  |
 | `0` `^` `$`               | Line start / first non-blank / line end                                                                                                                                           |
-| `w` `b` `e`               | Next word, previous word, end of word                                                                                                                                             |
+| `w` `b` `e`               | Next word, previous word, end of word (punctuation counts as separate words)                                                                                                      |
+| `W` `B` `E`               | Next WORD, previous WORD, end of WORD (whitespace-delimited, e.g. `src/path/file.ts` is one WORD)                                                                               |
 | `f` `F` `t` `T` + char    | Find / till that character on the line (`;` repeats, `,` reverses)                                                                                                                |
 | `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                                                                                                             |
 | `1`–`9` prefix            | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                                                                                               |

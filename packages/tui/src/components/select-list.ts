@@ -493,9 +493,8 @@ export class SelectList implements Component, MouseRoutable {
 			return;
 		}
 
-		// Typed text filters even when it collides with a navigation binding; then
-		// host navigation; every other key is the search field's.
-		if (extractPrintableText(keyData) !== undefined && this.#handleSearchInput(keyData)) return;
+		// Check for navigation bindings first when j/k are explicitly bound —
+		// this lets vim-style navigation take priority over type-to-search.
 		const wrap = this.layout.wrapNavigation !== false;
 		let selectionChanged = false;
 		if (kb.matches(keyData, "tui.select.up")) {

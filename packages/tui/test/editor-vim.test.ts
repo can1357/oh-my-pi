@@ -154,6 +154,31 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("alfa beta gamma |delta");
 		});
 
+		it("W lands on the start of the next WORD", () => {
+			const editor = vimEditor("foo.bar baz");
+			editor.handleInput("W");
+			editor.handleInput("i");
+			editor.handleInput("<");
+			expect(editor.getText()).toBe("foo.bar <baz");
+		});
+
+		it("B steps back to the start of the previous WORD", () => {
+			const editor = vimEditor("foo.bar baz");
+			editor.handleInput("W");
+			editor.handleInput("B");
+			editor.handleInput("i");
+			editor.handleInput(">");
+			expect(editor.getText()).toBe(">foo.bar baz");
+		});
+
+		it("E lands on the end of the WORD", () => {
+			const editor = vimEditor("foo.bar baz");
+			editor.handleInput("E");
+			editor.handleInput("a");
+			editor.handleInput(">");
+			expect(editor.getText()).toBe("foo.bar> baz");
+		});
+
 		it("gg and G jump to the buffer edges", () => {
 			const editor = vimEditor("one\ntwo\nthree");
 			editor.handleInput("G");

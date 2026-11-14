@@ -504,3 +504,40 @@ describe("SelectList.routeMouse", () => {
 		expect(selected).toBe("c");
 	});
 });
+
+describe("j/k navigation with user bindings", () => {
+	const makeTestList = () =>
+		new SelectList(
+			[
+				{ value: "a", label: "Apple" },
+				{ value: "b", label: "Banana" },
+				{ value: "c", label: "Cherry" },
+			],
+			5,
+			testTheme,
+		);
+
+	it("j/k navigate when bound to tui.select.up/down", () => {
+		const kb = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.select.up": ["up", "k"],
+			"tui.select.down": ["down", "j"],
+		});
+		const original = setKeybindings(kb);
+		try {
+			const list = makeTestList();
+			list.handleInput("j");
+			expect(list.debugState().selectedItemId).toBe("b");
+			list.handleInput("k");
+			expect(list.debugState().selectedItemId).toBe("a");
+		} finally {
+			setKeybindings(original);
+		}
+	});
+
+	it("j does not navigate when NOT bound (default)", () => {
+		const list = makeTestList();
+		list.handleInput("j");
+		// Without j/k binding, selection stays put (j goes to search field)
+		expect(list.debugState().selectedItemId).toBe("a");
+	});
+});

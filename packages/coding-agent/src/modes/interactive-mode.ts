@@ -464,6 +464,7 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiSelectVimKeys,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
@@ -505,6 +506,7 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"tui.select.vimKeys": cfgTuiSelectVimKeys,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,

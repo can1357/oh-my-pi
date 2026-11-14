@@ -204,6 +204,39 @@ function wordEnd(text: string, col: number): number {
 	return Math.max(col, prevGraphemeStart(text, end));
 }
 
+/** Vim's `W`: move to start of next whitespace-delimited WORD. */
+function wordForwardBig(text: string, col: number): number {
+	let i = col;
+	const len = text.length;
+	// Skip current WORD (non-whitespace run).
+	while (i < len && !/\s/.test(text.charAt(i))) i++;
+	// Skip whitespace to next WORD.
+	while (i < len && /\s/.test(text.charAt(i))) i++;
+	return i;
+}
+
+/** Vim's `E`: move to end of current/next whitespace-delimited WORD. */
+function wordEndBig(text: string, col: number): number {
+	let i = col;
+	const len = text.length;
+	// If on whitespace, skip to next WORD.
+	while (i < len && /\s/.test(text.charAt(i))) i++;
+	// Move to end of WORD.
+	while (i < len && !/\s/.test(text.charAt(i))) i++;
+	// Step back one grapheme to last char of WORD.
+	return prevGraphemeStart(text, i);
+}
+
+/** Vim's `B`: move to start of previous whitespace-delimited WORD. */
+function wordBackwardBig(text: string, col: number): number {
+	let i = col;
+	// Skip whitespace before cursor.
+	while (i > 0 && /\s/.test(text.charAt(prevGraphemeStart(text, i)))) i = prevGraphemeStart(text, i);
+	// Skip WORD before cursor.
+	while (i > 0 && !/\s/.test(text.charAt(prevGraphemeStart(text, i)))) i = prevGraphemeStart(text, i);
+	return i;
+}
+
 /** End-exclusive span an `iw`/`a(`-style text object resolves to. */
 interface TextObjectRange {
 	from: VimPosition;
@@ -921,6 +954,21 @@ export class VimState {
 			case "e": {
 				let col = buf.cursorCol;
 				for (let i = 0; i < count; i++) col = wordEnd(line, col);
+				return { to: at(col), inclusive: true, linewise: false };
+			}
+			case "W": {
+				let col = buf.cursorCol;
+				for (let i = 0; i < count; i++) col = wordForwardBig(line, col);
+				return { to: at(col), inclusive: false, linewise: false };
+			}
+			case "B": {
+				let col = buf.cursorCol;
+				for (let i = 0; i < count; i++) col = wordBackwardBig(line, col);
+				return { to: at(col), inclusive: false, linewise: false };
+			}
+			case "E": {
+				let col = buf.cursorCol;
+				for (let i = 0; i < count; i++) col = wordEndBig(line, col);
 				return { to: at(col), inclusive: true, linewise: false };
 			}
 			case "%": {
