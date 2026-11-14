@@ -45,6 +45,10 @@ describe("htmlToPaste", () => {
 		expect(htmlToPaste(html)).toEqual(["see diagram here"]);
 	});
 
+	it("keeps the space of a blank span and drops a blank style element", () => {
+		expect(htmlToPaste("<p>Hello<span> </span>world<style> </style>!</p>")).toEqual(["Hello world!"]);
+	});
+
 	it("has nothing to paste for markup without text or images", () => {
 		expect(htmlToPaste("<div> <br> </div>")).toBeUndefined();
 	});
