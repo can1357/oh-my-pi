@@ -3865,18 +3865,28 @@ mod tests {
 			assert!(fs::symlink_metadata(path(&dest)).unwrap().file_type().is_symlink(), "{flag}");
 		}
 
-		let (code, capture) = run_util::<Cp>(&["-dRL", "root-link", "out_dRL"], "", fixture.path());
-		assert_eq!(code, 0, "{}", capture.err());
-		assert_eq!(
-			fs::metadata(path("out_dRL/f1")).unwrap().ino(),
-			fs::metadata(path("out_dRL/f2")).unwrap().ino()
-		);
-		assert!(
-			!fs::symlink_metadata(path("out_dRL/inner"))
-				.unwrap()
-				.file_type()
-				.is_symlink()
-		);
+		for (flag, operand, inner_is_symlink) in [
+			("-dRL", "root-link", false),
+			("-dRH", "root-link", true),
+			("-dRP", "src", true),
+		] {
+			let dest = format!("out_{}", &flag[1..]);
+			let (code, capture) = run_util::<Cp>(&[flag, operand, &dest], "", fixture.path());
+			assert_eq!(code, 0, "{flag}: {}", capture.err());
+			assert_eq!(
+				fs::metadata(path(&format!("{dest}/f1"))).unwrap().ino(),
+				fs::metadata(path(&format!("{dest}/f2"))).unwrap().ino(),
+				"{flag}"
+			);
+			assert_eq!(
+				fs::symlink_metadata(path(&format!("{dest}/inner")))
+					.unwrap()
+					.file_type()
+					.is_symlink(),
+				inner_is_symlink,
+				"{flag}"
+			);
+		}
 	}
 
 	#[test]
