@@ -158,6 +158,8 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = PYTHON_KERNEL_CANCEL_BUDGET_MS + 1_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+/** Recheck interval while a prompt waits behind a run no client prompt owns. Exported for tests. */
+export const ACP_UNOWNED_RUN_POLL_MS = 50;
 
 /**
  * `<agentDir>/acp-session-handles.json` maps ACP handles whose durable session an
@@ -402,6 +404,10 @@ type ManagedSessionRecord = {
 	// inside the dispatch window). Marked by cancel(); consumed at slot
 	// creation so a stop never leaves a prompt streaming behind the client's back.
 	pendingPromptDispatches: Array<PromptDispatchCancellation>;
+	// Abort cancel() started for a run no client prompt owns. A prompt held behind
+	// that run waits for it before settling, so its own cancel cleanup never
+	// overlaps it (AgentSession.abort() does not coalesce concurrent calls).
+	unownedRunAbort: Promise<void> | undefined;
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
@@ -1289,6 +1295,7 @@ export class AcpAgent implements Agent {
 					await previousTurn.cleanup;
 				}
 				this.#throwIfRecordClosed(record);
+				await this.#holdBehindUnownedRun(record, cancellation);
 
 				const converted = this.#convertPromptBlocks(params.prompt);
 				const pendingPrompt = Promise.withResolvers<PromptResponse>();
@@ -1357,6 +1364,40 @@ export class AcpAgent implements Agent {
 		}
 	}
 
+	/**
+	 * Hold a client prompt while a run no client prompt owns (background-job wake,
+	 * IRC, scheduler) streams. Dispatching into it fails with AgentBusyError, and a
+	 * steer could strand on the deferred queue once that run ends, so the prompt
+	 * waits and then runs as an ordinary client-owned turn. The client is told it
+	 * is queued; cancel() aborts the run and marks the dispatch cancelled, which
+	 * the caller settles without running the prompt.
+	 */
+	async #holdBehindUnownedRun(record: ManagedSessionRecord, cancellation: PromptDispatchCancellation): Promise<void> {
+		if (!record.session.isStreaming || cancellation.cancelled) {
+			return;
+		}
+		await this.#connection.sessionUpdate({
+			sessionId: record.protocolSessionId,
+			update: {
+				sessionUpdate: "agent_thought_chunk",
+				content: { type: "text", text: "Queued: your message runs when the current turn finishes." },
+				messageId: crypto.randomUUID(),
+			},
+		});
+		// Poll instead of awaiting waitForIdle(): cancel() and closeSession() must
+		// release this prompt even when the run never unwinds, and `isStreaming`
+		// also counts prompt setup that waitForIdle() does not wait on.
+		while (record.session.isStreaming && !cancellation.cancelled && !record.closedError) {
+			await Bun.sleep(ACP_UNOWNED_RUN_POLL_MS);
+		}
+		// A closed record throws below without starting cleanup of its own, so it
+		// has no abort to wait for.
+		if (!record.closedError) {
+			await record.unownedRunAbort;
+		}
+		this.#throwIfRecordClosed(record);
+	}
+
 	async #queuePrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
 		const nextQueue = Promise.withResolvers<void>();
 		const releaseQueue = nextQueue.resolve;
@@ -1366,8 +1407,10 @@ export class AcpAgent implements Agent {
 			release: releaseQueue,
 		};
 		await previousQueue.promise;
-		this.#throwIfRecordClosed(record);
 		try {
+			// Inside the try: a closed record must still release this slot, or every
+			// prompt queued behind it waits forever.
+			this.#throwIfRecordClosed(record);
 			return await run();
 		} finally {
 			releaseQueue();
@@ -1586,6 +1629,12 @@ export class AcpAgent implements Agent {
 		if (!record.session.isStreaming) {
 			return;
 		}
+		// A repeated stop joins the abort already in flight instead of starting
+		// another one alongside it.
+		if (record.unownedRunAbort) {
+			await record.unownedRunAbort;
+			return;
+		}
 		// Autonomous run (steer-triggered follow-up, IRC wake, scheduler turn):
 		// no client promptTurn owns it, so #beginCancelCleanup has nothing to
 		// settle — but the client's stop is still an explicit interrupt. Abort
@@ -1596,6 +1645,9 @@ export class AcpAgent implements Agent {
 			() => timeoutGate.reject(new Error("ACP cancel cleanup timed out")),
 			this.#cancelCleanupTimeoutMs,
 		);
+		const aborted = Promise.withResolvers<void>();
+		record.unownedRunAbort = aborted.promise;
+		let closing: Promise<void> | undefined;
 		try {
 			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeoutGate.promise]);
 		} catch (error: unknown) {
@@ -1603,10 +1655,17 @@ export class AcpAgent implements Agent {
 				acpSessionId: record.protocolSessionId,
 				error,
 			});
-			await this.#closeManagedSession(record.protocolSessionId, record);
+			// Close marks the record closed synchronously. Release held prompts
+			// before waiting on teardown, which has no deadline of its own.
+			closing = this.#closeManagedSession(record.protocolSessionId, record);
 		} finally {
 			clearTimeout(timer);
+			if (record.unownedRunAbort === aborted.promise) {
+				record.unownedRunAbort = undefined;
+			}
+			aborted.resolve();
 		}
+		await closing;
 	}
 
 	/**
@@ -2007,6 +2066,7 @@ export class AcpAgent implements Agent {
 			closedError: undefined,
 			promptEventHandlers: new Set(),
 			pendingPromptDispatches: [],
+			unownedRunAbort: undefined,
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
 			commandMetadataUnsubscribe: undefined,

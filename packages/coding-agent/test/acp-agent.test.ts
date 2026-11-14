@@ -18,6 +18,7 @@ import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as oauthFlowModule from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
+	ACP_UNOWNED_RUN_POLL_MS,
 	AcpAgent,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
@@ -3484,31 +3485,209 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("maps agent-busy rejections to a typed session_busy error instead of internalError", async () => {
+	/** Resolves once the prompt reports it is held behind an unowned run. */
+	async function heldNotices(harness: AgentHarness, sessionId: string, count: number): Promise<void> {
+		const held = () =>
+			harness.updates.filter(
+				update =>
+					update.sessionId === sessionId &&
+					update.update.sessionUpdate === "agent_thought_chunk" &&
+					update.update.content.type === "text" &&
+					update.update.content.text.startsWith("Queued"),
+			).length;
+		for (let i = 0; i < 200 && held() < count; i++) await Bun.sleep(0);
+		expect(held()).toBe(count);
+	}
+
+	it("queues a prompt behind an autonomous run and runs it as a client turn once that run ends", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// Autonomous turns stream without an owning ACP promptTurn, so prompt()'s
-		// implicit-cancel guard never fires. Mirror AgentSession's contract: a
-		// bare prompt while streaming throws AgentBusyError.
+		// Autonomous run (background-job wake, IRC, scheduler): streaming with no
+		// ACP promptTurn owning it. AgentSession refuses a bare prompt meanwhile.
 		session.isStreaming = true;
-		session.prompt = async (): Promise<boolean> => {
+		const realPrompt = session.prompt.bind(session);
+		session.prompt = async (text: string): Promise<boolean> => {
 			if (session.isStreaming) throw new AgentBusyError();
-			return true;
+			return await realPrompt(text);
 		};
 
-		const error = await harness.agent
+		let settled = false;
+		const response = harness.agent
 			.prompt({
 				sessionId: created.sessionId,
 				prompt: [{ type: "text", text: "ping during autonomous turn" }],
 			} as PromptRequest)
-			.catch((reason: unknown) => reason);
+			.finally(() => {
+				settled = true;
+			});
+		await heldNotices(harness, created.sessionId, 1);
 
-		expect(error).toBeInstanceOf(RequestError);
-		const requestError = error as RequestError;
-		expect(requestError.code).toBe(-32003);
-		expect(requestError.message).toContain("already processing");
-		expect(requestError.data).toEqual({ reason: "session_busy", hint: "steer|followUp|wait" });
+		// Held, not failed, and not dispatched while the run streams.
+		expect(settled).toBe(false);
+		expect(session.promptCalls).toEqual([]);
+
+		session.isStreaming = false;
+		expect(await response).toMatchObject({ stopReason: "end_turn" });
+		expect(session.promptCalls).toEqual(["ping during autonomous turn"]);
+		expect(
+			harness.updates.some(
+				update =>
+					update.update.sessionUpdate === "agent_message_chunk" &&
+					update.update.content.type === "text" &&
+					update.update.content.text === "pong",
+			),
+		).toBe(true);
+	});
+
+	it("cancels a held prompt without running it even when the session never reports idle", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+		// The abort stops the run, but idle bookkeeping never settles: the hold
+		// must not depend on waitForIdle() to observe the cancel.
+		session.abort = async () => {
+			session.isStreaming = false;
+		};
+		session.waitForIdleBlocker = () => new Promise<void>(() => {});
+
+		const response = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "never runs" }],
+		} as PromptRequest);
+		await heldNotices(harness, created.sessionId, 1);
+		await harness.agent.cancel({ sessionId: created.sessionId });
+
+		expect(await response).toMatchObject({ stopReason: "cancelled" });
+		expect(session.promptCalls).toEqual([]);
+	});
+
+	it("lets cancel's abort of the autonomous run finish before a held prompt runs its own cleanup", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+		const releaseFirstAbort = Promise.withResolvers<void>();
+		let aborts = 0;
+		let firstAbortDone = false;
+		let overlapped = false;
+		session.abort = async () => {
+			aborts++;
+			if (aborts === 1) {
+				await releaseFirstAbort.promise;
+				session.isStreaming = false;
+				firstAbortDone = true;
+				return;
+			}
+			if (!firstAbortDone) overlapped = true;
+		};
+
+		let settled = false;
+		const response = harness.agent
+			.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "never runs" }] } as PromptRequest)
+			.finally(() => {
+				settled = true;
+			});
+		await heldNotices(harness, created.sessionId, 1);
+		const cancelled = harness.agent.cancel({ sessionId: created.sessionId });
+		// Real time on purpose: the hold notices the cancel on its own poll timer,
+		// so proving it does not start a second abort means letting several polls pass.
+		for (let i = 0; i < 4 && aborts < 2; i++) await Bun.sleep(ACP_UNOWNED_RUN_POLL_MS);
+		expect(aborts).toBe(1);
+		expect(settled).toBe(false);
+
+		releaseFirstAbort.resolve();
+		await cancelled;
+		expect(await response).toMatchObject({ stopReason: "cancelled" });
+		expect(overlapped).toBe(false);
+		expect(session.promptCalls).toEqual([]);
+	});
+
+	it("joins a repeated stop to the abort already in flight for the autonomous run", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+		const releaseFirstAbort = Promise.withResolvers<void>();
+		let aborts = 0;
+		let firstAbortDone = false;
+		let overlapped = false;
+		session.abort = async () => {
+			aborts++;
+			if (aborts === 1) {
+				await releaseFirstAbort.promise;
+				session.isStreaming = false;
+				firstAbortDone = true;
+				return;
+			}
+			if (!firstAbortDone) overlapped = true;
+		};
+
+		const response = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "never runs" }],
+		} as PromptRequest);
+		await heldNotices(harness, created.sessionId, 1);
+		const firstStop = harness.agent.cancel({ sessionId: created.sessionId });
+		const secondStop = harness.agent.cancel({ sessionId: created.sessionId });
+		// Real time on purpose, as above: the hold observes both stops on its poll timer.
+		for (let i = 0; i < 4 && aborts < 2; i++) await Bun.sleep(ACP_UNOWNED_RUN_POLL_MS);
+		expect(aborts).toBe(1);
+
+		releaseFirstAbort.resolve();
+		await Promise.all([firstStop, secondStop]);
+		expect(await response).toMatchObject({ stopReason: "cancelled" });
+		expect(overlapped).toBe(false);
+	});
+
+	it("settles a held prompt when the stop's abort times out, without waiting for session teardown", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		harness.agent.setCancelCleanupTimeoutForTesting(10);
+		session.isStreaming = true;
+		session.abort = () => new Promise<void>(() => {});
+		const releaseDispose = Promise.withResolvers<void>();
+		const dispose = session.dispose.bind(session);
+		session.dispose = async () => {
+			await releaseDispose.promise;
+			await dispose();
+		};
+
+		const response = harness.agent
+			.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "never runs" }] } as PromptRequest)
+			.then(
+				() => "resolved",
+				() => "rejected",
+			);
+		await heldNotices(harness, created.sessionId, 1);
+		const stop = harness.agent.cancel({ sessionId: created.sessionId });
+
+		expect(await response).toBe("rejected");
+		expect(session.promptCalls).toEqual([]);
+		releaseDispose.resolve();
+		await stop;
+	});
+
+	it("settles every prompt queued behind an autonomous run when the session closes", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		const responses = ["first", "second", "third"].map(text =>
+			harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text }] } as PromptRequest).then(
+				response => ({ settled: "resolved" as const, response }),
+				(error: unknown) => ({ settled: "rejected" as const, error }),
+			),
+		);
+		await heldNotices(harness, created.sessionId, 1);
+		await harness.agent.closeSession({ sessionId: created.sessionId });
+
+		const outcomes = await Promise.all(responses);
+		expect(outcomes.map(outcome => outcome.settled)).toEqual(["rejected", "rejected", "rejected"]);
+		expect(session.promptCalls).toEqual([]);
 	});
 
 	it("keeps closeSession gated while cancel cleanup is pending", async () => {
