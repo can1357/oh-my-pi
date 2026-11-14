@@ -39,6 +39,8 @@ import { formatTextPatch } from "./patch";
 
 /** Files above this size are selected whole, without line attribution. */
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
+/** Git mode of a symlink. */
+const SYMLINK_MODE = "120000";
 /** Tolerance when matching a file's mtime to a tool call window (event and fs clock skew). */
 const WINDOW_SLACK_MS = 1500;
 /** Concurrent file reads while building a draft. */
@@ -62,11 +64,24 @@ export interface DraftSource {
 	signal?: AbortSignal;
 }
 
+/** A file's text and git mode (`100644`, `100755`) on one side of a change. */
+export interface FileState {
+	text: string;
+	mode: string;
+}
+
 /** Content to commit for one path; produced by {@link Draft.selection}. */
 export type SelectedChange =
-	| { kind: "text"; path: string; head: string | null; content: string | null; mode: string }
-	/** Binary, non-UTF-8, or oversized file committed as its current worktree state. */
-	| { kind: "whole"; path: string; untracked: boolean };
+	/** HEAD's state (`null`: absent) → the selected state (`null`: deleted). */
+	| { kind: "text"; path: string; before: FileState | null; after: FileState | null }
+	/** Committed as its current worktree state; `added` when HEAD lacks the path. */
+	| { kind: "whole"; path: string; added: boolean };
+
+/**
+ * Why a file has no line attribution and is committed whole: binary, non-UTF-8, or oversized
+ * content; a symlink on either side; or a mode change with identical content.
+ */
+type WholeReason = "content" | "symlink" | "mode";
 
 /** What to select or deselect: a path (exact, glob, or unique suffix), hunk/unit ids, and/or a regex over change lines. */
 export interface SelectionTarget {
@@ -78,12 +93,15 @@ export interface SelectionTarget {
 
 interface FileChange {
 	path: string;
-	untracked: boolean;
 	head: string | null;
 	work: string | null;
-	/** Mode for the file if the commit creates it. */
-	mode: string;
-	/** Line attribution; absent for binary, non-UTF-8, or oversized files, which select whole. */
+	/** Git mode at HEAD; `null` when HEAD lacks the path. */
+	headMode: string | null;
+	/** Git mode in the worktree; `null` when the file is deleted. */
+	mode: string | null;
+	/** Set exactly when `attribution` is absent: the file selects whole. */
+	whole?: WholeReason;
+	/** Line attribution of the content change. */
 	attribution?: Attribution;
 	classification?: Classification;
 	selected: Set<number>;
@@ -221,15 +239,15 @@ async function loadEdits(
 
 /**
  * Build a draft of the repository's current changes for the agents in scope.
- * @throws when `cwd` is not inside a git checkout, HEAD is unborn, or the scope names an unknown agent.
+ * @throws when `cwd` is not inside a git checkout or the scope names an unknown agent.
  */
 export async function createDraft(source: DraftSource): Promise<Draft> {
 	if (vcs.isPureJj(source.cwd)) throw new Error("Selective commits need git; this is a Jujutsu workspace.");
 	const repo = vcs.git(source.cwd);
 	if (!repo) throw new Error(`Not inside a git repository: ${source.cwd}`);
 	const root = repo.info().repoRoot;
-	const [head, branch] = await Promise.all([repo.headSha(source.signal), repo.currentBranch(source.signal)]);
-	if (!head) throw new Error("HEAD has no commit yet; make the initial commit with git.");
+	const [headSha, branch] = await Promise.all([repo.headSha(source.signal), repo.currentBranch(source.signal)]);
+	const head = headSha ?? null;
 
 	const records = source.journal ? await source.journal.read() : [];
 	const parents = new Map<string, string | undefined>();
@@ -247,11 +265,23 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 	};
 
 	const realRoot = await fs.realpath(root).catch(() => root);
+	// Journaled paths keep the spelling the agent used, which may run through a symlinked
+	// directory (`~/.agent` → `~/.dotfiles/agent`). Resolve the directory, not the file: the
+	// file may be a symlink itself or already deleted.
+	const realDirs = new Map<string, string>();
 	const byPath = new Map<string, ChangeRecord[]>();
 	for (const record of records) {
 		if (record.type !== "change") continue;
 		let rel = path.relative(root, record.path);
-		if (rel.startsWith("..") || path.isAbsolute(rel)) rel = path.relative(realRoot, record.path);
+		if (rel.startsWith("..") || path.isAbsolute(rel)) {
+			const dir = path.dirname(record.path);
+			let realDir = realDirs.get(dir);
+			if (realDir === undefined) {
+				realDir = await fs.realpath(dir).catch(() => dir);
+				realDirs.set(dir, realDir);
+			}
+			rel = path.relative(realRoot, path.join(realDir, path.basename(record.path)));
+		}
 		if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
 		rel = rel.split(path.sep).join("/");
 		const list = byPath.get(rel);
@@ -264,10 +294,24 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 		repo.changedFiles({ cached: true }, source.signal),
 	]);
 	const dirty = parseDirtyPathsWithStatus(statusText);
+	const tracked = dirty.filter(entry => !entry.untracked).map(entry => entry.path);
+	const headModes = new Map(
+		head && tracked.length > 0
+			? (await repo.lsTree(head, tracked, source.signal)).map(entry => [entry.path, entry.mode])
+			: [],
+	);
 	const files: FileChange[] = [];
 	const skipped: string[] = [];
-	const load = async (entry: { path: string; untracked: boolean }) => {
-		const result = await loadFile(repo, root, head, entry, byPath.get(entry.path) ?? [], source.journal, windowCall);
+	const load = async (entry: { path: string }) => {
+		const result = await loadFile(
+			repo,
+			root,
+			{ sha: head, mode: headModes.get(entry.path) ?? null },
+			entry.path,
+			byPath.get(entry.path) ?? [],
+			source.journal,
+			windowCall,
+		);
 		if (result === "skip") skipped.push(entry.path);
 		else if (result) files.push(result);
 	};
@@ -303,50 +347,58 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 	});
 }
 
+/**
+ * One changed path of the worktree against `head` (`sha: null` on an unborn HEAD; `mode: null`
+ * when HEAD lacks the path). `"skip"` for submodules and other directories.
+ */
 async function loadFile(
 	repo: VcsGitRepo,
 	root: string,
-	head: string,
-	entry: { path: string; untracked: boolean },
+	head: { sha: string | null; mode: string | null },
+	file: string,
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
 	windowCall: (ms: number | undefined) => CallRecord | undefined,
 ): Promise<FileChange | "skip" | undefined> {
-	const absolute = path.join(root, entry.path);
+	const absolute = path.join(root, file);
 	let workBytes: Uint8Array | null = null;
 	let mtimeMs: number | undefined;
-	let mode = "100644";
+	let mode: string | null = null;
 	try {
 		const stat = await fs.lstat(absolute);
-		if (!stat.isFile()) return "skip";
 		mtimeMs = stat.mtimeMs;
-		if (stat.mode & 0o111) mode = "100755";
-		workBytes = await fs.readFile(absolute);
+		if (stat.isSymbolicLink()) mode = SYMLINK_MODE;
+		else if (!stat.isFile()) return "skip";
+		else {
+			mode = stat.mode & 0o111 ? "100755" : "100644";
+			workBytes = await fs.readFile(absolute);
+		}
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
-	let headBytes: Uint8Array | null = null;
-	try {
-		headBytes = (await repo.showBlob(`${head}:${entry.path}`)).data;
-	} catch (error) {
-		if (!(vcs.isVcsError(error) && error.code === "ObjectNotFound")) throw error;
-	}
-	if (headBytes === null && workBytes === null) return undefined;
-	const editors = [...new Set(records.map(record => record.agent))];
-	const headText = headBytes === null ? null : decodeText(headBytes);
-	const workText = workBytes === null ? null : decodeText(workBytes);
+	if (head.mode === null && mode === null) return undefined;
 	const base = {
-		path: entry.path,
-		untracked: entry.untracked,
+		path: file,
+		headMode: head.mode,
 		mode,
 		selected: new Set<number>(),
 		wholeSelected: false,
-		editors,
+		editors: [...new Set(records.map(record => record.agent))],
 	};
-	if (headText === undefined || workText === undefined) {
-		return { ...base, head: null, work: null, hint: records.length === 0 ? windowCall(mtimeMs) : undefined };
-	}
-	if (headText === workText) return undefined;
+	const whole = (reason: WholeReason): FileChange => ({
+		...base,
+		head: null,
+		work: null,
+		whole: reason,
+		hint: records.length === 0 ? windowCall(mtimeMs) : undefined,
+	});
+	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
+	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
+	const headBytes = head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`)).data : null;
+	const headText = headBytes === null ? null : decodeText(headBytes);
+	const workText = workBytes === null ? null : decodeText(workBytes);
+	if (headText === undefined || workText === undefined) return whole("content");
+	if (headText === workText) return head.mode === mode ? undefined : whole("mode");
 	const headLines = toLines(headText);
 	const workLines = toLines(workText);
 	const windowAgent = (ms: number | undefined) => windowCall(ms)?.agent;
@@ -363,7 +415,7 @@ async function loadFile(
 
 interface DraftInit {
 	root: string;
-	head: string;
+	head: string | null;
 	branch?: string;
 	caller: string;
 	scope: ReadonlySet<string>;
@@ -379,13 +431,37 @@ interface Counts {
 	removed: number;
 }
 
-function countOps(ops: Iterable<ChangeOp>): Counts {
+/**
+ * Line counts of `file`'s ops (all of them, or `ops`). A created or deleted file's final newline
+ * is an op of its own (an empty last line, see `toLines`) and is not counted as a line.
+ */
+function countOps(file: FileChange, ops: Iterable<ChangeOp> = file.attribution?.ops ?? []): Counts {
+	const last = file.attribution?.ops.at(-1);
+	const newline = (file.head === null || file.work === null) && last?.text === "" ? last : undefined;
 	const counts = { added: 0, removed: 0 };
 	for (const op of ops) {
+		if (op === newline) continue;
 		if (op.kind === "+") counts.added++;
 		else counts.removed++;
 	}
 	return counts;
+}
+
+/** ` mode 100644 → 100755` when a file that exists on both sides changes mode; empty otherwise. */
+function modeChange(file: FileChange): string {
+	return file.headMode && file.mode && file.headMode !== file.mode ? ` mode ${file.headMode} → ${file.mode}` : "";
+}
+
+/** What a whole-file change is, for the summary and `show()`. */
+function wholeLabel(file: FileChange): string {
+	switch (file.whole) {
+		case "symlink":
+			return "symlink";
+		case "mode":
+			return `file,${modeChange(file)}`;
+		default:
+			return "binary, non-UTF-8, or large file";
+	}
 }
 
 function formatCounts(counts: Counts): string {
@@ -399,15 +475,15 @@ function formatCounts(counts: Counts): string {
 export class Draft {
 	readonly id = `d${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
 	readonly root: string;
-	/** HEAD commit the draft was computed against. */
-	readonly head: string;
+	/** HEAD commit the draft was computed against; `null` before the first commit. */
+	readonly head: string | null;
 	readonly branch?: string;
 	readonly caller: string;
 	readonly scope: ReadonlySet<string>;
 	readonly agents: DraftInit["agents"];
 	/** Paths whose shared-index entry differs from HEAD (someone staged them); never committed by this draft. */
 	readonly staged: readonly string[];
-	/** Paths the draft cannot handle (symlinks, submodules, directories). */
+	/** Paths the draft cannot handle (submodules, nested repositories). */
 	readonly skipped: readonly string[];
 	#files: FileChange[];
 
@@ -433,13 +509,17 @@ export class Draft {
 		const changes: SelectedChange[] = [];
 		for (const file of this.#files) {
 			if (!file.attribution) {
-				if (file.wholeSelected) changes.push({ kind: "whole", path: file.path, untracked: file.untracked });
+				if (file.wholeSelected) changes.push({ kind: "whole", path: file.path, added: file.headMode === null });
 				continue;
 			}
 			if (file.selected.size === 0) continue;
 			const content = fromLines(buildContent(file.attribution, file.selected));
-			if (content === file.head) continue;
-			changes.push({ kind: "text", path: file.path, head: file.head, content, mode: file.mode });
+			// A partly reverted deletion keeps the file, with its HEAD mode.
+			const mode = file.mode ?? file.headMode;
+			const before = file.head === null || file.headMode === null ? null : { text: file.head, mode: file.headMode };
+			const after = content === null || mode === null ? null : { text: content, mode };
+			if (before?.text === after?.text && before?.mode === after?.mode) continue;
+			changes.push({ kind: "text", path: file.path, before, after });
 		}
 		return changes;
 	}
@@ -555,7 +635,7 @@ export class Draft {
 		const running = this.agents.filter(agent => agent.inScope && agent.running).map(agent => agent.id);
 		const scopeNames = [...this.scope].join(", ");
 		const lines = [
-			`HEAD ${this.head.slice(0, 10)}${this.branch ? ` on ${this.branch}` : ""} · scope: ${scopeNames}` +
+			`HEAD ${this.head?.slice(0, 10) ?? "(no commits yet)"}${this.branch ? ` on ${this.branch}` : ""} · scope: ${scopeNames}` +
 				(running.length > 0 ? ` (still running: ${running.join(", ")})` : ""),
 		];
 		const selected: string[] = [];
@@ -580,7 +660,7 @@ export class Draft {
 		}
 		const tail = [`Not yours: ${notYours} path(s).`];
 		if (this.staged.length > 0) tail.push(`Staged by others: ${this.staged.length} path(s), left staged.`);
-		if (this.skipped.length > 0) tail.push(`Skipped: ${this.skipped.join(", ")} (symlink/submodule; use git).`);
+		if (this.skipped.length > 0) tail.push(`Skipped: ${this.skipped.join(", ")} (submodule or nested repository).`);
 		lines.push(tail.join(" "));
 		return lines.join("\n");
 	}
@@ -588,7 +668,7 @@ export class Draft {
 	#describeFile(file: FileChange): { selected?: string; review: string[]; outOfScopeAgents: Set<string> } {
 		const outOfScopeAgents = new Set(file.editors.filter(agent => !this.scope.has(agent)));
 		if (!file.attribution) {
-			const label = file.head === null && file.work === null ? "binary/large file" : "file";
+			const label = wholeLabel(file);
 			if (file.wholeSelected) return { selected: `  ✓ ${file.path}  whole ${label}`, review: [], outOfScopeAgents };
 			const reason = file.hint
 				? `modified during ${describeCall(file.hint)}`
@@ -614,7 +694,7 @@ export class Draft {
 		});
 		if (chosen.length === 0 && file.hint && review.length === 0) {
 			review.push(
-				`  ? ${file.path}  ${formatCounts(countOps(ops))}; no edit record; modified during ${describeCall(file.hint)}`,
+				`  ? ${file.path}  ${formatCounts(countOps(file))}${modeChange(file)}; no edit record; modified during ${describeCall(file.hint)}`,
 			);
 		}
 		for (const op of ops) {
@@ -624,10 +704,10 @@ export class Draft {
 		const leftOut = ops.filter(op => !file.selected.has(op.id));
 		const owners = [...new Set(chosen.map(op => (op.by.startsWith("~") && op.hint ? op.hint : op.by)))];
 		const mark = leftOut.length === 0 ? "✓" : "◐";
-		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(chosen))}`;
+		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(file, chosen))}${modeChange(file)}`;
 		if (leftOut.length > 0) {
 			const others = [...new Set(leftOut.map(op => actorName(op.by)))];
-			line += ` of ${formatCounts(countOps(ops))}; left out: ${others.join(", ")}`;
+			line += ` of ${formatCounts(countOps(file))}; left out: ${others.join(", ")}`;
 		}
 		return { selected: `${line}  [${owners.map(actorName).join(", ")}]`, review, outOfScopeAgents };
 	}
@@ -654,12 +734,14 @@ export class Draft {
 		if (!file.attribution) {
 			const mark = file.wholeSelected ? "✓" : file.hint ? "?" : "·";
 			const hint = file.hint ? `; modified during ${describeCall(file.hint)}` : "";
-			return `${file.path}  whole-file change (binary, non-UTF-8, or large)${hint}\n  1 ${mark} whole file`;
+			return `${file.path}  whole-file change (${wholeLabel(file)})${hint}\n  1 ${mark} whole file`;
 		}
 		const { ops, hunks } = file.attribution;
 		const status = file.classification?.status ?? [];
 		const chosen = ops.filter(op => file.selected.has(op.id));
-		const lines = [`${file.path}  ${formatCounts(countOps(chosen))} of ${formatCounts(countOps(ops))} selected`];
+		const lines = [
+			`${file.path}  ${formatCounts(countOps(file, chosen))} of ${formatCounts(countOps(file))} selected${modeChange(file)}`,
+		];
 		hunks.forEach((hunk, hunkIndex) => {
 			const headRange = `${hunk.headStart + (hunk.headCount > 0 ? 1 : 0)},${hunk.headCount}`;
 			const workRange = `${hunk.workStart + (hunk.workCount > 0 ? 1 : 0)},${hunk.workCount}`;
@@ -692,7 +774,7 @@ export class Draft {
 	diff(): string {
 		const parts = this.selection().map(change =>
 			change.kind === "text"
-				? formatTextPatch(change.path, change.head, change.content, change.mode)
+				? formatTextPatch(change.path, change.before, change.after)
 				: `diff --git a/${change.path} b/${change.path}\n(whole-file change committed as in the worktree)\n`,
 		);
 		return parts.join("") || "Nothing selected.";

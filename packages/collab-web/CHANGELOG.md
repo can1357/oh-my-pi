@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
 ### Fixed
 
-- Fixed guests retaining stale agents, tool cards, and working state after a failed rejoin; guests now retry the welcome handshake within the automatic rejoin limit and correctly restore the current session state.
+- Fixed guests retaining stale agents, tool cards, and working state after a failed rejoin; guests now reliably restore the current session state when reconnecting.
 
 ## [18.19.0] - 2026-11-12
 
