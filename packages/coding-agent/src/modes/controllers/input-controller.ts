@@ -86,6 +86,7 @@ import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
+	cfgComposerRestoreInterruptedPrompt,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -362,7 +363,42 @@ export class InputController {
 	};
 
 	#abortStreamingTurn(): void {
-		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, retake: this.#retakeEnabled() });
+	}
+
+	/** Whether an interrupt may take the turn it stopped back off the transcript
+	 *  and hand its prompt to the composer; both halves ride one decision. */
+	#retakeEnabled(): boolean {
+		return !(isSettingsInitialized() && !cfgComposerRestoreInterruptedPrompt.get(settings));
+	}
+
+	/**
+	 * The prompt of the turn an interrupt is stopping, when Esc should hand it
+	 * back: the operator's own words, available only while that turn is still the
+	 * conversation's last one and inside its first thinking block (the session
+	 * reports nothing once the model has committed to an answer, or once anything
+	 * was steered in behind the prompt).
+	 */
+	#interruptedTurnPrompt(): RestoredQueuedMessage | undefined {
+		if (!this.#retakeEnabled()) return undefined;
+		return this.ctx.session.getInterruptiblePrompt?.();
+	}
+
+	/**
+	 * Esc on a live turn: hand the prompt that started it back to the composer,
+	 * then stop the turn. An interrupt during reasoning is usually "that is not
+	 * what I meant", and the typed words are already in the transcript —
+	 * restoring them makes the correction an edit instead of a retype. They
+	 * merge ahead of whatever was typed since, exactly like the queued-message
+	 * restore, so a draft started mid-turn survives.
+	 */
+	#interruptStreamingTurn(): void {
+		const prompt = this.#interruptedTurnPrompt();
+		if (prompt) {
+			this.#restoreEntriesToEditor([prompt]);
+			this.ctx.ui.requestRender();
+		}
+		this.#abortStreamingTurn();
 	}
 
 	setupKeyHandlers(): void {
@@ -653,7 +689,7 @@ export class InputController {
 				// for the next prompt instead of starting a turn.
 				void this.ctx.eventController.stopAwaitingAsyncWork();
 			} else if (this.ctx.session.isStreaming) {
-				this.#abortStreamingTurn();
+				this.#interruptStreamingTurn();
 			} else if (this.ctx.editor.getText().trim()) {
 				// Esc must not destroy an in-progress draft.
 				this.ctx.lastEscapeTime = 0;
@@ -1122,10 +1158,10 @@ export class InputController {
 
 			// Empty submit while streaming with queued (or live-steered) messages:
 			// abort the active turn and let the post-unwind drain deliver the
-			// agent-core queue.
+			// agent-core queue. The composer is untouched, so the turn stays too.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
 				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, retake: false });
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 					this.ctx.ui.requestRender();
@@ -1652,7 +1688,7 @@ export class InputController {
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) {
 			if (target.isStreaming && target.hasInterruptibleInput) {
-				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, retake: false });
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -2308,9 +2344,16 @@ export class InputController {
 			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
 			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
 		];
+		// An interrupt that lands while the turn is still inside its first thinking
+		// block also hands back the prompt that started it — older than every
+		// message queued behind it, so it leads the restore. The abort below latches
+		// this same prompt (same tick, one read) and retracts the turn it opened, so
+		// the composer never keeps words the transcript still holds.
+		const interrupted = options?.abort ? this.#interruptedTurnPrompt() : undefined;
+		if (interrupted) allQueued.unshift(interrupted);
 		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
 		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, retake: this.#retakeEnabled() });
 		}
 		return restored;
 	}

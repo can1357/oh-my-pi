@@ -4123,17 +4123,25 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Hands back a prompt the session dropped before dispatch (an Esc abort,
-	 * usage preflight denial or the cost cap raced turn setup). The message was
-	 * never persisted, so the tree/branch selectors cannot offer it — remove the
-	 * optimistic transcript row and put the typed text back in the editor for editing.
-	 * A prompt with unsent follow-ups comes back as one `=>` list.
+	 * Hands back a prompt that left the conversation: dropped before dispatch (an
+	 * Esc abort, usage preflight denial or the cost cap raced turn setup), or the
+	 * opening prompt of a turn an interrupt took back before the model committed
+	 * to an answer. The message is not on the branch in either case, so the
+	 * tree/branch selectors cannot offer it — remove the optimistic transcript row
+	 * and put the typed text back in the editor for editing. A prompt with unsent
+	 * follow-ups comes back as one `=>` list.
 	 */
 	restoreDroppedPrompt(prompt: DroppedPrompt): void {
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(true);
+		}
+		if (prompt.retractedTurn) {
+			// The turn itself left the transcript: drop its live block too, or the
+			// rebuild below carries the cut-short reply back onto the screen.
+			this.streamingComponent = undefined;
+			this.streamingMessage = undefined;
 		}
 		this.rebuildChatFromMessages();
 		// A /btw inject keeps its own retry (its key re-arms and it reports the reason); handing it
