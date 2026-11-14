@@ -101,6 +101,7 @@
 
 ### Fixed
 
+- Bedrock requests now use a regional `baseUrl` region after ambient and guardrail regions and before the `us-east-1` fallback ([#18573](https://github.com/can1357/oh-my-pi/pull/18573) by [@nick-maderight](https://github.com/nick-maderight))
 - Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Perplexity sign-in in `/login` and the setup wizard rejecting an email address at the first prompt with "Choose sso or email"; enter your email address for a login code, or leave the prompt blank for browser SSO ([#18625](https://github.com/can1357/oh-my-pi/pull/18625) by [@joswha](https://github.com/joswha)).
 

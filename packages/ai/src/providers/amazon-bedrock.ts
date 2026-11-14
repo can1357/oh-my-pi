@@ -345,11 +345,11 @@ const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
 };
 
 /**
- * AWS's own regional host, which every bundled catalog entry carries as a required
- * placeholder `baseUrl` — no routing info, so its region segment is re-derived.
- * FIPS, VPC-endpoint and gateway hosts don't match and are used as configured.
+ * AWS's own regional host. Its region segment is re-derived from the resolved
+ * region so request signing and routing agree. FIPS, VPC-endpoint and gateway
+ * hosts don't match and are used as configured.
  */
-const AWS_REGIONAL_BEDROCK_HOST = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
+const AWS_REGIONAL_BEDROCK_HOST = /^bedrock-runtime\.([a-z0-9-]+)\.amazonaws\.com$/;
 
 /** Geo prefix of a cross-region inference-profile id, e.g. `eu.anthropic.…` → `eu`. */
 function inferenceProfileGeo(modelId: string): string | undefined {
@@ -391,21 +391,22 @@ function regionServesGeo(region: string, geo: string): boolean {
  * honored only when it can serve the profile's geo. If the ambient region is
  * absent or mismatched, a same-geo guardrail ARN region is used when available;
  * otherwise the geo default is used. `global.` profiles have no geo entry, so
- * the ambient region (or, when absent, a guardrail ARN's region or
- * `us-east-1`) is used unchanged.
+ * the ambient region, guardrail ARN region, and regional `baseUrl` region are
+ * tried in that order before `us-east-1`.
  */
-function resolveBedrockRegion(modelId: string, options: BedrockOptions): string {
-	const explicit = options.region || inferRegionFromBedrockArn(modelId);
+function resolveBedrockRegion(model: Model<"bedrock-converse-stream">, options: BedrockOptions): string {
+	const explicit = options.region || inferRegionFromBedrockArn(model.id);
 	if (explicit) return explicit;
 	const ambient = resolveAwsAmbientRegion(options.profile);
 	const guardrailRegion = inferRegionFromBedrockArn(options.guardrailIdentifier ?? "");
-	const geo = inferenceProfileGeo(modelId);
+	const geo = inferenceProfileGeo(model.id);
 	if (geo) {
 		if (ambient && regionServesGeo(ambient, geo)) return ambient;
 		if (guardrailRegion && regionServesGeo(guardrailRegion, geo)) return guardrailRegion;
 		return INFERENCE_PROFILE_GEO_DEFAULT_REGION[geo];
 	}
-	return ambient || guardrailRegion || "us-east-1";
+	const baseUrlRegion = model.baseUrl ? AWS_REGIONAL_BEDROCK_HOST.exec(new URL(model.baseUrl).host)?.[1] : undefined;
+	return ambient || guardrailRegion || baseUrlRegion || "us-east-1";
 }
 
 type Block = (TextContent | ThinkingContent | ToolCall) & {
@@ -761,7 +762,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		let requestLocation: { region: string; base: URL } | undefined;
 		const getRequestLocation = (): { region: string; base: URL } => {
 			if (!requestLocation) {
-				const region = resolveBedrockRegion(model.id, options);
+				const region = resolveBedrockRegion(model, options);
 				requestLocation = { region, base: resolveBedrockBaseUrl(model, region) };
 			}
 			return requestLocation;
@@ -825,7 +826,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		const blocks = output.content as Block[];
 		const contentIndexByBlockIndex = new Map<number, number>();
 		let rawRequestDump: RawHttpRequestDump | undefined;
-		const region = resolveBedrockRegion(model.id, options);
+		const region = resolveBedrockRegion(model, options);
 
 		try {
 			const base = resolveBedrockBaseUrl(model, region);
