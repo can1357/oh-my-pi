@@ -310,7 +310,7 @@ async function runPrintModeCore(
 	// are real in the headless runtime belong here: each runs a session API
 	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
 	// `session.retry`). Commands whose hooks would be stubs
-	// (`/reload-plugins` and friends) stay undispatched, and so does
+	// `/reload-plugins` and friends) stay undispatched, and so does
 	// `/stats`: its dashboard server is in-process (`Bun.serve` inside this
 	// one-shot run), so launching it would open a browser tab that dies with
 	// the process and report a success the run cannot deliver. Keeping the
@@ -319,7 +319,12 @@ async function runPrintModeCore(
 	// behavior of every undispatched command.
 	// Matched with the dispatcher's own parser, so `/compact:focus` and
 	// `/compact focus` are treated alike; `/mcp` dispatches only `reauth`.
-	const PRINT_DISPATCHED_COMMANDS: Record<string, true> = { compact: true, handoff: true, retry: true };
+	const PRINT_DISPATCHED_COMMANDS: Record<string, true> = {
+		changelog: true,
+		compact: true,
+		handoff: true,
+		retry: true,
+	};
 	/**
 	 * Dispatch a CLI-authored message as a local command, if it is one.
 	 * Only CLI-authored input (`messages`, the positional/-p args) is ever
@@ -328,9 +333,10 @@ async function runPrintModeCore(
 	 * from the pipe as a command — so it always prompts the model as text.
 	 * Commands outside the dispatched list keep the historic behavior of
 	 * prompting the model with the literal text. Returns whether the message
-	 * was consumed locally.
+	 * was consumed locally, with `true`; a leftover prompt the command built
+	 * (`/changelog summary`) with the prompt text to turn on instead.
 	 */
-	const dispatchCliMessage = async (message: string): Promise<boolean> => {
+	const dispatchCliMessage = async (message: string): Promise<boolean | string> => {
 		const parsed = parseSlashCommand(message);
 		const dispatched =
 			parsed !== null &&
@@ -356,8 +362,12 @@ async function runPrintModeCore(
 		const refusalBeforeCommand = session.costCapRefusal;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		// The allow-list only matches registered commands, so `false` (not a
-		// command) and a `{ prompt }` residual cannot occur; stay defensive.
-		if (result === false || "prompt" in result) return false;
+		// command) cannot occur; stay defensive. A `{ prompt }` residual is the
+		// command-rewritten user input (`/changelog summary` inlines the
+		// rendered changelog before the turn): the caller turns with it so the
+		// literal slash text never reaches the model.
+		if (result === false) return false;
+		if ("prompt" in result) return result.prompt;
 		if (result.failed) builtinFailed = true;
 		// A builtin that scheduled a real agent turn (`/retry`) admitted that
 		// turn: its answer (and stop reason) belong to this run.
@@ -498,8 +508,16 @@ async function runPrintModeCore(
 	// reached, prompt everything else.
 	for (const message of messages) {
 		if (strictMCPFailure) break;
-		if (await dispatchCliMessage(message)) {
+		const dispatched = await dispatchCliMessage(message);
+		if (dispatched === true) {
 			readinessDirty = true;
+			continue;
+		}
+		if (typeof dispatched === "string") {
+			// A command-rewritten prompt (`/changelog summary`) turns with the
+			// built text instead of the literal message.
+			readinessDirty = true;
+			await promptTurn(dispatched);
 			continue;
 		}
 		await promptTurn(message);
