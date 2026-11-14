@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))
 - Retry and F5 now retry a failed request after a provider refusal instead of reporting "Nothing to retry"; starting, clearing, or rewinding a conversation discards the old failure
 - Pressing Enter in `/resume` on a session recorded in a folder that has since been moved or deleted no longer does nothing: a session filed under the current folder is moved here and resumed, and any other one reports why it cannot be resumed
 - Leading `KEY=VALUE` environment assignments are now stripped when evaluating `deny` and `prompt` rules in `bash.patterns` so they cannot bypass command restrictions ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
