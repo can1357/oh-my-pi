@@ -25,6 +25,7 @@ import {
 	checkBoxQuestions,
 	createNativeJudge,
 	type ImageContent,
+	isGatewayCredentialsExhausted,
 	isJudgmentApi,
 	judgmentImagesWithin,
 	nativeJudgmentImageBounds,
@@ -164,8 +165,9 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
 
 /**
  * How long a candidate stays skipped after a rejection that persists until
- * something changes out of band: 401/403 credential, 402 billing cap, or 404
- * for a model the route no longer serves. Every judgment rebuilds the chain,
+ * something changes out of band: 401/403 credential, 402 billing cap, 404
+ * for a model the route no longer serves, or a gateway's 502
+ * `upstream_credentials_exhausted`. Every judgment rebuilds the chain,
  * so without this each call re-pays the rejected request (plus a
  * credential-rotation round trip) before reaching the next candidate.
  */
@@ -1037,9 +1039,11 @@ export function warnIfHedgeShadowed(hedgeAfterMs: number, attemptTimeoutMs: numb
 
 /**
  * Reason for a rejection the route keeps answering until something changes out of band — a credential or
- * billing rejection of the account, or a 404 for a model the route does not serve — else `undefined`.
+ * billing rejection of the account, a 404 for a model the route does not serve, or a gateway 502 saying
+ * every upstream key for the model failed — else `undefined`.
  */
 function rejectionReason(error: unknown): string | undefined {
+	if (isGatewayCredentialsExhausted(error)) return "had no usable gateway credentials";
 	switch (AIError.status(error)) {
 		case 401:
 		case 402:

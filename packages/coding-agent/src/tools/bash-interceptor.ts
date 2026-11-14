@@ -5,7 +5,7 @@
  * this interceptor provides helpful error messages directing them to use
  * the specialized tools instead.
  */
-import { extractFlatShellCommandSegments } from "./shell-tokenize";
+import { extractFlatShellCommandSegments, withoutLeadingEnvironmentAssignments } from "./shell-tokenize";
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
 
 export interface InterceptionResult {
@@ -31,67 +31,6 @@ function compileRules(rules: BashInterceptorRule[]): Array<{ rule: BashIntercept
 		}
 	}
 	return compiled;
-}
-
-/** Finds the end of a shell word, respecting quotes and escapes; returns null for incomplete syntax. */
-function skipShellWord(command: string, start: number): number | null {
-	let inSingle = false;
-	let inDouble = false;
-	for (let i = start; i < command.length; i++) {
-		const ch = command[i];
-		if (inSingle) {
-			if (ch === "'") inSingle = false;
-			continue;
-		}
-		if (inDouble) {
-			if (ch === "\\") {
-				if (i + 1 >= command.length) return null;
-				i++;
-				continue;
-			}
-			if (ch === '"') inDouble = false;
-			continue;
-		}
-		if (ch === "'") {
-			inSingle = true;
-			continue;
-		}
-		if (ch === '"') {
-			inDouble = true;
-			continue;
-		}
-		if (ch === "\\") {
-			if (i + 1 >= command.length) return null;
-			i++;
-			continue;
-		}
-		if (ch === " " || ch === "\t") return i;
-	}
-	return inSingle || inDouble ? null : command.length;
-}
-
-/** Removes leading `NAME=value` assignments without interpreting shell syntax. */
-function withoutLeadingEnvironmentAssignments(command: string): string | null {
-	let index = 0;
-	let foundAssignment = false;
-	while (index < command.length) {
-		while (command[index] === " " || command[index] === "\t") index++;
-		const assignmentStart = index;
-		if (!/[A-Za-z_]/.test(command[index] ?? "")) break;
-		let nameEnd = index + 1;
-		while (/[A-Za-z0-9_]/.test(command[nameEnd] ?? "")) nameEnd++;
-		if (command[nameEnd] !== "=") {
-			return foundAssignment ? command.slice(assignmentStart).trimStart() : null;
-		}
-		const wordEnd = skipShellWord(command, nameEnd + 1);
-		if (wordEnd === null) return null;
-		foundAssignment = true;
-		index = wordEnd;
-		if (index === command.length) return null;
-	}
-	if (!foundAssignment) return null;
-	const commandWithoutAssignments = command.slice(index).trimStart();
-	return commandWithoutAssignments.length > 0 ? commandWithoutAssignments : null;
 }
 
 function interceptionCandidates(command: string): string[] {

@@ -193,7 +193,9 @@ async function loadExtensions(ctx: LoadContext): Promise<LoadResult<Extension>> 
 
 async function loadExtensionsFromDir(extensionsDir: string, level: "user" | "project"): Promise<LoadResult<Extension>> {
 	const entries = await readDirEntries(extensionsDir);
-	const dirEntries = entries.filter(entry => entry.isDirectory());
+	// A linked extension package reports as a link, not a directory; the manifest probe
+	// below narrows it back to a real directory.
+	const dirEntries = entries.filter(entry => entry.isDirectory() || entry.isSymbolicLink());
 
 	const results = await Promise.all(
 		dirEntries.map(async entry => {

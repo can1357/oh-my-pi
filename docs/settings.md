@@ -165,7 +165,7 @@ Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, env
 Layers are combined with a deep merge:
 
 - **Objects are deep-merged** — keys present only in a lower layer are kept; keys present in a higher layer override.
-- **Scalars and arrays are replaced wholesale** by the higher-precedence layer. A higher layer's array does not append to a lower layer's array.
+- **Scalars and most arrays are replaced wholesale** by the higher-precedence layer. Rule-list arrays configured with `merge: "prepend"` (`bash.patterns` and `bashInterceptor.patterns`) are the exception: project and `--config` overlay entries prepend ahead of global entries (or the schema default when the global layer leaves the list unset), while a configured `null` or empty `[]` resets the list and runtime overrides still replace it wholesale.
 - **A configured `null` counts as unset at read time**, so the schema default (or a fallback env var) applies rather than a lower-layer value. Project `modelRoles` entries are an exception: cleared/null project roles fall back to global roles.
 - **Named model presets are resolved whole**, not deep-merged across layers. A project preset of the same name replaces the global preset. Runtime/overlay `null` entries can hide a lower-layer preset.
 
@@ -187,8 +187,28 @@ tools:
 
 `tools.approval` is a record keyed by tool name; dotted forms such as `tools.approval.eval` and `tools.approval.computer` identify entries in that record, not separate setting ids. Each entry sets that tool's default policy. One entry is not a tool: the literal key `computer.control` (`tools.approval["computer.control"]`, written `computer.control: allow` in YAML, never nested under `computer`) answers the `computer` tool's requests for foreground control; see [computer use](./computer-use.md#menus-held-input-and-task-control). For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard. Whitespace is the exception: before matching, every run of spaces, tabs, or newlines in both the pattern and the command collapses to a single space, and leading/trailing whitespace is trimmed. A newline in a pattern therefore matches any whitespace: `match: "*\n*"` behaves like `"* *"` and matches every command containing a space. A newline-specific rule is unnecessary to catch dangerous commands in a newline-separated list: `deny` and `prompt` rules check each segment (see below). `allow` rules reject unquoted newline command separators, but can approve commands containing quoted or escaped literal newlines when the full command matches.
 
-By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
+Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` entries are **prepended** ahead of global `~/.omp/agent/config.yml` rules rather than replacing them, so repository-specific build or lint allowances can be declared locally without duplicating global rules.
 
+Leading `KEY=VALUE` environment assignments do not match an `allow` rule unless the pattern includes them explicitly or the variable name exactly matches an entry in `bash.allowedEnvVars` (or a per-rule `env` list); entries are literal names, not wildcards:
+
+```yaml
+bash:
+   allowedEnvVars:
+      - GOOS
+      - GOARCH
+      - CGO_ENABLED
+      - CARGO_TARGET_DIR
+   patterns:
+      - match: "go test*"
+        approval: allow
+      - match: "bun run build:native*"
+        approval: allow
+        env: [CMAKE_GENERATOR]
+```
+
+Because a name-only allowlist permits any value for that variable, list only benign build/test variables; never list execution-controlling variables (`PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `GIT_SSH_COMMAND`, `GOFLAGS`, `RUSTC_WRAPPER`, `CARGO_TARGET_<triple>_RUNNER`, and similar `*_RUNNER`/`*_WRAPPER` names), which would let a command run arbitrary code. `deny` and `prompt` rules always check segments both with and without leading bare `KEY=VALUE` assignments, so `FOO=1 rm -rf build` cannot bypass a `match: "rm -rf *"` restriction. Command wrappers are not unwrapped: `env FOO=1 rm -rf build` or `nice rm -rf build` does not start with `rm`, so it does not match that rule.
+
+By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
 ```yaml
 tools:
    approvalMode: write
@@ -267,7 +287,7 @@ disabledProviders:
    - groq # project array REPLACES the global array
 ```
 
-Array replacement is the most common surprise: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every other array-typed setting.
+Array replacement is the most common surprise for non-merged lists: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every array setting other than `bash.patterns` and `bashInterceptor.patterns` (which prepend project entries ahead of global ones).
 
 ## Project-local config
 
@@ -312,7 +332,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 ## Path-scoped arrays
 
-Three array settings — `enabledModels`, `enabledProviders`, and `disabledProviders` — accept path-scoped entries in addition to bare strings, so a single global config can behave differently per directory:
+Five array settings — `enabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` — accept path-scoped entries in addition to unscoped entries, so a single global config can behave differently per directory without maintaining separate `<repo>/.omp/config.yml` files:
 
 ```yaml
 enabledModels:
@@ -329,18 +349,29 @@ disabledProviders:
      providers:
         - anthropic
         - openai
+
+bash:
+   patterns:
+      - path: ~/work/service-repo
+        patterns:
+           - match: "make lint*"
+             approval: allow
+           - match: "make test*"
+             approval: allow
+      - match: "git status*" # applies everywhere
+        approval: allow
 ```
 
-Bare string entries apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
+Unscoped entries (bare strings for model/provider lists, or direct rule objects for `bash.patterns` and `bashInterceptor.patterns`) apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
 
 Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `pathPrefixes`.
 
 Accepted **value** keys:
 
-- `models` (for `enabledModels`) or `providers` (for `enabledProviders` and `disabledProviders`)
-- `values` or `items` (for any setting)
+- `models` (for `enabledModels`), `providers` (for `enabledProviders` and `disabledProviders`), or `patterns` (for `bash.patterns` and `bashInterceptor.patterns`)
+- `values` or `items` (for any path-scoped setting)
 
-Only string values are kept; malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array.
+For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may wrap a list under `patterns` / `values` / `items`, carry the rule fields itself (`{ path, match, approval }`), or both; inside its scope it contributes its own rule first, then the listed rules in order. Listed rules may be path-scoped themselves, narrowing the outer scope. An entry whose path keys hold no string (for example `path: ~`, which YAML reads as null; quote it as `"~"` for your home directory) is not scoped and applies everywhere. When `bashInterceptor.patterns` contains only path-scoped entries, the built-in interceptor rules still apply after any matching scoped rules; one unscoped rule in that list makes it replace the built-ins, but rules a project or `--config` overlay prepends onto it do not. For the other settings, malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array for the active working directory.
 
 ## Provider and source disabling
 
@@ -373,6 +404,18 @@ disabledProviders:
 The default is an empty array (nothing disabled). For the two subsystems' provider ids and ordering, see [Providers](./providers.md) and [Context files](./context-files.md).
 
 Native project `modelRoles` are also read directly from `.omp/config.yml`; disabling the `native` discovery provider does not suppress that model-role layer.
+
+### Paused providers
+
+Some providers are paused in their auth rules because using them puts accounts at risk (for example `google-antigravity`). A paused provider offers no login, refuses token refresh and requests, and ignores stored and env credentials. `auth.unpausedProviders` turns listed ones back on, accepting the risk the pause reason names; stored logins come back as they were. Only your global config, `--config` files and runtime overrides count: a project's `.omp/config.yml` cannot unpause a provider. Pick them under **Unpaused Providers** in `/settings`, or in `~/.omp/agent/config.yml`:
+
+```yaml
+auth:
+   unpausedProviders:
+      - google-antigravity
+```
+
+Edits apply to a running session at once: stored credentials come back on the next lookup and a newly unpaused provider's model list refreshes, as after a login. With an auth broker, set it on the broker host too (`omp auth-broker serve` reads it at startup): the broker drops a paused provider's credentials before clients see them.
 
 ## Resume picker scope
 
@@ -481,6 +524,7 @@ The deadline only applies when you configured a judge fallback: a timed-out cand
 The 3-second default leaves `find`'s 20-second budget room to reach a second and third candidate. A slow but healthy candidate can time out and fall through too; the cooldown does not remove it from the chain. For consistently slower judges, raise the budget with `omp config set judgment.attemptTimeoutMs 10000`. Raising the setting does not extend an enclosing tool or caller deadline.
 
 With `judgment.hedgeAfterMs` set, a candidate still pending after that delay keeps running while the next candidate in the chain starts beside it, but only when that candidate is a native judge you configured (`modelRoles.judge` or a `retry.fallbackChains.judge` entry), never a built-in default or the session model. At most one extra request is in flight: the first answer wins and the other request is cancelled, its usage still recorded. A candidate that fails before the delay falls through to the next one as before; each request keeps its own `judgment.attemptTimeoutMs` deadline and cooldowns, and the caller's cancellation stops both. Hedging trades a second billed request for latency, e.g. `omp config set judgment.hedgeAfterMs 1500`.
+Independently of the deadline, a judge candidate whose route rejects the account (`401`, `402`, `403`), does not serve the model (`404`), or is a gateway answering `502` with error type or code `upstream_credentials_exhausted` (every upstream key for the model failed) is skipped for 5 minutes by every judge using the same model registry. That gateway `502` is sent once rather than retried; other `5xx` answers stay transient and are retried.
 
 ### Advisor
 
@@ -656,10 +700,11 @@ tools:
 | `launch.persist`               | boolean | `false`   | Bash services (`name`) start persistent: they keep running after the last omp process in the project exits, until they stop on their own or `proc://<name>/kill` stops them. Print (`-p`, `--mode json`), RPC and ACP modes always turn it on, so a server the agent leaves running outlives the omp process. |
 | `async.widgets`                | boolean | `true`    | Live widgets for running background jobs (charts, bars, status grids derived from the job's output) in the `wait` card, the jobs pill and its hover card, and the jobs sheet. The `widget` model role writes one spec per job; every later update is computed locally without model calls. Off: plain job rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `out.enabled`                  | boolean | `true`    | Let the agent reply mid-task without ending its turn by writing Markdown to `out://` (the `write` tool, or `> out://` from bash; 64 KiB cap). Replies draw as assistant prose. Unset, it is on only in the interactive TUI (terminal or Tern) and off in print, RPC, and ACP sessions; an explicitly configured value applies everywhere. When off, the system prompt omits `out://` and writes are refused. Subagents are always refused.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `todo.midRunNudges`            | enum    | `capped`  | Hidden mid-run reminders to update the todo list while a turn keeps making changes (counted in successful `bash`, `eval`, `edit`, `write`, and `ast_edit` results since the last `todo` call). `off` never nudges; `capped` nudges after 12, at most twice until the todo list changes or you send a message; `backoff` keeps nudging, doubling the gap after each ignored nudge: after 12, 24, 48, 96, then every 192.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 Mounting still follows the session's explicit tool allow-list. A session that permits `read` but omits `write` can receive a device-only write transport; this does not grant filesystem writes.
 
-Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
+Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `commit.enabled` (default `true`; the `commit` eval prelude and `/commit`, which commit only the lines the current agent and its subagents wrote), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
 `find.hitThreshold` (a number above 0, up to 1; unset is `0.2`) is the verified-passage probability `find` needs before it reports a file as a hit, and the lowest probability of the line ranges it lists. The default suits TypeSafe Jev. Other decision models calibrate differently, and a judge that gives unrelated passages higher probabilities needs a higher value to keep its weak hits out (see [find](./tools/find.md)).
 
@@ -1190,7 +1235,7 @@ Selected migrations applied whenever raw settings are loaded (global, project, o
 
 ### A global array disappeared in a project
 
-Arrays replace; they do not append. If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or any other array, include the **complete** desired value in the project layer — the global array is fully replaced.
+Most arrays replace rather than append (`bash.patterns` and `bashInterceptor.patterns` prepend project entries ahead of global entries). If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or another replacing array, include the **complete** desired value in the project layer — the global array is fully replaced.
 
 ### A provider is still available after editing config
 

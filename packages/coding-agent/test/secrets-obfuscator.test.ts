@@ -22,6 +22,7 @@ import type {
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { isJsonSchemaValueValid } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async";
 import {
 	builtinCredentialSecretEntries,
 	collectEnvSecrets,
@@ -48,6 +49,9 @@ import {
 	stripPendingSecretPlaceholderSuffix,
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
+import { regexRematchesInContext } from "@oh-my-pi/pi-coding-agent/secrets/replacement";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
 
 describe("compileSecretRegex", () => {
@@ -68,6 +72,57 @@ describe("compileSecretRegex", () => {
 	});
 	it("rejects invalid regex flags", () => {
 		expect(() => compileSecretRegex("x", "zz")).toThrow();
+	});
+});
+
+describe("Unicode empty regex matches", () => {
+	// A broken scan loops synchronously forever, so bound the real RegExp calls
+	// and surface the lack of progress as a failure instead of hanging the suite.
+	function finishScan<T>(scan: () => T): T {
+		const exec = RegExp.prototype.exec;
+		let emptyMatches = 0;
+		const execSpy = spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, text: string) {
+			const match = exec.call(this, text);
+			if (match?.[0] === "" && (this.unicode || this.unicodeSets)) {
+				emptyMatches++;
+				if (emptyMatches > 64) throw new Error("Unicode empty-match scan stopped making progress");
+			}
+			return match;
+		});
+		try {
+			return scan();
+		} finally {
+			execSpy.mockRestore();
+		}
+	}
+
+	it("finishes secret-value collection in both Unicode modes", () => {
+		for (const flags of ["u", "v"]) {
+			const obfuscator = new SecretObfuscator([{ type: "regex", content: "(?:secret)?", flags }]);
+			expect(
+				finishScan(() => obfuscator.obfuscate("😀")),
+				flags,
+			).toBe("😀");
+		}
+	});
+
+	it("finishes match collection before redacting a later secret", () => {
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "(?:SECRET123)?", flags: "u" }]);
+		const input = "😀SECRET123";
+		const output = finishScan(() => obfuscator.obfuscate(input));
+		expect(output).not.toContain("SECRET123");
+		expect(obfuscator.deobfuscate(output)).toBe(input);
+	});
+
+	it("finishes prefix scans without stranding the cut inside a code point", () => {
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "(?:SECRET123)?", flags: "u" }]);
+		expect(finishScan(() => obfuscator.redactionPrefixEnd("😀SECRET123", 1))).toBe(1);
+	});
+
+	it("finishes replacement-context probes around an earlier supplementary character", () => {
+		const regex = compileSecretRegex("(?:TOKEN)?", "u");
+		const matches = finishScan(() => regexRematchesInContext("B", regex, { text: "😀A", start: 2, end: 3 }));
+		expect(matches).toBe(false);
 	});
 });
 
@@ -364,11 +419,41 @@ describe("SecretObfuscator regex behavior", () => {
 		expect(obfuscated.tools?.[0]?.parameters).toBe(parameters);
 	});
 
+	it("redacts a background bash job's command and output in its agent-attributed notice", () => {
+		const secret = "sdk-secret-token-123456";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const job = {
+			type: "bash",
+			status: "completed",
+			label: "curl",
+			process: { command: `curl -H "Authorization: ${secret}" https://example.test` },
+		} as unknown as AsyncJob;
+		const notice = buildAsyncResultBatchMessage([
+			{ jobId: "bg_1", result: `token is ${secret}`, job, durationMs: 5, epoch: 0 },
+		]);
+		if (!notice) throw new Error("expected a background job notice");
+		const context: Context = { messages: convertToLlm([notice]) };
+		expect(JSON.stringify(context.messages)).toContain(secret);
+
+		const obfuscated = obfuscateProviderContext(obfuscator, context);
+
+		const serialized = JSON.stringify(obfuscated.messages);
+		expect(serialized).not.toContain(secret);
+		expect(obfuscator.deobfuscate(serialized)).toContain(`Authorization: ${secret}`);
+		expect(obfuscator.deobfuscate(serialized)).toContain(`token is ${secret}`);
+	});
+
 	it("redacts user-facing messages and assistant replay content", () => {
 		const secret = "SUPER_SECRET_TOKEN_12345";
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
 		const userMsg: Message = { role: "user", content: `user says ${secret}`, timestamp: 1 };
 		const systemDeveloperMsg: Message = { role: "developer", content: `system reminder ${secret}`, timestamp: 1 };
+		const agentDeveloperMsg: Message = {
+			role: "developer",
+			content: [{ type: "text", text: `background job output ${secret}` }],
+			attribution: "agent",
+			timestamp: 1,
+		};
 		const fileMentionMsg: Message = {
 			role: "developer",
 			content: `<file>${secret}</file>`,
@@ -415,15 +500,13 @@ describe("SecretObfuscator regex behavior", () => {
 			fileMentionMsg,
 			assistantMsg,
 			toolResultMsg,
+			agentDeveloperMsg,
 		]);
 
-		// User-facing content and assistant replay fields are redacted.
-		expect(JSON.stringify(obfuscated[0])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[2])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[3])).not.toContain(secret);
-		expect(JSON.stringify(obfuscated[4])).not.toContain(secret);
-		// System developer reminders remain untouched.
-		expect(obfuscated[1]).toBe(systemDeveloperMsg);
+		// Every non-assistant message, whatever its attribution, and assistant replay fields are redacted.
+		for (const message of obfuscated) {
+			expect(JSON.stringify(message)).not.toContain(secret);
+		}
 	});
 
 	it("obfuscates file metadata on a replayed compaction payload but keeps the block verbatim", () => {
