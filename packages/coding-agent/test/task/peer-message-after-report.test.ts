@@ -19,6 +19,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -520,6 +521,112 @@ it("keeps a structured follow-up's yield when a peer message arrives as a turn o
 		// The peer's message was answered in a turn of its own.
 		expect(child.mock.calls.some(call => latestInput(call.context).includes(PEER_BODY))).toBe(true);
 	} finally {
+		child.close();
+	}
+}, 20_000);
+
+it("answers a peer separately when it arrives before a structured yield reminder", async () => {
+	const reminderEntered = Promise.withResolvers<void>();
+	const releaseReminder = Promise.withResolvers<void>();
+	let reminderContext = "";
+	let reminderActive = false;
+	let reminderAdmitted = false;
+	let assignmentSeen = false;
+	let reminderReadDone = false;
+	const child = await startRun({
+		structured: true,
+		respond: (request, context) => {
+			const input = latestInput(context);
+			if (input.includes(PEER_BODY)) return { content: ["PEER_REPLY"] };
+			if (input.includes("report again")) {
+				assignmentSeen = true;
+				return { content: ["Working on it."] };
+			}
+			if (assignmentSeen && !reminderReadDone) {
+				reminderReadDone = true;
+				return {
+					content: [
+						{
+							type: "toolCall",
+							id: `reminder-read-${request}`,
+							name: "read",
+							arguments: { path: "notes.txt" },
+						},
+					],
+				};
+			}
+			if (assignmentSeen) reminderContext = JSON.stringify(context.messages);
+			if (context.messages.at(-1)?.role === "toolResult" && !assignmentSeen) return { content: ["ok"] };
+			return {
+				content: [
+					{
+						type: "toolCall",
+						id: `yield-reminder-${request}`,
+						name: "yield",
+						arguments: { type: "result", data: assignmentSeen ? "DRIVEN_FINAL" : "INITIAL_FINAL" },
+					},
+				],
+			};
+		},
+	});
+	let followUp: Promise<unknown> | undefined;
+	try {
+		expect((await child.run).output).toContain("INITIAL_FINAL");
+		const handle = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!handle) throw new Error("kept-alive subagent has no live session");
+		const session = localSession(handle);
+		const restorePrimary = TurnRecovery.prototype.maybeRestoreRetryFallbackPrimary;
+		vi.spyOn(TurnRecovery.prototype, "maybeRestoreRetryFallbackPrimary").mockImplementation(
+			async function (this: TurnRecovery) {
+				const result = await restorePrimary.call(this);
+				if (reminderActive && reminderAdmitted) {
+					reminderEntered.resolve();
+					await releaseReminder.promise;
+				}
+				return result;
+			},
+		);
+		const prompt = session.prompt.bind(session);
+		vi.spyOn(session, "prompt").mockImplementation(async (text, options) => {
+			if (!options?.synthetic) return prompt(text, options);
+			reminderActive = true;
+			try {
+				return await prompt(text, {
+					...options,
+					onPromptAdmitted: () => {
+						reminderAdmitted = true;
+						options.onPromptAdmitted?.();
+					},
+				});
+			} finally {
+				reminderActive = false;
+			}
+		});
+		const resultPromise = runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+			message: "report again",
+			artifactsDir: child.artifactsDir,
+		});
+		followUp = resultPromise;
+		await reminderEntered.promise;
+		const peer = await IrcBus.global().send({ from: PEER_ID, to: AGENT_ID, body: PEER_BODY });
+		const parent = await IrcBus.global().send({ from: PARENT_ID, to: AGENT_ID, body: PARENT_BODY });
+		expect(peer.outcome).not.toBe("failed");
+		expect(parent.outcome).not.toBe("failed");
+		releaseReminder.resolve();
+		const result = await resultPromise;
+		expect(result.output).toContain("DRIVEN_FINAL");
+		expect(result.output).not.toContain(PEER_BODY);
+		expect(reminderContext).not.toContain(PEER_BODY);
+		expect(reminderContext).toContain(PARENT_BODY);
+		expect(await Bun.file(child.artifact).text()).toContain("DRIVEN_FINAL");
+		expect((await child.peerInbox)?.body).toContain("PEER_REPLY");
+		await settle();
+		expect(child.mock.calls.filter(call => latestInput(call.context).includes(PEER_BODY))).toHaveLength(1);
+	} finally {
+		releaseReminder.resolve();
+		await Promise.allSettled([child.run, ...(followUp ? [followUp] : [])]);
 		child.close();
 	}
 }, 20_000);

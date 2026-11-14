@@ -33,6 +33,8 @@
 
 ### Fixed
 
+- Driven subagent follow-ups and restored turns keep their own results, answer awaited children without publishing intermediate results, and avoid replaying assignments after admission ([#19213](https://github.com/can1357/oh-my-pi/pull/19213) by [@xiangnan0811](https://github.com/xiangnan0811))
+- Peer IRC messages arriving before a subagent's structured yield reminder now wait for their own wake turn instead of entering the reminder context ([#19214](https://github.com/can1357/oh-my-pi/pull/19214) by [@xiangnan0811](https://github.com/xiangnan0811))
 - Leading `KEY=VALUE` environment assignments are now stripped when evaluating `deny` and `prompt` rules in `bash.patterns` so they cannot bypass command restrictions ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - omp's WebKit engine is now pinned per omp release and updated in place: an engine in `~/.o2/lib/abkit` that names no version or an older release is replaced before the first open that runs it (once no process runs from it), so the ABKit 0.1.1 fix for plain-http cookies (sign-ins to router and LAN admin pages) reaches existing installs. Local builds (`VERSION` `dev`), newer releases and an engine another app manages (Tern's `manager.json` two folders above its real path, as for omp itself) are kept
 - Chromium and WebKit tabs: a click or key press that opens a `confirm()` or `prompt()` returns instead of timing out after 8 s, and while one is pending, calls that need the page (reads, actions, `evaluate`, waits on page content, screenshots) fail at once naming the dialog and `tab.handleDialog()`, instead of each running out its deadline with "could not count matches" or a bare timeout

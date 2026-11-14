@@ -626,6 +626,38 @@ export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
+
+/** Session-level lease acquired by the task executor while driving a follow-up or restored subagent turn. */
+export interface DrivenTurnLease {
+	/** Opaque ownership token carried through AsyncLocalStorage and scheduled work for this lease. */
+	readonly token: object;
+	/** Marks the lease closing when the session and all lease-owned tasks are quiescent. */
+	tryClose(): boolean;
+	/** Aborts the lease's owned work and waits for its scheduled tasks to settle before release. */
+	cancel(): Promise<void>;
+	/** Releases the lease and resumes any independent prompts, wakes, or flushes parked behind it. */
+	release(): void;
+}
+
+/** Factory invoked for a required child IRC continuation during an owned join to collect and relay its reply without starting an autonomous run. */
+export type IrcTurnReplyFactory = (
+	records: AgentMessage[],
+	acceptEvent: () => boolean,
+	signal: AbortSignal,
+) => (error?: unknown) => Promise<void>;
+
+interface DrivenTurnState {
+	token: object;
+	generation: number;
+	controller: AbortController;
+	invalid: boolean;
+	invalidated: PromiseWithResolvers<void>;
+	released: PromiseWithResolvers<void>;
+	tasks: Set<Promise<unknown>>;
+	phase: "open" | "closing" | "released";
+}
+
+const drivenTurnScope = new AsyncLocalStorage<{ session: AgentSession; token: object }>();
 /**
  * One session transition in its session's tree of transitions. Transitions it starts itself queue
  * on its `childTail`; it hands its parent's queue on once it and every one in `nested` settled.
@@ -853,6 +885,7 @@ type ScheduledAgentContinueOptions = {
 	source: string;
 	delayMs?: number;
 	generation?: number;
+	drivenTurn?: object;
 	shouldContinue?: () => boolean;
 	onSkip?: (reason: AgentContinueSkipReason) => void;
 	onError?: (error: unknown) => void;
@@ -885,6 +918,7 @@ type TurnObservation = {
 	/** The observed turn returned; the observation only waits for owned async work. */
 	turnEnded: boolean;
 	closed: boolean;
+	settled: PromiseWithResolvers<void>;
 	turnError: unknown;
 };
 
@@ -1228,6 +1262,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#ircWakeTurnObserver:
 		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
+	#ircDrivenReplyFactory: IrcTurnReplyFactory | undefined;
 	/** Active {@link holdIrcWakes} holds. */
 	#ircWakeHolds = 0;
 	/** IRC wakes waiting out a context replacement (see {@link #wakeForIrc}). */
@@ -1238,6 +1273,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#ircAwaitingAssignment = false;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
+	/** Includes detached monitors until their asynchronous finalization has settled. */
+	readonly #turnObservations = new Set<TurnObservation>();
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	/** Registry recording this agent blocked on the user while a {@link waitForUser} dialog is open. */
@@ -1393,6 +1430,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
 	#admittedSubmissionCount = 0;
 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
+	#drivenTurn: DrivenTurnState | undefined;
+	#drivenAsyncJoin: DrivenTurnState | undefined;
+	#drivenIrcWakeScheduled: DrivenTurnState | undefined;
+	#drivenIdleFlushParked: DrivenTurnState | undefined;
+	#drivenIndependentWaiters = 0;
+	#drivenIndependentWaitersSettled: PromiseWithResolvers<void> | undefined;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -1619,6 +1662,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  Runs whenever the session settles; the guard makes it a no-op when the
 	 *  queue was consumed normally or a new turn already started. */
 	#drainStrandedQueuedMessages(): void {
+		drivenTurnScope.exit(() => this.#drainStrandedQueuedMessagesIndependent());
+	}
+
+	#drainStrandedQueuedMessagesIndependent(): void {
 		if (this.#abortInProgress) return;
 		// Session transitions (newSession/`/new`, compact, model-switch, session-switch,
 		// dispose) call #disconnectFromAgent() BEFORE `await abort()`, so abort's own
@@ -1653,6 +1700,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  the agent responds to the peer. Skip only when a queued steer/follow-up will itself drive a
 	 *  resume turn whose aside poll already consumes these (no double-wake). */
 	#resumeStrandedIrcAsides(): void {
+		drivenTurnScope.exit(() => this.#resumeStrandedIrcAsidesIndependent());
+	}
+
+	#resumeStrandedIrcAsidesIndependent(): void {
+		if (this.#drivenTurn) {
+			this.#scheduleDrivenChildIrc();
+			return;
+		}
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
 			return;
 		}
@@ -1736,6 +1791,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(wakeRecords: AgentMessage[]): void {
+		drivenTurnScope.exit(() => this.#wakeForIrcIndependent(wakeRecords));
+	}
+
+	#wakeForIrcIndependent(wakeRecords: AgentMessage[]): void {
+		if (this.#drivenTurn) {
+			this.#irc.queueDeferredWake(wakeRecords);
+			this.#scheduleDrivenChildIrc();
+			return;
+		}
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(wakeRecords);
 			return;
@@ -1914,6 +1978,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * prompt race (AgentBusyError), so nothing is started.
 	 */
 	#startTurnObservation(records: AgentMessage[]): TurnObservation | undefined {
+		if (this.#drivenOrigin() !== "independent") return undefined;
 		const open = this.#openTurnObservation;
 		if (open) {
 			if (!open.turnEnded) return undefined;
@@ -1926,7 +1991,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			logger.warn("Turn observer failed to start", { error: String(error) });
 		}
 		if (!finish) return undefined;
-		const observation: TurnObservation = { finish, turnEnded: false, closed: false, turnError: undefined };
+		const observation: TurnObservation = {
+			finish,
+			turnEnded: false,
+			closed: false,
+			turnError: undefined,
+			settled: Promise.withResolvers<void>(),
+		};
+		this.#turnObservations.add(observation);
 		this.#openTurnObservation = observation;
 		return observation;
 	}
@@ -1960,13 +2032,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Runs an observation's finish exactly once; the observer detaches synchronously before the first await. */
 	async #closeTurnObservation(observation: TurnObservation): Promise<void> {
-		if (observation.closed) return;
+		if (observation.closed) return observation.settled.promise;
 		observation.closed = true;
 		if (this.#openTurnObservation === observation) this.#openTurnObservation = undefined;
 		try {
 			await observation.finish(observation.turnError);
 		} catch (error) {
 			logger.warn("Turn observer failed to finish", { error: String(error) });
+		} finally {
+			this.#turnObservations.delete(observation);
+			observation.settled.resolve();
 		}
 	}
 
@@ -2581,26 +2656,41 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			},
 			scheduleIdleFlush: run => {
-				this.#schedulePostPromptTask(
-					async signal => {
-						// Wait for compaction to replace history and reconnect persistence before
-						// delivering results. Cancellation releases the task; abort re-requests the flush.
-						const contextReplacement = this.#maintenance.waitForContextReplacement();
-						if (contextReplacement) {
-							try {
-								await untilAborted(signal, contextReplacement);
-							} catch {
+				const owner = this.#requiredDrivenFlushOwner();
+				if (this.#drivenTurn && !owner) {
+					this.#drivenIdleFlushParked = this.#drivenTurn;
+					return;
+				}
+				this.#drivenIdleFlushParked = undefined;
+				const skip = () => {
+					if (owner) this.yieldQueue.discardStale(ASYNC_RESULT_MESSAGE_TYPE);
+					this.yieldQueue.cancelIdleFlushScheduling();
+					if (owner) this.yieldQueue.requestIdleFlush();
+				};
+				const schedule = () =>
+					this.#schedulePostPromptTask(
+						async signal => {
+							const contextReplacement = this.#maintenance.waitForContextReplacement();
+							if (contextReplacement) {
+								try {
+									await untilAborted(signal, contextReplacement);
+								} catch {
+									skip();
+									return;
+								}
+							}
+							if (owner ? this.#requiredDrivenFlushOwner() !== owner : this.#drivenTurn !== undefined) {
+								this.yieldQueue.discardStale(ASYNC_RESULT_MESSAGE_TYPE);
 								this.yieldQueue.cancelIdleFlushScheduling();
+								this.yieldQueue.requestIdleFlush();
 								return;
 							}
-						}
-						await run();
-					},
-					{
-						delayMs: 1,
-						onSkip: () => this.yieldQueue.cancelIdleFlushScheduling(),
-					},
-				);
+							await run();
+						},
+						{ delayMs: 1, drivenTurn: owner?.token, onSkip: skip },
+					);
+				if (owner) schedule();
+				else drivenTurnScope.exit(schedule);
 			},
 		});
 		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
@@ -2619,8 +2709,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// consumed elsewhere since they queued (an eval cell awaiting the job)
 		// are dropped by the drain, so they must not cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
-			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
-			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
+			(!this.#drivenTurn || this.#requiredDrivenFlushOwner() !== undefined) &&
+			(this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
+				this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE));
 		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
 		// instead of sitting behind it. Deferred wakes are not peeked: no
 		// boundary injection would drain them. Foreground tools are unaffected.
@@ -2629,10 +2720,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A subagent whose messages get turns of their own (its run holds them,
 			// or its wake observer answers them) never extends a finished turn with
 			// one: that turn's text is its result.
-			const keepPeerMessages =
-				boundary === "stop" && (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined);
+			const keepPeerMessages = boundary === "stop" && this.#peerMessagesGetOwnTurns;
 			const thunks: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
-			thunks.push(...this.yieldQueue.drainLazy());
+			if (!this.#drivenTurn || this.#requiredDrivenFlushOwner()) thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
@@ -3735,15 +3825,351 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#admittedSubmissionsSettled.promise;
 	}
 
+	#isRequiredDrivenIrcRecord(record: AgentMessage, owner: DrivenTurnState): boolean {
+		const recipient = this.#agentId;
+		const manager = this.#asyncJobManager;
+		if (
+			owner !== this.#drivenTurn ||
+			owner !== this.#drivenAsyncJoin ||
+			this.#drivenOrigin(owner.token) !== "owned" ||
+			!recipient ||
+			!manager ||
+			record.role !== "custom" ||
+			record.customType !== "irc:incoming" ||
+			!isRecord(record.details) ||
+			typeof record.details.from !== "string" ||
+			record.details.broadcast === true ||
+			record.details.progress === true
+		)
+			return false;
+		const registry = AgentRegistry.global();
+		if (record.details.from === recipient || !registry.get(recipient)) return false;
+		const seen = new Set<string>();
+		let current = record.details.from;
+		while (!seen.has(current)) {
+			seen.add(current);
+			const ref = registry.get(current);
+			if (!ref?.parentId) return false;
+			if (ref.parentId === recipient) {
+				return manager
+					.getRunningJobs({ ownerId: recipient })
+					.some(job => job.type === "task" && job.agentId === current && !manager.isDeliverySuppressed(job.id));
+			}
+			current = ref.parentId;
+		}
+		return false;
+	}
+
+	#scheduleDrivenChildIrc(): void {
+		const owner = this.#drivenTurn;
+		if (
+			!owner ||
+			this.#drivenIrcWakeScheduled === owner ||
+			!this.#irc.hasQueuedMatching(record => this.#isRequiredDrivenIrcRecord(record, owner))
+		)
+			return;
+		const generation = this.#promptGeneration;
+		this.#drivenIrcWakeScheduled = owner;
+		this.#schedulePostPromptTask(
+			async signal => {
+				let epoch: number | undefined;
+				let selected: AgentMessage[] = [];
+				let parkedFollowUps: AgentMessage[] = [];
+				let parkedQueueDrainBlocked = false;
+				let finish: ((error?: unknown) => Promise<void>) | undefined;
+				let failure: unknown;
+				try {
+					for (;;) {
+						await untilAborted(signal, () => this.agent.waitForIdle());
+						await untilAborted(signal, () => this.#drainInFlightEventHandlers());
+						await untilAborted(signal, () => this.whenWorkPoolYieldSettled());
+						const replacement = this.#maintenance.waitForContextReplacement();
+						if (replacement) await untilAborted(signal, replacement);
+						signal.throwIfAborted();
+						if (
+							this.#promptGeneration !== generation ||
+							this.#drivenAsyncJoin !== owner ||
+							this.#drivenOrigin(owner.token) !== "owned"
+						)
+							return;
+						if (!this.agent.state.isStreaming) break;
+					}
+					epoch = this.#beginInFlight();
+					selected = this.#irc.drainQueuedMatching(record => this.#isRequiredDrivenIrcRecord(record, owner));
+					if (selected.length === 0) return;
+					if (this.#peerMessagesGetOwnTurns) {
+						this.#irc.queueDeferredWake(this.#irc.drainQueuedMatching(record => this.#irc.isPeerMessage(record)));
+					}
+					parkedFollowUps =
+						this.agent.peekSteeringQueue().length === 0 &&
+						this.agent.peekFollowUpQueue().length > 0 &&
+						!this.#canAutoContinueForFollowUp()
+							? [...this.agent.peekFollowUpQueue()]
+							: [];
+					parkedQueueDrainBlocked = parkedFollowUps.length > 0 && this.#queuedMessageDrainBlocked;
+					if (parkedFollowUps.length > 0) {
+						this.#holdQueuedMessages(parkedFollowUps);
+						this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
+						if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
+					}
+					try {
+						finish = this.#ircDrivenReplyFactory?.(selected, () => this.isDrivenTurnEvent(owner.token), signal);
+					} catch (error) {
+						this.#irc.queueDeferredWake(selected);
+						selected = [];
+						throw error;
+					}
+					for (const record of selected) this.agent.steer(record);
+					await this.agent.continue(signal);
+					await untilAborted(signal, () => this.agent.waitForIdle());
+					await untilAborted(signal, () => this.#drainInFlightEventHandlers());
+					signal.throwIfAborted();
+				} catch (error) {
+					failure = signal.aborted ? signal.reason : error;
+				} finally {
+					if (finish) {
+						try {
+							await finish(failure);
+						} catch (error) {
+							failure ??= error;
+						}
+					}
+					if (signal.aborted) failure ??= signal.reason;
+					if (selected.length > 0) {
+						const consumed = new Set(selected);
+						this.agent.replaceQueues(
+							this.agent.peekSteeringQueue().filter(record => !consumed.has(record)),
+							[...this.agent.peekFollowUpQueue()],
+						);
+					}
+					if (parkedFollowUps.length > 0) {
+						this.agent.replaceQueues(
+							[...this.agent.peekSteeringQueue()],
+							[...this.#releaseHeldQueuedMessages(parkedFollowUps), ...this.agent.peekFollowUpQueue()],
+						);
+						this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
+					}
+					if (failure !== undefined && !owner.controller.signal.aborted) owner.controller.abort(failure);
+					if (this.#drivenIrcWakeScheduled === owner) this.#drivenIrcWakeScheduled = undefined;
+					if (epoch !== undefined) this.#endInFlight(epoch);
+					if (
+						this.#drivenTurn === owner &&
+						this.#drivenAsyncJoin === owner &&
+						this.#drivenOrigin(owner.token) === "owned"
+					) {
+						this.#rearmParkedDrivenFlush();
+						this.#scheduleDrivenChildIrc();
+					}
+				}
+			},
+			{
+				drivenTurn: owner.token,
+				generation,
+				onSkip: () => {
+					if (this.#drivenIrcWakeScheduled === owner) this.#drivenIrcWakeScheduled = undefined;
+					if (this.#drivenTurn === owner && owner.phase === "open" && !owner.controller.signal.aborted) {
+						owner.controller.abort(new Error("Driven child IRC continuation was cancelled before dispatch."));
+					}
+				},
+			},
+		);
+	}
+
+	#drivenOrigin(token?: object): "independent" | "owned" | "invalid" {
+		const scope = drivenTurnScope.getStore();
+		const candidate = token ?? (scope?.session === this ? scope.token : undefined);
+		if (candidate === undefined) return "independent";
+		const state = this.#drivenTurn;
+		return state &&
+			state.token === candidate &&
+			state.phase === "open" &&
+			state.generation === this.#sessionGeneration &&
+			!this.#isDisposed &&
+			!state.controller.signal.aborted
+			? "owned"
+			: "invalid";
+	}
+
+	#requiredDrivenFlushOwner(): DrivenTurnState | undefined {
+		const state = this.#drivenTurn;
+		return state &&
+			this.#drivenAsyncJoin === state &&
+			this.#drivenIrcWakeScheduled !== state &&
+			this.#drivenOrigin(state.token) === "owned" &&
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE)
+			? state
+			: undefined;
+	}
+
+	#rearmParkedDrivenFlush(): void {
+		if (!this.#drivenIdleFlushParked) return;
+		this.#drivenIdleFlushParked = undefined;
+		this.yieldQueue.discardStale(ASYNC_RESULT_MESSAGE_TYPE);
+		this.yieldQueue.cancelIdleFlushScheduling();
+		this.yieldQueue.requestIdleFlush();
+	}
+
+	#invalidateDrivenTurn(): void {
+		const state = this.#drivenTurn;
+		if (!state || state.invalid) return;
+		state.invalid = true;
+		state.controller.abort();
+		state.invalidated.resolve();
+	}
+
+	/** Whether non-parent IRC messages should be answered in their own wake turns instead of extending a finished report turn. */
+	get #peerMessagesGetOwnTurns(): boolean {
+		return this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined;
+	}
+
+	/** Acquires exclusive driven-turn ownership when the session has no active or pending turn work. */
+	tryAcquireDrivenTurn(): DrivenTurnLease | undefined {
+		if (
+			this.#isDisposed ||
+			this.isSessionTransitioning ||
+			this.#drivenTurn ||
+			this.#drivenIndependentWaiters ||
+			this.#drivenIdleFlushParked ||
+			this.#admittedSubmissionCount ||
+			this.isStreaming ||
+			this.#turnObservations.size ||
+			this.#inFlightEventHandlers.size ||
+			this.#abortInProgress ||
+			this.#abortUnwinds.size ||
+			this.#postPromptTasks.size ||
+			this.#recovery.retryPromise ||
+			this.#ttsr.resumeGate ||
+			this.isCompacting ||
+			this.isGeneratingHandoff
+		) {
+			return undefined;
+		}
+		const state: DrivenTurnState = {
+			token: {},
+			generation: this.#sessionGeneration,
+			controller: new AbortController(),
+			invalidated: Promise.withResolvers<void>(),
+			released: Promise.withResolvers<void>(),
+			invalid: false,
+			tasks: new Set(),
+			phase: "open",
+		};
+		this.#drivenTurn = state;
+		const assertOpen = () => {
+			if (this.#drivenOrigin(state.token) !== "owned") throw new Error("Driven turn is no longer active.");
+		};
+		return {
+			token: state.token,
+			tryClose: () => {
+				assertOpen();
+				if (
+					this.#admittedSubmissionCount ||
+					this.isStreaming ||
+					this.#inFlightEventHandlers.size ||
+					this.#abortInProgress ||
+					this.#abortUnwinds.size ||
+					this.#postPromptTasks.size ||
+					this.#recovery.retryPromise ||
+					this.#ttsr.resumeGate ||
+					state.tasks.size ||
+					this.#hasPendingAsyncWake()
+				)
+					return false;
+				state.phase = "closing";
+				return true;
+			},
+			cancel: async () => {
+				if (this.#drivenTurn !== state || state.phase === "released")
+					throw new Error("Driven turn is no longer active.");
+				state.phase = "closing";
+				state.controller.abort();
+				await Promise.allSettled(state.tasks);
+			},
+			release: () => {
+				if (state.phase === "released") return;
+				state.phase = "released";
+				state.controller.abort();
+				if (this.#drivenTurn === state) this.#drivenTurn = undefined;
+				state.released.resolve();
+				queueMicrotask(() =>
+					drivenTurnScope.exit(() => {
+						if (this.#drivenIdleFlushParked === state) {
+							this.#drivenIdleFlushParked = undefined;
+							this.yieldQueue.cancelIdleFlushScheduling();
+						}
+						if (this.#isDisposed) return;
+						this.yieldQueue.requestIdleFlush();
+						this.#drainStrandedQueuedMessages();
+					}),
+				);
+			},
+		};
+	}
+
+	/** Waits until any active driven turn, admitted submission, transition, or turn observation has settled. */
+	async waitForDrivenTurnAvailability(): Promise<void> {
+		const state = this.#drivenTurn;
+		if (state) await state.released.promise;
+		if (this.#drivenIndependentWaitersSettled) await this.#drivenIndependentWaitersSettled.promise;
+		await this.waitForAdmittedSubmissions();
+		await this.waitForSessionTransition();
+		await this.waitForIdle();
+		while (this.#turnObservations.size > 0) {
+			await Promise.all([...this.#turnObservations].map(observation => observation.settled.promise));
+		}
+	}
+
+	/** Runs `work` inside the AsyncLocalStorage scope for an active driven-turn lease token. */
+	runWithDrivenTurn<T>(token: object, work: () => T): T {
+		if (this.#drivenOrigin(token) !== "owned") throw new Error("Driven turn is no longer active.");
+		return drivenTurnScope.run({ session: this, token }, work);
+	}
+
+	/** Returns whether the current execution context belongs to the active driven-turn lease identified by `token`. */
+	isDrivenTurnEvent(token: object): boolean {
+		const scope = drivenTurnScope.getStore();
+		return scope?.session === this && scope.token === token && this.#drivenOrigin(token) === "owned";
+	}
+
 	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
 	#inLogContext<T>(work: () => T): T {
 		return this.agent.logContext ? logger.withContext(this.agent.logContext, work) : work();
 	}
 
-	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
-		this.#admittedSubmissionCount++;
+	async #admitSubmission<T>(work: () => Promise<T>, dropped: () => T, invalid?: () => never): Promise<T> {
+		const origin = this.#drivenOrigin();
+		if (origin === "invalid") {
+			if (invalid) return invalid();
+			throw new PromptDroppedError();
+		}
+		if (origin === "independent" && this.#drivenTurn) {
+			const generation = this.#sessionGeneration;
+			this.#drivenIndependentWaiters++;
+			this.#drivenIndependentWaitersSettled ??= Promise.withResolvers<void>();
+			try {
+				while (this.#drivenTurn) {
+					const state = this.#drivenTurn;
+					await Promise.race([state.released.promise, state.invalidated.promise]);
+					if (this.#isDisposed || this.#sessionGeneration !== generation || state.invalid) return dropped();
+				}
+				if (this.#isDisposed || this.#sessionGeneration !== generation) return dropped();
+				this.#admittedSubmissionCount++;
+			} finally {
+				if (--this.#drivenIndependentWaiters === 0) {
+					const settled = this.#drivenIndependentWaitersSettled;
+					this.#drivenIndependentWaitersSettled = undefined;
+					settled?.resolve();
+				}
+			}
+		} else {
+			this.#admittedSubmissionCount++;
+		}
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+			if (origin === "owned" && this.#drivenOrigin() !== "owned") {
+				if (invalid) return invalid();
+				throw new PromptDroppedError();
+			}
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -3762,12 +4188,39 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * {@link hasPendingAsyncWork} still holds — a follow-up turn may start new
 	 * jobs.
 	 */
-	async settleAsyncWork(): Promise<void> {
-		const manager = this.#asyncJobManager;
-		if (!manager || !this.#agentId) return;
-		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
-		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
-		await this.waitForIdle();
+	async settleAsyncWork(options?: { drivenTurn?: object }): Promise<void> {
+		let owner: DrivenTurnState | undefined;
+		if (options?.drivenTurn) {
+			if (this.#drivenOrigin(options.drivenTurn) !== "owned") throw new Error("Driven turn is no longer active.");
+			owner = this.#drivenTurn;
+			this.#drivenAsyncJoin = owner;
+			this.#rearmParkedDrivenFlush();
+			this.#scheduleDrivenChildIrc();
+		}
+		try {
+			const manager = this.#asyncJobManager;
+			if (!manager || !this.#agentId) return;
+			if (owner) {
+				const signal = owner.controller.signal;
+				try {
+					await untilAborted(signal, () => manager.waitForOwnerJobs(this.#agentId!, { excludeSuppressed: true }));
+					signal.throwIfAborted();
+					await untilAborted(signal, () => manager.drainDeliveries({ filter: { ownerId: this.#agentId } }));
+					signal.throwIfAborted();
+					await untilAborted(signal, () => this.waitForIdle());
+					signal.throwIfAborted();
+				} catch (error) {
+					if (signal.aborted && signal.reason instanceof Error) throw signal.reason;
+					throw error;
+				}
+			} else {
+				await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+				await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+				await this.waitForIdle();
+			}
+		} finally {
+			if (owner && this.#drivenAsyncJoin === owner) this.#drivenAsyncJoin = undefined;
+		}
 	}
 
 	/**
@@ -3794,13 +4247,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
 		const durationMs = job ? Math.max(0, (job.endTime ?? Date.now()) - job.startTime) : undefined;
-		await this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
+		const receipt = this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
 			jobId,
 			result: formatted,
 			job,
 			durationMs,
 			epoch,
 		});
+		if (this.#drivenAsyncJoin) this.#rearmParkedDrivenFlush();
+		await receipt;
 	}
 
 	/**
@@ -5447,11 +5902,55 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
-		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
+		options?: {
+			delayMs?: number;
+			generation?: number;
+			onSkip?: (reason: PostPromptSkipReason) => void;
+			drivenTurn?: object;
+		},
 	): void {
+		const scope = drivenTurnScope.getStore();
+		const token = options?.drivenTurn ?? (scope?.session === this ? scope.token : undefined);
+		const origin = this.#drivenOrigin(token);
+		if (origin === "invalid") {
+			options?.onSkip?.("aborted");
+			return;
+		}
+		const owner = origin === "owned" ? this.#drivenTurn : undefined;
+		const postPromptSignal = this.#postPromptTasksAbortController.signal;
+		const held = origin === "independent" ? this.#drivenTurn : undefined;
+		if (held) {
+			const generation = this.#sessionGeneration;
+			this.#drivenIndependentWaiters++;
+			this.#drivenIndependentWaitersSettled ??= Promise.withResolvers<void>();
+			let settled = false;
+			const resume = () =>
+				drivenTurnScope.exit(() => {
+					if (settled) return;
+					settled = true;
+					postPromptSignal.removeEventListener("abort", resume);
+					try {
+						if (postPromptSignal.aborted || this.#isDisposed) options?.onSkip?.("aborted");
+						else if (this.#sessionGeneration !== generation) options?.onSkip?.("stale-generation");
+						else this.#schedulePostPromptTask(task, options);
+					} finally {
+						if (--this.#drivenIndependentWaiters === 0) {
+							const barrier = this.#drivenIndependentWaitersSettled;
+							this.#drivenIndependentWaitersSettled = undefined;
+							barrier?.resolve();
+						}
+					}
+				});
+			postPromptSignal.addEventListener("abort", resume, { once: true });
+			void held.released.promise.then(resume);
+			if (postPromptSignal.aborted) resume();
+			return;
+		}
 		const delayMs = options?.delayMs ?? 0;
-		const signal = this.#postPromptTasksAbortController.signal;
+		const signal = owner ? AbortSignal.any([postPromptSignal, owner.controller.signal]) : postPromptSignal;
 		const scheduled = (async () => {
+			// Register owned work before its callback can close or cancel the lease.
+			if (owner) await Promise.resolve();
 			if (delayMs > 0) {
 				try {
 					await scheduler.wait(delayMs, { signal });
@@ -5460,7 +5959,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 			}
-			if (signal.aborted) {
+			if (signal.aborted || (owner && this.#drivenOrigin(owner.token) !== "owned")) {
 				options?.onSkip?.("aborted");
 				return;
 			}
@@ -5468,8 +5967,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				options.onSkip?.("stale-generation");
 				return;
 			}
-			await task(signal);
+			if (owner) await drivenTurnScope.run({ session: this, token: owner.token }, () => task(signal));
+			else await task(signal);
 		})();
+		if (owner) {
+			owner.tasks.add(scheduled);
+			void scheduled.finally(() => owner.tasks.delete(scheduled)).catch(() => {});
+		}
 		this.#trackPostPromptTask(scheduled);
 	}
 
@@ -5574,6 +6078,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
+		const scope = drivenTurnScope.getStore();
+		const token = options.drivenTurn ?? (scope?.session === this ? scope.token : undefined);
 		const request: ScheduledAgentContinueRequest = {
 			schedulerToken: ++this.#agentContinueSchedulerToken,
 			options,
@@ -5615,13 +6121,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							activeSource: active.source,
 							activeSchedulerToken: active.schedulerToken,
 						});
-						this.#handleAgentContinueOutcome(await active.promise, request);
+						const outcome = await active.promise;
+						if (token && this.#drivenOrigin(token) !== "owned") {
+							this.#skipAgentContinue("aborted", request);
+							return;
+						}
+						this.#handleAgentContinueOutcome(outcome, request);
 						return;
 					}
 
 					// A request made by the active turn's agent_end is its next step,
 					// not a duplicate of that turn. Wait until it settles before starting.
 					await active.promise;
+					if (token && this.#drivenOrigin(token) !== "owned") {
+						this.#skipAgentContinue("aborted", request);
+						return;
+					}
 					if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
 						this.#skipAgentContinue("session-unavailable", request);
 						return;
@@ -5673,6 +6188,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			{
 				delayMs: options.delayMs,
 				generation: options.generation,
+				drivenTurn: token,
 				onSkip: reason => this.#skipAgentContinue(reason, request),
 			},
 		);
@@ -6658,6 +7174,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * gap slips past the disposal guards.
 	 */
 	beginDispose(): void {
+		this.#invalidateDrivenTurn();
 		this.#isDisposed = true;
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
@@ -7098,6 +7615,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.reset();
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
+		this.#invalidateDrivenTurn();
 		this.#sessionGeneration++;
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
@@ -8690,7 +9208,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * {@link PromptDroppedError} instead.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
-		return this.#admitSubmission(() => this.#prompt(text, options));
+		const submit = () =>
+			this.#admitSubmission(
+				() => this.#prompt(text, options),
+				() => {
+					this.#reportDroppedPrompt(text, options, this.#createPromptFollowUps(options?.followUps));
+					if (options?.throwOnDrop) throw new PromptDroppedError();
+					return true;
+				},
+			);
+		return options?.userInitiated === true ||
+			(options?.attribution ?? (options?.synthetic ? "agent" : "user")) === "user"
+			? drivenTurnScope.exit(submit)
+			: submit();
 	}
 
 	/**
@@ -8707,6 +9237,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @throws {Error} when there is no conversation to resume.
 	 */
 	async resume(): Promise<void> {
+		return drivenTurnScope.exit(() =>
+			this.#admitSubmission(
+				() => this.#resume(),
+				() => undefined,
+			),
+		);
+	}
+
+	async #resume(): Promise<void> {
 		if (!this.isStreaming) return this.#resumeIdle();
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
 		// until the continuation is live, so a host driving this session to a result
@@ -8902,6 +9441,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// one (after compaction it is the queued-message drain). Busy only from
 				// another prompt's setup claims nothing yet.
 				outcome.sessionClaimed = this.agent.state.isStreaming;
+				options?.onDrivenPreAdmissionBusy?.(
+					Promise.all([this.agent.waitForIdle(), this.waitForAdmittedSubmissions()]).then(() => {}),
+				);
 				throw new AgentBusyError();
 			}
 
@@ -8980,6 +9522,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
+				options?.onDrivenPreAdmissionBusy?.(
+					Promise.all([this.agent.waitForIdle(), this.waitForAdmittedSubmissions()]).then(() => {}),
+				);
 				throw new AgentBusyError();
 			}
 			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
@@ -9102,7 +9647,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
-		return this.#admitSubmission(() => this.#promptCustomMessage(message, options));
+		const submit = () =>
+			this.#admitSubmission(
+				() => this.#promptCustomMessage(message, options),
+				() => false,
+			);
+		return message.attribution === "user" ? drivenTurnScope.exit(submit) : submit();
 	}
 
 	async #promptCustomMessage<T = unknown>(
@@ -9509,6 +10059,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
+		const scope = drivenTurnScope.getStore();
+		const drivenToken = scope?.session === this ? scope.token : undefined;
 		const inFlightEpoch = this.#beginInFlight();
 		// Client ownership is reserved by #prompt before dispatch preprocessing
 		// and released when its bracket settles; callers that reach this
@@ -9538,7 +10090,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#eval.flushPending();
 			// This turn carries the assignment: IRC asides parked for it fold in ahead of the message.
 			this.#ircAwaitingAssignment = false;
-			this.#irc.flushPending();
+			this.#irc.flushPending({ keepPeerMessages: this.#peerMessagesGetOwnTurns });
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();
@@ -9769,15 +10321,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#planReferenceSent = true;
 			}
 			try {
-				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
-					// `agent.prompt` claims streaming synchronously before its
-					// first await: this callback fires exactly when THIS
-					// client-owned run goes live (never on a busy-retry that
-					// waits behind an autonomous run) — wake steers parked on
-					// the dispatch so they admit into the run they targeted.
-					this.#wakeDispatchLiveWaiters();
-					options?.followUpBatch?.release();
-				});
+				if (drivenToken && this.#drivenOrigin(drivenToken) !== "owned") throw new PromptDroppedError();
+				const run = this.#recovery.promptAgentWithIdleRetry(
+					messages,
+					agentPromptOptions,
+					() => {
+						// `agent.prompt` claims streaming synchronously before its
+						// first await: this callback fires exactly when THIS
+						// client-owned run goes live (never on a busy-retry that
+						// waits behind an autonomous run) — wake steers parked on
+						// the dispatch so they admit into the run they targeted.
+						this.#wakeDispatchLiveWaiters();
+						options?.followUpBatch?.release();
+					},
+					drivenToken ? "propagate" : "retry",
+				);
 				await run;
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
@@ -10882,7 +11440,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<boolean> {
-		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
+		const submit = () =>
+			this.#admitSubmission(
+				() => this.#sendCustomMessage(message, options),
+				() => false,
+			);
+		return typeof message === "object" &&
+			message !== null &&
+			!Array.isArray(message) &&
+			message.attribution === "user"
+			? drivenTurnScope.exit(submit)
+			: submit();
 	}
 
 	async #sendCustomMessage<T = unknown>(
@@ -12389,6 +12957,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// the same breath so an aside-queueing call still awaiting normalization for the
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
+			this.#invalidateDrivenTurn();
 			this.#sessionGeneration++;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
@@ -13454,8 +14023,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
-	async retry(): Promise<boolean> {
-		const didRetry = await this.#recovery.retry();
+	async retry(options?: { drivenTurn?: object }): Promise<boolean> {
+		const submit = () =>
+			this.#admitSubmission(
+				() => this.#retry(options),
+				() => false,
+				() => {
+					throw new Error("Driven turn is no longer active.");
+				},
+			);
+		return options?.drivenTurn ? this.runWithDrivenTurn(options.drivenTurn, submit) : drivenTurnScope.exit(submit);
+	}
+
+	async #retry(options?: { drivenTurn?: object }): Promise<boolean> {
+		const didRetry = await this.#recovery.retry(options);
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
 		if (didRetry) this.#advisors.autoResumeSuppressed = false;
@@ -13476,11 +14057,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @returns whether a continuation was scheduled; false while a turn runs, without
 	 * a model, or with nothing left unfinished.
 	 */
-	async restoreInterruptedTurn(): Promise<boolean> {
+	async restoreInterruptedTurn(options?: { drivenTurn?: object; onAdmitted?: () => void }): Promise<boolean> {
+		const submit = () =>
+			this.#admitSubmission(
+				() => this.#restoreInterruptedTurn(options),
+				() => false,
+				() => {
+					throw new Error("Driven turn is no longer active.");
+				},
+			);
+		return options?.drivenTurn ? this.runWithDrivenTurn(options.drivenTurn, submit) : drivenTurnScope.exit(submit);
+	}
+
+	async #restoreInterruptedTurn(options?: { drivenTurn?: object; onAdmitted?: () => void }): Promise<boolean> {
 		const branch = this.sessionManager.getBranch();
-		if (this.isStreaming || !hasRestorableTurn(branch)) return false;
+		if (this.isStreaming || this.isCompacting || this.isRetrying || !hasRestorableTurn(branch)) return false;
 		const model = this.model;
 		if (!model) return false;
+		options?.onAdmitted?.();
 		const abort = createInterruptedTurnAbortMessage(
 			branch,
 			{ api: model.api, provider: model.provider, model: model.id },
@@ -13491,7 +14085,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.appendMessage(abort);
 			this.replaceMessagesFromSessionContext(this.buildDisplaySessionContext().messages);
 		}
-		return this.retry();
+		return this.#retry(options);
 	}
 
 	// =========================================================================
@@ -13601,7 +14195,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		// The sender's context is active here; the delivery is the recipient's work.
-		return this.#inLogContext(() => this.#irc.deliver(msg));
+		return this.#inLogContext(async () => {
+			const receipt = await this.#irc.deliver(msg);
+			this.#scheduleDrivenChildIrc();
+			return receipt;
+		});
 	}
 
 	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */
@@ -13635,8 +14233,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	setIrcWakeTurnObserver(
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
+		replyOnly?: IrcTurnReplyFactory,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+		this.#ircDrivenReplyFactory = replyOnly;
 	}
 
 	/**
@@ -14148,6 +14748,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// aside-queueing call still awaiting normalization when the switch started drops its
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
+		this.#invalidateDrivenTurn();
 		const previousSessionGeneration = this.#sessionGeneration++;
 		const generationSettled = Promise.withResolvers<void>();
 		const previousSessionGenerationSettled = this.#sessionGenerationSettled;

@@ -81,12 +81,13 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "SubAgent",
 			asyncJobManager: manager,
 		});
@@ -153,6 +154,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const sessionManager = SessionManager.inMemory(temp.path());
+		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent: new Agent({
 				getApiKey: () => "test-key",
@@ -161,8 +163,8 @@ describe("AgentSession owner-routed async delivery", () => {
 				streamFn: mock.stream,
 			}),
 			sessionManager,
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage, temp.join("models.yml")),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, temp.join("models.yml"), { settings }),
 			agentId: "Lead",
 			asyncJobManager: manager,
 		});
@@ -262,11 +264,12 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorages.push(authStorage);
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Owner",
 			asyncJobManager: manager,
 		});
@@ -304,11 +307,12 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Lead",
 			asyncJobManager: manager,
 		});
@@ -370,11 +374,12 @@ describe("AgentSession owner-routed async delivery", () => {
 		const sessionManager = SessionManager.inMemory();
 		const allocate = vi.spyOn(sessionManager, "allocateArtifactPath");
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "CaptureOwner",
 			asyncJobManager: manager,
 		});
@@ -442,7 +447,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			agent,
 			sessionManager: store,
 			settings,
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "MixedCaptureOwner",
 			asyncJobManager: manager,
 		});
@@ -530,7 +535,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			agent,
 			sessionManager: store,
 			settings,
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "RawCaptureOwner",
 			asyncJobManager: manager,
 		});
@@ -1009,11 +1014,12 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.inMemory();
 		const owner = `${sessionManager.getSessionId()}-advisor`;
+		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 		});
 		const completion = {
 			event: "daemon-completed",
@@ -1063,12 +1069,13 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
@@ -1117,12 +1124,13 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
@@ -1172,12 +1180,13 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
@@ -1246,7 +1255,8 @@ describe("AgentSession owner-routed async delivery", () => {
 		const targetSessionFile = target.getSessionFile()!;
 		await target.close();
 
-		const modelRegistry = new ModelRegistry(authStorage);
+		const settings = Settings.isolated();
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 		let extensionRunner: ExtensionRunner | undefined;
 		if (options.extension) {
 			const register = options.extension;
@@ -1263,7 +1273,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated(),
+			settings,
 			modelRegistry,
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
@@ -1429,12 +1439,13 @@ describe("AgentSession owner-routed async delivery", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
+		const settings = Settings.isolated();
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, undefined, { settings }),
 			agentId: "SubAgent",
 			asyncJobManager: manager,
 		});

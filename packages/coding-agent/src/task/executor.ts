@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -86,6 +86,7 @@ import {
 import {
 	type AgentSession,
 	type AgentSessionEvent,
+	type DrivenTurnLease,
 	type Prewalk,
 	PromptDroppedError,
 	type PromptOptions,
@@ -769,6 +770,28 @@ function buildSchemaViolationOutcome(
 	return { rawOutput, stderr: headline, exitCode: 1 };
 }
 
+function updateReportTurnText(content: unknown, previous: string | undefined): string | undefined {
+	if (!Array.isArray(content)) return previous;
+	const turnText: string[] = [];
+	let startedMoreWork = false;
+	let completedServerWork = false;
+	for (const block of content) {
+		if (!isRecord(block)) continue;
+		if (block.type === "text" && typeof block.text === "string") {
+			if (block.text) turnText.push(block.text);
+			continue;
+		}
+		if (block.type !== "toolCall" || typeof block.name !== "string" || block.name === "yield") continue;
+		if (isCursorExecResolved(block)) completedServerWork = true;
+		else startedMoreWork = true;
+		turnText.length = 0;
+	}
+	const text = turnText.join("\n");
+	if (startedMoreWork) return undefined;
+	if (text.trim()) return text;
+	return completedServerWork ? undefined : previous;
+}
+
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
 	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
@@ -1409,7 +1432,7 @@ interface SubagentRunMonitor {
 	/** Return and clear the active session reference. */
 	takeActiveSession(): AgentSession | null;
 	/** Subscribe the monitor to a session's events. Returns the unsubscribe function. */
-	attach(session: AgentSession): () => void;
+	attach(session: AgentSession, acceptEvent?: () => boolean): () => void;
 	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
@@ -1498,6 +1521,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	 * run of yield-only turns bypass the budget entirely.
 	 */
 	let budgetCheckDeferred = false;
+	let replyYieldPending = false;
+	let replyBudgetCheckDeferred = false;
 	/** True while the reminder ladder's forced final `yield` is outstanding. */
 	let finalYieldForced = false;
 	let yieldInvalidatedByAsync = false;
@@ -1932,7 +1957,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			});
 	};
 
-	const processEvent = (event: AgentEvent) => {
+	const processEvent = (event: AgentEvent, replyOnly = false) => {
 		if (resolved) return;
 		const now = Date.now();
 		let flushProgress = false;
@@ -1992,8 +2017,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				if (intent) {
 					progress.lastIntent = intent;
 				}
-				if (event.toolName === "yield" && !yieldCalled) {
-					yieldCallPending = true;
+				if (event.toolName === "yield") {
+					if (replyOnly) replyYieldPending = true;
+					else if (!yieldCalled) yieldCallPending = true;
 				}
 				// Reset any prior in-flight task snapshot so we don't show stale
 				// nested progress when the agent enters a fresh `task` call.
@@ -2054,7 +2080,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 
 				// Check for registered subagent tool handler
-				const handler = subprocessToolRegistry.getHandler(event.toolName);
+				const handler =
+					replyOnly && event.toolName === "yield" ? undefined : subprocessToolRegistry.getHandler(event.toolName);
 				const eventRecord: unknown = event;
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
 				let endsRun = false;
@@ -2109,7 +2136,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}
 					}
 				}
-				if (event.toolName === "yield") {
+				if (replyOnly && event.toolName === "yield") {
+					replyYieldPending = false;
+					if (replyBudgetCheckDeferred) {
+						replyBudgetCheckDeferred = false;
+						evaluateSoftRequestBudget();
+					}
+				}
+				if (event.toolName === "yield" && !replyOnly) {
 					if (event.isError && !abortSent) {
 						consecutiveYieldToolErrors++;
 						let yieldErrorText = "";
@@ -2145,7 +2179,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					progress.requests += 1;
 					// A sibling yield still validating may be the run's terminal
 					// report; checking now could abort the response before it lands.
-					if (yieldCallPending) budgetCheckDeferred = true;
+					if (replyOnly && replyYieldPending) replyBudgetCheckDeferred = true;
+					else if (!replyOnly && yieldCallPending) budgetCheckDeferred = true;
 					else evaluateSoftRequestBudget();
 				}
 				break;
@@ -2195,47 +2230,29 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					assistantStreaming = false;
-					sawAssistantMessage = true;
+					if (!replyOnly) sawAssistantMessage = true;
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
 					if (messageContent && Array.isArray(messageContent)) {
-						const turnText: string[] = [];
-						let startedMoreWork = false;
-						let completedServerWork = false;
 						for (const block of messageContent) {
 							if (!isRecord(block)) continue;
-							if (block.type === "text" && typeof block.text === "string") {
+							if (!replyOnly && block.type === "text" && typeof block.text === "string")
 								outputChunks.push(block.text);
-								if (block.text) turnText.push(block.text);
-								continue;
+							if (block.type === "toolCall" && block.name === "yield" && (replyOnly || !yieldCalled)) {
+								if (replyOnly) replyYieldPending = true;
+								else yieldCallPending = true;
+								flushProgress = true;
 							}
-							if (block.type !== "toolCall" || typeof block.name !== "string") continue;
-							if (block.name === "yield") {
-								if (!yieldCalled) {
-									yieldCallPending = true;
-									flushProgress = true;
-								}
-								continue;
-							}
-							if (isCursorExecResolved(block)) completedServerWork = true;
-							else startedMoreWork = true;
-							turnText.length = 0;
 						}
-						// Locally runnable calls make all prose in or before this turn
-						// mid-work narration. Cursor exec-resolved calls already ran, so
-						// text after the last one is a report; without such text, prior
-						// prose predates that work and is invalidated.
-						const text = turnText.join("\n");
-						if (startedMoreWork) lastReportTurnText = undefined;
-						else if (text.trim()) lastReportTurnText = text;
-						else if (completedServerWork) lastReportTurnText = undefined;
+						if (!replyOnly) lastReportTurnText = updateReportTurnText(messageContent, lastReportTurnText);
 					}
 					// A yield awaiting validation suppresses the budget check for
 					// its own turn (#5006). Defer it rather than drop it: every
 					// yield turn latches the pending flag, so dropping the check
 					// lets a run of yield-only turns never account for a request.
-					if (yieldCallPending) budgetCheckDeferred = true;
+					if (replyOnly && replyYieldPending) replyBudgetCheckDeferred = true;
+					else if (!replyOnly && yieldCallPending) budgetCheckDeferred = true;
 					else evaluateSoftRequestBudget();
 				}
 				// Extract and accumulate usage (prefer message.usage, fallback to event.usage)
@@ -2277,8 +2294,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "agent_end":
+				if (replyOnly) {
+					replyYieldPending = false;
+					if (replyBudgetCheckDeferred) {
+						replyBudgetCheckDeferred = false;
+						evaluateSoftRequestBudget();
+					}
+				}
 				// Extract final content from assistant messages only (not user prompts)
-				if (event.messages && Array.isArray(event.messages)) {
+				if (!replyOnly && event.messages && Array.isArray(event.messages)) {
 					for (const msg of event.messages) {
 						if ((msg as { role?: string })?.role !== "assistant") continue;
 						const messageContent = getMessageContent(msg);
@@ -2307,7 +2331,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		}
 	};
 
-	const attach = (session: AgentSession): (() => void) => {
+	const attach = (session: AgentSession, acceptEvent?: () => boolean): (() => void) => {
 		// The session owns attribution: it knows which model produced its output
 		// and withholds an armed-but-unproven fallback. Re-deriving that here from
 		// the event stream got it wrong twice over — the stream also carries
@@ -2339,7 +2363,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			progress.contextWindow = contextWindow;
 			scheduleProgress(true);
 		};
-		return session.subscribe(event => {
+		// The session may publish this core boundary only after the reply marker is cleared.
+		// Preserve its classification by the messages array shared by the deferred frame.
+		const replyEndMessages = acceptEvent ? new WeakSet<AgentMessage[]>() : undefined;
+		const unsubscribeCore = acceptEvent
+			? session.agent.subscribe(event => {
+					if (event.type === "agent_end" && drivenIrcReplySessions.has(session) && acceptEvent()) {
+						replyEndMessages?.add(event.messages);
+					}
+				})
+			: undefined;
+		const handleEvent = (event: AgentSessionEvent): void => {
+			if (acceptEvent && !acceptEvent()) return;
 			emitSubagentEvent(event);
 			publishAdvisorState(session);
 			publishServingModel();
@@ -2372,7 +2407,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// watchdog can attribute any block to this in-process subagent.
 				pushLoopPhase(`subagent:${id}`);
 				try {
-					processEvent(event);
+					const replyOnly =
+						drivenIrcReplySessions.has(session) ||
+						(event.type === "agent_end" && replyEndMessages?.has(event.messages) === true);
+					processEvent(event, replyOnly);
 				} catch (err) {
 					logger.error("Subagent event processing failed", {
 						error: err instanceof Error ? err.message : String(err),
@@ -2382,7 +2420,26 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					popLoopPhase();
 				}
 			}
-		});
+		};
+		let unsubscribeSession: () => void;
+		try {
+			unsubscribeSession = session.subscribe(handleEvent);
+		} catch (error) {
+			try {
+				unsubscribeCore?.();
+			} catch (cleanupError) {
+				logger.warn("Subagent core event unsubscribe failed", { error: String(cleanupError) });
+			}
+			throw error;
+		}
+		if (!unsubscribeCore) return unsubscribeSession;
+		return () => {
+			try {
+				unsubscribeSession();
+			} finally {
+				unsubscribeCore();
+			}
+		};
 	};
 
 	const captureSalvage = (session: AgentSession): void => {
@@ -2541,9 +2598,17 @@ const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
 
 class PromptDispatchError extends Error {}
 
+class DrivenTurnPreAdmissionBusy extends Error {
+	constructor(readonly winner: Promise<void>) {
+		super("Another turn won before driven prompt admission.");
+	}
+}
+
 /** Failures no retry, reminder or notice turn can recover: they end the run. */
 function endsRun(err: unknown): boolean {
-	return err instanceof PromptDispatchError || err instanceof CostCapError;
+	return (
+		err instanceof PromptDispatchError || err instanceof CostCapError || err instanceof DrivenTurnPreAdmissionBusy
+	);
 }
 
 /**
@@ -2566,12 +2631,10 @@ async function driveSessionToResult(
 		solutionSpace?: string;
 		/** `false` = no `yield` tool; the final assistant message is the result. Default `true`. */
 		structured?: boolean;
-		/**
-		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
-		 * retrying. Lets the caller restore a safe contract and detach its monitor
-		 * while backing off. Absent, the busy error keeps the old path.
-		 */
-		onPromptBusy?: () => Promise<void>;
+		/** Reservation and admission bookkeeping are present only for follow-up turns. */
+		drivenTurn?: DrivenTurnLease;
+		attempt?: { initialized: boolean; stepsRecorded: boolean };
+		retryPreAdmission?: boolean;
 		/** Go on with the interrupted turn instead of sending `task`, which only labels the run. */
 		restore?: boolean;
 		/**
@@ -2582,7 +2645,7 @@ async function driveSessionToResult(
 		steps?: StepProgress;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore, steps } = options;
+	const { solutionSpace, drivenTurn, attempt, restore, steps } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2606,7 +2669,10 @@ async function driveSessionToResult(
 		}
 	};
 	const awaitAbortable = async <T>(promise: Promise<T>): Promise<T> => {
-		checkAbort();
+		if (abortSignal.aborted) {
+			void promise.catch(() => {});
+			checkAbort();
+		}
 		const { promise: abortPromise, reject } = Promise.withResolvers<never>();
 		const onAbort = () => {
 			try {
@@ -2635,10 +2701,33 @@ async function driveSessionToResult(
 		label: string,
 		{ forceFinalYield = false }: { forceFinalYield?: boolean } = {},
 	): Promise<void> => {
-		for (let attempt = 1; attempt <= MAX_PROMPT_DISPATCH_ATTEMPTS; attempt++) {
+		const onPromptAdmitted = () => {
+			promptOptions.onPromptAdmitted?.();
+			if (!attempt) return;
+			attempt.initialized = true;
+			if (steps && !restore && !attempt.stepsRecorded) {
+				recordStepsSent(session.sessionManager, steps.sent, steps.prompts);
+				attempt.stepsRecorded = true;
+			}
+		};
+		for (let dispatchAttempt = 1; dispatchAttempt <= MAX_PROMPT_DISPATCH_ATTEMPTS; dispatchAttempt++) {
+			checkAbort();
 			if (forceFinalYield) monitor.markFinalYieldForced(true);
 			try {
-				await awaitAbortable(session.prompt(text, { ...promptOptions, runCommands: false, throwOnDrop: true }));
+				await awaitAbortable(
+					session.prompt(text, {
+						...promptOptions,
+						runCommands: false,
+						throwOnDrop: true,
+						onPromptAdmitted: drivenTurn ? onPromptAdmitted : promptOptions.onPromptAdmitted,
+						onDrivenPreAdmissionBusy: drivenTurn
+							? winner => {
+									if (!attempt?.initialized && options.retryPreAdmission !== false)
+										throw new DrivenTurnPreAdmissionBusy(winner);
+								}
+							: undefined,
+					}),
+				);
 				return;
 			} catch (err) {
 				if (!(err instanceof PromptDroppedError)) throw err;
@@ -2646,8 +2735,10 @@ async function driveSessionToResult(
 			const refusal = costCapRefusal();
 			if (refusal) throw new CostCapError(refusal);
 			if (forceFinalYield) monitor.markFinalYieldForced(false);
-			if (attempt === MAX_PROMPT_DISPATCH_ATTEMPTS) {
-				throw new PromptDispatchError(`${label} dropped before provider dispatch after ${attempt} attempts`);
+			if (dispatchAttempt === MAX_PROMPT_DISPATCH_ATTEMPTS) {
+				throw new PromptDispatchError(
+					`${label} dropped before provider dispatch after ${dispatchAttempt} attempts`,
+				);
 			}
 			const deadline = AbortSignal.timeout(PROMPT_DISPATCH_IDLE_TIMEOUT_MS);
 			try {
@@ -2659,7 +2750,7 @@ async function driveSessionToResult(
 				}
 				throw err;
 			}
-			await untilAborted(abortSignal, () => Bun.sleep(250 * 2 ** (attempt - 1)));
+			await untilAborted(abortSignal, () => Bun.sleep(250 * 2 ** (dispatchAttempt - 1)));
 		}
 	};
 
@@ -2673,33 +2764,34 @@ async function driveSessionToResult(
 	 */
 	const runTurn = async (send: () => Promise<void>): Promise<void> => {
 		try {
+			checkAbort();
 			await send();
 			await awaitAbortable(session.waitForIdle());
 		} catch (err) {
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
-			if (!recoverableStop || abortSignal.aborted || endsRun(err)) throw err;
+			if (!recoverableStop || abortSignal.aborted || endsRun(err) || (drivenTurn && err instanceof AgentBusyError))
+				throw err;
 		}
 	};
 
 	try {
-		if (steps && !restore) recordStepsSent(session.sessionManager, steps.sent, steps.prompts);
+		if (steps && !restore && !drivenTurn) recordStepsSent(session.sessionManager, steps.sent, steps.prompts);
 		monitor.holdForSteps(steps !== undefined && steps.sent < steps.prompts.length);
 		await runTurn(async () => {
-			// An IRC wake may own the session when this turn dispatches. Its prompt
-			// wins the race and this prompt throws AgentBusyError; back off through
-			// the caller hook and retry. Bounded so a wedged worker still resolves
-			// instead of hanging the batch.
-			let promptAttempts = 0;
-			for (;;) {
-				try {
-					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
-					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
-					return;
-				} catch (error) {
-					promptAttempts++;
-					if (!(error instanceof AgentBusyError) || promptAttempts >= 3 || !onPromptBusy) throw error;
-					await onPromptBusy();
-				}
+			if (restore) {
+				const restored = await awaitAbortable(
+					session.restoreInterruptedTurn({
+						drivenTurn: drivenTurn?.token,
+						onAdmitted: attempt
+							? () => {
+									attempt.initialized = true;
+								}
+							: undefined,
+					}),
+				);
+				if (!restored) throw new PromptDispatchError("Interrupted turn was not admitted for restore.");
+			} else {
+				await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
 			}
 		});
 
@@ -2756,7 +2848,7 @@ async function driveSessionToResult(
 					);
 					await awaitAbortable(session.waitForIdle());
 				} catch (err) {
-					if (endsRun(err)) throw err;
+					if (endsRun(err) || (drivenTurn && err instanceof AgentBusyError)) throw err;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
 						// Benign control-flow exit — user cancel (^C) or compaction aborting
 						// pending operations both surface here as ToolAbortError. The outer
@@ -2823,7 +2915,7 @@ async function driveSessionToResult(
 					continue;
 				}
 				if (!monitor.yieldCalled()) {
-					await awaitAbortable(session.settleAsyncWork());
+					await awaitAbortable(session.settleAsyncWork(drivenTurn ? { drivenTurn: drivenTurn.token } : undefined));
 					continue;
 				}
 				if (!asyncPendingNoticeSent) {
@@ -2840,7 +2932,13 @@ async function driveSessionToResult(
 							await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
 							await awaitAbortable(session.waitForIdle());
 						} catch (err) {
-							if (abortSignal.aborted || err instanceof ToolAbortError || endsRun(err)) throw err;
+							if (
+								abortSignal.aborted ||
+								err instanceof ToolAbortError ||
+								endsRun(err) ||
+								(drivenTurn && err instanceof AgentBusyError)
+							)
+								throw err;
 							// Other notice-turn failures leave the pending jobs to settle passively.
 							logger.warn("Subagent async-pending notice failed", {
 								error: err instanceof Error ? err.message : String(err),
@@ -2851,7 +2949,7 @@ async function driveSessionToResult(
 						continue;
 					}
 				}
-				await awaitAbortable(session.settleAsyncWork());
+				await awaitAbortable(session.settleAsyncWork(drivenTurn ? { drivenTurn: drivenTurn.token } : undefined));
 				// Results delivered during the settle invalidated the recorded
 				// yield: the next iteration's ladder demands a fresh one.
 			}
@@ -2870,16 +2968,33 @@ async function driveSessionToResult(
 			monitor.holdForSteps(next + 1 < steps.prompts.length);
 			monitor.beginStep();
 			resetYieldTurnState(session.getToolByName("yield"));
-			recordStepsSent(session.sessionManager, next + 1);
+			if (!drivenTurn) recordStepsSent(session.sessionManager, next + 1);
 			const stepPrompt = steps.prompts[next];
 			await runTurn(() =>
-				dispatchPrompt(stepPrompt, { attribution: "agent", solutionSpace }, `step prompt ${next + 1}`),
+				dispatchPrompt(
+					stepPrompt,
+					{
+						attribution: "agent",
+						solutionSpace,
+						onPromptAdmitted: drivenTurn ? () => recordStepsSent(session.sessionManager, next + 1) : undefined,
+					},
+					`step prompt ${next + 1}`,
+				),
 			);
 			await settle();
 		}
 
 		if (!monitor.yieldCalled()) {
 			await awaitAbortable(session.waitForIdle());
+		}
+		if (drivenTurn) {
+			for (;;) {
+				checkAbort();
+				await awaitAbortable(session.waitForIdle());
+				checkAbort();
+				if (drivenTurn.tryClose()) break;
+				await settle();
+			}
 		}
 
 		const lastAssistant = session.getLastAssistantMessage();
@@ -2935,6 +3050,7 @@ async function driveSessionToResult(
 				"Background job results arrived after the subagent's last yield; it did not submit a refreshed yield covering them.";
 		}
 	} catch (err) {
+		if (err instanceof DrivenTurnPreAdmissionBusy) throw err;
 		if (abortSignal.aborted && monitor.yieldCalled() && !monitor.runtimeLimitExceeded()) {
 			exitCode = 0;
 		} else {
@@ -3304,11 +3420,12 @@ async function relayWakeTurnOutput(args: {
 	finalizeError: unknown;
 	/** Waker already receiving this turn's outcome as an async job delivery. */
 	jobOwnerId: string | undefined;
-}): Promise<void> {
+}): Promise<Error | undefined> {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
 	if (sources.length === 0) return;
 	const failed = wakeTurnFailed(args);
+	let firstError: Error | undefined;
 	for (const source of sources) {
 		if (source.from === args.jobOwnerId) continue;
 		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
@@ -3330,8 +3447,152 @@ async function relayWakeTurnOutput(args: {
 		});
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
+			firstError ??= new Error(receipt.error ?? "IRC wake-turn relay failed");
 		}
 	}
+	return firstError;
+}
+
+/** A reply-only continuation must not become the enclosing driven result. */
+const drivenIrcReplySessions = new WeakSet<AgentSession>();
+
+/** Collect only the owned continuation's answer; it is not an autonomous result turn. */
+function createDrivenIrcReply(
+	session: AgentSession,
+	id: string,
+	records: AgentMessage[],
+	acceptEvent: () => boolean,
+	signal: AbortSignal,
+): (error?: unknown) => Promise<void> {
+	const turnStartTime = Date.now();
+	const obligation = Promise.withResolvers<void>();
+	session.trackIrcReply(obligation.promise);
+	let report: string | undefined;
+	let lastAssistant: AssistantMessage | undefined;
+	let collectorError: Error | undefined;
+	const output: string[] = [];
+	const yields: YieldItem[] = [];
+	let unsubscribe: () => void;
+	drivenIrcReplySessions.add(session);
+	try {
+		unsubscribe = session.subscribe(event => {
+			if (!acceptEvent()) return;
+			try {
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					lastAssistant = event.message;
+					report = updateReportTurnText(event.message.content, report);
+					for (const block of event.message.content) {
+						if (block.type === "text") output.push(block.text);
+					}
+				} else if (event.type === "tool_execution_end" && event.toolName === "yield" && !event.isError) {
+					const handler = subprocessToolRegistry.getHandler("yield");
+					const eventRecord: unknown = event;
+					const args = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+					const data = handler?.extractData?.({
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+						args,
+						result: event.result,
+						isError: event.isError,
+					});
+					if (data !== undefined) yields.push(data as YieldItem);
+				}
+			} catch (error) {
+				collectorError ??= error instanceof Error ? error : new Error(String(error));
+			}
+		});
+	} catch (error) {
+		drivenIrcReplySessions.delete(session);
+		obligation.resolve();
+		throw error;
+	}
+	let finishing: Promise<void> | undefined;
+	return turnError => {
+		if (finishing) return finishing;
+		let unsubscribeError: unknown;
+		try {
+			unsubscribe();
+		} catch (error) {
+			unsubscribeError = error;
+		}
+		finishing = (async () => {
+			try {
+				const initialError = turnError ?? unsubscribeError ?? collectorError;
+				let firstError =
+					initialError === undefined
+						? undefined
+						: initialError instanceof Error
+							? initialError
+							: new Error(String(initialError));
+				const aborted = signal.aborted || lastAssistant?.stopReason === "aborted";
+				let providerError: string | undefined;
+				let finalizeError: unknown = collectorError ?? unsubscribeError;
+				try {
+					if (lastAssistant?.stopReason === "error") {
+						providerError = attributeSubagentError(lastAssistant.errorMessage, lastAssistant);
+					}
+				} catch (error) {
+					finalizeError ??= error;
+					firstError ??= error instanceof Error ? error : new Error(String(error));
+				}
+				if (providerError) firstError ??= new Error(providerError);
+				let error = providerError ?? (!aborted && firstError ? firstError.message : undefined);
+				let abortReason = aborted ? String(signal.aborted ? signal.reason : "Subagent aborted") : undefined;
+				let turnText = report ?? "";
+				let yieldAborted = false;
+				if (yields.length > 0) {
+					try {
+						const result = finalizeSubprocessOutput({
+							rawOutput: output.join(""),
+							exitCode: error ? 1 : 0,
+							stderr: error ?? "",
+							doneAborted: aborted,
+							signalAborted: signal.aborted,
+							yieldItems: yields,
+							outputSchema: undefined,
+							lastAssistantText: report,
+							structured: true,
+						});
+						turnText = result.rawOutput;
+						yieldAborted = result.abortedViaYield;
+						if (yieldAborted) {
+							abortReason = result.stderr;
+							firstError ??= new Error(result.stderr || "Subagent aborted task");
+						} else if (result.exitCode !== 0 || result.stderr) {
+							error = result.stderr || "Driven child IRC reply failed";
+							firstError ??= new Error(error);
+						}
+					} catch (shapeError) {
+						finalizeError ??= shapeError;
+						firstError ??= shapeError instanceof Error ? shapeError : new Error(String(shapeError));
+					}
+				}
+				try {
+					const deliveryError = await relayWakeTurnOutput({
+						id,
+						records,
+						turnStartTime,
+						yielded: false,
+						result: undefined,
+						turnText: finalizeError ? "" : turnText,
+						error,
+						aborted: aborted || yieldAborted,
+						abortReason,
+						finalizeError,
+						jobOwnerId: undefined,
+					});
+					if (deliveryError) firstError ??= deliveryError;
+				} catch (relayError) {
+					firstError ??= relayError instanceof Error ? relayError : new Error(String(relayError));
+				}
+				if (firstError) throw firstError;
+			} finally {
+				drivenIrcReplySessions.delete(session);
+				obligation.resolve();
+			}
+		})();
+		return finishing;
+	};
 }
 
 /** Whether a wake turn died on an error, a cancellation, or a finalization throw instead of completing. */
@@ -3433,304 +3694,310 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
-	session.setIrcWakeTurnObserver(records => {
-		// Autonomous IRC wake turns reuse the session's YieldTool just like
-		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
-		// and retry counters so this wake turn's guards see only its own state.
-		resetYieldTurnState(session.getToolByName("yield"));
-		const ircTask =
-			records
-				.map(record => {
-					if (record.role === "custom") {
-						const body =
-							record.details && typeof record.details === "object"
-								? Reflect.get(record.details, "message")
-								: undefined;
-						if (typeof body === "string") return body;
-						return extractIrcRecordText(record.content);
-					}
-					// User prompts: typed text, or the synthetic `.`/`c` continue directive.
-					if (record.role === "user" || record.role === "developer") return extractIrcRecordText(record.content);
-					return "";
-				})
-				.filter(Boolean)
-				.join("\n\n") || "IRC follow-up";
-		const turnStartTime = Date.now();
-		const relay = Promise.withResolvers<void>();
-		session.trackIrcReply(relay.promise);
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
-		// The parent receives this turn's outcome through an owner-routed job:
-		// ordinary async-result delivery, and what its `wait` blocks on. A
-		// parent wake owns the whole turn; a mid-turn parent request owns it only
-		// after its steer is consumed. Otherwise only an accepted yield registers
-		// a job, before the ref goes idle.
-		const ownerId = AgentRegistry.global().get(id)?.parentId;
-		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
-		// Cancelling the job cancels the turn it stands for.
-		const jobCancel = new AbortController();
-		// The turn's finished tool calls, which the job's widget reads like a first run's.
-		const tools = new TextTap(TOOLS_SOURCE_ID, TOOLS_SOURCE_LABEL);
-		let reportJobProgress: ((progress: AgentProgress) => void) | undefined;
-		let wakeJob: { ownerId: string; outcome: PromiseWithResolvers<AsyncJobRunResult> } | undefined;
-		const registerWakeJob = (): void => {
-			if (wakeJob) return;
-			const manager = session.asyncJobManager;
-			if (!ownerId || !manager) return;
-			const outcome = Promise.withResolvers<AsyncJobRunResult>();
-			try {
-				manager.register(
-					"task",
-					id,
-					({ signal, reportProgress }) => {
-						signal.addEventListener("abort", () => jobCancel.abort(signal.reason), { once: true });
-						// The progress record is what `wait` reads the turn's stage and estimate from.
-						reportJobProgress = progress => {
-							void reportProgress(`Running background task ${id}...`, { progress: [progress] });
-						};
-						return untilAborted(signal, outcome.promise);
-					},
-					{
-						id,
-						agentId: id,
-						ownerId,
-						widgetInputs: createTaskWidgetInputs({
-							manager,
-							agentId: id,
-							tools: () => tools,
-							progress: turnMonitor.progress,
-						}),
-					},
-				);
-				wakeJob = { ownerId, outcome };
-			} catch (error) {
-				logger.warn("IRC wake-turn job registration failed", {
-					id,
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		};
-		const turnMonitor = createSubagentRunMonitor({
-			index,
-			id,
-			agent,
-			task: ircTask,
-			description: options.description,
-			modelOverride: options.modelOverride,
-			modelRole: options.modelRole,
-			eventBus: options.eventBus,
-			subagentEventBus: options.subagentEventBus,
-			parentToolCallId: options.parentToolCallId,
-			detached: true,
-			sessionFile,
-			softRequestBudget,
-			softRequestBudgetNotice,
-			maxRuntimeMs,
-			// A peer's message gets a short answer, too short to probe; the owner's message is an
-			// assignment the owner waits on.
-			completionProbe: ownerWoken && options.completionProbe === true,
-			signal: jobCancel.signal,
-			onProgress: progress => reportJobProgress?.(progress),
-			onToolResult: result => appendToolResult(tools, result),
-			onYieldAccepted: registerWakeJob,
-		});
-
-		const startedPayload = {
-			id,
-			agent: agent.name,
-			parentToolCallId: options.parentToolCallId,
-			detached: true,
-			agentSource: agent.source,
-			description: options.description,
-			status: "started",
-			sessionFile,
-			index,
-		} as const;
-		emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
-
-		turnMonitor.setActiveSession(session);
-		const unsubscribeTurn = turnMonitor.attach(session);
-		if (ownerWoken) registerWakeJob();
-		// Only a message_end from the agent loop proves the queued parent steer
-		// entered this turn. Receipt alone cannot claim a peer's earlier answer.
-		let ownerPrompted = false;
-		const unsubscribeParentSteer = session.subscribe(event => {
-			if (event.type !== "message_end" || !session.isParentIrcSteer(event.message)) return;
-			ownerPrompted = true;
-			registerWakeJob();
-		});
-		// A focused-session user prompt is the operator driving this agent (#14428):
-		// like a parent follow-up, its message-result reply is the agent's new result.
-		const userPrompted = records.some(record =>
-			record.role === "user" ? record.attribution === "user" : record.role === "developer" && record.userInitiated,
-		);
-		return async turnError => {
-			unsubscribeTurn();
-			unsubscribeParentSteer();
-			const activeSession = turnMonitor.takeActiveSession();
-			if (activeSession) turnMonitor.captureSalvage(activeSession);
-			const lastAssistant = session.getLastAssistantMessage();
-			const yielded = turnMonitor.yieldCalled();
-			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const budgetExceeded = turnMonitor.abortKind() === "budget";
-			const aborted =
-				runtimeLimitExceeded || budgetExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
-			// Two error lanes. `error` carries full diagnostics (a thrown turn
-			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
-			// carries only the short, attributed message: a stack trace injected
-			// into another agent's model context is noise, not signal.
-			const providerError =
-				lastAssistant?.stopReason === "error"
-					? attributeSubagentError(lastAssistant.errorMessage, lastAssistant)
-					: undefined;
-			const thrown = providerError === undefined && turnError !== undefined && !yielded ? turnError : undefined;
-			const error =
-				providerError ??
-				(thrown instanceof Error
-					? thrown.stack || thrown.message
-					: thrown === undefined
-						? undefined
-						: String(thrown));
-			const errorForPeer =
-				providerError ??
-				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
-			turnMonitor.finish();
-			if (yielded) {
-				// Acceptance boundary for an autonomous wake turn (#11079): the
-				// turn's terminal yield is settled, so terminalize the ref here
-				// even when the run-state mirror never delivers `idle`.
-				AgentRegistry.global().markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
-			}
-			// Read before finalization: a schema-bearing agent that answered in
-			// prose gets a missing-yield warning prepended to `result.output`.
-			// Like a first run's message result, the answer is the final report
-			// turn; the session's last assistant text stands in only when the
-			// monitor saw no assistant message, never for narration it set aside.
-			const turnText =
-				turnMonitor.lastReportTurnText() ??
-				(turnMonitor.sawAssistantMessage() ? undefined : turnMonitor.lastAssistantSalvageText()) ??
-				"";
-			const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
-			let result: SingleResult | undefined;
-			let finalizeError: unknown;
-			try {
-				result = await finalizeRunResult({
-					monitor: turnMonitor,
-					done: {
-						exitCode: aborted || error ? 1 : 0,
-						error,
-						aborted,
-						abortReason,
-						durationMs: Date.now() - turnStartTime,
-					},
-					index,
-					id,
-					agent,
-					task: ircTask,
-					modelOverride: options.modelOverride,
-					modelRole: options.modelRole,
-					structured: options.structured,
-					outputSchema: options.outputSchema,
-					outputSchemaMode: options.outputSchemaMode,
-					outputSchemaSource: options.outputSchemaSource,
-					artifactsDir: options.artifactsDir,
-					eventBus: options.eventBus,
-					subagentEventBus: options.subagentEventBus,
-					parentToolCallId: options.parentToolCallId,
-					detached: true,
-					followUpTurn: true,
-					publishMessageResult: ownerWoken || ownerPrompted || userPrompted,
-					// A cancelled wake job must not replace the accepted result.
-					signal: jobCancel.signal,
-					sessionFile,
-					startTime: turnStartTime,
-				});
-			} catch (caught) {
-				finalizeError = caught;
-				logger.warn("IRC subagent turn finalization failed", {
-					id,
-					error: caught instanceof Error ? caught.message : String(caught),
-				});
-			} finally {
-				// A focused-user result can complete without a registered wake job;
-				// enqueue its delivery without reserving an execution slot.
-				const messageResult =
-					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
-				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
-					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
-					try {
-						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
-					} catch (error) {
-						logger.warn("User-resumed subagent result delivery failed", {
-							id,
-							error: error instanceof Error ? error.message : String(error),
-						});
-					}
-				}
-				// Once registered, the wake job carries this turn's outcome to the
-				// parent whatever it is: the yield result, the failure that
-				// superseded it, or, for a turn that never yielded, the answer a
-				// relay would have carried. `agentOutputPublished` tells the
-				// delivery whether this turn wrote `<id>.md`: a turn that neither
-				// yielded nor produced a message result leaves the previous turn's
-				// output there, which `agent://<id>` must not be offered for.
-				const outputPublished = result?.outputPath !== undefined;
-				if (wakeJob && (yielded || messageResult) && result) {
-					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
-					const structured = result.structuredOutput;
-					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-						wakeJob.outcome.reject(new AsyncJobError(text, structured));
-					} else {
-						wakeJob.outcome.resolve({
-							text,
-							agentOutputPublished: outputPublished,
-							...(structured ? { structured } : {}),
-						});
-					}
-				} else if (wakeJob && yielded) {
-					const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
-					wakeJob.outcome.reject(new Error(`Wake turn of ${id} failed to finalize: ${message}`));
-				} else if (wakeJob) {
-					const outcome = { error: errorForPeer, aborted, finalizeError };
-					const text = buildWakeRelayBody({
-						...outcome,
-						id,
-						yielded,
-						result,
-						turnText,
-						abortReason,
-						alreadyMessaged: IrcBus.global().sentSince(id, wakeJob.ownerId, turnStartTime),
-					});
-					if (wakeTurnFailed(outcome)) wakeJob.outcome.reject(new Error(text));
-					else wakeJob.outcome.resolve({ text, agentOutputPublished: outputPublished });
-				}
-				// Unconditional: a failed, cancelled, empty, or even un-finalized
-				// wake turn must still tell whoever woke it, or a `send await:true`
-				// waiter mistakes a dead peer for a healthy-but-silent one.
+	session.setIrcWakeTurnObserver(
+		records => {
+			// Autonomous IRC wake turns reuse the session's YieldTool just like
+			// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
+			// and retry counters so this wake turn's guards see only its own state.
+			resetYieldTurnState(session.getToolByName("yield"));
+			const ircTask =
+				records
+					.map(record => {
+						if (record.role === "custom") {
+							const body =
+								record.details && typeof record.details === "object"
+									? Reflect.get(record.details, "message")
+									: undefined;
+							if (typeof body === "string") return body;
+							return extractIrcRecordText(record.content);
+						}
+						// User prompts: typed text, or the synthetic `.`/`c` continue directive.
+						if (record.role === "user" || record.role === "developer")
+							return extractIrcRecordText(record.content);
+						return "";
+					})
+					.filter(Boolean)
+					.join("\n\n") || "IRC follow-up";
+			const turnStartTime = Date.now();
+			const relay = Promise.withResolvers<void>();
+			session.trackIrcReply(relay.promise);
+			const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+			// The parent receives this turn's outcome through an owner-routed job:
+			// ordinary async-result delivery, and what its `wait` blocks on. A
+			// parent wake owns the whole turn; a mid-turn parent request owns it only
+			// after its steer is consumed. Otherwise only an accepted yield registers
+			// a job, before the ref goes idle.
+			const ownerId = AgentRegistry.global().get(id)?.parentId;
+			const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
+			// Cancelling the job cancels the turn it stands for.
+			const jobCancel = new AbortController();
+			// The turn's finished tool calls, which the job's widget reads like a first run's.
+			const tools = new TextTap(TOOLS_SOURCE_ID, TOOLS_SOURCE_LABEL);
+			let reportJobProgress: ((progress: AgentProgress) => void) | undefined;
+			let wakeJob: { ownerId: string; outcome: PromiseWithResolvers<AsyncJobRunResult> } | undefined;
+			const registerWakeJob = (): void => {
+				if (wakeJob) return;
+				const manager = session.asyncJobManager;
+				if (!ownerId || !manager) return;
+				const outcome = Promise.withResolvers<AsyncJobRunResult>();
 				try {
-					await relayWakeTurnOutput({
+					manager.register(
+						"task",
 						id,
-						records,
-						turnStartTime,
-						yielded,
-						result,
-						turnText,
-						error: errorForPeer,
-						aborted,
-						abortReason,
-						finalizeError,
-						jobOwnerId: wakeJob?.ownerId,
+						({ signal, reportProgress }) => {
+							signal.addEventListener("abort", () => jobCancel.abort(signal.reason), { once: true });
+							// The progress record is what `wait` reads the turn's stage and estimate from.
+							reportJobProgress = progress => {
+								void reportProgress(`Running background task ${id}...`, { progress: [progress] });
+							};
+							return untilAborted(signal, outcome.promise);
+						},
+						{
+							id,
+							agentId: id,
+							ownerId,
+							widgetInputs: createTaskWidgetInputs({
+								manager,
+								agentId: id,
+								tools: () => tools,
+								progress: turnMonitor.progress,
+							}),
+						},
+					);
+					wakeJob = { ownerId, outcome };
+				} catch (error) {
+					logger.warn("IRC wake-turn job registration failed", {
+						id,
+						error: error instanceof Error ? error.message : String(error),
 					});
-				} catch (relayError) {
-					logger.warn("IRC wake-turn relay threw", {
+				}
+			};
+			const turnMonitor = createSubagentRunMonitor({
+				index,
+				id,
+				agent,
+				task: ircTask,
+				description: options.description,
+				modelOverride: options.modelOverride,
+				modelRole: options.modelRole,
+				eventBus: options.eventBus,
+				subagentEventBus: options.subagentEventBus,
+				parentToolCallId: options.parentToolCallId,
+				detached: true,
+				sessionFile,
+				softRequestBudget,
+				softRequestBudgetNotice,
+				maxRuntimeMs,
+				// A peer's message gets a short answer, too short to probe; the owner's message is an
+				// assignment the owner waits on.
+				completionProbe: ownerWoken && options.completionProbe === true,
+				signal: jobCancel.signal,
+				onProgress: progress => reportJobProgress?.(progress),
+				onToolResult: result => appendToolResult(tools, result),
+				onYieldAccepted: registerWakeJob,
+			});
+
+			const startedPayload = {
+				id,
+				agent: agent.name,
+				parentToolCallId: options.parentToolCallId,
+				detached: true,
+				agentSource: agent.source,
+				description: options.description,
+				status: "started",
+				sessionFile,
+				index,
+			} as const;
+			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
+
+			turnMonitor.setActiveSession(session);
+			const unsubscribeTurn = turnMonitor.attach(session);
+			if (ownerWoken) registerWakeJob();
+			// Only a message_end from the agent loop proves the queued parent steer
+			// entered this turn. Receipt alone cannot claim a peer's earlier answer.
+			let ownerPrompted = false;
+			const unsubscribeParentSteer = session.subscribe(event => {
+				if (event.type !== "message_end" || !session.isParentIrcSteer(event.message)) return;
+				ownerPrompted = true;
+				registerWakeJob();
+			});
+			// A focused-session user prompt is the operator driving this agent (#14428):
+			// like a parent follow-up, its message-result reply is the agent's new result.
+			const userPrompted = records.some(record =>
+				record.role === "user"
+					? record.attribution === "user"
+					: record.role === "developer" && record.userInitiated,
+			);
+			return async turnError => {
+				unsubscribeTurn();
+				unsubscribeParentSteer();
+				const activeSession = turnMonitor.takeActiveSession();
+				if (activeSession) turnMonitor.captureSalvage(activeSession);
+				const lastAssistant = session.getLastAssistantMessage();
+				const yielded = turnMonitor.yieldCalled();
+				const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
+				const budgetExceeded = turnMonitor.abortKind() === "budget";
+				const aborted =
+					runtimeLimitExceeded || budgetExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+				// Two error lanes. `error` carries full diagnostics (a thrown turn
+				// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
+				// carries only the short, attributed message: a stack trace injected
+				// into another agent's model context is noise, not signal.
+				const providerError =
+					lastAssistant?.stopReason === "error"
+						? attributeSubagentError(lastAssistant.errorMessage, lastAssistant)
+						: undefined;
+				const thrown = providerError === undefined && turnError !== undefined && !yielded ? turnError : undefined;
+				const error =
+					providerError ??
+					(thrown instanceof Error
+						? thrown.stack || thrown.message
+						: thrown === undefined
+							? undefined
+							: String(thrown));
+				const errorForPeer =
+					providerError ??
+					(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
+				turnMonitor.finish();
+				if (yielded) {
+					// Acceptance boundary for an autonomous wake turn (#11079): the
+					// turn's terminal yield is settled, so terminalize the ref here
+					// even when the run-state mirror never delivers `idle`.
+					AgentRegistry.global().markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
+				}
+				// Read before finalization: a schema-bearing agent that answered in
+				// prose gets a missing-yield warning prepended to `result.output`.
+				// Like a first run's message result, the answer is the final report
+				// turn; the session's last assistant text stands in only when the
+				// monitor saw no assistant message, never for narration it set aside.
+				const turnText =
+					turnMonitor.lastReportTurnText() ??
+					(turnMonitor.sawAssistantMessage() ? undefined : turnMonitor.lastAssistantSalvageText()) ??
+					"";
+				const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
+				let result: SingleResult | undefined;
+				let finalizeError: unknown;
+				try {
+					result = await finalizeRunResult({
+						monitor: turnMonitor,
+						done: {
+							exitCode: aborted || error ? 1 : 0,
+							error,
+							aborted,
+							abortReason,
+							durationMs: Date.now() - turnStartTime,
+						},
+						index,
 						id,
-						error: relayError instanceof Error ? relayError.message : String(relayError),
+						agent,
+						task: ircTask,
+						modelOverride: options.modelOverride,
+						modelRole: options.modelRole,
+						structured: options.structured,
+						outputSchema: options.outputSchema,
+						outputSchemaMode: options.outputSchemaMode,
+						outputSchemaSource: options.outputSchemaSource,
+						artifactsDir: options.artifactsDir,
+						eventBus: options.eventBus,
+						subagentEventBus: options.subagentEventBus,
+						parentToolCallId: options.parentToolCallId,
+						detached: true,
+						followUpTurn: true,
+						publishMessageResult: ownerWoken || ownerPrompted || userPrompted,
+						// A cancelled wake job must not replace the accepted result.
+						signal: jobCancel.signal,
+						sessionFile,
+						startTime: turnStartTime,
+					});
+				} catch (caught) {
+					finalizeError = caught;
+					logger.warn("IRC subagent turn finalization failed", {
+						id,
+						error: caught instanceof Error ? caught.message : String(caught),
 					});
 				} finally {
-					relay.resolve();
+					// A focused-user result can complete without a registered wake job;
+					// enqueue its delivery without reserving an execution slot.
+					const messageResult =
+						(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
+					if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
+						const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+						try {
+							session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+						} catch (error) {
+							logger.warn("User-resumed subagent result delivery failed", {
+								id,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+					// Once registered, the wake job carries this turn's outcome to the
+					// parent whatever it is: the yield result, the failure that
+					// superseded it, or, for a turn that never yielded, the answer a
+					// relay would have carried. `agentOutputPublished` tells the
+					// delivery whether this turn wrote `<id>.md`: a turn that neither
+					// yielded nor produced a message result leaves the previous turn's
+					// output there, which `agent://<id>` must not be offered for.
+					const outputPublished = result?.outputPath !== undefined;
+					if (wakeJob && (yielded || messageResult) && result) {
+						const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+						const structured = result.structuredOutput;
+						if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
+							wakeJob.outcome.reject(new AsyncJobError(text, structured));
+						} else {
+							wakeJob.outcome.resolve({
+								text,
+								agentOutputPublished: outputPublished,
+								...(structured ? { structured } : {}),
+							});
+						}
+					} else if (wakeJob && yielded) {
+						const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
+						wakeJob.outcome.reject(new Error(`Wake turn of ${id} failed to finalize: ${message}`));
+					} else if (wakeJob) {
+						const outcome = { error: errorForPeer, aborted, finalizeError };
+						const text = buildWakeRelayBody({
+							...outcome,
+							id,
+							yielded,
+							result,
+							turnText,
+							abortReason,
+							alreadyMessaged: IrcBus.global().sentSince(id, wakeJob.ownerId, turnStartTime),
+						});
+						if (wakeTurnFailed(outcome)) wakeJob.outcome.reject(new Error(text));
+						else wakeJob.outcome.resolve({ text, agentOutputPublished: outputPublished });
+					}
+					// Unconditional: a failed, cancelled, empty, or even un-finalized
+					// wake turn must still tell whoever woke it, or a `send await:true`
+					// waiter mistakes a dead peer for a healthy-but-silent one.
+					try {
+						await relayWakeTurnOutput({
+							id,
+							records,
+							turnStartTime,
+							yielded,
+							result,
+							turnText,
+							error: errorForPeer,
+							aborted,
+							abortReason,
+							finalizeError,
+							jobOwnerId: wakeJob?.ownerId,
+						});
+					} catch (relayError) {
+						logger.warn("IRC wake-turn relay threw", {
+							id,
+							error: relayError instanceof Error ? relayError.message : String(relayError),
+						});
+					} finally {
+						relay.resolve();
+					}
 				}
-			}
-		};
-	});
+			};
+		},
+		(records, acceptEvent, signal) => createDrivenIrcReply(session, id, records, acceptEvent, signal),
+	);
 }
 
 /**
@@ -3976,169 +4243,179 @@ async function driveFollowUpTurn(
 ): Promise<SingleResult> {
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
-	let session = live;
-	// Acquire turn ownership before mutating the shared yield contract: installing
-	// pooled items under a running ordinary wake would reject its in-flight tool
-	// calls. The check-to-install section below has no await, so once idle is
-	// observed no wake dispatch can interleave before the synchronous mutation.
-	// Bounded: a worker that never settles fails its batch instead of installing
-	// under the active turn or hanging the pool.
-	let ownershipWaits = 0;
-	const acquireOwnership = async (): Promise<void> => {
-		while (session.isStreaming && ownershipWaits < 3) {
-			ownershipWaits++;
-			if (signal) {
-				await untilAborted(signal, () => session.waitForIdle());
-			} else {
-				await session.waitForIdle();
-			}
-		}
-		if (session.isStreaming) {
-			throw new Error(
-				`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
-			);
-		}
-	};
-	await acquireOwnership();
-	// Revalidate until the worker survives an install round-trip unchanged: the
-	// waits/rebuild above can outlast the idle TTL, letting park() detach this
-	// instance mid-install. Each observed replacement means another full park
-	// cycle, so reinstall on the fresh session (a revival restores only the last persisted contract) and check
-	// again; genuine churn fails fast instead of driving a stale instance, and
-	// a released worker throws instead of driving a corpse. A replacement may
-	// already be streaming a wake, so ownership is reacquired every round.
-	for (let acquireAttempts = 0; ; acquireAttempts++) {
-		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-		const live = await ensureLocalLive(id);
-		if (live === session) break;
-		if (acquireAttempts >= 2) {
-			throw new Error(
-				`Subagent ${id} was replaced during every install attempt; refusing to drive a stale worker session`,
-			);
-		}
-		session = live;
-		await acquireOwnership();
-	}
-	// A kept-alive session reuses its YieldTool across turns; clear the prior
-	// run's incremental-section flag and retry counters so this turn's guards
-	// evaluate against its own state, not stale accumulators.
-	resetYieldTurnState(session.getToolByName("yield"));
-	const ref = AgentRegistry.global().get(id);
-	const sessionFile = ref?.sessionFile ?? undefined;
-	const softRequestBudget = options.softRequestBudget ?? 0;
-	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
-
-	const monitor = createSubagentRunMonitor({
-		index,
-		id,
-		agent,
-		task: message,
-		description: options.description,
-		modelRole: options.modelRole,
-		signal,
-		onProgress: options.onProgress,
-		eventBus: options.eventBus,
-		subagentEventBus: options.subagentEventBus,
-		parentToolCallId: options.parentToolCallId,
-		detached: true,
-		sessionFile,
-		softRequestBudget,
-		softRequestBudgetNotice,
-		maxRuntimeMs: options.maxRuntimeMs ?? 0,
-		completionProbe: options.completionProbe ?? false,
-	});
-
-	const startedPayload = {
-		id,
-		agent: agent.name,
-		parentToolCallId: options.parentToolCallId,
-		detached: true,
-		agentSource: agent.source,
-		description: options.description,
-		status: "started",
-		sessionFile,
-		index,
-	} as const;
-	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
-
-	monitor.setActiveSession(session);
-	// The batch monitor attaches per attempt; the hook below detaches before each
-	// backoff and reattaches for the retry, so the teardown always releases the
-	// current attempt — including when the drive rejects and no winning attempt
-	// was ever assigned.
-	let outcome: DriveOutcome;
-	// An IRC wake may own the session when this turn dispatches. drive retries the
-	// initial prompt through this hook: detach first so the wake turn's `yield`
-	// neither marks this batch yielded nor leaks into its result, restore the
-	// ordinary contract so the wake cannot consume pooled items, wait it out,
-	// then reinstall and reattach for the retry.
-	let attemptUnsubscribe = monitor.attach(session);
+	let monitor: SubagentRunMonitor | undefined;
 	const structured = options.structured !== false;
-	// As in a first run: this turn's monitor would take a wake turn's answer
-	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
-	const releaseIrcWakes = session.holdIrcWakes();
+	const attempt = { initialized: false, stepsRecorded: false };
+	let session = live;
+	let lease: DrivenTurnLease | undefined;
+	let unsubscribe: (() => void) | undefined;
+	let releaseIrcWakes: (() => void) | undefined;
+	let monitorFinished = false;
+	let ownershipWaits = 0;
+	let replacements = 0;
+	let busyAttempts = 0;
+	let sessionFile: string | undefined;
 	try {
-		try {
-			outcome = await driveSessionToResult(session, monitor, message, {
-				structured,
-				restore: options.restore,
-				steps: options.steps,
-				onPromptBusy: async () => {
-					attemptUnsubscribe();
-					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
-					await session.setWorkPoolYieldItems([]);
-					if (signal) {
-						await untilAborted(signal, () => session.waitForIdle());
-					} else {
-						await session.waitForIdle();
-					}
-					resetYieldTurnState(session.getToolByName("yield"));
-					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-					attemptUnsubscribe = monitor.attach(session);
-				},
-			});
-			if (resultDelivered(outcome, monitor, structured)) {
-				// A follow-up turn's accepted result is the run's final result too:
-				// terminalize the ref here, not just on the initial run (#11079).
-				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
+		for (;;) {
+			const attemptSession = session;
+			lease = attemptSession.tryAcquireDrivenTurn();
+			while (!lease) {
+				if (ownershipWaits++ >= 3) {
+					throw new Error(
+						`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
+					);
+				}
+				if (signal) await untilAborted(signal, () => attemptSession.waitForDrivenTurnAvailability());
+				else await attemptSession.waitForDrivenTurnAvailability();
+				lease = attemptSession.tryAcquireDrivenTurn();
 			}
-		} finally {
+			const attemptLease = lease;
+			await attemptSession.runWithDrivenTurn(attemptLease.token, () =>
+				attemptSession.setWorkPoolYieldItems(options.workPoolYieldItems ?? []),
+			);
+			const current = await ensureLocalLive(id);
+			if (current !== attemptSession) {
+				await attemptLease.cancel();
+				attemptLease.release();
+				lease = undefined;
+				if (replacements++ >= 2)
+					throw new Error(
+						`Subagent ${id} was replaced during every install attempt; refusing to drive a stale worker session`,
+					);
+				session = current;
+				continue;
+			}
+			attemptSession.runWithDrivenTurn(attemptLease.token, () =>
+				resetYieldTurnState(attemptSession.getToolByName("yield")),
+			);
+			sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? undefined;
+			if (!monitor) {
+				const softRequestBudget = options.softRequestBudget ?? 0;
+				monitor = createSubagentRunMonitor({
+					index,
+					id,
+					agent,
+					task: message,
+					description: options.description,
+					modelRole: options.modelRole,
+					signal,
+					onProgress: options.onProgress,
+					eventBus: options.eventBus,
+					subagentEventBus: options.subagentEventBus,
+					parentToolCallId: options.parentToolCallId,
+					detached: true,
+					sessionFile,
+					softRequestBudget,
+					softRequestBudgetNotice: options.softRequestBudgetNotice ?? softRequestBudget > 0,
+					maxRuntimeMs: options.maxRuntimeMs ?? 0,
+					completionProbe: options.completionProbe ?? false,
+				});
+				const startedPayload = {
+					id,
+					agent: agent.name,
+					parentToolCallId: options.parentToolCallId,
+					detached: true,
+					agentSource: agent.source,
+					description: options.description,
+					status: "started",
+					sessionFile,
+					index,
+				} as const;
+				emitSubagentFrame(
+					options.eventBus,
+					options.subagentEventBus,
+					TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+					startedPayload,
+				);
+			}
+			const attemptMonitor = monitor;
+			attemptMonitor.setActiveSession(attemptSession);
+			unsubscribe = attemptMonitor.attach(attemptSession, () =>
+				attemptSession.isDrivenTurnEvent(attemptLease.token),
+			);
+			releaseIrcWakes = attemptSession.holdIrcWakes();
+			if (signal?.aborted)
+				attemptMonitor.requestAbort(signal.reason === ASYNC_JOB_MANAGER_SHUTDOWN_REASON ? "shutdown" : "signal");
+			let outcome: DriveOutcome;
 			try {
-				await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
+				outcome = await attemptSession.runWithDrivenTurn(attemptLease.token, () =>
+					driveSessionToResult(attemptSession, attemptMonitor, message, {
+						structured,
+						restore: options.restore,
+						steps: options.steps,
+						drivenTurn: attemptLease,
+						attempt,
+						retryPreAdmission: busyAttempts < 2,
+					}),
+				);
+			} catch (error) {
+				if (!(error instanceof DrivenTurnPreAdmissionBusy)) throw error;
+				unsubscribe();
+				unsubscribe = undefined;
+				attemptMonitor.takeActiveSession();
+				await attemptLease.cancel();
+				attemptLease.release();
+				lease = undefined;
+				releaseIrcWakes();
+				releaseIrcWakes = undefined;
+				busyAttempts++;
+				if (signal) await untilAborted(signal, () => error.winner);
+				else await error.winner;
+				session = await ensureLocalLive(id);
+				continue;
+			}
+			if (outcome.exitCode !== 0 || outcome.aborted || attemptMonitor.abortSignal.aborted)
+				await attemptLease.cancel();
+			try {
+				await untilAborted(AbortSignal.timeout(5000), () => attemptMonitor.waitForActiveSessionAbort());
 			} catch {
 				// Ignore abort cleanup timeouts; the session stays adopted either way.
 			}
-			attemptUnsubscribe();
+			if (resultDelivered(outcome, attemptMonitor, structured))
+				AgentRegistry.global().markResultAccepted(id, attemptSession, attemptMonitor.yieldAcceptedAt());
+			unsubscribe();
+			unsubscribe = undefined;
+			const active = attemptMonitor.takeActiveSession();
+			if (active) attemptMonitor.captureSalvage(active);
+			attemptMonitor.finish();
+			monitorFinished = true;
+			return await finalizeRunResult({
+				monitor: attemptMonitor,
+				done: { ...outcome, abortReason: outcome.abortReasonText, durationMs: Date.now() - startTime },
+				index,
+				id,
+				agent,
+				task: message,
+				modelRole: options.modelRole,
+				structured,
+				outputSchema: options.outputSchema,
+				outputSchemaMode: options.outputSchemaMode,
+				outputSchemaSource: options.outputSchemaSource,
+				signal,
+				artifactsDir: options.artifactsDir,
+				eventBus: options.eventBus,
+				subagentEventBus: options.subagentEventBus,
+				parentToolCallId: options.parentToolCallId,
+				detached: true,
+				followUpTurn: true,
+				publishMessageResult: true,
+				sessionFile,
+				startTime,
+			});
+		}
+	} finally {
+		unsubscribe?.();
+		if (!monitorFinished && monitor) {
 			const active = monitor.takeActiveSession();
 			if (active) monitor.captureSalvage(active);
 			monitor.finish();
 		}
-
-		return await finalizeRunResult({
-			monitor,
-			done: { ...outcome, abortReason: outcome.abortReasonText, durationMs: Date.now() - startTime },
-			index,
-			id,
-			agent,
-			task: message,
-			modelRole: options.modelRole,
-			structured,
-			outputSchema: options.outputSchema,
-			outputSchemaMode: options.outputSchemaMode,
-			outputSchemaSource: options.outputSchemaSource,
-			signal,
-			artifactsDir: options.artifactsDir,
-			eventBus: options.eventBus,
-			subagentEventBus: options.subagentEventBus,
-			parentToolCallId: options.parentToolCallId,
-			detached: true,
-			followUpTurn: true,
-			publishMessageResult: true,
-			sessionFile,
-			startTime,
-		});
-	} finally {
-		releaseIrcWakes();
+		try {
+			if (lease) await lease.cancel();
+		} finally {
+			lease?.release();
+			releaseIrcWakes?.();
+		}
 	}
 }
 

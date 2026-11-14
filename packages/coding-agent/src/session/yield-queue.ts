@@ -199,6 +199,17 @@ export class YieldQueue {
 		return thunks;
 	}
 
+	/** Reject stale entries of one kind without building or dispatching live entries. */
+	discardStale(kind: string): void {
+		const dispatcher = this.#dispatchers.get(kind);
+		const entries = this.#entries.get(kind);
+		if (!dispatcher?.isStale || !entries?.length) return;
+		this.#entries.delete(kind);
+		const survivors = this.#filterStale(kind, dispatcher, entries);
+		const later = this.#entries.get(kind);
+		if (survivors.length > 0) this.#entries.set(kind, later ? [...survivors, ...later] : survivors);
+	}
+
 	/** Drop queued entries. With `kind`, drop only that kind's entries (leaving
 	 *  any pending idle-flush for other kinds intact); otherwise drop everything. */
 	clear(kind?: string): void {
@@ -240,7 +251,7 @@ export class YieldQueue {
 		return entries;
 	}
 
-	#build(kind: string, dispatcher: StoredDispatcher, entries: StoredEntry[]): BuiltMessage | null {
+	#filterStale(kind: string, dispatcher: StoredDispatcher, entries: StoredEntry[]): StoredEntry[] {
 		const survivors: StoredEntry[] = [];
 		for (const entry of entries) {
 			if (dispatcher.isStale) {
@@ -260,6 +271,11 @@ export class YieldQueue {
 			}
 			survivors.push(entry);
 		}
+		return survivors;
+	}
+
+	#build(kind: string, dispatcher: StoredDispatcher, entries: StoredEntry[]): BuiltMessage | null {
+		const survivors = this.#filterStale(kind, dispatcher, entries);
 		if (survivors.length === 0) return null;
 		try {
 			const message = dispatcher.build(survivors.map(entry => entry.value));
