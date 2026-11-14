@@ -3,8 +3,10 @@ import {
 	disposeProgramStatus,
 	holdBlockedStatus,
 	initProgramStatus,
+	programStatusSettingsGate,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	setProgramStatusFilter,
 	setRunStatus,
 	settleStartupRun,
 } from "@oh-my-pi/pi-coding-agent/utils/run-status";
@@ -39,8 +41,9 @@ describe("run status OSC 7501 reporting", () => {
 			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
 			return true;
 		});
-		// Order-independent baseline: the UI owns the terminal, reporting on, idle reported.
+		// Order-independent baseline: the UI owns the terminal, reporting on, no gate, idle reported.
 		initProgramStatus();
+		setProgramStatusFilter(undefined);
 		setProgramStatusEnabled(true);
 		setRunStatus({ state: "idle" });
 		writes.length = 0;
@@ -108,6 +111,59 @@ describe("run status OSC 7501 reporting", () => {
 		setProgramStatusEnabled(true);
 
 		expect(writes).toEqual([CLEAR, report("state=blocked:kind=permission:app=omp")]);
+	});
+
+	it("withdraws a silenced status and re-publishes it when the gate accepts it again", () => {
+		setProgramStatusFilter(status => status.state !== "blocked");
+
+		setRunStatus({ state: "working" });
+		const release = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Which branch?" });
+		expect(writes).toEqual([report("state=working:app=omp"), CLEAR]);
+
+		// An accepted gate reports the status the record was withdrawn for.
+		writes.length = 0;
+		setProgramStatusFilter(undefined);
+		expect(writes).toEqual([
+			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from("Which branch?").toString("base64")}`),
+		]);
+		release();
+	});
+
+	it("keeps working, idle and error records whatever the gate rejects", () => {
+		setProgramStatusFilter(status => status.state !== "done");
+
+		setRunStatus({ state: "done" });
+		setRunStatus({ state: "error", msg: "boom" });
+		setRunStatus({ state: "idle" });
+
+		expect(writes).toEqual([
+			CLEAR,
+			report(`state=error:app=omp:msg=${Buffer.from("boom").toString("base64")}`),
+			report("state=idle:app=omp"),
+		]);
+	});
+
+	it("keeps an approval prompt's record when ask.notify is off and withdraws only the asked question", () => {
+		setProgramStatusFilter(programStatusSettingsGate(false, true));
+
+		const releasePermission = holdBlockedStatus({ state: "blocked", kind: "permission", msg: "Approve the command?" });
+		const releaseQuestion = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Which branch?" });
+		releaseQuestion();
+
+		const permission = report(
+			`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`,
+		);
+		expect(writes).toEqual([permission, CLEAR, permission]);
+		releasePermission();
+	});
+
+	it("withdraws a finished turn only when completion.notify is off, whatever ask.notify says", () => {
+		setProgramStatusFilter(programStatusSettingsGate(false, false));
+
+		holdBlockedStatus({ state: "blocked", kind: "permission" })();
+		setRunStatus({ state: "done" });
+
+		expect(writes).toEqual([report("state=blocked:kind=permission:app=omp"), report("state=idle:app=omp"), CLEAR]);
 	});
 
 	it("re-sends prompt-invalidated working and blocked records but never repeats a done result", () => {
