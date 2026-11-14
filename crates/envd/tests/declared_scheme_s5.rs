@@ -2,10 +2,7 @@
 //! → builtin conformance, plus model-facing listing (`omp.schemes.live` /
 //! `SchemeGeneration::listing_payload`) without changing `omp.urls.schemes`.
 
-use std::{
-	collections::BTreeSet,
-	sync::{Arc, Mutex},
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use omp_core::{Principal, Str, sf};
@@ -26,6 +23,7 @@ use omp_tools::read::{
 	resolver::{Resolve, Scheme},
 	selector::{ParsedSelector, parse_uri},
 };
+use parking_lot::Mutex;
 
 fn claim(name: &str) -> SchemeClaim {
 	SchemeClaim {
@@ -60,7 +58,7 @@ struct CapturingReader {
 #[async_trait]
 impl SchemeTestReader for CapturingReader {
 	async fn read(&self, _scheme: &str, url: &str) -> Result<HostResourceResult, Str> {
-		self.seen.lock().expect("seen").push(url.to_owned());
+		self.seen.lock().push(url.to_owned());
 		Ok(HostResourceResult { content: Some(self.body.clone()), notes: Vec::new() })
 	}
 }
@@ -128,11 +126,7 @@ async fn declared_scheme_s5_joined_conformance() {
 		.expect("selector peel");
 	assert_eq!(std::str::from_utf8(&selected).expect("utf8"), "line2\nline3\n");
 	assert!(
-		seen
-			.lock()
-			.expect("seen")
-			.iter()
-			.any(|url| url == "widget://id"),
+		seen.lock().iter().any(|url| url == "widget://id"),
 		"handler must see peeled URL"
 	);
 

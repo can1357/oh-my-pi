@@ -261,6 +261,14 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		"omp.sessions.usage(omp.UsageQuery())"
 	),
 	symbol!(
+		"docs/py/09-journal.md",
+		"omp.schemes.live",
+		"() -> tuple[LiveDeclaration, ...]",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await omp.schemes.live()"
+	),
+	symbol!(
 		"docs/py/11-env.md",
 		"omp.env.info",
 		"() -> EnvInfo",
