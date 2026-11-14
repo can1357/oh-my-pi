@@ -595,7 +595,8 @@ fn lower_manifest(
 		[],
 		[],
 	)
-	.with_setting_schemas(manifest.settings.clone());
+	.with_setting_schemas(manifest.settings.clone())
+	.with_schemes(manifest.schemes.clone());
 	let settings = resolve_extension_settings(&manifest, &BTreeMap::new(), overrides)
 		.map_err(|source| NativeExtensionError::Settings { path: path.clone(), source })?;
 	let key = HostKey::new(layer, "sandboxed", manifest.id.clone());
