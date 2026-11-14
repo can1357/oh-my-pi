@@ -1300,6 +1300,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			"BASH_CMDS[git]=/tmp/evil && git status",
 			"'BASH_CMDS[git]'=/tmp/evil && git status",
 			"PATH=/tmp : && git status",
+			"repeat 1 export PATH=/tmp && git status",
 		]) {
 			expect(formatApprovalPrompt(bash, { command }).split("\n")).toEqual([
 				"Allow tool: bash",
@@ -1318,6 +1319,17 @@ describe("tool-owned dynamic approval declarations", () => {
 			"  ✓ git status (allowed: git status*)",
 			"  ? [[ -f a && -f b ]] (requires approval)",
 			"  ? git diff (requires approval)",
+		]);
+
+		// `&&` inside `${…}` and `{ … }` groups stays within its clause too.
+		expect(
+			formatApprovalPrompt(bash, { command: "git status && echo ${x:-a&&b} && { true && cd /tmp; }" }).split("\n"),
+		).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? echo ${x:-a&&b} (requires approval)",
+			"  ? { true && cd /tmp; } (requires approval)",
 		]);
 
 		// Long chains elide excess leading allowed rows in compact view so the first prompted segment is visible.

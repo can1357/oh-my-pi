@@ -129,6 +129,7 @@ const SHELL_STATEFUL_COMMANDS = new Set([
 	"!",
 	":",
 	".",
+	// Bash test -v evaluates array subscripts, including command substitutions.
 	"test",
 	"[",
 	"[[",
@@ -144,6 +145,8 @@ const SHELL_STATEFUL_COMMANDS = new Set([
 	"limit",
 	"print",
 	"rehash",
+	// Zsh's short `repeat N cmd && …` runs the whole sublist as the loop body.
+	"repeat",
 	"sched",
 	"setopt",
 	"unfunction",
@@ -501,6 +504,7 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 	let parenDepth = 0;
 	let inBacktick = false;
 	let inDoubleBracket = false;
+	let braceDepth = 0;
 	let atWordStart = true;
 	let segmentStart = 0;
 
@@ -568,6 +572,22 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 				continue;
 			}
 		}
+		// `${…}` expansions and `{ …; }` groups (zsh also accepts `{ … }`) keep their `&&` inside.
+		if (ch === "$" && command[i + 1] === "{") {
+			braceDepth++;
+			i++;
+			atWordStart = false;
+			continue;
+		}
+		if (ch === "{" && atWordStart && (command[i + 1] === " " || command[i + 1] === "\t")) {
+			braceDepth++;
+			continue;
+		}
+		if (ch === "}" && braceDepth > 0) {
+			braceDepth--;
+			atWordStart = false;
+			continue;
+		}
 		if (ch === "(") {
 			parenDepth++;
 			atWordStart = true;
@@ -579,7 +599,7 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 			atWordStart = false;
 			continue;
 		}
-		if (parenDepth > 0 || inDoubleBracket) {
+		if (parenDepth > 0 || inDoubleBracket || braceDepth > 0) {
 			atWordStart = ch === " " || ch === "\t" || ch === "&" || ch === "|" || ch === "(" || ch === ")";
 			continue;
 		}
@@ -606,7 +626,7 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 		atWordStart = ch === " " || ch === "\t";
 	}
 
-	if (quote || inBacktick || parenDepth !== 0 || inDoubleBracket) return null;
+	if (quote || inBacktick || parenDepth !== 0 || inDoubleBracket || braceDepth !== 0) return null;
 	const tail = command.slice(segmentStart).trim();
 	if (tail.length === 0) return null;
 	rawSegments.push(tail);
