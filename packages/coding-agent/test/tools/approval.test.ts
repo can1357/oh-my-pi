@@ -749,7 +749,7 @@ describe("tool-owned dynamic approval declarations", () => {
 
 	it("allows leading environment assignments only when permitted by bash.allowedEnvVars or rule.env, and strips them for deny/prompt", () => {
 		const settingsOverrides = {
-			"bash.allowedEnvVars": ["GOOS", "GOARCH", "CGO_ENABLED", "CARGO_TARGET_DIR", "GOFIPS*"],
+			"bash.allowedEnvVars": ["GOOS", "GOARCH", "CGO_ENABLED", "CARGO_TARGET_DIR", "GOFIPS140"],
 			"bash.patterns": [
 				{ match: "rm -rf *", approval: "deny" },
 				{ match: "curl *", approval: "prompt" },
@@ -778,12 +778,14 @@ describe("tool-owned dynamic approval declarations", () => {
 		}
 
 		// Leading env assignments cannot bypass deny or prompt rules.
-		expect(bashApproval("FOO=1 BAR=2 rm -rf build", settingsOverrides)).toEqual({
-			tier: "exec",
-			override: true,
-			policy: "deny",
-			reason: "Blocked by bash pattern: rm -rf *",
-		});
+		for (const command of ["FOO=1 BAR=2 rm -rf build", "true && FOO=1 rm -rf build"]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({
+				tier: "exec",
+				override: true,
+				policy: "deny",
+				reason: "Blocked by bash pattern: rm -rf *",
+			});
+		}
 		expect(bashApproval("HTTP_PROXY=http://proxy.local curl https://example.com", settingsOverrides)).toEqual({
 			tier: "exec",
 			override: true,
@@ -791,6 +793,55 @@ describe("tool-owned dynamic approval declarations", () => {
 			reason: "Prompt required by bash pattern: curl *",
 		});
 	});
+
+	it("matches bash.allowedEnvVars entries as exact names, never as wildcards", () => {
+		const settingsOverrides = {
+			"bash.allowedEnvVars": ["CARGO_*"],
+			"bash.patterns": [{ match: "cargo test*", approval: "allow", env: ["*"] }],
+		};
+
+		for (const command of [
+			"CARGO_BUILD_RUSTC_WRAPPER=/tmp/evil cargo test",
+			"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=/tmp/evil cargo test",
+			"LD_PRELOAD=/tmp/evil.so cargo test",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
+	});
+
+	it("resolves operator bash.patterns with operator bash.allowedEnvVars, not project ones", () => {
+		const operatorSettings = Settings.isolated({
+			"bash.patterns": [
+				{ match: "go test*", approval: "allow" },
+				{ match: "LD_PRELOAD=*", approval: "prompt" },
+			],
+		});
+		const sessionSettings = Settings.isolated({
+			"bash.allowedEnvVars": ["LD_PRELOAD"],
+			"bash.patterns": [
+				{ match: "go test*", approval: "allow" },
+				{ match: "LD_PRELOAD=*", approval: "prompt" },
+			],
+		});
+		spyOn(sessionSettings, "grantAuthority").mockReturnValue(operatorSettings);
+		spyOn(sessionSettings, "getShellConfig").mockReturnValue({
+			shell: "/bin/bash",
+			args: ["-c"],
+			env: {},
+			prefix: undefined,
+		});
+		const bash = new BashTool({ settings: sessionSettings } as unknown as ConstructorParameters<typeof BashTool>[0]);
+		const approval = bash.approval;
+		if (typeof approval !== "function") throw new Error("Bash approval must be dynamic");
+
+		expect(approval({ command: "LD_PRELOAD=/tmp/evil.so go test ./..." })).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: LD_PRELOAD=*",
+		});
+	});
+
 	it("never auto-approves a command that only prefixes an allow pattern", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "git *", approval: "allow" }],

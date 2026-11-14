@@ -188,7 +188,7 @@ export const cfgBashAllowedEnvVars = register({
 		group: "Bash",
 		label: "Bash Allowed Environment Variables",
 		description:
-			"Environment variable names (or '*' wildcards) allowed as leading KEY=VALUE prefixes when matching bash.patterns allow rules. Only list benign build/test variables; wildcards or execution-altering variables (PATH, LD_PRELOAD, BASH_ENV, *_RUNNER, *_WRAPPER) allow arbitrary command execution.",
+			"Exact environment variable names allowed as leading KEY=VALUE prefixes when matching bash.patterns allow rules (no wildcards). Any value is accepted, so list only benign build/test variables; execution-altering variables (PATH, LD_PRELOAD, BASH_ENV, *_RUNNER, *_WRAPPER) allow arbitrary command execution.",
 	},
 });
 

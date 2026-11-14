@@ -259,7 +259,7 @@ function normalizeBashAllowedEnvList(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return value
 		.filter((entry): entry is string => typeof entry === "string")
-		.map(entry => normalizeBashApprovalPattern(entry))
+		.map(entry => entry.trim())
 		.filter(entry => entry.length > 0);
 }
 
@@ -285,13 +285,11 @@ function commandMatchesBashApprovalPattern(command: string, pattern: string): bo
 	return bashApprovalPatternToRegExp(pattern).test(normalizedCommand);
 }
 
-function stripAllowedLeadingEnvAssignments(command: string, allowedEnvPatterns: readonly string[]): string | undefined {
-	if (allowedEnvPatterns.length === 0) return undefined;
-	return (
-		withoutLeadingEnvironmentAssignments(command, varName =>
-			allowedEnvPatterns.some(pattern => commandMatchesBashApprovalPattern(varName, pattern)),
-		) ?? undefined
-	);
+// Names match exactly: a wildcard such as `CARGO_*` would also admit
+// execution-redirecting variables (`CARGO_BUILD_RUSTC_WRAPPER`, `*_RUNNER`).
+function stripAllowedLeadingEnvAssignments(command: string, allowedEnvNames: readonly string[]): string | undefined {
+	if (allowedEnvNames.length === 0) return undefined;
+	return withoutLeadingEnvironmentAssignments(command, varName => allowedEnvNames.includes(varName)) ?? undefined;
 }
 
 // `deny`/`prompt` rules are matched per segment so a dangerous command buried in
