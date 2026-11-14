@@ -6,6 +6,13 @@
 
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history
 - Markdown links an extension handles itself (a registered extension scheme) get their own `mdExtensionLink` theme color, so they no longer look like links that open a URL; themes that omit it get a muted blend of `mdLink` and `text` ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Approval dialogs style covered (`✓ … (allowed: …)`) and prompted (`? … (…)`) compound bash command segments with distinct colours and native spans, opening scrolled to the first prompted segment ([#18749](https://github.com/can1357/oh-my-pi/pull/18749) by [@asuffield](https://github.com/asuffield))
+
+### Fixed
+
+- A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line ([#19202](https://github.com/can1357/oh-my-pi/pull/19202) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback
+- Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback ([#19204](https://github.com/can1357/oh-my-pi/pull/19204) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [18.20.0] - 2026-11-12
 

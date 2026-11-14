@@ -165,7 +165,7 @@ Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, env
 Layers are combined with a deep merge:
 
 - **Objects are deep-merged** — keys present only in a lower layer are kept; keys present in a higher layer override.
-- **Scalars and arrays are replaced wholesale** by the higher-precedence layer. A higher layer's array does not append to a lower layer's array.
+- **Scalars and most arrays are replaced wholesale** by the higher-precedence layer. Rule-list arrays configured with `merge: "prepend"` (`bash.patterns` and `bashInterceptor.patterns`) are the exception: project and `--config` overlay entries prepend ahead of global entries (or the schema default when the global layer leaves the list unset), while a configured `null` or empty `[]` resets the list and runtime overrides still replace it wholesale.
 - **A configured `null` counts as unset at read time**, so the schema default (or a fallback env var) applies rather than a lower-layer value. Project `modelRoles` entries are an exception: cleared/null project roles fall back to global roles.
 - **Named model presets are resolved whole**, not deep-merged across layers. A project preset of the same name replaces the global preset. Runtime/overlay `null` entries can hide a lower-layer preset.
 
@@ -187,8 +187,28 @@ tools:
 
 `tools.approval` is a record keyed by tool name; dotted forms such as `tools.approval.eval` and `tools.approval.computer` identify entries in that record, not separate setting ids. Each entry sets that tool's default policy. One entry is not a tool: the literal key `computer.control` (`tools.approval["computer.control"]`, written `computer.control: allow` in YAML, never nested under `computer`) answers the `computer` tool's requests for foreground control; see [computer use](./computer-use.md#menus-held-input-and-task-control). For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard. Whitespace is the exception: before matching, every run of spaces, tabs, or newlines in both the pattern and the command collapses to a single space, and leading/trailing whitespace is trimmed. A newline in a pattern therefore matches any whitespace: `match: "*\n*"` behaves like `"* *"` and matches every command containing a space. A newline-specific rule is unnecessary to catch dangerous commands in a newline-separated list: `deny` and `prompt` rules check each segment (see below). `allow` rules reject unquoted newline command separators, but can approve commands containing quoted or escaped literal newlines when the full command matches.
 
-By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
+Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` entries are **prepended** ahead of global `~/.omp/agent/config.yml` rules rather than replacing them, so repository-specific build or lint allowances can be declared locally without duplicating global rules.
 
+Leading `KEY=VALUE` environment assignments do not match an `allow` rule unless the pattern includes them explicitly or the variable name exactly matches an entry in `bash.allowedEnvVars` (or a per-rule `env` list); entries are literal names, not wildcards:
+
+```yaml
+bash:
+   allowedEnvVars:
+      - GOOS
+      - GOARCH
+      - CGO_ENABLED
+      - CARGO_TARGET_DIR
+   patterns:
+      - match: "go test*"
+        approval: allow
+      - match: "bun run build:native*"
+        approval: allow
+        env: [CMAKE_GENERATOR]
+```
+
+Because a name-only allowlist permits any value for that variable, list only benign build/test variables; never list execution-controlling variables (`PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `GIT_SSH_COMMAND`, `GOFLAGS`, `RUSTC_WRAPPER`, `CARGO_TARGET_<triple>_RUNNER`, and similar `*_RUNNER`/`*_WRAPPER` names), which would let a command run arbitrary code. `deny` and `prompt` rules always check segments both with and without leading bare `KEY=VALUE` assignments, so `FOO=1 rm -rf build` cannot bypass a `match: "rm -rf *"` restriction. Command wrappers are not unwrapped: `env FOO=1 rm -rf build` or `nice rm -rf build` does not start with `rm`, so it does not match that rule.
+
+By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
 ```yaml
 tools:
    approvalMode: write
@@ -267,7 +287,7 @@ disabledProviders:
    - groq # project array REPLACES the global array
 ```
 
-Array replacement is the most common surprise: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every other array-typed setting.
+Array replacement is the most common surprise for non-merged lists: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every array setting other than `bash.patterns` and `bashInterceptor.patterns` (which prepend project entries ahead of global ones).
 
 ## Project-local config
 
@@ -312,7 +332,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 ## Path-scoped arrays
 
-Three array settings — `enabledModels`, `enabledProviders`, and `disabledProviders` — accept path-scoped entries in addition to bare strings, so a single global config can behave differently per directory:
+Five array settings — `enabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` — accept path-scoped entries in addition to unscoped entries, so a single global config can behave differently per directory without maintaining separate `<repo>/.omp/config.yml` files:
 
 ```yaml
 enabledModels:
@@ -329,18 +349,29 @@ disabledProviders:
      providers:
         - anthropic
         - openai
+
+bash:
+   patterns:
+      - path: ~/work/service-repo
+        patterns:
+           - match: "make lint*"
+             approval: allow
+           - match: "make test*"
+             approval: allow
+      - match: "git status*" # applies everywhere
+        approval: allow
 ```
 
-Bare string entries apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
+Unscoped entries (bare strings for model/provider lists, or direct rule objects for `bash.patterns` and `bashInterceptor.patterns`) apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
 
 Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `pathPrefixes`.
 
 Accepted **value** keys:
 
-- `models` (for `enabledModels`) or `providers` (for `enabledProviders` and `disabledProviders`)
-- `values` or `items` (for any setting)
+- `models` (for `enabledModels`), `providers` (for `enabledProviders` and `disabledProviders`), or `patterns` (for `bash.patterns` and `bashInterceptor.patterns`)
+- `values` or `items` (for any path-scoped setting)
 
-Only string values are kept; malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array.
+For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may wrap a list under `patterns` / `values` / `items`, carry the rule fields itself (`{ path, match, approval }`), or both; inside its scope it contributes its own rule first, then the listed rules in order. Listed rules may be path-scoped themselves, narrowing the outer scope. An entry whose path keys hold no string (for example `path: ~`, which YAML reads as null; quote it as `"~"` for your home directory) is not scoped and applies everywhere. When `bashInterceptor.patterns` contains only path-scoped entries, the built-in interceptor rules still apply after any matching scoped rules; one unscoped rule in that list makes it replace the built-ins, but rules a project or `--config` overlay prepends onto it do not. For the other settings, malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array for the active working directory.
 
 ## Provider and source disabling
 
@@ -1187,7 +1218,7 @@ Selected migrations applied whenever raw settings are loaded (global, project, o
 
 ### A global array disappeared in a project
 
-Arrays replace; they do not append. If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or any other array, include the **complete** desired value in the project layer — the global array is fully replaced.
+Most arrays replace rather than append (`bash.patterns` and `bashInterceptor.patterns` prepend project entries ahead of global entries). If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or another replacing array, include the **complete** desired value in the project layer — the global array is fully replaced.
 
 ### A provider is still available after editing config
 
