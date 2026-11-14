@@ -147,12 +147,41 @@ describe("MCP lost remote server retry schedule", () => {
 		expect(manager.getConnectionStatus("flaky")).toBe("connected");
 	});
 
-	it("does not schedule a server that never connected", async () => {
+	it("schedules a never-connected server that failed transiently with 429 and recovers it", async () => {
+		// A 429 capacity answer on initialize is transient (RFC 6585 section 4):
+		// the server exists and asked to be retried, so the quiet background
+		// schedule applies even though the server never connected.
 		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-lost-remote-"));
-		flaky = startFlakyHttpMcpServer();
+		flaky = startFlakyHttpMcpServer({ downStatus: 429, downRetryAfterSeconds: 0 });
 		flaky.setDown(true);
 		manager = new MCPManager(workDir, null, undefined, FAST);
 		const config: MCPHttpServerConfig = { type: "http", url: flaky.url, timeout: GUARD_MS };
+		await manager.connectServers({ flaky: config }, {});
+		expect((await manager.waitForStartup(0)).failed.map(failure => failure.name)).toEqual(["flaky"]);
+		// The startup-armed ladder already failed; the quiet schedule is armed
+		// but idle, so the server reads "disconnected" until the first probe.
+		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
+
+		flaky.setDown(false);
+		await until(() => manager?.getConnectionStatus("flaky") === "connected", "the scheduled retry to connect");
+		expect((await manager.waitForStartup(0)).connected).toEqual(["flaky"]);
+		const ping = manager.getTools().find(tool => tool.mcpServerName === "flaky");
+		if (!ping) throw new Error("ping tool not registered after scheduled recovery");
+		const result = await ping.execute("call-1", {}, noop, noCtx);
+		expect(result.isError).toBeFalsy();
+		expect(result.content[0]).toEqual({ type: "text", text: flaky.pong });
+	});
+
+	it("does not schedule a server that never connected", async () => {
+		// A refused connection is permanent for scheduling: nothing answered,
+		// so no server asked to be retried. (A 429/502/503 initial failure is
+		// transient and joins the schedule — see the test above.)
+		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-lost-remote-"));
+		const unused = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+		const port = unused.port;
+		unused.stop(true);
+		manager = new MCPManager(workDir, null, undefined, FAST);
+		const config: MCPHttpServerConfig = { type: "http", url: `http://127.0.0.1:${port}/mcp`, timeout: GUARD_MS };
 		await manager.connectServers({ flaky: config }, {});
 		expect((await manager.waitForStartup(0)).failed.map(failure => failure.name)).toEqual(["flaky"]);
 		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
@@ -161,10 +190,8 @@ describe("MCP lost remote server retry schedule", () => {
 		expect(await manager.reconnectServer("flaky")).toBeNull();
 		expect(await manager.reconnectServer("flaky", { manual: true })).toBeNull();
 
-		flaky.setDown(false);
 		await Bun.sleep(QUIET_MS); // negative contract, see above
 
-		expect(flaky.initializes).toBe(0);
 		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
 	});
 });

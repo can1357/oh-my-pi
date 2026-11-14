@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- MCP servers that answer `initialize` with HTTP 429 now reconnect with backoff that honors `Retry-After`, and rejoin the quiet background retry schedule instead of staying failed until `/mcp reconnect` ([#19240](https://github.com/can1357/oh-my-pi/issues/19240))
 - Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
