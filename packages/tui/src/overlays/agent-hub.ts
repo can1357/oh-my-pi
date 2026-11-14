@@ -89,7 +89,7 @@ import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
 import { node, span, stableKey, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import { hintsRow, NARROW_SHEET_COLS, type NativeHint, overlayCard } from "../native/overlay";
 import { CLOSE_ACTION, NestedPicker, picker, pickerQuery } from "../native/picker";
 import { Input } from "../components/input";
 
@@ -767,12 +767,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const usePicker = cx.supports("picker");
 		const nativeTree = cx.supports("tree");
 		const meter = cx.supports("meter");
-		const size = this.#pickerSize();
-		const variant = usePicker ? `picker:${meter}:${size}` : nativeTree ? "tree" : "list";
+		// A narrow pane has no room for a card with margins: fill it, as the backend fills its narrow sheets.
+		const card = this.#pickerSize() === "lg" ? null : cx.cols < NARROW_SHEET_COLS ? "full" : "lg";
+		const variant = usePicker ? `picker:${meter}:${card}` : nativeTree ? "tree" : "list";
 		if (this.#native && this.#nativeVariant === variant) return this.#native;
 		this.#nativeVariant = variant;
 		if (usePicker) {
-			this.#native = this.#describePicker(meter, size);
+			this.#native = this.#describePicker(meter, card);
 			return this.#native;
 		}
 		const tabs = node("tabs", { items: SECTION_TABS, active: this.#section }, undefined, "section");
@@ -935,26 +936,27 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	/**
 	 * The hub as a data-first `picker` (§9.1): roster or activity log, selected
-	 * agent as preview. A `screen` picker goes in a centered `lg` card, which
-	 * runs the pane's height and keeps the transcript visible beside it.
+	 * agent as preview. Given a `card` size, a `screen` picker goes in a
+	 * centered card of that size, which runs the pane's height and, at `lg`,
+	 * keeps the transcript visible beside it.
 	 */
-	#describePicker(meter: boolean, size: "lg" | "screen"): NativeNode {
+	#describePicker(meter: boolean, card: "lg" | "full" | null): NativeNode {
 		const activity = this.#section === "activity";
 		const props: TspPickerProps = {
 			title: "Agents",
 			subtitle: this.#pickerSubtitle(),
 			icon: "users",
-			size,
+			size: card ? "screen" : "lg",
 			tabs: PICKER_TABS,
 			tab: this.#section,
 			...(activity ? this.#activityPickerProps() : this.#agentPickerProps()),
 		};
 		const preview = activity ? [] : this.#describePreview(this.#rows[this.#selectedRow], meter);
-		if (size === "lg") return picker(props, preview);
+		if (!card) return picker(props, preview);
 		this.#cardPicker.node = picker(props, preview);
 		return node(
 			"overlay",
-			{ role: "omp.overlay.agentHub", anchor: "center", size: "lg", modal: true },
+			{ role: "omp.overlay.agentHub", anchor: "center", size: card, modal: true },
 			[this.#cardPicker],
 			"card",
 		);

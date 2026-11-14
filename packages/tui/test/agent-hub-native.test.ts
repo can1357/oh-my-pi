@@ -189,6 +189,12 @@ test("on a tall pane the hub is a screen picker in its own card; a click beside 
 
 		h.event({ ev: "focus", sf, id: editorId });
 		expect(h.tui.getFocused()).toBe(editor);
+
+		// A narrow, tall split has no room for margins: the card fills the pane.
+		h.terminal.resize(90, 100);
+		h.flush();
+		expect(layer()).toEqual([["overlay", "full"]]);
+		expect(cardPicker()).toMatchObject({ k: "picker", p: { size: "screen", selected: "beta" } });
 	} finally {
 		hub.dispose();
 		h.stop();
