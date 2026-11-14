@@ -36,14 +36,16 @@ it("aborts the process at the real host boundary for the parent test", async () 
 	});
 	if (stage === "before") {
 		const register = AsyncJobManager.prototype.register;
-		vi.spyOn(AsyncJobManager.prototype, "register").mockImplementation(function (type, label, run, options) {
-			if (type === "task") {
-				process.stdout.write(`PROBE_READY:${session.sessionManager.getSessionFile()}\n`);
-				const wait = new Int32Array(new SharedArrayBuffer(4));
-				for (;;) Atomics.wait(wait, 0, 0, 1000);
-			}
-			return register.call(this, type, label, run, options);
-		});
+		vi.spyOn(AsyncJobManager.prototype, "register").mockImplementation(
+			function (this: AsyncJobManager, type, label, run, options) {
+				if (type === "task") {
+					process.stdout.write(`PROBE_READY:${session.sessionManager.getSessionFile()}\n`);
+					const wait = new Int32Array(new SharedArrayBuffer(4));
+					for (;;) Atomics.wait(wait, 0, 0, 1000);
+				}
+				return register.call(this, type, label, run, options);
+			},
+		);
 	}
 	const hookExtension: ExtensionFactory = pi => {
 		const pauseAfterResult = async () => {
