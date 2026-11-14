@@ -87,7 +87,7 @@ export interface ComposerStyle {
 	 *  column, IME-safe layout, and the right-border scrollbar. */
 	readonly sideBorders: boolean;
 	/** Rows consumed by top+bottom chrome (drives maxHeight budgeting). */
-	readonly verticalChrome: 0 | 1 | 2;
+	readonly verticalChrome: 0 | 1 | 2 | 3;
 	/** Where the host should attach the status bar: embedded in the top border,
 	 * rendered as a flush soft-capped band above the input, docked onto a top rule, or detached into a standalone bottom bar. */
 	readonly statusAttachment: "top-border" | "top-band" | "top-rule-chip" | "none";
@@ -103,8 +103,10 @@ export interface ComposerStyle {
 	defaultPaddingX(themePaddingX: number | undefined): number;
 	/** Cells consumed per side on content rows (border glyph + padding). */
 	sideChromeWidth(paddingX: number): number;
-	/** Top chrome row; `undefined` renders none. */
-	renderTop(ctx: ComposerChromeContext): string | undefined;
+	/** Top chrome rows in display order; a string remains a single row.
+	 * `undefined` renders none. Each row must occupy `ctx.width` cells.
+	 * The style places `ctx.topBorder` on its chosen header row. */
+	renderTop(ctx: ComposerChromeContext): string | string[] | undefined;
 	/** Chrome-wrapped content row; box's IME-safe last row emits two rows. */
 	renderRow(ctx: ComposerRowContext): string[];
 	/** Bottom chrome row; `undefined` renders none (box merges the bottom
