@@ -21,12 +21,40 @@ import type { KeyName } from "../key-hint-format";
 import { getKeybindings, type Keybinding } from "../keybindings";
 import type { Input } from "../components/input";
 import type { SelectItem, SelectList } from "../components/select-list";
+import type { Component } from "../tui";
 import { col, node } from "./describe";
 import type { NativeChild, NativeNode, NativeUiEvent } from "./node";
 
 /** The picker sheet; `preview` children fill its preview pane. */
 export function picker(p: TspProps<"picker">, preview?: readonly NativeChild[]): NativeNode {
 	return node("picker", p, preview);
+}
+
+/**
+ * A picker as a component of its own: a component's root picker stays where
+ * it is described (a prefs page's editor slot, an `overlay` card), where a
+ * picker described inside another node would be hoisted into `layer` on its
+ * own. Its events go to `route`.
+ */
+export class NestedPicker implements Component {
+	node: NativeNode | undefined;
+	readonly #route: (event: NativeUiEvent) => void;
+
+	constructor(route: (event: NativeUiEvent) => void) {
+		this.#route = route;
+	}
+
+	render(): readonly string[] {
+		return [];
+	}
+
+	describe(): NativeNode | null {
+		return this.node ?? null;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.#route(event);
+	}
 }
 
 /**

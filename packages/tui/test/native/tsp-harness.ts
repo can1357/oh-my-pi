@@ -127,6 +127,7 @@ export class TspTestTerminal implements Terminal {
 	#cols: number;
 	#rows: number;
 	#onInput: ((data: string) => void) | undefined;
+	#onResize: (() => void) | undefined;
 	#helloCallbacks: TspHelloHandler[] = [];
 	#helloResult: TspHello | null | undefined;
 	#pending = false;
@@ -192,14 +193,22 @@ export class TspTestTerminal implements Terminal {
 
 	start(
 		onInput: (data: string) => void,
-		_onResize?: () => void,
+		onResize?: () => void,
 		_onDisconnect?: () => void,
 		options?: TerminalStartOptions,
 	): void {
 		this.#onInput = onInput;
+		this.#onResize = onResize;
 		this.#helloResult = undefined;
 		// A deferred start sends no probe until enableInput().
 		this.#pending = options?.deferInput !== true;
+	}
+
+	/** The pane changed size: what SIGWINCH reports to the program. */
+	resize(cols: number, rows: number): void {
+		this.#cols = cols;
+		this.#rows = rows;
+		this.#onResize?.();
 	}
 
 	enableInput(): void {
@@ -208,6 +217,7 @@ export class TspTestTerminal implements Terminal {
 
 	stop(): void {
 		this.#onInput = undefined;
+		this.#onResize = undefined;
 		this.#helloCallbacks = [];
 	}
 

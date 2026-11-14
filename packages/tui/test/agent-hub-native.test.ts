@@ -10,8 +10,11 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "../src/overlays/session-observer-registry";
+import { Editor } from "../src/components/editor";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/tui";
+import { TspHarness } from "./native/tsp-harness";
+import { defaultEditorTheme } from "./test-themes";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -55,7 +58,8 @@ function createHub(
 	ui?: TUI,
 ): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
-		ui,
+		// A short pane unless a test says otherwise, whatever the terminal running the tests.
+		ui: ui ?? ({ terminal: { rows: 24 }, requestRender() {}, requestComponentRender() {} } as unknown as TUI),
 		observers,
 		transcript: { fs, parseEntries: () => [] },
 		loadPersisted: async () => {},
@@ -153,21 +157,41 @@ test("the By parent action and the t key both switch the picker to the parent tr
 	}
 });
 
-test("a tall pane floats the hub as a full-height card; shrinking it floats the lg sheet again", () => {
-	const terminal = { rows: 111 };
-	const ui = { terminal, requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-	const hub = createHub([agent("alpha", 1_000)], [], undefined, ui);
+test("on a tall pane the hub is a screen picker in its own card; a click beside it still takes the keys", async () => {
+	const editor = new Editor(defaultEditorTheme);
+	const h = await TspHarness.start(
+		tui => {
+			tui.addChild(editor);
+			tui.setFocus(editor);
+		},
+		{ rows: 40 },
+	);
+	const hub = createHub([agent("alpha", 2_000), agent("beta", 1_000)], [], undefined, h.tui);
 	try {
-		expect(hub.nativeSheet(pickerCx)).toBe(false);
-		expect(hub.nativeOverlay).toEqual({ role: "omp.overlay.agentHub", anchor: "center", size: "lg" });
-		expect(pickerProps(hub).size).toBe("screen");
+		const sf = h.terminal.surface!;
+		const editorId = h.find(n => n.k === "editor")!.id;
+		h.tui.showOverlay(hub, { fullscreen: true, width: "100%", maxHeight: "100%" });
+		await h.render();
+		const layer = () => (h.region("layer")?.c ?? []).map(n => [n.k, n.p && "size" in n.p ? n.p.size : undefined]);
+		expect(layer()).toEqual([["picker", "lg"]]);
 
-		terminal.rows = 44;
-		expect(hub.nativeSheet(pickerCx)).toBe(true);
-		expect(hub.nativeOverlay).toBeUndefined();
-		expect(pickerProps(hub).size).toBe("lg");
+		// SIGWINCH to a taller pane, same width: the hub describes again.
+		h.terminal.resize(h.terminal.columns, 100);
+		h.flush();
+		expect(h.terminal.surface).toBe(sf);
+		expect(layer()).toEqual([["overlay", "lg"]]);
+		const cardPicker = () => h.region("layer")?.c?.[0]?.c?.[0];
+		expect(cardPicker()).toMatchObject({ k: "picker", p: { size: "screen", selected: "alpha" } });
+
+		// Picker events still reach the hub from inside the card.
+		h.event({ ev: "select", sf, id: cardPicker()!.id, item: "beta" });
+		expect(cardPicker()).toMatchObject({ p: { selected: "beta" } });
+
+		h.event({ ev: "focus", sf, id: editorId });
+		expect(h.tui.getFocused()).toBe(editor);
 	} finally {
 		hub.dispose();
+		h.stop();
 	}
 });
 

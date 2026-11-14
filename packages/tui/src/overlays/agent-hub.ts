@@ -90,7 +90,7 @@ import { Stack } from "../components/layout/stack";
 import { node, span, stableKey, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
 import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
-import { CLOSE_ACTION, picker, pickerQuery } from "../native/picker";
+import { CLOSE_ACTION, NestedPicker, picker, pickerQuery } from "../native/picker";
 import { Input } from "../components/input";
 
 /** A chrome-less search field: the hub draws its own prompt. */
@@ -157,10 +157,11 @@ const NATIVE_RECENT_ACTIVITY = 20;
 /** Child ids the native inspector names before summarizing the rest. */
 const NATIVE_CHILD_IDS = 12;
 /**
- * Pane rows from which the hub floats as a full-height card instead of an `lg`
- * picker sheet. The terminal caps an `lg` sheet's height (760px in Tern)
- * whatever the pane's height, so on a tall pane the roster scrolls in a small
- * box above empty space. 60 rows is over 1,000px at common row heights.
+ * Pane rows from which the hub is a `screen` picker in a centered `lg` card of
+ * its own instead of an `lg` picker sheet. The terminal caps an `lg` sheet's
+ * height (760px in Tern) whatever the pane's height, so on a tall pane the
+ * roster scrolls in a small box above empty space; the card grows with the
+ * pane. Rows stand in for pixels: 60 rows is over 1,000px at common row heights.
  */
 const SCREEN_PICKER_MIN_ROWS = 60;
 
@@ -522,6 +523,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#native: NativeNode | undefined;
 	/** Which terminal kinds {@link #native} was described for (support may change between frames). */
 	#nativeVariant = "";
+	/** The picker inside the tall-pane card, a component so it stays in the card instead of hoisting into `layer`. */
+	readonly #cardPicker = new NestedPicker(event => this.handleNativeEvent(event));
 	/** Preview recent-activity rows by node key, for their pointer actions. */
 	#recentByKey = new Map<string, AgentActivityRow>();
 	/** Last agent picker list: clock-free rows (`key`), the sent rows, and when their clocks were read. */
@@ -751,26 +754,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	// Native description
 	// ========================================================================
 
-	/** Whether the terminal draws `picker`, as the last {@link nativeSheet} call saw. */
-	#pickerKind = false;
-
 	/**
 	 * A `picker` is its own sheet: the backend mounts it in `layer` without an
-	 * `overlay` wrapper. On a tall pane it is not: {@link nativeOverlay} wraps it.
+	 * `overlay` wrapper. On a tall pane the hub still describes its own sheet,
+	 * the `overlay` card around the picker, so clicks beside it still release it.
 	 */
 	nativeSheet(cx: DescribeContext): boolean {
-		this.#pickerKind = cx.supports("picker");
-		return this.#pickerKind && this.#pickerSize() === "lg";
-	}
-
-	/**
-	 * On a tall pane, a `screen` picker (no chrome of its own) inside an `lg`
-	 * card: the card grows with the pane, the transcript stays visible around
-	 * it. The backend asks {@link nativeSheet} first, which records the kind.
-	 */
-	get nativeOverlay(): { role: string; anchor: "center"; size: "lg" } | undefined {
-		if (!this.#pickerKind || this.#pickerSize() !== "screen") return undefined;
-		return { role: "omp.overlay.agentHub", anchor: "center", size: "lg" };
+		return cx.supports("picker");
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
@@ -943,7 +933,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		return rows >= SCREEN_PICKER_MIN_ROWS ? "screen" : "lg";
 	}
 
-	/** The hub as a data-first `picker` (§9.1): roster or activity log, selected agent as preview. */
+	/**
+	 * The hub as a data-first `picker` (§9.1): roster or activity log, selected
+	 * agent as preview. A `screen` picker goes in a centered `lg` card, which
+	 * runs the pane's height and keeps the transcript visible beside it.
+	 */
 	#describePicker(meter: boolean, size: "lg" | "screen"): NativeNode {
 		const activity = this.#section === "activity";
 		const props: TspPickerProps = {
@@ -956,7 +950,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			...(activity ? this.#activityPickerProps() : this.#agentPickerProps()),
 		};
 		const preview = activity ? [] : this.#describePreview(this.#rows[this.#selectedRow], meter);
-		return picker(props, preview);
+		if (size === "lg") return picker(props, preview);
+		this.#cardPicker.node = picker(props, preview);
+		return node(
+			"overlay",
+			{ role: "omp.overlay.agentHub", anchor: "center", size: "lg", modal: true },
+			[this.#cardPicker],
+			"card",
+		);
 	}
 
 	/** Roster totals: `$0.389 · 18.7s · 6 req · 114K tok`. */
