@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+### Fixed
+
 - Context estimates no longer price a turn's thinking text on routes that strip reasoning history from their requests (OpenRouter's Anthropic and Muse routes, opencode's Muse routes, Factory's Muse Spark), which do not send it; the text stays priced where the request rebuilds the stripped reasoning item for a tool call and carries it ([#18489](https://github.com/can1357/oh-my-pi/pull/18489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
