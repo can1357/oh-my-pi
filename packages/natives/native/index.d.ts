@@ -4252,6 +4252,8 @@ export interface VcsCommitOptions {
   indexPath?: string
   /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
   expectedHead?: string
+  /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
+  noVerify?: boolean
 }
 
 /** Detach copied Git metadata. */

@@ -211,6 +211,8 @@ pub struct VcsCommitOptions {
 	pub index_path:    Option<String>,
 	/// Fail with `HeadMoved` unless HEAD resolves to this revision.
 	pub expected_head: Option<String>,
+	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
+	pub no_verify:     Option<bool>,
 }
 /// Patch application options.
 #[napi(object)]
@@ -383,6 +385,7 @@ impl From<VcsCommitOptions> for core::CommitOptions {
 			files:         v.files.unwrap_or_default(),
 			index_path:    v.index_path.map(PathBuf::from),
 			expected_head: v.expected_head,
+			no_verify:     v.no_verify.unwrap_or(false),
 		}
 	}
 }

@@ -256,6 +256,8 @@ pub struct CommitOptions {
 	/// unless HEAD (the commit being amended, for `amend`) resolves to this
 	/// revision.
 	pub expected_head: Option<String>,
+	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
+	pub no_verify:     bool,
 }
 
 /// Which hunks of a file a selection covers.

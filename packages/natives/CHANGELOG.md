@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added `noVerify` to `commitCreate()` options to skip the `pre-commit` and `commit-msg` hooks, like `git commit --no-verify`.
 - Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.
 - Improved `grep()` and `glob()` performance for ovnfs checkouts by using the serving daemon when supported, while retaining native fallback behavior and existing streaming, filtering, and link-following options.
 
