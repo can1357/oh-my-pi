@@ -17,6 +17,7 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Added `display.stepSummaries`: a one-line plain-English caption above each tool-calling step's usage metrics (requires `display.showTokenUsage`), generated locally for read-only steps and otherwise by the `tiny` model role ([#17456](https://github.com/can1357/oh-my-pi/pull/17456) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 

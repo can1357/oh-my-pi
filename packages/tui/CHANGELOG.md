@@ -20,6 +20,7 @@
 - Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
 - Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
+- Exported `UsageRowBlock` (returned by `createUsageRowBlock`) with `setSummary()`, which adds a caption line above a usage row's metrics after the row is mounted, in both the ANSI and native renderers; captions are stripped of terminal escapes and control characters and clipped to one line rather than wrapped ([#17456](https://github.com/can1357/oh-my-pi/pull/17456) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.20.0] - 2026-11-12
 
