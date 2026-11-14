@@ -1,0 +1,25 @@
+// Catalog entry for "abliteratedllm".
+
+provider "abliteratedllm" {
+	default-model "glm-5.3-flash-abliterated"
+	env "ABLITERATEDLLM_API_KEY"
+	dynamic-models-authoritative #true
+	// AbliteratedLLM rows carry their own metadata; same-id rows from other
+	// providers describe different deployments.
+	skip-cross-provider-reference-fills #true
+	// `/v1/models` is public, so catalog generation needs no key.
+	discovery label="AbliteratedLLM" allow-unauthenticated=#true
+
+	// Chat Completions dialect per https://abliteratedllm.dev/docs/chat-completions:
+	// fields the gateway does not list are passed to the model unchanged, so no
+	// `store` is sent, and reasoning rides `reasoning_effort` on every model
+	// (not Qwen's `enable_thinking`, which Qwen 3.8 templates reject when false).
+	// `low`/`medium`/`high` are the documented values; `minimal` has no match
+	// and is sent as `low`. System prompts already ride the `system` role, and
+	// both `max_tokens` and `max_completion_tokens` are accepted.
+	supports-store #false
+	thinking-format "openai"
+	reasoning-effort-map {
+		minimal "low"
+	}
+}

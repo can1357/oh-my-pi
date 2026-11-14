@@ -4915,6 +4915,64 @@ export function chutesModelManagerOptions(config?: SimpleProviderConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// AbliteratedLLM
+// ---------------------------------------------------------------------------
+
+/**
+ * AbliteratedLLM rows carry `pricing` as decimal strings in USD per million
+ * tokens (`input`, `output`, `cached_input`), plus `context_length`,
+ * `max_output_tokens`, `input_modalities`, and `capabilities.reasoning`. Each
+ * field falls back independently to the bundled row when absent, so a row
+ * missing one field keeps the rest of its live metadata.
+ */
+function mapAbliteratedllmModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithFeatureListMetadata(entry, defaults, reference);
+	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
+	const reasoning = toBoolean(capabilities.reasoning) ?? model.reasoning;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	return {
+		...model,
+		reasoning,
+		// A row that reports no reasoning must not carry a reference effort ladder.
+		...(reasoning ? {} : { thinking: undefined }),
+		// Every listed model is priced; an absent price falls back to the
+		// bundled row, so cost is not authoritative. There is no cache-write charge.
+		cost: {
+			input: toPositiveNumber(pricing.input, model.cost.input),
+			output: toPositiveNumber(pricing.output, model.cost.output),
+			cacheRead: toPositiveNumber(pricing.cached_input, model.cost.cacheRead),
+			cacheWrite: model.cost.cacheWrite,
+		},
+		maxTokens: toPositiveNumber(entry.max_output_tokens, model.maxTokens),
+	};
+}
+
+/** Builds AbliteratedLLM's model-discovery manager (`https://api.abliteratedllm.dev/v1/models`, public). */
+export function abliteratedllmModelManagerOptions(
+	config?: SimpleProviderConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "abliteratedllm",
+		defaultBaseUrl: "https://api.abliteratedllm.dev/v1",
+		config,
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+		// `capabilities.reasoning` / `input_modalities` are the deployment's whole
+		// truth: a live row without reasoning or `image` must not regain them
+		// from the bundled row.
+		dynamicReasoningAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		mapModel: mapAbliteratedllmModel,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Inception
 // ---------------------------------------------------------------------------
 

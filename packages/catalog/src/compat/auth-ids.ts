@@ -2,6 +2,7 @@
 
 /** Every provider with an `auth/<id>.kdl` policy. */
 export type AuthProviderId =
+	| "abliteratedllm"
 	| "abliteration"
 	| "aiand"
 	| "aimlapi"
@@ -111,6 +112,7 @@ export type AuthProviderId =
 
 /** Providers whose policy declares a `login` flow (the `/login` roster). */
 export type LoginProviderId =
+	| "abliteratedllm"
 	| "abliteration"
 	| "aiand"
 	| "alibaba-coding-plan"
