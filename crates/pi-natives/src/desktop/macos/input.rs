@@ -2501,7 +2501,7 @@ fn background_gesture(
 							control::settle,
 						);
 					}
-					step_slider(
+					if let Some(left) = step_slider(
 						window,
 						&control.role,
 						(at, target),
@@ -2510,7 +2510,11 @@ fn background_gesture(
 						step,
 						|| control.value(),
 						control::settle,
-					)?;
+					)? {
+						// The pointer had moved it: rule as for a slider it moved.
+						control::report_drag_note(left_note(&control.role, left, target, tolerance));
+						return Ok(());
+					}
 					if let Some(now) = control.value()
 						&& now != at
 					{
@@ -3300,9 +3304,12 @@ fn step_slider_geometry(
 /// slider's step size, and a second confirms it: a slider whose steps are not
 /// even is not stepped further. The rest go out together, since the page
 /// applies them in order, and the value is read until it settles. When the
-/// first step changes nothing, the steps are uneven, or the slider settles
-/// short of where the steps lead and not at the end of `range`, the call
-/// throws `InputFailed` instead of returning as if the slider had moved.
+/// first step changes nothing, the steps are uneven and stepping back does
+/// not return it, or the slider settles short of where the steps lead and not
+/// at the end of `range`, the call throws `InputFailed` instead of returning as
+/// if the slider had moved. Uneven steps that step back to where the second
+/// step says the slider stood mean the first read was stale and the pointer
+/// had moved it: `Some` with the value it is back at.
 fn step_slider(
 	window: &DesktopWindow,
 	role: &str,
@@ -3312,11 +3319,11 @@ fn step_slider(
 	mut step: impl FnMut(bool) -> CoreResult<()>,
 	mut value: impl FnMut() -> Option<f64>,
 	mut wait: impl FnMut(Duration),
-) -> CoreResult<()> {
+) -> CoreResult<Option<f64>> {
 	let up = target > before;
 	let action = if up { "AXIncrement" } else { "AXDecrement" };
 	if target == before {
-		return Ok(());
+		return Ok(None);
 	}
 	// A refusal that says nothing was sent, or a failed step, would hide that
 	// the drag and maybe some steps went out.
@@ -3345,7 +3352,7 @@ fn step_slider(
 			)));
 		},
 		// No longer readable: nothing left to confirm.
-		Followed::Gone => return Ok(()),
+		Followed::Gone => return Ok(None),
 		Followed::Moved(first) => first,
 	};
 	let size = (first - before).abs();
@@ -3375,19 +3382,49 @@ fn step_slider(
 				)));
 			}
 		}
-		return Ok(());
+		return Ok(None);
 	}
 	// A second step confirms the step size: a read that caught the page still
 	// applying the drag gives a size the slider does not step by.
 	check().map_err(|error| stopped(error, value()))?;
 	step(up).map_err(|error| stopped(error, value()))?;
 	let second = match held(first, &mut value, &mut wait) {
-		Followed::Gone => return Ok(()),
+		Followed::Gone => return Ok(None),
 		Followed::Unchanged => first,
 		Followed::Moved(second) => second,
 	};
 	let at_limit = |at: f64| if up { at >= max } else { at <= min };
 	if ((second - first).abs() - size).abs() > size * 1e-6 && !at_limit(second) {
+		// The second step's size is the slider's own: the first read was stale,
+		// so the pointer had moved the slider to one step short of `first`.
+		// Send back both steps; a slider that returns there was moved by the
+		// pointer and is left there.
+		let true_size = (second - first).abs();
+		if second != first {
+			let start = if up {
+				first - true_size
+			} else {
+				first + true_size
+			};
+			check().map_err(|error| stopped(error, value()))?;
+			step(!up).map_err(|error| stopped(error, value()))?;
+			step(!up).map_err(|error| stopped(error, value()))?;
+			let undone = settle(start, true_size / 2.0, &mut value, &mut wait);
+			match undone {
+				Some(undone) if (undone - start).abs() <= true_size / 2.0 => return Ok(Some(undone)),
+				None => return Ok(None),
+				Some(undone) => {
+					return Err(DesktopError::input_failed(format!(
+						"the drag on window {} ({}) left the {role} it started on short of {target}, \
+						 the value under the path's end, and its {action} steps were not even (from \
+						 {before} to {first}, then to {second}); stepping back to {start} left it at \
+						 {undone}. Read the target before retrying; takeover (takeover: true) drags it \
+						 with the pointer",
+						window.id, window.app,
+					)));
+				},
+			}
+		}
 		return Err(DesktopError::input_failed(format!(
 			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
 			 {target}, the value under the path's end, and its {action} steps were not even (from \
@@ -3405,7 +3442,7 @@ fn step_slider(
 	}
 	let expected = f64::from(wanted).mul_add(if up { size } else { -size }, first);
 	let Some(settled) = settle(expected, size / 2.0, &mut value, &mut wait) else {
-		return Ok(());
+		return Ok(None);
 	};
 	let at_end = at_limit(settled);
 	if (settled - expected).abs() > size / 2.0 && !at_end {
@@ -3427,7 +3464,7 @@ fn step_slider(
 			window.id, window.app,
 		)));
 	}
-	Ok(())
+	Ok(None)
 }
 
 /// Reads `value`, `TRACKED_POLL` apart, until it reads within `within` of
@@ -8758,38 +8795,42 @@ mod tests {
 	}
 
 	#[test]
-	fn a_web_slider_read_while_the_page_still_applies_the_drag_is_not_stepped_on() {
-		use std::cell::Cell;
+	fn a_web_slider_read_while_the_page_still_applies_the_drag_is_stepped_back_and_left() {
+		use std::cell::{Cell, RefCell};
 		// The page moved the slider to 40, but the reads caught the press's 2
 		// twice: the first step lands on 41, a "step" of 39; the second, on 42.
-		let at = Cell::new(2.0);
-		let page = Cell::new(40.0);
-		let steps = Cell::new(0);
-		let outcome = step_slider(
-			&background_window("Electron"),
-			"AXSlider",
-			(2.0, 75.0),
-			(0.0, 100.0),
-			|| Ok(()),
-			|up| {
-				steps.update(|v| v + 1);
-				page.set(page.get() + if up { 1.0 } else { -1.0 });
-				at.set(page.get());
-				Ok(())
-			},
-			|| Some(at.get()),
-			|_| {},
-		);
-		let error = outcome.unwrap_err();
-		assert_eq!((error.code, steps.get()), (ErrorCode::InputFailed, 2));
-		assert!(
-			error
-				.message
-				.contains("were not even (from 2 to 41, then to 42)"),
-			"{}",
-			error.message
-		);
-		assert!(error.message.contains("it reads 42"), "{}", error.message);
+		// `stuck` steps back by `back` instead of 1. Returns the outcome, where
+		// the slider ends and the steps sent.
+		let run = |back: f64| {
+			let page = Cell::new(40.0);
+			let shown = Cell::new(2.0);
+			let steps = RefCell::new(Vec::new());
+			let outcome = step_slider(
+				&background_window("Electron"),
+				"AXSlider",
+				(2.0, 75.0),
+				(0.0, 100.0),
+				|| Ok(()),
+				|up| {
+					steps.borrow_mut().push(up);
+					page.set(page.get() + if up { 1.0 } else { -back });
+					shown.set(page.get());
+					Ok(())
+				},
+				|| Some(shown.get()),
+				|_| {},
+			);
+			(outcome.map_err(|error| (error.code, error.message)), page.get(), steps.into_inner())
+		};
+		// Both steps are sent back, and it is left at 40, where the pointer
+		// put it: the caller reports it as a slider the pointer moved.
+		assert_eq!(run(1.0), (Ok(Some(40.0)), 40.0, vec![true, true, false, false]));
+		// A step back that does not return it there fails naming the value.
+		let (outcome, at, steps) = run(0.0);
+		let (code, message) = outcome.unwrap_err();
+		assert_eq!((code, at, steps.len()), (ErrorCode::InputFailed, 42.0, 4));
+		assert!(message.contains("were not even (from 2 to 41, then to 42)"), "{message}");
+		assert!(message.contains("stepping back to 40 left it at 42"), "{message}");
 	}
 
 	#[test]
@@ -8871,19 +8912,19 @@ mod tests {
 			};
 		let run = |before, target, size, stops| run_with(before, target, size, stops, 0, 0);
 		let (outcome, value, steps) = run(0.0, 75.0, 1.0, 100.0);
-		assert_eq!((outcome, value, steps.len()), (Ok(()), 75.0, 75));
+		assert_eq!((outcome, value, steps.len()), (Ok(None), 75.0, 75));
 		assert!(steps.iter().all(|&up| up));
 		// Down, and to the step nearest the target: 7 is nearer 7.4 than 10.
 		assert_eq!(run(50.0, 7.4, 1.0, 100.0).1, 7.0);
-		assert_eq!(run(0.0, 7.4, 5.0, 100.0), (Ok(()), 5.0, vec![true]));
+		assert_eq!(run(0.0, 7.4, 5.0, 100.0), (Ok(None), 5.0, vec![true]));
 		// One step past the target is taken back when the start was nearer.
-		assert_eq!(run(0.0, 2.0, 5.0, 100.0), (Ok(()), 0.0, vec![true, false]));
+		assert_eq!(run(0.0, 2.0, 5.0, 100.0), (Ok(None), 0.0, vec![true, false]));
 		// Steps that run into the end of the range are not a shortfall.
-		assert_eq!(run(97.0, 100.0, 2.0, 100.0), (Ok(()), 100.0, vec![true, true]));
+		assert_eq!(run(97.0, 100.0, 2.0, 100.0), (Ok(None), 100.0, vec![true, true]));
 		// Already there: nothing is taken.
-		assert_eq!(run(40.0, 40.0, 1.0, 100.0), (Ok(()), 40.0, vec![]));
+		assert_eq!(run(40.0, 40.0, 1.0, 100.0), (Ok(None), 40.0, vec![]));
 		// A fractional step settles without waiting out every read.
-		assert_eq!(run(0.2, 0.5, 0.1, 100.0).0, Ok(()));
+		assert_eq!(run(0.2, 0.5, 0.1, 100.0).0, Ok(None));
 		// A slider that takes no step is reported, not passed off as moved.
 		let (outcome, value, steps) = run(0.0, 75.0, 1.0, 0.0);
 		let (code, message) = outcome.unwrap_err();
@@ -8972,13 +9013,13 @@ mod tests {
 		};
 		// Nearer the lower step, and nearer the upper one: the drag is done
 		// there, not short of the value under the path's end.
-		assert_eq!(run(0.0, 34.0), (Ok(()), 30.0, vec![true; 3]));
-		assert_eq!(run(0.0, 36.0), (Ok(()), 40.0, vec![true; 4]));
-		assert_eq!(run(100.0, 64.0), (Ok(()), 60.0, vec![false; 4]));
+		assert_eq!(run(0.0, 34.0), (Ok(None), 30.0, vec![true; 3]));
+		assert_eq!(run(0.0, 36.0), (Ok(None), 40.0, vec![true; 4]));
+		assert_eq!(run(100.0, 64.0), (Ok(None), 60.0, vec![false; 4]));
 		// Within the first step: the step out is kept when it lands nearer,
 		// and taken back when the start was nearer.
-		assert_eq!(run(0.0, 6.0), (Ok(()), 10.0, vec![true]));
-		assert_eq!(run(0.0, 4.0), (Ok(()), 0.0, vec![true, false]));
+		assert_eq!(run(0.0, 6.0), (Ok(None), 10.0, vec![true]));
+		assert_eq!(run(0.0, 4.0), (Ok(None), 0.0, vec![true, false]));
 	}
 
 	#[test]
