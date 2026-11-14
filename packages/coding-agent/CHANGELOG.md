@@ -186,6 +186,7 @@
 - Model discovery skips a listed model whose id names two vendors instead of dropping the provider’s whole list ([#18770](https://github.com/can1357/oh-my-pi/issues/18770)) ([#19175](https://github.com/can1357/oh-my-pi/pull/19175) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
 - Judge candidates behind a gateway that answers HTTP 502 `upstream_credentials_exhausted` are now skipped for 5 minutes, like a rejected account or an unserved model, instead of costing every judgment three attempts before the fallback ([#19158](https://github.com/can1357/oh-my-pi/pull/19158) by [@Xytronix](https://github.com/Xytronix))
 - `omp zsh` on Windows: `mkdir -p` with a drive-absolute path (`C:/Users/me/x/y`) no longer fails on `C:` ([#19169](https://github.com/can1357/oh-my-pi/pull/19169) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Fixed `mkdir -p` in `omp zsh` on Windows failing on `C:` for drive-absolute paths (`C:/Users/me/x/y`) and on UNC share roots ([#19169](https://github.com/can1357/oh-my-pi/pull/19169) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 
 ### Removed
 
