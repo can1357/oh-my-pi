@@ -524,7 +524,12 @@ describe("formatSessionHistoryMarkdown", () => {
 					content: `[IMPORTANT: User invoked the "in-your-own-words" skill; follow its instructions. Full skill below.]\n\n${body}\n\n---\n\nUser: ${args}`,
 					display: true,
 					attribution: "user",
-					details: { name: "in-your-own-words", path: "/skills/in-your-own-words/SKILL.md", args, lineCount: 21 },
+					details: {
+						name: "in-your-own-words",
+						path: "/skills/in-your-own-words/SKILL.md",
+						args,
+						lineCount: 21,
+					},
 					timestamp: 1,
 				},
 			],
