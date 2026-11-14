@@ -1,4 +1,4 @@
-import { isEisdir, isEnoent, isEnotdir, jsonContainerEnd, peekFileSync, tryParseJson } from "@oh-my-pi/pi-utils";
+import { jsonContainerEnd, peekFileSync, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { FileEntry, SessionHeader } from "./session-entries";
 import { parseTitleSlotLine } from "./session-title-slot";
 
@@ -53,15 +53,15 @@ export function sessionIdFromContent(content: string): string | undefined {
  * Synchronous session-header id reader shared by synchronous delete paths:
  * the session id in `filePath`'s header, read from a bounded prefix (title
  * slot plus the 1 MiB header budget), or `undefined` when there is no
- * readable file or no valid header. Matches the async
- * `readSessionHeaderId` in `./session-loader` (kept there to avoid a
- * storage/loader import cycle); change both together.
+ * readable file or no valid header. Never throws: `claimSession` and the
+ * delete purge both promise not to fail on an unreadable transcript. Parses
+ * like the async `readSessionHeaderId` in `./session-loader` (kept there to
+ * avoid a storage/loader import cycle); change both together.
  */
 export function readSessionHeaderIdSync(filePath: string): string | undefined {
 	try {
 		return peekFileSync(filePath, SESSION_HEADER_READ_LIMIT, sessionHeaderIdFromPrefix);
-	} catch (err) {
-		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
-		throw err;
+	} catch {
+		return undefined;
 	}
 }

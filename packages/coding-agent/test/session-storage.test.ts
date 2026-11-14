@@ -560,6 +560,20 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(rollupRows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
 	});
 
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"deletes an unreadable transcript even though its rows cannot be resolved",
+		async () => {
+			const sessionPath = await createSessionFile("unreadable");
+			const historyDbPath = path.join(tempDir, "history.db");
+			new Database(historyDbPath).close();
+			await fsp.chmod(sessionPath, 0o000);
+
+			await storage.deleteSessionWithArtifacts(sessionPath, { historyDbPath });
+
+			expect(fs.existsSync(sessionPath)).toBe(false);
+		},
+	);
+
 	it("deleteSessionWithArtifacts removes the transcript and its artifacts dir", async () => {
 		const sessionPath = await createSessionFile("purge-wires-delete");
 		const nestedDir = sessionPath.slice(0, -".jsonl".length);
