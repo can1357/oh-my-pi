@@ -86,6 +86,7 @@
 - Fixed `github` `run_watch` marking failed-job logs unavailable when they contain ANSI or other terminal escape sequences, returning plain-text logs on both current and older GitHub CLI (`gh`) releases ([#18968](https://github.com/can1357/oh-my-pi/pull/18968) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `web_search` leaving pages open in the shared headless browser when a search was cancelled while its page was still opening or the page failed to close, so the browser's memory no longer grows over a long session ([#19058](https://github.com/can1357/oh-my-pi/pull/19058) by [@tuschla](https://github.com/tuschla))
 - Task progress, task results, and restored-agent context gauges now show the provider-reported occupied context instead of token totals summed across segmented continuation requests, so they no longer hit the context ceiling early ([#19190](https://github.com/can1357/oh-my-pi/pull/19190) by [@eggpeat](https://github.com/eggpeat))
+- Fixed omp exiting during its first web search after a crashed session left tabs open in the shared browser, and closing several browser tabs at once breaking later web searches in the session ([#19206](https://github.com/can1357/oh-my-pi/pull/19206) by [@tuschla](https://github.com/tuschla))
 
 ### Removed
 
