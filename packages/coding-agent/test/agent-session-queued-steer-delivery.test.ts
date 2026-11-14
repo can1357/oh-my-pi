@@ -1372,6 +1372,8 @@ describe("AgentSession queued steer delivery", () => {
 		const firstDelivered = nextUserMessage(session, "first queued");
 		await session.steer("first queued");
 		await firstDelivered;
+		// Delivery is acknowledged before the request, so the model call follows the message event.
+		while (mock.calls.length < 2) await Bun.sleep(1);
 		expect(mock.calls.length).toBe(2);
 
 		await session.steer("second queued");

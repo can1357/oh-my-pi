@@ -2089,6 +2089,11 @@ export class Agent {
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
 			},
+			refreshContextAfterDelivery: context => {
+				context.systemPrompt = this.#state.systemPrompt;
+				this.#onModelCallSystemPrompt?.(context.systemPrompt);
+				context.tools = this.#toolsForModel(this.#state.model ?? model);
+			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
 					? async (context, signal) => {

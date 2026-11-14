@@ -1542,6 +1542,52 @@ async function runLoopBody(
 						emitInputMessages(stream, turnMessages, ack);
 						inputsEmitted = true;
 						await waitForInputDelivery(promise, signal);
+						if (config.refreshContextAfterDelivery) {
+							const stalePrompt = currentContext.systemPrompt;
+							const staleTools = currentContext.tools;
+							const staleModel = preparedProviderCall.model;
+							config.refreshContextAfterDelivery(currentContext);
+							const sameTools =
+								staleTools === currentContext.tools ||
+								(staleTools?.length === currentContext.tools?.length &&
+									(staleTools ?? []).every((tool, index) => tool === currentContext.tools?.[index]));
+							if (
+								staleModel !== (config.getModel?.() ?? config.model) ||
+								stalePrompt !== currentContext.systemPrompt ||
+								!sameTools
+							) {
+								// A delivery callback changed the request configuration: the gate must
+								// approve the call that is actually sent.
+								preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+								preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
+								let regate = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+								if (config.beforeModelCall && signal?.aborted) regate = { stop: true };
+								if (regate?.stop) {
+									if (regate.reason) {
+										logger.debug("Agent loop stopped before the model call", { reason: regate.reason });
+									}
+									const stopMessage = createGateStopMessage(preparedProviderCall.model, regate.reason);
+									currentContext.messages.push(stopMessage);
+									newMessages.push(stopMessage);
+									stream.push({ type: "message_start", message: stopMessage });
+									stream.push({ type: "message_end", message: stopMessage });
+									await emitTurnEnd(
+										stream,
+										currentContext,
+										stopMessage,
+										[],
+										config,
+										signal,
+										{ willContinue: false },
+										true,
+									);
+									turnOpen = false;
+									preserveSoftRequirementState = !signal?.aborted;
+									endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+									return;
+								}
+							}
+						}
 					}
 					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(

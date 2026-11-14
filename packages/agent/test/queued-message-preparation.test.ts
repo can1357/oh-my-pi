@@ -286,6 +286,51 @@ describe("queued message preparation", () => {
 		]);
 	});
 
+	it("sends and gates the configuration a delivery callback staged", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model, systemPrompt: ["old"] } });
+		const gated: string[][] = [];
+		agent.setBeforeModelCall(context => {
+			gated.push([...(context.systemPrompt ?? [])]);
+			return undefined;
+		});
+		agent.prepareQueuedMessages = () => ({
+			commit: () => [],
+			onDelivered: () => agent.setSystemPrompt(["new"]),
+		});
+		const unsubscribe = agent.subscribe(event => {
+			if (event.type !== "turn_end") return;
+			unsubscribe();
+			agent.steer(createUserMessage("steering"));
+		});
+
+		await agent.prompt("ordinary");
+
+		expect(mock.calls.map(call => call.context.systemPrompt)).toEqual([["old"], ["new"]]);
+		// The gate approved the request that was sent, so it also saw the staged prompt.
+		expect(gated.at(-1)).toEqual(["new"]);
+	});
+
+	it("lets the gate stop a request whose configuration a delivery callback changed", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model, systemPrompt: ["old"] } });
+		agent.setBeforeModelCall(context => (context.systemPrompt?.includes("new") ? { stop: true } : undefined));
+		agent.prepareQueuedMessages = () => ({
+			commit: () => [],
+			onDelivered: () => agent.setSystemPrompt(["new"]),
+		});
+		const unsubscribe = agent.subscribe(event => {
+			if (event.type !== "turn_end") return;
+			unsubscribe();
+			agent.steer(createUserMessage("steering"));
+		});
+
+		await agent.prompt("ordinary");
+
+		expect(mock.calls).toHaveLength(1);
+		expect(userTexts(agent.state.messages)).toContain("steering");
+	});
+
 	it.each(["steering", "followUp"] as const)(
 		"does not leave a stale queue notification listing a delivered batch when a later %s arrives during preparation",
 		async queue => {

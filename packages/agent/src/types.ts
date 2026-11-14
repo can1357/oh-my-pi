@@ -433,6 +433,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	syncContextBeforeModelCall?: (context: AgentContext, signal?: AbortSignal) => void | Promise<void>;
 
 	/**
+	 * Copy the agent's current system prompt and tools into the context without running model-call hooks.
+	 * Called after queued delivery callbacks ran, so their configuration changes reach the request; when the
+	 * model, prompt or tools changed the loop prepares the provider call again and re-asks the gate.
+	 */
+	refreshContextAfterDelivery?: (context: AgentContext) => void;
+
+	/**
 	 * Asked after the complete provider context has been built, including
 	 * message conversion, provider transforms, normalized tools, and owned
 	 * dialect prompt injection. Returning {@link AgentPreModelCallStop} ends
