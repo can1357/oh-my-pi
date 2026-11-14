@@ -22,6 +22,8 @@ fn claim(name: &str) -> SchemeClaim {
 		description: None,
 		writable:    false,
 		immutable:   false,
+		fetch:       false,
+		credentials: false,
 	}
 }
 

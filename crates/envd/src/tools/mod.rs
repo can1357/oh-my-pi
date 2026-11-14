@@ -10,8 +10,8 @@ mod roster_host;
 
 pub use bridges::{
 	ActiveContentInputs, CommandCredentialExecutorFactory, ContentResolver, DynamicTool,
-	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, InvocationEditor,
-	RegistryBridges, SearchInference, TelemetryUpload, invocation_acp_documents,
+	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, HostUriJudgment,
+	InvocationEditor, RegistryBridges, SearchInference, TelemetryUpload, invocation_acp_documents,
 	invocation_approvals, with_invocation_approvals,
 };
 pub(super) use bridges::{
