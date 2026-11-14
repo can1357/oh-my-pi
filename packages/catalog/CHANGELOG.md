@@ -19,6 +19,8 @@
 - Fixed Gemini 4 Hydrogen missing from the Gemini CLI model picker: its thinking-tier SKUs now collapse into one entry with low, medium, high and xhigh levels ([#19217](https://github.com/can1357/oh-my-pi/pull/19217) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed OpenRouter `/model` listing every public OpenRouter model for keys whose workspace guardrails allow-list only a few: the keyed `/models` roster now replaces the bundled chat catalog instead of being merged into it, and the model cache is kept per key ([#19013](https://github.com/can1357/oh-my-pi/pull/19013) by [@YibaiMeng](https://github.com/YibaiMeng)).
 - Fixed OpenCode Go Muse Spark tool-call turns dropping encrypted reasoning between steps; OpenCode Zen is unchanged ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn))
+- Fixed Vertex AI Gemini 3+ models failing with `400 Function call is missing a thought_signature` when a replayed or cross-model assistant turn's first tool call lacks a thought signature; that call now carries Google's `skip_thought_signature_validator` value ([#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@duck1eee](https://github.com/duck1eee))
+- Fixed Cursor hiding models that AvailableModels serves but GetUsableModels omits (GLM 5.3, Grok 4.7) ([#18248](https://github.com/can1357/oh-my-pi/pull/18248) by [@joseotaviorf](https://github.com/joseotaviorf))
 
 ## [18.20.0] - 2026-11-12
 
@@ -154,9 +156,6 @@
 
 - Fixed Mistral discovery listing embedding, OCR, moderation, transcription, and speech models as chat models; only rows with `capabilities.completion_chat` are offered, with context, image input, and reasoning read from the row ([#18244](https://github.com/can1357/oh-my-pi/pull/18244) by [@VeigaPunk](https://github.com/VeigaPunk))
 - A failed refresh no longer replaces a cached catalog whose models carry request headers with an empty snapshot; the next launch refetches it instead ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
-### Fixed
-
-- Fixed Cursor hiding models that AvailableModels serves but GetUsableModels omits (GLM 5.3, Grok 4.7) ([#18248](https://github.com/can1357/oh-my-pi/pull/18248) by [@joseotaviorf](https://github.com/joseotaviorf))
 
 ## [18.17.0] - 2026-11-06
 
