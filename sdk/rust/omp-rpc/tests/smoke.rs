@@ -391,5 +391,6 @@ fn prompt(message: &str) -> PromptCommand {
 		message:            message.to_owned(),
 		images:             None,
 		streaming_behavior: None,
+		client_message_id:  None,
 	}
 }

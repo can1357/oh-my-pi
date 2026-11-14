@@ -33,6 +33,10 @@
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
 - A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
 
+### Added
+
+- RPC hosts can correlate submitted intents across native messages, queues, skill expansion and session reloads with optional `clientMessageId` metadata and read-only `get_client_message_status` reconciliation, without sending client IDs to providers ([#18668](https://github.com/can1357/oh-my-pi/pull/18668) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 - With the Spotlight experiment on, a `read` with `:raw` returns the selected bytes instead of an outlined, compacted, collapsed or cut rendering ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))

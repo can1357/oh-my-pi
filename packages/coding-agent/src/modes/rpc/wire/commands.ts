@@ -30,6 +30,10 @@ export interface RpcCommandSpec {
 }
 
 const IMAGES = doc("ImageContent[]", "Images attached to the message.");
+const CLIENT_MESSAGE_ID = doc(
+	"string",
+	"Local intent identity: nonempty, at most 128 characters; reuse in one session is rejected.",
+);
 
 export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
@@ -41,12 +45,25 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
 		name: "prompt",
 		doc: "Submit a prompt; acknowledged once admitted, completed by its `prompt_result`.",
-		params: { message: "string", "images?": IMAGES, "streamingBehavior?": "StreamingBehavior" },
+		params: {
+			message: "string",
+			"images?": IMAGES,
+			"streamingBehavior?": "StreamingBehavior",
+			"clientMessageId?": CLIENT_MESSAGE_ID,
+		},
 		result: "PromptAck",
 		completion: "prompt_result",
 	},
-	{ name: "steer", doc: "Queue a steering message.", params: { message: "string", "images?": IMAGES } },
-	{ name: "follow_up", doc: "Queue a follow-up message.", params: { message: "string", "images?": IMAGES } },
+	{
+		name: "steer",
+		doc: "Queue a steering message.",
+		params: { message: "string", "images?": IMAGES, "clientMessageId?": CLIENT_MESSAGE_ID },
+	},
+	{
+		name: "follow_up",
+		doc: "Queue a follow-up message.",
+		params: { message: "string", "images?": IMAGES, "clientMessageId?": CLIENT_MESSAGE_ID },
+	},
 	{
 		name: "remove_queued_message",
 		doc: "Remove one pending queued message by its queue-chip text.",
@@ -63,7 +80,7 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
 		name: "abort_and_prompt",
 		doc: "Abort the current run and submit a prompt; completed by its `prompt_result`.",
-		params: { message: "string", "images?": IMAGES },
+		params: { message: "string", "images?": IMAGES, "clientMessageId?": CLIENT_MESSAGE_ID },
 		completion: "prompt_result",
 	},
 	{
@@ -85,6 +102,14 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 
 	{ name: "get_state", doc: "Snapshot the session state.", result: "SessionState" },
+	{
+		name: "get_client_message_status",
+		doc: "Read current correlated messages, queues and explicit resolutions without starting or waiting for a turn.",
+		params: {
+			clientMessageIds: doc("string[]", "Between 1 and 32 unique nonempty IDs, each at most 128 characters."),
+		},
+		result: "ClientMessageStatus",
+	},
 	{
 		name: "set_fast_mode",
 		doc: "Enable or disable fast mode for the session.",

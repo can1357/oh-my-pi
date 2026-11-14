@@ -122,19 +122,77 @@ Important edge behavior from runtime:
 - Ordinary `prompt` handling acknowledges after the message is admitted (queued, given an idle turn slot, or routed to an extension command), not before native `input` handlers or image preparation finish, and without waiting for the agent run. `abort_and_prompt` first awaits the abort, then acknowledges. A failure before admission is the command's error response. A failure after admission can still emit a later error response with the same `id`.
 - An accepted `prompt` or `abort_and_prompt` completes exactly once: either its success response carries `data.agentInvoked: false` (finished locally), or a later `prompt_result` frame with the same `id` reports how its work ended. `prompt_result` is always written after the response for that `id`.
 
+### Client intent identity
+
+`get_state.supportsClientMessageIds: true` advertises optional `clientMessageId`
+on `prompt`, `steer`, `follow_up`, and `abort_and_prompt`. IDs are nonempty
+strings of at most 128 characters, distinct from per-request `id`. Reusing an ID
+already submitted, persisted, or explicitly resolved in the session is rejected;
+this is correlation, not automatic retry or idempotent command execution.
+Omitting the field preserves legacy behavior. IDs are checked against the
+session the input targets: input pipelined behind a session change is checked
+once that change completes, and an `abort_and_prompt` checked that way cancels
+earlier input only after its ID is accepted, so a rejected one cancels nothing.
+
+`message_start` and `message_end` project the ID at the top level, separate from
+their native `message`. `queuedMessages` and `queue_update` optionally include
+`clientMessageIds: { steering: (string | null)[], followUp: (string | null)[] }`,
+aligned with the chip arrays; legacy slots are `null`. An identity-only queue
+change emits `queue_update` even when chip texts are unchanged. IDs survive
+template/skill expansion and persist on `message` or `custom_message` journal
+entries, never on model-facing messages.
+
+Use `{ id?, type: "get_client_message_status", clientMessageIds: string[] }`
+with 1–32 unique valid IDs to reconcile selectively, including during streaming.
+It starts no turn and does not wait for the active turn to end. Success data:
+
+```ts
+{
+  messages: { clientMessageId: string; message: AgentMessage }[];
+  queuedMessages: QueuedMessagesState;
+  resolvedClientMessageIds: string[];
+  persistedClientMessageIds: string[];
+  unresolvedClientMessageIds: string[];
+  queueTextsOmitted?: true;
+}
+```
+
+`messages` contains actual current native representations, not reconstructed
+submitted text. The queue snapshot describes the whole current queue.
+`resolvedClientMessageIds` reports only explicit withdrawal or local consumption,
+recorded as non-message custom entries so it survives reopen. The input is
+withdrawn first and the resolution journaled after, so a journal write failure
+never blocks or reverts the withdrawal. Absence alone is
+unresolved. `persistedClientMessageIds` follows ordinary in-flight persistence
+settlement and journal flush, and lists only entries journaled before that
+flush began; write failures fail the query, with no additional
+fsync guarantee. A persisted-only ID is not a display replacement: finish
+transcript catch-up before retiring a pending intent from the UI.
+Correlated message entries and explicit resolutions materialize an otherwise
+lazy journal before the first assistant reply; requests without IDs retain the
+existing lazy-file behavior.
+The response fits the negotiated response limit (1 MiB per frame on v1, 64 MiB
+reassembled on v2). Native representations that would exceed it are omitted,
+never truncated: use their successfully flushed persisted IDs and transcript
+catch-up, or leave them unresolved when no durable entry or queued
+representation exists. If the queue chip texts alone would exceed the limit,
+they are fitted after the native messages: texts that do not fit become `""`
+and `queueTextsOmitted: true` is set, while every slot and its
+`clientMessageIds` entry stays aligned. Texts are never truncated.
+
 ## Command Schema (canonical)
 
 `RpcCommand` is defined in `packages/coding-agent/src/modes/rpc/rpc-types.ts`:
 
 ### Prompting
 
-- `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
-- `{ id?, type: "steer", message: string, images?: ImageContent[] }`
-- `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp", clientMessageId?: string }`
+- `{ id?, type: "steer", message: string, images?: ImageContent[], clientMessageId?: string }`
+- `{ id?, type: "follow_up", message: string, images?: ImageContent[], clientMessageId?: string }`
 - `{ id?, type: "remove_queued_message", message: string, queue: "steering" | "followUp" }`
 - `{ id?, type: "promote_queued_message", message: string }`
 - `{ id?, type: "abort" }`
-- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[], clientMessageId?: string }`
 - `{ id?, type: "abort_and_restore_queue" }`
 - `{ id?, type: "new_session", parentSession?: string }`
 - `{ id?, type: "open_session", sessionDir: string, provider?: string, modelId?: string }`
@@ -146,6 +204,7 @@ Important edge behavior from runtime:
 ### State
 
 - `{ id?, type: "get_state" }`
+- `{ id?, type: "get_client_message_status", clientMessageIds: string[] }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "set_slow_mode", enabled: boolean }`
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`

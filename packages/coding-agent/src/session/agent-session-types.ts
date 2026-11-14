@@ -432,8 +432,38 @@ export interface AgentSessionConfig {
 	autoTitle?: boolean;
 }
 
+/** Displayable queues and their aligned, local-only client intent identities. */
+export interface ClientMessageQueueSnapshot {
+	steering: readonly string[];
+	followUp: readonly string[];
+	liveSteered: number;
+	clientMessageIds?: { steering: (string | null)[]; followUp: (string | null)[] };
+}
+
+/** Selective reconciliation; persisted-only IDs require transcript catch-up before display handoff. */
+export interface ClientMessageStatus {
+	messages: { clientMessageId: string; message: AgentMessage }[];
+	queuedMessages: ClientMessageQueueSnapshot;
+	resolvedClientMessageIds: string[];
+	persistedClientMessageIds: string[];
+	unresolvedClientMessageIds: string[];
+	/** Only ever `true`: the queue texts exceeded the response limit, so some are `""`; slots and IDs stay aligned. */
+	queueTextsOmitted?: true;
+}
+
+/** A local command's hold on one correlated input; returned by `beginLocalClientMessage`, passed back to finish it. */
+export interface LocalClientMessageRegistration {
+	readonly id: string;
+	/** Journal (session manager) that admitted the input. */
+	readonly journalId: string;
+	/** That journal's session file; absent for an in-memory session. */
+	readonly sessionFile: string | undefined;
+}
+
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/** Local intent correlation, never part of the model-facing message. */
+	clientMessageId?: string;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**
@@ -514,6 +544,7 @@ export interface DroppedPrompt {
 
 /** Options for AgentSession.followUp(). */
 export interface FollowUpOptions {
+	clientMessageId?: string;
 	/** Enqueue as a hidden developer message instead of a user follow-up. */
 	synthetic?: boolean;
 	/** Whether to expand file-based prompt templates (default: true). */
@@ -526,6 +557,7 @@ export interface FollowUpOptions {
 
 /** Options for AgentSession.steer(). */
 export interface SteerOptions {
+	clientMessageId?: string;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
 	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */

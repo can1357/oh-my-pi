@@ -575,10 +575,35 @@ class ContextUsage:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class QueuedClientMessageIds:
+    steering: tuple[str | None, ...]
+    follow_up: tuple[str | None, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class CorrelatedClientMessage:
+    client_message_id: str
+    message: AgentMessage
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ClientMessageStatus:
+    messages: tuple[CorrelatedClientMessage, ...]
+    queued_messages: QueuedMessagesState
+    resolved_client_message_ids: tuple[str, ...]
+    persisted_client_message_ids: tuple[str, ...]
+    unresolved_client_message_ids: tuple[str, ...]
+    queue_texts_omitted: bool | None = None
+    """Only ever `true`: the queue texts exceeded the response limit, so some chip texts are `""`; every slot and its ID stay aligned."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class QueuedMessagesState:
     """Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`."""
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    client_message_ids: QueuedClientMessageIds | None = None
+    """IDs align with chip arrays; legacy slots are null."""
     live_steered: int = 0
     """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
 
@@ -643,6 +668,7 @@ class UsageLimitWrapUp:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class SessionState:
     session_id: str
+    supports_client_message_ids: bool = False
     model: ModelInfo | None = None
     thinking_level: ThinkingLevel | None = None
     is_streaming: bool = False
@@ -1026,6 +1052,7 @@ class MessageStartEvent:
     message: AgentMessage
     message_id: str | None = None
     """Shared by the start, updates, and end of one message; unique per process."""
+    client_message_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1043,6 +1070,7 @@ class MessageEndEvent:
     message: AgentMessage
     message_id: str | None = None
     """Shared by the start, updates, and end of one message; unique per process."""
+    client_message_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1258,6 +1286,7 @@ class QueueUpdateEvent:
     type: Literal["queue_update"] = "queue_update"
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    client_message_ids: QueuedClientMessageIds | None = None
     live_steered: int = 0
     """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
 
@@ -1973,11 +2002,40 @@ def parse_context_usage(value: object, path: str = "ContextUsage") -> ContextUsa
     )
 
 
+def parse_queued_client_message_ids(value: object, path: str = "QueuedClientMessageIds") -> QueuedClientMessageIds:
+    payload = expect_object(value, path)
+    return QueuedClientMessageIds(
+        steering=required(payload, "steering", array(nullable(decode_str)), path),
+        follow_up=required(payload, "followUp", array(nullable(decode_str)), path),
+    )
+
+
+def parse_correlated_client_message(value: object, path: str = "CorrelatedClientMessage") -> CorrelatedClientMessage:
+    payload = expect_object(value, path)
+    return CorrelatedClientMessage(
+        client_message_id=required(payload, "clientMessageId", decode_str, path),
+        message=required(payload, "message", parse_agent_message, path),
+    )
+
+
+def parse_client_message_status(value: object, path: str = "ClientMessageStatus") -> ClientMessageStatus:
+    payload = expect_object(value, path)
+    return ClientMessageStatus(
+        messages=required(payload, "messages", array(parse_correlated_client_message), path),
+        queued_messages=required(payload, "queuedMessages", parse_queued_messages_state, path),
+        resolved_client_message_ids=required(payload, "resolvedClientMessageIds", array(decode_str), path),
+        persisted_client_message_ids=required(payload, "persistedClientMessageIds", array(decode_str), path),
+        unresolved_client_message_ids=required(payload, "unresolvedClientMessageIds", array(decode_str), path),
+        queue_texts_omitted=optional(payload, "queueTextsOmitted", decode_bool, path),
+    )
+
+
 def parse_queued_messages_state(value: object, path: str = "QueuedMessagesState") -> QueuedMessagesState:
     payload = expect_object(value, path)
     return QueuedMessagesState(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        client_message_ids=optional(payload, "clientMessageIds", parse_queued_client_message_ids, path),
         live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
     )
 
@@ -2046,6 +2104,7 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
     payload = expect_object(value, path)
     return SessionState(
         session_id=required(payload, "sessionId", decode_str, path),
+        supports_client_message_ids=defaulted(payload, "supportsClientMessageIds", decode_bool, path, False),
         model=optional(payload, "model", parse_model_info, path),
         thinking_level=optional(payload, "thinkingLevel", _decode_thinking_level, path),
         is_streaming=defaulted(payload, "isStreaming", decode_bool, path, False),
@@ -2458,6 +2517,7 @@ def parse_message_start_event(value: object, path: str = "MessageStartEvent") ->
     return MessageStartEvent(
         message=required(payload, "message", parse_agent_message, path),
         message_id=optional(payload, "messageId", decode_str, path),
+        client_message_id=optional(payload, "clientMessageId", decode_str, path),
     )
 
 
@@ -2477,6 +2537,7 @@ def parse_message_end_event(value: object, path: str = "MessageEndEvent") -> Mes
     return MessageEndEvent(
         message=required(payload, "message", parse_agent_message, path),
         message_id=optional(payload, "messageId", decode_str, path),
+        client_message_id=optional(payload, "clientMessageId", decode_str, path),
     )
 
 
@@ -2726,6 +2787,7 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     return QueueUpdateEvent(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        client_message_ids=optional(payload, "clientMessageIds", parse_queued_client_message_ids, path),
         live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
     )
 
@@ -3357,20 +3419,24 @@ class WireClient:
     def _listen(self, frame_type: str, listener: Callable[..., None]) -> Callable[[], None]:
         raise NotImplementedError
 
-    def steer(self, message: str, *, images: Sequence[ImageContent] | None = None) -> None:
+    def steer(self, message: str, *, images: Sequence[ImageContent] | None = None, client_message_id: str | None = None) -> None:
         """Queue a steering message."""
         params: dict[str, object] = {}
         params["message"] = message
         if images is not None:
             params["images"] = list(images)
+        if client_message_id is not None:
+            params["clientMessageId"] = client_message_id
         self._command("steer", params)
 
-    def follow_up(self, message: str, *, images: Sequence[ImageContent] | None = None) -> None:
+    def follow_up(self, message: str, *, images: Sequence[ImageContent] | None = None, client_message_id: str | None = None) -> None:
         """Queue a follow-up message."""
         params: dict[str, object] = {}
         params["message"] = message
         if images is not None:
             params["images"] = list(images)
+        if client_message_id is not None:
+            params["clientMessageId"] = client_message_id
         self._command("follow_up", params)
 
     def remove_queued_message(self, message: str, queue: QueuedMessageQueue) -> RemoveQueuedMessageResult:
@@ -3417,6 +3483,12 @@ class WireClient:
         """Snapshot the session state."""
         params: dict[str, object] = {}
         return parse_session_state(self._command("get_state", params), "get_state")
+
+    def get_client_message_status(self, client_message_ids: Sequence[str]) -> ClientMessageStatus:
+        """Read current correlated messages, queues and explicit resolutions without starting or waiting for a turn."""
+        params: dict[str, object] = {}
+        params["clientMessageIds"] = list(client_message_ids)
+        return parse_client_message_status(self._command("get_client_message_status", params), "get_client_message_status")
 
     def set_fast_mode(self, enabled: bool) -> FastModeResult:
         """Enable or disable fast mode for the session."""
@@ -4075,6 +4147,7 @@ __all__ = [
     "CacheWarmingStartEvent",
     "CancelUiRequest",
     "CancellationResult",
+    "ClientMessageStatus",
     "CommandOutputEvent",
     "CompactionResult",
     "CompactionSummaryMessage",
@@ -4083,6 +4156,7 @@ __all__ = [
     "ConfiguredThinkingLevel",
     "ConfirmUiRequest",
     "ContextUsage",
+    "CorrelatedClientMessage",
     "CustomMessage",
     "DeveloperMessage",
     "DictationEndEvent",
@@ -4151,6 +4225,7 @@ __all__ = [
     "PythonExecutionMessage",
     "QueueMode",
     "QueueUpdateEvent",
+    "QueuedClientMessageIds",
     "QueuedMessageQueue",
     "QueuedMessagesState",
     "ReadyEvent",
@@ -4269,6 +4344,7 @@ __all__ = [
     "parse_cache_warming_start_event",
     "parse_cancel_ui_request",
     "parse_cancellation_result",
+    "parse_client_message_status",
     "parse_command_output_event",
     "parse_compaction_result",
     "parse_compaction_summary_message",
@@ -4276,6 +4352,7 @@ __all__ = [
     "parse_config_warnings_changed_event",
     "parse_confirm_ui_request",
     "parse_context_usage",
+    "parse_correlated_client_message",
     "parse_custom_message",
     "parse_developer_message",
     "parse_dictation_end_event",
@@ -4333,6 +4410,7 @@ __all__ = [
     "parse_prompt_result_event",
     "parse_python_execution_message",
     "parse_queue_update_event",
+    "parse_queued_client_message_ids",
     "parse_queued_messages_state",
     "parse_ready_event",
     "parse_redacted_thinking_content",

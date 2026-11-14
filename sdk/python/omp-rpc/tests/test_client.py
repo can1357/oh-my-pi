@@ -24,6 +24,7 @@ from omp_rpc import (
     GoalResult,
     HandoffResult,
     LivePhaseEvent,
+    MessageEndEvent,
     OpenSessionResult,
     PromptResultEvent,
     QueueUpdateEvent,
@@ -689,6 +690,10 @@ FAKE_SERVER = textwrap.dedent(
             if message == "notifications":
                 print(json.dumps({"type": "extension_error", "extensionPath": "/tmp/ext.py", "event": "run", "error": "boom"}), flush=True)
                 print(json.dumps({"type": "unknown_future_event", "value": 1}), flush=True)
+            if "clientMessageId" in command:
+                # The server echoes a correlated prompt's ID on the user message it produced.
+                user = {"role": "user", "content": [{"type": "text", "text": message}], "timestamp": 1}
+                print(json.dumps({"type": "message_end", "message": user, "clientMessageId": command["clientMessageId"]}), flush=True)
             emit_prompt_turn(
                 "pong",
                 delay=0.3 if message == "slow" else 0.0,
@@ -1438,6 +1443,35 @@ class RpcClientTests(unittest.TestCase):
             turn = client.prompt_and_wait("say hello", timeout=2.0)
             self.assertEqual(turn.require_assistant_text(), "pong")
             self.assertGreaterEqual(len(turn.events), 3)
+
+    def test_prompt_apis_send_client_message_id_only_when_given(self) -> None:
+        echoed: list[str | None] = []
+        with self.make_client() as client:
+            client.on_message_end(
+                lambda event: (
+                    echoed.append(event.client_message_id)
+                    if event.message["role"] == "user"
+                    else None
+                )
+            )
+            turn = client.prompt_and_wait(
+                "say hello", client_message_id="intent-wait", timeout=2.0
+            )
+            client.prompt("say hello", client_message_id="intent-prompt")
+            client.wait_for_idle(timeout=2.0)
+            client.abort_and_prompt("say hello", client_message_id="intent-abort")
+            client.wait_for_idle(timeout=2.0)
+            client.prompt_and_wait("say hello", timeout=2.0)
+
+        self.assertIn(
+            "intent-wait",
+            [
+                event.client_message_id
+                for event in turn.events
+                if isinstance(event, MessageEndEvent)
+            ],
+        )
+        self.assertEqual(echoed, ["intent-wait", "intent-prompt", "intent-abort"])
 
     def test_prompt_and_wait_ignores_stale_run_until_own_prompt_result(self) -> None:
         results: list[PromptResultEvent] = []

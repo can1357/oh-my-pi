@@ -2235,10 +2235,84 @@ func (v *ContextUsage) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type QueuedClientMessageIds struct {
+	Steering []*string `json:"steering"`
+	FollowUp []*string `json:"followUp"`
+}
+
+func (v *QueuedClientMessageIds) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "QueuedClientMessageIds", v.decodeFrom)
+}
+
+func (v *QueuedClientMessageIds) decodeFrom(raw map[string]json.RawMessage) error {
+	var out QueuedClientMessageIds
+	d := fieldDecoder{raw: raw, owner: "QueuedClientMessageIds"}
+	d.required("steering", &out.Steering)
+	d.required("followUp", &out.FollowUp)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type CorrelatedClientMessage struct {
+	ClientMessageID string       `json:"clientMessageId"`
+	Message         AgentMessage `json:"message"`
+}
+
+func (v *CorrelatedClientMessage) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "CorrelatedClientMessage", v.decodeFrom)
+}
+
+func (v *CorrelatedClientMessage) decodeFrom(raw map[string]json.RawMessage) error {
+	var out CorrelatedClientMessage
+	d := fieldDecoder{raw: raw, owner: "CorrelatedClientMessage"}
+	d.required("clientMessageId", &out.ClientMessageID)
+	d.required("message", &out.Message)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type ClientMessageStatus struct {
+	Messages                   []CorrelatedClientMessage `json:"messages"`
+	QueuedMessages             QueuedMessagesState       `json:"queuedMessages"`
+	ResolvedClientMessageIds   []string                  `json:"resolvedClientMessageIds"`
+	PersistedClientMessageIds  []string                  `json:"persistedClientMessageIds"`
+	UnresolvedClientMessageIds []string                  `json:"unresolvedClientMessageIds"`
+	// Only ever `true`: the queue texts exceeded the response limit, so some chip texts are `""`; every slot and its ID stay aligned.
+	QueueTextsOmitted *bool `json:"queueTextsOmitted,omitempty"`
+}
+
+func (v *ClientMessageStatus) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ClientMessageStatus", v.decodeFrom)
+}
+
+func (v *ClientMessageStatus) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ClientMessageStatus
+	d := fieldDecoder{raw: raw, owner: "ClientMessageStatus"}
+	d.required("messages", &out.Messages)
+	d.required("queuedMessages", &out.QueuedMessages)
+	d.required("resolvedClientMessageIds", &out.ResolvedClientMessageIds)
+	d.required("persistedClientMessageIds", &out.PersistedClientMessageIds)
+	d.required("unresolvedClientMessageIds", &out.UnresolvedClientMessageIds)
+	d.optional("queueTextsOmitted", &out.QueueTextsOmitted)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 // Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.
 type QueuedMessagesState struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
+	// IDs align with chip arrays; legacy slots are null.
+	ClientMessageIds *QueuedClientMessageIds `json:"clientMessageIds,omitempty"`
 	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
 }
@@ -2252,6 +2326,7 @@ func (v *QueuedMessagesState) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "QueuedMessagesState"}
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
+	d.optional("clientMessageIds", &out.ClientMessageIds)
 	d.defaulted("liveSteered", &out.LiveSteered, `0`)
 	if d.err != nil {
 		return d.err
@@ -2531,19 +2606,20 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type SessionState struct {
-	SessionID             string         `json:"sessionId"`
-	Model                 *ModelInfo     `json:"model,omitempty"`
-	ThinkingLevel         *ThinkingLevel `json:"thinkingLevel,omitempty"`
-	IsStreaming           bool           `json:"isStreaming"`
-	IsCompacting          bool           `json:"isCompacting"`
-	SteeringMode          QueueMode      `json:"steeringMode"`
-	FollowUpMode          QueueMode      `json:"followUpMode"`
-	InterruptMode         InterruptMode  `json:"interruptMode"`
-	SessionFile           *string        `json:"sessionFile,omitempty"`
-	SessionName           *string        `json:"sessionName,omitempty"`
-	AutoCompactionEnabled bool           `json:"autoCompactionEnabled"`
-	FastModeEnabled       bool           `json:"fastModeEnabled"`
-	FastModeActive        bool           `json:"fastModeActive"`
+	SessionID                string         `json:"sessionId"`
+	SupportsClientMessageIds bool           `json:"supportsClientMessageIds"`
+	Model                    *ModelInfo     `json:"model,omitempty"`
+	ThinkingLevel            *ThinkingLevel `json:"thinkingLevel,omitempty"`
+	IsStreaming              bool           `json:"isStreaming"`
+	IsCompacting             bool           `json:"isCompacting"`
+	SteeringMode             QueueMode      `json:"steeringMode"`
+	FollowUpMode             QueueMode      `json:"followUpMode"`
+	InterruptMode            InterruptMode  `json:"interruptMode"`
+	SessionFile              *string        `json:"sessionFile,omitempty"`
+	SessionName              *string        `json:"sessionName,omitempty"`
+	AutoCompactionEnabled    bool           `json:"autoCompactionEnabled"`
+	FastModeEnabled          bool           `json:"fastModeEnabled"`
+	FastModeActive           bool           `json:"fastModeActive"`
 	// `/slow` applies to the active model.
 	SlowModeSupported bool `json:"slowModeSupported"`
 	// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
@@ -2577,6 +2653,7 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	var out SessionState
 	d := fieldDecoder{raw: raw, owner: "SessionState"}
 	d.required("sessionId", &out.SessionID)
+	d.defaulted("supportsClientMessageIds", &out.SupportsClientMessageIds, `false`)
 	d.optional("model", &out.Model)
 	d.optional("thinkingLevel", &out.ThinkingLevel)
 	d.defaulted("isStreaming", &out.IsStreaming, `false`)
@@ -3750,7 +3827,8 @@ func (v TurnEndEvent) MarshalJSON() ([]byte, error) {
 type MessageStartEvent struct {
 	Message AgentMessage `json:"message"`
 	// Shared by the start, updates, and end of one message; unique per process.
-	MessageID *string `json:"messageId,omitempty"`
+	MessageID       *string `json:"messageId,omitempty"`
+	ClientMessageID *string `json:"clientMessageId,omitempty"`
 }
 
 func (v *MessageStartEvent) UnmarshalJSON(data []byte) error {
@@ -3763,6 +3841,7 @@ func (v *MessageStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "message_start")
 	d.required("message", &out.Message)
 	d.optional("messageId", &out.MessageID)
+	d.optional("clientMessageId", &out.ClientMessageID)
 	if d.err != nil {
 		return d.err
 	}
@@ -3808,7 +3887,8 @@ func (v MessageUpdateEvent) MarshalJSON() ([]byte, error) {
 type MessageEndEvent struct {
 	Message AgentMessage `json:"message"`
 	// Shared by the start, updates, and end of one message; unique per process.
-	MessageID *string `json:"messageId,omitempty"`
+	MessageID       *string `json:"messageId,omitempty"`
+	ClientMessageID *string `json:"clientMessageId,omitempty"`
 }
 
 func (v *MessageEndEvent) UnmarshalJSON(data []byte) error {
@@ -3821,6 +3901,7 @@ func (v *MessageEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "message_end")
 	d.required("message", &out.Message)
 	d.optional("messageId", &out.MessageID)
+	d.optional("clientMessageId", &out.ClientMessageID)
 	if d.err != nil {
 		return d.err
 	}
@@ -4552,8 +4633,9 @@ func (v GoalUpdatedEvent) MarshalJSON() ([]byte, error) {
 
 // Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.
 type QueueUpdateEvent struct {
-	Steering []string `json:"steering"`
-	FollowUp []string `json:"followUp"`
+	Steering         []string                `json:"steering"`
+	FollowUp         []string                `json:"followUp"`
+	ClientMessageIds *QueuedClientMessageIds `json:"clientMessageIds,omitempty"`
 	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
 }
@@ -4568,6 +4650,7 @@ func (v *QueueUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "queue_update")
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
+	d.optional("clientMessageIds", &out.ClientMessageIds)
 	d.defaulted("liveSteered", &out.LiveSteered, `0`)
 	if d.err != nil {
 		return d.err
@@ -7799,6 +7882,8 @@ type PromptCommand struct {
 	// Images attached to the message.
 	Images            []ImageContent     `json:"images,omitempty"`
 	StreamingBehavior *StreamingBehavior `json:"streamingBehavior,omitempty"`
+	// Local intent identity: nonempty, at most 128 characters; reuse in one session is rejected.
+	ClientMessageID *string `json:"clientMessageId,omitempty"`
 }
 
 // Prompt sends "prompt": Submit a prompt; acknowledged once admitted, completed by its `prompt_result`.
@@ -7814,6 +7899,8 @@ type SteerCommand struct {
 	Message string `json:"message"`
 	// Images attached to the message.
 	Images []ImageContent `json:"images,omitempty"`
+	// Local intent identity: nonempty, at most 128 characters; reuse in one session is rejected.
+	ClientMessageID *string `json:"clientMessageId,omitempty"`
 }
 
 // Steer sends "steer": Queue a steering message.
@@ -7826,6 +7913,8 @@ type FollowUpCommand struct {
 	Message string `json:"message"`
 	// Images attached to the message.
 	Images []ImageContent `json:"images,omitempty"`
+	// Local intent identity: nonempty, at most 128 characters; reuse in one session is rejected.
+	ClientMessageID *string `json:"clientMessageId,omitempty"`
 }
 
 // FollowUp sends "follow_up": Queue a follow-up message.
@@ -7868,6 +7957,8 @@ type AbortAndPromptCommand struct {
 	Message string `json:"message"`
 	// Images attached to the message.
 	Images []ImageContent `json:"images,omitempty"`
+	// Local intent identity: nonempty, at most 128 characters; reuse in one session is rejected.
+	ClientMessageID *string `json:"clientMessageId,omitempty"`
 }
 
 // AbortAndPrompt sends "abort_and_prompt": Abort the current run and submit a prompt; completed by its `prompt_result`.
@@ -7913,6 +8004,19 @@ func (c Commands) OpenSession(ctx context.Context, p OpenSessionCommand) (OpenSe
 func (c Commands) GetState(ctx context.Context) (SessionState, error) {
 	var out SessionState
 	err := c.call(ctx, "get_state", nil, 0, &out)
+	return out, err
+}
+
+// GetClientMessageStatusCommand holds the parameters of "get_client_message_status".
+type GetClientMessageStatusCommand struct {
+	// Between 1 and 32 unique nonempty IDs, each at most 128 characters.
+	ClientMessageIds []string `json:"clientMessageIds"`
+}
+
+// GetClientMessageStatus sends "get_client_message_status": Read current correlated messages, queues and explicit resolutions without starting or waiting for a turn.
+func (c Commands) GetClientMessageStatus(ctx context.Context, p GetClientMessageStatusCommand) (ClientMessageStatus, error) {
+	var out ClientMessageStatus
+	err := c.call(ctx, "get_client_message_status", p, 0, &out)
 	return out, err
 }
 

@@ -23,7 +23,12 @@ process.args(["--mode", "rpc", "--no-session"]);
 let (client, events) = Client::spawn(process, ClientOptions::default())?; // waits for `ready`, negotiates v2
 let state = client.call(&GetStateCommand {})?;
 let turn = client.prompt_and_wait(
-    &PromptCommand { message: "say hi".into(), images: None, streaming_behavior: None },
+    &PromptCommand {
+        message: "say hi".into(),
+        images: None,
+        streaming_behavior: None,
+        client_message_id: None,
+    },
     DEFAULT_PROMPT_TIMEOUT,
 )?;
 println!("{:?} {:?}", turn.assistant_text, turn.result.map(|result| result.status));

@@ -17,6 +17,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 //   "consume:"   -> handled, never reaches the agent
 //   "transform:" -> replaced with untrimmed text
 //   "slow:"      -> unchanged, after many I/O round trips so a later submission would overtake it if unordered
+//   "hop"        -> rewritten to `/hop`, a custom command that switches to a new session
 // Session switches take the same detour, so a frame sent right after `new_session` is read before it commits.
 async function ioDetour(): Promise<void> {
 	for (let index = 0; index < 50; index++) await Bun.file(import.meta.path).text();
@@ -33,6 +34,7 @@ const extension = await loadExtensionFromFactory(
 			if (event.text.startsWith("consume:")) return { handled: true };
 			if (event.text.startsWith("transform:")) return { text: "  transformed by hook\n" };
 			if (event.text.startsWith("slow:")) await ioDetour();
+			if (event.text === "hop") return { text: "/hop" };
 			return undefined;
 		});
 		pi.on("session_before_switch", async () => {
@@ -58,5 +60,19 @@ const session = new AgentSession({
 	settings: Settings.isolated({ "compaction.enabled": false }),
 	modelRegistry,
 	extensionRunner,
+	customCommands: [
+		{
+			path: "hop",
+			resolvedPath: "hop",
+			source: "user",
+			command: {
+				name: "hop",
+				description: "Switches to a new session",
+				execute: async (_args, ctx) => {
+					await ctx.newSession();
+				},
+			},
+		},
+	],
 });
 await runRpcMode(session);
