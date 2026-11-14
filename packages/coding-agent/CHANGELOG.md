@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added fixed bash guard rules that require approval, like critical patterns, for reading credentials (`~/.ssh` keys, `~/.aws`, `~/.netrc`, omp's auth store, …), sending a credential file, `.env`, or the environment over the network, discarding uncommitted git work (`git reset --hard`, `git checkout .`, `git clean -f`) when `git status` shows changes, and `pkill`/`killall` patterns that match omp itself. The `read` and `grep` tools apply the credential rule to their paths, and every rule and critical pattern now also applies inside `bash -c`, `eval`, heredoc, and `$( )` scripts.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

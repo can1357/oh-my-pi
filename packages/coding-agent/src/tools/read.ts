@@ -13,7 +13,7 @@ import type {
 	ToolSpeculationCommitContext,
 	ToolSpeculationDiscardContext,
 	ToolSpeculationExecutionContext,
-	ToolTier,
+	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import {
@@ -86,6 +86,7 @@ import {
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
 import { approvalDirectoryKey } from "./approval-cache";
+import { fileToolApproval } from "./guard-rules";
 import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
 import {
 	postProcessToolResult,
@@ -1207,14 +1208,15 @@ function isSingleWebUrl(readPath: string): boolean {
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
 	readonly readsSkillUris = true;
-	readonly approval = (args: unknown): ToolTier => {
+	readonly approval = (args: unknown): ToolApprovalDecision => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
 		const urlTier = InternalUrlRouter.instance().readTier(readPath);
 		if (urlTier !== "read") return urlTier;
 		readPath = splitImageQuestionTarget(readPath).path;
 		const target = splitPathAndSel(readPath);
-		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+		const tier = target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+		return fileToolApproval(tier, [readPath], this.session.cwd);
 	};
 	/**
 	 * `always-ask-cached` key: the file this read targets, with every selector

@@ -3,7 +3,13 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-agent-core";
 import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -31,6 +37,7 @@ import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { fileToolApproval } from "./guard-rules";
 import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 import { isFindEnabled } from "./jfind";
@@ -550,7 +557,11 @@ export interface GrepToolOptions {
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
-	readonly approval = searchPathTier;
+	readonly approval = (args: unknown): ToolApprovalDecision => {
+		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
+		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => approvalRootCandidates(root));
+		return fileToolApproval(searchPathTier(args), roots, this.session.cwd);
+	};
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a
 	 * folder grant recorded by a `read` covers a search of it and a search of one

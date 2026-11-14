@@ -1,3 +1,5 @@
+import * as path from "node:path";
+
 /**
  * Conservative shell command tokenizer shared by the bash approval-pattern
  * matcher, the gh-cache invalidator, and the session anonymizer.
@@ -9,7 +11,8 @@
  *
  * It is deliberately not a full POSIX parser — heredocs, command substitution,
  * and arithmetic expansion are out of scope; callers fall through when they
- * cannot find the structure they need.
+ * cannot find the structure they need. Safety rules that must see through
+ * that syntax use {@link parseShellScript} instead.
  */
 export function tokenizeShellSegments(command: string): string[][] {
 	const segments: string[][] = [];
@@ -947,4 +950,485 @@ export function readShellWord(text: string): { value: string; rest: string } | "
 	}
 	if (inSingle || inDouble) return "unterminated";
 	return { value, rest: text.slice(i).trim() };
+}
+
+/** Nested `bash -c`, `eval`, heredoc-script and substitution levels {@link parseShellScript} follows. */
+export const SHELL_SCRIPT_MAX_DEPTH = 8;
+
+/** One simple command found by {@link parseShellScript}, with its wrappers peeled off. */
+export interface ShellCommand {
+	/** Arguments after quote removal and wrapper unwrapping; `argv[0]` is the program's basename. */
+	argv: string[];
+	/** The program word as written (`./run.sh`, `/usr/bin/rm`). */
+	program: string;
+	/** Wrappers that ran the command, outermost first (`sudo`, `env`, `timeout`, `xargs`, ...). */
+	wrappers: string[];
+	/** Targets of `<` input redirections. */
+	reads: string[];
+	/** Targets of output redirections (`>`, `>>`, `&>`, ...). */
+	writes: string[];
+	/** Commands inside the `$( )`, backtick, and `<( )` substitutions used in this command's words. */
+	subs: ShellCommand[];
+	/** Directory the command runs in, after the `cd`s that precede it in the script. */
+	cwd: string;
+}
+
+/** A shell script broken into pipelines, nested scripts included. */
+export interface ParsedShellScript {
+	/** Every pipeline, in order: the top level first, then nested scripts and substitutions. */
+	pipelines: ShellCommand[][];
+	/** Source text of every nested script (`bash -c` and `eval` strings, shell heredocs, substitution bodies). */
+	scripts: string[];
+}
+
+/** Where a parsed script runs: its starting directory and the home `~` and `$HOME` expand to. */
+export interface ShellScriptScope {
+	cwd: string;
+	home: string;
+}
+
+/**
+ * The absolute path a shell word names, resolved lexically against `cwd`. `~`, `$HOME`, and `$PWD`
+ * expand; any other expansion makes the path unknown (`undefined`).
+ */
+export function resolveShellWordPath(word: string, cwd: string, home: string): string | undefined {
+	let expanded = word.replace(/\$(?:\{HOME\}|HOME\b)/g, () => home);
+	expanded = expanded.replace(/\$(?:\{PWD\}|PWD\b)/g, () => cwd);
+	if (expanded === "~" || expanded.startsWith("~/")) expanded = home + expanded.slice(1);
+	if (!expanded || expanded.includes("$") || expanded.includes("\0") || expanded.startsWith("~")) return undefined;
+	return path.resolve(cwd, expanded);
+}
+
+// Longest first, so `&&` is never read as two `&`.
+const SHELL_OPERATORS = [
+	"&&",
+	"||",
+	"|&",
+	";;",
+	"&>>",
+	"&>",
+	">>",
+	">|",
+	">&",
+	"<<<",
+	"<<-",
+	"<<",
+	"<&",
+	"<>",
+	"|",
+	";",
+	"&",
+	"\n",
+	"(",
+	")",
+	">",
+	"<",
+];
+const SHELL_PIPES: Record<string, true> = { "|": true, "|&": true };
+const SHELL_REDIRECTS: Record<string, true> = {
+	"&>>": true,
+	"&>": true,
+	">>": true,
+	">|": true,
+	">&": true,
+	"<<<": true,
+	"<<-": true,
+	"<<": true,
+	"<&": true,
+	"<>": true,
+	">": true,
+	"<": true,
+};
+const SHELL_WRITE_REDIRECTS: Record<string, true> = {
+	"&>>": true,
+	"&>": true,
+	">>": true,
+	">|": true,
+	"<>": true,
+	">": true,
+};
+const SHELL_KEYWORDS: readonly string[] = [
+	"if",
+	"then",
+	"else",
+	"elif",
+	"fi",
+	"do",
+	"done",
+	"while",
+	"until",
+	"!",
+	"{",
+	"}",
+	"esac",
+];
+/** Commands that run the rest of their arguments as a command, with the options that take a value. */
+const SHELL_WRAPPERS: Record<string, readonly string[]> = {
+	sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"],
+	doas: ["-u", "-C"],
+	env: ["-u", "-C", "-S", "--unset", "--chdir"],
+	nohup: [],
+	exec: ["-a"],
+	command: [],
+	builtin: [],
+	nice: ["-n"],
+	ionice: ["-c", "-n", "-p"],
+	time: [],
+	timeout: ["-s", "-k", "--signal", "--kill-after"],
+	stdbuf: ["-i", "-o", "-e"],
+	xargs: ["-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter"],
+	caffeinate: ["-t", "-w"],
+	unbuffer: [],
+};
+const SCRIPT_SHELLS: Record<string, true> = {
+	sh: true,
+	bash: true,
+	zsh: true,
+	dash: true,
+	ksh: true,
+	ash: true,
+	fish: true,
+};
+const HEREDOC_RE = /(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][\w.-]*)\2/g;
+const SHELL_BEFORE_HEREDOC_RE = /(?:^|[;&|(]\s*)(?:sudo\s+)?(?:ba|z|da|k)?sh(?:\s+-\S+)*\s*$/;
+
+type ShellScriptToken = { text: string; operator: boolean };
+
+interface ShellScriptSegment {
+	words: string[];
+	writes: string[];
+	reads: string[];
+	operator: string;
+}
+
+/** The script without heredoc bodies, and each body with the line text before its `<<`. */
+function splitHeredocs(text: string): { text: string; bodies: { before: string; body: string }[] } {
+	const lines = text.split("\n");
+	const kept: string[] = [];
+	const bodies: { before: string; body: string }[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		const line = lines[i];
+		kept.push(line);
+		i++;
+		for (const match of line.matchAll(HEREDOC_RE)) {
+			const body: string[] = [];
+			const stripTabs = match[1] === "-";
+			while (i < lines.length && (stripTabs ? lines[i].replace(/^\t+/, "") : lines[i]) !== match[3]) {
+				body.push(lines[i]);
+				i++;
+			}
+			i++;
+			bodies.push({ before: line.slice(0, match.index), body: body.join("\n") });
+		}
+	}
+	return { text: kept.join("\n"), bodies };
+}
+
+/** Index of the `)` closing the group opened just before `start`. */
+function closingParen(text: string, start: number): number {
+	let depth = 1;
+	let i = start;
+	while (i < text.length) {
+		const ch = text[i];
+		if (ch === "\\") {
+			i += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			const end = text.indexOf(ch, i + 1);
+			i = end < 0 ? text.length : end + 1;
+			continue;
+		}
+		if (ch === "(") depth++;
+		else if (ch === ")" && --depth === 0) return i;
+		i++;
+	}
+	return text.length;
+}
+
+/** The command a wrapper chain runs (`sudo env X=1 timeout 5 rm ...` runs `rm ...`). */
+function unwrapShellCommand(words: string[], wrappers: string[]): string[] {
+	let i = 0;
+	while (i < words.length) {
+		const word = words[i];
+		if (SHELL_ASSIGNMENT.test(word) || SHELL_KEYWORDS.includes(word)) {
+			i++;
+			continue;
+		}
+		const name = path.posix.basename(word);
+		const valued = Object.hasOwn(SHELL_WRAPPERS, name) ? SHELL_WRAPPERS[name] : undefined;
+		if (!valued || (name === "command" && (words[i + 1] === "-v" || words[i + 1] === "-V"))) break;
+		wrappers.push(name);
+		i++;
+		let positional = name === "timeout" ? 1 : 0; // timeout's duration
+		while (i < words.length) {
+			const arg = words[i];
+			if (arg === "--") {
+				i++;
+				break;
+			}
+			if (name === "env" && SHELL_ASSIGNMENT.test(arg)) {
+				i++;
+			} else if (arg.startsWith("-") && arg.length > 1) {
+				i += valued.includes(arg) ? 2 : 1;
+			} else if (positional > 0) {
+				positional--;
+				i++;
+			} else {
+				break;
+			}
+		}
+	}
+	return words.slice(i);
+}
+
+/** The script a `bash -c '...'` or `eval ...` runs. */
+function inlineShellScript(argv: readonly string[]): string | undefined {
+	const name = argv[0];
+	if (name === "eval") return argv.slice(1).join(" ");
+	if (!Object.hasOwn(SCRIPT_SHELLS, name)) return undefined;
+	for (let i = 1; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "-o" || arg === "+o") {
+			i++;
+			continue;
+		}
+		if (!(arg.startsWith("-") || arg.startsWith("+")) || arg.startsWith("--")) return undefined;
+		if (arg.slice(1).includes("c")) return argv[i + 1];
+	}
+	return undefined;
+}
+
+/** A command's operands: the arguments after `argv[0]` that are not options (everything after `--` counts). */
+export function shellPositionalArgs(argv: readonly string[]): string[] {
+	const out: string[] = [];
+	let options = true;
+	for (const arg of argv.slice(1)) {
+		if (options && arg === "--") options = false;
+		else if (!(options && arg.startsWith("-") && arg !== "-")) out.push(arg);
+	}
+	return out;
+}
+
+class ShellScriptParser {
+	#count = 0;
+	readonly scripts: string[] = [];
+	constructor(readonly home: string) {}
+
+	parse(source: string, startCwd: string, depth: number): ShellCommand[][] {
+		if (depth > SHELL_SCRIPT_MAX_DEPTH) return [];
+		if (depth > 0) this.scripts.push(source);
+		let cwd = startCwd;
+		const { text, bodies } = splitHeredocs(source);
+		const subs = new Map<string, ShellCommand[][]>();
+		const segments = this.#segments(this.#tokens(text, cwd, depth, subs));
+		const pipelines: ShellCommand[][] = [];
+		const nested: ShellCommand[][] = [];
+		let pipeline: ShellCommand[] = [];
+		for (const segment of segments) {
+			const command = this.#command(segment, cwd, subs, depth, nested);
+			if (command) pipeline.push(command);
+			if (Object.hasOwn(SHELL_PIPES, segment.operator) || pipeline.length === 0) continue;
+			pipelines.push(pipeline);
+			const only = pipeline.length === 1 ? pipeline[0] : undefined;
+			if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
+				const target = shellPositionalArgs(only.argv)[0];
+				cwd = target === undefined ? this.home : (resolveShellWordPath(target, cwd, this.home) ?? cwd);
+			}
+			pipeline = [];
+		}
+		for (const { before, body } of bodies) {
+			if (SHELL_BEFORE_HEREDOC_RE.test(before)) nested.push(...this.parse(body, cwd, depth + 1));
+		}
+		return [...pipelines, ...nested, ...[...subs.values()].flat()];
+	}
+
+	/** Words and operators; a quoted word is never an operator. */
+	#tokens(text: string, cwd: string, depth: number, subs: Map<string, ShellCommand[][]>): ShellScriptToken[] {
+		const out: ShellScriptToken[] = [];
+		let word = "";
+		let started = false;
+		const flush = () => {
+			if (started) out.push({ text: word, operator: false });
+			word = "";
+			started = false;
+		};
+		let i = 0;
+		while (i < text.length) {
+			const ch = text[i];
+			if (ch === " " || ch === "\t" || ch === "\r") {
+				flush();
+				i++;
+			} else if (ch === "\\") {
+				if (text[i + 1] === "\n") {
+					i += 2;
+					continue;
+				}
+				word += text.slice(i + 1, i + 2);
+				started = true;
+				i += 2;
+			} else if (ch === "'") {
+				let end = text.indexOf("'", i + 1);
+				if (end < 0) end = text.length;
+				word += text.slice(i + 1, end);
+				started = true;
+				i = end + 1;
+			} else if (ch === '"') {
+				i = this.#double(text, i + 1, cwd, depth, subs, part => {
+					word += part;
+				});
+				started = true;
+			} else if (ch === "`" || ((ch === "$" || ch === "<" || ch === ">") && text[i + 1] === "(")) {
+				const sub = this.#substitution(text, i, cwd, depth, subs);
+				word += sub.key;
+				i = sub.after;
+				started = true;
+			} else if (ch === "#" && !started) {
+				const end = text.indexOf("\n", i);
+				i = end < 0 ? text.length : end;
+			} else {
+				const operator = SHELL_OPERATORS.find(op => text.startsWith(op, i));
+				if (operator === undefined) {
+					word += ch;
+					started = true;
+					i++;
+					continue;
+				}
+				// The file descriptor of `2>`.
+				if ((operator[0] === "<" || operator[0] === ">") && started && /^\d+$/.test(word)) {
+					word = "";
+					started = false;
+				}
+				flush();
+				out.push({ text: operator, operator: true });
+				i += operator.length;
+			}
+		}
+		flush();
+		return out;
+	}
+
+	#double(
+		text: string,
+		start: number,
+		cwd: string,
+		depth: number,
+		subs: Map<string, ShellCommand[][]>,
+		append: (part: string) => void,
+	): number {
+		let i = start;
+		while (i < text.length && text[i] !== '"') {
+			const ch = text[i];
+			if (ch === "\\" && i + 1 < text.length) {
+				const next = text[i + 1];
+				if (next === "$" || next === "`" || next === '"' || next === "\\") append(next);
+				else if (next !== "\n") append(ch + next);
+				i += 2;
+			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
+				const sub = this.#substitution(text, i, cwd, depth, subs);
+				append(sub.key);
+				i = sub.after;
+			} else {
+				append(ch);
+				i++;
+			}
+		}
+		return i + 1;
+	}
+
+	#substitution(
+		text: string,
+		start: number,
+		cwd: string,
+		depth: number,
+		subs: Map<string, ShellCommand[][]>,
+	): { key: string; after: number } {
+		let inner: string;
+		let after: number;
+		if (text[start] === "`") {
+			let end = start + 1;
+			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
+			inner = text.slice(start + 1, end);
+			after = end + 1;
+		} else {
+			const end = closingParen(text, start + 2);
+			inner = text.slice(start + 2, end);
+			after = end + 1;
+		}
+		const key = `\0${this.#count++}\0`;
+		subs.set(key, this.parse(inner, cwd, depth + 1));
+		return { key, after };
+	}
+
+	/** Each command's words, write and read redirections, and the operator after it. */
+	#segments(tokens: readonly ShellScriptToken[]): ShellScriptSegment[] {
+		const segments: ShellScriptSegment[] = [];
+		let current: ShellScriptSegment = { words: [], writes: [], reads: [], operator: ";" };
+		let redirect: string | undefined;
+		for (const token of tokens) {
+			if (redirect !== undefined && !token.operator) {
+				if (
+					Object.hasOwn(SHELL_WRITE_REDIRECTS, redirect) ||
+					(redirect === ">&" && !(/^\d+$/.test(token.text) || token.text === "-"))
+				) {
+					current.writes.push(token.text);
+				} else if (redirect === "<") {
+					current.reads.push(token.text);
+				}
+				redirect = undefined;
+			} else if (!token.operator) {
+				current.words.push(token.text);
+			} else if (Object.hasOwn(SHELL_REDIRECTS, token.text)) {
+				redirect = token.text;
+			} else {
+				current.operator = token.text;
+				segments.push(current);
+				current = { words: [], writes: [], reads: [], operator: ";" };
+				redirect = undefined;
+			}
+		}
+		segments.push(current);
+		return segments;
+	}
+
+	#command(
+		segment: ShellScriptSegment,
+		cwd: string,
+		subs: Map<string, ShellCommand[][]>,
+		depth: number,
+		nested: ShellCommand[][],
+	): ShellCommand | undefined {
+		const { words, writes, reads } = segment;
+		const wrappers: string[] = [];
+		const argv = unwrapShellCommand(words, wrappers);
+		// `env` alone prints the environment.
+		if (argv.length === 0 && wrappers.length > 0) argv.push(wrappers.pop()!);
+		if (argv.length === 0 && writes.length === 0) return undefined;
+		const program = argv[0] ?? "";
+		if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
+		const everything = [...words, ...writes, ...reads];
+		const used: ShellCommand[] = [];
+		for (const [key, pipelines] of subs) {
+			if (everything.some(word => word.includes(key))) used.push(...pipelines.flat());
+		}
+		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
+		if (script !== undefined) nested.push(...this.parse(script, cwd, depth + 1));
+		return { argv, program, wrappers, reads, writes, subs: used, cwd };
+	}
+}
+
+/**
+ * Parses a shell script into the simple commands it runs, for safety rules that must see through
+ * shell syntax. Follows quotes, escapes, comments, `;`/`&&`/`||`/`|` chains, `( )` groups,
+ * redirections, heredocs, `$( )`/backtick/`<( )` substitutions, `bash -c`/`sh -c`/`eval` strings
+ * (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd` between commands, and wrappers (`sudo`,
+ * `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a tokenizer, not a shell: variables
+ * other than `$HOME`/`$PWD`, aliases, functions, and code run by other interpreters are not
+ * followed.
+ */
+export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
+	const parser = new ShellScriptParser(scope.home);
+	const pipelines = parser.parse(command, scope.cwd, 0);
+	return { pipelines, scripts: parser.scripts };
 }
