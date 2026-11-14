@@ -62,6 +62,26 @@ export class LspRequestTimeoutError extends Error {
 	}
 }
 
+function serverExitError(proc: LspTransport): Error {
+	// Strip informational log lines (e.g. marksman's [INF]/[DBG] prefix)
+	// — they are startup noise, not actionable errors.
+	const stderr = proc
+		.peekStderr()
+		.trim()
+		.split("\n")
+		.filter(line => !/^\[\d{2}:\d{2}:\d{2} (?:INF|DBG|VRB)\]/.test(line))
+		.join("\n")
+		.trim();
+	const code = proc.exitCode;
+	return new Error(
+		stderr ? `LSP server exited (code ${code}): ${stderr}` : `LSP server exited unexpectedly (code ${code})`,
+	);
+}
+
+function isLiveClient(client: LspClient): boolean {
+	return client.status !== "error" && client.proc.exitCode === null;
+}
+
 // =============================================================================
 // Client State
 // =============================================================================
@@ -1390,7 +1410,7 @@ export async function getOrCreateClient(
 	const key = clientKey(config, cwd);
 	// Check if client already exists
 	const existingClient = clients.get(key);
-	if (existingClient && !invalidatedClientKeys.has(key)) {
+	if (existingClient && !invalidatedClientKeys.has(key) && isLiveClient(existingClient)) {
 		existingClient.lastActivity = Date.now();
 		maybeStartIdleChecker(existingClient);
 		return existingClient;
@@ -1415,7 +1435,7 @@ export async function getOrCreateClient(
 			throw error;
 		}
 		const clientAfterReload = clients.get(key);
-		if (clientAfterReload && !invalidatedClientKeys.has(key)) {
+		if (clientAfterReload && !invalidatedClientKeys.has(key) && isLiveClient(clientAfterReload)) {
 			clientAfterReload.lastActivity = Date.now();
 			maybeStartIdleChecker(clientAfterReload);
 			return clientAfterReload;
@@ -1494,6 +1514,9 @@ export async function getOrCreateClient(
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
+			// Mark exit before evicting or rejecting: a caller holding this client can
+			// issue a request after the pending-request rejection pass.
+			client.status = "error";
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
@@ -1502,18 +1525,7 @@ export async function getOrCreateClient(
 
 			// Reject any pending requests — the server is gone, they will never complete.
 			if (client.pendingRequests.size > 0) {
-				// Strip informational log lines (e.g. marksman's [INF]/[DBG] prefix)
-				// — they are startup noise, not actionable errors.
-				const rawStderr = proc.peekStderr().trim();
-				const stderr = rawStderr
-					.split("\n")
-					.filter(line => !/^\[\d{2}:\d{2}:\d{2} (?:INF|DBG|VRB)\]/.test(line))
-					.join("\n")
-					.trim();
-				const code = proc.exitCode;
-				const err = new Error(
-					stderr ? `LSP server exited (code ${code}): ${stderr}` : `LSP server exited unexpectedly (code ${code})`,
-				);
+				const err = serverExitError(proc);
 				for (const pending of client.pendingRequests.values()) {
 					pending.reject(err);
 				}
@@ -2478,6 +2490,7 @@ function sendRequestOnce(
 		const reason = signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		return Promise.reject(reason);
 	}
+	if (!isLiveClient(client)) return Promise.reject(serverExitError(client.proc));
 
 	const request: LspJsonRpcRequest = {
 		jsonrpc: "2.0",

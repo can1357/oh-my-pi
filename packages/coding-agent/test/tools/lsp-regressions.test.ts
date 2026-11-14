@@ -6086,7 +6086,11 @@ describe("lsp regressions", () => {
 			name: "test-lsp",
 			cwd: process.cwd(),
 			config: { command: "test-lsp", fileTypes: [".ts"], rootMarkers: [] },
-			proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
+			proc: {
+				stdin: { write() {}, flush: async () => {} },
+				exitCode: null,
+				peekStderr: () => "",
+			} as unknown as LspClient["proc"],
 			requestId: 0,
 			diagnostics: new Map(),
 			publishedDiagnostics: new Map(),
@@ -7068,6 +7072,27 @@ describe("lsp regressions", () => {
 		});
 	});
 	describe("reader exit ordering (#7041)", () => {
+		it("rejects requests sent around and after server exit instead of timing out", async () => {
+			const server = installHandshakeLsp();
+			const tempDir = TempDir.createSync("@omp-lsp-exited-request-");
+			try {
+				const config: ServerConfig = { command: "fake-lsp-exited-request", fileTypes: [".ts"], rootMarkers: [] };
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+
+				server.exit(23);
+				await expect(lspClient.sendRequest(client, "textDocument/references", {}, undefined, 100)).rejects.toThrow(
+					"LSP server exited unexpectedly (code 23)",
+				);
+				await client.proc.exited;
+				await expect(lspClient.sendRequest(client, "textDocument/definition", {}, undefined, 100)).rejects.toThrow(
+					"LSP server exited unexpectedly (code 23)",
+				);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("surfaces the process diagnostic when stdout closes before exit publication", async () => {
 			installFakeLsp(
 				(message, server) => {
