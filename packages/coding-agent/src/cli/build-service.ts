@@ -196,6 +196,12 @@ export interface BuildAnswer {
 }
 
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/** Whether `version` is a version the build service publishes builds under (semver, no build metadata). */
+export function isBuildVersion(version: string): boolean {
+	return SEMVER.test(version);
+}
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 function isSize(value: unknown): value is number {
@@ -241,7 +247,7 @@ export function parseBuildAnswer(
 ): BuildAnswer {
 	if (!isRecord(body) || !isRecord(body.build)) throw new Error("answer has no build");
 	const version = body.build.version;
-	if (typeof version !== "string" || !SEMVER.test(version)) throw new Error("build has no valid version");
+	if (typeof version !== "string" || !isBuildVersion(version)) throw new Error("build has no valid version");
 	const fileName = product.fileName(host, version);
 	const file = body.file;
 	if (!isRecord(file)) throw new Error("answer has no file");
