@@ -332,13 +332,15 @@ describe("ovnfs checkout recovery", () => {
 	it("records the start checkout a branch baseline opens until it is removed", async () => {
 		const repo = path.join(root, "start");
 		await fs.mkdir(repo);
+		const missingStartCheckout = path.join(path.parse(root).root, `${path.basename(root)}-missing-start-checkout`);
+		await expect(fs.stat(missingStartCheckout)).rejects.toMatchObject({ code: "ENOENT" });
 		const removed: string[] = [];
 		const opened: DaemonOp[] = [];
 		let failRemoval = false;
 		captureDaemon(repo, ["new.base", "diff.binary"], op => {
 			if (op.op === "new") {
 				opened.push(op);
-				return { checkout: { name: op.name, path: path.join(root, "missing", op.name ?? ""), base: op.base } };
+				return { checkout: { name: op.name, path: missingStartCheckout, base: op.base } };
 			}
 			if (op.op === "rm") {
 				removed.push(op.checkout ?? "");

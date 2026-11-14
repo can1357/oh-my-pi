@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Driven subagent follow-ups and restored turns keep their own results, answer awaited children without publishing intermediate results, and avoid replaying assignments after admission.
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
 

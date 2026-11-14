@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
@@ -275,7 +276,7 @@ describe("seance cold restore", () => {
 		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			authStorage.keys.setRuntime("anthropic", "test-key");
-			const modelRegistry = new ModelRegistry(authStorage);
+			const modelRegistry = new ModelRegistry(authStorage, undefined, { settings: Settings.isolated() });
 			using tempDir = TempDir.createSync("@omp-seance-restore-");
 			const cwd = tempDir.path();
 			const init = {

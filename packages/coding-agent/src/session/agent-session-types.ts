@@ -476,6 +476,8 @@ export interface PromptOptions {
 	 * failed before admission still only settles through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
+	/** Internal task-driver arbitration before prompt admission. */
+	onDrivenPreAdmissionBusy?: (winner: Promise<void>) => void;
 	/**
 	 * Called synchronously when this prompt is pushed onto the steer or
 	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it
