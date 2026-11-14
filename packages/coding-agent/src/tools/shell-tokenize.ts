@@ -115,10 +115,20 @@ export interface LiteralShellCommandSegment {
 	/** Literal argv after shell quote removal. */
 	argv: string[];
 }
+
+/** One segment of a top-level `&&` chain, paired with its literal parse when eligible. */
+export interface AndChainSegment {
+	/** Original segment text with quoting and escaping preserved. */
+	text: string;
+	/** Parsed literal command when the segment is eligible for compound allow, else `null`. */
+	literal: LiteralShellCommandSegment | null;
+	/** True when executing this clause can mutate current-shell state for later clauses. */
+	mutatesShellState: boolean;
+}
 const SHELL_STATEFUL_COMMANDS = new Set([
 	"!",
+	":",
 	".",
-	// Bash test -v evaluates array subscripts, including command substitutions.
 	"test",
 	"[",
 	"[[",
@@ -227,7 +237,7 @@ const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
 	zsh: true,
 };
 
-const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/u;
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 const SHELL_ASSIGNMENT_NAME = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/u;
 const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
 
@@ -429,6 +439,186 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 
 	if (quote || !pushSegment(command.length) || segments.length < 2) return null;
 	return segments;
+}
+
+function parseLiteralShellCommandSegment(segmentText: string): LiteralShellCommandSegment | null {
+	const pair = extractLiteralAndChainSegments(`${segmentText} && true`);
+	return pair ? pair[0]! : null;
+}
+
+function segmentMutatesShellState(segmentText: string, literal: LiteralShellCommandSegment | null): boolean {
+	if (literal !== null) return false;
+	if (/[$`(){}[\]\n\r]/u.test(segmentText)) return true;
+	const segments = tokenizeShellSegments(segmentText);
+	if (segments.length === 0) return true;
+	for (const words of segments) {
+		let index = 0;
+		while (index < words.length) {
+			const word = words[index]!;
+			if (SHELL_ASSIGNMENT.test(word)) {
+				if (word.includes("[")) return true;
+				index++;
+			} else if (/^[0-9]*[<>]+$/u.test(word)) {
+				index += 2;
+			} else if (/^[0-9]*[<>]/u.test(word)) {
+				index++;
+			} else {
+				break;
+			}
+		}
+		const executable = words[index];
+		if (!executable) return true;
+		const commandName = executable.slice(Math.max(executable.lastIndexOf("/"), executable.lastIndexOf("\\")) + 1);
+		if (
+			SHELL_STATEFUL_COMMANDS.has(commandName) ||
+			Object.hasOwn(SHELL_INTERPRETER_COMMANDS, commandName) ||
+			words.slice(index + 1).some(arg => SHELL_REINTERPRET_OPTION.test(arg))
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Splits a single-line command on top-level unquoted `&&` (two or more clauses)
+ * and annotates each clause with {@link LiteralShellCommandSegment} when that
+ * clause alone qualifies for literal compound-command approval.
+ *
+ * Top-level `;`, `&`, and `||` have equal or lower precedence than `&&` and
+ * alter short-circuit flow, so commands containing them outside quotes/parens
+ * are rejected (`null`). Higher-precedence constructs inside a clause (pipes,
+ * redirections, expansions, globs, stateful builtins) stay inside that clause
+ * with `literal: null`.
+ */
+export function extractAndChainSegments(command: string): AndChainSegment[] | null {
+	for (let i = 0; i < command.length; i++) {
+		const code = command.charCodeAt(i);
+		if ((code < 0x20 && code !== 0x09) || code === 0x7f) return null;
+	}
+	const rawSegments: string[] = [];
+	let quote: "'" | '"' | undefined;
+	let parenDepth = 0;
+	let inBacktick = false;
+	let inDoubleBracket = false;
+	let atWordStart = true;
+	let segmentStart = 0;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (quote === "'") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === "\\") {
+				if (i + 1 >= command.length) return null;
+				i++;
+				continue;
+			}
+			if (ch === '"') quote = undefined;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 >= command.length) return null;
+			i++;
+			atWordStart = false;
+			continue;
+		}
+		if (ch === "`") {
+			inBacktick = !inBacktick;
+			atWordStart = false;
+			continue;
+		}
+		if (inBacktick) continue;
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			atWordStart = false;
+			continue;
+		}
+		if (ch === "#" && atWordStart) {
+			break;
+		}
+		if (
+			!inDoubleBracket &&
+			atWordStart &&
+			ch === "[" &&
+			command[i + 1] === "[" &&
+			(command[i + 2] === " " || command[i + 2] === "\t")
+		) {
+			inDoubleBracket = true;
+			i++;
+			atWordStart = false;
+			continue;
+		}
+		if (inDoubleBracket && atWordStart && ch === "]" && command[i + 1] === "]") {
+			const after = command[i + 2];
+			if (
+				after === undefined ||
+				after === " " ||
+				after === "\t" ||
+				after === ";" ||
+				after === "&" ||
+				after === "|" ||
+				after === ")"
+			) {
+				inDoubleBracket = false;
+				i++;
+				atWordStart = false;
+				continue;
+			}
+		}
+		if (ch === "(") {
+			parenDepth++;
+			atWordStart = true;
+			continue;
+		}
+		if (ch === ")") {
+			if (parenDepth === 0) return null;
+			parenDepth--;
+			atWordStart = false;
+			continue;
+		}
+		if (parenDepth > 0 || inDoubleBracket) {
+			atWordStart = ch === " " || ch === "\t" || ch === "&" || ch === "|" || ch === "(" || ch === ")";
+			continue;
+		}
+		if (ch === ";") return null;
+		if (ch === "|" && command[i + 1] === "|") return null;
+		if (ch === "&") {
+			const prev = command[i - 1];
+			const next = command[i + 1];
+			if (prev === ">" || prev === "<" || next === ">") {
+				atWordStart = false;
+				continue;
+			}
+			if (next === "&" && command[i + 2] !== "&") {
+				const segment = command.slice(segmentStart, i).trim();
+				if (segment.length === 0) return null;
+				rawSegments.push(segment);
+				i++;
+				segmentStart = i + 1;
+				atWordStart = true;
+				continue;
+			}
+			return null;
+		}
+		atWordStart = ch === " " || ch === "\t";
+	}
+
+	if (quote || inBacktick || parenDepth !== 0 || inDoubleBracket) return null;
+	const tail = command.slice(segmentStart).trim();
+	if (tail.length === 0) return null;
+	rawSegments.push(tail);
+	if (rawSegments.length < 2) return null;
+	return rawSegments.map(text => {
+		const literal = parseLiteralShellCommandSegment(text);
+		return {
+			text,
+			literal,
+			mutatesShellState: segmentMutatesShellState(text, literal),
+		};
+	});
 }
 
 /**

@@ -10,6 +10,7 @@
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
 - Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` fires the rule again on later matching turns, at most once per turn and never on the retry or follow-up turn its own reminder started ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
+- Compound bash approval prompts (`bash.allowCompoundCommands: true`) list each `&&` segment on its own line, marking segments covered by `bash.patterns` allow rules (`✓ … (allowed: <pattern>)`) separately from segments being prompted for (`? … (requires approval | prompt: <pattern> | critical pattern)`) ([#18749](https://github.com/can1357/oh-my-pi/pull/18749) by [@asuffield](https://github.com/asuffield))
 
 ### Changed
 

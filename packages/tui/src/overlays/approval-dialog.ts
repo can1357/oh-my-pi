@@ -32,7 +32,8 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
-import { col, item, node } from "../native/describe";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { col, item, node, span } from "../native/describe";
 import { leafKey, type NativeNode, type NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../render/render-utils";
@@ -105,6 +106,40 @@ function promptDetails(lines: string[]): string[] {
 	return details;
 }
 
+const ALLOWED_SEGMENT_RE = /^(\s*)✓(\s+)(.+)(\s+\((?:allowed: .*|\d+ allowed segments?)\))$/u;
+const PROMPTED_SEGMENT_RE = /^(\s*)\?(\s+)(.+)(\s+\((?:requires approval|prompt: .*|critical pattern)\))$/u;
+
+function styleApprovalDetailLine(line: string): { ansi: string; spans?: TspSpan[] } {
+	const allowed = ALLOWED_SEGMENT_RE.exec(line);
+	if (allowed) {
+		const [, indent = "", space = " ", command = "", suffix = ""] = allowed;
+		return {
+			ansi: `${indent}${theme.fg("success", "✓")}${space}${theme.fg("dim", `${command}${suffix}`)}`,
+			spans: [
+				...(indent ? [span(indent)] : []),
+				span("✓", "success"),
+				span(space),
+				span(`${command}${suffix}`, "dim"),
+			],
+		};
+	}
+	const prompted = PROMPTED_SEGMENT_RE.exec(line);
+	if (prompted) {
+		const [, indent = "", space = " ", command = "", suffix = ""] = prompted;
+		return {
+			ansi: `${indent}${theme.fg("warning", "?")}${space}${theme.bold(theme.fg("accent", command))}${theme.fg("warning", suffix)}`,
+			spans: [
+				...(indent ? [span(indent)] : []),
+				span("?", "warning"),
+				span(space),
+				span(command, "accent strong"),
+				span(suffix, "warning"),
+			],
+		};
+	}
+	return { ansi: theme.fg("accent", line) };
+}
+
 export class ApprovalDialogComponent implements Component {
 	readonly #title: string;
 	readonly #summary: readonly string[];
@@ -140,6 +175,10 @@ export class ApprovalDialogComponent implements Component {
 		this.#summary = promptDetails(lines);
 		this.#full =
 			options.fullPrompt === undefined ? undefined : promptDetails(sanitizeDisplayLines(options.fullPrompt));
+		const firstPrompted = this.#summary.findIndex(line => PROMPTED_SEGMENT_RE.test(line));
+		if (firstPrompted >= MAX_DETAIL_ROWS) {
+			this.#scrollOffset = firstPrompted - MAX_DETAIL_ROWS + 1;
+		}
 		this.#choices = this.#buildChoices();
 		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
 		this.#panel = new OverlayPanel(title, "omp.overlay.approval");
@@ -356,9 +395,11 @@ export class ApprovalDialogComponent implements Component {
 		];
 		if (this.#details.length > 0) {
 			// One clipped row per detail like the text view; expanded details wrap.
-			const rows = this.#details.map((line, index) =>
-				node("text", this.#expanded ? { text: line } : { text: line, truncate: "end" }, undefined, String(index)),
-			);
+			const rows = this.#details.map((line, index) => {
+				const styled = styleApprovalDetailLine(line);
+				const content = styled.spans ? { spans: styled.spans } : { text: line };
+				return node("text", this.#expanded ? content : { ...content, truncate: "end" }, undefined, String(index));
+			});
 			children.push(node("col", { role: "omp.approval.details" }, rows, "details"));
 		}
 		const choices = this.#choices.map(choice =>
@@ -398,9 +439,11 @@ export class ApprovalDialogComponent implements Component {
 	/** Detail rows at `width`: one clipped row per detail, or wrapped rows once expanded. */
 	#detailLines(width: number): string[] {
 		if (!this.#expanded) {
-			return this.#details.map(line => truncateToWidth(theme.fg("accent", line), width, Ellipsis.Unicode));
+			return this.#details.map(line => truncateToWidth(styleApprovalDetailLine(line).ansi, width, Ellipsis.Unicode));
 		}
-		return this.#details.flatMap(line => (line === "" ? [""] : wrapTextWithAnsi(theme.fg("accent", line), width)));
+		return this.#details.flatMap(line =>
+			line === "" ? [""] : wrapTextWithAnsi(styleApprovalDetailLine(line).ansi, width),
+		);
 	}
 
 	#footerHint(overflows: boolean, drafting: boolean): string {
