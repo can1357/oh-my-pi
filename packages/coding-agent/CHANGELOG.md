@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/fork` and fork-from-transcript now abort a running response and fork instead of refusing with "Wait for the current response to finish".
+
 ### Added
 
 - Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
