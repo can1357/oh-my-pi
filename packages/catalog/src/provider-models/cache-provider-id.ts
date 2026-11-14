@@ -112,6 +112,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// gateway publishes its own roster; discovery is authoritative, so the
 			// namespace must follow the endpoint. The official backend keeps the
 			// unhashed namespace so existing caches stay valid.
+			// The namespace keys on the pinned fallback, not the npm-resolved version:
+			// the startup cache read runs before any lookup, so a moving key would miss
+			// on every launch. A newer release's roster lands on the next regular refresh.
 			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
 			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
 			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;

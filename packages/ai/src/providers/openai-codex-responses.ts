@@ -5,9 +5,10 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
-	CODEX_CLIENT_VERSION,
 	codexRoutingHint,
+	ensureCodexClientVersion,
 	getCodexAccountId,
+	getCodexClientVersion,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -1264,7 +1265,7 @@ function createCodexRequestContext(
 	const url = resolveCodexResponsesUrl(baseUrl);
 
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
-	const codexClientVersion = CODEX_CLIENT_VERSION;
+	const codexClientVersion = getCodexClientVersion();
 	const requestHeaders = { ...model.headers, ...options?.headers };
 	const rawRequestDump: RawHttpRequestDump = {
 		provider: model.provider,
@@ -1350,6 +1351,11 @@ async function buildCodexRequestContext(
 ): Promise<CodexRequestContext> {
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
 	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
+	// The backend gates models on the client version; a process that skipped
+	// discovery (fresh model cache) must still send the current one. The npm
+	// registry is not Codex, so the lookup goes through the global fetch: a
+	// caller's transport only carries provider requests.
+	await ensureCodexClientVersion(fetch, options?.signal);
 	return createCodexRequestContext(model, transformedBody, options, {
 		isolateCompactionTransport: true,
 		startNewTurn: options?.codexCompaction ? undefined : !isCodexWithinTurnContinuation(context),
@@ -1553,6 +1559,7 @@ export async function openCodexCompactionEventStream(
 		transport: CodexTransport;
 	};
 	try {
+		await ensureCodexClientVersion(fetch, options.signal);
 		requestContext = createCodexRequestContext(model, toCodexRequestBody(body), options, {
 			isolateCompactionTransport: false,
 		});
@@ -3250,7 +3257,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						baseUrl: model.baseUrl || CODEX_BASE_URL,
 						url: "",
 						requestHeaders: {},
-						codexClientVersion: CODEX_CLIENT_VERSION,
+						codexClientVersion: getCodexClientVersion(),
 						turnState: {},
 						responsesLite: options?.responsesLite === true,
 						transformedBody: { model: model.id },
@@ -3320,7 +3327,8 @@ export async function prewarmOpenAICodexResponses(
 	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
 	const metadataSession = getOrCreateCodexMetadataSessionState(transportSessionId, providerSessionState);
 	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
-	const codexClientVersion = CODEX_CLIENT_VERSION;
+	await ensureCodexClientVersion(fetch, options?.signal);
+	const codexClientVersion = getCodexClientVersion();
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
 	const attestation = await getCodexAttestationHeader(accountId);
 	const routedRequest: Pick<RequestBody, "model" | "service_tier"> = {

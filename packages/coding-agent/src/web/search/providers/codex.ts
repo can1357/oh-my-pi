@@ -9,8 +9,9 @@ import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
-	CODEX_CLIENT_VERSION,
+	ensureCodexClientVersion,
 	getCodexAccountId,
+	getCodexClientVersion,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -303,7 +304,7 @@ function buildCodexHeaders(
 	}
 	applyCodexResidencyHeader(headers, accessToken);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
-	headers.set(OPENAI_HEADERS.VERSION, CODEX_CLIENT_VERSION);
+	headers.set(OPENAI_HEADERS.VERSION, getCodexClientVersion());
 	headers.set("User-Agent", USER_AGENT);
 	headers.set("Accept", "text/event-stream");
 	headers.set("Content-Type", "application/json");
@@ -359,6 +360,7 @@ async function callCodexSearch(
 		transport: CodexSearchTransport;
 	},
 ): Promise<CodexSearchResult> {
+	await ensureCodexClientVersion(fetch, options.signal);
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
 	const requestedModel = options.modelId;

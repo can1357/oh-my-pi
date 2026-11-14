@@ -24,6 +24,7 @@
 - Fixed Vertex AI Gemini 3+ models failing with `400 Function call is missing a thought_signature` when a replayed or cross-model assistant turn's first tool call lacks a thought signature; that call now carries Google's `skip_thought_signature_validator` value ([#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@duck1eee](https://github.com/duck1eee))
 - Fixed Cursor hiding models that AvailableModels serves but GetUsableModels omits (GLM 5.3, Grok 4.7) ([#18248](https://github.com/can1357/oh-my-pi/pull/18248) by [@joseotaviorf](https://github.com/joseotaviorf))
 - Fixed Gemini CLI requests reporting a stale client version; the current `@google/gemini-cli` release is now looked up from npm ([#19254](https://github.com/can1357/oh-my-pi/pull/19254) by [@Xytronix](https://github.com/Xytronix))
+- Fixed Codex hiding newly released models until the pinned client version (0.159.0) was bumped by hand; discovery and requests now report the current `@openai/codex` release from npm, re-checked hourly, with 0.159.0 as the offline fallback and `PI_AI_CODEX_VERSION` as an override. A newer roster appears on the next regular model-cache refresh ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@Xytronix](https://github.com/Xytronix))
 ### Changed
 
 - Paused Google Antigravity (`google-antigravity`): it no longer offers a login and stored credentials are not used until it is re-enabled; use `GEMINI_API_KEY` (AI Studio) or `google-vertex` instead ([#18341](https://github.com/can1357/oh-my-pi/issues/18341))

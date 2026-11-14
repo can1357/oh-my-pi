@@ -2,8 +2,9 @@ import { type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/p
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
-	CODEX_CLIENT_VERSION,
+	ensureCodexClientVersion,
 	getCodexAccountId,
+	getCodexClientVersion,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
@@ -93,10 +94,10 @@ function liveSessionHeaders(
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${access.accessToken}`,
 		"OpenAI-Alpha": "quicksilver=v2",
-		"User-Agent": `Codex Desktop/${CODEX_CLIENT_VERSION}`,
+		"User-Agent": `Codex Desktop/${getCodexClientVersion()}`,
 		"x-session-id": realtimeSessionId,
 		[OPENAI_HEADERS.ORIGINATOR]: LIVE_ORIGINATOR,
-		[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
+		[OPENAI_HEADERS.VERSION]: getCodexClientVersion(),
 		[OPENAI_HEADERS.SCOPED_SESSION_ID]: sessionId,
 		[OPENAI_HEADERS.THREAD_ID]: sessionId,
 	};
@@ -224,6 +225,7 @@ export class CodexLiveTransport {
 		access: OAuthAccess,
 		attestation: string | undefined,
 	): Promise<LiveSignalingResult> {
+		await ensureCodexClientVersion(fetch, this.#options.signal);
 		const headers = new Headers({
 			...liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
 			Accept: "*/*",

@@ -45,6 +45,7 @@ describe("ModelRegistry runtime discovery", () => {
 	let originalOllamaContextLength: string | undefined;
 	let originalAnthropicApiKey: string | undefined;
 	let originalLlamaCppBaseUrl: string | undefined;
+	let originalCodexVersion: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -59,6 +60,9 @@ describe("ModelRegistry runtime discovery", () => {
 		// The developer's shell or ~/.omp/agent/.env must not redirect llama.cpp discovery probes.
 		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
 		delete Bun.env.LLAMA_CPP_BASE_URL;
+		// Codex discovery assertions list every captured request; keep the npm version lookup off the mock.
+		originalCodexVersion = Bun.env.PI_AI_CODEX_VERSION;
+		Bun.env.PI_AI_CODEX_VERSION = CODEX_CLIENT_VERSION;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -96,6 +100,11 @@ describe("ModelRegistry runtime discovery", () => {
 			delete Bun.env.LLAMA_CPP_BASE_URL;
 		} else {
 			Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
+		}
+		if (originalCodexVersion === undefined) {
+			delete Bun.env.PI_AI_CODEX_VERSION;
+		} else {
+			Bun.env.PI_AI_CODEX_VERSION = originalCodexVersion;
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
