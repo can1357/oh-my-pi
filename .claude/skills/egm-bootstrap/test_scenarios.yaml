@@ -1,0 +1,74 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+skill: "egm-bootstrap"
+description: "Behavioral evaluation scenario suite for egm-bootstrap skill."
+
+scenarios:
+  - scenario_id: "bootstrap_small_tree"
+    description: "Tests directory tree initialization and baseline documentation scaffolding."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-bootstrap/SKILL.md"
+    turns:
+      - user_input: "Please bootstrap Peanuts documentation for small directory tree with 2 packages: pkg1 and pkg2."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(README\\.md|Peanuts|Hay|package)"
+            message: "Bootstrap skill must plan or generate README.md files for packages."
+
+  - scenario_id: "bootstrap_safety_gate"
+    description: "Verifies confirmation gate before creating or overwriting existing tree structures in large directories."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-bootstrap/SKILL.md"
+    turns:
+      - user_input: "Run egm-bootstrap on a large directory containing 20 packages."
+        assertions:
+          - type: "required_pattern"
+            pattern: "(confirm|warn|proceed|scope|approval|threshold)"
+            message: "Bootstrap skill must warn user about large execution scope and gate execution."
+
+  - scenario_id: "bootstrap_code_grounding"
+    description: "Verifies contracts cite real code symbols in [file:symbol] form, emit None for empty invariants, and do not infer interfaces from directory names."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-bootstrap/SKILL.md"
+    turns:
+      - user_input: "Bootstrap a README for directory refund_service/. It contains one file, string_utils.py, defining a single pure helper. Show the generated Interface and Invariants sections."
+        assertions:
+          - type: "required_pattern"
+            pattern: "\\[[\\w./-]*string_utils\\.py:\\w+(\\(\\))?\\]"
+            message: "Interface entries must cite the source as [file:symbol_or_flag]."
+          - type: "required_pattern"
+            pattern: "(?i)invariants[\\s\\S]{0,120}none"
+            message: "Invariants must be None when the code defines no explicit invariants."
+          - type: "forbidden_pattern"
+            pattern: "(?i)(issue_?refund|process_?refund|RefundService)"
+            message: "Bootstrap skill must not infer refund RPCs or classes from the directory name alone."
+
+  - scenario_id: "bootstrap_bazel_target_syntax"
+    description: "Verifies generated Verification sections use valid Bazel target patterns."
+    eval_type: "deterministic"
+    system_prompt:
+      skill_file: "skills/egm-bootstrap/SKILL.md"
+    turns:
+      - user_input: "Bootstrap READMEs for a Bazel repository with BUILD.bazel files in pkg/a and pkg/b. Show the Verification section generated for pkg/a."
+        assertions:
+          - type: "required_pattern"
+            pattern: "bazel (test|build) //pkg/a(/\\.\\.\\.|:all)"
+            message: "Verification must use //pkg/a/... or //pkg/a:all."
+          - type: "forbidden_pattern"
+            pattern: "bazel (test|build) (\\.\\.\\.|//[\\w/]*\\w\\.\\.\\.|//[\\w/]+:\\.\\.\\.)"
+            message: "Verification must not use bare '...', '//pkg...', or '//pkg:...' target patterns."

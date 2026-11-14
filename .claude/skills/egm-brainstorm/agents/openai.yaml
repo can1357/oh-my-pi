@@ -1,0 +1,6 @@
+interface:
+  display_name: "EGM Brainstorm"
+  short_description: "Turn an idea into a clear design brief"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+  brand_color: "#1B6EF3"

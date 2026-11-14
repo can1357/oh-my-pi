@@ -1,0 +1,17 @@
+Local vendoring notice for Elephant-Goldfish Model (EGM)
+
+Source: https://github.com/google/elephant-goldfish-model
+Commit: 964a4f1ecd333961375c35cb37ed09364dab5e4e
+Retrieved: 2026-11-14
+
+The selected EGM files are distributed under Apache License 2.0; the unchanged
+upstream LICENSE is provided alongside this notice. Copyright notices and
+SPDX identifiers present in the copied source files are retained unchanged.
+
+The inspected upstream commit does not contain a NOTICE file. This file is a
+local provenance notice, not an upstream NOTICE or a claim that Google supplied
+additional attribution terms. See EGM-PROVENANCE.md for the exact copied scope,
+layout, integrity fingerprints and runtime limitations.
+
+This vendored license covers the copied EGM material. It does not relicense
+the repository's independently authored OMP2 skills or other source files.

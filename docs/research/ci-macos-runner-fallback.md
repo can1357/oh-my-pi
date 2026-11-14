@@ -1,5 +1,12 @@
 # Which CI jobs use the self-hosted Mac
 
+Historical configuration. **2026-11-14 update:** native jobs now select standard
+GitHub-hosted Ubuntu/macOS explicitly; only BuildBuddy-capable jobs retain the
+variable-based launcher routing below. See
+[hosted-runner restoration](ci-hosted-runners-restoration.md) for current policy
+and observed runner failures. The older "without hosted minutes" rationale below
+is not evidence that public-repository standard hosted compute is exhausted.
+
 The self-hosted Apple silicon runner is registered on **this** repository
 (`blyzer/oh-my-pi`), via `vars.MACOS_RUNNER`. It is not the upstream
 repository's runner. Same-repo branches and pull requests use it directly.

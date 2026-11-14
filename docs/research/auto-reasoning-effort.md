@@ -12,6 +12,16 @@ Evidence keys:
 
 No build, test or run was made for this document.
 
+Revision 2026-11-14 (EGM rounds 1 to 3; the ADR is machine-reviewed, not owner-approved): ADR 0064 now decides how the choice is applied, the engagement gate, precedence, the judge's role and effort, and child sessions. Where sections 2 and 5 below differ from the ADR, the ADR wins; the points it corrects are marked "Superseded by ADR 0064". The main corrections from round 2:
+
+- The classifier runs on `@tiny`, not `@judge`: accepted ADR 0023 puts "classify this prompt's difficulty" on the tiny role (`docs/adr/0023-tiny-local-model.md:9-10`, `docs/adr/0023-tiny-local-model.md:21-23`), and `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`). Upstream's judge role also chains to `@tiny` (`upstream:packages/coding-agent/src/config/model-resolver.ts:1280`).
+- The gate is `ai_auto_effort` and the ceiling `ai_auto_effort_ceiling` (not `sv_auto_effort` / `ai_auto_thinking_ceiling`); the gate is read live and the Director is never removed.
+- There is no short-prompt heuristic; only the single-tier and empty-prompt shortcuts remain. The judge input reuses `preprocess_tiny_message` (`crates/ai/src/local/message_preproc.rs:17`).
+- No pin detection: while the gate is on, the auto bind wins over every `ai_thinking` write; the gate is the pin.
+- Children spawn with the gate off (ADR 0064 D11).
+
+Round 3 further changed: judge outcomes, latency and tokens go to `tracing`, not Director state, and there is no failure breaker (ADR 0064 O9 asks the owner about measurement); the ladder floors at `low` before the ceiling, as upstream does (`upstream:packages/tui/src/thinking.ts:290-299`); `state/effort` is written only by a judge answer; the S0a and S0b driver fixes wait for the owner (O7). A no-effort `Prefer` request would not avoid S0b, because the router fills an absent effort with its default (`crates/ai/src/router.rs:682-684`).
+
 ## Question
 
 Upstream lets the user set `defaultThinkingLevel: auto`. A small classifier picks the reasoning effort for each user prompt, and `providers.autoThinkingMaxEffort` raises the ceiling it may reach. How would omp2 offer the same as a Director, under one hard rule: the Director chooses effort only and never switches the model in the middle of a session?
@@ -56,7 +66,7 @@ Upstream never changes the model in this path. It only sets effort.
 - The catalog has its own `ai_default_thinking` (`crates/catalog/src/settings.rs:1191`) and a universal `ai_thinking_ceiling` defaulting to `Max` (`crates/catalog/src/settings.rs:1203`). The legacy path for the default is `defaultThinkingLevel` (`crates/catalog/src/settings.rs:1199`).
 - The type is `ThinkingEffort` (`crates/catalog/src/thinking.rs:36`). There is a coarse `ThinkingEffortSelector` (`Lo | Med | Hi`) used by delegated tasks (`crates/catalog/src/thinking.rs:113`).
 - The router clamps every request. `clamp_thinking_effort` bounds the requested effort by a configured ceiling and by the model's own, picking the greatest supported effort at or below it (`crates/catalog/src/thinking.rs:320`). The router calls it with the request's `thinking_ceiling` (`crates/ai/src/router.rs:143`, `crates/ai/src/router.rs:682-687`).
-- The kernel builds the request with `reasoning: Setting::Unset` (`crates/agent/src/loop.rs:2343`). The effort that finally goes out is decided in the router. How the session's `ai_thinking` value reaches that decision I did not trace: UNVERIFIED. `ModelWatch` reads the resulting effort and reports changes (`crates/agent/src/model_watch.rs:1-11`, `crates/agent/src/model_watch.rs:24-34`).
+- The kernel builds the request with `reasoning: Setting::Unset` (`crates/agent/src/loop.rs:2343`). The effort that finally goes out is decided in the driver and the router: `ProductionInference::apply_convars` fills a still-`Unset` reasoning from the effective `ai_thinking` through `convar_reasoning` (`crates/driver/src/headless/kernel.rs:342-348`, `crates/driver/src/headless/kernel.rs:492-530`), and the router clamps it again and rejects an effort on a model without a thinking policy (`crates/ai/src/router.rs:1168-1187`). OBSERVED 2026-11-14. `ModelWatch` reads the resulting effort and reports changes (`crates/agent/src/model_watch.rs:1-11`, `crates/agent/src/model_watch.rs:24-34`).
 - A Director bind that supplies `ai_thinking` is already a known case: `ModelWatch` checks `engagement_owner(AI_THINKING)` (`crates/agent/src/model_watch.rs:88`).
 
 ### Directors
@@ -69,7 +79,7 @@ Upstream never changes the model in this path. It only sets effort.
 - `MutDirectorCx.inference` is an `ErasedInference`. `execute_on(selector, request)` runs an isolated request on any catalog key or `@role` and leaves the live route untouched (`crates/contract/src/director.rs:612`, `crates/contract/src/director.rs:619`). The advisor Director already uses it for its second-model review (`crates/agent/src/directors/advisor.rs:344`).
 - A `@judge` role exists. It falls back to the slow selection when unset (`crates/catalog/src/selection.rs:177`, `crates/catalog/src/selection.rs:465`, tests at `crates/catalog/src/selection.rs:1228` and `crates/catalog/src/selection.rs:1243`).
 - `DirectorEffect` can carry session-layer convar writes. `Plan` and `Prewalk` use that to set `ai_model` and `ai_thinking` on handoff (`crates/contract/src/director.rs:457`, `crates/contract/src/director.rs:489`, `crates/agent/src/directors/plan.rs:137`, `crates/agent/src/directors/prewalk.rs:60`). `Prewalk` documents that it "switches models exactly once" (`crates/agent/src/directors/prewalk.rs:19-20`). The new Director must not copy that.
-- Binds are written into the Director's DOM node when it is built (`crates/contract/src/director.rs:1580`, `crates/contract/src/director.rs:1591`). Whether a bind can change while the engagement stays active: UNVERIFIED.
+- Binds are written into the Director's DOM node when it is built (`crates/contract/src/director.rs:1580`, `crates/contract/src/director.rs:1591`). A bind can change while the engagement stays active: binds are the element's `bind/*` props, re-derived from the DOM on every derivation (`crates/contract/src/director.rs:900-936`), so one `Op::Set` changes one and a `Null` value clears it (`crates/contract/src/director.rs:235-246`). OBSERVED 2026-11-14.
 - Standing Directors are registered in `register_standard` (`crates/agent/src/directors/mod.rs:43` shows the pattern) and the kernel engages `CompactionDirector` itself when a runtime flag is on and none is active or queued (`crates/agent/src/loop.rs:1421-1425`). The stack runs `before_inference` on every request round trip (`crates/contract/src/director.rs:1066`; call site `crates/agent/src/loop.rs:1592`).
 - Not related, do not confuse: `RecoveryKind::ThinkingClassification` heals reasoning text leaked into the answer; it is not effort selection (`crates/ai/src/recovery/thinking.rs:1`).
 
@@ -107,6 +117,8 @@ Choice: option 3, with option 1's rules as its first pass. A deterministic rule 
 
 ## 5. Plan
 
+Superseded by ADR 0064: the slice plan there (S0a, S0b, S1 to S4) replaces the four slices below, adds the drop-safe isolated call and the judge's own effort, and applies the choice as an `ai_thinking` bind, not a request edit.
+
 ### Slice 1: settings, no behaviour
 
 - Add the `auto` selection and `ai_auto_thinking_ceiling` (`xhigh | max`, default `xhigh`, legacy path `providers.autoThinkingMaxEffort`).
@@ -137,11 +149,13 @@ Estimate for all four slices: 3 to 5 days including tests. [INFERENCE]
 #### Shape
 
 - **Family** `auto_effort`, in `crates/agent/src/directors/auto_effort.rs`, registered in `register_standard`. It claims no `Slot` (it must not block Plan, Goal or Loop, which claim `Mode` or `Loop`; `Slot` is at `crates/contract/src/director.rs:190`). It never returns a verdict other than `Pass`, because it does not own yields.
-- **Engagement.** The kernel engages it, like compaction, when `ai_thinking` is `auto` (or when the auto setting is on). It disengages when the user pins a level.
+- **Engagement.** The kernel engages it, like compaction, when `ai_thinking` is `auto` (or when the auto setting is on). It disengages when the user pins a level. Superseded by ADR 0064 D2-D4: engaged per turn when `ai_auto_effort` is on, never removed, inert when the gate is off; no pin detection.
 - **When it runs.** `before_inference`, but only on the first request of a user turn. Detect that by remembering the last classified user-turn id in the Director's durable state (`state()` at `crates/contract/src/director.rs:645`) and comparing it with `cx.turn`. Tool-continuation round trips return `Prepared::Unchanged` at once. This also keeps the effort stable inside a turn, which protects the provider's cached prompt prefix. [INFERENCE]
 - **Inputs.** The latest user text (and, for a task-spawned child, the delegator's `solutionSpace`, which omp2 already carries; not traced here, UNVERIFIED). Nothing else is needed for a first slice.
 
 #### Classifier
+
+Superseded by ADR 0064 D6 and D7: the selector is `@tiny`, the short-prompt rule below is removed, and the call is bounded to one attempt per turn (round 3 removed the failure cooldown).
 
 - A heuristic pre-pass answers the obvious cases without a model call: an empty or very short prompt maps to `low`; a prompt that is only a slash command or a yes/no maps to `low`. [INFERENCE]
 - Otherwise one isolated request through `cx.inference.execute_on("@judge", request)`. The request asks for exactly one label of `low | medium | high | xhigh | max` with a fixed rubric stored as a prompt file next to the other prompts. It is cheap, short and non-streaming. The ladder offered excludes `max` unless the auto ceiling is `max`.
@@ -156,14 +170,14 @@ Three ways to apply it. All three only change effort.
 2. **Bind.** `binds()` supplies `ai_thinking` while engaged. `ModelWatch` already treats that as a Director-supplied effort (`crates/agent/src/model_watch.rs:88`). The user's `auto` stays stored under the engagement. Problem: binds look fixed at node build time, so a changing value may need a re-engagement or a state update path. UNVERIFIED.
 3. **Request edit.** `prepare_inference` sets `req.reasoning` (the field built as `Unset` at `crates/agent/src/loop.rs:2343`) from the stored choice. Simple and local; not journaled, so `ModelWatch` and the UI badge would not show it unless the choice is also journaled in Director state. [INFERENCE]
 
-Recommendation: store the choice in Director state (`StateUpdate`), apply it with option 3 on every request of the turn, and publish it for the UI through the existing `ModelWatch` path if it can be made to observe it. Option 2 is better if a bind can be updated cheaply. The first slice should settle this by reading how `ai_thinking` flows into the router, which this research did not trace.
+Superseded by ADR 0064 D8: option 3 skips `convar_reasoning`, because the driver fills only an `Unset` reasoning (`crates/driver/src/headless/kernel.rs:346`), so a model without a thinking policy fails the request (`crates/ai/src/router.rs:1179-1185`); the ADR chooses option 2, which the bind trace above makes cheap. The original recommendation, kept for the record: store the choice in Director state (`StateUpdate`), apply it with option 3 on every request of the turn, and publish it for the UI through the existing `ModelWatch` path if it can be made to observe it. Option 2 is better if a bind can be updated cheaply. The first slice should settle this by reading how `ai_thinking` flows into the router, which this research did not trace.
 
 #### The invariant: effort only, never the model
 
 - The Director never writes `ai_model`, never reads or writes a model role, and never calls `execute_on` with a selector for the main route. Its only auxiliary model is `@judge`, and only through the isolated path that leaves the live route untouched (`crates/contract/src/director.rs:616-619`).
 - It never changes `ai_thinking_ceiling`. It reads the model's allowed range through the same clamp the router already applies (`crates/catalog/src/thinking.rs:320`), so an effort the model cannot take falls to the nearest supported one below.
 - Enforce it by construction and by test: the Director's `DirectorEffect` never contains a write named `ai_model`; a test fails if any `with_write` name other than `ai_thinking` appears (compare the existing plan test that asserts an `ai_thinking` write, `crates/agent/tests/directors/plan.rs:89`).
-- The `@judge` call may itself run on a different model. That is an isolated auxiliary request, not a change of the session's model, and its tokens must be journaled as judge usage (as the advisor does). Say so in the user-facing docs.
+- The `@judge` call may itself run on a different model. That is an isolated auxiliary request, not a change of the session's model, and its tokens must be journaled as judge usage (as the advisor does). Say so in the user-facing docs. Superseded by ADR 0064 D7: the role is `@tiny` and its usage goes to `tracing`, since the journal has no judge receipt role (O5).
 
 #### Settings
 
@@ -181,10 +195,11 @@ Recommendation: store the choice in Director state (`StateUpdate`), apply it wit
 
 - **Cache.** Changing effort between turns may break a provider's prefix cache on some routes. Upstream notes that only models taking per-message effort relax mid-run (`upstream:packages/coding-agent/src/session/model-controls.ts:735`); omp2 has no such flag that I found (searched: `per_message` effort in `crates/catalog`, not exhaustive). Classify once per user turn, never inside a turn.
 - **Cost and latency.** A judge call on every prompt costs tokens and up to 4 s. The heuristic pre-pass and the short-circuit when only one tier exists limit it.
-- **Judge availability.** `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`), which may be expensive. Consider a dedicated cheap default or let the user opt out.
+- **Judge availability.** `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`), which may be expensive. Resolved in ADR 0064 round 2: the classifier uses `@tiny` (ADR 0023).
 - **Subagents.** A child session inherits `ai_thinking`. Whether a child of an `auto` parent should also classify, or take the delegator's `solutionSpace`, is open.
 - **Wire visibility.** Adding a value to `ai_thinking` touches `ModelWatch`, the chat badge (`crates/chat/src/host.rs:953`) and RPC (`crates/app/src/rpc_mode.rs:1156`). Each reads it as an effort string today. That is a change to an existing convar's accepted values, so under the additive-only rule the separate boolean is the safer fallback; the owner should choose.
-- UNVERIFIED: how `ai_thinking` reaches the router; whether binds can change while engaged; whether `solutionSpace` is available to a child's Director.
+- UNVERIFIED: whether `solutionSpace` is available to a child's Director. (How `ai_thinking` reaches the router and whether binds can change while engaged are now traced in section 2.)
+- Found in round 1 (ADR 0064 Context): an isolated `chat_on` call leaves the client on the judge's model if its future is dropped (`crates/driver/src/headless/kernel.rs:1822-1839`), and it gives an `Unset` request the session's `ai_thinking` (`crates/driver/src/headless/kernel.rs:424-436`).
 
 ## 7. Upstream origin and license
 
