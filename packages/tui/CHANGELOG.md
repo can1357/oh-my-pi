@@ -19,6 +19,7 @@
 - Fixed Markdown task lists dropping their checkboxes, so done (`- [x]`) and open (`- [ ]`) items looked the same in the transcript ([#16557](https://github.com/can1357/oh-my-pi/pull/16557) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 - Fixed DEC 2048 in-band resize reports typing `48;rows;cols;…` into the composer on iTerm2 ([#16695](https://github.com/can1357/oh-my-pi/pull/16695) by [@demon-i386](https://github.com/demon-i386))
 - Fixed the working-row shimmer dropping to a few frames a second while omp waits on a tool or the model, on terminals without synchronized output such as tmux 3.6 ([#19032](https://github.com/can1357/oh-my-pi/pull/19032) by [@nategriffin26](https://github.com/nategriffin26))
+- Expanded tool output (Ctrl+O) now shows the complete, soft-wrapped message in IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of the first 12 lines cut at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#18648](https://github.com/can1357/oh-my-pi/pull/18648) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
@@ -60,7 +61,6 @@
 
 ### Fixed
 
-- Expanded tool output (Ctrl+O) now shows the complete, soft-wrapped message in IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of the first 12 lines cut at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#18648](https://github.com/can1357/oh-my-pi/pull/18648) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it ([#18660](https://github.com/can1357/oh-my-pi/pull/18660) by [@DocksDocks](https://github.com/DocksDocks))
 - The `/resume` picker shows dates of sessions older than a week in the locale from `LC_ALL`, `LC_TIME` or `LANG` instead of always using `MM/DD/YYYY` ([#18863](https://github.com/can1357/oh-my-pi/pull/18863) by [@raoulkent](https://github.com/raoulkent))
 - Fixed an `ask` HTML form in Tern not taking typing after a click on its Other row or a text well while a composer draft held the keyboard: the click now hands the keys to the form, as ↑/↓ does, instead of every key still editing the draft
