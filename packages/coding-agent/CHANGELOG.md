@@ -24,6 +24,7 @@
 - `spotlight.thinking` now defaults to `med` instead of `low`: Spotlight reads deeper heads, which ranked needed lines better on the benchmark and on recorded sessions, at a higher cost per request
 - With the Spotlight experiment on, results the agent mostly read back right after a cut are shown whole: a source `read` of at most ~12k characters is no longer outlined, a `pr://` or `issue://` thread stays whole up to ~12k characters, and CUDA, Objective-C, Luau, QML, CSS, shell and CMake files are treated as source (whole up to ~12k characters, outlined past it) instead of being cut by rank
 - Secret obfuscation is now enabled by default, so configured secrets and credential-shaped tokens are redacted before provider requests without any setup; disable it with **Hide Secrets** in `/settings` or `secrets.enabled: false`.
+- Secret obfuscation is now enabled by default, so configured secrets and credential-shaped tokens are redacted before provider requests without any setup; disable it with **Hide Secrets** in `/settings` or `secrets.enabled: false` ([#19251](https://github.com/can1357/oh-my-pi/pull/19251) by [@javierbits](https://github.com/javierbits)).
 
 ### Fixed
 
