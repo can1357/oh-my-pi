@@ -4524,19 +4524,23 @@ export class SessionManager {
 	}
 
 	/**
-	 * Whether `session` was recorded in a worktree of `cwd`'s repository that no
-	 * longer exists, e.g. a `/wt` worktree removed since. Resume such a session
-	 * through {@link openRelocated} into `cwd`: its own directory cannot be entered.
+	 * Whether `session` is filed under `cwd` (its cwd-derived session directory,
+	 * or a worktree sibling's) while the directory it recorded no longer exists:
+	 * a `/wt` worktree removed since, or the project folder moved or renamed.
+	 * Such a session belongs to `cwd`; resume it through {@link openRelocated},
+	 * its own directory cannot be entered. A custom `--session-dir` is shared
+	 * across projects, so filing there proves nothing.
 	 * @param sessionDir `cwd`'s session directory; defaults to the cwd-derived one.
 	 */
-	static async isFromRemovedWorktree(
+	static async isStrandedIn(
 		session: Pick<SessionInfo, "path" | "cwd">,
 		cwd: string,
 		sessionDir?: string,
 	): Promise<boolean> {
 		if (!session.cwd || !(await directoryIsMissing(session.cwd))) return false;
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd);
+		const dir = path.resolve(sessionDir ?? SessionManager.getDefaultSessionDir(cwd));
 		const home = path.resolve(path.dirname(session.path));
+		if (home === dir) return resolveManagedSessionRoot(dir, cwd) !== undefined;
 		return (await worktreeSessionDirs(cwd, dir)).some(sibling => path.resolve(sibling) === home);
 	}
 

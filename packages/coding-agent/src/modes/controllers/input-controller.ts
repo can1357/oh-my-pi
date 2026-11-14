@@ -70,6 +70,7 @@ import {
 } from "../../utils/clipboard";
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
+import { htmlToPaste } from "../../utils/html-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
@@ -1024,25 +1025,15 @@ export class InputController {
 
 		this.#enhancedPaste = new EnhancedPasteController({
 			write: data => this.ctx.ui.terminal.write(data),
-			pasteText: text => {
-				// Route enhanced-paste text to the currently focused component: through
-				// its `pasteText` hook (modal Input prompts: OAuth API-key entry,
-				// Perplexity OTP, GitHub Enterprise URL, manual redirect URL), else as
-				// the bracketed paste a terminal without enhanced paste sends it
-				// (dialogs that keep their field inside: the agents hub's New agent,
-				// the /annotate note). Falling back to the main editor would bury the
-				// text in the detached editor while the dialog has focus (#2127). The
-				// main editor takes it as a bracketed paste too, so a pasted or dropped
-				// image path attaches (#3506) instead of landing as text.
-				const focused = this.ctx.ui.getFocused();
-				if (focused && focused !== this.ctx.editor && hasPasteText(focused)) focused.pasteText(text);
-				else if (focused && focused !== this.ctx.editor && focused.handleInput)
-					focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
-				else this.ctx.editor.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
-				this.ctx.ui.requestRender();
-			},
+			pasteText: text => this.#pasteTextIntoFocus(text),
 			pasteImage: image =>
 				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
+			// Styled text goes where images do: the composer, or a prompt that takes them.
+			acceptsHtml: () => {
+				const focused = this.ctx.ui.getFocused();
+				return !focused || focused === this.ctx.editor || (hasPasteText(focused) && focused.acceptsImages === true);
+			},
+			pasteHtml: html => this.#pasteHtml(html),
 			showStatus: message => this.ctx.showStatus(message),
 			pasteNative: () => {
 				if (!this.#clipboardIsTerminalLocal()) return false;
@@ -2588,6 +2579,46 @@ export class InputController {
 			}
 			throw error;
 		}
+	}
+
+	/**
+	 * Route enhanced-paste text to the currently focused component: through its `pasteText`
+	 * hook (modal Input prompts: OAuth API-key entry, Perplexity OTP, GitHub Enterprise URL,
+	 * manual redirect URL), else as the bracketed paste a terminal without enhanced paste sends
+	 * it (dialogs that keep their field inside: the agents hub's New agent, the /annotate note).
+	 * Falling back to the main editor would bury the text in the detached editor while the
+	 * dialog has focus (#2127). The main editor takes it as a bracketed paste too, so a pasted
+	 * or dropped image path attaches (#3506) instead of landing as text.
+	 */
+	#pasteTextIntoFocus(text: string): void {
+		const focused = this.ctx.ui.getFocused();
+		if (focused && focused !== this.ctx.editor && hasPasteText(focused)) focused.pasteText(text);
+		else if (focused && focused !== this.ctx.editor && focused.handleInput)
+			focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+		else this.ctx.editor.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Paste clipboard HTML as Markdown: text alone as a text paste, else its text and images
+	 * in order through the focused image destination, each image attached where it stood.
+	 */
+	async #pasteHtml(html: string): Promise<void> {
+		const parts = htmlToPaste(html);
+		if (!parts) {
+			this.ctx.showStatus("Clipboard paste was empty");
+			return;
+		}
+		if (parts.every(part => typeof part === "string")) {
+			this.#pasteTextIntoFocus(parts.join(""));
+			return;
+		}
+		await this.#pasteImageIntoFocus(async sink => {
+			for (const part of parts) {
+				if (typeof part === "string") sink.pasteText(part);
+				else await sink.attach(part, `Unsupported pasted image format: ${part.mimeType}`);
+			}
+		});
 	}
 
 	/**

@@ -11,6 +11,8 @@ import type { OAuthController, OAuthCredentials } from "./types";
 const API_VERSION = "2.18";
 const NATIVE_APP_BUNDLE = "ai.perplexity.mac";
 const APP_USER_AGENT = "Perplexity/641 CFNetwork/1568 Darwin/25.2.0";
+/** Shape check that tells an address from a mistyped method; Perplexity validates the address itself. */
+const EMAIL_ADDRESS = /^[^\s@]+@[^\s@]+$/;
 
 function serializeCookies(cookies: CookieMap): string {
 	let header = "";
@@ -92,16 +94,19 @@ async function extractFromNativeApp(): Promise<string | null> {
 
 /**
  * Send email OTP and exchange it for a Perplexity JWT via HTTP endpoints.
+ * Prompts for the address unless the login-method answer already supplied it.
  */
-async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> {
+async function httpEmailLogin(ctrl: OAuthController, email?: string): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt) {
 		throw new AIError.OnPromptRequiredError("Perplexity");
 	}
-	const email = await ctrl.onPrompt({
-		message: "Enter your Perplexity email address",
-		placeholder: "user@example.com",
-	});
-	const trimmedEmail = email.trim();
+	const trimmedEmail = (
+		email ??
+		(await ctrl.onPrompt({
+			message: "Enter your Perplexity email address",
+			placeholder: "user@example.com",
+		}))
+	).trim();
 	if (!trimmedEmail)
 		throw new AIError.OAuthError("Email is required for Perplexity login", {
 			kind: "validation",
@@ -349,23 +354,22 @@ export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCrede
 	}
 
 	if (ctrl.onBrowserSession) {
-		const method = (
+		const answer = (
 			await ctrl.onPrompt({
-				message: "Login method: sso (browser) or email; blank for sso",
-				placeholder: "sso / email",
+				message: "Perplexity email address for a login code (blank for browser SSO)",
+				placeholder: "user@example.com",
 				allowEmpty: true,
 			})
-		)
-			.trim()
-			.toLowerCase();
+		).trim();
 		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+		const method = answer.toLowerCase();
 		if (!method || method === "sso") return browserSsoLogin(ctrl);
-		if (method !== "email") {
-			throw new AIError.OAuthError("Choose sso or email for Perplexity login", {
-				kind: "validation",
-				provider: "perplexity",
-			});
-		}
+		if (method === "email") return httpEmailLogin(ctrl);
+		if (EMAIL_ADDRESS.test(answer)) return httpEmailLogin(ctrl, answer);
+		throw new AIError.OAuthError("Expected a Perplexity email address, or a blank answer for browser SSO", {
+			kind: "validation",
+			provider: "perplexity",
+		});
 	}
 	return httpEmailLogin(ctrl);
 }

@@ -6,7 +6,13 @@ import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { describeShimmer, type ShimmerPalette, shimmerEnabled } from "../theme/shimmer";
-import { sharedSpinnerFrame, spinnerAnimated, spinnerInterval, spinnerTickDelay } from "../spinner-clock";
+import {
+	sharedSpinnerFrame,
+	sharedSpinnerTick,
+	spinnerAnimated,
+	spinnerInterval,
+	spinnerTickDelay,
+} from "../spinner-clock";
 import type { TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
@@ -103,6 +109,8 @@ export type LoaderMessageColorFn = ColorFn & {
 export class Loader extends Text {
 	#frames = DEFAULT_SPINNER_FRAMES;
 	#currentFrame = 0;
+	/** Shared-clock period at the last tick (see {@link sharedSpinnerTick}); a later one earns a repaint. */
+	#spinnerTick = 0;
 	#intervalId?: NodeJS.Timeout;
 	#ui: TUI | null = null;
 	#layoutSource?: readonly string[];
@@ -298,7 +306,9 @@ export class Loader extends Text {
 	}
 
 	start() {
-		this.#currentFrame = sharedSpinnerFrame(this.#frames.length);
+		const now = Date.now();
+		this.#spinnerTick = sharedSpinnerTick(now);
+		this.#currentFrame = sharedSpinnerFrame(this.#frames.length, now);
 		this.#syncText();
 		this.#requestPaint();
 		// The TSP terminal animates the described spinner; nothing to repaint.
@@ -370,10 +380,15 @@ export class Loader extends Text {
 				return;
 			}
 			const startedAt = performance.now();
+			// One repaint per period of the shared clock. The period decides, not the glyph: a
+			// one-glyph spinner beside an animated message (the working row) never changes glyph,
+			// yet its message moves every period.
+			const now = Date.now();
+			const tick = sharedSpinnerTick(now);
+			const advanced = tick !== this.#spinnerTick;
+			this.#spinnerTick = tick;
 			// The glyph is the shared clock's, so every spinner on screen shows the same frame.
-			const frame = sharedSpinnerFrame(this.#frames.length);
-			const advanced = frame !== this.#currentFrame;
-			this.#currentFrame = frame;
+			this.#currentFrame = sharedSpinnerFrame(this.#frames.length, now);
 			// A static spinner still re-reads a dynamic message (countdown, elapsed) on its 1 s tick.
 			const animated = spinnerAnimated();
 			if (advanced || !animated) this.#syncText();

