@@ -139,6 +139,7 @@ import {
 	claudeCodeSystemInstruction,
 	adoptRequiredClaudeCodeVersion,
 	claudeToolPrefix,
+	ensureClaudeCodeVersion,
 	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
 import {
@@ -2256,6 +2257,14 @@ const streamAnthropicOnce = (
 				clientDefaultHeaders = created.defaultHeaders;
 				return created;
 			};
+			// OAuth requests carry the Claude Code identity (User-Agent, billing
+			// header), whose version gates newer models; resolve the current release
+			// first so a new model doesn't cost a `claude_code_version_too_old` round
+			// trip. The registry is public, so the lookup uses the global fetch rather
+			// than the provider's (possibly proxied or credentialed) fetcher.
+			if (!transport && !options?.client && (options?.isOAuth ?? isAnthropicOAuthToken(apiKey))) {
+				await ensureClaudeCodeVersion(fetch, options?.signal);
+			}
 			let { client, isOAuthToken } = resolveClient();
 			// Message threads: only for this provider's own client against a
 			// session. Per-call context messages are rebuilt next request, so a

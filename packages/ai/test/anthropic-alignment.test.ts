@@ -34,7 +34,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
+import { withEnv, withOfficialAnthropicEndpoint, withoutClaudeCodeVersionLookup } from "./helpers";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
@@ -175,6 +175,7 @@ function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionI
 }
 
 withOfficialAnthropicEndpoint();
+withoutClaudeCodeVersionLookup();
 
 describe("Anthropic request fingerprint alignment", () => {
 	it("maps Stainless OS and arch values from explicit inputs", () => {

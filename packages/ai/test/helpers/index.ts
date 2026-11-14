@@ -1,6 +1,7 @@
 import { afterEach, beforeEach } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ensureClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import type { Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -140,6 +141,24 @@ export function withOfficialAnthropicEndpoint(): void {
 			Bun.env.ANTHROPIC_BASE_URL = previous;
 		}
 	});
+}
+
+const unreachableRegistry = Object.assign(
+	async (): Promise<Response> => {
+		throw new Error("npm registry disabled in tests");
+	},
+	{ preconnect: fetch.preconnect },
+);
+
+/**
+ * Keep Claude Code OAuth requests in the calling test file off the npm
+ * registry. Each test starts with a failed lookup, whose back-off makes the
+ * request path's {@link ensureClaudeCodeVersion} a no-op, so the advertised
+ * version stays the pinned fallback (plus any server-adopted version) and
+ * tests that forbid or count global `fetch` calls see none.
+ */
+export function withoutClaudeCodeVersionLookup(): void {
+	beforeEach(() => ensureClaudeCodeVersion(unreachableRegistry));
 }
 
 /**

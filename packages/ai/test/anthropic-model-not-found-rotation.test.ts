@@ -7,6 +7,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { withoutClaudeCodeVersionLookup } from "./helpers";
 import { anthropicChunks, captureFetch, type CapturedRequest } from "./helpers/factory-droid";
 
 const MODEL_ID = "claude-mythos-5-2";
@@ -36,6 +37,8 @@ function modelNotFoundBody(modelId: unknown = MODEL_ID): string {
 function rejection(body: string, status = 404, headers?: Record<string, string>): Response {
 	return new Response(body, { status, headers: { "Content-Type": "application/json", ...headers } });
 }
+
+withoutClaudeCodeVersionLookup();
 
 describe("Anthropic OAuth model-not-found credential rotation", () => {
 	let dir: string;

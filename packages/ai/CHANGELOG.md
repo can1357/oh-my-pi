@@ -25,6 +25,7 @@
 - Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
 - Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
 - Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
+- Fixed Claude subscription (OAuth) requests to new Claude models being rejected once with `claude_code_version_too_old` because the advertised Claude Code version was a pinned 2.1.321; the version now comes from the current `@anthropic-ai/claude-code` npm release, re-checked hourly, and never drops below a version the server already required ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
