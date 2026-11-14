@@ -150,10 +150,10 @@ export class ToolCallLoopGuard {
 				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
 				this.#lastHash = undefined;
-				this.#count = 0;
-				this.#lastNormalizedHash = undefined;
-				this.#lastAssistantText = undefined;
-				this.#normalizedCount = 0;
+			this.#count = 0;
+			this.#lastNormalizedHash = undefined;
+			this.#lastAssistantText = undefined;
+			this.#normalizedCount = 0;
 			}
 			return null;
 		}
@@ -188,7 +188,7 @@ export class ToolCallLoopGuard {
 
 		if (this.#count < this.#threshold && this.#normalizedCount < this.#threshold) return null;
 		const count = this.#count >= this.#threshold ? this.#count : this.#normalizedCount;
-		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
+		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
