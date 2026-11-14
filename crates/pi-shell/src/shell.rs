@@ -203,6 +203,7 @@ pub struct ShellRunResult {
 	/// trailing `exit` at the end of the input — which ends the run where
 	/// the input's end would have — is not reported. The session stays
 	/// usable, with its state (including armed options) intact.
+	#[serde(default)]
 	pub ended_by_exit: bool,
 }
 

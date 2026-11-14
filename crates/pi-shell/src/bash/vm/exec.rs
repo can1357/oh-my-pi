@@ -739,6 +739,11 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// the dispatch loop already advanced (the errexit check); it feeds
 /// [`exit_cut_short`].
 fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_unrun: u32) {
+	// An `exec` replacement or a POSIX-fatal error ends the shell without
+	// the `exit`/errexit abort this reports. Taken up front so that every
+	// exit path — the zsh hook return below included — consumes it: one
+	// left set would suppress the next exit's own report.
+	let exit_fatal = std::mem::take(&mut k.exit_fatal);
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
 	if vp.zsh.is_some()
@@ -752,9 +757,6 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_
 		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
 	});
 	vp.status = status;
-	// An `exec` replacement or a POSIX-fatal error ends the shell without
-	// the `exit`/errexit abort this reports.
-	let exit_fatal = std::mem::take(&mut k.exit_fatal);
 	if vp.parent.is_none()
 		&& let Some(run) = vp.runs.front()
 	{
@@ -862,6 +864,9 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		return false;
 	}
 	run.started = true;
+	// The fatal flag describes one run's own end; one left set never
+	// applies to the next run (its fatal scope ended without `exit_shell`).
+	k.exit_fatal = false;
 	if run.explicit_mode {
 		run.restore_mode = Some(vp.mode);
 		let mode = run.mode;
@@ -3155,6 +3160,11 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 		},
 		Opcode::Spawn => spawn(k, vp, cx, unit, op),
 		Opcode::SubExit => {
+			// The scope ending here — a subshell, pipeline stage or job —
+			// contains any `exec` replacement or POSIX-fatal error that made
+			// it exit: the flag says how its own shell's run ends, so it must
+			// not survive into an unrelated later one.
+			k.exit_fatal = false;
 			if matches!(top_frame(vp).kind, FrameKind::NoFork | FrameKind::Stage) {
 				pop_frame(&mut k.root, cx.store, vp);
 			} else {

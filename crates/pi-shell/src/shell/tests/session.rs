@@ -1011,6 +1011,76 @@ async fn exit_and_errexit_report_ended_by_exit() {
 	);
 }
 
+/// A fatal inside a nested scope — an `exec` replacement or a POSIX-fatal
+/// error in a subshell or command substitution — ends only that scope: the
+/// flag it sets must not survive to suppress the report of a later, real
+/// abort (#18899).
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_scope_fatal_does_not_hide_a_later_abort() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+	let arm = "set -e; PI_NESTED_ARMED=1";
+
+	// An `exec` replacement inside a subshell ends the subshell only. Each
+	// setup disarms errexit first: an abort leaves it armed for the session.
+	assert_eq!(run("set +e; (exec /bin/true); true").await.exit_code, Some(0));
+	assert_eq!(run(arm).await.exit_code, Some(0));
+	let aborted = run("false; echo never").await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a subshell `exec` hid the later abort");
+
+	// A POSIX-fatal error inside a subshell, likewise.
+	assert_eq!(
+		run("set +e; set -o posix; (for 1 in a; do :; done); set +o posix; true")
+			.await
+			.exit_code,
+		Some(0)
+	);
+	assert_eq!(run(arm).await.exit_code, Some(0));
+	let aborted = run("false; echo never").await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a subshell POSIX-fatal hid the later abort");
+
+	// An `exec` inside a command substitution, likewise.
+	assert_eq!(
+		run("set +e; PI_CS_OUT=$(exec /bin/true); true")
+			.await
+			.exit_code,
+		Some(0)
+	);
+	assert_eq!(run(arm).await.exit_code, Some(0));
+	let aborted = run("false; echo never").await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a command-substitution `exec` hid the later abort");
+
+	// A forked subshell running an exit-trapped function, likewise.
+	assert_eq!(
+		run("set +e; pi_nested_fn() { trap 'true' EXIT; }; ( pi_nested_fn ); true")
+			.await
+			.exit_code,
+		Some(0)
+	);
+	assert_eq!(run(arm).await.exit_code, Some(0));
+	let aborted = run("false; echo never").await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "a trapped fork hid the later abort");
+
+	// Within one input, a subshell's `exec` leaves a later explicit exit
+	// still reported as cutting the run short.
+	let aborted = run("(exec /bin/true); exit 0; echo never").await;
+	assert!(aborted.ended_by_exit, "a subshell `exec` hid an exit in the same input");
+}
+
 /// The cut-short signal survives the incremental script path (newline-
 /// separated commands each parse as their own unit), follows reachable
 /// control flow only (an `else` arm the taken branch jumps around never
