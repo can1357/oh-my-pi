@@ -65,7 +65,7 @@ fn rows(p: &Value) -> Vec<(String, &Value)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsing() {
 	// A command still streaming in: nothing has run, its last line is
-	// unfinished.
+	// unfinished and drawn as it will continue.
 	let trace =
 		RunTrace::new("cd /tmp && git add -A\nfor f in *.go; do echo \"$f\"; done\nif true; th");
 	let streaming = present(&trace, &Options::default());
@@ -76,10 +76,15 @@ async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsi
 		"and git add -A",
 		"for f in glob(\"*.go\"):",
 		"print(f\"{f}\")",
-		"if true; th"
+		"if true:"
 	]);
 	assert!(shown.iter().all(|(_, row)| row["state"].is_null()), "{streaming}");
-	assert_eq!(shown[4].1["role"], "raw", "an unfinished command stays literal");
+
+	// What no completion makes valid stays literal.
+	let p = present(&RunTrace::new("ls\nfi x"), &Options::default());
+	let shown = rows(&p);
+	assert_eq!(shown.last().unwrap().0, "fi x");
+	assert_eq!(shown.last().unwrap().1["role"], "raw", "an unparsable command stays literal");
 
 	// The engine never reaches the last line: it is drawn, but never ran.
 	let shell = Shell::new(None);
@@ -114,6 +119,28 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		// A streamed `\` would escape an appended quote: it waits for its
 		// escapee.
 		("echo \"C:\\", &["print(\"C:\")"]),
+		("x=$(echo a\\", &["x = ⟨print(\"a\")⟩"]),
+		// An empty body: the placeholder it is closed with draws no row.
+		("for f in a b; do", &["for f in [\"a\", \"b\"]:"]),
+		("cd /tmp && (", &["cwd /tmp", "and subshell:"]),
+		// A header still arriving: the start of `then` is not a command.
+		("if true; th", &["if true:"]),
+		// Nor are the starts of `in` and `do`.
+		("for f i", &["for f in args:"]),
+		("for f in a b; d", &["for f in [\"a\", \"b\"]:"]),
+		// A compound keyword with no header yet stays the command name it
+		// read as a byte earlier (`fo`).
+		("cd /tmp && for", &["cwd /tmp", "and for"]),
+		("for f in a; do echo $f; for", &["for f in [\"a\"]:", "print(f)", "for"]),
+		// A loop opening inside a loop on the same line.
+		("for i in 1 2; do for v", &["for i in [\"1\", \"2\"]:", "for v in args:"]),
+		// The fd of a redirection still arriving after a compound.
+		("(cd /tmp) 2>", &["subshell:", "cwd /tmp"]),
+		// A function header: the name stays a command until `()` arrives,
+		// then the definition is drawn before its body.
+		("x; gen(", &["x", "gen"]),
+		("x; gen()", &["x", "def gen():"]),
+		("x; function gen", &["x", "def gen():"]),
 	] {
 		let p = present(&RunTrace::new(script), &Options::default());
 		let shown = rows(&p);
@@ -122,22 +149,17 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		assert!(shown.iter().all(|(_, row)| row["role"] != "raw"), "{script:?}: {p}");
 	}
 
-	// A compound still opening has no body a closer could complete: only it
-	// stays literal, not the commands before it.
-	let p = present(&RunTrace::new("cd /tmp && for"), &Options::default());
-	let shown = rows(&p);
-	let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
-	assert_eq!(texts, ["cwd /tmp", " && for"]);
-	assert_ne!(shown[0].1["role"], "raw", "{p}");
-	assert_eq!(shown[1].1["role"], "raw", "{p}");
-
-	// The `&` backgrounding the head stays with it rather than drawing a
-	// literal row of its own.
-	let p = present(&RunTrace::new("sleep 1 &\nfor f in"), &Options::default());
-	let shown = rows(&p);
-	assert_eq!(shown.len(), 2, "{p}");
-	assert_ne!(shown[0].1["role"], "raw", "{p}");
-	assert_eq!(shown[1].0, "for f in");
+	// A tail no completion closes stays literal, but not the commands
+	// before it; the `&` backgrounding the head stays with it rather than
+	// drawing a literal row of its own.
+	for (script, head) in [("cd /tmp && for (", "cwd /tmp"), ("sleep 1 &\nfor (", "spawn sleep 1")] {
+		let p = present(&RunTrace::new(script), &Options::default());
+		let shown = rows(&p);
+		assert_eq!(shown.len(), 2, "{script:?}: {p}");
+		assert_eq!(shown[0].0, head, "{script:?}");
+		assert_ne!(shown[0].1["role"], "raw", "{script:?}: {p}");
+		assert_eq!(shown[1].1["role"], "raw", "{script:?}: {p}");
+	}
 
 	// Escape parity: after `\\` the `|` is a pipe awaiting its next stage,
 	// after `\` it is part of the word.

@@ -88,7 +88,8 @@ struct Cached {
 	raw:          [Option<(usize, Arc<raw::Static>)>; 2],
 	docs:         HashMap<NodeKey, Arc<Vec<Option<Span>>>>,
 	script_utf16: Option<Arc<[u32]>>,
-	/// Parses of uncompiled script byte ranges; the script never changes.
+	/// Parses of uncompiled script byte ranges, by whether a streamed tail
+	/// may be repaired; the script never changes.
 	ahead:        HashMap<(usize, usize, bool), Option<Arc<Ahead>>>,
 }
 #[derive(Clone, Debug)]
@@ -173,11 +174,15 @@ struct Ahead {
 	ids:      Vec<u32>,
 	map:      SourceMap,
 	analysis: Analysis,
-	/// The text parsed when it is not the script's own: its streamed tail
-	/// repaired by [`repair_tail`].
+	/// The text parsed when it is not the script's own: a streamed tail
+	/// repaired by [`repair_tail`] or [`parsed_head`].
 	repaired: Option<Box<[u8]>>,
+	/// Script bytes of the range the parse stands for; the rest up to
+	/// [`Self::hidden`] is drawn literally.
+	covered:  usize,
 	/// Bytes at the end of the range drawn nowhere, which a repair dropped:
-	/// a dangling operator or redirection, or the start of an awaited keyword.
+	/// a dangling operator or redirection, the start of an awaited keyword,
+	/// or a `\` that would escape an appended closer.
 	hidden:   usize,
 }
 #[derive(Clone, Debug)]
@@ -569,9 +574,11 @@ impl<S: VizSource> Printer<'_, S> {
 	/// has an outcome until the engine announces it; the first command that
 	/// does not parse and everything after it stay literal, as does a unit
 	/// the engine announced without syntax (its parse may have used aliases
-	/// or features this one lacks) and everything after that. A leading
-	/// `&&`/`||` continues the chain of the unit before it; a leading `;` is
-	/// the separator of the unit before and draws no row of its own.
+	/// or features this one lacks) and everything after that. The exception
+	/// is the end of a script still streaming in, which is drawn as it will
+	/// most likely continue ([`repair_tail`]). A leading `&&`/`||` continues
+	/// the chain of the unit before it; a leading `;` is the separator of
+	/// the unit before and draws no row of its own.
 	fn ahead(&mut self, lo: usize, hi: usize) {
 		if lo >= hi {
 			return;
@@ -599,6 +606,7 @@ impl<S: VizSource> Printer<'_, S> {
 			Some(repaired) => repaired,
 			None => &script[lo..stop],
 		};
+		let first_row = self.rows.len();
 		let mut cursor = 0;
 		for (((tree, root), span), id) in ahead.commands.iter().zip(&ahead.spans).zip(&ahead.ids) {
 			let start = span.lo as usize;
@@ -618,58 +626,67 @@ impl<S: VizSource> Printer<'_, S> {
 			self.chain_list(List::at(tree, *root), &context, 0, lead.take());
 			cursor = span.hi as usize;
 		}
+		let covered = lo + ahead.covered;
+		if ahead.repaired.is_some() {
+			// A placeholder body a repair appended (`do :`) maps wholly onto
+			// the end of what it covers: such a row has no source to draw.
+			let end = script_utf16(source)[covered];
+			let mut index = 0;
+			self.rows.retain(|row| {
+				index += 1;
+				index <= first_row || row.range != Some([end, end])
+			});
+		}
 		// A repaired command can end in appended closers, past the script;
 		// only a repair at the script's end hides bytes, so `stop == hi`.
-		let shown = hi - ahead.hidden;
-		let cursor = (lo + cursor).min(shown);
-		self.pending(&script[cursor..shown], cursor as u32, 0);
+		let cursor = (lo + cursor).min(covered);
+		self.pending(&script[cursor..hi - ahead.hidden], cursor as u32, 0);
 	}
 
 	fn parsed_ahead(&self, lo: usize, hi: usize) -> Option<Arc<Ahead>> {
-		// Only a run still going can be streaming in; a finished script's
-		// error is its own and stays literal.
-		let streaming = self.runtime.executing;
+		let script: &[u8] = self.source.script().as_ref();
+		// Streaming cuts off only the end of a script still running; anywhere
+		// else, or once the run has ended, the error is the script's own.
+		let repairable = self.source.streaming() && hi == script.len();
 		if let Some(cached) = self
 			.source
 			.cache()
 			.inner
 			.lock()
 			.ahead
-			.get(&(lo, hi, streaming))
+			.get(&(lo, hi, repairable))
 		{
 			return cached.clone();
 		}
-		let script: &[u8] = self.source.script().as_ref();
 		let text = &script[lo..hi];
-		let Parsed { mut commands, mut spans, error } = parse_commands(text);
-		let mut repaired = None;
-		let mut hidden = 0;
-		// Streaming cuts off only the script's end; anywhere else the error
-		// is the script's own.
-		if let Some(error) = error
-			&& streaming
-			&& hi == script.len()
-		{
-			if let Some(repair) = repair_tail(text, error) {
-				(commands, spans, hidden) = (repair.commands, repair.spans, repair.hidden);
-				repaired = Some(repair.text);
-			} else if let Some(head) = parsed_head(text) {
-				(commands, spans) = (head.commands, head.spans);
-			}
-		}
+		let parsed = parse_commands(text);
+		// A repaired tail drops what it does not cover; after a repaired head
+		// the rest is drawn literally.
+		let repair = match parsed.error {
+			Some(error) if repairable => repair_tail(text, error)
+				.map(|tail| (text.len() - tail.covered, tail))
+				.or_else(|| parsed_head(text).map(|head| (0, head))),
+			_ => None,
+		};
+		let (commands, spans, repaired, covered, hidden) = match repair {
+			Some((hidden, repair)) => {
+				(repair.commands, repair.spans, Some(repair.text), repair.covered, hidden)
+			},
+			None => (parsed.commands, parsed.spans, None, text.len(), 0),
+		};
 		let parsed = (!commands.is_empty()).then(|| {
 			let ids: Vec<u32> = spans.iter().map(|span| lo as u32 + span.lo + 1).collect();
 			let mut analysis = analysis::program(&commands, AHEAD, &ids);
 			analysis.arithmetic = Arc::clone(&self.analysis.arithmetic);
-			let shown = hi - lo - hidden;
-			let appended = repaired.as_deref().map_or(shown, <[u8]>::len) - shown;
+			let appended = repaired.as_deref().map_or(0, |text| text.len() - covered);
 			Arc::new(Ahead {
-				map: source::script_map(self.source, lo, shown).padded(appended),
+				map: source::script_map(self.source, lo, covered, appended),
 				commands,
 				spans,
 				ids,
 				analysis,
 				repaired,
+				covered,
 				hidden,
 			})
 		});
@@ -679,7 +696,7 @@ impl<S: VizSource> Printer<'_, S> {
 			.inner
 			.lock()
 			.ahead
-			.insert((lo, hi, streaming), parsed.clone());
+			.insert((lo, hi, repairable), parsed.clone());
 		parsed
 	}
 
@@ -2596,13 +2613,18 @@ fn parse_commands(text: &[u8]) -> Parsed {
 /// A streamed tail parsed as it will most likely continue.
 struct Repair {
 	text:     Box<[u8]>,
-	/// Bytes dropped from the end of the original text.
-	hidden:   usize,
+	/// Bytes of the original text `text` stands for, from its start.
+	covered:  usize,
 	commands: Vec<(Tree, u32)>,
 	spans:    Vec<Span>,
 }
+impl Repair {
+	fn new(text: Vec<u8>, covered: usize, parsed: Parsed) -> Self {
+		Self { text: text.into(), covered, commands: parsed.commands, spans: parsed.spans }
+	}
+}
 
-/// Constructs one repair closes; each appended closer closes one.
+/// Repair passes at most: each closes one construct or trims the end.
 const MAX_REPAIRS: usize = 16;
 
 /// A script still streaming in usually ends mid-construct: inside a quote or
@@ -2615,38 +2637,61 @@ const MAX_REPAIRS: usize = 16;
 /// parser awaits. `None` when `error` is not an unfinished end, or the
 /// repaired text still does not parse.
 fn repair_tail(text: &[u8], error: ParseErrorKind) -> Option<Repair> {
+	if let Some(end) = bare_keyword(text) {
+		// So far it reads as the command name it was a byte ago (`fo`,
+		// `whil`); quoted, it is one until its header arrives.
+		let mut quoted = text[..end].to_vec();
+		quoted.extend_from_slice(b"''");
+		let mut repair = close(&quoted)?;
+		// The quotes are appended, not script bytes.
+		repair.covered = end;
+		return Some(repair);
+	}
 	close_tail(text, error, true).or_else(|| {
-		// Inside `$(` a dangling operator surfaces as the unclosed `$(`, and
-		// closing it leaves `|)`: drop the operator first, then close.
+		// A dangling operator or redirection inside an open construct (`$(a
+		// |`) surfaces as that construct, and closing it leaves `|)`: drop
+		// it first, then repair what is left, still the streamed end.
 		let cut = dangling_operator(text).or_else(|| dangling_redirection(text))?;
-		let Parsed { commands, spans, error } = parse_commands(&text[..cut]);
-		let mut repair = match error {
-			None => Repair { text: text[..cut].into(), hidden: 0, commands, spans },
-			Some(error) => close_tail(&text[..cut], error, false)?,
-		};
-		repair.hidden += text.len() - cut;
-		Some(repair)
+		let head = &text[..cut];
+		let parsed = parse_commands(head);
+		match parsed.error {
+			None => Some(Repair::new(head.to_vec(), cut, parsed)),
+			Some(error) => repair_tail(head, error),
+		}
 	})
 }
 
-/// [`repair_tail`]'s single pass; only a `pristine` end may be cut or
-/// unquoted.
+/// `text` as is when it parses, else with its open constructs closed.
+fn close(text: &[u8]) -> Option<Repair> {
+	let parsed = parse_commands(text);
+	match parsed.error {
+		None => Some(Repair::new(text.to_vec(), text.len(), parsed)),
+		Some(error) => close_tail(text, error, false),
+	}
+}
+
+/// One attempt of [`repair_tail`]: only while `pristine` may the end be
+/// trimmed or a reserved word quoted.
 fn close_tail(text: &[u8], mut error: ParseErrorKind, mut pristine: bool) -> Option<Repair> {
 	let mut repaired = text.to_vec();
 	let mut shown = text.len();
 	for _ in 0..MAX_REPAIRS {
-		match error {
+		let parsed = match error {
 			ParseErrorKind::Unmatched(close) => {
-				// A streamed `\` would escape the appended quote: hide it
+				// A streamed `\` would escape the appended closer: hide it
 				// until what it escapes arrives.
-				if pristine && matches!(close, "\"" | "`") && escaped(&repaired) {
+				if pristine && escaped(&repaired) {
 					shown -= 1;
 					repaired.truncate(shown);
 				}
 				repaired.extend_from_slice(close.as_bytes());
+				parse_commands(&repaired)
 			},
 			ParseErrorKind::UnexpectedEof { from } => {
-				let keyword = from.map(|(keyword, _)| keyword);
+				// A function's header reports no opener: its body is awaited.
+				let keyword = from
+					.map(|(keyword, _)| keyword)
+					.or_else(|| function_header(&repaired).then_some("function"));
 				let cut = if pristine {
 					dangling_operator(&repaired)
 						.or_else(|| keyword.and_then(|keyword| awaited_prefix(&repaired, keyword)))
@@ -2656,35 +2701,41 @@ fn close_tail(text: &[u8], mut error: ParseErrorKind, mut pristine: bool) -> Opt
 				if let Some(cut) = cut {
 					shown = cut;
 					repaired.truncate(cut);
+					parse_commands(&repaired)
 				} else {
-					repaired.extend_from_slice(closer(keyword?));
+					complete(&mut repaired, keyword?)?
 				}
 			},
 			ParseErrorKind::UnexpectedToken { token, .. } if pristine => {
-				if *token == *b"newline" {
-					shown = dangling_redirection(&repaired)?;
+				let trailing = repaired.ends_with(&token);
+				let header_word = [&b"in"[..], b"do"]
+					.iter()
+					.any(|word| word.len() > token.len() && word.starts_with(&token));
+				if trailing && (header_word || token.iter().all(u8::is_ascii_digit)) {
+					// The start of the header word a compound awaits (`for f
+					// i`, `for f in a; d`), or the fd of a redirection still
+					// arriving after a compound (`(a) 2`): hidden until whole.
+					shown -= token.len();
 					repaired.truncate(shown);
-				} else if token.iter().all(u8::is_ascii_lowercase) && repaired.ends_with(&token) {
+				} else if trailing && token.iter().all(u8::is_ascii_lowercase) {
 					// Quoted, the reserved word is a plain command name, as it
 					// will be once the rest of the name arrives.
 					repaired.extend_from_slice(b"''");
+				} else if *token == *b"newline" && repaired.ends_with(b"(") {
+					// A function header awaiting its `)` (`gen(`): drawn as
+					// the command it read as a byte ago until it is whole.
+					shown -= 1;
+					repaired.truncate(shown);
 				} else {
 					return None;
 				}
+				parse_commands(&repaired)
 			},
 			_ => return None,
-		}
+		};
 		pristine = false;
-		let Parsed { commands, spans, error: next } = parse_commands(&repaired);
-		match next {
-			None => {
-				return Some(Repair {
-					text: repaired.into(),
-					hidden: text.len() - shown,
-					commands,
-					spans,
-				});
-			},
+		match parsed.error {
+			None => return Some(Repair::new(repaired, shown, parsed)),
 			Some(next) => error = next,
 		}
 	}
@@ -2695,38 +2746,69 @@ fn close_tail(text: &[u8], mut error: ParseErrorKind, mut pristine: bool) -> Opt
 const MAX_HEAD_CUTS: usize = 8;
 
 /// The commands of `text` before its last list or pipeline operator whose
-/// head parses as is: what precedes a compound command still opening (`&&
-/// for f in`, `; (`), which no appended closer completes while its body is
-/// empty. The rest stays literal, rather than the whole command.
-fn parsed_head(text: &[u8]) -> Option<Parsed> {
+/// head parses, its open constructs closed: what precedes a compound
+/// command whose header is still arriving (`&& for`, `; while`), which no
+/// completion closes. The rest stays literal, rather than the whole command.
+fn parsed_head(text: &[u8]) -> Option<Repair> {
 	let cuts = text.iter().enumerate().filter(|&(at, byte)| {
 		matches!(byte, b';' | b'&' | b'|' | b'\n')
 			&& (at == 0 || !matches!(text[at - 1], b';' | b'&' | b'|' | b'<' | b'>'))
+			&& !escaped(&text[..at])
 	});
 	for (at, &byte) in cuts.rev().take(MAX_HEAD_CUTS) {
 		// A lone `&` backgrounds the head and a `;` ends it: both stay with it.
 		let lone =
 			matches!(byte, b';' | b'&') && !matches!(text.get(at + 1), Some(b'&' | b'>' | b';'));
 		let end = if lone { at + 1 } else { at };
-		// A cut inside quotes leaves the head unterminated: it does not parse.
-		let head = parse_commands(&text[..end]);
-		if head.error.is_none() && !head.commands.is_empty() {
+		// A cut inside quotes leaves the head unterminated: it does not close.
+		if let Some(head) = close(&text[..end])
+			&& !head.commands.is_empty()
+		{
 			return Some(head);
 		}
 	}
 	None
 }
 
-/// What closes the compound command opened by `keyword`.
-fn closer(keyword: &str) -> &'static [u8] {
-	match keyword {
-		"if" => b"\nfi",
-		"case" => b"\nesac",
-		"for" | "select" | "while" | "until" => b"\ndone",
-		"{" => b"\n}",
-		"(" => b"\n)",
-		_ => b" ]]",
+/// Close the compound command opened by `keyword` at the end of `repaired`,
+/// trying in turn: its closer; a placeholder body, when the body is still
+/// empty; and the rest of its header, when that is still arriving. Keeps the
+/// first that parses or leaves only an outer construct open.
+fn complete(repaired: &mut Vec<u8>, keyword: &str) -> Option<Parsed> {
+	let completions: &[&[u8]] = match keyword {
+		"if" => &[b"\nfi", b"\n:\nfi", b"\nthen :\nfi"],
+		"for" | "select" | "while" | "until" => &[b"\ndone", b"\n:\ndone", b"\ndo :\ndone"],
+		"case" => &[b"\nesac", b"\nin\nesac", b")\nesac"],
+		"{" => &[b"\n}", b"\n:\n}"],
+		"(" => &[b"\n)", b"\n:\n)"],
+		"[[" => &[b" ]]"],
+		"function" => &[b" {\n:\n}"],
+		_ => return None,
+	};
+	let end = repaired.len();
+	completions.iter().find_map(|completion| {
+		repaired.truncate(end);
+		repaired.extend_from_slice(completion);
+		let parsed = parse_commands(repaired);
+		matches!(
+			parsed.error,
+			None | Some(ParseErrorKind::Unmatched(_) | ParseErrorKind::UnexpectedEof { .. })
+		)
+		.then_some(parsed)
+	})
+}
+
+/// Whether `text` ends in a function header whose body is still to come:
+/// `gen()`, `function gen`.
+fn function_header(text: &[u8]) -> bool {
+	let text = text.trim_ascii_end();
+	if text.ends_with(b"()") {
+		return true;
 	}
+	let mut words = text
+		.rsplit(u8::is_ascii_whitespace)
+		.filter(|word| !word.is_empty());
+	words.next().is_some() && words.next() == Some(b"function")
 }
 
 /// Start of the `|`, `|&`, `&&` or `||` ending `text` before blanks: a
@@ -2770,8 +2852,8 @@ fn dangling_redirection(text: &[u8]) -> Option<usize> {
 /// loop). Drawn as a command, it would vanish once the keyword completes.
 fn awaited_prefix(text: &[u8], keyword: &str) -> Option<usize> {
 	let awaited: &[&[u8]] = match keyword {
-		"if" => &[b"fi", b"else", b"elif"],
-		"for" | "select" | "while" | "until" => &[b"done"],
+		"if" => &[b"then", b"fi", b"else", b"elif"],
+		"for" | "select" | "while" | "until" => &[b"do", b"done"],
 		"case" => &[b"esac"],
 		_ => return None,
 	};
@@ -2783,7 +2865,25 @@ fn awaited_prefix(text: &[u8], keyword: &str) -> Option<usize> {
 	if word.is_empty() || !awaited.iter().any(|keyword| keyword.starts_with(word)) {
 		return None;
 	}
-	// Command position: after a separator, or a keyword opening a body.
+	command_position(text, at).then_some(at)
+}
+
+/// End of the compound command keyword ending `text` before blanks with no
+/// header yet (`; for`, `&& while `), which no completion closes.
+fn bare_keyword(text: &[u8]) -> Option<usize> {
+	let end = text.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+	let at = text[..end]
+		.iter()
+		.rposition(|&byte| !(byte.is_ascii_lowercase() || byte == b'['))
+		.map_or(0, |at| at + 1);
+	let keyword =
+		matches!(&text[at..end], b"if" | b"for" | b"select" | b"while" | b"until" | b"case" | b"[[");
+	(keyword && command_position(text, at)).then_some(end)
+}
+
+/// Whether a word starting at `at` is in command position: after a
+/// separator, or a keyword opening a body.
+fn command_position(text: &[u8], at: usize) -> bool {
 	let blanks = text[..at]
 		.iter()
 		.rev()
@@ -2796,11 +2896,10 @@ fn awaited_prefix(text: &[u8], keyword: &str) -> Option<usize> {
 				.last()
 				.is_none_or(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b';'))
 	});
-	let command = after_keyword
+	after_keyword
 		|| before
 			.last()
-			.is_none_or(|byte| matches!(byte, b';' | b'\n' | b'&' | b'|' | b'(' | b'{'));
-	command.then_some(at)
+			.is_none_or(|byte| matches!(byte, b';' | b'\n' | b'&' | b'|' | b'(' | b'{'))
 }
 fn single(a: AndOr<'_>) -> Option<Command<'_>> {
 	let first = a.first();
