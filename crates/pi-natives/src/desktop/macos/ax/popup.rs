@@ -55,7 +55,7 @@ pub(super) fn choose(popup: &AXUIElement, value: &str) -> CoreResult<()> {
 		.as_ref()
 		.map(|(pid, before)| (*pid, before.as_slice()));
 	if opened {
-		items = match open_menu(popup, windows) {
+		items = match open_menu(popup, windows, items.len()) {
 			Ok(items) => items,
 			Err(error) => return Err(unopened(error, value, &titles)),
 		};
@@ -196,19 +196,25 @@ fn open_menu_element(popup: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 		.find(|child| copy_string(child, "AXRole").as_deref() == Some("AXMenu"))
 }
 
-/// The items of an open menu once the app has built them; `None` while no
-/// menu is open, even when the closed popup publishes its chosen option.
-fn built_menu<T>(menu: Option<Vec<T>>) -> Option<Vec<T>> {
-	menu.filter(|items| !items.is_empty())
+/// Waits for an open menu's options, ignoring the closed popup's chosen item.
+fn await_menu<T>(
+	wait: Duration,
+	closed: usize,
+	mut probe: impl FnMut() -> (bool, Vec<T>),
+) -> Option<Vec<T>> {
+	poll(wait, || {
+		let (open, items) = probe();
+		(!items.is_empty() && (open || items.len() > closed)).then_some(items)
+	})
 }
 
 /// Opens a closed popup's menu with the control's own action and returns its
-/// items once the app has built them ([`built_menu`]). `AXPress` is what a
-/// click does; `AXShowMenu` is the fallback for popups the first leaves
-/// without options.
+/// items once the app has built them. `AXPress` is what a click does;
+/// `AXShowMenu` is the fallback for popups the first leaves without options.
 fn open_menu(
 	popup: &AXUIElement,
 	windows: Option<(libc::pid_t, &[u32])>,
+	closed: usize,
 ) -> CoreResult<Vec<CFRetained<AXUIElement>>> {
 	let actions = copy_strings_from_action_names(popup)?;
 	let mut attempts = Vec::new();
@@ -224,11 +230,14 @@ fn open_menu(
 			attempts.push(error.message);
 			continue;
 		}
-		let published = poll(MENU_OPEN_WAIT, || {
-			built_menu(
-				open_menu_element(popup)
-					.map(|menu| copy_elements_optional(&menu, "AXChildren").unwrap_or_default()),
-			)
+		let published = await_menu(MENU_OPEN_WAIT, closed, || {
+			if let Some(menu) = open_menu_element(popup) {
+				let items = copy_elements_optional(&menu, "AXChildren").unwrap_or_default();
+				if !items.is_empty() {
+					return (true, items);
+				}
+			}
+			(false, menu_items(popup))
 		});
 		if let Some(items) = published {
 			return Ok(items);
@@ -371,8 +380,7 @@ mod tests {
 	use std::{cell::RefCell, time::Duration};
 
 	use super::{
-		Refusal, built_menu, choose_option, needs_menu, option_list, option_title, settle_choice,
-		unopened,
+		Refusal, await_menu, choose_option, option_list, option_title, settle_choice, unopened,
 	};
 
 	fn titles(names: &[&str]) -> Vec<String> {
@@ -469,22 +477,16 @@ mod tests {
 	}
 
 	#[test]
-	fn a_closed_popup_without_the_requested_option_opens_its_menu() {
-		// `AppKit` publishes no options while closed; Chromium only the chosen
-		// one.
-		assert!(needs_menu(&titles(&["Low"]), "Medium", false));
-		// An open menu already lists them all.
-		assert!(!needs_menu(&titles(&["Low"]), "Medium", true));
-	}
-
-	#[test]
-	fn a_menu_counts_as_open_once_it_has_items_whatever_the_closed_popup_published() {
-		// A one-option menu opened from a popup that published that option
-		// while closed is ready: its count does not grow.
-		assert_eq!(built_menu(Some(vec!["Low"])), Some(vec!["Low"]));
-		// Closed, or open but not yet built, it is not.
-		assert_eq!(built_menu::<&str>(None), None);
-		assert_eq!(built_menu::<&str>(Some(vec![])), None);
+	fn a_popup_with_direct_menu_items_chooses_its_newly_published_option() {
+		let closed = titles(&["Low"]);
+		assert!(await_menu(Duration::ZERO, closed.len(), || (false, closed.clone())).is_none());
+		assert_eq!(
+			await_menu(Duration::ZERO, closed.len(), || (true, closed.clone())),
+			Some(closed.clone())
+		);
+		let items =
+			await_menu(Duration::ZERO, closed.len(), || (false, titles(&["Low", "Medium", "High"])));
+		assert_eq!(choose_option(&items.expect("the open menu has options"), "Medium"), Ok(1));
 	}
 
 	#[test]
