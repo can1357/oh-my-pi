@@ -42,30 +42,33 @@ test("an exclusive session pool falls back only inside its allowlist and denies 
 			expect(scope.permits("anthropic", sessionId, accountC.credentialId)).toBe(false);
 		}
 
-		expect(scope.allow("anthropic", "email:c@example.com|org:org-c")).toBe(true);
-		for (const sessionId of [PRIMARY_SESSION, SECONDARY_SESSION]) {
-			expect(scope.permits("anthropic", sessionId, accountC.credentialId)).toBe(true);
-		}
-		expect(scope.allow("anthropic", "email:c@example.com|org:org-c")).toBe(false);
+		expect(scope.pin("anthropic", "email:c@example.com|org:org-c")).toBe(false);
+		expect(scope.pin("anthropic", "email:b@example.com|org:org-b")).toBe(true);
+		expect(scope.permits("anthropic", PRIMARY_SESSION, accountA.credentialId)).toBe(true);
+		expect(scope.permits("anthropic", PRIMARY_SESSION, accountB.credentialId)).toBe(true);
+		expect(scope.permits("anthropic", SECONDARY_SESSION, accountA.credentialId)).toBe(false);
+		expect(scope.permits("anthropic", SECONDARY_SESSION, accountB.credentialId)).toBe(true);
 
 		expect(authStorage.sessions.pin("anthropic", PRIMARY_SESSION, accountA.credentialId)).toBe(true);
 		expect(await authStorage.keys.get("anthropic", PRIMARY_SESSION)).toBe("access-a");
 		await authStorage.credentials.disable(accountA.credentialId, "test quota exhausted");
 		expect(await authStorage.keys.get("anthropic", PRIMARY_SESSION)).toBe("access-b");
 
-		expect(scope.pin("anthropic", "email:b@example.com|org:org-b")).toBe(true);
-		for (const sessionId of [PRIMARY_SESSION, SECONDARY_SESSION]) {
-			expect(scope.permits("anthropic", sessionId, accountA.credentialId)).toBe(false);
-			expect(scope.permits("anthropic", sessionId, accountB.credentialId)).toBe(true);
-			expect(scope.permits("anthropic", sessionId, accountC.credentialId)).toBe(false);
-		}
-		expect(scope.allows("anthropic", "email:c@example.com|org:org-c")).toBe(true);
+		scope.adopt(PRIMARY_SESSION);
+		expect(scope.allows("anthropic", "email:c@example.com|org:org-c")).toBe(false);
+		expect(scope.allow("anthropic", "email:c@example.com|org:org-c")).toBe(true);
+		expect(scope.permits("anthropic", PRIMARY_SESSION, accountC.credentialId)).toBe(true);
+		expect(scope.permits("anthropic", SECONDARY_SESSION, accountC.credentialId)).toBe(false);
+		expect(scope.pin("anthropic", "email:c@example.com|org:org-c")).toBe(true);
+		expect(scope.permits("anthropic", PRIMARY_SESSION, accountB.credentialId)).toBe(false);
+		expect(scope.permits("anthropic", PRIMARY_SESSION, accountC.credentialId)).toBe(true);
+		expect(scope.permits("anthropic", SECONDARY_SESSION, accountB.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("anthropic", PRIMARY_SESSION)).toBe("access-c");
+
 		await authStorage.credentials.disable(accountB.credentialId, "test hard pin");
-		await expect(authStorage.keys.get("anthropic", PRIMARY_SESSION)).rejects.toThrow(
+		await expect(authStorage.keys.get("anthropic", SECONDARY_SESSION)).rejects.toThrow(
 			"restricted to its OAuth account pool",
 		);
-		expect(scope.pin("anthropic", "email:c@example.com|org:org-c")).toBe(true);
-		expect(await authStorage.keys.get("anthropic", PRIMARY_SESSION)).toBe("access-c");
 		await expect(registry.getApiKeyForProvider("openrouter", PRIMARY_SESSION)).rejects.toThrow(
 			"restricted to its OAuth account pool",
 		);

@@ -72,15 +72,15 @@ describe("credential pins", () => {
 		manager.appendMessage(assistantMessage("anthropic", Date.now()));
 		manager.appendCredentialPin("anthropic", "hash-old");
 		manager.appendCredentialPin("openai-codex", "hash-codex");
-		manager.appendCredentialPin("anthropic", "hash-new");
+		manager.appendCredentialPin("anthropic", "hash-new", { hard: true });
 		await manager.flush();
 		const file = manager.getSessionFile();
 		if (!file) throw new Error("expected a persisted session file");
 
 		const reopened = await SessionManager.open(file);
 		const pins = reopened.getCredentialPins();
-		expect(pins.get("anthropic")?.hash).toBe("hash-new");
-		expect(pins.get("openai-codex")?.hash).toBe("hash-codex");
+		expect(pins.get("anthropic")).toMatchObject({ hash: "hash-new", hard: true });
+		expect(pins.get("openai-codex")).toMatchObject({ hash: "hash-codex", hard: false });
 	});
 
 	test("later assistant turns advance the pin's effective last-use; other providers and new pins do not", () => {
@@ -204,7 +204,7 @@ describe("credential pins", () => {
 		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
 	});
 
-	test("recording appends the serving account's hash once and dedupes repeats", () => {
+	test("recording distinguishes explicit hard pins without automatic records downgrading them", () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();
 		const accounts = storage.oauth.accounts("anthropic", sessionId);
@@ -213,10 +213,18 @@ describe("credential pins", () => {
 
 		recordCredentialPin(storage, manager, sessionId, "anthropic");
 		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getBranch().filter(entry => entry.type === "credential_pin")).toHaveLength(1);
+		expect(manager.getCredentialPins().get("anthropic")?.hard).toBe(false);
+
+		recordCredentialPin(storage, manager, sessionId, "anthropic", { hard: true });
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
 
 		const entries = manager.getBranch().filter(entry => entry.type === "credential_pin");
-		expect(entries).toHaveLength(1);
+		expect(entries).toHaveLength(2);
 		const identity = storage.oauth.identity("anthropic", sessionId);
-		expect(manager.getCredentialPins().get("anthropic")?.hash).toBe(credentialPinHash("anthropic", identity!));
+		expect(manager.getCredentialPins().get("anthropic")).toMatchObject({
+			hash: credentialPinHash("anthropic", identity!),
+			hard: true,
+		});
 	});
 });

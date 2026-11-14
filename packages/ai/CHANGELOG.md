@@ -4,7 +4,6 @@
 
 ### Changed
 
-- Usage reporting now covers every configured credential independently of inference session restrictions ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed

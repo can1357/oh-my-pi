@@ -132,10 +132,11 @@ describe("AgentSession account pools after a dispose deadline", () => {
 		return { session, released: released.promise };
 	}
 
-	it("hard-pins and persists an account even when the session did not start with a configured pool", async () => {
+	it("keeps an unconfigured session pin soft and persists its cache-affinity account", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
 		const sessionManager = SessionManager.inMemory(tempDir.path());
+		authStorage.keys.removeRuntime("anthropic");
 		const session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
 			sessionManager,
@@ -152,20 +153,143 @@ describe("AgentSession account pools after a dispose deadline", () => {
 
 		expect(session.pinCurrentProviderOAuthAccount(accountC.id)).toBe(true);
 		expect(session.isCurrentProviderOAuthAccountPermitted(accountA.id)).toBe(true);
-		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountA.id)).toBe(false);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountA.id)).toBe(true);
 		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountC.id)).toBe(true);
 		expect(await authStorage.keys.get("anthropic", session.sessionId)).toBe("access-c");
-		expect(sessionManager.getCredentialPins().get("anthropic")?.hash).toBe(
-			credentialPinHash("anthropic", accountC.credential),
-		);
+		expect(sessionManager.getCredentialPins().get("anthropic")).toMatchObject({
+			hash: credentialPinHash("anthropic", accountC.credential),
+			hard: false,
+		});
 
-		expect(session.pinCurrentProviderOAuthAccount(accountA.id)).toBe(true);
-		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountA.id)).toBe(true);
+		await authStorage.credentials.disable(accountC.id, "test soft pin fallback");
+		const fallbackKey = await authStorage.keys.get("anthropic", session.sessionId);
+		if (!fallbackKey) throw new Error("expected OAuth fallback");
+		expect(["access-a", "access-b"]).toContain(fallbackKey);
+	});
+
+	it("keeps configured hard pins inside the pool and drops them for a new session", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled model");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.join("sessions"));
+		const providerSessionId = sessionManager.getSessionId();
+		const pool = {
+			anthropic: ["email:a@example.com|org:org-a", "email:b@example.com|org:org-b"],
+		};
+		const scope = new SessionAccountPoolScope(authStorage, pool, providerSessionId);
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: scope.registry(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"))),
+			providerSessionId,
+			accountPoolScope: scope,
+		});
+		sessionManager.appendMessage({ role: "user", content: "keep this pinned session", timestamp: Date.now() });
+		sessions.push(session);
+		const rows = authStorage.credentials.list("anthropic");
+		const accountA = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-a");
+		const accountB = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-b");
+		const accountC = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-c");
+		if (!accountA || !accountB || !accountC) throw new Error("expected OAuth fixtures");
+
+		expect(session.pinCurrentProviderOAuthAccount(accountC.id)).toBe(false);
+		expect(session.isCurrentProviderOAuthAccountPermitted(accountC.id)).toBe(false);
+		expect(session.pinCurrentProviderOAuthAccount(accountB.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountA.id)).toBe(false);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountB.id)).toBe(true);
 		expect(authStorage.sessions.permits("anthropic", session.sessionId, accountC.id)).toBe(false);
-		expect(await authStorage.keys.get("anthropic", session.sessionId)).toBe("access-a");
-		expect(sessionManager.getCredentialPins().get("anthropic")?.hash).toBe(
-			credentialPinHash("anthropic", accountA.credential),
-		);
+		expect(sessionManager.getCredentialPins().get("anthropic")?.hard).toBe(true);
+		expect(await session.newSession()).toBe(true);
+		expect(session.isCurrentProviderOAuthAccountPermitted(accountA.id)).toBe(true);
+		expect(session.isCurrentProviderOAuthAccountPermitted(accountB.id)).toBe(true);
+		expect(session.isCurrentProviderOAuthAccountPermitted(accountC.id)).toBe(false);
+	});
+
+	it("restores only explicit hard pins when configured-pool sessions resume", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled model");
+		const pool = {
+			anthropic: ["email:a@example.com|org:org-a", "email:b@example.com|org:org-b"],
+		};
+		const rows = authStorage.credentials.list("anthropic");
+		const accountA = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-a");
+		const accountB = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-b");
+		const accountC = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-c");
+		if (
+			!accountA ||
+			accountA.credential.type !== "oauth" ||
+			!accountB ||
+			accountB.credential.type !== "oauth" ||
+			!accountC
+		) {
+			throw new Error("expected OAuth fixtures");
+		}
+
+		const hardManager = SessionManager.create(tempDir.path(), tempDir.path());
+		hardManager.appendMessage({ role: "user", content: "persist hard pin", timestamp: Date.now() });
+		const hardProviderSessionId = hardManager.getSessionId();
+		const hardScope = new SessionAccountPoolScope(authStorage, pool, hardProviderSessionId);
+		const hardSession = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager: hardManager,
+			settings: Settings.isolated(),
+			modelRegistry: hardScope.registry(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"))),
+			providerSessionId: hardProviderSessionId,
+			accountPoolScope: hardScope,
+		});
+		sessions.push(hardSession);
+		expect(hardSession.pinCurrentProviderOAuthAccount(accountB.id)).toBe(true);
+		expect(hardManager.getCredentialPins().get("anthropic")?.hard).toBe(true);
+		await hardManager.ensureOnDisk();
+		const hardFile = hardManager.getSessionFile();
+		if (!hardFile) throw new Error("expected persisted hard-pin session");
+		hardScope.release();
+
+		const resumedHardManager = await SessionManager.open(hardFile);
+		expect(resumedHardManager.getCredentialPins().get("anthropic")?.hard).toBe(true);
+		const resumedHardId = resumedHardManager.getSessionId();
+		const resumedHardScope = new SessionAccountPoolScope(authStorage, pool, resumedHardId);
+		const resumedHard = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager: resumedHardManager,
+			settings: Settings.isolated(),
+			modelRegistry: resumedHardScope.registry(
+				new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			),
+			providerSessionId: resumedHardId,
+			accountPoolScope: resumedHardScope,
+		});
+		sessions.push(resumedHard);
+		expect(authStorage.sessions.permits("anthropic", resumedHard.sessionId, accountA.id)).toBe(false);
+		expect(authStorage.sessions.permits("anthropic", resumedHard.sessionId, accountB.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", resumedHard.sessionId, accountC.id)).toBe(false);
+
+		const softManager = SessionManager.create(tempDir.path(), tempDir.path());
+		softManager.appendMessage({ role: "user", content: "persist soft affinity", timestamp: Date.now() });
+		const softHash = credentialPinHash("anthropic", accountA.credential);
+		if (!softHash) throw new Error("expected soft pin hash");
+		softManager.appendCredentialPin("anthropic", softHash);
+		await softManager.ensureOnDisk();
+		const softFile = softManager.getSessionFile();
+		if (!softFile) throw new Error("expected persisted soft-pin session");
+		const resumedSoftManager = await SessionManager.open(softFile);
+		expect(resumedSoftManager.getCredentialPins().get("anthropic")?.hard).toBe(false);
+		const resumedSoftId = resumedSoftManager.getSessionId();
+		const resumedSoftScope = new SessionAccountPoolScope(authStorage, pool, resumedSoftId);
+		const resumedSoft = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager: resumedSoftManager,
+			settings: Settings.isolated(),
+			modelRegistry: resumedSoftScope.registry(
+				new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			),
+			providerSessionId: resumedSoftId,
+			accountPoolScope: resumedSoftScope,
+		});
+		sessions.push(resumedSoft);
+		expect(authStorage.sessions.permits("anthropic", resumedSoft.sessionId, accountA.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", resumedSoft.sessionId, accountB.id)).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", resumedSoft.sessionId, accountC.id)).toBe(false);
 	});
 
 	it("lifts the pool once a run that outlived the deadline settles", async () => {

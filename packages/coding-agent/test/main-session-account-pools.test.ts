@@ -56,7 +56,7 @@ test("top-level text and JSON sessions receive only the explicitly selected pool
 	}
 });
 
-test("the sole configured pool is selected automatically and exposed to the session environment", async () => {
+test("the sole configured pool is selected automatically", async () => {
 	const { options, parsed } = await buildWithPools({
 		personal: { "openai-codex": ["account:personal"] },
 	});

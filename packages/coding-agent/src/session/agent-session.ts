@@ -6545,16 +6545,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.setMetadataResolver((provider: string) =>
 			buildSessionMetadata(sid, provider, this.#modelRegistry.authStorage),
 		);
-		// A fresh or reset id becomes the pool scope's primary id, restricted
-		// before restored pins are seeded so they cannot leave the pool.
+		// A fresh or reset id becomes the pool scope's primary id before restored
+		// pins are seeded so an out-of-pool persisted account cannot widen it.
 		this.#accountPoolScope?.adopt(sid);
 		// Restore the session's recorded provider accounts before the first
-		// request routes: sticky rows are process-local under a remote auth
-		// broker, and losing them re-ranks onto a different account, cold-missing
-		// the account-scoped prompt cache. Skipped for fresh provider sessions —
-		// those explicitly want new routing identity.
+		// request routes. Only pins explicitly recorded as hard restrictions
+		// narrow a configured pool; automatic serving-account records remain soft.
 		if (!this.#freshProviderSessionId) {
-			seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
+			const authStorage = this.#modelRegistry.authStorage;
+			for (const pin of seedCredentialPins(authStorage, this.sessionManager, sid)) {
+				if (!pin.hard || !this.#accountPoolScope) continue;
+				const row = authStorage.credentials.list(pin.provider).find(candidate => candidate.id === pin.credentialId);
+				if (row?.credential.type !== "oauth") continue;
+				const identityKey = resolveCredentialIdentityKey(pin.provider, row.credential);
+				if (identityKey) this.#accountPoolScope.pin(pin.provider, identityKey, sid);
+			}
 		}
 		// Keep every live advisor's provider identity in lockstep with the primary's
 		// across every session-boundary transition — including branch paths that
@@ -15335,7 +15340,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (identity.accountId !== undefined && credential.accountId !== identity.accountId) continue;
 			if (identity.orgId !== undefined && credential.orgId !== identity.orgId) continue;
 			const identityKey = resolveCredentialIdentityKey(provider, credential);
-			if (identityKey) return this.#accountPoolScope.allow(provider, identityKey);
+			if (identityKey) return this.#accountPoolScope.allow(provider, identityKey, this.sessionId);
 		}
 		return false;
 	}
@@ -15363,43 +15368,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (row?.credential.type !== "oauth") return false;
 		if (!this.#accountPoolScope) return true;
 		const identityKey = resolveCredentialIdentityKey(provider, row.credential);
-		return identityKey !== null && this.#accountPoolScope.allows(provider, identityKey);
+		return identityKey !== null && this.#accountPoolScope.allows(provider, identityKey, this.sessionId);
 	}
 
 	/**
-	 * Hard-pin a stored OAuth account to the current provider.
+	 * Select a stored OAuth account for the current provider. Configured account
+	 * pools hard-pin the allowed identity; unconfigured sessions retain the auth
+	 * store's existing soft stickiness and may fall back when it is unavailable.
 	 * Returns false while streaming or when the credential is no longer selectable.
 	 */
 	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
 		const authStorage = this.#modelRegistry.authStorage;
-		const rows = authStorage.credentials.list(provider);
-		const row = rows.find(candidate => candidate.id === credentialId);
+		const row = authStorage.credentials.list(provider).find(candidate => candidate.id === credentialId);
 		if (row?.credential.type !== "oauth") return false;
 		const identityKey = resolveCredentialIdentityKey(provider, row.credential);
 		if (!identityKey) return false;
 
-		if (!this.#accountPoolScope) {
-			const identityKeys = rows.flatMap(candidate => {
-				const key = resolveCredentialIdentityKey(provider, candidate.credential);
-				return candidate.credential.type === "oauth" && key ? [key] : [];
-			});
-			this.#accountPoolScope = new SessionAccountPoolScope(
-				authStorage,
-				{ [provider]: identityKeys },
-				this.sessionId,
-			);
-		} else {
-			for (const candidate of rows) {
-				if (candidate.credential.type !== "oauth") continue;
-				const key = resolveCredentialIdentityKey(provider, candidate.credential);
-				if (key) this.#accountPoolScope.allow(provider, key);
-			}
+		const hard = this.#accountPoolScope !== undefined;
+		if (this.#accountPoolScope && !this.#accountPoolScope.pin(provider, identityKey, this.sessionId)) {
+			return false;
 		}
-		if (!this.#accountPoolScope.pin(provider, identityKey)) return false;
 		const pinned = authStorage.sessions.pin(provider, this.sessionId, credentialId);
-		if (pinned) recordCredentialPin(authStorage, this.sessionManager, this.sessionId, provider);
+		if (pinned) {
+			recordCredentialPin(authStorage, this.sessionManager, this.sessionId, provider, { hard });
+		}
 		return pinned;
 	}
 

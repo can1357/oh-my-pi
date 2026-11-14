@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Usage Details now renders separate blocks for each stored account and marks the account serving the current session as `In use` ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

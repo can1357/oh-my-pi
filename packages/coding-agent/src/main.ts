@@ -1460,7 +1460,7 @@ export async function buildSessionOptions(
 	if (parsed.systemPrompt !== undefined && parsed.systemPromptTemplate !== undefined) {
 		throw new Error("--system-prompt and --system-prompt-template cannot be combined");
 	}
-	const cwd = options.cwd ?? getProjectDir();
+	const cwd = options.cwd;
 	const protocolOwnsCredentialPolicy = parsed.mode === "rpc" || parsed.mode === "rpc-ui" || parsed.mode === "acp";
 	if (protocolOwnsCredentialPolicy) {
 		if (parsed.accountPool !== undefined) {
@@ -2443,8 +2443,6 @@ export async function runRootCommand(
 			return options;
 		};
 		let sessionOptions = await buildStartupSessionOptions(sessionManager);
-		if (parsedArgs.accountPool !== undefined) process.env.OMP_ACCOUNT_POOL = parsedArgs.accountPool;
-		else delete process.env.OMP_ACCOUNT_POOL;
 		const marketplaceAutoUpdateOptions: MarketplaceAutoUpdateOptions = {
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
 			resolveActiveProjectRegistryPath,

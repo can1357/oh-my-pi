@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `auth.sessionAccountPools` and `--account-pool` to restrict a top-level session to named OAuth account sets ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+
+### Changed
+
+- Usage Details now includes every stored account even when inference is restricted to a session account pool ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+- Interactive `/login` adds the new OAuth account only to the current session pool, and `/session pin` hard-restricts configured pool sessions to the selected account ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+
 ### Fixed
 
 - Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
@@ -112,11 +121,6 @@
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
 
-### Changed
-
-- Usage Details now shows every stored account even when inference is restricted to a session account pool ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
-- Interactive `/login` now permits the added OAuth account in the current session pool without changing the saved pool or other sessions ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
-- `/session pin` now hard-restricts every session to the selected provider account instead of rotating to a sibling when it becomes unavailable ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 
 ## [18.19.0] - 2026-11-12
 
