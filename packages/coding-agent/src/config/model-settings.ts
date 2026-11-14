@@ -7,6 +7,7 @@ import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
+import { type SessionAccountPools, validateSessionAccountPools } from "./account-pools";
 
 /** Display metadata for one model tag. */
 export interface ModelTagDef {
@@ -35,6 +36,7 @@ const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const EMPTY_MODEL_PRESETS_RECORD: Record<string, ModelPreset> = {};
 const EMPTY_AUTH_ACCOUNT_POLICIES: AuthAccountPolicies = [];
+const EMPTY_SESSION_ACCOUNT_POOLS: SessionAccountPools = {};
 
 // Auth broker — credentials proxied through a remote `omp auth-broker serve`
 // host. Hidden from the UI; populate via env vars or hand-edited config.yml. Env takes
@@ -60,6 +62,13 @@ export const cfgAuthAccountPolicies = register({
 	id: "auth.accountPolicies",
 	type: "array",
 	default: EMPTY_AUTH_ACCOUNT_POLICIES,
+});
+
+export const cfgAuthSessionAccountPools = register({
+	id: "auth.sessionAccountPools",
+	type: "record",
+	default: EMPTY_SESSION_ACCOUNT_POOLS,
+	validate: validateSessionAccountPools,
 });
 
 /** Providers the auth rules pause (`disabled "<reason>"`), offered as opt-back-in choices. */
@@ -90,7 +99,6 @@ export const cfgAuthUnpausedProviders = register({
 /** `auth.unpausedProviders` from operator layers only; the value the process applies. */
 export const cfgOperatorUnpausedProviders = operatorValue(cfgAuthUnpausedProviders);
 effect(cfgOperatorUnpausedProviders, setUnpausedProviders);
-
 export const cfgEnabledModels = register({
 	id: "enabledModels",
 	type: "array",

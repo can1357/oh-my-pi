@@ -373,6 +373,35 @@ Accepted **value** keys:
 
 For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may wrap a list under `patterns` / `values` / `items`, carry the rule fields itself (`{ path, match, approval }`), or both; inside its scope it contributes its own rule first, then the listed rules in order. Listed rules may be path-scoped themselves, narrowing the outer scope. An entry whose path keys hold no string (for example `path: ~`, which YAML reads as null; quote it as `"~"` for your home directory) is not scoped and applies everywhere. When `bashInterceptor.patterns` contains only path-scoped entries, the built-in interceptor rules still apply after any matching scoped rules; one unscoped rule in that list makes it replace the built-ins, but rules a project or `--config` overlay prepends onto it do not. For the other settings, malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array for the active working directory.
 
+## Session-bound account pools
+
+`auth.sessionAccountPools` defines named OAuth account allowlists for top-level text and JSON CLI sessions:
+
+```yaml
+auth:
+   sessionAccountPools:
+      company:
+         anthropic:
+            - email:you@example.com|org:org-id
+         openai-codex:
+            - account:company-account-id
+      personal:
+         openai-codex:
+            - account:personal-account-id
+```
+
+With one configured pool, OMP selects it automatically before the session starts. With multiple pools, select one explicitly:
+
+```bash
+omp --account-pool company
+```
+
+A top-level text or JSON launch with multiple configured pools and no `--account-pool` fails instead of choosing among them. An unknown name also fails. The selected or sole pool remains fixed across `/move`, `/worktree`, resumed-project cwd changes, and file access. A successful interactive `/login` explicitly adds that OAuth identity to the current session scope only; it does not edit the saved pool or affect another running session.
+
+Each pool maps provider ids to OAuth `identityKey` values listed by `omp usage accounts`. Fallback and rotation stay inside the selected identities plus accounts explicitly added through `/login` in that session. Regardless of whether a saved pool is active, `/session pin` hard-restricts the current provider to the selected identity; selecting another stored account switches that restriction. Providers absent from the selected pool are denied, listed providers never use API keys, and an empty identity list denies that provider. If every allowed account is exhausted, the request fails instead of borrowing another stored account or provider credential. Invalid maps fail settings load.
+
+RPC, RPC-UI, and ACP hosts retain ownership of their session credential policy and reject `--account-pool`. SDK callers can pass `oauthAccountPools` directly; `oauthAccountPoolsDenyUnlistedProviders` opts into the CLI's total-allowlist behavior. Account pools are trusted-client routing policy, not an authorization boundary; use separate profiles when a process must not be able to read another account's credentials.
+
 ## Provider and source disabling
 
 `enabledProviders` opts foreign user-level configuration sources into discovery. Its default is empty, so user roots from Cursor, Codex, Claude, Claude marketplace plugins, Gemini, OpenCode, Windsurf, and GitHub are normally excluded until their provider id is listed (or `*`/`all` is listed). Enabling `claude` also enables `claude-plugins`; an explicit `CLAUDE_CONFIG_DIR` opts Claude's user root in without a list entry. Explicitly selected discovery roots can also opt in. `disabledProviders` still wins.

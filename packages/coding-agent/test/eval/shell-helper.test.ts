@@ -56,6 +56,7 @@ const PYTHON_INTEGRATION = Bun.env.PI_PYTHON_INTEGRATION === "1";
 
 const CELLS = {
 	js: [
+		// oxlint-disable-next-line eslint/no-template-curly-in-string -- JavaScript eval source fixture
 		"const quoted = await sh`sleep 0.2; printf '%s|' ${['a b', \"c'd\"]} ${'$HOME'}`;",
 		"await sh('cd sub');",
 		"const cwd = [(await sh('pwd -P')).trim(), (await sh('pwd -P', { cwd: 'sub' })).trim()];",

@@ -235,6 +235,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatch(event: AgentSessionEvent): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- Snapshot before callbacks mutate subscriptions.
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(event);
@@ -248,6 +249,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatchRunState(state: SessionRunState): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- Snapshot before callbacks mutate subscriptions.
 		for (const listener of [...this.#runStateListeners]) {
 			try {
 				listener(state);

@@ -413,6 +413,36 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 	});
 });
 
+describe("AuthStorage usage cache: session restrictions", () => {
+	it("reports every stored OAuth credential while inference remains session-restricted", async () => {
+		const storage = new AuthStorage(
+			makeStore([oauthRow(1, "pooled@example.com"), oauthRow(2, "outside@example.com")]),
+			{
+				usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+			},
+		);
+		await storage.credentials.reload();
+		const probed: string[] = [];
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const email = params.credential.email;
+			if (!email) return null;
+			probed.push(email);
+			return makeReport(email);
+		});
+		const lease = storage.sessions.restrict("anthropic", "pooled-session", ["email:pooled@example.com"]);
+		try {
+			const reports = anthropicReports(await storage.usage.reports());
+
+			expect(probed).toEqual(["pooled@example.com", "outside@example.com"]);
+			expect(reports.map(report => report.metadata?.email)).toEqual(["pooled@example.com", "outside@example.com"]);
+		} finally {
+			storage.sessions.unrestrict("anthropic", "pooled-session", lease);
+			storage.close();
+			vi.restoreAllMocks();
+		}
+	});
+});
+
 describe("AuthStorage usage cache: Claude saved resets", () => {
 	it("keeps the last known saved resets when a later reset probe fails", async () => {
 		let probeStatus = 200;

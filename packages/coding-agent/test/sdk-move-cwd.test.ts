@@ -274,4 +274,114 @@ describe("createAgentSession cwd after /move", () => {
 			}
 		}
 	});
+
+	it("keeps an explicit OAuth pool during headless moves and rollback", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-account-pool-move-"));
+		tempDirs.push(tempDir);
+		const cwdA = path.join(tempDir, "cwd-a");
+		const cwdB = path.join(tempDir, "cwd-b");
+		const unrestricted = path.join(tempDir, "unrestricted");
+		const agentDir = path.join(tempDir, "agent");
+		for (const cwd of [cwdA, cwdB, unrestricted]) fs.mkdirSync(cwd, { recursive: true });
+		const settings = await Settings.loadIsolated({
+			inMemory: true,
+			cwd: cwdA,
+			agentDir,
+			overrides: {
+				"auth.sessionAccountPools": {
+					company: { anthropic: ["email:a@example.com|org:org-a"] },
+				},
+			},
+		});
+		const sessionManager = SessionManager.create(cwdA, SessionManager.getDefaultSessionDir(cwdA, agentDir));
+		const authStorage = createInMemoryAuthStorage();
+		await authStorage.credentials.set(
+			"anthropic",
+			["a", "b"].map(suffix => ({
+				type: "oauth" as const,
+				access: `access-${suffix}`,
+				refresh: `refresh-${suffix}`,
+				expires: Date.now() + 60 * 60_000,
+				accountId: `account-${suffix}`,
+				email: `${suffix}@example.com`,
+				orgId: `org-${suffix}`,
+			})),
+		);
+		const accountA = authStorage.oauth.accounts("anthropic").find(account => account.accountId === "account-a");
+		const accountB = authStorage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
+		if (!accountA || !accountB) throw new Error("Expected both OAuth fixtures");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		const { session } = await createAgentSession({
+			cwd: cwdA,
+			agentDir,
+			sessionManager,
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+			settings,
+			model,
+			oauthAccountPools: { anthropic: ["email:a@example.com|org:org-a"] },
+			oauthAccountPoolsDenyUnlistedProviders: true,
+			restrictToolNames: true,
+			toolNames: ["read"],
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+		});
+		const originalProjectDir = getProjectDir();
+		try {
+			let failRescope = false;
+			const output: string[] = [];
+			const runtime = {
+				session,
+				sessionManager,
+				settings,
+				cwd: cwdA,
+				output: (text: string) => {
+					output.push(text);
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {
+					if (!failRescope) return;
+					failRescope = false;
+					throw new Error("destination plugin rescope failed");
+				},
+			};
+			const permits = (account: { credentialId: number }) =>
+				authStorage.sessions.permits("anthropic", sessionManager.getSessionId(), account.credentialId);
+			const move = async (cwd: string) => {
+				await executeAcpBuiltinSlashCommand(`/move ${cwd}`, runtime);
+			};
+
+			await move(cwdB);
+			expect(permits(accountA)).toBe(true);
+			expect(permits(accountB)).toBe(false);
+
+			await move(unrestricted);
+			expect(permits(accountA)).toBe(true);
+			expect(permits(accountB)).toBe(false);
+
+			await move(cwdA);
+			expect(permits(accountA)).toBe(true);
+			expect(permits(accountB)).toBe(false);
+
+			failRescope = true;
+			await move(cwdB);
+			expect(output.at(-1)).toContain("Move failed");
+			expect(sessionManager.getCwd()).toBe(cwdA);
+			expect(permits(accountA)).toBe(true);
+			expect(permits(accountB)).toBe(false);
+		} finally {
+			setProjectDir(originalProjectDir);
+			await session.dispose();
+			authStorage.close();
+		}
+	});
 });

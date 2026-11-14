@@ -271,6 +271,8 @@ export interface CredentialPinEntry extends SessionEntryBase {
 	provider: string;
 	/** `credentialPinHash()` of the serving account's identity + scope tuple. */
 	hash: string;
+	/** True when an explicit selection must remain a hard pool restriction on resume. */
+	hard?: boolean;
 }
 
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */

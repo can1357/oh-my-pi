@@ -9,12 +9,12 @@
  * headroom, which is biased *away* from the account that just served the
  * session (it has the highest recent burn), cold-missing the entire prefix.
  *
- * These helpers close the loop through the session file itself: after each
- * assistant turn the serving account is recorded as a `credential_pin` entry,
- * and on session adoption the pin is matched against the stored accounts and
- * seeded back into the auth store with the session's effective last-use
- * timestamp, so the provider's warm-window semantics still decide whether to
- * stick or re-rank.
+ * These helpers close the loop through the session file itself: an explicit
+ * account selection is recorded immediately, and the serving account is
+ * recorded after each assistant turn. On session adoption, the pin is matched
+ * against stored accounts and seeded back into the auth store with the
+ * session's effective last-use timestamp, so the provider's warm-window
+ * semantics still decide whether to stick or re-rank.
  */
 
 import type { AuthStorage } from "./auth-storage";
@@ -54,45 +54,57 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
 }
 
 /**
- * Record the account that served the latest assistant turn for `provider`.
- * Appends a `credential_pin` entry only when the account differs from the
- * branch's latest pin, so steady-state sessions add a single entry; the
- * effective last-use time is derived from later assistant turns on read
- * (see `SessionManager.getCredentialPins`).
+ * Record the account selected for `provider`. Called immediately for an
+ * explicit `/session pin` and after assistant turns for automatic routing.
+ * Appends a `credential_pin` entry only when the account or hard-pin mode
+ * differs from the branch's latest pin, so steady-state sessions add a single
+ * entry; the effective last-use time is derived from later assistant turns on
+ * read (see `SessionManager.getCredentialPins`). An automatic record never
+ * downgrades an unchanged explicit hard pin.
  */
 export function recordCredentialPin(
 	authStorage: AuthStorage,
 	sessionManager: SessionManager,
 	sessionId: string,
 	provider: string,
+	options: { hard?: boolean } = {},
 ): void {
 	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
-	sessionManager.appendCredentialPin(provider, hash);
+	if (!hash) return;
+	const current = sessionManager.getCredentialPins().get(provider);
+	if (current?.hash === hash && (current.hard || !options.hard)) return;
+	sessionManager.appendCredentialPin(provider, hash, options);
 }
 
 /**
  * Re-pin the accounts recorded in the session file onto the auth store's
- * session stickiness. No-op per provider when the account is gone (logged out)
- * or when a live sticky for another account exists (same-process
- * branch/session switches must not clobber fresher routing). A sticky for the
- * same account whose last use predates the pin is advanced to the pin's time:
- * the persisted sticky is written lazily, so the session file can be newer.
- * Seeds with the session's effective last-use time so stale resumes still fall
- * through to usage ranking.
+ * session stickiness and return every stored account they matched. No-op per
+ * provider when the account is gone. A soft persisted pin never clobbers a
+ * live sticky for another account; an explicit hard pin does. A sticky for the
+ * same account whose last use predates the pin is advanced to the pin's time.
+ * Seeds with the session's effective last-use time so stale soft resumes still
+ * fall through to usage ranking.
  */
-export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
+export function seedCredentialPins(
+	authStorage: AuthStorage,
+	sessionManager: SessionManager,
+	sessionId: string,
+): Array<{ provider: string; credentialId: number; hard: boolean }> {
+	const matches: Array<{ provider: string; credentialId: number; hard: boolean }> = [];
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
 		const accounts = authStorage.oauth.accounts(provider, sessionId);
 		if (accounts.length === 0) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
 		if (!match) continue;
+		matches.push({ provider, credentialId: match.credentialId, hard: pin.hard });
 		const active = accounts.find(account => account.active);
-		if (active && (active !== match || (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt)) continue;
+		if (active === match && (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt) continue;
+		if (active && active !== match && !pin.hard) continue;
 		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
 			restoredAtMs: pin.lastUsedAt,
 		});
 	}
+	return matches;
 }
