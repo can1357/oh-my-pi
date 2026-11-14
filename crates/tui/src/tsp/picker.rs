@@ -1,13 +1,13 @@
-//! Typed props of the selection kinds: the data-first `picker` sheet and the
-//! `overlay` + `list` + `item` composition of a completion list anchored to
-//! the caret, plus the pointer gestures Tern sends back for them.
+//! Typed props of the selection kinds and the gestures Tern sends for them.
 //!
-//! A picker carries its rows as data (`items`), names its selected row by
-//! item id, and holds that row's preview as its children. Keys stay the
-//! program's: Tern sends a row click as `select` (move the selection there
-//! and preview it), a double click or Enter on a row as `activate` (choose
-//! it), and an action-bar button as `action` with the button id.
-//! [`Gesture::of`] folds the three into one shape.
+//! The kinds are the data-first `picker` sheet and the `overlay` + `list` +
+//! `item` composition of a completion list anchored to the caret. A picker
+//! carries its rows as data (`items`), names its selected row by item id, and
+//! holds that row's preview as its children. Keys stay the program's: Tern
+//! sends a row click as `select` (move the selection there and preview it), a
+//! double click or Enter on a row as `activate` (choose it), and an action-bar
+//! button as `action` with the button id. [`Gesture::of`] folds the three into
+//! one shape.
 
 use std::collections::BTreeMap;
 
@@ -98,7 +98,7 @@ pub enum ColumnFormat {
 }
 
 /// A right-aligned fact column.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PickerColumn {
 	/// Column id: the key of each item's `facts`.
 	pub id:     Str,

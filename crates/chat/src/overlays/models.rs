@@ -1666,9 +1666,24 @@ fn compact_count(value: u64) -> Str {
 
 #[cfg(test)]
 mod tests {
-	use omp_tui::{Mods, MouseButton, frame_text};
+	use std::{mem, time::Duration};
+
+	use omp_tui::{
+		Mods, MouseButton, frame_text,
+		tsp::{
+			DEFAULT_APC_LIMIT,
+			doc::Document,
+			frame::{Incoming, split},
+			picker::read,
+			wire::{self, Op},
+		},
+	};
 
 	use super::*;
+	use crate::{
+		settings::TspStreamPacing,
+		tsp::{Sheet, Surface},
+	};
 
 	const VIEW: Size = Size::new(100, 40);
 	/// Columns holding the frame edge, padding, and the provider rail at
@@ -2277,12 +2292,12 @@ mod tests {
 	/// it applied (chunked bodies joined as Tern joins them) and the largest
 	/// body one APC string carried.
 	struct Applied {
-		frames:  Vec<omp_tui::tsp::wire::Frame>,
+		frames:  Vec<wire::Frame>,
 		chunked: usize,
 		largest: usize,
 	}
 
-	fn apply(doc: &mut omp_tui::tsp::doc::Document, output: &[u8]) -> Applied {
+	fn apply(doc: &mut Document, output: &[u8]) -> Applied {
 		let mut applied = Applied { frames: Vec::new(), chunked: 0, largest: 0 };
 		let mut joined = Vec::new();
 		let mut rest = output;
@@ -2292,7 +2307,7 @@ mod tests {
 				.windows(2)
 				.position(|w| w == b"\x1b\\")
 				.expect("terminated message");
-			let raw = omp_tui::tsp::frame::split(&after[..end]).expect("a TSP message");
+			let raw = split(&after[..end]).expect("a TSP message");
 			rest = &after[end + 2..];
 			applied.largest = applied.largest.max(raw.body.len());
 			joined.extend_from_slice(raw.body);
@@ -2302,10 +2317,9 @@ mod tests {
 			if raw.param("c").is_some() {
 				applied.chunked += 1;
 			}
-			let body = std::mem::take(&mut joined);
+			let body = mem::take(&mut joined);
 			if raw.verb == "f" {
-				let frame: omp_tui::tsp::wire::Frame =
-					serde_json::from_slice(&body).expect("valid frame JSON");
+				let frame: wire::Frame = serde_json::from_slice(&body).expect("valid frame JSON");
 				let rejected = doc.apply(&frame);
 				assert!(rejected.is_empty(), "frame had rejected ops: {rejected:?}");
 				applied.frames.push(frame);
@@ -2315,25 +2329,15 @@ mod tests {
 	}
 
 	/// A live session surface with the picker presented as its sheet.
-	fn mounted(
-		picker: &mut ModelPicker,
-	) -> (crate::tsp::Surface, omp_tui::tsp::doc::Document, Applied) {
-		let mut surface = crate::tsp::Surface::optimistic(false);
-		let mut doc = omp_tui::tsp::doc::Document::new("omp-chat");
+	fn mounted(picker: &mut ModelPicker) -> (Surface, Document, Applied) {
+		let mut surface = Surface::optimistic(false);
+		let mut doc = Document::new("omp-chat");
 		let mut out = Vec::new();
 		surface
-			.present(
-				&mut out,
-				&[],
-				"",
-				0,
-				"",
-				std::time::Duration::ZERO,
-				crate::settings::TspStreamPacing::Raw,
-			)
+			.present(&mut out, &[], "", 0, "", Duration::ZERO, TspStreamPacing::Raw)
 			.expect("session frame");
 		surface
-			.present_sheet(&mut out, crate::tsp::Sheet::Picker, Some(picker.tsp_node()))
+			.present_sheet(&mut out, Sheet::Picker, Some(picker.tsp_node()))
 			.expect("picker frame");
 		let applied = apply(&mut doc, &out);
 		acknowledge(&mut surface, &applied);
@@ -2341,21 +2345,18 @@ mod tests {
 	}
 
 	/// Tern acknowledges every frame it applied, freeing the credits.
-	fn acknowledge(surface: &mut crate::tsp::Surface, applied: &Applied) {
+	fn acknowledge(surface: &mut Surface, applied: &Applied) {
 		if let Some(s) = applied.frames.iter().map(|frame| frame.s).max() {
-			surface.incoming(omp_tui::tsp::frame::Incoming::Event(omp_tui::tsp::wire::Event::Ack {
-				sf: Str::new_static("omp-chat"),
-				s,
-			}));
+			surface.incoming(Incoming::Event(wire::Event::Ack { sf: Str::new_static("omp-chat"), s }));
 		}
 	}
 
-	fn sheet(doc: &omp_tui::tsp::doc::Document) -> PickerProps {
+	fn sheet(doc: &Document) -> PickerProps {
 		let node = doc.get(MODEL_PICKER_ID).expect("the picker is mounted");
-		omp_tui::tsp::picker::read(&node).expect("picker props")
+		read(&node).expect("picker props")
 	}
 
-	fn preview(doc: &omp_tui::tsp::doc::Document) -> String {
+	fn preview(doc: &Document) -> String {
 		doc.get(MODEL_PREVIEW_FACTS_ID)
 			.and_then(|node| {
 				node
@@ -2406,14 +2407,14 @@ mod tests {
 		assert_eq!(picker.key(Key::Down), PickerEvent::Consumed);
 		let mut out = Vec::new();
 		surface
-			.present_sheet(&mut out, crate::tsp::Sheet::Picker, Some(picker.tsp_node()))
+			.present_sheet(&mut out, Sheet::Picker, Some(picker.tsp_node()))
 			.expect("patch frame");
 		let applied = apply(&mut doc, &out);
 		let [frame] = applied.frames.as_slice() else {
 			panic!("one frame patches the picker: {:?}", applied.frames);
 		};
 		for op in &frame.ops {
-			let omp_tui::tsp::wire::Op::Set { id, props } = op else {
+			let Op::Set { id, props } = op else {
 				panic!("a cursor move only sets props: {op:?}");
 			};
 			assert!(!props.contains_key("items"), "the catalogue is not resent: {id} {props:?}");
@@ -2424,7 +2425,7 @@ mod tests {
 
 		let mut out = Vec::new();
 		surface
-			.present_sheet(&mut out, crate::tsp::Sheet::Picker, Some(picker.tsp_node()))
+			.present_sheet(&mut out, Sheet::Picker, Some(picker.tsp_node()))
 			.expect("no frame");
 		assert!(out.is_empty(), "an unchanged picker sends nothing");
 	}
@@ -2467,7 +2468,7 @@ mod tests {
 		let (_, doc, applied) = mounted(&mut picker);
 		assert!(applied.chunked > 0, "a catalogue this large is chunked");
 		assert!(
-			applied.largest <= omp_tui::tsp::DEFAULT_APC_LIMIT,
+			applied.largest <= DEFAULT_APC_LIMIT,
 			"an APC string carried {} bytes",
 			applied.largest
 		);

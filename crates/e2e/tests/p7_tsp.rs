@@ -851,8 +851,7 @@ fn label_of(props: &PickerProps, id: &str) -> String {
 		.items
 		.iter()
 		.find(|item| item.id.as_str() == id)
-		.map(|item| item.label.as_str().to_owned())
-		.unwrap_or_else(|| panic!("{id} is not an item"))
+		.map_or_else(|| panic!("{id} is not an item"), |item| item.label.as_str().to_owned())
 }
 
 /// A `select` (or, with `activate`, an `activate`) on row `item` of node `id`.

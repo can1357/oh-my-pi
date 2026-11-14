@@ -8,7 +8,12 @@
 //! [`PanelEvent`] — a console line (ADR 0014), a composer recall, a notice,
 //! a clipboard write — and never touch the session DOM.
 
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+use std::{
+	collections::BTreeMap,
+	fmt,
+	sync::Arc,
+	time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use omp_agent::{ApprovalDecision, ApprovalScope, ApprovalSource, ApprovalTicket};
 use omp_con::Ctx;
@@ -866,8 +871,8 @@ impl HistoryPicker {
 	}
 
 	fn build_tsp_node(&self) -> Node {
-		let now = std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
+		let now = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
 			.ok()
 			.and_then(|duration| i64::try_from(duration.as_secs()).ok())
 			.unwrap_or_default();
