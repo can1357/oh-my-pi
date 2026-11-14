@@ -4,6 +4,7 @@
 
 ### Added
 
+- Hooks and extensions can listen for `session_clear`, fired after `/clear` resets the context in place, to invalidate cached "already injected" instructions; it is not a `session_switch` and keeps the session id ([#17142](https://github.com/can1357/oh-my-pi/issues/17142), [#17317](https://github.com/can1357/oh-my-pi/pull/17317) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT))
 - `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
 - Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow leading `KEY=VALUE` prefixes for exactly named environment variables on `allow` rules without duplicating rules for each variable combination ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` and `bashInterceptor.patterns` now prepend ahead of global rules instead of replacing them wholesale ([#18352](https://github.com/can1357/oh-my-pi/pull/18352) by [@asuffield](https://github.com/asuffield))
@@ -402,13 +403,6 @@
 
 ### Breaking Changes
 
-- Hooks and extensions can listen for `session_clear`, fired after `/clear` resets the context in place, to invalidate cached "already injected" instructions; it is not a `session_switch` and keeps the session id ([#17142](https://github.com/can1357/oh-my-pi/issues/17142), [#17317](https://github.com/can1357/oh-my-pi/pull/17317) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT))
-- Added opt-in `taskFile` input (`task.file=true`) to dispatch subagent instructions from a UTF-8 file via an absolute path or `local://` URL, recording the submitted path and SHA-256 ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
-- Pin and unpin sessions from the resume picker with `Alt+K` / `Alt+Shift+K` (remappable as `app.session.pin` / `app.session.unpin`); pinned sessions move to the top at once and also lead search results ([#9837](https://github.com/can1357/oh-my-pi/pull/9837) by [@zhang17-24](https://github.com/zhang17-24))
-- Set `PI_LINK_SCHEME` (and optionally `PI_LINK_HOST`) to make file links in SSH/tmux sessions open through a desktop protocol handler such as `ompfile://<host>/<path>?line=N&col=M` ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu))
-- Extensions can start `/live` voice sessions with the audio on their own WebRTC peer, such as a phone browser, through `ctx.startLive({ sdpOffer })`; the RPC `live_connect` command does the same for RPC clients ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
-- Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
-- Added extension link schemes behind the same setting: links using a scheme claimed with `pi.registerLinkScheme()` draw as a dotted-underlined label and raise `link_activate` for that extension when picked with Alt+O (`app.links.hint`) or clicked with `tui.mouse` on; `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 - The `ask` tool takes one HTML form (`{ html }`) instead of `questions[]`: the model writes a `<form>` of radios, checkboxes, selects, text inputs and textareas with its recommendation preselected, and receives the submitted form data as JSON. `AskToolDetails` is now `{ answers: { name, question, answer }[]; timedOut? }`; `QuestionResult`, the "Other", "Chat about this", answer-note and answer-image paths of the tool are removed, and `/tree` re-answer reopens the original form (`NavigateTreeResult.reopenAsk` carries `html`).
 
 ### Added
