@@ -28,7 +28,6 @@
 - Fixed Muse sessions after credential changes, key rotation, or idle resume so subsequent turns can continue normally.
 - Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
 - Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
-- Fixed the auth broker's background refresh sweep refreshing every pooled Google Antigravity account together with no request behind it, which links the accounts; Antigravity accounts now refresh only when a request is about to use one ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Google Antigravity request identity so a pooled-account switch mid-conversation starts a fresh agent, trajectory and session under the new account instead of reusing the previous account's, which linked the accounts ([#19276](https://github.com/can1357/oh-my-pi/pull/19276) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
