@@ -336,6 +336,49 @@ async fn stat_and_identify() {
 	);
 }
 
+/// Following a Windows name-surrogate reparse point reports its target.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stat_windows_symlink_targets() {
+	let tmp = TempDir::new("stat-windows-symlink");
+	tmp.write("d/f", b"abc");
+	if let Err(error) =
+		std::os::windows::fs::symlink_file(tmp.0.join("d/f"), tmp.0.join("file-link"))
+	{
+		if error.raw_os_error() == Some(1314) {
+			eprintln!("skipping Windows symlink stats: symlink privilege unavailable");
+			return;
+		}
+		panic!("creating Windows file symlink: {error}");
+	}
+	let fs = Fs::native();
+	let mut s = fs.session();
+	assert_eq!(
+		s.stat(&tmp.0.join("file-link"), false)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Symlink)
+	);
+	let followed = s.stat(&tmp.0.join("file-link"), true).await.unwrap();
+	assert_eq!((followed.file_type, followed.size), (Some(FileType::File), 3));
+	std::os::windows::fs::symlink_dir(tmp.0.join("d"), tmp.0.join("dir-link")).unwrap();
+	assert_eq!(
+		s.stat(&tmp.0.join("dir-link"), false)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Symlink)
+	);
+	assert_eq!(
+		s.stat(&tmp.0.join("dir-link"), true)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Dir)
+	);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn join_host_paths() {
 	let root = Path::new("/r");

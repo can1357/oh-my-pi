@@ -779,6 +779,132 @@ fn a_scripts_term_does_not_escalate() {
 	assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Kill));
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn pi_host_cancellation_preserves_group_term_after_the_leader_exits() {
+	use crate::bash::Host as _;
+
+	let root = tempfile::tempdir().unwrap();
+	let pidfile = root.path().join("child.pid");
+	std::fs::write(
+		root.path().join("cleanup.sh"),
+		"trap 'printf cleaned >> cleaned; exit 0' TERM\nprintf '%s' \"$$\" > child.pid\nwhile :; do \
+		 :; done\n",
+	)
+	.unwrap();
+	let mut host = crate::host::PiHost::new(
+		Box::new(crate::sys::StdFs::default()),
+		tokio::runtime::Handle::current(),
+	);
+	let env = EnvView::default();
+	let args = sh("/bin/sh cleanup.sh &");
+	let mut invocation = spec(&args, &env, NEW);
+	invocation.cwd = root.path().as_os_str().as_encoded_bytes().as_bstr();
+	let mut external = host.spawn(invocation).await.unwrap();
+	let parent = crate::proctree::Process::from_pid(i32::try_from(external.pid()).unwrap()).unwrap();
+	let mut child = None;
+	until("group child ready", || {
+		child = std::fs::read_to_string(&pidfile)
+			.ok()
+			.and_then(|pid| pid.parse::<i32>().ok())
+			.and_then(crate::proctree::Process::from_pid);
+		child.is_some()
+	});
+	let child = child.unwrap();
+	assert_eq!(wait(&mut external), ExitStatus::Exited(0));
+	assert_eq!(parent.group_id(), None, "exited leaders cannot supply a live group id");
+	assert_eq!(child.group_id(), Some(parent.pid()));
+	host.cancel_externals(Signal::Term, &mut [external.as_mut()]);
+	let exited = child
+		.wait_for_exit(Some(Duration::from_secs(5)), crate::cancel::CancelToken::default())
+		.await;
+	// Clean up before asserting, including when TERM missed the surviving group.
+	let _ = external.signal(Signal::Kill);
+	assert!(exited.unwrap(), "cancellation skipped the exited leader's group");
+	assert_eq!(std::fs::read_to_string(root.path().join("cleaned")).unwrap(), "cleaned");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn pi_host_cancellation_retains_escaped_pins_and_refreshes_late_descendants() {
+	use crate::{
+		bash::Host as _,
+		proctree::{KILL_SIGNAL, Process},
+	};
+
+	struct Pins(Vec<Process>);
+	impl Drop for Pins {
+		fn drop(&mut self) {
+			for process in self.0.iter().rev() {
+				let _ = process.kill_tree(Some(KILL_SIGNAL));
+			}
+		}
+	}
+
+	let root = tempfile::tempdir().unwrap();
+	std::fs::write(
+		root.path().join("escaped.sh"),
+		"trap 'trap \"\" TERM; setsid /bin/sh late.sh &' TERM\nprintf '%s' \"$$\" > \
+		 escaped.pid\nwhile :; do /bin/sleep 30; done\n",
+	)
+	.unwrap();
+	std::fs::write(
+		root.path().join("late.sh"),
+		"trap '' TERM\nprintf '%s' \"$$\" > late.pid\nwhile :; do /bin/sleep 30; done\n",
+	)
+	.unwrap();
+	let mut host = crate::host::PiHost::new(
+		Box::new(crate::sys::StdFs::default()),
+		tokio::runtime::Handle::current(),
+	);
+	let spawner = spawner(Sessions::Detach, Duration::from_millis(100));
+	let env = EnvView::default();
+	let args = sh("setsid /bin/sh escaped.sh & wait");
+	let mut invocation = spec(&args, &env, NEW);
+	invocation.cwd = root.path().as_os_str().as_encoded_bytes().as_bstr();
+	let mut external = spawner.spawn(invocation).unwrap();
+	let parent = Process::from_pid(i32::try_from(external.pid()).unwrap()).unwrap();
+	let mut pins = Pins(vec![parent]);
+	let read_pin = |name| {
+		std::fs::read_to_string(root.path().join(name))
+			.ok()
+			.and_then(|pid| pid.parse::<i32>().ok())
+			.and_then(Process::from_pid)
+	};
+	let mut child = None;
+	until("escaped child ready", || {
+		child = read_pin("escaped.pid");
+		child.is_some()
+	});
+	let child = child.unwrap();
+	pins.0.push(child.clone());
+	host.cancel_externals(Signal::Term, &mut [external.as_mut()]);
+	let mut grandchild = None;
+	// Retain the external until the TERM handler created a new session.
+	// Dropping it starts the grace, so readiness cannot race hard escalation.
+	until("late escaped grandchild ready", || {
+		grandchild = read_pin("late.pid");
+		grandchild.is_some()
+	});
+	let grandchild = grandchild.unwrap();
+	pins.0.push(grandchild.clone());
+	// A second cancellation must not replace the first snapshot with this
+	// exited leader's now-empty tree.
+	assert_eq!(wait(&mut external), ExitStatus::Signaled(Signal::Term));
+	host.cancel_externals(Signal::Term, &mut [external.as_mut()]);
+	drop(external);
+	let child_exited = child
+		.wait_for_exit(Some(Duration::from_secs(5)), crate::cancel::CancelToken::default())
+		.await
+		.unwrap();
+	let grandchild_exited = grandchild
+		.wait_for_exit(Some(Duration::from_secs(5)), crate::cancel::CancelToken::default())
+		.await
+		.unwrap();
+	assert!(child_exited, "cancellation lost its escaped pre-TERM pin");
+	assert!(grandchild_exited, "hard escalation did not refresh the retained orphan subtree");
+}
+
 #[test]
 fn output_is_delivered_before_completion() {
 	let env = EnvView::default();

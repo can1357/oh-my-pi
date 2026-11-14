@@ -21,8 +21,8 @@
  */
 
 import * as path from "node:path";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
+import { primaryRootOrCwd } from "../utils/active-repo-context";
 import type { HindsightClientApi } from "./client";
 import type { HindsightConfig } from "./config";
 
@@ -82,8 +82,7 @@ function baseBankId(config: HindsightConfig): string {
  */
 function projectLabel(directory: string): string {
 	if (!directory) return UNKNOWN_PROJECT;
-	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
-	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;
+	return path.basename(primaryRootOrCwd(directory)).toLowerCase() || UNKNOWN_PROJECT;
 }
 
 /**

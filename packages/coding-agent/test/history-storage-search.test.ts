@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -32,6 +33,30 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
+	it("keeps public recent reads and search quiet while strict reads report a closed handle", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["deploy the service"]);
+		HistoryStorage.close();
+
+		expect(storage.getRecent(10)).toEqual([]);
+		expect(() => storage.getRecentOrThrow(10)).toThrow();
+		expect(storage.search("deploy", 10)).toEqual([]);
+	});
+
+	it("returns no public recent results after a real SQL failure, but exposes the strict failure", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["deploy the service"]);
+		const raw = new Database(tempDir!.join("history.db"));
+		try {
+			raw.run("DROP TABLE history");
+			expect(storage.getRecent(10)).toEqual([]);
+			expect(() => storage.getRecentOrThrow(10)).toThrow();
+			expect(storage.search("deploy", 10)).toEqual([]);
+		} finally {
+			raw.close();
+		}
+	});
+
 	it("removes deleted prompts from search and permits reinserting them", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["commit one", "commit two"]);
@@ -42,17 +67,16 @@ describe("HistoryStorage.search", () => {
 		await storage.add("commit one");
 		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit one", "commit two"]);
 	});
-
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
-		const storage = await freshStorage();
-		await seed(storage, ["run git commit --amend now", "unrelated noise"]);
+	const storage = await freshStorage();
+	await seed(storage, ["run git commit --amend now", "unrelated noise"]);
 
-		// Before the tokenization fix, `git-commit` produced a single FTS phrase
-		// `"git-commit"*` which matched nothing because unicode61 indexed the stored
-		// prompt as `git` and `commit` separately.
-		const results = storage.search("git-commit", 10);
-		expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
-	});
+	// Before the tokenization fix, `git-commit` produced a single FTS phrase
+	// `"git-commit"*` which matched nothing because unicode61 indexed the stored
+	// prompt as `git` and `commit` separately.
+	const results = storage.search("git-commit", 10);
+	expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
+});
 
 	it("keeps a punctuated term's parts together instead of matching them anywhere", async () => {
 		const storage = await freshStorage();

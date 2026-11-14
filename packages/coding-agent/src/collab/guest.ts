@@ -487,9 +487,12 @@ export class CollabGuestLink {
 		await this.#restoreLocalSession();
 	}
 
-	sendPrompt(text: string, images?: ImageContent[]): void {
-		if (this.#rejectReadOnly()) return;
-		this.#socket?.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined });
+	/** Whether the prompt entered the local relay queue, not a host acknowledgement. */
+	sendPrompt(text: string, images?: ImageContent[]): boolean {
+		if (this.#rejectReadOnly()) return false;
+		return (
+			this.#socket?.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined }) ?? false
+		);
 	}
 
 	sendAbort(): void {
@@ -971,7 +974,9 @@ export class CollabGuestLink {
 		clearGuestTransientStatus(this.#ctx);
 		this.#ctx.pendingShellContainer.clear();
 		this.#ctx.pendingMessagesContainer.clear();
-		this.#ctx.compactionQueuedMessages = [];
+		// Queued local input was never ours to replay: hand it back to the editor
+		// instead of dropping it with the rest of the transient local UI.
+		this.#ctx.restoreCompactionQueueToEditor("Joined collab: unsent queued input returned to the editor");
 		this.#ctx.streamingComponent = undefined;
 		this.#ctx.streamingMessage = undefined;
 		this.#ctx.pendingTools.clear();

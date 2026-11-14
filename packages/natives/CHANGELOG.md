@@ -8,6 +8,20 @@
 
 ### Added
 
+- Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+### Fixed
+
+- Preserved ordinary file and directory types for non-name-surrogate Windows reparse points, including cloud placeholders, when native path stats follow links ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed cancelled commands missing descendants that start a new process session, repeating termination cleanup, or being killed before cleanup finishes ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed hard process-tree termination missing a pinned child that escapes its process group during delivery, and graceful termination reporting success while escaped orphan descendants survive. Hard escalation retains eligible process handles, merges overlapping snapshots safely across numeric PID reuse, and refreshes orphan subtrees created during the grace period without repeating TERM cleanup ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Avoided an unnecessary host-wide process scan when cancelling internal shell jobs, while retaining host-protection checks for external process targets ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed `tail -f` continuing to follow after its downstream reader exits when unrelated directory activity keeps its filesystem watcher busy ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed cancelling a traced command leaving TERM-ignoring descendants alive after their parent exits, including blocked captured output and descendants that escape into new sessions. Cancellation now retains its pre-TERM identities through hard escalation and refreshes late orphan descendants; ordinary script signals and successful background commands keep their existing behavior ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed Zsh's GNU-profile signal names, function-trap activation and alias identity, and OS handler restoration across local scopes and re-exec. Function copies, enable/disable operations, missing function bodies, and failed handler setup now preserve their distinct trap semantics without losing cleanup errors or cancellation status ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+### Added
+
 - Added `noVerify` to `commitCreate()` options to skip the `pre-commit` and `commit-msg` hooks, like `git commit --no-verify`.
 - Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.
 - Improved `grep()` and `glob()` performance for ovnfs checkouts by using the serving daemon when supported, while retaining native fallback behavior and existing streaming, filtering, and link-following options.

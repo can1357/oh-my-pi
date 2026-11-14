@@ -11,7 +11,8 @@ This document covers execution/process/terminal primitives in `@oh-my-pi/pi-nati
 - `crates/pi-shell/src/cancel.rs`
 - `crates/pi-builtins` (embedded-shell builtins: bash builtins plus in-process utility/process commands)
 - `crates/pi-shell/src/windows.rs` (Windows-only PATH enrichment)
-- `crates/pi-shell/src/process.rs`
+- `crates/pi-shell/src/proctree.rs` (stable process references and tree termination)
+- `crates/pi-shell/src/process/mod.rs` (standalone process-shell runtime)
 - `crates/pi-natives/src/pty.rs`
 - `crates/pi-natives/src/ps.rs`
 - `crates/pi-natives/src/keys.rs`
@@ -141,6 +142,7 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 - Structured result flags are used:
    - timeout -> `exitCode` omitted, `timedOut: true`.
    - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
+- On Unix, cancellation retains cleanup ownership while an output relay drains, even if its external parent has already exited. Remaining descendants receive hard escalation after the TERM grace period without repeating TERM. A script's ordinary `kill -TERM` and successful background commands do not acquire this cancellation-only escalation.
 
 `Shell.abort()` behavior:
 
@@ -258,7 +260,7 @@ Current JS surface is the `Process` class:
 - `terminate(options?)` is async and resolves whether the tree exited within its wait windows. Defaults are 1000ms graceful wait and 5000ms post-hard-kill wait. `gracefulMs < 0` skips the graceful wait, not the initial polite signal. `group: true` also targets the process group where supported; aborting its signal rejects termination waits.
 - `waitForExit(options?)` resolves `true` when the process exits and `false` on timeout; aborting its signal rejects the promise.
 
-The platform-specific implementation lives in `pi_shell::process`; `crates/pi-natives/src/ps.rs` is a N-API shim plus re-exports used by PTY termination.
+The platform-specific implementation lives in `pi_shell::proctree`; `crates/pi-natives/src/ps.rs` is a N-API shim plus re-exports used by PTY termination.
 
 `execReplace(argv)` is a separate synchronous process handoff: on Unix it calls `execvp`, replacing the host process without JS/native cleanup on success. Callers must restore the terminal and flush logs first. Empty argv, interior NUL bytes, exec failures, and unsupported platforms throw; Windows callers must use spawn-and-wait instead.
 

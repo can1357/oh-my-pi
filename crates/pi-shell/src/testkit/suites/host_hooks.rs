@@ -18,11 +18,13 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		Budget, CallOutcome, Cx, ExitStatus, ExtProc, PipeMirror, PipeTap, Script, ShellApi, Signal,
-		SpawnFuture, SpawnSpec, Step,
+		Budget, CallOutcome, Cx, EngineConfig, ExitStatus, ExtProc, ModeId, PipeMirror, PipeTap,
+		Platform, Script, ShellApi, ShellInit, Signal, SpawnFuture, SpawnSpec, Step, Verdict,
+		event::EventData,
+		store::{Key, Record, TrapKey},
 	},
 	testkit::{
-		FakeHost, Rig,
+		FakeHost, Fault, Rig,
 		fault::skeleton_init,
 		run::{Stop, advance, wait_runnable},
 	},
@@ -390,4 +392,169 @@ fn snapshot_of_a_pending_spawn_reissues_it_without_duplicating_the_process() {
 	assert_eq!(until_done(&mut r), 0);
 	assert_eq!(r.parts().1.stdout.bytes(), b"status 7\n");
 	assert_eq!(tally(&gate), (2, 2, 1), "one process for one command");
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalAction {
+	Default,
+	Ignored,
+	Caught,
+}
+
+#[derive(Default)]
+struct SignalChanges {
+	calls:       Vec<(Signal, SignalAction)>,
+	diagnostics: Vec<&'static str>,
+}
+
+fn signal_rig(fail_at: usize) -> (Rig, Arc<Mutex<SignalChanges>>) {
+	let changes = Arc::new(Mutex::new(SignalChanges::default()));
+	let updates = Arc::clone(&changes);
+	let host = FakeHost::new().with_signal_trap(move |sig, action| {
+		let mut changes = updates.lock();
+		let action = match action {
+			None => SignalAction::Default,
+			Some(action) if action.is_empty() => SignalAction::Ignored,
+			Some(_) => SignalAction::Caught,
+		};
+		changes.calls.push((sig, action));
+		if changes.calls.len() == fail_at {
+			Err(io::ErrorKind::PermissionDenied.into())
+		} else {
+			Ok(true)
+		}
+	});
+	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
+	let cfg = EngineConfig { platform: Platform::Linux, ..EngineConfig::default() };
+	let mut rig = Rig::with_config(host, init, cfg);
+	let diagnostics = Arc::clone(&changes);
+	rig.host.on_event(Box::new(move |event| {
+		if let EventData::Diag { code, .. } = &event.data {
+			diagnostics.lock().diagnostics.push(*code);
+		}
+		Verdict::Continue
+	}));
+	(rig, changes)
+}
+
+fn assert_failed_signal_restoration(changes: &Mutex<SignalChanges>) {
+	let changes = changes.lock();
+	assert_eq!(
+		changes.calls.as_slice(),
+		&[
+			(Signal::Io, SignalAction::Caught),
+			(Signal::Usr1, SignalAction::Caught),
+			(Signal::Io, SignalAction::Ignored),
+			(Signal::Usr1, SignalAction::Ignored),
+			(Signal::Io, SignalAction::Caught),
+			(Signal::Usr1, SignalAction::Caught),
+		],
+		"both saved handlers restore once, even when the first host update fails"
+	);
+	assert_eq!(
+		changes.diagnostics.as_slice(),
+		&["SignalSetup"],
+		"a host failure is not StoreFailed"
+	);
+}
+
+#[test]
+fn failed_signal_restoration_preserves_return_exit_and_local_exit_trap() {
+	for (transfer, expected) in
+		[(":", 1), ("return 0", 1), ("return 7", 7), ("exit 0", 1), ("exit 7", 7)]
+	{
+		let (mut rig, changes) = signal_rig(5);
+		let script = format!(
+			"TRAPIO() {{ :; }}; TRAPUSR1() {{ :; }}; f() {{ setopt localtraps; trap '' 29; trap '' \
+			 10; trap 'print LOCAL_EXIT' EXIT; {transfer}; }}; f"
+		);
+		assert_eq!(rig.run(Script::command(script.as_bytes()), Fault::None), expected, "{transfer}");
+		assert_eq!(rig.host.stdout.bytes(), b"LOCAL_EXIT\n", "the taken EXIT trap runs once");
+		assert_failed_signal_restoration(&changes);
+	}
+}
+
+#[test]
+fn failed_signal_restoration_survives_a_pending_exit_through_always() {
+	let (mut rig, changes) = signal_rig(5);
+	let script = b"TRAPIO() { :; }; TRAPUSR1() { :; }; \
+		inner() { setopt localtraps; trap '' 29; trap '' 10; exit 0; }; \
+		outer() { { inner; } always { print ALWAYS; }; }; outer";
+	assert_eq!(rig.run(Script::command(script.as_slice()), Fault::None), 1);
+	assert_eq!(rig.host.stdout.bytes(), b"ALWAYS\n");
+	assert_failed_signal_restoration(&changes);
+}
+
+#[test]
+fn cancellation_status_survives_failed_signal_restoration_and_pending_exit() {
+	for pending_exit in [false, true] {
+		let (mut rig, changes) = signal_rig(5);
+		let script = if pending_exit {
+			"TRAPIO() { :; }; TRAPUSR1() { :; }; inner() { setopt localtraps; trap '' 29; trap '' 10; \
+			 exit 0; }; outer() { { inner; } always { READY=1; while :; do :; done; }; }; outer"
+		} else {
+			"TRAPIO() { :; }; TRAPUSR1() { :; }; f() { setopt localtraps; trap '' 29; trap '' 10; \
+			 READY=1; while :; do :; done; }; f"
+		};
+		let (shell, host, store) = rig.parts();
+		let id = shell.submit(Script::command(script.as_bytes()));
+		let one = Budget { max_ops: 1, max_ns: u64::MAX };
+		for _ in 0..1_000 {
+			if store.record(Key::Var(BStr::new("READY"))).is_some() {
+				break;
+			}
+			assert_eq!(advance(shell, host, store, id, one), Stop::Yield);
+		}
+		assert!(
+			store.record(Key::Var(BStr::new("READY"))).is_some(),
+			"cancel only after local setup"
+		);
+		shell.control().cancel(Signal::Term);
+		let status = loop {
+			match advance(shell, host, store, id, Budget::default()) {
+				Stop::Done(status) => break status,
+				Stop::Yield => {},
+				other => panic!("unexpected {other:?} after cancellation"),
+			}
+		};
+		assert_eq!(status, 143, "pending exit: {pending_exit}");
+		assert!(host.stdout.bytes().is_empty());
+		host.assert_no_leaks(shell, store);
+		assert_failed_signal_restoration(&changes);
+	}
+}
+
+#[test]
+fn restoring_a_function_trap_reinstalls_the_host_handler_without_list_trap_records() {
+	let (mut rig, changes) = signal_rig(0);
+	assert_eq!(
+		rig.run(Script::command(b"TRAPIO() { print RESTORED; };".as_slice()), Fault::None),
+		0
+	);
+	changes.lock().calls.clear();
+	rig.snapshot();
+	assert_eq!(changes.lock().calls.as_slice(), &[(Signal::Io, SignalAction::Caught)]);
+	assert!(matches!(
+		rig.store.record(Key::Trap(TrapKey::Signal(Signal::Io))),
+		Some(Record::TrapFunction)
+	));
+	assert_eq!(rig.run(Script::command(b"kill -29 $$".as_slice()), Fault::None), 0);
+	assert_eq!(rig.host.stdout.bytes(), b"RESTORED\n");
+	assert!(changes.lock().diagnostics.is_empty());
+}
+
+#[test]
+fn a_refused_function_catch_stays_ignored_without_losing_function_identity() {
+	let host = FakeHost::new().with_signal_trap(|_, _| Ok(false));
+	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
+	let cfg = EngineConfig { platform: Platform::Linux, ..EngineConfig::default() };
+	let mut rig = Rig::with_config(host, init, cfg);
+	let script = b"TRAPIO() { print WRONG; }; kill -29 $$; print -r -- \"FN=${+functions[TRAPIO]}\"";
+	assert_eq!(rig.run(Script::command(script.as_slice()), Fault::Snapshot { every: 1 }), 0);
+	assert_eq!(rig.host.stdout.bytes(), b"FN=1\n");
+	assert!(matches!(
+		rig.store.record(Key::Trap(TrapKey::Signal(Signal::Io))),
+		Some(Record::TrapFunction)
+	));
+	assert!(rig.host.stderr.bytes().is_empty());
 }

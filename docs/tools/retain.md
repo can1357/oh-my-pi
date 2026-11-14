@@ -71,6 +71,7 @@ Mnemopi:
    - each event id hashes the session id, tool call id, item index, scope, context and content. It becomes the server `document_id` with `update_mode: "replace"`, so a retried call or a resend after an ambiguous response replaces the same document, while a reused tool call id with different content is a new one;
    - the queue flushes immediately once 16 new events are pending, otherwise after a `RETAIN_FLUSH_INTERVAL_MS` debounce; primary-state installation also flushes, delivering events earlier processes left for the same API URL and bank;
    - a flush takes the destination's drain lease (an OS lock released when its process exits; a busy lease defers to the holder and retries after the debounce), best-effort ensures the bank exists, and sends async `retainBatch(...)` requests of up to 16 events per tag set in publication order: project items carry their captured tags, global items none. Each tag set gets its own request, because Hindsight tags a request's generated documents with the union of its items' tags and document-level re-tags cascade to every memory in it. A 2xx response deletes the events; it means server acceptance, not completed extraction.
+   - delivery snapshots share the publication lock, so a drain cannot send part of a call whose persistence later fails. Every drain sweeps expired quarantine files, including when no new event is rejected.
 
 ## Modes / Variants
 

@@ -1720,6 +1720,77 @@ async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() 
 	assert_eq!(fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup"), "cleaned");
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_reaches_descendants_in_a_new_session() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("escaped child directory");
+	let pidfile = root.path().join("escaped.pid");
+	let parent_pidfile = root.path().join("parent.pid");
+	let _cleanup = PidfileProcessCleanup(vec![parent_pidfile.clone(), pidfile.clone()]);
+	fs::write(
+		root.path().join("escaped.sh"),
+		"trap 'printf cleaned > cleaned; exit 0' TERM\nprintf '%s' \"$$\" > escaped.pid\nwhile :; \
+		 do :; done\n",
+	)
+	.expect("escaped child script");
+	fs::write(
+		root.path().join("parent.sh"),
+		"printf '%s' \"$$\" > parent.pid\nsetsid sh escaped.sh &\nwait\n",
+	)
+	.expect("parent script");
+	let shell = Shell::new(None);
+	let mut cancel = CancelToken::default();
+	let abort = cancel.emplace_abort_token();
+	let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+	let task = tokio::spawn(async move {
+		shell
+			.run(
+				ShellRunOptions {
+					command: "sh parent.sh".into(),
+					cwd: Some(cwd),
+					..Default::default()
+				},
+				None,
+				cancel,
+			)
+			.await
+	});
+	let child = time::timeout(Duration::from_secs(5), async {
+		loop {
+			if let Some(child) = fs::read_to_string(&pidfile)
+				.ok()
+				.and_then(|pid| pid.parse::<i32>().ok())
+				.and_then(proctree::Process::from_pid)
+			{
+				break child;
+			}
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("escaped child ready");
+	let parent_pid = fs::read_to_string(parent_pidfile)
+		.expect("parent pid")
+		.parse::<i32>()
+		.expect("numeric parent pid");
+	assert_eq!(child.group_id(), Some(child.pid()));
+	assert_ne!(child.group_id(), Some(parent_pid));
+	abort.abort(AbortReason::Signal);
+	let exited = child
+		.wait_for_exit(Some(Duration::from_secs(5)), CancelToken::default())
+		.await
+		.expect("wait for escaped child");
+	let result = time::timeout(Duration::from_secs(5), task)
+		.await
+		.expect("cancel finished")
+		.expect("run task")
+		.expect("shell result");
+	assert!(result.cancelled);
+	assert!(exited, "cancellation left the escaped descendant alive");
+	assert_eq!(fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup"), "cleaned");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
@@ -2515,18 +2586,35 @@ async fn pipe_tap_exposes_input_a_later_stage_holds_back() {
 
 /// A consumer that exits early still ends the pipeline at once through a
 /// tapped pipe: the relay lets go of the producer's end when `head`
-/// leaves, so `tail -f` (idle, no further writes) sees its pipe widowed.
+/// leaves, so `tail -f` (no further writes) sees its pipe widowed even while
+/// unrelated sibling files keep its parent-directory watcher busy.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn pipe_tap_widows_the_producer_when_the_consumer_exits() {
 	let _guard = shell_test_lock().lock().await;
-	let log = tempfile::NamedTempFile::new().expect("log file");
-	std::fs::write(log.path(), "first\nsecond\n").expect("write log");
-	let command = format!("tail -f {} | head -n 1", quote_arg(&log.path().to_string_lossy()));
+	let dir = tempfile::tempdir().expect("log directory");
+	let log = dir.path().join("followed.log");
+	std::fs::write(&log, "first\nsecond\n").expect("write log");
+	let command = format!("tail -f {} | head -n 1", quote_arg(&log.to_string_lossy()));
+	let stop = Arc::new(AtomicBool::new(false));
+	let noise_stop = Arc::clone(&stop);
+	let noise_path = dir.path().join("unrelated");
+	let noise = std::thread::spawn(move || -> std::io::Result<()> {
+		while !noise_stop.load(Ordering::Relaxed) {
+			std::fs::write(&noise_path, b"unrelated\n")?;
+			std::thread::sleep(Duration::from_millis(1));
+		}
+		Ok(())
+	});
 	let (_taps, run, rx) = run_tapped(&command, CancelToken::default());
 
-	let result = time::timeout(Duration::from_secs(10), run)
-		.await
+	let result = time::timeout(Duration::from_secs(10), run).await;
+	stop.store(true, Ordering::Relaxed);
+	noise
+		.join()
+		.expect("watcher noise thread panicked")
+		.expect("write unrelated sibling");
+	let result = result
 		.expect("tail -f kept following after head exited")
 		.expect("run task panicked")
 		.expect("run");

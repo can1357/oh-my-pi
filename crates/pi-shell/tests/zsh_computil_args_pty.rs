@@ -48,6 +48,7 @@ fn spawn(real: bool, rc: &str, rows: u16, cols: u16) -> Spawn {
 
 /// Source the rc file (`-f` skips it) and wait until it ran.
 fn start(pty: &mut Pty) -> io::Result<()> {
+	pty.wait_raw(SLOW)?;
 	pty.settle(QUIET, SLOW)?;
 	pty.type_keys(". ~/.zshrc; print -r READY$((6*7))\r", KEY)?;
 	pty.read_until("READY42", SLOW)?;

@@ -3567,7 +3567,7 @@ fn zsh_enter_call(
 		}
 	}
 	if let Some(z) = zsh.as_mut() {
-		z.traps = builtins::trap::start_scope(&mut k.root, cx.store, vp)?;
+		z.traps = builtins::trap::start_scope(&mut k.root, cx.store, vp, k.engine.config().platform)?;
 		let set = if warn_nested {
 			Some(true)
 		} else if name == ir::ANON.as_bytes() {

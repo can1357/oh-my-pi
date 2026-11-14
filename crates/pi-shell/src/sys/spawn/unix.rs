@@ -1654,6 +1654,10 @@ impl ExtProc for UnixProc {
 		self.scope.signal(sig)
 	}
 
+	fn signal_delivered(&mut self, sig: Signal, targets: crate::proctree::TerminationTargets) {
+		self.tracker.cancellation_delivered(sig, targets);
+	}
+
 	fn stop(&mut self) -> io::Result<()> {
 		self.scope.signal(Signal::Stop)
 	}
@@ -1743,6 +1747,8 @@ fn escalate(tracker: &Tracker, scope: Scope, kill_at: Instant) {
 	if kill_at > now {
 		thread::sleep(kill_at - now);
 	}
+	// Refresh retained orphan trees before any KILL can hide their new children.
+	tracker.kill_cancellation();
 	{
 		let mut life = tracker.lock();
 		if life.take_kill(Instant::now().max(kill_at)) {

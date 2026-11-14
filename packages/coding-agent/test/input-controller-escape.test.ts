@@ -383,7 +383,6 @@ describe("InputController escape behavior", () => {
 
 		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?", undefined);
 		expect(spies.prompt).not.toHaveBeenCalled();
-		expect(editor.addToHistory).toHaveBeenCalledWith("/btw why is it doing that?");
 	});
 
 	describe("side file commands", () => {
@@ -420,7 +419,6 @@ describe("InputController escape behavior", () => {
 
 			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", undefined, "/sitrep");
 			expect(spies.prompt).not.toHaveBeenCalled();
-			expect(editor.addToHistory).toHaveBeenCalledWith("/sitrep");
 			expect(editor.getText()).toBe("");
 		});
 

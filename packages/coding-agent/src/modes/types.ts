@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { Component, Container, EditorTheme, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, Container, EditorTheme, HistoryContext, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import type { StatusNotice, StatusNoticeAction } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
@@ -64,7 +64,7 @@ import type { EventController } from "./controllers/event-controller";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
-import type { ConversationPosition } from "./utils/conversation-position";
+import type { ConversationPosition } from "../session/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
@@ -355,8 +355,8 @@ export interface InteractiveModeContext {
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Compaction queued for the next yield; follow-ups sent after it wait in `compactionQueuedMessages`. */
 	yieldCompaction: YieldCompaction | undefined;
-	/** While a queued compaction runs, the conversation the input it held in `compactionQueuedMessages`
-	 *  belongs to; checked when that input is flushed. */
+	/** Conversation owning the current compaction queue. Detached drains retain
+	 * their own immutable origin until admission or recovery settles. */
 	compactionQueueOrigin: ConversationPosition | undefined;
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
@@ -471,7 +471,7 @@ export interface InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; historyRecorded?: boolean; historyContext?: HistoryContext },
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */

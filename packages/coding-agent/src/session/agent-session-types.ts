@@ -28,6 +28,7 @@ import type { AgentDefinition } from "../task/types";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import type { ConversationPosition } from "./conversation-position";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { SkillsSettings } from "../extensibility/settings";
@@ -434,6 +435,12 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/**
+	 * Optional origin for externally replayed input. Active session transitions
+	 * settle before command effects or admission; a different conversation rejects.
+	 * Not inherited by extension hooks or other SDK submissions.
+	 */
+	conversationOrigin?: ConversationPosition;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**
@@ -472,8 +479,8 @@ export interface PromptOptions {
 	 * is pushed onto its steer/follow-up/aside queue (after image
 	 * normalization and vision-description preprocessing for that prompt); or
 	 * is routed to an extension command, before its handler runs. Admission is
-	 * not proof that a model call will occur. A prompt dropped, cancelled, or
-	 * failed before admission still only settles through the returned promise.
+	 * not proof that a model call will occur. Drops notify onPromptDropped or
+	 * the session host; other failures settle through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
 	/**
@@ -484,6 +491,12 @@ export interface PromptOptions {
 	 * is queued as an aside.
 	 */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+	/**
+	 * Called synchronously when this user prompt is dropped before dispatch,
+	 * instead of the session host's setPromptDropped hook. Keep notification
+	 * synchronous; perform asynchronous recovery after the prompt settles.
+	 */
+	onPromptDropped?: (prompt: DroppedPrompt) => void;
 	/**
 	 * Text prompts that must run after this one, in order. The session holds them off the
 	 * queue until this prompt reaches the agent (its run goes live, it lands on a queue, or an
@@ -496,11 +509,11 @@ export interface PromptOptions {
 	followUps?: readonly string[];
 }
 
-/** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
- *  before it reached the agent (an abort or usage preflight denial raced turn
- *  setup), so it was never persisted to the session. A prompt carrying
- *  {@link PromptOptions.followUps} is also reported when its setup throws or the
- *  extension command it ran fails, so the follow-ups are never lost with it. */
+/** Payload for a submission's onPromptDropped or AgentSession.setPromptDropped:
+ *  a user prompt cancelled before it reached the agent, so it was never
+ *  persisted to the session. A prompt carrying {@link PromptOptions.followUps}
+ *  is also reported when its setup throws or the extension command it ran
+ *  fails, so the follow-ups are never lost with it. */
 export interface DroppedPrompt {
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;
@@ -520,6 +533,8 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Optional origin for externally replayed input. See {@link PromptOptions.conversationOrigin}. */
+	conversationOrigin?: ConversationPosition;
 	/** Called synchronously with the messages pushed onto the follow-up queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
@@ -528,6 +543,8 @@ export interface FollowUpOptions {
 export interface SteerOptions {
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Optional origin for externally replayed input. See {@link PromptOptions.conversationOrigin}. */
+	conversationOrigin?: ConversationPosition;
 	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
 }

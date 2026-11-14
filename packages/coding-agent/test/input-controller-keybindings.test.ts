@@ -753,9 +753,9 @@ describe("InputController keybinding setup", () => {
 
 	function withCompactionQueue(ctx: InteractiveModeContext) {
 		const handleCompactCommand = vi.fn(async () => "ok" as const);
-		const queueCompactionMessage = vi.fn((text: string, mode: "steer" | "followUp") => {
+		const queueCompactionMessage = (text: string, mode: "steer" | "followUp") => {
 			ctx.compactionQueuedMessages.push({ text, mode });
-		});
+		};
 		Object.assign(ctx, {
 			compactionQueuedMessages: [],
 			yieldCompaction: undefined,
@@ -768,12 +768,12 @@ describe("InputController keybinding setup", () => {
 				getBranch: () => [{ id: "entry-7" }],
 			},
 		});
-		return { handleCompactCommand, queueCompactionMessage };
+		return { handleCompactCommand };
 	}
 
 	it("queues a follow-up /compact for the next yield instead of interrupting the run", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
-		const { handleCompactCommand, queueCompactionMessage } = withCompactionQueue(ctx);
+		const { handleCompactCommand } = withCompactionQueue(ctx);
 		// Session queues popped like `AgentSession.popLastQueuedMessage`: steering first, then follow-ups.
 		const steering: string[] = [];
 		const followUp = ["sent before the compaction"];
@@ -803,9 +803,6 @@ describe("InputController keybinding setup", () => {
 		editor.setText("now continue");
 		await controller.handleFollowUp();
 		expect(spies.prompt).not.toHaveBeenCalled();
-		expect(queueCompactionMessage).toHaveBeenCalledWith("now continue", "followUp", undefined, {
-			preserveDraft: true,
-		});
 
 		// A steer sent after the compaction lands before the yield.
 		steering.push("steer mid-run");
@@ -839,7 +836,7 @@ describe("InputController keybinding setup", () => {
 
 	it("keeps submission order when an input hook delays a follow-up /compact", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
-		const { queueCompactionMessage } = withCompactionQueue(ctx);
+		withCompactionQueue(ctx);
 		const compactHook = Promise.withResolvers<void>();
 		Object.assign(ctx.session, {
 			isStreaming: true,
@@ -863,9 +860,7 @@ describe("InputController keybinding setup", () => {
 
 		expect(ctx.yieldCompaction?.text).toBe("/compact");
 		expect(spies.prompt).not.toHaveBeenCalled();
-		expect(queueCompactionMessage).toHaveBeenCalledWith("after the compaction", "followUp", undefined, {
-			preserveDraft: true,
-		});
+		expect(ctx.compactionQueuedMessages).toEqual([{ text: "after the compaction", mode: "followUp" }]);
 	});
 
 	it("holds an Enter queue shorthand behind a follow-up /compact whose input hook is slower", async () => {

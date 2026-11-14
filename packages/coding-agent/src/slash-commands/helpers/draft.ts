@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "../types";
 
 /** Clear only text still owned by this submission, never a newer detached draft. */
@@ -27,6 +28,125 @@ export function restoreDetachedDraft(
 		editor.imageLinks = editor.pendingImageLinks;
 	}
 	editor.setCollapsedText([restoredText, currentText].filter(part => part.trim()).join("\n\n"));
+}
+
+/** The merged, marker-shifted block `restoreQueuedDraft` would prepend for these entries. */
+export function queuedDraftText(editor: CustomEditor, entries: readonly RestoredQueuedMessage[]): string {
+	if (entries.length === 0) return "";
+	const queuedImages = entries.flatMap(entry => entry.images ?? []);
+	if (queuedImages.length === 0) return entries.map(entry => entry.text).join("\n\n");
+	const parts: string[] = [];
+	let imageOffset = editor.pendingImages.length;
+	for (const entry of entries) {
+		parts.push(shiftImageMarkers(entry.text, imageOffset));
+		if (entry.images?.length) imageOffset += entry.images.length;
+	}
+	return parts.join("\n\n");
+}
+
+/** Stable submission rank for queued entries, first-seen first. */
+const queuedEntryRanks = new WeakMap<object, number>();
+let nextQueuedEntryRank = 0;
+export function queuedEntryRank(entry: object): number {
+	let rank = queuedEntryRanks.get(entry);
+	if (rank === undefined) {
+		rank = nextQueuedEntryRank++;
+		queuedEntryRanks.set(entry, rank);
+	}
+	return rank;
+}
+
+function hasQueuedEntryRank(entry: object): boolean {
+	return queuedEntryRanks.has(entry);
+}
+
+/**
+ * Restored blocks per editor, kept while they still head the editor text.
+ * Successive restores merge into the block set by rank (oldest first, draft
+ * last) so a later-failing newer batch never prepends ahead of an older
+ * restored one. The set is dropped when the user edits the blocks away.
+ */
+const editorRestoreBlocks = new WeakMap<CustomEditor, { text: string; rank: number }[]>();
+
+export function restoreQueuedDraftOrdered(editor: CustomEditor, entries: readonly RestoredQueuedMessage[]): number {
+	if (entries.length === 0) return 0;
+	const ranked = entries.every(entry => hasQueuedEntryRank(entry));
+	if (ranked) {
+		// Entries carry their enqueue chronology: merge into the tracked blocks by rank.
+		const ordered = [...entries].sort((left, right) => queuedEntryRank(left) - queuedEntryRank(right));
+		const batchText = queuedDraftText(editor, ordered);
+		const batch = { text: batchText, rank: queuedEntryRank(ordered[ordered.length - 1]!) };
+		const blocks = editorRestoreBlocks.get(editor) ?? [];
+		const prefix = blocks.map(block => block.text).join("\n\n");
+		const expanded = editor.getExpandedText();
+		const rest = expanded.slice(prefix.length);
+		// Merge only while the tracked blocks literally head the draft: an edited
+		// or extended block (no prefix, or no blank-line block boundary after it)
+		// falls back to a plain prepend that preserves what the user typed.
+		const boundary = rest === "" || rest.startsWith("\n\n");
+		if (blocks.length > 0 && prefix && boundary && expanded.startsWith(prefix)) {
+			// Tracked blocks still head the draft: shift and merge only this batch,
+			// rebuild every restored block by rank, and keep the residual draft last.
+			const residual = rest.slice(2);
+			restoreQueuedDraft(editor, ordered, residual);
+			const union = [...blocks, batch].sort((left, right) => left.rank - right.rank);
+			const merged = [union.map(block => block.text).join("\n\n"), residual]
+				.filter(text => text.trim())
+				.join("\n\n");
+			editor.setCollapsedText(merged);
+			editorRestoreBlocks.set(editor, union);
+		} else {
+			// No tracked blocks (or the user edited them away): plain prepend.
+			restoreQueuedDraft(editor, ordered);
+			editorRestoreBlocks.set(editor, [batch]);
+		}
+		return entries.length;
+	}
+	// Freshly mapped entries (session-queue pops, yield requests) carry no enqueue
+	// chronology; dequeues arrive newest-first, so prepend the array as given and
+	// rank it now only to keep later queue-path comparisons monotonic.
+	const batchText = queuedDraftText(editor, entries);
+	restoreQueuedDraft(editor, entries);
+	for (const entry of entries) queuedEntryRank(entry);
+	editorRestoreBlocks.set(editor, [{ text: batchText, rank: nextQueuedEntryRank - 1 }]);
+	return entries.length;
+}
+
+/**
+ * Merge explicit queued entries, oldest first, ahead of the current draft.
+ * Existing draft images keep their positions; queued attachments append.
+ */
+export function restoreQueuedDraft(
+	editor: CustomEditor,
+	entries: readonly RestoredQueuedMessage[],
+	currentText?: string,
+): number {
+	if (entries.length === 0) return 0;
+	// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
+	// (legacy drafts may still carry a trailing `attachment://N`). Each queued
+	// message numbered its references against its own local image list
+	// (1..K). Because we prepend the queued text but append the queued images
+	// to `pendingImages`, any existing draft images (M of them) — plus images
+	// already pulled in by earlier queued messages — shift the slot index that
+	// every reference must point to. Bumping each message's marker and URI
+	// indices by the running offset keeps the merged text aligned with the merged
+	// `pendingImages` order; draft markers stay valid because draft images
+	// keep their original positions.
+	const queuedText = queuedDraftText(editor, entries);
+	const current = currentText ?? editor.getText();
+	const combinedText = [queuedText, current].filter(text => text.trim()).join("\n\n");
+	// Hand queued images back to the pending-image buffer first (links are
+	// re-materialized lazily), then set the text: setCollapsedText folds the
+	// renumbered `[Image #N, WxH]` references back into chip tokens, and the
+	// collapse only recognizes indices within the merged pendingImages range.
+	if (entries.some(entry => entry.images?.length)) {
+		const queuedImages = entries.flatMap(entry => entry.images ?? []);
+		editor.pendingImages.push(...queuedImages);
+		editor.pendingImageLinks.push(...queuedImages.map(() => undefined));
+		editor.imageLinks = editor.pendingImageLinks;
+	}
+	editor.setCollapsedText(combinedText);
+	return entries.length;
 }
 
 /** A text-only command gives a draft with images back instead of running without them; returns whether it refused. */

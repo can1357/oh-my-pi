@@ -1901,6 +1901,114 @@ mod tests {
 		assert_eq!(sh(&mut s, "echo ok").await.stdout, "ok\n");
 	}
 
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn traced_cancel_sweeps_orphans_while_output_is_blocked() {
+		use std::{
+			io::Write,
+			os::fd::{AsRawFd, OwnedFd},
+		};
+
+		use crate::proctree::{KILL_SIGNAL, Process, ProcessStatus};
+
+		struct Cleanup(Vec<Process>);
+		impl Drop for Cleanup {
+			fn drop(&mut self) {
+				for process in &self.0 {
+					let _ = process.signal(KILL_SIGNAL);
+				}
+			}
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("fixture.sh"),
+			concat!(
+				"printf '%s' \"$$\" > parent.pid\n",
+				"(trap '' TERM; : > ready; exec /bin/sleep 30) &\n",
+				"printf '%s' \"$!\" > child.pid\n",
+				"while [ ! -e ready ]; do :; done\n",
+				"printf x\n",
+			),
+		)
+		.unwrap();
+
+		let (reader, writer) = io::pipe().unwrap();
+		let mut writer = std::fs::File::from(OwnedFd::from(writer));
+		let fd = writer.as_raw_fd();
+		// SAFETY: these calls only query/change this fixture's open pipe flags.
+		let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+		assert!(flags >= 0);
+		// SAFETY: fd is this fixture's live pipe writer.
+		assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+		for bytes in [&[0u8; 4096][..], &b"x"[..]] {
+			loop {
+				match writer.write(bytes) {
+					Ok(n) => assert!(n > 0),
+					Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+					Err(error) => panic!("fill capture: {error}"),
+				}
+			}
+		}
+		// SAFETY: restore the same live writer's original flags before the run.
+		assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+
+		let mut session = session();
+		let mut options = RunOptions::new("/bin/sh fixture.sh");
+		options.cwd = Some(BString::from(dir.path().as_os_str().as_bytes()));
+		options.events = Some(Arc::new(crate::bash::trace::RunTrace::new("/bin/sh fixture.sh")));
+		let cancel = CancellationToken::new();
+		let run_cancel = cancel.clone();
+		let run = tokio::spawn(async move {
+			session
+				.run_with(options, RunStdio { stdout: Some(writer), ..RunStdio::default() }, run_cancel)
+				.await
+		});
+		let mut cleanup = Cleanup(Vec::new());
+		let child = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				let read_pid = |name| {
+					std::fs::read_to_string(dir.path().join(name))
+						.ok()
+						.and_then(|text| text.parse::<i32>().ok())
+				};
+				if let (Some(parent), Some(child)) = (read_pid("parent.pid"), read_pid("child.pid"))
+					&& let (Some(parent), Some(child)) =
+						(Process::from_pid(parent), Process::from_pid(child))
+				{
+					if cleanup.0.is_empty() {
+						cleanup.0.extend([parent.clone(), child.clone()]);
+					}
+					if parent.status() == ProcessStatus::Exited {
+						break child;
+					}
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("parent must exit despite blocked observed stdout");
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		assert!(!run.is_finished(), "the relay must still await the full capture");
+		cancel.cancel();
+		let outcome = tokio::time::timeout(Duration::from_secs(5), run)
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert!(outcome.cancelled);
+		let exited = child
+			.wait_for_exit(
+				Some(TERM_GRACE + Duration::from_secs(2)),
+				crate::cancel::CancelToken::default(),
+			)
+			.await
+			.unwrap();
+		drop(reader);
+		drop(cleanup);
+		assert!(exited, "cancellation must sweep the TERM-ignoring orphan after grace");
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn trapped_term_escalates_to_kill() {
 		let mut s = session();

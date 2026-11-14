@@ -139,6 +139,10 @@ pub enum Signal {
 
 crate::bash::packed_names::packed_names!(Signal, Display);
 
+/// Traditional signals exposed by the supported zsh profiles; ZERR and
+/// DEBUG follow them in `$signals` and function-trap arguments.
+pub(crate) const ZSH_SIGCOUNT: u8 = 31;
+
 /// What a signal does to a process that neither traps nor ignores it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultAction {
@@ -153,6 +157,88 @@ pub enum DefaultAction {
 }
 
 impl Signal {
+	/// Canonical spelling of the configured zsh reference profile. Linux
+	/// follows GNU zsh 5.9's generated signal table, not the engine's
+	/// platform-independent enum spelling.
+	pub(crate) fn zsh_name(self, platform: Platform) -> &'static str {
+		match (platform, self) {
+			(Platform::Linux, Self::Abrt) => "IOT",
+			(Platform::Linux, Self::Io) => "POLL",
+			_ => self.into(),
+		}
+	}
+
+	/// Alternate spelling accepted by zsh's `alt_sigs` table.
+	pub(crate) const fn zsh_alias(self, platform: Platform) -> Option<&'static str> {
+		match (platform, self) {
+			(Platform::Linux, Self::Chld) => Some("CLD"),
+			(Platform::Linux, Self::Io) => Some("IO"),
+			_ => None,
+		}
+	}
+
+	/// The canonical `TRAPNAL` function name, from packed static storage.
+	pub(crate) fn zsh_function(self, platform: Platform) -> &'static str {
+		match (platform, self) {
+			(Platform::Linux, Self::Abrt) => "TRAPIOT",
+			(Platform::Linux, Self::Io) => "TRAPPOLL",
+			_ => {
+				use strum::VariantNames;
+				static NAMES: crate::bash::packed_names::PackedNames<
+					{
+						crate::bash::packed_names::packed_len(Signal::VARIANTS)
+							+ 4 * Signal::VARIANTS.len()
+					},
+					{ Signal::VARIANTS.len() },
+				> = crate::bash::packed_names::PackedNames::prefixed(Signal::VARIANTS, "TRAP");
+				NAMES.get(self as usize)
+			},
+		}
+	}
+
+	/// The alternate `TRAPNAL` function name, when this profile has one.
+	pub(crate) const fn zsh_function_alias(self, platform: Platform) -> Option<&'static str> {
+		match (platform, self) {
+			(Platform::Linux, Self::Chld) => Some("TRAPCLD"),
+			(Platform::Linux, Self::Io) => Some("TRAPIO"),
+			_ => None,
+		}
+	}
+
+	/// Parse an unprefixed zsh signal name, retaining whether the spelling
+	/// came from `alt_sigs`. General Bash/native parsing stays unchanged.
+	pub(crate) fn parse_zsh_name(
+		name: &[u8],
+		platform: Platform,
+		nocase: bool,
+	) -> Option<(Self, bool)> {
+		let signal = Self::parse_spec(name, platform)?;
+		let eq = |expected: &[u8]| {
+			if nocase {
+				name.eq_ignore_ascii_case(expected)
+			} else {
+				name == expected
+			}
+		};
+		if eq(signal.zsh_name(platform).as_bytes()) {
+			return Some((signal, false));
+		}
+		if signal
+			.zsh_alias(platform)
+			.is_some_and(|alias| eq(alias.as_bytes()))
+		{
+			return Some((signal, true));
+		}
+		let realtime = name.get(..5).is_some_and(|prefix| {
+			if nocase {
+				prefix.eq_ignore_ascii_case(b"RTMIN") || prefix.eq_ignore_ascii_case(b"RTMAX")
+			} else {
+				prefix == b"RTMIN" || prefix == b"RTMAX"
+			}
+		});
+		(realtime && signal.number(platform) >= 34).then_some((signal, false))
+	}
+
 	/// Signal number on `platform`, or zero when the platform has no such
 	/// signal.
 	pub const fn number(self, platform: Platform) -> u8 {
@@ -442,4 +528,81 @@ pub enum SigTarget {
 	/// A virtual process and every descendant: the process group of a
 	/// forked zsh subshell (`zpty -d` sends `SIGHUP` to it).
 	Tree(Vpid),
+}
+
+#[cfg(test)]
+mod tests {
+	use strum::IntoEnumIterator;
+
+	use super::{Signal, ZSH_SIGCOUNT};
+	use crate::bash::ids::Platform;
+
+	#[test]
+	fn zsh_names_and_static_function_keys_roundtrip_in_each_profile() {
+		for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+			for signal in Signal::iter() {
+				let name = signal.zsh_name(platform);
+				assert_eq!(signal.zsh_function(platform).strip_prefix("TRAP"), Some(name));
+				if signal.number(platform) != 0 {
+					assert_eq!(
+						Signal::parse_zsh_name(name.as_bytes(), platform, false),
+						Some((signal, false)),
+						"{platform:?}: {name}",
+					);
+				}
+				if let Some(alias) = signal.zsh_alias(platform) {
+					assert_eq!(
+						Signal::parse_zsh_name(alias.as_bytes(), platform, false),
+						Some((signal, true)),
+					);
+					assert_eq!(
+						signal
+							.zsh_function_alias(platform)
+							.and_then(|name| name.strip_prefix("TRAP")),
+						Some(alias),
+					);
+				}
+			}
+			for number in 1..=ZSH_SIGCOUNT {
+				assert!(Signal::from_number(number, platform).is_some(), "{platform:?}: {number}");
+			}
+		}
+	}
+
+	#[test]
+	fn gnu_zsh_alias_acceptance_does_not_change_general_signal_names() {
+		assert_eq!(Signal::Abrt.to_string(), "ABRT");
+		assert_eq!(Signal::Io.to_string(), "IO");
+		for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+			assert_eq!(Signal::parse_spec(b"ABRT", platform), Some(Signal::Abrt));
+			assert_eq!(Signal::parse_spec(b"IOT", platform), Some(Signal::Abrt));
+			assert_eq!(Signal::parse_spec(b"IO", platform), Some(Signal::Io));
+		}
+		assert_eq!(Signal::parse_zsh_name(b"ABRT", Platform::Linux, false), None);
+		assert_eq!(
+			Signal::parse_zsh_name(b"IOT", Platform::Linux, false),
+			Some((Signal::Abrt, false))
+		);
+		assert_eq!(
+			Signal::parse_zsh_name(b"POLL", Platform::Linux, false),
+			Some((Signal::Io, false))
+		);
+		assert_eq!(Signal::parse_zsh_name(b"IO", Platform::Linux, false), Some((Signal::Io, true)));
+		assert_eq!(
+			Signal::parse_zsh_name(b"CLD", Platform::Linux, false),
+			Some((Signal::Chld, true))
+		);
+		assert_eq!(Signal::parse_zsh_name(b"iot", Platform::Linux, false), None);
+		assert_eq!(
+			Signal::parse_zsh_name(b"iot", Platform::Linux, true),
+			Some((Signal::Abrt, false))
+		);
+		for platform in [Platform::MacOs, Platform::Windows] {
+			assert_eq!(Signal::Abrt.zsh_name(platform), "ABRT");
+			assert_eq!(Signal::Io.zsh_name(platform), "IO");
+			assert_eq!(Signal::parse_zsh_name(b"IOT", platform, false), None);
+			assert_eq!(Signal::parse_zsh_name(b"CLD", platform, false), None);
+			assert_eq!(Signal::parse_zsh_name(b"POLL", platform, false), None);
+		}
+	}
 }

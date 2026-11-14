@@ -24,7 +24,7 @@ use crate::{
 		Vpid,
 		store::{
 			BlobSlot, Change, Elem, Job, JobState, Key, KeyBuf, LossyKind, MiscKey, OptId, Record,
-			Sticky, Table, TrapKey, Var, ZshScope,
+			Sticky, Table, TrapKey, Var, ZshSavedTrap, ZshScope,
 		},
 		zshopt::{ZshOpt, ZshOpts},
 	},
@@ -138,8 +138,38 @@ fn zsh_scope_sample() -> ZshScope {
 		sticky: Some(sticky_sample()),
 		restore_sticky: true,
 		traps: vec![
-			(TrapKey::Exit, Some(Record::Trap { mode: ModeId::Zsh, action: bytes(b"echo \xffbye") })),
+			(
+				TrapKey::Exit,
+				Some(ZshSavedTrap::Text(Record::Trap {
+					mode:         ModeId::Zsh,
+					action:       bytes(b"echo \xffbye"),
+					assumed_name: false,
+				})),
+			),
 			(TrapKey::Signal(Signal::Usr1), None),
+			(
+				TrapKey::Signal(Signal::Io),
+				Some(ZshSavedTrap::Function {
+					name:     bytes(b"TRAPIO"),
+					record:   Record::Func {
+						mode:   ModeId::Zsh,
+						sticky: None,
+						source: bytes(b"TRAPIO () {\n\tprint caught\n}").into(),
+						unit:   UnitId([9; 32]),
+						attrs:  Attrs::TRACE,
+						file:   bytes(b"trap"),
+					},
+					disabled: true,
+				}),
+			),
+			(
+				TrapKey::Signal(Signal::Chld),
+				Some(ZshSavedTrap::Text(Record::Trap {
+					mode:         ModeId::Zsh,
+					action:       bytes(b"print child"),
+					assumed_name: true,
+				})),
+			),
 		],
 		lossy: LossyKind::SparseGaps.bit() | LossyKind::Shadowed.bit(),
 		pat_disables: vec![bytes(b"*")],
@@ -265,10 +295,16 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 		(KeyBuf::Alias(bytes(b"l\xffl")), Record::Alias(bytes(b"ls -l \xfe"))),
 		(KeyBuf::Opt(OptId::Errexit), Record::Opt(true)),
 		(KeyBuf::Opt(OptId::Nullglob), Record::Opt(false)),
-		(KeyBuf::Trap(TrapKey::Exit), Record::Trap { mode: ModeId::Bash, action: bytes(b"") }),
+		(KeyBuf::Trap(TrapKey::Exit), Record::Trap {
+			mode:         ModeId::Bash,
+			action:       bytes(b""),
+			assumed_name: false,
+		}),
+		(KeyBuf::Trap(TrapKey::Signal(Signal::Abrt)), Record::TrapFunction),
 		(KeyBuf::Trap(TrapKey::Signal(Signal::Usr1)), Record::Trap {
-			mode:   ModeId::Bash,
-			action: bytes(b"echo \xff"),
+			mode:         ModeId::Bash,
+			action:       bytes(b"echo \xff"),
+			assumed_name: false,
 		}),
 		(
 			KeyBuf::Job(JobId(1)),

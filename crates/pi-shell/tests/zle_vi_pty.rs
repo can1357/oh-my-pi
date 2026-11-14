@@ -113,6 +113,7 @@ const TEXTOBJECTS: &str =
 type Shots = Vec<(String, String)>;
 
 fn drive(pty: &mut Pty, cases: &[Case]) -> io::Result<Shots> {
+	pty.wait_raw(TIMEOUT)?;
 	let mut shots = Vec::with_capacity(cases.len());
 	pty.settle(QUIET, TIMEOUT)?;
 	keys(pty, ". ~/.zshrc\r")?;

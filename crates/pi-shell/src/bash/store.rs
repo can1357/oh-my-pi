@@ -452,10 +452,17 @@ pub enum Record {
 	/// A trap.
 	Trap {
 		/// Mode the trap was set in.
-		mode:   ModeId,
+		mode:         ModeId,
 		/// Action text; empty means "ignore".
-		action: BString,
+		action:       BString,
+		/// Zsh listed an alternate signal spelling (`IO`, `CLD`, or `ERR`)
+		/// when this trap was set, rather than its canonical spelling.
+		assumed_name: bool,
 	},
+	/// Zsh's `ZSIG_FUNC`: this numeric trap is active and uses its
+	/// function-table handler. The body lives only in [`Self::Func`];
+	/// copying a function into a `TRAP` name does not activate a trap.
+	TrapFunction,
 	/// A job of the root shell's job table.
 	Job(Job),
 	/// A child vproc of the shell (subshell, pipeline stage, background job,
@@ -498,6 +505,23 @@ pub struct Sticky {
 	pub off:  Vec<ZshOpt>,
 }
 
+/// A zsh trap saved by a function scope, including the exact function
+/// identity when the handler lives in the function table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZshSavedTrap {
+	/// A list trap and its mode/name provenance.
+	Text(Record),
+	/// The one function handler that was replaced.
+	Function {
+		/// Its actual canonical or alternate function-table key.
+		name:     BString,
+		/// The saved function record.
+		record:   Record,
+		/// The saved node's disabled flag (kept separately for live nodes).
+		disabled: bool,
+	},
+}
+
 /// What a zsh-dialect or mode-switching function call restores when it
 /// returns (zsh `funcsave`), kept with its scope ([`Record::Scope`] for
 /// the root shell, the scope image for a subshell).
@@ -515,7 +539,7 @@ pub struct ZshScope {
 	pub restore_sticky:  bool,
 	/// Traps as they were before this call first changed them, for
 	/// `localtraps` (`None`: unset then).
-	pub traps:           Vec<(TrapKey, Option<Record>)>,
+	pub traps:           Vec<(TrapKey, Option<ZshSavedTrap>)>,
 	/// [`LossyKind`] bits already reported through `Diag::ModeLossy` during
 	/// this call (one report per kind per crossing).
 	pub lossy:           u8,

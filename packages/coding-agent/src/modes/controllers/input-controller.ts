@@ -7,6 +7,7 @@ import {
 	BRACKETED_PASTE_START,
 	type Component,
 	emergencyTerminalRestore,
+	type HistoryContext,
 	isKeyRelease,
 	isKeyRepeat,
 	matchesKey,
@@ -15,7 +16,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -45,7 +46,11 @@ import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
-import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
+import {
+	type FileSlashCommand,
+	parseFileSlashInvocation,
+	renderFileSlashCommand,
+} from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
@@ -53,8 +58,12 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
-import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
+import {
+	executeBuiltinSlashCommand,
+	guestRefusesSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
+import { queuedEntryRank, restoreDetachedDraft, restoreQueuedDraft, restoreQueuedDraftOrdered } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -75,7 +84,11 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
-import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
+import {
+	type ConversationPosition,
+	continuesConversation,
+	conversationPosition,
+} from "../../session/conversation-position";
 import { ensureSupportedImageInput, ImageInputTooLargeError } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
@@ -1110,6 +1123,8 @@ export class InputController {
 				await this.#submitToFocusedSession(text, "steer");
 				return;
 			}
+			// Main owns this submission even if focus changes while input hooks or dispatch await.
+			const historyContext = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
 
 			// Empty submit while streaming with queued (or live-steered) messages:
 			// abort the active turn and let the post-unwind drain deliver the
@@ -1188,6 +1203,7 @@ export class InputController {
 			if (queueBody !== undefined) {
 				await this.#queueForYield(queueBody, {
 					historyText: text,
+					historyContext,
 					images: inputImages,
 					imageLinks: inputImageLinks,
 				});
@@ -1203,7 +1219,13 @@ export class InputController {
 				);
 				return;
 			}
+			// A bare word routed into a command is recorded like the command itself: the opt-in
+			// means the user asked for it to behave as typed. The confirm path above returns first,
+			// so a word that is only armed — not run — is never recorded.
 			if (bareSlashCommand) text = bareSlashCommand.command;
+
+			// Only suppress this submission's already-recorded text: a builtin can return a distinct body.
+			let recordedHistoryText: string | undefined;
 
 			// Handle built-in slash commands
 			if (text) {
@@ -1212,6 +1234,20 @@ export class InputController {
 					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
+				// Commands such as /new, /resume, /fork and /move switch the conversation or the
+				// working directory while they run. Recording before dispatch files the command
+				// under the context it was typed in — in the database *and* in the editor's local
+				// list, which is still the one that context seeded. Recording after dispatch put
+				// the command in the destination's list, where the next Up would recall it.
+				if (
+					text.startsWith("/") &&
+					!shouldSkipHistory(text) &&
+					!this.#guestRefusesSlash(text) &&
+					!this.#resolveSideFileCommand(text)
+				) {
+					this.ctx.editor.addToHistory(text, historyContext);
+					recordedHistoryText = text;
+				}
 				let slashResult: string | boolean;
 				try {
 					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
@@ -1226,14 +1262,10 @@ export class InputController {
 					return;
 				}
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls
-					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			}
@@ -1258,10 +1290,15 @@ export class InputController {
 					return;
 				}
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.clearDraft(text);
-				// No local render: the prompt comes back from the host as a
-				// collab-prompt event/entry and renders with the author badge.
-				this.ctx.collabGuest.sendPrompt(text, images);
+				if (this.ctx.collabGuest.sendPrompt(text, images)) {
+					this.ctx.editor.clearDraft(text, historyContext);
+				} else {
+					this.#dropSubmittedPending(submittedImages);
+					restoreDetachedDraft(this.ctx.editor, text, images, inputImageLinks);
+					this.ctx.showStatus("Collab prompt was not queued; returned it to the editor");
+				}
+				// No local render: admitted prompts come back from the host as a
+				// collab-prompt event/entry and render with the author badge.
 				return;
 			}
 
@@ -1269,10 +1306,15 @@ export class InputController {
 			// transcript and runnable mid-turn, so they never steer the running work.
 			// The side question carries text only, so the submitted attachments drop.
 			if (
-				await this.#runSideFileCommand(text, {
-					detach: () => this.#detachSideSubmission(draftText, submittedImages),
-					restore: () => this.#restoreResetSubmission(submittedText),
-				})
+				await this.#runSideFileCommand(
+					text,
+					{
+						detach: () => this.#detachSideSubmission(draftText, submittedImages),
+						restore: () => this.#restoreResetSubmission(submittedText),
+					},
+					historyContext,
+					recordedHistoryText,
+				)
 			) {
 				return;
 			}
@@ -1289,10 +1331,22 @@ export class InputController {
 				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.ctx.queueCompactionMessage(text, "steer", images, {
+						historyRecorded: text === recordedHistoryText,
+						historyContext,
+					});
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (
+					await this.#invokeSkillCommand(
+						text,
+						"steer",
+						historyContext,
+						recordedHistoryText,
+						inputImages,
+						inputImageLinks,
+					)
+				) {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
@@ -1315,7 +1369,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(text, historyContext);
 					await this.ctx.handleBashCommand(command, isExcluded);
 					this.ctx.isBashMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1336,7 +1390,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(text, historyContext);
 					await this.ctx.handlePythonCommand(code, isExcluded);
 					this.ctx.isPythonMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1347,7 +1401,10 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.ctx.queueCompactionMessage(text, "steer", images, {
+					historyRecorded: text === recordedHistoryText,
+					historyContext,
+				});
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -1361,7 +1418,7 @@ export class InputController {
 			// submission path creates an optimistic user message; otherwise a
 			// consumed command remains rendered like a prompt sent to the model.
 			if (this.#isLocalExtensionCommand(text)) {
-				this.ctx.editor.clearDraft(text);
+				this.ctx.editor.clearDraft(text === recordedHistoryText ? undefined : text, historyContext);
 				try {
 					await this.ctx.session.prompt(text, { images: inputImages });
 				} catch (error) {
@@ -1383,7 +1440,7 @@ export class InputController {
 			// If streaming, use prompt() with steer behavior
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
-				this.ctx.editor.addToHistory(text);
+				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 				// Enter already cleared the editor synchronously. A later clear here
 				// can erase the tail of an unbracketed paste arriving after Enter.
 				this.ctx.editor.imageLinks = undefined;
@@ -1503,7 +1560,7 @@ export class InputController {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-			this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		};
 		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
 		// expansion, `/queue`, mode commands), the same as for the follow-up key.
@@ -1541,6 +1598,12 @@ export class InputController {
 			this.ctx.locallySubmittedUserSignatures.size === 0 &&
 			this.ctx.session.messages.length === 0;
 		const folded = text.toLowerCase();
+		// A /guided-goal interview is a question-and-answer exchange, so `c` is a
+		// plausible answer ("option C"), not a request to run a command named /c — the
+		// same reason the continue shortcut stands down at the submit call site (see
+		// `text === "c" && !isGuidedGoalInterviewActive()`). Leaving the word alone here
+		// also keeps an empty session from silently executing `/c` on a single Enter.
+		if (folded === "c" && this.ctx.isGuidedGoalInterviewActive()) return undefined;
 		if (
 			emptySession &&
 			Object.hasOwn(BARE_EXIT_WORDS, folded) &&
@@ -1569,21 +1632,35 @@ export class InputController {
 		);
 	}
 
+	#resolveSideFileCommand(text: string): { command: FileSlashCommand; args: string } | undefined {
+		const invocation = parseFileSlashInvocation(text);
+		if (!invocation) return undefined;
+		const builtin = lookupBuiltinSlashCommand(invocation.name);
+		if (builtin && (builtin.allowArgs || !invocation.args)) return undefined;
+		if (!this.ctx.fileSlashCommands.has(invocation.name)) return undefined;
+		const session = this.ctx.session;
+		if (session.extensionRunner?.getCommand(invocation.name) !== undefined) return undefined;
+		if (session.customCommands.some(loaded => loaded.command.name === invocation.name)) return undefined;
+		if (isKnownSkillCommand(this.ctx, text)) return undefined;
+		const command = session.slashCommands.find(cmd => cmd.name === invocation.name);
+		return command?.side ? { command, args: invocation.args } : undefined;
+	}
+
 	/**
 	 * Answer `text` as a /btw side question when it invokes a `side: true` file command.
 	 * Extension, custom and skill commands keep precedence over a file command of the same name.
 	 * `draft.detach` releases the submission's remaining editor state before the side question
 	 * runs; `draft.restore` hands the submission back when its template fails to render.
 	 */
-	async #runSideFileCommand(text: string, draft: { detach?: () => void; restore: () => void }): Promise<boolean> {
-		const invocation = parseFileSlashInvocation(text);
-		if (!invocation || !this.ctx.fileSlashCommands.has(invocation.name)) return false;
-		const session = this.ctx.session;
-		if (session.extensionRunner?.getCommand(invocation.name) !== undefined) return false;
-		if (session.customCommands.some(loaded => loaded.command.name === invocation.name)) return false;
-		if (isKnownSkillCommand(this.ctx, text)) return false;
-		const command = session.slashCommands.find(cmd => cmd.name === invocation.name);
-		if (!command?.side) return false;
+	async #runSideFileCommand(
+		text: string,
+		draft: { detach?: () => void; restore: () => void },
+		historyContext: HistoryContext,
+		recordedHistoryText?: string,
+	): Promise<boolean> {
+		const invocation = this.#resolveSideFileCommand(text);
+		if (!invocation) return false;
+		const { command } = invocation;
 		let question: string;
 		try {
 			question = renderFileSlashCommand(command, invocation.args);
@@ -1592,7 +1669,7 @@ export class InputController {
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return true;
 		}
-		this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		draft.detach?.();
 		const args = invocation.args.trim();
 		await this.ctx.handleBtwCommand(question, undefined, args ? `/${command.name} ${args}` : `/${command.name}`);
@@ -1637,6 +1714,7 @@ export class InputController {
 	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
+		const historyContext = { sessionId: target.sessionManager.getSessionId(), cwd: getProjectDir() };
 		const draftText = this.ctx.editor.getText();
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
@@ -1661,7 +1739,7 @@ export class InputController {
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, historyContext);
 					return;
 				}
 			}
@@ -1671,10 +1749,14 @@ export class InputController {
 		if (
 			text &&
 			!this.#matchesBuiltinSlashCommand(text) &&
-			(await this.#runSideFileCommand(text, {
-				detach: () => this.#detachSideSubmission(draftText, images),
-				restore: () => this.#restoreResetSubmission(text),
-			}))
+			(await this.#runSideFileCommand(
+				text,
+				{
+					detach: () => this.#detachSideSubmission(draftText, images),
+					restore: () => this.#restoreResetSubmission(text),
+				},
+				historyContext,
+			))
 		) {
 			return;
 		}
@@ -1685,7 +1767,7 @@ export class InputController {
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
 		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
-		this.ctx.editor.clearDraft(text);
+		this.ctx.editor.clearDraft(text, historyContext);
 		try {
 			if (isContinueShortcut) {
 				await target.resume();
@@ -1873,9 +1955,11 @@ export class InputController {
 		}
 		const compaction = this.ctx.compactionQueuedMessages;
 		if (compaction.length > 0) {
+			// Return the entry itself: its first-seen rank keeps repeated dequeues
+			// in submission order through the shared restore chronology.
 			const last = compaction[compaction.length - 1];
 			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
-			return { text: last.text, images: last.images };
+			return last;
 		}
 		if (yieldCompaction) {
 			this.ctx.yieldCompaction = undefined;
@@ -1887,13 +1971,17 @@ export class InputController {
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
 	 * using the supplied `streamingBehavior`. Returns false when the text is not
-	 * a registered skill command and leaves the editor state untouched. Registered
-	 * skills consume the full composer draft (text plus pending images) before
-	 * dispatch; if dispatch rejects, the draft is restored so the user can retry.
+	 * a registered skill command and leaves the editor state untouched.
+	 * A distinct skill body returned by a builtin is recorded before dispatch, without
+	 * recording the original submission twice. Preserve newer composer state when the
+	 * submitted draft is already detached; otherwise consume it. Restore the submitted
+	 * text and images on rejection so the user can retry.
 	 */
 	async #invokeSkillCommand(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
+		historyContext: HistoryContext,
+		recordedHistoryText: string | undefined,
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 		preserveDraft = false,
@@ -1918,8 +2006,13 @@ export class InputController {
 			}
 		};
 
-		if (preserveDraft) this.ctx.editor.addToHistory(text);
-		else this.ctx.editor.clearDraft(text);
+		// The wrapper is already filed; a distinct returned skill invocation is new input.
+		const historyText = text === recordedHistoryText ? undefined : text;
+		if (preserveDraft) {
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText, historyContext);
+		} else {
+			this.ctx.editor.clearDraft(historyText, historyContext);
+		}
 		try {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
 				images: draftImages,
@@ -1976,6 +2069,7 @@ export class InputController {
 		text: string,
 		options: {
 			historyText?: string;
+			historyContext?: HistoryContext;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
 			/** The submitted draft already left the editor; anything there now is newer. Restored on failure. */
@@ -2005,16 +2099,21 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
-		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText);
+		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText, options.historyContext);
 
 		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
+			if (this.ctx.compactionQueuedMessages.length === 0) {
+				this.ctx.compactionQueueOrigin = conversationPosition(this.ctx.sessionManager);
+			}
 			for (let index = 0; index < messages.length; index++) {
-				this.ctx.compactionQueuedMessages.push({
+				const entry = {
 					text: messages[index] ?? "",
-					mode: "followUp",
+					mode: "followUp" as const,
 					images: index === 0 ? images : undefined,
-				});
+				};
+				queuedEntryRank(entry);
+				this.ctx.compactionQueuedMessages.push(entry);
 			}
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus(
@@ -2119,6 +2218,7 @@ export class InputController {
 			await this.#submitToFocusedSession(text, "followUp");
 			return;
 		}
+		const historyContext = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
 
 		// Detach before the first await: another Ctrl+Enter cannot submit the
 		// same draft, and later typing belongs to the next submission.
@@ -2156,10 +2256,32 @@ export class InputController {
 			} finally {
 				hooksDone.resolve();
 			}
-			await this.#dispatchFollowUp(text, images, imageLinks, origin, admitted);
+			await this.#dispatchFollowUp(text, images, imageLinks, origin, historyContext, admitted);
 		} finally {
 			admitted();
 		}
+	}
+
+	/** Guest plaintext belongs to the host, never the local compaction/yield queue. */
+	#deliverFollowUpToGuest(
+		text: string,
+		images: ImageContent[] | undefined,
+		imageLinks: (string | undefined)[] | undefined,
+		historyContext: HistoryContext,
+		recordedHistoryText?: string,
+	): boolean {
+		const guest = this.ctx.collabGuest;
+		if (!guest || text.startsWith("/")) return false;
+		if (guest.readOnly) {
+			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+		} else if (guest.sendPrompt(text, images)) {
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
+		} else {
+			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			this.ctx.showStatus("Collab prompt was not queued; returned it to the editor");
+		}
+		return true;
 	}
 
 	/** Dispatch a follow-up-key submission that passed its input hooks. `admitted` fires once the session holds it. */
@@ -2168,13 +2290,24 @@ export class InputController {
 		images: ImageContent[] | undefined,
 		imageLinks: (string | undefined)[] | undefined,
 		origin: ConversationPosition,
+		historyContext: HistoryContext,
 		admitted: () => void,
 	): Promise<void> {
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
 		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
 
-		// Compaction first: while compacting, free text gets queued via
+		this.releaseStaleYieldCompaction();
+		if (this.#guestRefusesSlash(text)) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			if (this.#matchesBuiltinSlashCommand(text)) {
+				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			}
+			return;
+		}
+		if (this.#deliverFollowUpToGuest(text, images, imageLinks, historyContext)) return;
+
+		// Local compaction first: free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
 		// `promptCustomMessage`. The compaction-resume path re-parses the
@@ -2183,23 +2316,36 @@ export class InputController {
 		// main-turn prompt. Builtins keep precedence, as in the dispatch below.
 		// A compaction queued for the next yield holds later follow-ups the same
 		// way, so they run after it.
-		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
 			if (
 				text &&
 				!this.#matchesBuiltinSlashCommand(text) &&
-				(await this.#runSideFileCommand(text, restoreSideDraft))
+				(await this.#runSideFileCommand(text, restoreSideDraft, historyContext))
 			) {
 				return;
 			}
-			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
+			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true, historyContext });
 			return;
 		}
+
+		let recordedHistoryText: string | undefined;
 
 		if (text) {
 			try {
 				const input =
 					(images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+				// Same reason as the submit path: record before dispatch files the command under the
+				// context it was typed in — in the database and in the editor's local list, which is
+				// still the one that context seeded.
+				if (
+					text.startsWith("/") &&
+					!shouldSkipHistory(text) &&
+					!this.#guestRefusesSlash(text) &&
+					!this.#resolveSideFileCommand(text)
+				) {
+					this.ctx.editor.addToHistory(text, historyContext);
+					recordedHistoryText = text;
+				}
 				const slashResult = await executeBuiltinSlashCommand(text, {
 					ctx: this.ctx,
 					input,
@@ -2207,13 +2353,10 @@ export class InputController {
 					followUp: origin,
 				});
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls it.
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			} catch (error) {
@@ -2223,12 +2366,32 @@ export class InputController {
 			}
 		}
 
-		if (text && (await this.#runSideFileCommand(text, restoreSideDraft))) return;
+		if (text && (await this.#runSideFileCommand(text, restoreSideDraft, historyContext, recordedHistoryText))) return;
+
+		// The dispatcher can leave a skill or unknown slash command unconsumed for a guest.
+		// Refuse it without touching the composer: this submission was detached before the awaits.
+		// Bash and python input stay ungated here, as they always were.
+		if (this.ctx.collabGuest && text.startsWith("/")) {
+			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+			return;
+		}
+		if (this.#deliverFollowUpToGuest(text, images, imageLinks, historyContext, recordedHistoryText)) return;
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
+		if (
+			text &&
+			(await this.#invokeSkillCommand(
+				text,
+				"followUp",
+				historyContext,
+				recordedHistoryText,
+				images,
+				imageLinks,
+				true,
+			))
+		) {
 			return;
 		}
 
@@ -2241,7 +2404,7 @@ export class InputController {
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -2261,7 +2424,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		try {
 			await this.ctx.withLocalSubmission(
 				text,
@@ -2294,10 +2457,10 @@ export class InputController {
 		this.ctx.yieldCompaction = undefined;
 		const allQueued = [
 			...steering,
-			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
+			...compactionQueued.filter(e => e.mode === "steer"),
 			...followUp,
 			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
-			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
+			...compactionQueued.filter(e => e.mode === "followUp"),
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
 		if (options?.abort) {
@@ -2366,47 +2529,15 @@ export class InputController {
 	 * Returns the number of entries restored.
 	 */
 	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
-		if (entries.length === 0) {
-			this.ctx.updatePendingMessagesDisplay();
-			return 0;
-		}
-		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
-		// (legacy drafts may still carry a trailing `attachment://N`). Each queued
-		// message numbered its references against its own local image list
-		// (1..K). Because we prepend the queued text but append the queued images
-		// to `pendingImages`, any existing draft images (M of them) — plus images
-		// already pulled in by earlier queued messages — shift the slot index that
-		// every reference must point to. Bumping each message's marker and URI
-		// indices by the running offset keeps the merged text aligned with the merged
-		// `pendingImages` order; draft markers stay valid because draft images
-		// keep their original positions.
-		const queuedImages = entries.flatMap(e => e.images ?? []);
-		let queuedText: string;
-		if (queuedImages.length > 0) {
-			const parts: string[] = [];
-			let imageOffset = this.ctx.editor.pendingImages.length;
-			for (const entry of entries) {
-				parts.push(shiftImageMarkers(entry.text, imageOffset));
-				if (entry.images && entry.images.length > 0) imageOffset += entry.images.length;
-			}
-			queuedText = parts.join("\n\n");
-		} else {
-			queuedText = entries.map(e => e.text).join("\n\n");
-		}
-		const current = currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
-		// Hand queued images back to the pending-image buffer first (links are
-		// re-materialized lazily), then set the text: setCollapsedText folds the
-		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
-		// collapse only recognizes indices within the merged pendingImages range.
-		if (queuedImages.length > 0) {
-			this.ctx.editor.pendingImages.push(...queuedImages);
-			this.ctx.editor.pendingImageLinks.push(...queuedImages.map(() => undefined));
-			this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-		}
-		this.ctx.editor.setCollapsedText(combinedText);
+		// Without an explicit text override the restore joins the shared per-editor
+		// block chronology, so a controller restore never prepends ahead of an
+		// older batch the flush path already returned.
+		const count =
+			currentText === undefined
+				? restoreQueuedDraftOrdered(this.ctx.editor, entries)
+				: restoreQueuedDraft(this.ctx.editor, entries, currentText);
 		this.ctx.updatePendingMessagesDisplay();
-		return entries.length;
+		return count;
 	}
 
 	async #insertPendingImage(imageData: ImageContent, source?: ImageAttachmentSource): Promise<void> {
@@ -3004,6 +3135,14 @@ export class InputController {
 			this.ctx.editor.insertTextAttachment(text);
 			this.ctx.showError("Failed to save paste to a file — attached as a text chip instead");
 		}
+	}
+
+	/**
+	 * Whether this session's collab guest gates refuse `text` instead of running it. A refused
+	 * command must not enter history: the next Up would offer a command that cannot be repeated.
+	 */
+	#guestRefusesSlash(text: string): boolean {
+		return this.ctx.collabGuest !== undefined && guestRefusesSlashCommand(text);
 	}
 
 	/**

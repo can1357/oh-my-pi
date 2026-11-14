@@ -11,6 +11,7 @@ import {
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalGlyphProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 const SUPPORT_QUERY = "\x1b_25a1;s\x1b\\";
 const DA1_REPLY = "\x1b[?1;2c";
@@ -97,7 +98,6 @@ const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "i
 const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
 const originalProbeEnv = Bun.env.PI_TUI_GLYPH_PROTOCOL_PROBE;
 const originalKillSwitch = Bun.env.PI_NO_GLYPH_PROTOCOL;
-const originalTmux = Bun.env.TMUX;
 
 function restoreProperty(target: object, key: string, descriptor: PropertyDescriptor | undefined): void {
 	if (descriptor) {
@@ -142,6 +142,8 @@ function setupProcessTerminal() {
 }
 
 describe("glyph protocol probe", () => {
+	withoutTerminalMultiplexer();
+
 	let previousHeadless = false;
 
 	beforeEach(() => {
@@ -149,7 +151,6 @@ describe("glyph protocol probe", () => {
 		previousHeadless = setTerminalHeadless(false);
 		Bun.env.PI_TUI_GLYPH_PROTOCOL_PROBE = "1";
 		delete Bun.env.PI_NO_GLYPH_PROTOCOL;
-		delete Bun.env.TMUX;
 	});
 
 	afterEach(() => {
@@ -158,7 +159,6 @@ describe("glyph protocol probe", () => {
 		setTerminalGlyphProtocol(false);
 		restoreEnv("PI_TUI_GLYPH_PROTOCOL_PROBE", originalProbeEnv);
 		restoreEnv("PI_NO_GLYPH_PROTOCOL", originalKillSwitch);
-		restoreEnv("TMUX", originalTmux);
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);

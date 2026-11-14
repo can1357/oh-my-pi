@@ -85,6 +85,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
+		restoreCompactionQueueToEditor: () => {},
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		pendingTools: new Map(),
