@@ -2997,6 +2997,7 @@ mod capture_tests {
 				child_count: 0,
 				selected: false,
 				role_name: None,
+				unread_children: 0,
 			})
 		}
 

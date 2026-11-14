@@ -405,6 +405,7 @@ impl AxBackend for Win32Ax {
 			label_complete: false,
 			selected: false,
 			role_name: None,
+			unread_children: 0,
 		})
 	}
 

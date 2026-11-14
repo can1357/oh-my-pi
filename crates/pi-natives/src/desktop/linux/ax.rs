@@ -252,6 +252,49 @@ pub fn resolve_focus(
 	}
 }
 
+/// Bound standalone child reads and focus searches independently of tree walks.
+const MAX_CHILDREN: u32 = 5_000;
+// Bound in-flight replies to avoid flooding the application's bus.
+const CHILD_READ_CONCURRENCY: usize = 32;
+
+/// Read at most `limit` children by index; a stale count never authorizes an
+/// unbounded whole-list request. Failed indices count as unread; if none
+/// answers, the first error is returned.
+async fn children_of(
+	proxy: &atspi::proxy::accessible::AccessibleProxy<'_>,
+	count: Option<u32>,
+	limit: u32,
+) -> zbus::Result<(Vec<ObjectRefOwned>, u32)> {
+	use futures::StreamExt;
+
+	let Some(count) = count else {
+		return Ok((Vec::new(), crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN));
+	};
+	let read = limit.min(count);
+	let mut replies = futures::stream::iter(0..read)
+		.map(|index| proxy.get_child_at_index(index as i32))
+		.buffered(CHILD_READ_CONCURRENCY);
+	let mut children = Vec::with_capacity(read as usize);
+	let mut first_error = None;
+	let mut unread = count - read;
+	while let Some(reply) = replies.next().await {
+		match reply {
+			Ok(child) if !child.is_null() => children.push(child),
+			Ok(_) => unread += 1,
+			Err(err) => {
+				unread += 1;
+				first_error.get_or_insert(err);
+			},
+		}
+	}
+	if children.is_empty()
+		&& let Some(err) = first_error
+	{
+		return Err(err);
+	}
+	Ok((children, unread))
+}
+
 impl AtSpiAx {
 	pub(crate) fn new() -> CoreResult<Self> {
 		let rt = Builder::new_current_thread()
@@ -667,16 +710,19 @@ impl AtSpiAx {
 		let proxy = answered("the application", reply_timeout, root.as_accessible_proxy(connection))
 			.await?
 			.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-		if answered("the application", reply_timeout, proxy.get_state())
-			.await?
-			.is_ok_and(|state| state.contains(State::Focused))
-		{
+		let state = answered("the application", reply_timeout, proxy.get_state()).await?;
+		if state.is_ok_and(|state| state.contains(State::Focused)) {
 			return Ok(Some(root));
 		}
-		for child in answered("the application", reply_timeout, proxy.get_children())
+		let count = answered("the application", reply_timeout, proxy.child_count())
 			.await?
-			.unwrap_or_default()
-		{
+			.ok()
+			.map(|count| count.max(0) as u32);
+		let (children, _) =
+			answered("the application", reply_timeout, children_of(&proxy, count, MAX_CHILDREN))
+				.await?
+				.unwrap_or_default();
+		for child in children {
 			if let Some(found) =
 				Box::pin(Self::find_focused(connection, child, depth + 1, reply_timeout)).await?
 			{
@@ -684,6 +730,36 @@ impl AtSpiAx {
 			}
 		}
 		Ok(None)
+	}
+
+	/// `h`'s children, at most `limit`, with the number left unread.
+	/// `count` is its `ChildCount` when already read.
+	fn read_children(
+		&self,
+		h: &AxHandle,
+		count: Option<u32>,
+		limit: u32,
+	) -> CoreResult<(Vec<AxHandle>, u32)> {
+		let object = Self::object(h).clone();
+		self.request(async {
+			let failed = |err: String| DesktopError::ax_failed(format!("AT-SPI children: {err}"));
+			let proxy = object
+				.as_accessible_proxy(&self.connection)
+				.await
+				.map_err(|err| failed(err.to_string()))?;
+			let count = match count {
+				Some(count) => Some(count),
+				None => proxy
+					.child_count()
+					.await
+					.ok()
+					.map(|count| count.max(0) as u32),
+			};
+			let (children, unread) = children_of(&proxy, count, limit)
+				.await
+				.map_err(|err| failed(err.to_string()))?;
+			Ok((children.into_iter().map(AxHandle::AtSpi).collect(), unread))
+		})
 	}
 
 	/// An element's properties, with its bounds when `bounds` asks for them.
@@ -720,7 +796,7 @@ impl AtSpiAx {
 				Ok(action) => action_names(&action).await.unwrap_or_default(),
 				Err(_) => Vec::new(),
 			};
-			let child_count = proxy.child_count().await.unwrap_or(0).max(0) as u32;
+			let child_count = proxy.child_count().await;
 			Ok(AxProps {
 				role: normalize_role_atspi(&native_role, multiline),
 				native_role,
@@ -733,12 +809,17 @@ impl AtSpiAx {
 					.is_some_and(|states| states.contains(State::Focused)),
 				bounds,
 				actions,
-				child_count,
+				child_count: child_count.as_ref().copied().unwrap_or(0).max(0) as u32,
 				identity: None,
 				partial: false,
 				label_complete: false,
 				selected: false,
 				role_name: None,
+				unread_children: if child_count.is_err() {
+					crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN
+				} else {
+					0
+				},
 			})
 		})))??
 	}
@@ -1406,29 +1487,21 @@ impl AxBackend for AtSpiAx {
 		&mut self,
 		h: &AxHandle,
 		bounds: WalkBounds,
+		max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
-		Ok((self.read_props(h, bounds)?, self.children(h)?))
+		let mut props = self.read_props(h, bounds)?;
+		if props.unread_children > 0 {
+			return Ok((props, Vec::new()));
+		}
+		let (children, unread) = self.read_children(h, Some(props.child_count), max_children)?;
+		props.unread_children = unread;
+		Ok((props, children))
 	}
 
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
-		let object = Self::object(h).clone();
-		self.request(async {
-			let proxy = object
-				.as_accessible_proxy(&self.connection)
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))?;
-			proxy
-				.get_children()
-				.await
-				.map(|items| {
-					items
-						.into_iter()
-						.filter(|item| !item.is_null())
-						.map(AxHandle::AtSpi)
-						.collect()
-				})
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))
-		})
+		self
+			.read_children(h, None, MAX_CHILDREN)
+			.map(|(children, _)| children)
 	}
 
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>> {
@@ -2357,12 +2430,17 @@ mod tests {
 
 		#[interface(name = "org.a11y.atspi.Accessible")]
 		impl Node {
+			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				self.children.len() as i32
+			}
+
 			fn get_state(&self) -> Vec<u32> {
 				self.state.clone()
 			}
 
-			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
-				self.children.clone()
+			fn get_child_at_index(&self, index: i32) -> (String, OwnedObjectPath) {
+				self.children[index as usize].clone()
 			}
 		}
 
@@ -2407,6 +2485,247 @@ mod tests {
 				.as_deref(),
 			Some("/focus")
 		);
+	}
+
+	mod long_lists {
+		use std::sync::{
+			Arc,
+			atomic::{AtomicU32, Ordering},
+		};
+
+		use atspi::zbus::{
+			Connection, connection::Builder as ConnectionBuilder, fdo, interface,
+			zvariant::OwnedObjectPath,
+		};
+
+		use super::*;
+
+		const PEER: &str = ":1.7";
+
+		/// A table that reports a million children, as Qt does for a
+		/// 250,000-row `QTableView`, and counts each request for all of them.
+		struct Table {
+			whole_reads: Arc<AtomicU32>,
+			/// The child that holds focus.
+			focused_at:  i32,
+			/// Whether it fails every request for one child.
+			refuses:     bool,
+			failed_at:   Option<i32>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Table {
+			#[allow(clippy::unused_self, reason = "the fake table's count is fixed")]
+			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				1_000_000
+			}
+
+			#[allow(clippy::unused_self, reason = "the fake table is never focused")]
+			fn get_state(&self) -> Vec<u32> {
+				vec![0, 0]
+			}
+
+			fn get_children(&self) -> fdo::Result<Vec<(String, OwnedObjectPath)>> {
+				self.whole_reads.fetch_add(1, Ordering::SeqCst);
+				Err(fdo::Error::LimitsExceeded("a million children".into()))
+			}
+
+			fn get_child_at_index(&self, index: i32) -> fdo::Result<(String, OwnedObjectPath)> {
+				if self.refuses || self.failed_at == Some(index) {
+					return Err(fdo::Error::Failed("no such child".into()));
+				}
+				let path = if index == self.focused_at {
+					"/focus"
+				} else {
+					"/cell"
+				};
+				Ok((PEER.to_owned(), OwnedObjectPath::try_from(path).unwrap()))
+			}
+		}
+
+		struct Cell {
+			count_reads: Arc<AtomicU32>,
+			state:       Vec<u32>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Cell {
+			#[allow(clippy::unused_self, reason = "fake cells have no children")]
+			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				self.count_reads.fetch_add(1, Ordering::SeqCst);
+				0
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				self.state.clone()
+			}
+
+			#[allow(clippy::unused_self, reason = "fake cells have no children")]
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				Vec::new()
+			}
+		}
+
+		/// Runs `check` against a client connected to an app serving the
+		/// table at `/table`, one that answers no request for a child at
+		/// `/refusing`, a plain cell at `/cell` and a focused cell at `/focus`;
+		/// returns its result and how often a table was asked for all of its
+		/// children.
+		fn with_table<T>(check: impl AsyncFnOnce(&Connection) -> T) -> (T, u32) {
+			let focused = State::Focused as u64;
+			let whole_reads = Arc::new(AtomicU32::new(0));
+			let rt = Builder::new_current_thread().enable_all().build().unwrap();
+			let result = rt.block_on(async {
+				let (client, server) = tokio::net::UnixStream::pair().unwrap();
+				let table = Table {
+					whole_reads: whole_reads.clone(),
+					focused_at:  2,
+					refuses:     false,
+					failed_at:   None,
+				};
+				let refusing = Table {
+					whole_reads: whole_reads.clone(),
+					focused_at:  -1,
+					refuses:     true,
+					failed_at:   None,
+				};
+				let partial = Table {
+					whole_reads: whole_reads.clone(),
+					focused_at:  -1,
+					refuses:     false,
+					failed_at:   Some(1),
+				};
+				let server = ConnectionBuilder::unix_stream(server)
+					.server(atspi::zbus::Guid::generate())
+					.unwrap()
+					.p2p()
+					.serve_at("/table", table)
+					.unwrap()
+					.serve_at("/refusing", refusing)
+					.unwrap()
+					.serve_at("/cell", Cell {
+						count_reads: Arc::new(AtomicU32::new(0)),
+						state:       vec![0, 0],
+					})
+					.unwrap()
+					.serve_at("/partial", partial)
+					.unwrap()
+					.serve_at("/focus", Cell {
+						count_reads: whole_reads.clone(),
+						state:       vec![focused as u32, (focused >> 32) as u32],
+					})
+					.unwrap()
+					.build();
+				let client = ConnectionBuilder::unix_stream(client).p2p().build();
+				let (server, client) = tokio::try_join!(server, client).unwrap();
+				let result = check(&client).await;
+				drop(server);
+				result
+			});
+			(result, whole_reads.load(Ordering::SeqCst))
+		}
+
+		/// Proxy for `path`'s accessible and its child count.
+		async fn table(
+			client: &Connection,
+			path: &'static str,
+		) -> (atspi::proxy::accessible::AccessibleProxy<'static>, u32) {
+			let proxy = atspi::proxy::accessible::AccessibleProxy::builder(client)
+				.destination(PEER)
+				.unwrap()
+				.path(path)
+				.unwrap()
+				.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+				.build()
+				.await
+				.unwrap();
+			let count = proxy.child_count().await.unwrap() as u32;
+			(proxy, count)
+		}
+
+		#[test]
+		fn an_unknown_child_count_leaves_children_unread_without_asking_for_all() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, _) = table(client, "/table").await;
+				children_of(&proxy, None, 800).await.unwrap()
+			});
+			assert!(children.is_empty());
+			assert_eq!(unread, u32::MAX);
+			assert_eq!(whole_reads, 0);
+		}
+
+		#[test]
+		fn a_small_stale_count_never_requests_all_children_or_exceeds_the_budget() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, _) = table(client, "/table").await;
+				children_of(&proxy, Some(4), 2).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (2, 2, 0));
+		}
+
+		#[test]
+		fn a_focused_root_does_not_read_its_child_count() {
+			let (found, count_reads) = with_table(async |client| {
+				AtSpiAx::find_focused(
+					client,
+					ObjectRefOwned::from_static_str_unchecked(PEER, "/focus"),
+					0,
+					Duration::from_secs(1),
+				)
+				.await
+				.unwrap()
+			});
+			assert!(found.is_some());
+			assert_eq!(count_reads, 0);
+		}
+
+		#[test]
+		fn a_failed_index_is_counted_as_unread() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, count) = table(client, "/partial").await;
+				children_of(&proxy, Some(count), 3).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (2, 999_998, 0));
+		}
+
+		#[test]
+		fn a_long_list_is_read_by_index_up_to_the_limit() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, count) = table(client, "/table").await;
+				children_of(&proxy, Some(count), 6_000).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (6_000, 994_000, 0));
+		}
+
+		#[test]
+		fn a_long_list_that_answers_no_child_fails_the_read() {
+			let (read, whole_reads) = with_table(async |client| {
+				let (proxy, count) = table(client, "/refusing").await;
+				children_of(&proxy, Some(count), 800).await
+			});
+			assert!(read.is_err(), "{read:?}");
+			assert_eq!(whole_reads, 0);
+		}
+
+		#[test]
+		fn the_focused_search_finds_a_cell_of_a_long_table_without_reading_it_whole() {
+			let (found, whole_reads) = with_table(async |client| {
+				let table = ObjectRefOwned::from_static_str_unchecked(PEER, "/table");
+				AtSpiAx::find_focused(client, table, 0, REPLY_TIMEOUT).await
+			});
+			let found = found.expect("the focused search must not fail");
+			assert_eq!(
+				(
+					found
+						.map(|object| object.path_as_str().to_owned())
+						.as_deref(),
+					whole_reads
+				),
+				(Some("/focus"), 0)
+			);
+		}
 	}
 
 	#[test]
@@ -3033,6 +3352,11 @@ mod tests {
 		#[interface(name = "org.a11y.atspi.Accessible")]
 		impl Element {
 			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				self.children.len() as i32
+			}
+
+			#[zbus(property)]
 			fn name(&self) -> String {
 				self.name.to_owned()
 			}
@@ -3054,6 +3378,10 @@ mod tests {
 
 			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
 				self.children.clone()
+			}
+
+			fn get_child_at_index(&self, index: i32) -> (String, OwnedObjectPath) {
+				self.children[index as usize].clone()
 			}
 		}
 
