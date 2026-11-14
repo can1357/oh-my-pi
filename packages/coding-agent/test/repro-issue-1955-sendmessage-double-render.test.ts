@@ -134,7 +134,7 @@ function createHarness(): Harness {
 		initialChatRendered: false,
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
-		settings: { get: () => false },
+		settings: Settings.isolated(),
 		session: sessionMock,
 		viewSession: {
 			buildTranscriptSessionContext: () => buildSessionContext(entries),
