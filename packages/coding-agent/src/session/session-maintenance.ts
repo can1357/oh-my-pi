@@ -281,6 +281,17 @@ function findUsageAnchorIndex(branchEntries: readonly SessionEntry[], compaction
 	return -1;
 }
 
+/**
+ * The active branch without the usage ledger's records.
+ *
+ * A `model_usage` entry bills a side request; it carries no transcript. It
+ * must never read as branch growth — a speculation's own summary request would
+ * otherwise look like the live turn moved on (see `#armedSpeculationValid`).
+ */
+function transcriptBranch(branch: readonly SessionEntry[]): SessionEntry[] {
+	return branch.filter(entry => entry.type !== "model_usage");
+}
+
 /** A terminal payload rejection may be byte-sized history or irreducible media, not necessarily token overflow. */
 function payloadRejectionNotice(storedTokens: number, contextWindow: number): string {
 	const remedies =
@@ -1624,6 +1635,9 @@ export class SessionMaintenance {
 							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
+							// Bill the summary requests against the branch that issued
+							// them, even when this compaction is later abandoned.
+							onUsage: this.#host.sessionManager.createUsageObserver(),
 						},
 						compactionCandidates,
 					);
@@ -2444,7 +2458,12 @@ export class SessionMaintenance {
 		const settings = this.#compactionSettings;
 		const effectiveSettings = resolveMethodSettings(settings, method);
 		const branch = this.#host.sessionManager.getBranch();
-		const snapshotLeafId = branch[branch.length - 1]?.id;
+		// The usage ledger is not transcript: the branch can end on a
+		// `model_usage` record (a compaction's own summary request was billed
+		// and no transcript turn followed it). The snapshot must anchor on a
+		// transcript entry, or the staleness check below can never find it and
+		// the freshly paid speculation is thrown away.
+		const snapshotLeafId = transcriptBranch(branch).at(-1)?.id;
 		if (!snapshotLeafId) return clear();
 		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
 		if (!preparation) return clear();
@@ -2502,6 +2521,9 @@ export class SessionMaintenance {
 					// overlapping the live stream must never interleave with it.
 					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
 					preferWebsockets: false,
+					// The speculation summarizes the snapshot, so its spend belongs
+					// to the branch the snapshot was taken on.
+					onUsage: this.#host.sessionManager.createUsageObserver(snapshotLeafId),
 				},
 				candidates,
 			);
@@ -2550,7 +2572,9 @@ export class SessionMaintenance {
 		) {
 			return false;
 		}
-		const branch = this.#host.sessionManager.getBranch();
+		// The usage ledger is not transcript: a speculation's own summary
+		// request must not read as branch growth (see #armedSpeculationValid).
+		const branch = transcriptBranch(this.#host.sessionManager.getBranchView());
 		const leafIdx = branch.findIndex(entry => entry.id === armed.snapshotLeafId);
 		if (leafIdx < 0) return false;
 		for (let i = leafIdx + 1; i < branch.length; i++) {
@@ -5395,6 +5419,10 @@ export class SessionMaintenance {
 						? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
 						: undefined;
 				const branchBefore = this.#projectCurrentBranchContextTokens();
+				// The usage ledger is not transcript: only a transcript entry
+				// after the snapshot needs the native history replayed.
+				const branchGrewPastSnapshot =
+					transcriptBranch(this.#host.sessionManager.getBranchView()).at(-1)?.id !== armedSpec.snapshotLeafId;
 				return await this.#commitAutoCompactionResult({
 					summary: armedSpec.result.summary,
 					shortSummary: armedSpec.result.shortSummary,
@@ -5408,8 +5436,7 @@ export class SessionMaintenance {
 					providerReplayThroughEntryId:
 						armedSpec.result.providerReplayThroughEntryId ??
 						(armedSpec.result.preserveData?.openaiRemoteCompaction ||
-						(armedSpec.result.preserveData?.anthropicCompaction &&
-							this.#host.sessionManager.getBranch().at(-1)?.id !== armedSpec.snapshotLeafId)
+						(armedSpec.result.preserveData?.anthropicCompaction && branchGrewPastSnapshot)
 							? armedSpec.snapshotLeafId
 							: undefined),
 					action,
@@ -5943,6 +5970,9 @@ export class SessionMaintenance {
 						options.phase ??
 						(reason === "threshold" ? "pre_turn" : reason === "idle" ? "standalone_turn" : "mid_turn"),
 				});
+				// Bill the summary requests against the branch that issued them,
+				// even when this compaction is later abandoned.
+				const usageObserver = this.#host.sessionManager.createUsageObserver();
 
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
@@ -6000,6 +6030,7 @@ export class SessionMaintenance {
 									// retry too — the budgets would multiply and each outer
 									// wait would stack on top of an inner backoff.
 									oneshotRetry: false,
+									onUsage: usageObserver,
 								},
 							);
 							break;

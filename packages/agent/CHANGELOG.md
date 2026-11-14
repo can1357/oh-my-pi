@@ -33,6 +33,7 @@
 - Fixed GenAI message-content capture configured in omp's own `.env` files so it continues to apply when those values are no longer exposed through the process environment.
 - Fixed compaction preparation for remote OpenAI compaction that the active model cannot replay, ensuring the content is expanded and remains available for compaction.
 - Fixed generic remote compaction requests to `/chat/completions` so gateway sessions retain the correct per-request model attribution.
+- Compaction and handoff oneshots now report every completed provider attempt through a new `onUsage` option, including provider-native compaction requests (V1 `/responses/compact`, streamed V2, Anthropic's native compaction, and OpenAI-compatible chat-completions summarizers), attempts a transient retry replaced, responses the provider rejected, and attempts the provider billed but whose payload or stream ended unusable (an incomplete or failed V2 stream, an Anthropic compaction without a signed block, a handoff without a document, a chat-completions response without content); a billed attempt that produced nothing usable is recorded as a failed request rather than a successful one, and a provider-native compaction's usage keeps every bucket the provider billed — cache reads, cache writes and provider-side orchestration — instead of a reduced subset ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.17.0] - 2026-11-06
 

@@ -35,6 +35,7 @@ import {
 import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson, toError } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
+import { parseResponsesUsage, type RemoteCompactionUsage } from "./remote-usage";
 
 // ============================================================================
 // Types & Configuration
@@ -64,13 +65,17 @@ const CONTEXTUAL_USER_PREFIXES = [
 ];
 
 /** Token usage reported by the streamed V2 Responses completion. */
-export interface CompactionV2Usage {
-	inputTokens: number;
-	outputTokens: number;
-	totalTokens: number;
-	cachedInputTokens?: number;
-	reasoningOutputTokens?: number;
-}
+export type CompactionV2Usage = RemoteCompactionUsage;
+
+/**
+ * Bills one V2 attempt.
+ *
+ * `failure` is set when the provider charged the request but the attempt
+ * produced nothing usable — a truncated or failed stream, or a terminal
+ * response whose compaction payload is unusable. The record then has to stay
+ * distinguishable from a successful request.
+ */
+export type CompactionV2UsageReporter = (usage: RemoteCompactionUsage, failure?: string) => void;
 
 /** Provider-ready Responses body and local state needed for V2 compaction. */
 export interface CompactionV2Request {
@@ -275,6 +280,14 @@ export async function requestCompactionV2Streaming(
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
 		codexAccessPrograms?: boolean;
+		/**
+		 * Bills the attempt as soon as the terminal event reports its usage.
+		 *
+		 * The provider charged for the request even when the compaction
+		 * payload turns out to be unusable, so the usage is reported before
+		 * the payload is validated.
+		 */
+		onUsage?: CompactionV2UsageReporter;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -318,6 +331,7 @@ export async function requestCompactionV2Streaming(
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
 				codexAccessPrograms: options?.codexAccessPrograms,
+				onUsage: options?.onUsage,
 			});
 		} catch (err) {
 			const error = toError(err);
@@ -355,6 +369,7 @@ async function attemptCompactionV2Streaming(
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
 		codexAccessPrograms?: boolean;
+		onUsage?: CompactionV2UsageReporter;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -387,7 +402,7 @@ async function attemptCompactionV2Streaming(
 				implementation: "responses_compaction_v2",
 			}),
 		});
-		return collectCompactionV2Events(eventStream, request);
+		return collectCompactionV2Events(eventStream, model, request, options.onUsage);
 	}
 
 	const response = await fetchImpl(endpoint, {
@@ -415,7 +430,7 @@ async function attemptCompactionV2Streaming(
 		);
 	}
 
-	return collectCompactionV2Output(response, request);
+	return collectCompactionV2Output(response, model, request, options.onUsage);
 }
 
 function buildCompactionV2Headers(
@@ -485,42 +500,73 @@ function buildCompactionV2Headers(
 }
 
 interface CompactionV2CollectionState {
+	/** Model the request was sent for; prices the reported usage. */
+	model: Model;
 	outputItemCount: number;
 	compactionItems: Array<Record<string, unknown>>;
 	sawCompleted: boolean;
 	usage: CompactionV2Usage | undefined;
+	/** Whether the billed usage was already handed to the observer. */
+	usageReported: boolean;
 }
 
-function createCompactionV2CollectionState(): CompactionV2CollectionState {
+function createCompactionV2CollectionState(model: Model): CompactionV2CollectionState {
 	return {
+		model,
 		outputItemCount: 0,
 		compactionItems: [],
 		sawCompleted: false,
 		usage: undefined,
+		usageReported: false,
 	};
+}
+
+/**
+ * Hand the billed usage to the observer exactly once.
+ *
+ * Two terminal events carry a usage object: a completed response and an
+ * unusable one (an incomplete or a failed stream). Both billed the request,
+ * and the unusable one is rejected — so its report has to happen before the
+ * rejection, or the fallback underreports the abandoned attempt. `failure`
+ * names the reason so the record stays distinguishable from a success.
+ */
+function reportCompactionV2Usage(
+	state: CompactionV2CollectionState,
+	onUsage: CompactionV2UsageReporter | undefined,
+	failure?: string,
+): void {
+	if (state.usageReported) return;
+	const usage = state.usage;
+	if (!usage) return;
+	state.usageReported = true;
+	onUsage?.(usage, failure);
 }
 
 async function collectCompactionV2Events(
 	events: AsyncIterable<Record<string, unknown>>,
+	model: Model,
 	request: CompactionV2Request,
+	onUsage?: CompactionV2UsageReporter,
 ): Promise<CompactionV2Response> {
-	const state = createCompactionV2CollectionState();
+	const state = createCompactionV2CollectionState(model);
 	for await (const event of events) {
-		handleCompactionV2Event(event, undefined, state);
+		handleCompactionV2Event(event, undefined, state, onUsage);
 	}
-	return finishCompactionV2Collection(state, request);
+	return finishCompactionV2Collection(state, request, onUsage);
 }
 
 async function collectCompactionV2Output(
 	response: Response,
+	model: Model,
 	request: CompactionV2Request,
+	onUsage?: CompactionV2UsageReporter,
 ): Promise<CompactionV2Response> {
 	const reader = response.body?.getReader();
 	if (!reader) {
 		throw new Error("No response body for V2 compaction streaming");
 	}
 
-	const state = createCompactionV2CollectionState();
+	const state = createCompactionV2CollectionState(model);
 	try {
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -532,7 +578,7 @@ async function collectCompactionV2Output(
 				eventName = undefined;
 				return;
 			}
-			handleCompactionV2SseEvent(dataLines.join("\n"), eventName, state);
+			handleCompactionV2SseEvent(dataLines.join("\n"), eventName, state, onUsage);
 			eventName = undefined;
 			dataLines = [];
 		};
@@ -567,20 +613,27 @@ async function collectCompactionV2Output(
 		reader.releaseLock();
 	}
 
-	return finishCompactionV2Collection(state, request);
+	return finishCompactionV2Collection(state, request, onUsage);
 }
 
 function finishCompactionV2Collection(
 	state: CompactionV2CollectionState,
 	request: CompactionV2Request,
+	onUsage?: CompactionV2UsageReporter,
 ): CompactionV2Response {
 	if (!state.sawCompleted) {
 		throw new Error("V2 compaction stream closed before response.completed");
 	}
-	if (state.compactionItems.length !== 1) {
-		throw new Error(
-			`V2 compaction expected exactly one compaction output item, got ${state.compactionItems.length} from ${state.outputItemCount} output items`,
-		);
+	// The provider billed this attempt whatever its payload turns out to be.
+	// Report the usage before the output-count validation, so an attempt that
+	// is abandoned here is still in the ledger when the fallback runs.
+	const payloadError =
+		state.compactionItems.length !== 1
+			? `V2 compaction expected exactly one compaction output item, got ${state.compactionItems.length} from ${state.outputItemCount} output items`
+			: undefined;
+	reportCompactionV2Usage(state, onUsage, payloadError);
+	if (payloadError !== undefined) {
+		throw new Error(payloadError);
 	}
 
 	const compactionItem = state.compactionItems[0];
@@ -592,7 +645,7 @@ function finishCompactionV2Collection(
 	return {
 		compactionItem,
 		replacementHistory,
-		usedTokens: state.usage?.inputTokens ?? 0,
+		usedTokens: state.usage ? state.usage.input + state.usage.cacheRead + state.usage.cacheWrite : 0,
 		usage: state.usage,
 		retainedImageCount,
 	};
@@ -602,6 +655,7 @@ function handleCompactionV2SseEvent(
 	data: string,
 	eventName: string | undefined,
 	state: CompactionV2CollectionState,
+	onUsage?: CompactionV2UsageReporter,
 ): void {
 	if (data === "[DONE]") return;
 	let event: Record<string, unknown>;
@@ -610,13 +664,14 @@ function handleCompactionV2SseEvent(
 	} catch (err) {
 		throw new Error(`V2 compaction stream parse failed: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	handleCompactionV2Event(event, eventName, state);
+	handleCompactionV2Event(event, eventName, state, onUsage);
 }
 
 function handleCompactionV2Event(
 	event: Record<string, unknown>,
 	eventName: string | undefined,
 	state: CompactionV2CollectionState,
+	onUsage?: CompactionV2UsageReporter,
 ): void {
 	const type = typeof event.type === "string" ? event.type : eventName;
 	if (type === "response.output_item.done") {
@@ -630,12 +685,23 @@ function handleCompactionV2Event(
 
 	if (type === "response.completed" || type === "response.done") {
 		state.sawCompleted = true;
-		state.usage = parseCompactionV2Usage(event);
+		state.usage = parseCompactionV2Usage(event, state.model);
 		return;
 	}
 
 	if (type === "response.failed" || type === "response.incomplete") {
-		throw new Error(formatCompactionV2Failure(event, type));
+		// The provider billed this attempt even though the stream ended
+		// unusable — incomplete (`max_output_tokens`, content filter) or
+		// failed. Report the terminal usage before rejecting the stream, so
+		// the retry or the fallback that follows bills the abandoned request
+		// instead of losing it.
+		const message = formatCompactionV2Failure(event, type);
+		const usage = parseCompactionV2Usage(event, state.model);
+		if (usage) {
+			state.usage = usage;
+			reportCompactionV2Usage(state, onUsage, message);
+		}
+		throw new Error(message);
 	}
 
 	// A standalone `error` event terminates the stream. Keep its status so a
@@ -647,27 +713,9 @@ function handleCompactionV2Event(
 	}
 }
 
-function parseCompactionV2Usage(event: Record<string, unknown>): CompactionV2Usage | undefined {
+function parseCompactionV2Usage(event: Record<string, unknown>, model: Model): CompactionV2Usage | undefined {
 	const response = isRecord(event.response) ? event.response : undefined;
-	const usage = response && isRecord(response.usage) ? response.usage : undefined;
-	if (!usage) return undefined;
-
-	const inputTokens = numberField(usage, "input_tokens");
-	const outputTokens = numberField(usage, "output_tokens");
-	const totalTokens = numberField(usage, "total_tokens");
-	if (inputTokens === undefined || outputTokens === undefined || totalTokens === undefined) return undefined;
-
-	const inputDetails = isRecord(usage.input_tokens_details) ? usage.input_tokens_details : undefined;
-	const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : undefined;
-	const cachedInputTokens = inputDetails ? numberField(inputDetails, "cached_tokens") : undefined;
-	const reasoningOutputTokens = outputDetails ? numberField(outputDetails, "reasoning_tokens") : undefined;
-	return {
-		inputTokens,
-		outputTokens,
-		totalTokens,
-		...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
-		...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
-	};
+	return parseResponsesUsage(response?.usage, model);
 }
 
 function formatCompactionV2Failure(event: Record<string, unknown>, type: string): string {

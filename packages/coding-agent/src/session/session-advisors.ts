@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	canReplayRemoteCompaction,
+	type CompactionRequestUsage,
 	type CompactionResult,
 	compact,
 	compactionContextTokens,
@@ -2019,6 +2020,19 @@ export class SessionAdvisors {
 		}
 	}
 
+	/**
+	 * Add a compaction request the advisor made on its own to its running spend.
+	 *
+	 * The advisor's overflow compaction bypasses the advisor `Agent`, so its
+	 * cost never reaches {@link #recordAdvisorCost}. Without this the advisor
+	 * under-reports what its maintenance calls cost.
+	 */
+	#recordAdvisorUsageCost(advisor: ActiveAdvisor, usage: CompactionRequestUsage): void {
+		const cost = usage.usage.cost.total;
+		if (!Number.isFinite(cost)) return;
+		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + cost);
+	}
+
 	/** Subscribe the advisor agent's finalized messages into the transcript recorder.
 	 *  Idempotent-by-replacement: callers detach the prior feed first. Kept separate
 	 *  so the re-prime path can mute the feed across an abort-driven reset. */
@@ -2672,6 +2686,14 @@ export class SessionAdvisors {
 						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						codexCompaction,
+						// The advisor's overflow compaction bypasses the advisor
+						// `Agent`, so its spend reaches neither the advisor cost map
+						// nor the advisor transcript. Report it like any other
+						// advisor call.
+						onUsage: usage => {
+							advisor.recorder.recordUsage(usage);
+							this.#recordAdvisorUsageCost(advisor, usage);
+						},
 					},
 				);
 				break;
