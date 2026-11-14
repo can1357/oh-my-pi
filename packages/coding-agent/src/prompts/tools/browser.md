@@ -80,6 +80,7 @@ Browser choice:
   4. cmux
   5. omp's own browser: headless WebKit when installed, downloaded first when no browser is (off with the `browser.webkit` setting or `PI_BROWSER_WEBKIT=0`),
      else managed Chromium (installs on first use)
+- A subagent skips the relay, Tern and cmux: pass `app: "relay"` or `app: "tern"` when the task needs the user's browser or pane.
 - The open result names the browser and any fallback it took.
 - `app` is one string:
   - `"relay"` (the user's Chrome), `"tern"`, `"webkit"`, `"chromium"` (managed)

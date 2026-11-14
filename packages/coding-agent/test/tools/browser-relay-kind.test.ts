@@ -131,3 +131,72 @@ describe("browser prelude relay guidance", () => {
 		}
 	});
 });
+
+describe("resolveBrowserKind in a subagent", () => {
+	const subagent = (settings: Record<string, unknown>, taskDepth = 1): ToolSession =>
+		({
+			cwd: process.cwd(),
+			hasUI: false,
+			taskDepth,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(settings),
+		}) as ToolSession;
+	const pane = {
+		TERN_PANE_SOCKET: "/tmp/tern.sock",
+		TERN_PANE: "1",
+		CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+		PI_BROWSER_WEBKIT: "0",
+	};
+
+	it("skips the relay, Tern and cmux the parent would use for an open without app", () => {
+		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane).kind).toBe("headless");
+		expect(resolveBrowserKind({ action: "open" }, subagent({}), { ...pane, PI_BROWSER_RELAY: "1" }).kind).toBe(
+			"headless",
+		);
+		expect(
+			resolveBrowserKind(
+				{ action: "open" },
+				subagent({ "browser.relay": true, "browser.cdpUrl": "http://127.0.0.1:9222" }),
+				pane,
+			).kind,
+		).toBe("connected");
+	});
+
+	it("skips Tern and cmux even when PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent", () => {
+		const forced = { ...pane, PI_BROWSER_TERN: "1", PI_BROWSER_CMUX: "1" };
+		expect(resolveBrowserKind({ action: "open" }, subagent({}), forced).kind).toBe("headless");
+		expect(
+			resolveBrowserKind({ action: "open" }, subagent({}), {
+				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+				PI_BROWSER_CMUX: "1",
+				PI_BROWSER_WEBKIT: "0",
+			}).kind,
+		).toBe("headless");
+	});
+
+	it("leaves a /tan clone (task depth 0) on its parent's defaults, which its copied prompt describes", () => {
+		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }, 0), pane).kind).toBe("relay");
+	});
+
+	it("still opens the user's Chrome or Tern when the open asks", () => {
+		const session = subagent({ "browser.relay": true });
+		expect(resolveBrowserKind({ action: "open", app: "relay" }, session, pane).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open", app: "tern" }, session, pane).kind).toBe("tern");
+		expect(resolveBrowserKind({ action: "open", target: "docs" }, session, pane).kind).toBe("tern");
+		expect(
+			resolveBrowserKind({ action: "open", app: "relay" }, session, { ...pane, PI_BROWSER_RELAY: "0" }).kind,
+		).toBe("headless");
+	});
+
+	it("gets no relay guidance, since its open without app stays out of the user's Chrome", () => {
+		const saved = process.env.PI_BROWSER_RELAY;
+		delete process.env.PI_BROWSER_RELAY;
+		try {
+			const guidance = createBrowserPrelude(subagent({ "browser.relay": true })).guidance;
+			expect(guidance).toBe(createBrowserPrelude(subagent({ "browser.relay": false })).guidance);
+		} finally {
+			if (saved !== undefined) process.env.PI_BROWSER_RELAY = saved;
+		}
+	});
+});

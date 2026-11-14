@@ -52,6 +52,21 @@ describe("resolveBrowserKind with omp's WebKit host", () => {
 		).toBe("headless");
 	});
 
+	it("keeps a subagent on omp's WebKit host even when the parent's relay and panes are enabled", () => {
+		const child = { ...session({ "browser.relay": true }), taskDepth: 1 };
+		expect(
+			resolveBrowserKind({ action: "open" }, child, {
+				PI_BROWSER_WEBKIT_PATH: engineDir,
+				PI_BROWSER_RELAY: "1",
+				PI_BROWSER_TERN: "1",
+				PI_BROWSER_CMUX: "1",
+				TERN_PANE_SOCKET: "/tmp/tern.sock",
+				TERN_PANE: "1",
+				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+			}),
+		).toEqual({ kind: "webkit", path: executable });
+	});
+
 	it("opens Chromium when no host executable resolves", async () => {
 		expect(resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: emptyDir }).kind).toBe(
 			"headless",
