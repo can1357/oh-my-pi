@@ -66,7 +66,7 @@ import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
+import { cfgFetchEnabled, cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
 import { cfgTaskDisabledAgents } from "../task/settings";
 
 const searchSchema = type({
