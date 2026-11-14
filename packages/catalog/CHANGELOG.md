@@ -5,6 +5,7 @@
 ### Added
 
 - Added Gemini 4 Hydrogen on Google Antigravity as one model with low, medium, high and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
+- Added AbliteratedLLM (`abliteratedllm`) with live model discovery from `https://api.abliteratedllm.dev/v1/models` and `/login abliteratedllm` (`ABLITERATEDLLM_API_KEY`) ([#19227](https://github.com/can1357/oh-my-pi/pull/19227) by [@whiteworthy](https://github.com/whiteworthy))
 
 ### Fixed
 

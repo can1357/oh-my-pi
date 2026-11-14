@@ -132,6 +132,7 @@ The variables below supply credentials after runtime/config overrides and stored
 
 | Provider ID                      | Environment variable(s)                                                             |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
+| `abliteratedllm`                 | `ABLITERATEDLLM_API_KEY`                                                            |
 | `abliteration`                   | `ABLITERATION_API_KEY`, then `ABLIT_KEY`                                            |
 | `aiand`                          | `AIAND_API_KEY`                                                                     |
 | `cerebras`                       | `CEREBRAS_API_KEY`                                                                  |

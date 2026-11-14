@@ -16,6 +16,7 @@ import type { ModelManagerConfig, ProviderDescriptor } from "./descriptor-types"
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
+	abliteratedllmModelManagerOptions,
 	abliterationModelManagerOptions,
 	aiandModelManagerOptions,
 	aimlApiModelManagerOptions,
@@ -102,6 +103,7 @@ export type { KnownProvider } from "../compat/provider-ids";
 type ModelManagerFactory = (config: ModelManagerConfig) => ModelManagerOptions<Api>;
 
 const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManagerFactory>>> = {
+	abliteratedllm: config => abliteratedllmModelManagerOptions(config),
 	abliteration: config => abliterationModelManagerOptions(config),
 	aiand: config => aiandModelManagerOptions(config),
 	aimlapi: config => aimlApiModelManagerOptions(config),
