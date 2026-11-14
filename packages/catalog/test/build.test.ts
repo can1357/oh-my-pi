@@ -1653,7 +1653,7 @@ describe("model cache materialized round trip", () => {
 		}
 	});
 
-	it("ignores rows materialized under a stale build or rules policy without deleting them", async () => {
+	it("keeps rows materialized under another build or rules policy beside this build's row", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
@@ -1664,8 +1664,8 @@ describe("model cache materialized round trip", () => {
 			db.run("UPDATE model_cache SET materialization_policy = ?", ["stale-builder:stale-rules"]);
 			db.close();
 
-			// Another app version's rows read as absent but are not mass-deleted on
-			// open; each provider's next write replaces its own row lazily.
+			// Another app version's rows read as absent and are not mass-deleted on
+			// open; this build's next write adds its own row instead of replacing theirs.
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
 			const countRows = () => {
 				const verified = new Database(dbPath, { readonly: true });
@@ -1678,7 +1678,7 @@ describe("model cache materialized round trip", () => {
 			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)?.models).toHaveLength(1);
 			expect(readModelCache("other-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
-			expect(countRows()).toBe(2);
+			expect(countRows()).toBe(3);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

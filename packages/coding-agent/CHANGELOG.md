@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
+- Todo tool status line now displays task count for multiple targets
 - Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.
 - Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
 - Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
@@ -14,10 +16,12 @@
 - Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict auxiliary services to the active model’s provider or disable off-provider services.
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
+- The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
 
 ### Fixed
 
 - The bash tool now reports when `exit` or an armed `set -e` ends a call before its remaining statements ran: the result carries an `endedByExit` flag, a notice says the rest of the call did not run and that options like `set -e` stay set in the session (a call that ran in a copy of a busy session shell gets a notice without the persistence claim), and the same flag crosses the RPC wire for `bash` results; a trailing `exit` at the end of the input is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
 - A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
 - A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
 - Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation

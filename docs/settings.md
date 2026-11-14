@@ -405,6 +405,18 @@ The default is an empty array (nothing disabled). For the two subsystems' provid
 
 Native project `modelRoles` are also read directly from `.omp/config.yml`; disabling the `native` discovery provider does not suppress that model-role layer.
 
+### Paused providers
+
+Some providers are paused in their auth rules because using them puts accounts at risk (for example `google-antigravity`). A paused provider offers no login, refuses token refresh and requests, and ignores stored and env credentials. `auth.unpausedProviders` turns listed ones back on, accepting the risk the pause reason names; stored logins come back as they were. Only your global config, `--config` files and runtime overrides count: a project's `.omp/config.yml` cannot unpause a provider. Pick them under **Unpaused Providers** in `/settings`, or in `~/.omp/agent/config.yml`:
+
+```yaml
+auth:
+   unpausedProviders:
+      - google-antigravity
+```
+
+Edits apply to a running session at once: stored credentials come back on the next lookup and a newly unpaused provider's model list refreshes, as after a login. With an auth broker, set it on the broker host too (`omp auth-broker serve` reads it at startup): the broker drops a paused provider's credentials before clients see them.
+
 ## Resume picker scope
 
 By default, `omp --resume` and `/resume` include sessions from other worktrees of

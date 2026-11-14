@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+
 ### Changed
 
 - Updated Vertex AI Gemini requests to use the v1beta1 API, restoring support for long Gemini responses.

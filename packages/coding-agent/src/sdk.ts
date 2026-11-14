@@ -201,10 +201,12 @@ import {
 import type { AgentSessionDisposeOptions } from "./session/agent-session-types";
 import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
+	applyUnpausedProviders,
 	createAuthStorageSettingsSync,
 	discoverAuthStorage as discoverAuthStorageFromConfig,
 	type EffectiveSettingsScope,
 	loadEffectiveAuthAccountPolicyConfig,
+	resolveEffectiveSettings,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { CostCapError, type CostGateApi, guardStreamFn } from "./session/cost-gate";
@@ -1156,7 +1158,9 @@ export async function discoverAuthStorage(
 		Omit<EffectiveSettingsScope, "agentDir"> = {},
 ): Promise<AuthStorage> {
 	const { settings, cwd, ...discoveryOptions } = options;
-	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings, cwd, agentDir });
+	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
+	applyUnpausedProviders(effective);
+	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
 	return discoverAuthStorageFromConfig(agentDir, {
 		...discoveryOptions,
 		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
@@ -5444,7 +5448,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		}
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
-		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage);
+		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage, modelRegistry);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the
 		// `tools.format` catalog dialect, personality, …), so a bulk change rebuilds once.
 		// Hide Secrets first switches outbound obfuscation on the live obfuscator (earlier
