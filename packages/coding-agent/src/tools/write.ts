@@ -82,7 +82,7 @@ import {
 } from "./sqlite-reader";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
-import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
+import { formatWriteSnapshotText, maybeWriteSnapshotDisplay, stripWriteContent } from "./write-content";
 import { docTopicsReadable } from "./xdev";
 
 import {
@@ -1175,15 +1175,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// use it so a drifted write (e.g. client format-on-save) still
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
+				const display = maybeWriteSnapshotDisplay(this.session, absolutePath, bridgeWrite.text, displayPath);
 				const writeLine = `Successfully wrote ${cleanBytes} bytes to ${displayPath}`;
-				let resultText = header ? `${header}\n${writeLine}` : writeLine;
-				if (stripped) {
-					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-				}
-				if (madeExecutable) {
-					resultText += `\n${EXECUTABLE_NOTICE}`;
-				}
+				// Receipts stay with the summary; the content map goes last.
+				const notes = [
+					stripped ? "Note: auto-stripped hashline display prefixes from content before writing." : "",
+					madeExecutable ? EXECUTABLE_NOTICE : "",
+				].filter(note => note.length > 0);
+				const resultText = formatWriteSnapshotText(display, writeLine, notes);
 				return {
 					content: [{ type: "text", text: resultText }],
 					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
@@ -1210,22 +1209,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			const finalContent = diagnostics.finalContent;
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
+			const display = maybeWriteSnapshotDisplay(this.session, absolutePath, finalContent, displayPath);
 			const finalBytes = finalContent === writeContent ? writeBytes : Buffer.byteLength(finalContent, "utf8");
 			const writeLine = `Successfully wrote ${finalBytes} bytes to ${displayPath}`;
-			let resultText = header ? `${header}\n${writeLine}` : writeLine;
-			if (stripped) {
-				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-			}
 			// A non-final batch entry returns before the batch's formatter runs: claim nothing yet.
 			const conventionNote =
 				batchRequest?.flush === false ? undefined : textFileConventionNote(applied, finalContent);
-			if (conventionNote) {
-				resultText += `\n${conventionNote}`;
-			}
-			if (madeExecutable) {
-				resultText += `\n${EXECUTABLE_NOTICE}`;
-			}
+			// Receipts stay with the summary; the content map goes last.
+			const notes = [
+				stripped ? "Note: auto-stripped hashline display prefixes from content before writing." : "",
+				conventionNote ?? "",
+				madeExecutable ? EXECUTABLE_NOTICE : "",
+			].filter(note => note.length > 0);
+			const resultText = formatWriteSnapshotText(display, writeLine, notes);
 			if (!diagnostics.diagnostics) {
 				return {
 					content: [{ type: "text", text: resultText }],
