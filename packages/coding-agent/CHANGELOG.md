@@ -76,6 +76,11 @@
 - Extensions enabled or reconfigured through `extensions` or `disabledExtensions` now load into the active session without requiring a restart.
 - Rich-text pastes made during approval steering or in dialogs now preserve Markdown formatting and images when inserted into the chat editor.
 - Moving a task or resuming a session in another project now switches its agents, extensions, custom tools, and MCP servers to match the destination project without a restart.
+- Changed the default local text-to-speech model to Phonon 31M: faster synthesis, a smaller download, and new voices (Kokoro voice settings migrate automatically); the speaking-rate range is now 0.8–1.3×, and old Kokoro caches are removed after the first Phonon install
+- In Tern, `/btw` answers in a note in the transcript where you asked it instead of opening the BTW history sheet: click the note to send the composer's drafts to it as follow-ups (Esc returns to the chat), right-click it to copy, branch, inject or stop, and fold it to one line with its ×; notes come back folded when the transcript is rebuilt or the session resumed. `/btw` alone still opens the history
+- Bash calls that overlap a running or backgrounded call now carry the variables, functions, aliases, options and traps they set into the session's shell (the call that ends last wins a name both set), instead of discarding them with a "Ran in a copy of the busy session shell" notice on every overlapping call; background jobs they start are no longer killed when that copy is garbage-collected
+- Newly enabled extensions now load into the running session when `extensions` or `disabledExtensions` changes, instead of requiring a restart
+- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused.
 
 ### Fixed
 
@@ -146,10 +151,6 @@
 - Added the `antigravity-cli` provider for Google Antigravity over ACP, with managed binary installation, `/login antigravity-cli` Google sign-in, host tool execution, and retained conversations across tool steps and history changes.
 
 ## [18.20.1] - 2026-11-14
-### Changed
-
-- `/fork` and fork-from-transcript now abort a running response and fork instead of refusing with "Wait for the current response to finish".
-- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused.
 
 ### Added
 
