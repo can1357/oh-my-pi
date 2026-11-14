@@ -32,7 +32,7 @@ import type {
 import type { Editor } from "../components/editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { sanitizeHookStatusText, sanitizeStatusText } from "../chrome/shared";
-import { getThemeEpoch, theme, type Theme } from "../theme";
+import { getThemeEpoch, theme } from "../theme";
 import { type CompactionBoundaries, EMPTY_STRING_PARTS, getToolSchemaMetadataRevision } from "./context-usage";
 import {
 	type CodexResetFireworksEvent,
@@ -500,11 +500,10 @@ interface CachedStatusLine {
 	externalInputs: StatusLineExternalInputs;
 }
 
-/** Configured separator glyphs with no end caps, for the plain (borderless) layouts. */
-const plainSeparator = (style: StatusLineSeparatorStyle, themeRef: Theme): SeparatorDef => {
-	const { left, right } = getSeparator(style, themeRef);
-	return { left, right };
-};
+/** Dot separator of the plain (borderless) layouts; carries no caps. Kept as
+ *  the implicit default so plain layouts read unchanged unless the user sets
+ *  `statusLine.separator` explicitly. */
+const PLAIN_SEPARATOR: SeparatorDef = { left: "·", right: "·" };
 
 /** A separator style's glyphs and cell widths: theme-pure, so measured once per theme. */
 interface SeparatorMetrics {
@@ -693,8 +692,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#externalInputsProbe = new StatusLineExternalInputs();
 	/** `adjustHsv` result for the gauge's threshold tint; pure in its source hex. */
 	#dimmedAccentMemo: { sourceHex: string; hex: string } | undefined;
-	/** Separator widths per style for the plain layouts, and for the styled (box/band) layouts; see {@link #separatorMetrics}. */
-	#plainSeparatorMetrics = new Map<StatusLineSeparatorStyle, SeparatorMetrics>();
+	/** Separator widths for the plain and the styled (box/band) layouts; see {@link #separatorMetrics}. */
+	#plainSeparatorMetrics: SeparatorMetrics | undefined;
 	#styledSeparatorMetrics: SeparatorMetrics | undefined;
 	/** Gauge boundary markers; a pure function of the session's compaction settings, model, and window. */
 	#compactionBoundariesMemo:
@@ -3069,11 +3068,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 */
 	#separatorMetrics(plain: boolean, style: StatusLineSeparatorStyle): SeparatorMetrics {
 		const themeEpoch = getThemeEpoch();
-		const memo = plain ? this.#plainSeparatorMetrics.get(style) : this.#styledSeparatorMetrics;
-		if (memo && memo.themeRef === theme && memo.themeEpoch === themeEpoch) {
+		const explicit = this.#settings.separator !== undefined;
+		const memo = plain ? this.#plainSeparatorMetrics : this.#styledSeparatorMetrics;
+		if (memo && memo.themeRef === theme && memo.themeEpoch === themeEpoch && memo.style === style) {
 			return memo;
 		}
-		const def = plain ? plainSeparator(style, theme) : getSeparator(style, theme);
+		const def = plain && !explicit ? PLAIN_SEPARATOR : getSeparator(style, theme);
 		const metrics: SeparatorMetrics = {
 			themeRef: theme,
 			themeEpoch,
@@ -3085,7 +3085,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			rightCapWidth: def.endCaps ? visibleWidth(def.endCaps.left) : 0,
 			bandCapWidth: def.endCaps ? visibleWidth(theme.sep.powerlineCapLeft) : 0,
 		};
-		if (plain) this.#plainSeparatorMetrics.set(style, metrics);
+		if (plain) this.#plainSeparatorMetrics = metrics;
 		else this.#styledSeparatorMetrics = metrics;
 		return metrics;
 	}

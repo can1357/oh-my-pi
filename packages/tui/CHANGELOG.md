@@ -20,6 +20,15 @@
 - Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
 - Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
+- A `bash` call that returns as a background job right away (`async: true`) keeps showing its command in the interpreted shell view instead of switching to the raw command line ([#19202](https://github.com/can1357/oh-my-pi/pull/19202) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback
+- Switching to a subagent, resuming, or rebuilding a long transcript paints the newest messages at full size immediately instead of flashing a stack of one-line block stubs while older history drains into scrollback ([#19204](https://github.com/can1357/oh-my-pi/pull/19204) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed Markdown task lists dropping their checkboxes, so done (`- [x]`) and open (`- [ ]`) items looked the same in the transcript ([#16557](https://github.com/can1357/oh-my-pi/pull/16557) by [@mottopanikeiku](https://github.com/mottopanikeiku))
+- Fixed DEC 2048 in-band resize reports typing `48;rows;cols;…` into the composer on iTerm2 ([#16695](https://github.com/can1357/oh-my-pi/pull/16695) by [@demon-i386](https://github.com/demon-i386))
+- Fixed the working-row shimmer dropping to a few frames a second while omp waits on a tool or the model, on terminals without synchronized output such as tmux 3.6 ([#19032](https://github.com/can1357/oh-my-pi/pull/19032) by [@nategriffin26](https://github.com/nategriffin26))
+- Expanded tool output (Ctrl+O) now shows the complete, soft-wrapped message in IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of the first 12 lines cut at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#18648](https://github.com/can1357/oh-my-pi/pull/18648) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Switched the `/resume` session picker to edge-triggered scrolling, preventing premature list shifting at the vertical midpoint ([#18604](https://github.com/can1357/oh-my-pi/pull/18604) by [@SuperUserA](https://github.com/SuperUserA))
+- The plain status line layouts (standalone bottom bar, claude top-rule chip) honor an explicitly configured `statusLine.separator` instead of always joining segments with `·`; with no separator configured the `·` dot stays ([#19220](https://github.com/can1357/oh-my-pi/pull/19220) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 

@@ -366,7 +366,9 @@ export class SelectorController {
 								preset: cfgStatusLinePreset.get(settings),
 								leftSegments: cfgStatusLineLeftSegments.get(settings),
 								rightSegments: cfgStatusLineRightSegments.get(settings),
-								separator: cfgStatusLineSeparator.get(settings),
+								separator: cfgStatusLineSeparator.isConfigured(settings)
+									? cfgStatusLineSeparator.get(settings)
+									: undefined,
 								showHookStatus: cfgStatusLineShowHookStatus.get(settings),
 								sessionAccent: cfgStatusLineSessionAccent.get(settings),
 								transparent: cfgStatusLineTransparent.get(settings),
@@ -399,7 +401,9 @@ export class SelectorController {
 								preset: cfgStatusLinePreset.get(settings),
 								leftSegments: cfgStatusLineLeftSegments.get(settings),
 								rightSegments: cfgStatusLineRightSegments.get(settings),
-								separator: cfgStatusLineSeparator.get(settings),
+								separator: cfgStatusLineSeparator.isConfigured(settings)
+									? cfgStatusLineSeparator.get(settings)
+									: undefined,
 								showHookStatus: cfgStatusLineShowHookStatus.get(settings),
 								sessionAccent: cfgStatusLineSessionAccent.get(settings),
 								transparent: cfgStatusLineTransparent.get(settings),
