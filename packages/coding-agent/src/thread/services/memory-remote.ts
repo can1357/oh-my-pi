@@ -312,11 +312,6 @@ export class RemoteSupermemorySessionState implements SupermemorySessionStateApi
 	get aliasOf(): SupermemorySessionStateApi | undefined {
 		return this.#remote.callSync("aliasOf");
 	}
-
-	get lastRecallSnippet(): string | undefined {
-		return this.#remote.callSync("lastRecallSnippet");
-	}
-
 	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		return this.#remote.call("search", query, limit, signal);
 	}

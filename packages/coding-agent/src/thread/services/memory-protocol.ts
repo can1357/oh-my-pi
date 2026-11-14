@@ -144,7 +144,6 @@ export type MnemopiSessionStateProtocol = {
 export type SupermemorySessionStateProtocol = {
 	namespace: RpcMethod<[], string>;
 	aliasOf: RpcMethod<[], SupermemorySessionStateApi | undefined>;
-	lastRecallSnippet: RpcMethod<[], string | undefined>;
 	search: RpcMethod<[query: string, limit: number | undefined, signal?: AbortSignal], SupermemorySearchItem[]>;
 	enqueueRetain: RpcMethod<[toolCallId: string, items: SupermemoryRetainInput[]], void>;
 	save: RpcMethod<

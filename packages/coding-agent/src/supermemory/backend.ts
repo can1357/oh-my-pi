@@ -65,8 +65,8 @@ export const supermemoryBackend: MemoryBackend = {
 		const parts = [
 			prompt.render(supermemoryInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
 		];
-		const state = session?.getSupermemorySessionState();
-		const snippet = (state?.aliasOf ?? state)?.lastRecallSnippet;
+		// Only the session's own recall: a subagent does its own `recall` instead of inheriting the parent's.
+		const snippet = session?.getSupermemorySessionState()?.lastRecallSnippet;
 		if (snippet) parts.push(snippet);
 		return parts.join("\n\n");
 	},
@@ -94,8 +94,8 @@ export const supermemoryBackend: MemoryBackend = {
 		const state = session?.getSupermemorySessionState();
 		if (state) {
 			await state.flush();
-			// Queued `retain`/`learn` writes (including a subagent's, which land in this outbox) are
-			// delivered by the queue's own drain, which `flush` does not track; wait for it too.
+			// Also deliver what is still queued: leftovers from earlier processes and writes waiting
+			// on a retry backoff, which no tracked write covers.
 			if (!state.aliasOf) await state.drainOutbox();
 			state.clearRecall();
 		}
@@ -121,7 +121,7 @@ export const supermemoryBackend: MemoryBackend = {
 			writable: true,
 			searchable: true,
 			scope: state.namespace,
-			lastRecall: (state.aliasOf ?? state).lastRecallSnippet !== undefined,
+			lastRecall: state.lastRecallSnippet !== undefined,
 		};
 	},
 

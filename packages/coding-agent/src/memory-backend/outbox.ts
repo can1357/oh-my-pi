@@ -358,6 +358,11 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 		return this.#outbox;
 	}
 
+	/** A delivery is running (started by an enqueue, a flush or the retry timer). */
+	get flushing(): boolean {
+		return this.#flushing !== undefined;
+	}
+
 	/** Resolves once every item of the call is durable; rejects, queueing nothing, when it cannot be. */
 	async enqueue(toolCallId: string, items: I[]): Promise<void> {
 		if (this.#closed) throw new Error(`${this.#options.label} retain queue is closed.`);

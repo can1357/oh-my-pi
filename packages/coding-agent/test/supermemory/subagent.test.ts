@@ -137,7 +137,6 @@ async function outboxFiles(agentDir: string): Promise<string[]> {
 describe("Supermemory subagent alias", () => {
 	it("routes a child's recall, retain and memory_edit to the parent's namespace, outbox and notices", async () => {
 		const parent = await startSession("parent", "/tmp", 0);
-		parent.state.lastRecallSnippet = "<supermemory>parent recall</supermemory>";
 		// A child in another directory would resolve another namespace on its own.
 		const child = await startSession("child", temp.path(), 1, parent.state);
 		const tag = parent.state.namespace;
@@ -160,9 +159,8 @@ describe("Supermemory subagent alias", () => {
 		expect(child.notices).toEqual([]);
 	});
 
-	it("never auto-recalls, auto-retains or writes cursors in a child, and shows the parent's recall snippet", async () => {
+	it("never auto-recalls, auto-retains or writes cursors in a child", async () => {
 		const parent = await startSession("parent", "/tmp", 0);
-		parent.state.lastRecallSnippet = "<supermemory>parent recall</supermemory>";
 		const child = await startSession("child", "/tmp", 1, parent.state);
 
 		expect(await supermemoryBackend.beforeAgentStartPrompt!(child.session as never, "q", undefined)).toBeUndefined();
@@ -172,13 +170,6 @@ describe("Supermemory subagent alias", () => {
 		await supermemoryBackend.enqueue("/tmp", "/tmp", child.session as never);
 		await parent.state.flush();
 		expect(child.entries.filter(entry => entry.type === "custom")).toEqual([]);
-		const instructions = await supermemoryBackend.buildDeveloperInstructions(
-			"/tmp",
-			"/tmp",
-			child.session.settings,
-			child.session as never,
-		);
-		expect(instructions).toContain("<supermemory>parent recall</supermemory>");
 		expect(requests).toEqual([]);
 	});
 

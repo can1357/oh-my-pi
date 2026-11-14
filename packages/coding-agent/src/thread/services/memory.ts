@@ -103,7 +103,6 @@ const serveMnemopiState: RpcServe<MnemopiSessionState, MnemopiSessionStateProtoc
 const serveSupermemoryState: RpcServe<SupermemorySessionState, SupermemorySessionStateProtocol> = {
 	namespace: state => state.namespace,
 	aliasOf: state => state.aliasOf,
-	lastRecallSnippet: state => state.lastRecallSnippet,
 	search: (state, query, limit, signal) => state.search(query, limit, signal),
 	enqueueRetain: (state, toolCallId, items) => state.enqueueRetain(toolCallId, items),
 	save: (state, content, metadata, id, dreaming) => state.save(content, metadata, id, dreaming),

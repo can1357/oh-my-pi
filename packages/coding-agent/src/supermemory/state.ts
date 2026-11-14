@@ -135,14 +135,13 @@ export interface SupermemoryAliasOptions {
 }
 
 /**
- * What a subagent alias routes to its parent: namespace, recall snippet, and every
- * tool read, write and edit. A subagent worker holds a remote implementation whose calls run
- * on main's state, so writes land in the parent's outbox.
+ * What a subagent alias routes to its parent: namespace and every tool read, write and edit.
+ * A subagent worker holds a remote implementation whose calls run on main's state, so writes
+ * land in the parent's outbox.
  */
 export interface SupermemorySessionStateApi {
 	readonly namespace: string;
 	readonly aliasOf?: SupermemorySessionStateApi;
-	readonly lastRecallSnippet?: string;
 	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]>;
 	enqueueRetain(toolCallId: string, items: SupermemoryRetainInput[]): Promise<void>;
 	save(
@@ -380,10 +379,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/**
 	 * Persists one tool call's items, all or none, before resolving, then starts delivering
 	 * them. A retried call has the same event ids, so it neither queues nor uploads twice.
+	 * The delivery is tracked (it joins the queue's own flush), so {@link flush} and dispose wait for it.
 	 */
 	async enqueueRetain(toolCallId: string, items: SupermemoryRetainInput[]): Promise<void> {
 		if (this.aliasOf) return this.aliasOf.enqueueRetain(toolCallId, items);
 		await this.#local().outbox.enqueue(toolCallId, items);
+		void this.drainOutbox();
 	}
 
 	/** Delivers this destination's outbox, including events earlier processes left; tracked so {@link flush} awaits it. */
@@ -768,7 +769,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	}
 
 	/**
-	 * Stops automatic work and gives pending writes and the outbox a bounded chance to land.
+	 * Stops automatic work and gives writes still in flight (and the outbox behind them) a bounded
+	 * chance to land. With nothing in flight it returns at once and starts no delivery: starting disk
+	 * or network work during shutdown can outlive the event loop (the process exits with dispose
+	 * still pending). Events a failed delivery left on disk stay there for the next drain of this
+	 * destination (a top-level session's start, or the next write).
 	 * An alias owns nothing: its writes sit in the parent's outbox, which the parent disposes.
 	 */
 	async dispose(): Promise<void> {
@@ -778,6 +783,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe = undefined;
 		const own = this.#own;
 		if (!own) return;
+		if (this.#writes.size === 0 && !own.outbox.flushing) {
+			this.#disposed = true;
+			own.outbox.dispose();
+			return;
+		}
+		// Joins a running delivery (a retry timer's included) rather than starting a second one.
 		void this.drainOutbox();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const timer = setTimeout(resolve, DISPOSE_FLUSH_TIMEOUT_MS);
