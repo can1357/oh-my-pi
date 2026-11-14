@@ -27,6 +27,14 @@
 - Reduced memory usage when visualizing long multi-line shell commands.
 - Fixed the shell cp builtin so symlink-following options work correctly with archive and directory-copy modes without disabling recursion or attribute preservation.
 - Replaced built-in shell crashes on very long -a/-o chains in [ ] and test expressions with a clear error for excessively deep expressions.
+- Fixed `<text>` elements disappearing from rendered SVGs when a generic font family refers to an unavailable font ([#15181](https://github.com/can1357/oh-my-pi/issues/15181), [#18538](https://github.com/can1357/oh-my-pi/pull/18538)).
+- Fixed `worktree add` with source checkouts containing read-only files or directories, including cleanup and safety issues involving tracked directories replaced by symlinks ([#14190](https://github.com/can1357/oh-my-pi/issues/14190), [#18537](https://github.com/can1357/oh-my-pi/pull/18537)).
+- Fixed cancelled or timed-out `Shell.run` calls so they stop only jobs started by that invocation while preserving the shell session for subsequent runs.
+- Improved shell search behavior across local and network filesystems: local searches no longer descend into network mounts unexpectedly, network-backed walks keep more directory operations in flight, and `fd` uses parallel traversal with support for its ignore, pruning, depth, worker, and error-reporting options.
+- Reduced memory usage in shell visualization for long multi-line commands ([#18791](https://github.com/can1357/oh-my-pi/issues/18791), [#19177](https://github.com/can1357/oh-my-pi/pull/19177)).
+- Fixed the shell `cp` builtin so symlink-following options used with archive and directory-copy modes correctly override one another without disabling recursion or attribute preservation ([#19215](https://github.com/can1357/oh-my-pi/pull/19215)).
+- Fixed a built-in shell crash when `[ ]` or `test` expressions contained very long `-a`/`-o` chains; excessively deep parenthesized expressions now produce a clear error instead ([#18498](https://github.com/can1357/oh-my-pi/pull/18498)).
+- Fixed macOS `press()` and background `el.click()` reporting success on a control a person could not click, such as a hover toolbar's button after the pointer left, a hidden control, or one of a window that shows a sheet; they now fail before anything is sent and name what the window shows there
 
 ## [18.20.0] - 2026-11-12
 
