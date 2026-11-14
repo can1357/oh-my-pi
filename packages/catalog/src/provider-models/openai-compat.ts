@@ -3636,10 +3636,13 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
-		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`.
-		// Namespace the refreshed pseudo-API cache separately so those rows cannot
-		// override bundled `api: "openrouter"` models during online-if-uncached startup.
-		cacheProviderId: resolveModelCacheProviderId("openrouter"),
+		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`;
+		// the pseudo-API namespace keeps them from overriding bundled `api: "openrouter"`
+		// models. It is also scoped by key: the keyed roster is guardrail-filtered.
+		cacheProviderId: resolveModelCacheProviderId("openrouter", { apiKey, baseUrl }),
+		// With a key, `/models` lists only the models the key's workspace guardrails
+		// allow; bundled rows from the public roster must not widen that set.
+		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
@@ -3838,12 +3841,12 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 				]);
 
 			if (imageModels === null) {
-				logger.warn("OpenRouter image model discovery unavailable; preserving chat model discovery", {
+				logger.warn("OpenRouter image model discovery unavailable; preserving other model discovery", {
 					endpoint: `${baseUrl}/images/models`,
 				});
 			}
 			if (decisionModels === null) {
-				logger.warn("OpenRouter decision model discovery unavailable; preserving chat model discovery", {
+				logger.warn("OpenRouter decision model discovery unavailable; preserving other model discovery", {
 					endpoint: `${baseUrl}/models?output_modalities=decisions`,
 				});
 			}
@@ -3862,19 +3865,19 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 					endpoint: `${baseUrl}/embeddings/models`,
 				});
 			}
-			if (
-				chatModels === null &&
-				imageModels === null &&
-				decisionModels === null &&
-				rerankModels === null &&
-				videoModels === null &&
-				embeddingModels === null
-			) {
+			// Discovery is authoritative for chat rows: a successful result replaces
+			// the bundled chat roster. Without the chat listing there is no roster to
+			// replace it with, so fall back to cache/bundled rows instead of pruning
+			// every chat model on the strength of a media-only response.
+			if (chatModels === null) {
+				logger.warn("OpenRouter chat model discovery unavailable; keeping cached model catalog", {
+					endpoint: `${baseUrl}/models`,
+				});
 				return null;
 			}
 
 			const models = new Map<string, ModelSpec<Api>>();
-			for (const model of chatModels ?? []) models.set(model.id, model);
+			for (const model of chatModels) models.set(model.id, model);
 			for (const model of imageModels ?? []) models.set(model.id, model);
 			for (const model of decisionModels ?? []) models.set(model.id, model);
 			for (const model of rerankModels ?? []) models.set(model.id, model);

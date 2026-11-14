@@ -208,6 +208,40 @@ describe("persisted agent model attribution", () => {
 		expect(history?.metrics?.requests).toBe(2);
 	});
 
+	it("reports occupied context tokens, not summed continuation billing, in restored metrics", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-context-");
+		// A segmented Gemini response sums `totalTokens` across continuation
+		// requests (275) while `contextTokens` (165) is the occupied window the
+		// provider reported. Restored-agent metrics must show the occupied
+		// figure or the Hub's context gauge hits its ceiling early.
+		const segmented = JSON.stringify({
+			type: "message",
+			id: "a1",
+			parentId: "si",
+			timestamp: "2026-08-07T11:00:00.000Z",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				provider: SONNET.provider,
+				model: SONNET.model,
+				stopReason: "stop",
+				usage: {
+					input: 120,
+					output: 155,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 275,
+					contextTokens: 165,
+					cost: { total: 0.5 },
+				},
+			},
+		});
+		const registry = await historyFor(tempDir.path(), "Segmented", [...transcriptHead(), segmented]);
+
+		const history = registry.get("Segmented")?.history;
+		expect(history?.metrics?.contextTokens).toBe(165);
+	});
+
 	it("labels the row with the newest role a transition assigned, skipping ephemeral ones", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-role-");
 		// Two real role transitions plus an ephemeral fallback on top: the label

@@ -39,13 +39,13 @@ import type {
 	BrowserErrorEntry,
 	BrowserErrorOptions,
 } from "../console-capture";
-import type { DialogPolicy, DialogState } from "../dialogs";
+import { type DialogPolicy, type DialogState, dialogBlocksPageError } from "../dialogs";
 import type { BrowserDownload } from "../downloads";
 import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult } from "../emulation";
 import type { BrowserFrameInfo } from "../frames";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { loadedKnownDevices, loadPuppeteer } from "../launch";
-import { pushStateInPage, sameAddress } from "../navigation";
+import { assertUrlPattern, pushStateInPage, sameAddress } from "../navigation";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -251,6 +251,22 @@ interface TernEvent {
 	type: string;
 	[key: string]: unknown;
 }
+
+/**
+ * Block ops the page's script runs, which a held confirm or prompt stops until it is answered, and how one meets a
+ * dialog that opens while it runs: `blocks` fails, `answers` (input: the click or key press opened it) ends as done.
+ */
+const PAGE_OP_DIALOG: Record<string, "blocks" | "answers"> = {
+	eval: "blocks",
+	dom: "blocks",
+	edit: "blocks",
+	capture: "blocks",
+	pdf: "blocks",
+	input: "answers",
+};
+
+/** Bound on one waiting `events` call that watches for a dialog; the watch sends the next when it runs out. */
+const DIALOG_WATCH_TIMEOUT_MS = 60_000;
 
 interface PendingDialog {
 	type: string;
@@ -482,6 +498,10 @@ export class TernTab implements InProcessRunTab {
 	#consoleDropped = 0;
 	// Page state from events.
 	#pendingDialog: PendingDialog | undefined;
+	/** Page calls in flight that a held confirm or prompt would stop ({@link #whenDialog}). */
+	readonly #dialogWaiters = new Set<(dialog: DialogState) => void>();
+	/** Ends the held `events` call that watches for a dialog once no page call waits on one. */
+	#dialogWatch: AbortController | undefined;
 	readonly #frameUrls = new Map<string, string>();
 	readonly #downloads = new Map<number, { url: string; path?: string; state: string; error?: string }>();
 	readonly #completedDownloads: BrowserDownload[] = [];
@@ -708,14 +728,106 @@ export class TernTab implements InProcessRunTab {
 		return this.#runContext?.timeoutMs ?? 30_000;
 	}
 
-	/** Send a block op; aborts with the run. */
+	/**
+	 * Send a block op; aborts with the run. An op the page's script runs ({@link PAGE_OP_DIALOG}) fails at once while
+	 * a confirm or prompt is held, since that stops the page until it is answered; one opening while the op runs
+	 * fails it too, except for input, which ends as done (the dialog is what the click or key press did).
+	 */
 	async #op(op: string, fields: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
 		const signal = this.#signal;
 		throwIfAborted(signal);
-		return await this.#client.request(
-			{ op, block: this.block, ...fields },
-			{ timeoutMs: timeoutMs ?? resolveOpTimeouts(this.#cellMs).budgetBound, signal },
-		);
+		const options = { timeoutMs: timeoutMs ?? resolveOpTimeouts(this.#cellMs).budgetBound, signal };
+		const dialogMode = PAGE_OP_DIALOG[op];
+		if (!dialogMode) return await this.#client.request({ op, block: this.block, ...fields }, options);
+		const label = `${this.product} ${op}`;
+		const held = this.#dialogState();
+		if (held.open) throw dialogBlocksPageError(label, held, "is open");
+		const done = new AbortController();
+		const opSignal = signal ? AbortSignal.any([signal, done.signal]) : done.signal;
+		try {
+			const answer = await Promise.race([
+				this.#client.request({ op, block: this.block, ...fields }, { ...options, signal: opSignal }),
+				this.#whenDialog(opSignal).then(dialog => {
+					if (dialogMode === "blocks") throw dialogBlocksPageError(label, dialog, "opened");
+					return undefined;
+				}),
+			]);
+			// Read the events the input caused, so a dialog it opened stops the next page call before it is sent.
+			if (dialogMode === "answers" && !this.#pendingDialog) await this.#pull();
+			return answer;
+		} finally {
+			done.abort();
+		}
+	}
+
+	/** The held confirm or prompt as the tab knows it from the events read so far. */
+	#dialogState(): DialogState {
+		const pending = this.#pendingDialog;
+		if (!pending) return { open: false };
+		return {
+			open: true,
+			type: pending.type,
+			message: pending.message,
+			...(pending.defaultValue !== undefined ? { defaultValue: pending.defaultValue } : {}),
+		};
+	}
+
+	/**
+	 * Resolve with the held dialog once one is: at once when it already is, else from the events read while `signal`
+	 * is live. A server that holds a waiting `events` call (omp's WebKit host) is asked with one; on the others, only
+	 * the events other calls read show it. Stays pending once `signal` aborts.
+	 */
+	#whenDialog(signal: AbortSignal): Promise<DialogState> {
+		const held = this.#dialogState();
+		if (held.open) return Promise.resolve(held);
+		const { promise, resolve } = Promise.withResolvers<DialogState>();
+		if (signal.aborted) return promise;
+		const forget = (): void => {
+			this.#dialogWaiters.delete(notify);
+			signal.removeEventListener("abort", forget);
+			if (this.#dialogWaiters.size === 0) this.#dialogWatch?.abort();
+		};
+		const notify = (dialog: DialogState): void => {
+			forget();
+			resolve(dialog);
+		};
+		this.#dialogWaiters.add(notify);
+		signal.addEventListener("abort", forget, { once: true });
+		if (this.#client.waitsForEvents && (!this.#dialogWatch || this.#dialogWatch.signal.aborted)) {
+			void this.#watchEvents();
+		}
+		return promise;
+	}
+
+	/**
+	 * Read the block's events with a waiting `events` call, one at a time, while a page call waits on a dialog. The
+	 * host answers a waiting call when there is an event, or early when another `events` call (a {@link #pull})
+	 * arrives; either way the next one is sent. Ended by {@link #whenDialog} once no call waits.
+	 */
+	async #watchEvents(): Promise<void> {
+		const watch = new AbortController();
+		this.#dialogWatch = watch;
+		try {
+			while (!watch.signal.aborted && this.#dialogWaiters.size > 0) {
+				let answer: unknown;
+				try {
+					answer = await this.#client.request(
+						{ op: "events", block: this.block, after: this.#cursor, wait: true },
+						{ timeoutMs: DIALOG_WATCH_TIMEOUT_MS, signal: watch.signal },
+					);
+				} catch (error) {
+					// A quiet page: ask again.
+					if (error instanceof TernError && error.kind === "timeout") continue;
+					throw error;
+				}
+				this.#ingestEvents(answer);
+			}
+		} catch (error) {
+			if (!watch.signal.aborted)
+				logger.debug("Watching a browser block for dialogs failed", { error: String(error) });
+		} finally {
+			if (this.#dialogWatch === watch) this.#dialogWatch = undefined;
+		}
 	}
 
 	/** Evaluate a function source; resolves its JSON value (`undefined` for none). */
@@ -787,27 +899,31 @@ export class TernTab implements InProcessRunTab {
 	async #pull(): Promise<void> {
 		if (this.#pulling) return await this.#pulling;
 		const pulling = (async () => {
-			const answer = await this.#op("events", { after: this.#cursor }, 10_000);
-			if (!isRecord(answer) || !Array.isArray(answer.events)) return;
-			for (const raw of answer.events) {
-				if (!isRecord(raw) || typeof raw.seq !== "number" || typeof raw.type !== "string") continue;
-				if (raw.seq <= this.#cursor) continue;
-				this.#cursor = raw.seq;
-				const event: TernEvent = { ...raw, seq: raw.seq, type: raw.type };
-				this.#events.push(event);
-				this.#ingest(event);
-			}
-			if (this.#events.length > EVENT_LOG_LIMIT) this.#events.splice(0, this.#events.length - EVENT_LOG_LIMIT);
-			if (typeof answer.dropped === "number" && answer.dropped > 0) {
-				logger.debug("Tern dropped browser events before omp read them", { dropped: answer.dropped });
-				this.#network.forgetInflight();
-			}
+			this.#ingestEvents(await this.#op("events", { after: this.#cursor }, 10_000));
 		})();
 		this.#pulling = pulling;
 		try {
 			await pulling;
 		} finally {
 			this.#pulling = undefined;
+		}
+	}
+
+	/** Apply an `events` answer: the events after the cursor, in order. */
+	#ingestEvents(answer: unknown): void {
+		if (!isRecord(answer) || !Array.isArray(answer.events)) return;
+		for (const raw of answer.events) {
+			if (!isRecord(raw) || typeof raw.seq !== "number" || typeof raw.type !== "string") continue;
+			if (raw.seq <= this.#cursor) continue;
+			this.#cursor = raw.seq;
+			const event: TernEvent = { ...raw, seq: raw.seq, type: raw.type };
+			this.#events.push(event);
+			this.#ingest(event);
+		}
+		if (this.#events.length > EVENT_LOG_LIMIT) this.#events.splice(0, this.#events.length - EVENT_LOG_LIMIT);
+		if (typeof answer.dropped === "number" && answer.dropped > 0) {
+			logger.debug("Tern dropped browser events before omp read them", { dropped: answer.dropped });
+			this.#network.forgetInflight();
 		}
 	}
 
@@ -839,6 +955,8 @@ export class TernTab implements InProcessRunTab {
 						message: stringOr(event.message, ""),
 						...(event.kind === "prompt" ? { defaultValue: stringOr(event.default, "") } : {}),
 					};
+					const held = this.#dialogState();
+					for (const notify of this.#dialogWaiters) notify(held);
 				}
 				return;
 			case "download":
@@ -1351,6 +1469,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Wait until the URL contains `pattern` (string) or matches it (RegExp). */
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
+		assertUrlPattern(pattern);
 		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
 		let iteration = 0;
 		return await this.#poll(
@@ -2827,14 +2946,7 @@ export class TernTab implements InProcessRunTab {
 	/** The confirm/prompt Tern holds for a decision. */
 	async dialog(): Promise<DialogState> {
 		await this.#pull();
-		const pending = this.#pendingDialog;
-		if (!pending) return { open: false };
-		return {
-			open: true,
-			type: pending.type,
-			message: pending.message,
-			...(pending.defaultValue !== undefined ? { defaultValue: pending.defaultValue } : {}),
-		};
+		return this.#dialogState();
 	}
 
 	/** Accept or dismiss the held dialog. */

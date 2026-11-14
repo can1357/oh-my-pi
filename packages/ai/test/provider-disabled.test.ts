@@ -11,6 +11,7 @@ import {
 	getOAuthProviders,
 	refreshOAuthToken,
 	registerOAuthProvider,
+	setUnpausedProviders,
 	unregisterOAuthProviders,
 } from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -107,5 +108,24 @@ describe("a provider disabled in its auth rules", () => {
 		} finally {
 			unregisterOAuthProviders("provider-disabled-test");
 		}
+	});
+
+	test("listing the id as unpaused brings back its login and loaded credentials without a reload", async () => {
+		disable();
+		await auth.credentials.reload();
+		expect(await auth.keys.get(PROVIDER)).toBeUndefined();
+		const pausedGeneration = auth.credentials.generation;
+
+		setUnpausedProviders([PROVIDER]);
+		try {
+			// Generation-keyed snapshot consumers (broker clients) see the change before any other read.
+			expect(auth.credentials.generation).toBeGreaterThan(pausedGeneration);
+			expect(getOAuthProviders().some(provider => provider.id === PROVIDER)).toBe(true);
+			expect(await auth.keys.get(PROVIDER)).toBe("sk-stored");
+		} finally {
+			setUnpausedProviders([]);
+		}
+		expect(await auth.keys.get(PROVIDER)).toBeUndefined();
+		expect(getOAuthProviders().some(provider => provider.id === PROVIDER)).toBe(false);
 	});
 });
