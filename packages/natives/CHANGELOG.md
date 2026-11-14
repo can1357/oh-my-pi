@@ -16,6 +16,7 @@
 - Reduced memory usage in shell visualization for long multi-line commands ([#18791](https://github.com/can1357/oh-my-pi/issues/18791), [#19177](https://github.com/can1357/oh-my-pi/pull/19177)).
 - Fixed the shell `cp` builtin so symlink-following options used with archive and directory-copy modes correctly override one another without disabling recursion or attribute preservation ([#19215](https://github.com/can1357/oh-my-pi/pull/19215)).
 - Fixed a built-in shell crash when `[ ]` or `test` expressions contained very long `-a`/`-o` chains; excessively deep parenthesized expressions now produce a clear error instead ([#18498](https://github.com/can1357/oh-my-pi/pull/18498)).
+- Fixed shell `grep -o` printing nothing for a pattern anchored at the end of a line, such as `echo abc | grep -o 'c$'`, and `grep -z` missing records that match such a pattern: matches are now found in the line without its terminator, as in GNU grep ([#19262](https://github.com/can1357/oh-my-pi/pull/19262) by [@tuschla](https://github.com/tuschla))
 
 ## [18.20.0] - 2026-11-12
 

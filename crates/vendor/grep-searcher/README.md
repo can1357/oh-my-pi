@@ -33,6 +33,11 @@ can be fed bytes as they come.
   (`pub(crate)`) for the `LineBuffer` methods the push search drives.
 - `src/searcher/mod.rs`, `src/lib.rs`: the `push` module and the `PushSearch`
   re-export.
+- `src/searcher/core.rs`: `is_line_by_line_fast` refuses the fast path for a
+  NUL line terminator whatever the matcher reports. Upstream keyed that guard
+  on the matcher's terminator, which grep-regex withholds for patterns with
+  text anchors, so `grep -z 'x$'` searched the whole buffer and `$` never
+  matched before a NUL.
 - `Cargo.toml`: `publish = false`. The crates.io `Cargo.toml.orig`, `Cargo.lock`
   and VCS metadata are dropped; `BUILD.bazel` and `rustfmt.toml` are workspace
   wiring.

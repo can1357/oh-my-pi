@@ -679,21 +679,22 @@ impl<'s, M: Matcher, S: Sink> Core<'s, M, S> {
         if self.config.stop_on_nonmatch && self.has_matched {
             return false;
         }
-        if let Some(line_term) = self.matcher.line_terminator() {
-            // FIXME: This works around a bug in grep-regex where it does
-            // not set the line terminator of the regex itself, and thus
-            // line anchors like `(?m:^)` and `(?m:$)` will not match
-            // anything except for `\n`. So for now, we just disable the fast
-            // line-by-line searcher which requires the regex to be able to
-            // deal with line terminators correctly. The slow line-by-line
-            // searcher strips line terminators and thus absolves the regex
-            // engine from needing to care about whether they are `\n` or NUL.
-            if line_term.as_byte() == b'\x00' {
-                return false;
-            }
-            if line_term == self.config.line_term {
-                return true;
-            }
+        // FIXME: This works around a bug in grep-regex where it does
+        // not set the line terminator of the regex itself, and thus
+        // line anchors like `(?m:^)` and `(?m:$)` will not match
+        // anything except for `\n`. So for now, we just disable the fast
+        // line-by-line searcher which requires the regex to be able to
+        // deal with line terminators correctly. The slow line-by-line
+        // searcher strips line terminators and thus absolves the regex
+        // engine from needing to care about whether they are `\n` or NUL.
+        //
+        // Check the searcher's terminator: grep-regex reports none for
+        // patterns with `^`/`$`, which slipped past this guard.
+        if self.config.line_term.as_byte() == b'\x00' {
+            return false;
+        }
+        if self.matcher.line_terminator() == Some(self.config.line_term) {
+            return true;
         }
         if let Some(non_matching) = self.matcher.non_matching_bytes() {
             // If the line terminator is CRLF, we don't actually need to care
