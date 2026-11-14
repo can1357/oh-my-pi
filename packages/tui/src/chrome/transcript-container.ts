@@ -867,12 +867,16 @@ export class TranscriptContainer extends Container {
 				const below = cutBelowWholeImage(blocks[0]!, headClipped);
 				if (below > headClipped) output[gaps[0]! + below - 1] = "";
 			}
-			// The whole live tail fits, so these blocks' measured rows ARE the
-			// viewport output: they reached the terminal. A block that keeps a
-			// per-paint fact (a pending shape that must be replayed when its
-			// first result arrives) has to learn that the shape it measured was
-			// painted, or it treats a visible shape as one the user never saw.
-			if (drop === 0) {
+			// Only a walk that collected the whole live tail may promote: every
+			// shown block's measured rows ARE the viewport output. A block that
+			// keeps a per-paint fact (a pending shape that must be replayed when
+			// its first result arrives) has to learn that the shape it measured
+			// was painted, or it treats a visible shape as one the user never
+			// saw. When the walk stopped mid-tail (`shown.length > capacity`
+			// tripped, or a clip cut the walk short), omitted blocks never
+			// reached the terminal — and shown ones may yet retire above a
+			// converged tail — so nothing promotes.
+			if (shown.length <= capacity && !clip) {
 				for (const candidate of shown) {
 					(candidate.entry.component as Component & TranscriptPresentationTarget).notifyMeasuredPaint?.();
 				}

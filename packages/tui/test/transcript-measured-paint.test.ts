@@ -38,15 +38,17 @@ afterEach(() => {
 
 describe("TranscriptContainer measured-paint promotion", () => {
 	it("does not promote a measured block the emergency layout omits", () => {
-		// More live blocks than the viewport can hold: the container cannot
-		// show them all, so the ones it drops were only measured, never
-		// painted. Promoting them would ask for a replay of a shape the
-		// user never saw.
+		// Genuine overflow (more rows than the viewport holds): the newest-first
+		// walk stops at the capacity cap and the emergency layout shows one
+		// representative row. Blocks it omits were only measured, never painted,
+		// so none may be promoted.
 		const transcript = new TranscriptContainer();
 		const blocks = [new MeasuredBlock(), new MeasuredBlock(), new MeasuredBlock()];
 		for (const block of blocks) transcript.addChild(block);
 
-		transcript.renderViewport(40, 1, frame);
+		// Capacity 2 forces genuine overflow: the walk stops mid-tail and the
+		// emergency layout shows a subset. Omitted blocks were only measured.
+		transcript.renderViewport(40, 2, frame);
 
 		for (const block of blocks) {
 			expect({ notifications: block.paintNotifications }).toEqual({ notifications: 0 });
