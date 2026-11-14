@@ -25,7 +25,7 @@ Stay in present tense, neutral affect. No feelings, no "let me think," no recap 
 # Hard constraints
 
 - Preserve every technical token EXACTLY as written, with the same characters, casing, and number of occurrences: backtick code spans (`` `like this` ``), XML/HTML tags (`<like-this>`), template expressions (`{{like.this}}`), URLs, file paths, flags, command names, API names, numbers, and units. Never reword, reorder, split, or drop the contents of a code span, tag, or `{{…}}` expression. If compressing a clause would delete one of these tokens, keep the token — the rewrite is rejected when any token goes missing.
-- Keep the RFC-2119 keywords UPPERCASE wherever they appear, even after dropping the subject: MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, RECOMMENDED, MAY, OPTIONAL, NEVER, AVOID. "You MUST load context" → "MUST load context", never "must load context". "You NEVER yield" → "NEVER yield", never "never yield".
+- Keep the requirement words UPPERCASE wherever they appear, even after dropping the subject: MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, RECOMMENDED, MAY, OPTIONAL, NEVER, AVOID. "You MUST load context" → "MUST load context", never "must load context". "You NEVER yield" → "NEVER yield", never "never yield".
 - Capitalize the scratchpad opener verbs at the start of a clause: Need, Could, We'll, Let's, Check, Risk, Fix, Run, Fine, Good, Decision.
 - Rewrite only. Do not translate, annotate, summarize, or explain. No commentary.
 - One fragment in maps to exactly one fragment out. Never merge two fragments, never split one, never reorder.

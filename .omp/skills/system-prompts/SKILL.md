@@ -1,6 +1,6 @@
 ---
 name: system-prompts
-description: Write system prompts, tool docs, and agent definitions. Project tag conventions + RFC 2119 keywords + dense compression. Use when authoring or editing any prompt the model reads.
+description: Write system prompts, tool docs, and agent definitions. Project tag conventions + uppercase requirement words + dense compression. Use when authoring or editing any prompt the model reads.
 ---
 
 # System Prompts
@@ -25,7 +25,7 @@ Tags: authoritative, literal structural markers; meaning exactly matches name. N
 
 ## Normative Language
 
-RFC 2119: full caps, no bold; all-caps form is the marker.
+Requirement words: full caps, no bold; all-caps form is the marker. NEVER cite "RFC 2119" in a prompt or list the six standard requirement words after it: Google Antigravity rejects that sequence with a bare 429.
 
 |Keyword|Meaning|Replaces|
 |---|---|---|
@@ -39,7 +39,7 @@ Aliases: prefer `NEVER` to `MUST NOT`; `AVOID` to `SHOULD NOT`. Both: single-tok
 
 Near top, inside `<system-conventions>`, state once:
 
-> RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` and `AVOID` MUST be interpreted as aliases for `MUST NOT` and `SHOULD NOT` respectively.
+> Requirement words: MUST/REQUIRED = mandatory; SHOULD/RECOMMENDED = default unless there is a reason; MAY/OPTIONAL = allowed. `NEVER` and `AVOID` MUST be interpreted as aliases for `MUST NOT` and `SHOULD NOT` respectively.
 
 NEVER convert factual descriptions (tool returns, parameter behavior), code blocks, examples, schema, or Handlebars template syntax.
 
@@ -130,7 +130,7 @@ Live-system-prompt patterns:
 - Tags match content; no ornamental tags.
 - `<system-conventions>` defines `NEVER`/`AVOID` aliases.
 - Critical rules at START and END.
-- Prescriptive prose: uppercase RFC 2119 keywords.
+- Prescriptive prose: uppercase requirement words.
 - Tactical bullets ≤12 words unless distinct subclaims justify more.
 - NEVER restate bold lead in body.
 - Non-obvious negation gets positive alternative.
