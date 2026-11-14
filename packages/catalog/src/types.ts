@@ -1114,6 +1114,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsConfigurationUpdate"
 			| "supportsSteering"
 			| "stripImageInput"
+			| "requiresOpenCodeEnvironment"
 			| "whenThinking"
 		>
 	> & {
