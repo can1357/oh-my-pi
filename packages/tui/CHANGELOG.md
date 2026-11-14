@@ -94,6 +94,9 @@
 ### Fixed
 
 - Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+- The streaming `write` preview changes height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- The streaming `write` preview changes height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#18712](https://github.com/can1357/oh-my-pi/pull/18712) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ## [18.18.6] - 2026-11-09
 

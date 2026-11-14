@@ -18,13 +18,28 @@ export interface AnimationFrame {
 
 /** Lets an active block adapt its presentation to its allocated viewport rows. */
 export interface TranscriptPresentationTarget {
-	setTranscriptAllocation?(rows: number, frame: AnimationFrame): void;
+/**
+	 * The block's viewport allocation. `measured` marks a render that only
+	 * sizes the block — the transcript measures a block before it decides
+	 * whether to show it, and a block it then omits never reaches the
+	 * terminal. A measured render is not a paint, so a block must not treat it
+	 * as one.
+	 */
+	setTranscriptAllocation?(rows: number, frame: AnimationFrame, measured?: boolean): void;
 	/**
 	 * Rows of this streaming block no longer fit on screen and none of them is
 	 * stable yet: freeze whatever layout keeps its finished rows changing (a
 	 * table's column widths) so they can go to scrollback.
 	 */
 	lockStreamingLayout?(): void;
+	/**
+	 * The block's measured render became the viewport output, so it reached
+	 * the terminal after all. A block that keeps per-paint facts (a pending
+	 * shape that must be replayed when its first result arrives) has to learn
+	 * that the shape it measured was painted, or it treats a visible shape as
+	 * one the user never saw.
+	 */
+	notifyMeasuredPaint?(): void;
 }
 
 /** Presentation declaration captured permanently when a block is added. */
@@ -695,7 +710,10 @@ export class TranscriptContainer extends Container {
 	}
 
 	#measureEntry(entry: TranscriptEntry, width: number): MeasuredBlock {
-		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		// The render only sizes the block: the viewport has not decided whether
+		// to show it, and a block it then omits never reaches the terminal. It
+		// is not a paint, so the block must not treat it as one.
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame, true);
 		const { value: rows, images } = measureRender(() => this.#renderEntry(entry, width));
 		return { rows, images };
 	}
@@ -848,6 +866,20 @@ export class TranscriptContainer extends Container {
 			if (headClipped > 0) {
 				const below = cutBelowWholeImage(blocks[0]!, headClipped);
 				if (below > headClipped) output[gaps[0]! + below - 1] = "";
+			}
+			// Only a walk that collected the whole live tail may promote: every
+			// shown block's measured rows ARE the viewport output. A block that
+			// keeps a per-paint fact (a pending shape that must be replayed when
+			// its first result arrives) has to learn that the shape it measured
+			// was painted, or it treats a visible shape as one the user never
+			// saw. When the walk stopped mid-tail (`shown.length > capacity`
+			// tripped, or a clip cut the walk short), omitted blocks never
+			// reached the terminal — and shown ones may yet retire above a
+			// converged tail — so nothing promotes.
+			if (shown.length <= capacity && !clip) {
+				for (const candidate of shown) {
+					(candidate.entry.component as Component & TranscriptPresentationTarget).notifyMeasuredPaint?.();
+				}
 			}
 			this.#commitViewportSpans(owners.slice(drop), output.length - drop);
 			return drop > 0 ? output.slice(drop) : output;
@@ -1945,8 +1977,8 @@ export class TranscriptContainer extends Container {
 		(entry.component as Component & TranscriptPresentationTarget).lockStreamingLayout?.();
 	}
 
-	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {
-		(component as Component & TranscriptPresentationTarget).setTranscriptAllocation?.(rows, frame);
+	#setAllocation(component: Component, rows: number, frame: AnimationFrame, measured = false): void {
+		(component as Component & TranscriptPresentationTarget).setTranscriptAllocation?.(rows, frame, measured);
 	}
 
 	#settleFinalized(): void {
