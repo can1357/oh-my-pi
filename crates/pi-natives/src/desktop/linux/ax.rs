@@ -722,6 +722,8 @@ impl AtSpiAx {
 			};
 			let child_count = proxy.child_count().await.unwrap_or(0).max(0) as u32;
 			Ok(AxProps {
+				#[cfg(test)]
+				read_as_fingerprint: None,
 				role: normalize_role_atspi(&native_role, multiline),
 				native_role,
 				title,
