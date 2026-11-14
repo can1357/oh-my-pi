@@ -1,5 +1,6 @@
 /** Schema-independent display definitions for the settings overlay. */
 import type { SymbolKey } from "../theme/symbols";
+import { displayText, getDisplayCatalogEpoch } from "./display-catalog";
 
 export type SettingTab =
 	| "appearance"
@@ -44,6 +45,17 @@ export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
 	providers: { label: "Providers", icon: "tab.providers" },
 };
 
+/**
+ * Tab metadata with its label translated by the display catalog. The icon is a
+ * theme symbol key, never display text, so it is left alone. The original object
+ * comes back when the label is unchanged, keeping memory identity stable.
+ */
+export function tabDisplayMetadata(tab: SettingTab): TabMetadata {
+	const meta = TAB_METADATA[tab];
+	const label = displayText(`tab.${tab}.label`, meta.label);
+	return label === meta.label ? meta : { ...meta, label };
+}
+
 /** One-sentence lead per tab, under the page title of the native settings page. */
 export const TAB_LEADS: Record<SettingTab, string> = {
 	appearance: "Theme, composer, status line and how the transcript renders.",
@@ -57,6 +69,11 @@ export const TAB_LEADS: Record<SettingTab, string> = {
 	tasks: "Modes, subagents, isolation and custom commands.",
 	providers: "Services, provider protocols, timeouts and privacy.",
 };
+
+/** The tab's lead sentence, translated by the display catalog. */
+export function tabDisplayLead(tab: SettingTab): string {
+	return displayText(`tab.${tab}.lead`, TAB_LEADS[tab]);
+}
 
 /**
  * Ordered section groups per tab. Settings declare their section via `ui.group`;
@@ -101,6 +118,15 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
+
+/**
+ * A section heading translated by the display catalog, keyed on the canonical
+ * group name. `SettingDef.group` and `TAB_GROUPS` stay canonical: they drive
+ * ordering and `prefsSectionId`, which must not follow the display language.
+ */
+export function groupDisplayName(tab: SettingTab, group: string): string {
+	return displayText(`group.${tab}.${group}`, group);
+}
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -227,6 +253,22 @@ function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
 	return ui.options;
 }
 
+/** Localize an option list; the original array comes back when no choice is translated. */
+function localizeOptions(path: string, options: OptionList): OptionList {
+	let changed = false;
+	const localized = options.map(option => {
+		const label = displayText(`setting.${path}.option.${option.value}.label`, option.label);
+		const description =
+			option.description === undefined
+				? undefined
+				: displayText(`setting.${path}.option.${option.value}.description`, option.description);
+		if (label === option.label && description === option.description) return option;
+		changed = true;
+		return description === undefined ? { value: option.value, label } : { value: option.value, label, description };
+	});
+	return changed ? localized : options;
+}
+
 function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 	const { path, ui } = entry;
 	if (!ui) return null;
@@ -237,10 +279,11 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		path,
 		defaultValue: entry.defaultValue,
 		schemaType,
-		label: ui.label,
-		description: ui.description,
-		warning: ui.warning,
+		label: displayText(`setting.${path}.label`, ui.label),
+		description: displayText(`setting.${path}.description`, ui.description),
+		warning: ui.warning === undefined ? undefined : displayText(`setting.${path}.warning`, ui.warning),
 		tab: ui.tab,
+		// Canonical, untranslated: `group` drives ordering (TAB_GROUPS) and prefsSectionId.
 		group: ui.group,
 		condition,
 	};
@@ -249,7 +292,8 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		return { ...base, type: "boolean" };
 	}
 
-	const options = resolveOptions(ui);
+	const resolved = resolveOptions(ui);
+	const options = resolved && resolved !== "runtime" ? localizeOptions(path, resolved) : resolved;
 
 	if (schemaType === "enum") {
 		if (options === undefined) {
@@ -296,19 +340,20 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 	return null;
 }
 
-const definitions = new WeakMap<readonly SettingsDisplayEntry[], SettingDef[]>();
+/** Definitions per entry list, rebuilt when the display catalog changes (`epoch`). */
+const definitions = new WeakMap<readonly SettingsDisplayEntry[], { epoch: number; defs: SettingDef[] }>();
 
 /** Get all setting definitions with UI, retaining live host visibility predicates. */
 export function getAllSettingDefs(entries: readonly SettingsDisplayEntry[]): SettingDef[] {
-	let defs = definitions.get(entries);
-	if (!defs) {
-		defs = [];
-		for (const entry of entries) {
-			const def = entryToSettingDef(entry);
-			if (def) defs.push(def);
-		}
-		definitions.set(entries, defs);
+	const epoch = getDisplayCatalogEpoch();
+	const cached = definitions.get(entries);
+	if (cached?.epoch === epoch) return cached.defs;
+	const defs: SettingDef[] = [];
+	for (const entry of entries) {
+		const def = entryToSettingDef(entry);
+		if (def) defs.push(def);
 	}
+	definitions.set(entries, { epoch, defs });
 	return defs;
 }
 

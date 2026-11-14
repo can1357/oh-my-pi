@@ -10,6 +10,7 @@ import { col, node, span } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainLine, plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { displayTemplate, displayText } from "../overlays/display-catalog";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { ScrollView } from "./scroll-view";
@@ -813,7 +814,11 @@ export class SettingsList implements Component {
 		const lines: string[] = [];
 
 		if (this.#items.length === 0) {
-			lines.push(this.#theme.hint(`  ${this.#options.emptyText ?? "No settings available"}`));
+			lines.push(
+				this.#theme.hint(
+					`  ${this.#options.emptyText ?? displayText("chrome.emptyList", "No settings available")}`,
+				),
+			);
 			return lines;
 		}
 
@@ -821,11 +826,16 @@ export class SettingsList implements Component {
 			if (this.#shouldRenderSearchStatus()) {
 				lines.push(this.#renderSearchStatus(width));
 			}
-			lines.push(this.#theme.hint("  No matching settings"));
+			lines.push(this.#theme.hint(`  ${displayText("chrome.noMatching", "No matching settings")}`));
 			lines.push("");
 			const editKey = editorKey("tui.editor.deleteCharBackward");
 			const cancelKey = editorKey("tui.select.cancel");
-			lines.push(truncateToWidth(this.#theme.hint(`  ${editKey} to edit search · ${cancelKey} to cancel`), width));
+			const searchHint = displayTemplate(
+				"chrome.searchEditHint",
+				`${editKey} to edit search · ${cancelKey} to cancel`,
+				{ edit: editKey, cancel: cancelKey },
+			);
+			lines.push(truncateToWidth(this.#theme.hint(`  ${searchHint}`), width));
 			return lines;
 		}
 
@@ -930,7 +940,7 @@ export class SettingsList implements Component {
 	 * both panes, falling back to the flat single-column layout.
 	 */
 	#renderSplitList(width: number, sections: SettingSection[]): string[] | null {
-		const sectionNames = sections.map(section => section.name || "Other");
+		const sectionNames = sections.map(section => section.name || displayText("chrome.sectionOther", "Other"));
 		let nameWidth = 0;
 		for (const name of sectionNames) nameWidth = Math.max(nameWidth, visibleWidth(name));
 		const sidebarWidth = this.#options.sidebarWidth ?? Math.min(22, nameWidth) + 4; // 2-space indent + 2-space gap
