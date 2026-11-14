@@ -3491,6 +3491,8 @@ export class TurnRecovery {
 	 * A restored session deliberately omits failed assistant turns from provider
 	 * context. In that case, the persisted display transcript remains the source
 	 * of truth for whether the current branch has a retryable failed tail.
+	 * `prunedTerminalFailure` retains a live failure omitted from both histories;
+	 * its context is already ready for continuation and must not be stripped again.
 	 *
 	 * When the failure is a fully failed/aborted tool batch with complete
 	 * arguments (see {@link toolReplayStart}), the retry strips the failed
@@ -3501,11 +3503,11 @@ export class TurnRecovery {
 	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(prunedTerminalFailure?: AssistantMessage): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
-		const activeTurnEnd = retryableAssistantTurnEnd(messages);
+		const activeTurnEnd = prunedTerminalFailure ? undefined : retryableAssistantTurnEnd(messages);
 		if (activeTurnEnd !== undefined) {
 			const replayStart = toolReplayStart(messages);
 			if (replayStart !== undefined) {
@@ -3519,7 +3521,7 @@ export class TurnRecovery {
 					...messages.slice(conversationEnd(messages)),
 				]);
 			}
-		} else {
+		} else if (!prunedTerminalFailure) {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.
