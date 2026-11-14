@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `compaction.numberCheck` (default off): compaction summaries and handoff documents no longer keep numbers the session never showed; the summarizer gets one chance to correct them and any left read `?`
+- Added `compaction.numberCheck` (default off): compaction summaries and handoff documents no longer keep numbers the session never showed; the summarizer gets one chance to correct them and any left read `?` ([#19290](https://github.com/can1357/oh-my-pi/pull/19290))
 
 ## [18.20.2] - 2026-11-14
 
