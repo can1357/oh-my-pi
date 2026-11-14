@@ -15,6 +15,56 @@ async fn patcher_apply_cases() {
 	common::run_fixture("hashline/patcher.json", EditMode::Hashline).await;
 }
 
+#[tokio::test]
+async fn missing_bare_path_names_unique_tag_match_outside_workspace() {
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	let outside = workspace.write("skills/flow.mjs", "a\n");
+	let tag = workspace.snapshot("skills/flow.mjs", "a\n", None);
+	let work = workspace
+		.write("work/.keep", "")
+		.parent()
+		.unwrap()
+		.to_path_buf();
+	workspace.config.policy.cwd = work;
+	let error = workspace
+		.apply_json(
+			&json!({ "input": format!("[flow.mjs#{tag}]\nPUT 1.=1:\n+b") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("outside-workspace match must not be rebound");
+	let message = error.to_string();
+	assert!(message.contains(&format!("[{}#{tag}]", outside.display())), "{message}");
+	assert!(!message.contains("write tool"), "{message}");
+	assert_eq!(std::fs::read_to_string(&outside).unwrap(), "a\n");
+}
+
+#[tokio::test]
+async fn missing_bare_path_with_ambiguous_tag_match_names_no_path() {
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("x/flow.mjs", "a\n");
+	workspace.write("y/flow.mjs", "a\n");
+	let tag = workspace.snapshot("x/flow.mjs", "a\n", None);
+	workspace.snapshot("y/flow.mjs", "a\n", None);
+	let work = workspace
+		.write("work/.keep", "")
+		.parent()
+		.unwrap()
+		.to_path_buf();
+	workspace.config.policy.cwd = work;
+	let error = workspace
+		.apply_json(
+			&json!({ "input": format!("[flow.mjs#{tag}]\nPUT 1.=1:\n+b") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("ambiguous match must fail");
+	assert_eq!(
+		error.to_string(),
+		"File not found: flow.mjs. Use the write tool to create new files."
+	);
+}
+
 #[test]
 fn matcher_paths_accept_partial_sections_and_header_noise() {
 	let engine = HashlineEngine { enforce_seen_lines: false, max_columns: 512 };
