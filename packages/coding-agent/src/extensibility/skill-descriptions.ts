@@ -422,6 +422,13 @@ export class SkillDescriptionCatalog {
 		const misses = new Map<string, Skill>();
 		const rendered = skills.map(skill => {
 			const key = keyFor(skill);
+			// Authored descriptions already within the preview budget need no model
+			// compression: use them verbatim so exclusions survive.
+			const verbatim = skill.description.replace(/\s+/g, " ").trim();
+			if (verbatim.length <= MAX_PREVIEW_CHARS) {
+				this.#snapshot.set(key, verbatim);
+				return { ...skill, description: verbatim };
+			}
 			let description = this.#snapshot.get(key);
 			if (description === undefined) {
 				try {
