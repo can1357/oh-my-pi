@@ -93,11 +93,13 @@ export function parseAntigravityManifestVersion(yamlText: string): string | null
 }
 
 /**
- * Antigravity release lookup. Success is cached for the process lifetime;
- * failures keep the pinned fallback and back off for 10 minutes.
+ * Antigravity release lookup. A discovered version is re-checked in the
+ * background once it is an hour old: sessions run for days, and a release that
+ * lands mid-session is what this lookup exists for. Failures keep the last
+ * discovered (or pinned) version and back off for 10 minutes.
  */
 const antigravityVersionLookup = createVersionLookup({
-	ttlMs: Number.POSITIVE_INFINITY,
+	ttlMs: 60 * 60_000,
 	resolve: async (fetcher, signal) => {
 		const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
 			headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
@@ -115,6 +117,11 @@ const antigravityVersionLookup = createVersionLookup({
 export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
 	if (process.env.PI_AI_ANTIGRAVITY_VERSION) return Promise.resolve();
 	return antigravityVersionLookup.ensure(fetcher, signal);
+}
+
+/** Drops the discovered Antigravity version and back-off; tests only. */
+export function resetAntigravityVersionForTest(): void {
+	antigravityVersionLookup.resetForTest();
 }
 
 /**
