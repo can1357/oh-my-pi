@@ -21,6 +21,7 @@
 - Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
 - Extensions and response-header diagnostics now receive response notifications for Gemini-family responses, including resumed long responses and regional Vertex AI fallbacks.
 - Fixed Muse sessions failing after credential changes, key rotation, or idle resume by recovering from stale reasoning context and allowing subsequent turns to continue.
+- Fixed Gemini models behind the `omp auth-gateway` Anthropic endpoint (`/v1/messages`) writing their reasoning into reply text: thought signatures now reach the client and return to the same model ([#19237](https://github.com/can1357/oh-my-pi/pull/19237) by [@Zhu-Aemon](https://github.com/Zhu-Aemon))
 
 ## [18.20.0] - 2026-11-12
 
