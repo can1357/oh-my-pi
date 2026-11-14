@@ -9,7 +9,12 @@ import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
-import { type ComputerScreenshot, type ComputerSessionSnapshot, screenStateNotice } from "./computer/protocol";
+import {
+	type ComputerScreenshot,
+	type ComputerSessionSnapshot,
+	screenStateNotice,
+	secureInputNotice,
+} from "./computer/protocol";
 import {
 	type ComputerController,
 	ComputerSupervisor,
@@ -17,7 +22,7 @@ import {
 	registerComputerController,
 } from "./computer/supervisor";
 import type { ToolSession } from "./index";
-import { renderCallChain, renderFunctionRun } from "./run-code";
+import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
@@ -134,19 +139,9 @@ export function createComputerPrelude(
 	// Eval-first-use boundary: source/declaration assets stay unloaded until a
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
-	let closed = false;
-	const lifetime: ComputerLifetime = {
-		isClosed: () => closed,
-		close: async () => {
-			if (closed) return;
-			closed = true;
-			unregisterOwner();
-			unregisterDisposal?.();
-			await controller.close();
-		},
-	};
-	const unregisterDisposal = session.registerDisposeCallback?.(() => {
-		void lifetime.close();
+	session.registerDisposeCallback?.(() => {
+		unregisterOwner();
+		void controller.close();
 	});
 
 	return {
@@ -164,7 +159,7 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
-			return await invokeComputer(session, controller, parsed, context, lifetime);
+			return await invokeComputer(session, controller, parsed, context);
 		},
 		status: describeComputerCall,
 	};
@@ -176,7 +171,10 @@ function describeComputerCall(parameters: unknown): string | undefined {
 	if (parsed instanceof type.errors) return undefined;
 	switch (parsed.action) {
 		case "call":
-			return `desktop.${renderCallChain(parsed.chain)}`;
+			// Text `type`, `setValue` and `clipboard.write` enter is their first argument.
+			return `desktop.${renderStatusCallChain(parsed.chain, step =>
+				step.method === "type" || step.method === "setValue" || step.method === "clipboard.write" ? 0 : undefined,
+			)}`;
 		case "run":
 			return `run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
 		case "capabilities":
@@ -185,29 +183,20 @@ function describeComputerCall(parameters: unknown): string | undefined {
 	}
 }
 
-interface ComputerLifetime {
-	isClosed(): boolean;
-	close(): Promise<void>;
-}
-
 async function invokeComputer(
 	session: ToolSession,
 	controller: ComputerController,
 	params: ComputerParams,
 	context: EvalPreludeContext,
-	lifetime: ComputerLifetime,
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(context.signal);
 
 	switch (params.action) {
 		case "run":
 		case "call":
-			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
 			return await runComputer(session, controller, params, context);
 		case "capabilities": {
-			const capabilities = lifetime.isClosed()
-				? undefined
-				: await controller.capabilities(buildComputerSnapshot(session, true), context.signal);
+			const capabilities = await controller.capabilities(buildComputerSnapshot(session, true), context.signal);
 			throwIfAborted(context.signal);
 			return {
 				content: [
@@ -220,7 +209,7 @@ async function invokeComputer(
 			};
 		}
 		case "close":
-			await lifetime.close();
+			await controller.reset();
 			throwIfAborted(context.signal);
 			return { content: [{ type: "text", text: "Closed computer session" }] };
 	}
@@ -298,6 +287,8 @@ async function runComputer(
 	const content: AgentToolResult<ComputerPreludeDetails>["content"] = [];
 	const notice = screenStateNotice(run.capabilities);
 	if (notice) content.push({ type: "text", text: notice });
+	const secure = secureInputNotice(run.capabilities);
+	if (secure) content.push({ type: "text", text: secure });
 	if (cappedText) content.push({ type: "text", text: cappedText });
 	for (const image of run.displays) {
 		if (image.type === "image") content.push({ ...image, detail: "original" });

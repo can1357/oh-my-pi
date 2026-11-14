@@ -10,7 +10,11 @@ import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-age
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import {
+	isPerCallContextMessage,
+	kCursorExecResolved,
+	kStreamingBlockIndex,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -2389,6 +2393,107 @@ describe("ExtensionRunner", () => {
 			}
 		});
 
+		it("keeps a session_before_* handler's dialog answerable past the handler budget, unlike a non-gate event", async () => {
+			const extensionPath = path.join(tempDir.path(), "gate-dialog.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_switch", async (_event, ctx) => ({ cancel: await ctx.ui.confirm("Leave?", "") }));
+						pi.on("agent_end", async (_event, ctx) => {
+							await ctx.ui.confirm("Still there?", "");
+						});
+					}
+				`,
+			);
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: string[] = [];
+			runner.onError(error => errors.push(error.error));
+			let presented = Promise.withResolvers<AbortSignal | undefined>();
+			let answer = Promise.withResolvers<boolean>();
+			const confirm: ExtensionUIContext["confirm"] = async (_title, _message, dialogOptions) => {
+				presented.resolve(dialogOptions?.signal);
+				return answer.promise;
+			};
+			// The runner proxies the UI context, so the overrides sit on its prototype.
+			initializeRunner(runner, Object.create(Object.create(runner.getUIContext(), { confirm: { value: confirm } })));
+			vi.useFakeTimers();
+			let now = 0;
+			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
+			try {
+				testSetExtensionHandlerTimeoutMs(15);
+				// The operator answers well after the handler budget.
+				const gate = runner.emit({ type: "session_before_switch", reason: "new" });
+				await presented.promise;
+				now = 100;
+				vi.advanceTimersByTime(100);
+				answer.resolve(true);
+				expect(await gate).toEqual({ cancel: true });
+				expect(errors).toEqual([]);
+
+				// Real timers from here: the handler's own 15ms budget is what ends the wait.
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+				presented = Promise.withResolvers();
+				answer = Promise.withResolvers();
+				const notification = runner.emit({ type: "agent_end", messages: [] });
+				const dialogSignal = await presented.promise;
+				await notification;
+				expect(errors).toHaveLength(1);
+				expect(errors[0]).toContain("timed out after 15ms");
+				expect(dialogSignal?.aborted).toBe(true);
+			} finally {
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("closes a gate handler's pending dialog and drops its late result when the event's signal aborts", async () => {
+			const extensionPath = path.join(tempDir.path(), "gate-abort.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_shutdown", async (_event, ctx) => {
+							await ctx.ui.select("Outcome", ["done"]);
+							return { cancel: true };
+						});
+					}
+				`,
+			);
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const presented = Promise.withResolvers<AbortSignal | undefined>();
+			const answer = Promise.withResolvers<string | undefined>();
+			// Ignores its signal, like a handler that never checks it.
+			const select: ExtensionUIContext["select"] = async (_title, _options, dialogOptions) => {
+				presented.resolve(dialogOptions?.signal);
+				return answer.promise;
+			};
+			initializeRunner(runner, Object.create(Object.create(runner.getUIContext(), { select: { value: select } })));
+			const controller = new AbortController();
+			const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
+			const dialogSignal = await presented.promise;
+			controller.abort();
+			expect(await emission).toBeUndefined();
+			expect(dialogSignal?.aborted).toBe(true);
+			answer.resolve("done");
+		});
+
 		it("cancels a pending confirmation and blocks tool execution when the outer dispatch aborts (#4223)", async () => {
 			const extensionPath = path.join(tempDir.path(), "confirm-abort-tool-call.ts");
 			fs.writeFileSync(
@@ -4378,6 +4483,37 @@ describe("ExtensionRunner", () => {
 				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 			}
 		});
+
+		it("stops waiting behind an extension's earlier event when the queued event's signal aborts", async () => {
+			const stall = Promise.withResolvers<void>();
+			try {
+				let asked = 0;
+				const busy = inlineExtension("busy", {
+					agent_end: () => stall.promise,
+					session_before_shutdown: () => {
+						asked++;
+					},
+				});
+				const runner = new ExtensionRunner(
+					[busy],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				void runner.emit({ type: "agent_end", messages: [] });
+				const controller = new AbortController();
+				const startedAt = performance.now();
+				const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
+				controller.abort();
+				expect(await emission).toBeUndefined();
+				// The default budget would hold the event for 30 seconds behind agent_end.
+				expect(performance.now() - startedAt).toBeLessThan(1_000);
+				expect(asked).toBe(0);
+			} finally {
+				stall.resolve();
+			}
+		});
 	});
 
 	describe("credential_disabled", () => {
@@ -5039,6 +5175,141 @@ describe("ExtensionRunner", () => {
 				);
 			});
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
+		});
+
+		const createRewritingRunner = async (prefix: string) => {
+			const extensionCode = `
+				export default function(pi) {
+					let calls = 0;
+					pi.on("context", async event => {
+						calls++;
+						const tag = ${prefix};
+						return {
+							messages: event.messages.map(message => {
+								if (typeof message.content === "string") return { ...message, content: tag + message.content };
+								if (!Array.isArray(message.content)) return message;
+								return {
+									...message,
+									content: message.content.map(block => (block.type === "text" ? { ...block, text: tag + block.text } : block)),
+								};
+							}),
+						};
+					});
+				}
+			`;
+			await Bun.write(path.join(extensionsDir, "rewrite.ts"), extensionCode);
+			const result = await loadTestExtensions();
+			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		const toolLoopStep = (id: string, timestamp: number): AgentMessage[] => [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id, name: "lookup", arguments: {} }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp,
+			},
+			{
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "lookup",
+				content: [{ type: "text", text: `result ${id}` }],
+				isError: false,
+				timestamp: timestamp + 1,
+			},
+		];
+
+		const captureAnthropicBody = async (transformed: AgentMessage[]): Promise<MessageCreateParams> => {
+			const model = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic model to exist");
+			let body: MessageCreateParams | undefined;
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			}) as typeof fetch;
+			await streamAnthropic(
+				model,
+				{
+					systemPrompt: ["system"],
+					messages: convertToLlm(wrapSteeringForModel(transformed)),
+					tools: [
+						{
+							name: "lookup",
+							description: "Lookup a value",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					],
+				},
+				{ apiKey: "sk-ant-api-test", fetch: fetchMock },
+			)
+				.result()
+				.catch(() => undefined);
+			if (!body) throw new Error("Expected Anthropic wire body");
+			return body;
+		};
+
+		it("advances the tail breakpoint through a tool loop when a hook rewrites history the same way every call", async () => {
+			const runner = await createRewritingRunner(`"[tag] "`);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "task", timestamp: 1 },
+				...toolLoopStep("toolu_1", 2),
+			];
+			await runner.emitContext(messages);
+			messages.push(...toolLoopStep("toolu_2", 4));
+
+			const transformed = await runner.emitContext(messages);
+			expect(transformed.some(message => isPerCallContextMessage(message))).toBe(false);
+			const body = await captureAnthropicBody(transformed);
+			const tail = body.messages.at(-1)?.content;
+			if (!Array.isArray(tail)) throw new Error("Expected a structured tail message");
+			const last = tail.at(-1);
+			expect(last).toMatchObject({ type: "tool_result", tool_use_id: "toolu_2" });
+			expect(last !== undefined && "cache_control" in last && last.cache_control != null).toBe(true);
+		});
+
+		it("still marks a hook rewrite per-call once it differs from the previous call", async () => {
+			const runner = await createRewritingRunner(`"[" + calls + "] "`);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "task", timestamp: 1 },
+				...toolLoopStep("toolu_1", 2),
+			];
+
+			const first = await runner.emitContext(messages);
+			expect(first.some(message => isPerCallContextMessage(message))).toBe(false);
+			const second = await runner.emitContext(messages);
+			expect(second.map(message => isPerCallContextMessage(message))).toEqual([true, false, true]);
+		});
+
+		it("does not mark a streamed assistant per-call when a hook leaves its content as is", async () => {
+			// streamAnthropic leaves `kStreamingBlockIndex` on every block it streams; structuredClone
+			// drops it, so the clone a hook hands back never deep-equals the in-memory history message.
+			const runner = await createRewritingRunner(`""`);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "task", timestamp: 1 },
+				...toolLoopStep("toolu_1", 2),
+			];
+			const assistant = messages[1];
+			if (assistant?.role !== "assistant") throw new Error("Expected the streamed assistant");
+			assistant.content.forEach((block, index) => Object.assign(block, { [kStreamingBlockIndex]: index }));
+
+			for (let pass = 0; pass < 2; pass++) {
+				const transformed = await runner.emitContext(messages);
+				expect(transformed.some(message => isPerCallContextMessage(message))).toBe(false);
+			}
 		});
 	});
 });

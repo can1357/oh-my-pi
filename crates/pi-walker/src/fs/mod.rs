@@ -24,6 +24,7 @@
 //! }
 //! ```
 
+pub(crate) mod mounts;
 mod native;
 mod provider;
 mod root;
@@ -485,6 +486,20 @@ impl File {
 		match &self.repr {
 			FileRepr::Native(handle) => Some(NativeReader { handle, pos: &mut self.pos }),
 			FileRepr::Provider(_) => None,
+		}
+	}
+
+	/// The identity of the open file, read from the handle rather than from
+	/// the path it was opened by: a name replaced after the open still reports
+	/// the file that was opened.
+	///
+	/// # Errors
+	///
+	/// The handle's (or provider's) status query.
+	pub fn metadata(&self) -> io::Result<pi_vfs::Metadata> {
+		match &self.repr {
+			FileRepr::Native(handle) => native::handle_metadata(handle),
+			FileRepr::Provider(file) => file.metadata(),
 		}
 	}
 }

@@ -434,7 +434,7 @@ export async function findReusableCdp(
 	if (!canLaunchIsolatedProfile && candidates.length > 0) {
 		const name = path.basename(exe);
 		throw new ToolError(
-			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass app.cdp_url for an existing endpoint.`,
+			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass its CDP endpoint URL as app.`,
 		);
 	}
 	return null;
@@ -548,7 +548,7 @@ async function fetchRelayEntries(
 	}
 }
 
-/** A relay page `app.target` may pick: not discarded by Chrome, and not internal (devtools, service workers…). */
+/** A relay page `target` may pick: not discarded by Chrome, and not internal (devtools, service workers…). */
 function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
 	return (
 		entry.discarded !== "true" &&
@@ -557,9 +557,9 @@ function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
 	);
 }
 
-/** One of the user's Chrome tabs as `browser.targets()` lists it: `app.target` adopts it by `target` (its URL). */
+/** One of the user's Chrome tabs as `browser.targets()` lists it: its `target` (the URL) adopts it. */
 export interface RelayTarget {
-	/** The page URL, as `app.target` takes it (a URL/title substring). */
+	/** The page URL, as `target` takes it (a URL/title substring). */
 	target: string;
 	title: string;
 	url: string;
@@ -592,7 +592,7 @@ export function describeRelayTargets(targets: readonly RelayTarget[]): string {
 	const list = targets
 		.map(entry => `- ${JSON.stringify(entry.title)} ${entry.url}${entry.shown ? " (active)" : ""}`)
 		.join("\n");
-	return `Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n${list}`;
+	return `Chrome pages via the relay (adopt one with target set to its URL or a title substring):\n${list}`;
 }
 
 /** The pages of the user's Chrome the relay at `relayJson` can adopt. */
@@ -623,7 +623,7 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 		}
 		const summary = entries.map(e => `- ${e.id}  ${e.title || "(untitled)"}  ${e.url}`).join("\n");
 		throw new ToolError(
-			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target id, URL or title substring (browser.targets() lists URLs before adopting), or omit it to use the active tab. Available pages:\n${summary}`,
+			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target id, URL or title substring (browser.targets() lists URLs before adopting), or omit target to open omp's own tab, with url to load the page there. Available pages:\n${summary}`,
 		);
 	}
 	const usable = entries.filter(isAdoptableRelayEntry);

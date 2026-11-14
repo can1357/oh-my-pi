@@ -116,4 +116,20 @@ describe("astGrepToolRenderer header", () => {
 		const headText = typeof head === "string" ? head : (head ?? []).map(part => part.t).join("");
 		expect(headText).toBe("AST Grep f( in src");
 	});
+
+	it("renders zero matches as a single header with a warning-colored count", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: { matchCount: 0, fileCount: 0, filesSearched: 4, limitReached: false, scopePath: "src" },
+		};
+		const lines = astGrepToolRenderer
+			.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { pat: "f($A)" })
+			.render(120);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(uiTheme.fg("warning", "0 matches"));
+		expect(sanitizeText(lines[0]!)).toContain("AST Grep: f($A) in src 0 matches · searched 4");
+		const view = astGrepToolRenderer.describeResult(result, { expanded: false, isPartial: false }, { pat: "f($A)" });
+		expect(view.body).toEqual([]);
+	});
 });

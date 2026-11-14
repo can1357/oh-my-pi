@@ -851,7 +851,7 @@ describe("update_notes", () => {
 		await dbOverride.remove().catch(() => {});
 	});
 
-	it("replaces session notes and refreshes runtime state", async () => {
+	async function setupNotes() {
 		const dir = freshRepo().dir;
 		await writeHarnessStub(dir);
 		const runtime = createSessionRuntime();
@@ -867,6 +867,11 @@ describe("update_notes", () => {
 			getRuntime: () => runtime,
 			pi: harness.api,
 		});
+		return { dir, runtime, notes };
+	}
+
+	it("replaces session notes and refreshes runtime state", async () => {
+		const { dir, runtime, notes } = await setupNotes();
 		await notes.execute("n", { body: "## Plan\n- step one\n" }, undefined, undefined, createCtx(dir));
 		expect(runtime.state.notes).toContain("step one");
 
@@ -877,8 +882,8 @@ describe("update_notes", () => {
 			arguments: { append_idea: "try caching" },
 		}) as typeof notes.parameters.infer;
 		const append = await notes.execute("n2", validated, undefined, undefined, createCtx(dir));
-		expect(append.details?.notes).toContain("- try caching");
-		expect(runtime.state.notes).toContain("- try caching");
+		expect(append.details?.notes).toBe("## Plan\n- step one\n\n## Ideas\n- try caching\n");
+		expect(runtime.state.notes).toBe("## Plan\n- step one\n\n## Ideas\n- try caching\n");
 
 		const empty = await notes.execute("n3", { append_idea: "   " }, undefined, undefined, createCtx(dir));
 		expect(firstTextBlockText(empty.content)).toContain("Error:");
@@ -894,5 +899,33 @@ describe("update_notes", () => {
 		expect(firstTextBlockText(replaced.content)).toContain("Notes updated");
 		expect(replaced.details?.notes).toBe("## Replacement\n");
 		expect(runtime.state.notes).toBe("## Replacement\n");
+	});
+
+	it("append_idea creates an Ideas section when only a similarly named heading exists", async () => {
+		const { dir, runtime, notes } = await setupNotes();
+		const initialNotes = "## Plan\n- step one\n\n## Ideas backlog\n- old item\n\n### Ideas\n- nested item\n";
+		await notes.execute("n1", { body: initialNotes }, undefined, undefined, createCtx(dir));
+
+		const appended = await notes.execute("n2", { append_idea: "try caching" }, undefined, undefined, createCtx(dir));
+		const expectedNotes =
+			"## Plan\n- step one\n\n## Ideas backlog\n- old item\n\n### Ideas\n- nested item\n\n## Ideas\n- try caching\n";
+		expect(appended.details?.notes).toBe(expectedNotes);
+		expect(runtime.state.notes).toBe(expectedNotes);
+	});
+
+	it("append_idea stays inside an existing Ideas section before the next heading", async () => {
+		const { dir, runtime, notes } = await setupNotes();
+		await notes.execute(
+			"n1",
+			{ body: "## Plan\n- step one\n\n## Ideas\n- try pooling\n## Results\n- baseline\n" },
+			undefined,
+			undefined,
+			createCtx(dir),
+		);
+
+		const appended = await notes.execute("n2", { append_idea: "try caching" }, undefined, undefined, createCtx(dir));
+		const expectedNotes = "## Plan\n- step one\n\n## Ideas\n- try pooling\n- try caching\n## Results\n- baseline\n";
+		expect(appended.details?.notes).toBe(expectedNotes);
+		expect(runtime.state.notes).toBe(expectedNotes);
 	});
 });

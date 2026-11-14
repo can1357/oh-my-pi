@@ -44,8 +44,10 @@ import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker"
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { runAutoUpdate } from "./cli/auto-update";
-import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
+import { managedInstallName } from "./cli/managed-install";
+import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
+import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
@@ -155,7 +157,8 @@ import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
-import { cfgAsyncPrintWake, cfgToolsApprovalMode } from "./tools/settings";
+import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
+import { claimTerminal } from "./tools/browser/terminal-owner";
 import {
 	cfgAutocompleteMaxVisible,
 	cfgAutoResume,
@@ -434,6 +437,7 @@ export async function submitInteractiveInput(
 		| "renderOptimisticSkillMessage"
 		| "clearOptimisticSkillMessage"
 		| "optimisticSkillMessagePending"
+		| "restoreDroppedPrompt"
 	> &
 		Partial<Pick<InteractiveMode, "loopPrompt" | "pauseLoop">>,
 	session: Pick<AgentSession, "buildUserSkillPrompt" | "prompt" | "promptCustomMessage" | "resume" | "isStreaming">,
@@ -467,6 +471,7 @@ export async function submitInteractiveInput(
 			showError: mode.showError.bind(mode),
 			renderOptimisticSkillMessage: mode.renderOptimisticSkillMessage.bind(mode),
 			clearOptimisticSkillMessage: mode.clearOptimisticSkillMessage.bind(mode),
+			restoreDroppedPrompt: mode.restoreDroppedPrompt.bind(mode),
 			get optimisticSkillMessagePending() {
 				return mode.optimisticSkillMessagePending;
 			},
@@ -490,11 +495,16 @@ export async function submitInteractiveInput(
 				imageLinks: input.imageLinks,
 				optimistic: true,
 				propagateErrors: true,
+				followUps: input.followUps,
 			});
 		} else {
 			let forwarded = false;
 			try {
-				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+				forwarded = await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior,
+					followUps: input.followUps,
+				});
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}
@@ -1565,6 +1575,7 @@ export async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			if (resolved.configuredRole) options.modelRole = resolved.configuredRole;
 			options.rebindModelAfterDiscovery = true;
 			// The recorded role must carry the effort the session actually starts
 			// at, or the first cycle back into `default` overrides it.
@@ -1927,6 +1938,9 @@ export async function runRootCommand(
 		const autoPrint =
 			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
 		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		// The TUI owns the Tern pane or cmux workspace it draws in; an omp its commands start sees the claim and
+		// keeps its browser tabs out of this session's pane.
+		if (isInteractive) claimTerminal();
 		// Before session resolution: resume, fork, and import act on these same
 		// startup-parse flags, so rejecting later would leave forked or imported
 		// transcripts (or an opened picker) behind a usage error.
@@ -1990,6 +2004,9 @@ export async function runRootCommand(
 		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
 		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);
 		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);
+		if (parsedArgs.noJudge) cfgNoJudge.override(settingsInstance, true);
+		if (parsedArgs.noSpotlight) cfgNoSpotlight.override(settingsInstance, true);
+		if (parsedArgs.offline) cfgOffline.override(settingsInstance, true);
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
@@ -2044,6 +2061,12 @@ export async function runRootCommand(
 		// explicit --hide-thinking block display option still wins for output display.
 		if (parsedArgs.printThoughts && !isProtocolMode && !isInteractive) {
 			cfgOmitThinking.override(settingsInstance, false);
+		}
+		// Print, RPC and ACP hosts serve a caller (script, harness, editor) that outlives the
+		// session and uses the servers a run leaves running; keep them past this process's
+		// exit, as `nohup cmd &` is.
+		if (!isInteractive) {
+			cfgLaunchPersist.override(settingsInstance, true);
 		}
 		// Apply --hide-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.hideThinking) {
@@ -2355,7 +2378,7 @@ export async function runRootCommand(
 		daemonPresencePromise?.catch(() => {});
 
 		let startupTelemetry: CreateAgentSessionOptions["telemetry"];
-		let startupExtensions: CreateAgentSessionOptions["extensions"];
+		let startupTopLevelExtensions: CreateAgentSessionOptions["topLevelExtensions"];
 		// An interactive launch writes nothing to the terminal before its UI: the
 		// first paint clears the screen, and in Tern the surface would open over
 		// (and briefly flash) any line printed ahead of it.
@@ -2391,7 +2414,7 @@ export async function runRootCommand(
 			options.deferSkillDescriptionCompression = isInteractive;
 			options.settings = settingsInstance;
 			options.telemetry = startupTelemetry;
-			options.extensions = startupExtensions;
+			options.topLevelExtensions = startupTopLevelExtensions;
 			options.onPrewalkWarning = startupWarning;
 			return options;
 		};
@@ -2488,8 +2511,9 @@ export async function runRootCommand(
 			// file — and the same result is handed to createAgentSession via
 			// `preloadedExtensions` so the discovery work is not repeated.
 			if (isInteractive && !parsedArgs.trustedExtensions?.length) {
-				startupExtensions = sessionOptions.extensions = [
-					...(sessionOptions.extensions ?? []),
+				// Top-level only: subagents, `/tan` forks, and worker threads never inherit the bridge.
+				startupTopLevelExtensions = sessionOptions.topLevelExtensions = [
+					...(sessionOptions.topLevelExtensions ?? []),
 					createWarpEventBridgeExtension(),
 				];
 			}

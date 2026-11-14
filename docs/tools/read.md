@@ -6,6 +6,7 @@
 
 - Entry: `packages/coding-agent/src/tools/read.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/read.md`
+- On-demand doc topics (`ReadTool.docTopics()`): `xd://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `xd://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — prefer literal filenames; normalize local paths and recover accidental delimited path lists.
    - `packages/tui/src/tools/read.ts` / `line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
@@ -24,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode and executable-view guidance only when IDA is available.
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable views only when IDA is available.
 
 ## Inputs
 
@@ -150,7 +151,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Archives
 
 - Supported archive containers (extension table in `packages/utils/src/ar/registry.ts`): tar family `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/`.tbz`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, `.tar.z`; ZIP family `.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`; standalone `.rar`/`.cbr`, `.7z`, `.iso`, `.cab`, `.cpio`, `.rpm`, `.ar`/`.a`/`.lib`, `.deb`, `.lzh`/`.lha`, `.arj`, `.asar`; single-stream `.gz`, `.bz2`, `.xz`, `.zst`, `.z`, `.lzma`.
-- Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`.
+- Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`, `archive.ext:path/inside.json?q=.x`.
 - `openArchive()` dispatches through the `@oh-my-pi/pi-utils/ar` registry (`packages/utils/src/ar/open.ts`); limits live in `packages/utils/src/ar/limits.ts`: in-memory archives cap at 256 MiB, index reads at 64 MiB, and individual member extraction at 64 MiB.
 - Plain TAR indexing reads headers and bounded metadata through byte ranges, skipping member payloads. Its container size is not subject to the whole-buffer limit; selected members retain the extraction limit.
 - Archive paths normalize `/`, drop `.` segments, and reject `..`.
@@ -159,7 +160,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Selected PDF entries use the same Markdown conversion as ordinary PDF files, including line, multi-range, tail, and raw selectors. The read identity retains both the archive and member path and is immutable.
 - PDF page-image reads such as `a.zip:folder/sample document.pdf:page2.png` render only the selected member through Chromium. Its bounded temporary PDF is removed after success, failure, or cancellation; archive paths are never unpacked into the working directory.
 - Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
-- Text archive entries reuse the normal in-memory pagination/anchoring path.
+- Text archive entries are paginated in memory as immutable resources (no hashline anchors) and accept [JSON queries](#json-queries).
 
 ### Executables and IDA databases
 
@@ -231,6 +232,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Modifier-only selectors (`?limit=2`, `?offset=1`, `?raw=true`, `?compact=true`) and empty `q=`/`query=` use the identity filter `.`. Unknown-only query strings are not JSON selectors.
 - One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
 - `ssh://HOST/tmp/data.json?q=.items&limit=2` resolves the bare SSH file URI and runs the same JSON renderer locally on its bounded text. The 1 MiB SSH ceiling still applies. Filters never enter the remote shell, `%3F` still names a literal `?`, and unsupported URL parameters remain errors. Temporary query input is owned and removed on success, failure, or cancellation; trailing line selectors address query output.
+- Archive members accept JSON queries (`archive.tar:receipt.json?q=.x`). A literal member name containing `?` wins; otherwise the query runs on the extracted UTF-8 member text, and trailing line selectors address query output. Directory, PDF, and binary members with a JSON selector throw a `ToolError`.
 
 ### Documents
 
@@ -385,7 +387,7 @@ Notes: ...
 - Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
 - Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
-- Binary archive entries do not throw; they return a text notice.
+- Binary archive entries return a text notice without throwing, unless a JSON selector is attached (JSON selectors on directory, PDF, or binary archive entries throw a `ToolError`).
 - Document conversion failure returns a text notice.
 - Image oversize/unsupported/invalid cases throw.
 - SQLite parser rejects unsupported parameter combinations early; DB/runtime errors are caught and rethrown as `ToolError(message)`.
@@ -403,3 +405,4 @@ Notes: ...
 - Raw SQLite `q=` execution is not keyword-restricted beyond “no bound parameters”; `PRAGMA query_only = ON` prevents database writes.
 - The file snapshot store is not a read acceleration cache. It exists to verify and recover hashline edits when the file changed after the read.
 - From the third identical successful text result for the same path, a per-session loop-breaking hint advises narrowing the selector or proceeding with the edit; tracking resets when the output changes.
+- A read that runs beside an earlier call of the same message that may write (its approval, asked with its arguments and no context, is not `read`, e.g. `bash`) gets `ctx.toolCall.earlierEffectsSettled` from the agent loop. `execute()` waits for those calls before reading, so it returns the file as they left it; an abort during the wait rejects the read. A single web URL (no `;`) does not wait.

@@ -149,7 +149,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
-	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
+	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id", "x-session-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
@@ -289,6 +289,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
+	"temperature-floor": wire("temperatureFloor", ["devin"]),
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
@@ -303,6 +304,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
 		"google",
 	]),
+	"base64-skip-thought-signature": wire("base64SkipThoughtSignature", ["google"]),
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──

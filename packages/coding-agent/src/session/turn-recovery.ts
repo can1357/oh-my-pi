@@ -26,6 +26,7 @@ import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -107,6 +108,7 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -384,12 +386,17 @@ type UsageLimitOutcome = {
 	reportResetAtMs: number | undefined;
 };
 
+/** Request-time provider for the main Agent; not serialized into session history. */
+export const kUsageLimitRequestProvider = Symbol("usage-limit-request-provider");
+type IssuedProviderAssistantMessage = AssistantMessage & { [kUsageLimitRequestProvider]?: string };
+
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	readonly #unexpectedStopJudgeTimeoutMs: number;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#genericAbortStreak = 0;
 	/**
 	 * Selectors a classifier refusal has already moved off in the current retry saga; see the walk
 	 * bound below. Cleared in `resolveRetry()`, which every end of a saga goes through (an answer,
@@ -828,6 +835,9 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		// Only the request-time provider proves a delayed error belongs to the old pool.
+		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		if (requestProvider !== undefined && requestProvider !== activeModel.provider) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
@@ -1968,13 +1978,16 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { wrapAround?: boolean },
 	): RetryFallbackSelector[] {
-		return findRetryFallbackCandidates(
+		const candidates = findRetryFallbackCandidates(
 			this.#getRetryFallbackResolutionContext(),
 			role,
 			currentSelector,
 			currentModel,
 			options,
 		);
+		if (!cfgOffline.get(this.#host.settings)) return candidates;
+		const provider = this.#host.model()?.provider;
+		return candidates.filter(candidate => provider !== undefined && candidate.provider === provider);
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
@@ -2110,6 +2123,7 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
 				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
+				if (cfgOffline.get(this.#host.settings) && candidateModel.provider !== currentModel.provider) continue;
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
 				// Skip a candidate whose window cannot hold the live context so we
 				// never switch onto an oversized request (issue #8065).
@@ -2209,6 +2223,7 @@ export class TurnRecovery {
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
+		if (cfgOffline.get(this.#host.settings) && candidate.provider !== this.#host.model()?.provider) return false;
 		const apiKey =
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
@@ -2337,6 +2352,7 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				if (cfgOffline.get(this.#host.settings) && candidate.provider !== sourceModel?.provider) continue;
 				// A candidate that would leave the request exactly as it is — same
 				// routed model, same effective thinking level — is not a switch, and
 				// must never be applied: `findRetryFallbackCandidates` excludes the
@@ -2600,6 +2616,7 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
+		if (cfgOffline.get(this.#host.settings) && primaryModel.provider !== currentModel.provider) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 
@@ -2672,7 +2689,12 @@ export class TurnRecovery {
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
+		if (this.#retryAttempt === 0) this.#genericAbortStreak = 0;
 		this.#retryAttempt++;
+		this.#genericAbortStreak =
+			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage)
+				? this.#genericAbortStreak + 1
+				: 0;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2691,10 +2713,17 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		const retryBudgetExhausted =
+			this.#retryAttempt > maxRetries || this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		const oldProviderLimitFor = (model: Model | undefined): boolean =>
+			requestProvider !== undefined &&
+			model !== undefined &&
+			AIError.is(id, AIError.Flag.UsageLimit) &&
+			requestProvider !== model.provider;
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
@@ -2710,8 +2739,10 @@ export class TurnRecovery {
 			(message.errorStatus === 429 || rateLimitReason === "RATE_LIMIT_EXCEEDED");
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
-		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		let recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
+		let staleUsageLimit = oldProviderLimitFor(this.#host.model());
+		if (staleUsageLimit) recordedUsageLimitOutcome = undefined;
+		let parsedRetryAfterMs = staleUsageLimit ? undefined : this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
@@ -2741,7 +2772,7 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
-		const siblingAvailabilityWaitMs =
+		let siblingAvailabilityWaitMs =
 			recordedUsageLimitOutcome?.retryAtMs === undefined
 				? undefined
 				: Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
@@ -2858,8 +2889,18 @@ export class TurnRecovery {
 			}
 		}
 
-		const allowModelFallback = options?.allowModelFallback !== false && !this.#host.modelFallbackDisabled?.();
 		const currentModel = this.#host.model();
+		// The model may have changed while the quota reset lookup awaited.
+		if (!staleUsageLimit && oldProviderLimitFor(currentModel)) {
+			staleUsageLimit = true;
+			recordedUsageLimitOutcome = undefined;
+			parsedRetryAfterMs = undefined;
+			usageLimitWaitMs = undefined;
+			siblingAvailabilityWaitMs = undefined;
+			switchedCredential = false;
+			delayMs = calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		}
+		const allowModelFallback = options?.allowModelFallback !== false && !this.#host.modelFallbackDisabled?.();
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
@@ -2959,7 +3000,7 @@ export class TurnRecovery {
 		// finish.
 		const billingCap = isBillingCapUsageLimit(message.errorStatus, errorMessage);
 		const exceedsDelayCap = (waitMs: number): boolean => {
-			if (billingCap) return true;
+			if (billingCap && !staleUsageLimit) return true;
 			const waitForUsageReset =
 				retrySettings.waitForUsageReset === true &&
 				recordedUsageLimitOutcome !== undefined &&
@@ -2987,6 +3028,7 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit)) &&
+				!staleUsageLimit &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
@@ -3047,7 +3089,13 @@ export class TurnRecovery {
 			}
 		}
 
-		if (retryBudgetExhausted) {
+		if (retryBudgetExhausted && staleUsageLimit) {
+			// The spent attempts and their backoff belong to the replaced provider.
+			// Give the selected model its first request without inheriting the old
+			// provider's fail-fast cap or reset window.
+			this.#retryAttempt = 1;
+			delayMs = 0;
+		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
@@ -3060,7 +3108,10 @@ export class TurnRecovery {
 			// A fallback model gets a fresh retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			if (switchedModel) {
+				this.#retryAttempt = 1;
+				this.#genericAbortStreak = 0;
+			}
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`

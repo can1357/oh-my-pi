@@ -42,44 +42,27 @@ function createSession(
 const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
-// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
+// `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
 // `context`) is gated by the `task.batch` setting (default on, covered by
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("requires task", () => {
-		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
-		expect(parsed instanceof type.errors).toBe(true);
-	});
-
-	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
+	it.each([false, true])("advertises only the source task.steps selects (batch=%s)", batchEnabled => {
 		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
-		for (const file of [true, false]) {
-			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
-			const item = {
-				taskFile: "local://assignment.md",
-				model: "mock/file-worker",
-				solutionSpace: "one defined change",
-			};
+		for (const steps of [true, false]) {
+			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, steps });
+			const item = steps
+				? { steps: ["Add the parser.", "Wire it in."], solutionSpace: "one defined change" }
+				: { task: "Add the parser.", solutionSpace: "one defined change" };
 			const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : item);
+			if (parsed instanceof type.errors) throw new Error(parsed.summary);
+			expect(parsed).toMatchObject(batchEnabled ? { tasks: [item] } : item);
 			const wire = schema.toJsonSchema();
 			const tasks = isRecord(wire.properties) ? wire.properties.tasks : undefined;
 			const itemWire = batchEnabled && isRecord(tasks) ? tasks.items : wire;
 			if (!isRecord(itemWire)) throw new Error("Expected an object schema for task input");
-			if (file) {
-				if (parsed instanceof type.errors) throw new Error(parsed.summary);
-				expect(parsed).toMatchObject(
-					batchEnabled
-						? { tasks: [{ taskFile: item.taskFile, model: item.model }] }
-						: { taskFile: item.taskFile, model: item.model },
-				);
-				expect(itemWire.required).not.toContain("task");
-				expect(itemWire.properties).toHaveProperty("model");
-			} else {
-				expect(parsed instanceof type.errors).toBe(true);
-				expect(itemWire.properties).not.toHaveProperty("taskFile");
-				expect(itemWire.required).toContain("task");
-			}
+			expect(itemWire.required).toContain(steps ? "steps" : "task");
+			expect(itemWire.properties).not.toHaveProperty(steps ? "task" : "steps");
 		}
 	});
 
@@ -175,10 +158,24 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				// Only the per-call `model` remains: one string, never the seance selector list.
-				expect(wireSchema).toContain('"model":{"type":"string"}');
+				expect(wireSchema).not.toContain('"model"');
+				// Per-call model alone advertises one string, never the seance selector list.
+				const perCall = JSON.stringify(
+					getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true }).toJsonSchema(),
+				);
+				expect(perCall).toContain('"model":{"type":"string"}');
 			}
 		}
+	});
+
+	it.each([
+		["off", false],
+		["eval", false],
+		["on", true],
+	] as const)("advertises model only when task.perCallModel allows task calls (%s)", async (mode, advertised) => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }));
+		expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"')).toBe(advertised);
 	});
 
 	it("advertises fields only when bundled seance is spawnable", async () => {
@@ -225,7 +222,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).toContain('"model":{"type":"string"}');
+		expect(planSchema).not.toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -261,6 +258,18 @@ describe("task spawn validation", () => {
 	it("rejects a missing task", async () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
+	});
+
+	it.each([
+		{
+			label: "both task and steps",
+			params: { agent: "scout", task: "Map auth.", steps: ["Map auth."] },
+			refusal: "takes `task` or `steps`, not both",
+		},
+		{ label: "empty steps", params: { agent: "scout", steps: [] }, refusal: "invalid `steps`" },
+		{ label: "a blank step", params: { agent: "scout", steps: ["Map auth.", "  "] }, refusal: "invalid `steps`" },
+	])("refuses $label", async ({ params, refusal }) => {
+		expect(await executeText({ ...params, solutionSpace: "c" })).toContain(refusal);
 	});
 	it("rejects a model override for an ordinary task while task.perCallModel is off", async () => {
 		const schema = getTaskSchema({

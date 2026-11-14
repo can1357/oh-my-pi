@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a web guest going live with the agents, tool cards and working state from before a rejoin when the rejoin's welcome failed to apply; the guest now says hello again within the auto-rejoin budget ([#19182](https://github.com/can1357/oh-my-pi/pull/19182) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.19.0] - 2026-11-12
+
+### Fixed
+
+- Fixed `task` tool cards so spawned tasks consistently display their name, assigned agent, and instructions, with `steps` spawns shown as numbered stages.
+
+## [18.18.8] - 2026-11-11
+
+### Changed
+
+- Ask result cards render saved notes beneath their matching selected answers ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+
+## [18.18.3] - 2026-11-09
+
 ### Changed
 
 - `ask` tool cards show the HTML form's fieldset legends and field count while pending, and each question with its submitted answer (or "(no answer)") once answered, flagging submissions made by the timeout

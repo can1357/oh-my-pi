@@ -88,9 +88,13 @@ const setResume: OptionalSetter = (result, value) => {
 	result.resume = value !== undefined ? value : true;
 };
 
-/** `--restore` selects its session exactly as `--resume` does, then goes on with it. */
+/**
+ * `--restore` selects its session exactly as `--resume` does, then goes on with it. A bare
+ * `--restore` keeps a session `--session` or `--resume` already named, so `--session <id> --restore`
+ * restores that session, as `--restore --session <id>` does, instead of opening the picker.
+ */
 const setRestore: OptionalSetter = (result, value) => {
-	setResume(result, value);
+	if (value !== undefined || typeof result.resume !== "string") setResume(result, value);
 	result.restore = true;
 };
 
@@ -354,6 +358,9 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--from-codex",
 	"--no-session",
 	"--no-tools",
+	"--no-judge",
+	"--no-spotlight",
+	"--offline",
 	"--no-lsp",
 	"--no-pty",
 	"--hide-thinking",

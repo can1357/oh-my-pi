@@ -3,6 +3,7 @@ import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
+import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
 import type {
@@ -102,6 +103,8 @@ export interface UsageServiceDeps {
 	usageProviders: (provider: Provider) => UsageProvider | undefined;
 	fetch: typeof fetch;
 	requestTimeoutMs: number;
+	/** The key inference would send (the auth cascade); `usesRequestKey` adapters probe with it. */
+	requestKey: (provider: Provider) => Promise<string | undefined>;
 	logger: UsageLogger;
 }
 
@@ -114,8 +117,10 @@ type UsageReportsOptions = {
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
-	/** Runtime extension providers take precedence over the configured/default resolver. */
+	/** Runtime extension providers take precedence over configured and resolver providers. */
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
+	/** Configuration-sourced providers (models.yml gateways); above the resolver, below runtime overrides. */
+	#configuredUsageProviders: Map<Provider, UsageProvider> = new Map();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
@@ -142,9 +147,16 @@ export class UsageService implements UsageApi {
 	 * could have fetched usage for but didn't" apart from "a provider with no
 	 * usage concept" (web-search keys, local/keyless servers, inference
 	 * providers without a usage API) — the latter never warrants a usage row.
+	 * A provider paused by its auth rules (`disabled "<reason>"`) has none, so
+	 * no usage collection or probe ever calls it.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
-		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
+		if (providerPauseReason(provider) !== undefined) return undefined;
+		return (
+			this.#runtimeUsageProviderOverrides.get(provider)?.provider ??
+			this.#configuredUsageProviders.get(provider) ??
+			this.#deps.usageProviders(provider)
+		);
 	}
 
 	/**
@@ -160,9 +172,28 @@ export class UsageService implements UsageApi {
 		});
 		this.#deps.cache.invalidateForProvider(provider);
 	}
-	/** Carry runtime usage provider overrides over from the service this one replaces (store swap). */
-	adoptRuntimeProviders(previous: UsageService): void {
+	/** Carry runtime and configured registrations over from the service this one replaces (store swap). */
+	adoptRegistrations(previous: UsageService): void {
 		this.#runtimeUsageProviderOverrides = previous.#runtimeUsageProviderOverrides;
+		this.#configuredUsageProviders = previous.#configuredUsageProviders;
+	}
+
+	/**
+	 * Replace every configuration-sourced usage provider. A provider whose
+	 * effective adapter changes has its cached reports invalidated, like
+	 * {@link setProvider}; one shadowed by a runtime override keeps them, and so
+	 * does one gaining its first adapter, whose persisted reports another process
+	 * wrote with that same configuration.
+	 */
+	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void {
+		const previous = this.#configuredUsageProviders;
+		for (const provider of new Set([...previous.keys(), ...providers.keys()])) {
+			if (this.#runtimeUsageProviderOverrides.has(provider)) continue;
+			const before = previous.get(provider) ?? this.#deps.usageProviders(provider);
+			const after = providers.get(provider) ?? this.#deps.usageProviders(provider);
+			if (before !== undefined && before !== after) this.#deps.cache.invalidateForProvider(provider);
+		}
+		this.#configuredUsageProviders = new Map(providers);
 	}
 
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
@@ -588,6 +619,7 @@ export class UsageService implements UsageApi {
 			new Set<string>([
 				...this.#deps.pool.providers(),
 				...this.#runtimeUsageProviderOverrides.keys(),
+				...this.#configuredUsageProviders.keys(),
 				...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
 			]);
 
@@ -596,6 +628,20 @@ export class UsageService implements UsageApi {
 			const providerImpl = this.providerFor(provider);
 			if (!providerImpl) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
+			if (providerImpl.usesRequestKey === true) {
+				// Probe with exactly the key inference would send, never every stored row.
+				let apiKey: string | undefined;
+				try {
+					apiKey = await this.#deps.requestKey(provider);
+				} catch {
+					this.logger?.debug("Usage request key resolution failed", { provider });
+					continue;
+				}
+				if (!apiKey) continue;
+				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
+				continue;
+			}
 			let entries = this.#deps.pool.entries(providerId);
 			if (entries.length > 0) {
 				const dedupedEntries = await this.#deps.pool.pruneDuplicates(providerId, entries);
@@ -664,12 +710,32 @@ export class UsageService implements UsageApi {
 		return requests;
 	}
 
+	/**
+	 * Re-check a blocked credential against live usage when a healthy report
+	 * could lift its block; the fetch reconciles the block. Returns the report,
+	 * or `undefined` when nothing was probed: the credential is not blocked
+	 * under `blockScopes`, or no usage report can lift what blocks it.
+	 */
+	async probeBlocked(
+		provider: Provider,
+		providerKey: string,
+		credentialIndex: number,
+		credential: AuthCredential,
+		blockScopes: string | readonly string[] | undefined,
+		options?: { baseUrl?: string; signal?: AbortSignal },
+	): Promise<UsageReport | null | undefined> {
+		if (!this.#deps.blocks.canHeal(provider, providerKey, credentialIndex, blockScopes)) return undefined;
+		return this.report(provider, credential, { ...options, timeoutMs: this.requestTimeoutMs });
+	}
+
 	/** Fetch the best available report for one stored credential. */
 	async report(
 		provider: Provider,
 		credential: AuthCredential,
 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
+		// A paused provider is never probed, not even through the broker's per-credential hook.
+		if (providerPauseReason(provider) !== undefined) return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch
@@ -785,13 +851,14 @@ export class UsageService implements UsageApi {
 					? fetched.filter(report => report.provider === options.provider)
 					: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
-			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
+			const ownLocal = [...this.#runtimeUsageProviderOverrides.keys(), ...this.#configuredUsageProviders.keys()];
+			if (!reports || ownLocal.length === 0) return reports;
 
-			// The broker owns its reported providers; only extension providers
-			// absent from its response need local credentials and a local probe.
+			// The broker owns its reported providers; only extension and configured
+			// providers absent from its response need local credentials and a local probe.
 			const brokerProviders = new Set(reports.map(report => report.provider));
 			const localProviders = new Set<Provider>();
-			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+			for (const provider of ownLocal) {
 				if (options?.provider !== undefined && provider !== options.provider) continue;
 				if (!brokerProviders.has(provider)) localProviders.add(provider);
 			}

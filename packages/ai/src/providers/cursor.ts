@@ -1078,7 +1078,9 @@ function debugBytes(bytes: Uint8Array, asHex: boolean): string {
 	try {
 		const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 		if (/^[\x20-\x7E\s]*$/.test(text)) return text;
-	} catch {}
+	} catch {
+		// Expected for binary data — fall back to hex representation.
+	}
 	return Buffer.from(bytes).toString("hex");
 }
 
@@ -2347,8 +2349,10 @@ function resumeParkedCursorRun(
 }
 
 /** Streams a Cursor Agent turn, retrying a discovered effort id when its normalized wire id is unavailable. */
-export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) =>
-	resumeParkedCursorRun(model, context, options) ?? streamCursorWithWireMode(model, context, options, "normalized");
+export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) => {
+	const turn = withPromptLast(context);
+	return resumeParkedCursorRun(model, turn, options) ?? streamCursorWithWireMode(model, turn, options, "normalized");
+};
 
 export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
@@ -2899,6 +2903,34 @@ const EXCLUSIVE_EXEC_CASES: Partial<Record<NonNullable<ExecServerMessage["messag
 	piWriteArgs: true,
 };
 
+/**
+ * Whether an MCP frame runs alone, classified by the host from the tool it
+ * will actually run (`CursorExecHandlers.mcpConcurrency`).
+ *
+ * Only a call this host executes (`execHandlers.mcp`) takes an exclusive
+ * place: a frame handed to an external executor never touches local state,
+ * and an approval probe runs nothing. A throwing classifier resolves to
+ * exclusive — the ordering that cannot race — rather than taking the batch
+ * down, matching the agent loop's handling of a throwing `concurrency`
+ * resolver. The decoded call rides into `runExecServerMessage` so the frame
+ * is decoded once.
+ */
+function classifyMcpExecFrame(
+	execMsg: ExecServerMessage,
+	execHandlers: CursorExecHandlers | undefined,
+): { exclusive: boolean; call?: CursorMcpCall } {
+	if (execMsg.message.case !== "mcpArgs" || !execHandlers?.mcp || !execHandlers.mcpConcurrency) {
+		return { exclusive: false };
+	}
+	const call = decodeMcpCall(execMsg.message.value);
+	if (call.approvalOnly) return { exclusive: false, call };
+	try {
+		return { exclusive: execHandlers.mcpConcurrency(call) === "exclusive", call };
+	} catch {
+		return { exclusive: true, call };
+	}
+}
+
 /** The call a frame belongs to: its tool call id, or the frame itself when it carries none. */
 function execFrameCallId(execMsg: ExecServerMessage): string {
 	const value = execMsg.message.value;
@@ -2924,6 +2956,10 @@ async function handleExecServerMessage(
 	state: BlockState,
 	externalToolExecutor: boolean,
 ): Promise<void> {
+	const order = state.execOrder;
+	const execCase = execMsg.message.case;
+	const gated = order !== undefined && execCase !== undefined && execCase !== "requestContextArgs";
+	const mcp = gated ? classifyMcpExecFrame(execMsg, execHandlers) : { exclusive: false };
 	const run = () =>
 		runExecServerMessage(
 			execMsg,
@@ -2936,14 +2972,13 @@ async function handleExecServerMessage(
 			stream,
 			state,
 			externalToolExecutor,
+			mcp.call,
 		);
-	const order = state.execOrder;
-	const execCase = execMsg.message.case;
-	if (!order || !execCase || execCase === "requestContextArgs") return run();
+	if (!gated) return run();
 	const callId = execFrameCallId(execMsg);
 	const editOwned =
 		(execCase === "readArgs" || execCase === "writeArgs") && isEditOwnedToolCallId(state, output, callId);
-	const reached = await order.enter(callId, editOwned || EXCLUSIVE_EXEC_CASES[execCase] === true);
+	const reached = await order.enter(callId, editOwned || mcp.exclusive || EXCLUSIVE_EXEC_CASES[execCase] === true);
 	try {
 		if (reached) await run();
 	} finally {
@@ -2963,6 +2998,7 @@ async function runExecServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	externalToolExecutor: boolean,
+	predecodedMcpCall?: CursorMcpCall,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -3310,7 +3346,7 @@ async function runExecServerMessage(
 		}
 		case "mcpArgs": {
 			const args = execMsg.message.value;
-			const mcpCall = decodeMcpCall(args);
+			const mcpCall = predecodedMcpCall ?? decodeMcpCall(args);
 			// An approval probe, not an invocation: the frame asks whether the
 			// call would be permitted. Running the tool to find out fires a side
 			// effect the user has not been asked about, and fires it again when
@@ -4796,7 +4832,11 @@ function decodeMcpArgValue(value: Uint8Array): unknown {
 			return first === "{" || first === "[" || first === '"' ? parseToolArgsJson(jsonValue) : jsonValue;
 		}
 		return jsonValue;
-	} catch {}
+	} catch (error) {
+		logger.debug("cursor: failed to decode MCP arg value as JSON, falling back to text", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 	const text = new TextDecoder().decode(value);
 	return parseToolArgsJson(text);
 }
@@ -6363,10 +6403,20 @@ function resolveCursorRecordReplays(
 ): Map<number, CursorRecordReplay> {
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const replays = new Map<number, CursorRecordReplay>();
+	// The message a turn was recorded against, chosen as `withPromptLast` chooses
+	// it: a user prompt outranks developer context sent beside it.
 	let userMessage: Message | undefined;
+	let promptInBlock = false;
 	for (let index = 0; index < historyEnd; index++) {
 		const msg = messages[index];
-		if (msg.role === "user" || msg.role === "developer") userMessage = msg;
+		if (msg.role === "user") {
+			userMessage = msg;
+			promptInBlock = true;
+		} else if (msg.role === "developer") {
+			if (!promptInBlock) userMessage = msg;
+		} else {
+			promptInBlock = false;
+		}
 		if (msg.role !== "assistant" || msg.providerPayload?.type !== "cursorHistory") continue;
 		if (msg.api !== "cursor-agent" || msg.provider !== provider || msg.model !== modelId) continue;
 		if (msg.providerPayload.wireRoute !== wireRoute) continue;
@@ -6669,6 +6719,20 @@ function findLastUserMessageIndex(messages: Message[]): number {
 		}
 	}
 	return -1;
+}
+
+/**
+ * Puts the turn's user prompt last. Hosts append context after the prompt
+ * (developer messages from `context` hooks), and Cursor sends the last message
+ * as the run's user message: trailing context would stand in for the prompt,
+ * and the prompt would ride in history. The context moves ahead of the prompt.
+ */
+function withPromptLast(context: Context): Context {
+	const { messages } = context;
+	let index = messages.length - 1;
+	while (index >= 0 && messages[index].role === "developer") index--;
+	if (index === messages.length - 1 || messages[index]?.role !== "user") return context;
+	return { ...context, messages: [...messages.slice(0, index), ...messages.slice(index + 1), messages[index]] };
 }
 
 /**
@@ -7520,7 +7584,7 @@ export async function buildGrpcRequest(
 	options: CursorOptions | undefined,
 	state: CursorRequestState,
 ): Promise<CursorGrpcRequest> {
-	return buildGrpcRequestForWireMode(model, context, options, state, "normalized");
+	return buildGrpcRequestForWireMode(model, withPromptLast(context), options, state, "normalized");
 }
 
 function hasImages(content: (TextContent | ImageContent)[]): boolean {

@@ -524,11 +524,22 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 			blocksDropped: 0,
 			tokensFreed: 0,
 		});
-		const notices = collectNotices();
-		await triggerMaintenance();
-		const warning = notices.find(n => n.source === NOTICE_SOURCE && n.message.includes("fixed context"));
-		expect(warning?.message).toContain("compaction.modelThresholds");
-		expect(warning?.message).not.toContain("clear large tool output");
+		const compactSpy = vi.spyOn(snapcompact, "compact");
+		// The fixed-context gate blocks before any pass starts, so no
+		// auto_compaction_end fires; wait for the warning itself.
+		const { promise: warned, resolve: onWarned } = Promise.withResolvers<string>();
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === NOTICE_SOURCE && event.message.includes("fixed context")) {
+				onWarned(event.message);
+			}
+		});
+		const assistantMsg = highUsageAssistant();
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		const warning = await warned;
+		await session.waitForIdle();
+		expect(warning).toContain("compaction.modelThresholds");
+		expect(warning).not.toContain("clear large tool output");
+		expect(compactSpy).not.toHaveBeenCalled();
 	});
 
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {
