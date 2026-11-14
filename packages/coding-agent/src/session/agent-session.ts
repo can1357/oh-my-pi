@@ -2781,6 +2781,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			sessionManager: this.sessionManager,
 			promptGeneration: () => this.#promptGeneration,
+			planModeEnabled: () => this.#planModeState?.enabled === true,
 			judge: () => {
 				const judge = resolveJudge({
 					settings: this.settings,

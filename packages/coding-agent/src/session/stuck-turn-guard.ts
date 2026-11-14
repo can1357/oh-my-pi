@@ -57,6 +57,8 @@ export interface StuckTurnGuardHost extends TurnEndCorrectiveSink {
 	judge(): Judge;
 	/** Changes on each prompt start; strikes never carry over from an earlier prompt. */
 	promptGeneration(): number;
+	/** Whether plan mode (read-only until approval) is on; the guard does not run then. */
+	planModeEnabled(): boolean;
 }
 
 /** A verdict being asked for one completed turn; settle it with {@link StuckTurnGuard.settle}. */
@@ -72,15 +74,10 @@ export interface StuckTurnNudgeDetails {
 	stuckProbability: number;
 }
 
-/** P(re_investigating) + P(retrying); a choice given without probabilities counts as certain. */
+/** P(re_investigating) + P(retrying); judges one-hot a bare choice upstream, so it counts as certain. */
 export function stuckProbability(answer: ChoiceAnswer<StuckTurnMode>): number {
-	const probabilities = answer.probabilities as Partial<Record<StuckTurnMode, number>> | undefined;
-	if (!probabilities || Object.keys(probabilities).length === 0) return STUCK_MODES.includes(answer.choice) ? 1 : 0;
 	let total = 0;
-	for (const mode of STUCK_MODES) {
-		const probability = probabilities[mode];
-		if (typeof probability === "number" && Number.isFinite(probability)) total += probability;
-	}
+	for (const mode of STUCK_MODES) total += answer.probabilities[mode] ?? 0;
 	return total;
 }
 
@@ -98,15 +95,16 @@ export class StuckTurnGuard {
 
 	/**
 	 * Starts the verdict for a completed tool-call turn, so the ask runs while
-	 * the rest of the turn-end work does. `undefined` when the guard is off or
-	 * the turn ends the run (no next request would carry a nudge).
+	 * the rest of the turn-end work does. `undefined` when the guard is off, plan
+	 * mode is on, or the turn ends the run (no next request would carry a nudge).
 	 */
 	ask(
 		messages: readonly AgentMessage[],
 		context: AgentTurnEndContext | undefined,
 		signal: AbortSignal | undefined,
 	): PendingStuckVerdict | undefined {
-		if (cfgModelStuckTurnGuardEnabled.get(this.#host.settings) !== true) {
+		// Plan mode is read-only until approval: a nudge to act would contradict it.
+		if (cfgModelStuckTurnGuardEnabled.get(this.#host.settings) !== true || this.#host.planModeEnabled()) {
 			this.#strikes = 0;
 			return undefined;
 		}
@@ -121,8 +119,8 @@ export class StuckTurnGuard {
 
 	/**
 	 * Counts the verdict toward the streak and injects the nudge into `messages`
-	 * when the streak reaches the strike count. `corrected` skips the nudge (the
-	 * streak still resets) when another guard already corrected this turn.
+	 * when the streak reaches the strike count. `corrected` (another guard
+	 * already corrected this turn) resets the streak instead of counting it.
 	 */
 	async settle(
 		messages: AgentMessage[],
@@ -140,20 +138,22 @@ export class StuckTurnGuard {
 		const strikesNeeded = cfgModelStuckTurnGuardStrikes.get(settings);
 		const probability = stuckProbability(answer);
 		const stuck = probability >= threshold;
-		this.#strikes = stuck ? this.#strikes + 1 : 0;
+		// A turn another guard corrected starts the streak over, so its corrective
+		// gets a full streak of turns before this one can stack a second.
+		this.#strikes = stuck && !options.corrected ? this.#strikes + 1 : 0;
 		const due = this.#strikes >= strikesNeeded;
 		logger.debug("stuck-turn guard verdict", {
 			choice: answer.choice,
 			stuckProbability: probability,
 			threshold,
 			stuck,
+			corrected: options.corrected === true,
 			strikes: this.#strikes,
-			nudge: due && !options.corrected,
+			nudge: due,
 		});
 		if (!due) return;
 		const strikes = this.#strikes;
 		this.#strikes = 0;
-		if (options.corrected) return;
 		logger.warn("stuck turns detected; nudging the model to act on its findings", {
 			strikes,
 			stuckProbability: probability,

@@ -91,6 +91,7 @@ interface Harness {
 	/** Runs one tool-call turn end through the guard. */
 	turn(options?: { willContinue?: boolean; corrected?: boolean }): Promise<void>;
 	nextPrompt(): void;
+	setPlanMode(enabled: boolean): void;
 }
 
 function harness(verdicts: Verdict[], overrides: Record<string, unknown> = {}, timeoutMs?: number): Harness {
@@ -101,6 +102,7 @@ function harness(verdicts: Verdict[], overrides: Record<string, unknown> = {}, t
 	const journal: Harness["journal"] = [];
 	let calls = 0;
 	let generation = 1;
+	let planMode = false;
 	const judge = scriptedJudge(verdicts);
 	const host: StuckTurnGuardHost = {
 		settings,
@@ -112,6 +114,7 @@ function harness(verdicts: Verdict[], overrides: Record<string, unknown> = {}, t
 			},
 		} as unknown as StuckTurnGuardHost["sessionManager"],
 		promptGeneration: () => generation,
+		planModeEnabled: () => planMode,
 		judge: () => {
 			calls++;
 			return judge;
@@ -140,6 +143,9 @@ function harness(verdicts: Verdict[], overrides: Record<string, unknown> = {}, t
 		},
 		nextPrompt: () => {
 			generation++;
+		},
+		setPlanMode: enabled => {
+			planMode = enabled;
 		},
 	};
 }
@@ -229,15 +235,31 @@ describe("StuckTurnGuard", () => {
 		expect(nudges(run.messages)).toHaveLength(0);
 	});
 
-	it("skips its nudge when another guard corrected the same turn, and still starts over", async () => {
+	it("resets the streak on a turn another guard corrected, giving that corrective a full streak", async () => {
+		// Reviewer's scenario: stuck, stuck + loop-guard redirect, stuck. Without the reset
+		// the third turn would stack a stuck nudge right after the redirect.
 		const run = harness([STUCK, STUCK, STUCK, STUCK, STUCK]);
 
 		await run.turn();
-		await run.turn();
 		await run.turn({ corrected: true });
 		await run.turn();
+		expect(nudges(run.messages)).toHaveLength(0);
 		await run.turn();
+		await run.turn();
+		expect(nudges(run.messages)).toHaveLength(1);
+	});
 
+	it("does not ask while plan mode is on, and drops the streak it had", async () => {
+		const run = harness([STUCK, STUCK, STUCK, STUCK]);
+
+		await run.turn();
+		await run.turn();
+		run.setPlanMode(true);
+		await run.turn();
+		expect(run.judgeCalls()).toBe(2);
+		run.setPlanMode(false);
+		await run.turn();
+		await run.turn();
 		expect(nudges(run.messages)).toHaveLength(0);
 	});
 });

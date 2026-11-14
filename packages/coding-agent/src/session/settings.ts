@@ -426,7 +426,7 @@ export const cfgModelStuckTurnGuardStrikes = register({
 	type: "number",
 	default: 3,
 	validate: raw => {
-		if (!Number.isSafeInteger(raw) || (raw as number) < 1) {
+		if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) {
 			throw new Error("model.stuckTurnGuard.strikes must be a positive integer");
 		}
 	},
