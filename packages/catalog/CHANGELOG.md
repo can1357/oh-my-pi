@@ -50,6 +50,7 @@
 - Factory Droid requests identify as droid 1.7.1 and report the interactive CLI as their surface, and prefix-bound Claude models (Opus, Sonnet and Haiku 5.5, Fable 5.1) on Factory's direct Anthropic route now ask Anthropic to drop stale signed thinking instead of rejecting a turn whose earlier context changed ([#18771](https://github.com/can1357/oh-my-pi/pull/18771) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+- Fixed Codex discovery tests failing after a catalog refresh removed plain GPT-6 Astra and Sol entries ([#19087](https://github.com/can1357/oh-my-pi/issues/19087)).
 
 - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
 - Fixed Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) misrouting to the first-party Gemini endpoint; they now ride the `publishers/mistralai` raw-predict endpoint with ADC auth and an OpenAI-shaped body ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus)).

@@ -242,7 +242,7 @@ describe("Codex model discovery", () => {
 		expect(buildModel(red).cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
 	});
 
-	it("normalizes plain and worker Codex GPT-6 Astra metadata", async () => {
+	it("normalizes Codex GPT-6 Astra worker metadata without an unbundled plain route", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
 				Response.json({
@@ -266,34 +266,32 @@ describe("Codex model discovery", () => {
 			clientVersion: "0.153.0",
 			fetchFn,
 		});
-		const astra = result?.models.find(model => model.id === "gpt-6-astra");
 		const workerAstra = result?.models.find(model => model.id === "gpt-6-astra-wm");
-		if (!astra || !workerAstra) throw new Error("Expected plain and worker GPT-6 Astra routes");
+		expect(result?.models.map(model => model.id)).toEqual(["gpt-6-astra-wm"]);
+		if (!workerAstra) throw new Error("Expected GPT-6 Astra worker route");
 
-		for (const model of [astra, workerAstra]) {
-			// `/models` omits prices, so discovery stays neutral and the KDL
-			// catalog rule remains the single authority for billed metadata.
-			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-			expect(model.contextWindow).toBe(272_000);
-			const builtModel = buildModel(model);
-			// Codex credits have no long-context pricing tier. Catalog composition
-			// retains the standard window; the registry expands it only when
-			// extended context is enabled.
-			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
-			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5, ultrafast: 8 });
-			expect(builtModel).toMatchObject({
-				contextWindow: 272_000,
-				maxTokens: 128_000,
-			});
-		}
+		// `/models` omits prices, so discovery stays neutral and the KDL
+		// catalog rule remains the single authority for billed metadata.
+		expect(workerAstra.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(workerAstra.contextWindow).toBe(272_000);
+		const builtModel = buildModel(workerAstra);
+		// Codex credits have no long-context pricing tier. Catalog composition
+		// retains the standard window; the registry expands it only when
+		// extended context is enabled.
+		expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
+		expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5, ultrafast: 8 });
+		expect(builtModel).toMatchObject({
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		});
 	});
 
 	it("applies GPT-6 / GPT-6.1 Sol, Terra, and Luna pricing to discovered plain and worker routes", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
 				Response.json({
-					// GPT-6 plain rows are bundled, so their `-wm` listing also yields
-					// the plain route; GPT-6.1 Sol and Terra are not yet bundled and ship both.
+					// Only GPT-6 Luna has a bundled plain row; the other worker-only
+					// GPT-6 slugs stay verbatim. GPT-6.1 Sol and Terra advertise both.
 					models: [
 						"gpt-6-sol-wm",
 						"gpt-6-luna-wm",
@@ -321,7 +319,6 @@ describe("Codex model discovery", () => {
 		expect(result?.models.map(model => model.id).sort()).toEqual([
 			"gpt-6-luna",
 			"gpt-6-luna-wm",
-			"gpt-6-sol",
 			"gpt-6-sol-wm",
 			"gpt-6.1-sol",
 			"gpt-6.1-sol-wm",
