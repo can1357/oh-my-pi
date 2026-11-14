@@ -5,8 +5,9 @@
  * stacked with the separator's leading space into a 2-space gap at the first
  * separator while every later gap stayed single (#11103).
  *
- * The plain layouts (bottom bar, top-rule chip) honor the configured
- * `statusLine.separator` instead of a hardcoded dot (#19084).
+ * The plain layouts (bottom bar, top-rule chip) honor an explicitly
+ * configured `statusLine.separator` instead of a hardcoded dot, and keep the
+ * `·` dot when no separator is configured (#19084).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -65,14 +66,13 @@ function fakeSession(): AgentSession {
 	} as unknown as AgentSession;
 }
 
-/** `pi` + `model` bottom bar (plain separators) through the real pipeline. */
+/** `pi` + `model` bottom bar through the real pipeline (dot default: no separator configured). */
 function makeComponent(): StatusLineComponent {
 	const component = new StatusLineComponent(fakeSession(), statusLineHost);
 	component.updateSettings({
 		preset: "custom",
 		leftSegments: ["pi", "model"],
 		rightSegments: [],
-		separator: "powerline-thin",
 		sessionAccent: false,
 	});
 	return component;
@@ -91,14 +91,13 @@ function makeSeparatorComponent(separator: "none" | "slash"): StatusLineComponen
 	return component;
 }
 
-/** Spaces immediately flanking the first configured-separator glyph in the stripped bar. */
-function firstSeparatorGap(bar: string): { before: number; after: number } {
+/** Spaces immediately flanking the first separator glyph in the stripped bar. */
+function firstSeparatorGap(bar: string, glyph: string): { before: number; after: number } {
 	const plain = bar.replace(/\x1b\[[0-9;]*m/g, "");
-	const sep = theme.sep.powerlineThinLeft;
-	const dot = plain.indexOf(sep);
+	const dot = plain.indexOf(glyph);
 	if (dot < 0) throw new Error(`no separator in bar: ${JSON.stringify(plain)}`);
 	const before = plain.slice(0, dot).match(/ *$/)?.[0].length ?? 0;
-	const after = plain.slice(dot + sep.length).match(/^ */)?.[0].length ?? 0;
+	const after = plain.slice(dot + glyph.length).match(/^ */)?.[0].length ?? 0;
 	return { before, after };
 }
 
@@ -110,7 +109,7 @@ describe("status line segment padding", () => {
 		try {
 			component.markActivityStart();
 			const bar = component.renderBottomBar(80, "full");
-			expect(firstSeparatorGap(bar)).toEqual({ before: 1, after: 1 });
+			expect(firstSeparatorGap(bar, "·")).toEqual({ before: 1, after: 1 });
 		} finally {
 			component.dispose();
 		}
@@ -120,21 +119,41 @@ describe("status line segment padding", () => {
 		const component = makeComponent();
 		try {
 			const bar = component.renderBottomBar(80, "full");
-			expect(firstSeparatorGap(bar)).toEqual({ before: 1, after: 1 });
+			expect(firstSeparatorGap(bar, "·")).toEqual({ before: 1, after: 1 });
 		} finally {
 			component.dispose();
 		}
 	});
 
-	it("honors the configured separator in the plain bottom bar and top-rule chip", () => {
+	it("keeps the dot default when no separator is configured", () => {
+		// Maintainer call for #19084: existing plain-layout users see no
+		// change unless they set `statusLine.separator` explicitly.
+		const component = makeSeparatorComponent("slash");
+		try {
+			component.updateSettings({
+				preset: "custom",
+				leftSegments: ["pi", "model"],
+				rightSegments: ["hostname", "time"],
+				sessionAccent: false,
+			});
+			const bar = Bun.stripANSI(component.renderBottomBar(120, "full"));
+			expect(bar).toContain("·");
+			const chip = Bun.stripANSI(component.getStandaloneTopBorder(120).content);
+			expect(chip).toContain("·");
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("honors an explicitly configured separator in the plain bottom bar and top-rule chip", () => {
 		// Regression for #19084: the plain layouts hardcoded the `·` dot, so
 		// `statusLine.separator: none` never reached the bottom bar or chip.
 		const none = makeSeparatorComponent("none");
 		try {
 			const bar = Bun.stripANSI(none.renderBottomBar(120, "full"));
-			expect(bar).not.toContain("\u00b7");
+			expect(bar).not.toContain("·");
 			const chip = Bun.stripANSI(none.getStandaloneTopBorder(120).content);
-			expect(chip).not.toContain("\u00b7");
+			expect(chip).not.toContain("·");
 		} finally {
 			none.dispose();
 		}
@@ -143,10 +162,10 @@ describe("status line segment padding", () => {
 		try {
 			const bar = Bun.stripANSI(slash.renderBottomBar(120, "full"));
 			expect(bar).toContain(` ${theme.sep.slash.trim()} `);
-			expect(bar).not.toContain("\u00b7");
+			expect(bar).not.toContain("·");
 			const chip = Bun.stripANSI(slash.getStandaloneTopBorder(120).content);
 			expect(chip).toContain(` ${theme.sep.slash.trim()} `);
-			expect(chip).not.toContain("\u00b7");
+			expect(chip).not.toContain("·");
 		} finally {
 			slash.dispose();
 		}
