@@ -21,10 +21,25 @@ import type {
 	TspSpan,
 } from "@oh-my-pi/pi-wire";
 import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
+import {
+	catalogJudgmentApis,
+	isJudgmentApi,
+	JUDGMENT_API_PATHS,
+	JUDGMENT_PROTOCOLS,
+	type JudgmentApi,
+	judgmentProtocol,
+	type NativeJudgeRootDefault,
+	nativeJudgeRootDefault,
+	type NativeJudgeRouteDraft,
+	validateNativeJudgeEndpointRoot,
+	validateNativeJudgeProviderId,
+} from "@oh-my-pi/pi-ai/judgment/native";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
 import { FuzzyCorpus } from "../fuzzy";
@@ -34,10 +49,13 @@ import type { KeyName } from "../key-hint-format";
 import { col, compact, kbd, md, node, span, text } from "../native/describe";
 import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../native/picker";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
-import { actionHint, hintsRow, type NativeHint } from "../native/overlay";
+import { actionBar, actionButton, actionHint, hintsRow, type NativeHint } from "../native/overlay";
 import { plainText } from "../native/spans";
 import { isNativeRendering } from "../native/state";
 import { Input } from "../components/input";
+import { SelectFormField, TextFormField } from "../components/form";
+import { Text } from "../components/text";
+import { formTheme } from "../chrome/form-theme";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { truncateToWidth, visibleWidth } from "../utils";
 import type {
@@ -48,7 +66,7 @@ import type {
 } from "./model-browser";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
 import { sanitizeDisplayWarning, thinkingLevelGlyph } from "../render/render-utils";
-import { theme } from "../theme/theme";
+import { getSelectListTheme, theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import {
 	buildBrowserItems,
@@ -100,6 +118,101 @@ type AssignTarget =
 	| { kind: "role"; role: string }
 	| { kind: "fallback"; role: string; index: number | null }
 	| { kind: "fallbackKey" };
+
+/** A native route as the open Ctrl+R or Ctrl+N form would save it, sent by its Test route action (Ctrl+T). */
+export interface NativeJudgeRouteTest {
+	route: NativeJudgeRouteDraft;
+	/** The catalog model Ctrl+R edits; absent for a Ctrl+N declaration. */
+	model?: Model;
+	/** The key typed into Ctrl+N's key step (with its Cloudflare account ID), not yet stored. */
+	credential?: { token: string; accountId?: string };
+}
+
+/** A route test in flight, then its outcome as one status line. */
+interface NativeRouteTestState {
+	controller: AbortController;
+	result?: { ok: boolean; message: string };
+}
+
+/** Ctrl+R: set the protocol and endpoint root of an existing catalog model. */
+interface NativeRouteEditor {
+	kind: "edit";
+	item: ModelBrowserItem;
+	api?: JudgmentApi;
+	field: SelectFormField | TextFormField;
+	preview?: Text;
+	test?: NativeRouteTestState;
+}
+
+type NativeJudgeCreateStep = "provider" | "id" | "protocol" | "baseUrl" | "token" | "accountId";
+
+/** Ctrl+N: declare a model the catalog does not list, then optionally store its provider key. */
+interface NativeJudgeCreateEditor {
+	kind: "create";
+	/** The pick in progress when the form opened; the new model lands selected in it, unassigned. */
+	target: AssignTarget;
+	draft: Partial<NativeJudgeRouteDraft>;
+	step: NativeJudgeCreateStep;
+	api?: JudgmentApi;
+	field: SelectFormField | TextFormField;
+	preview?: Text;
+	token?: string;
+	accountId?: string;
+	/** Set once the declaration is saved; a retry then stores only the credential. */
+	saved?: Model;
+	test?: NativeRouteTestState;
+}
+
+const NATIVE_PROTOCOL_ITEMS = JUDGMENT_PROTOCOLS.map(protocol => ({
+	value: protocol.api,
+	label: protocol.label,
+	description: `${protocol.api} · POST <base URL>${protocol.path}`,
+}));
+
+/** The protocol to preselect: the model's own judgment API, else the provider's only catalog judgment API. */
+function preselectedJudgmentApi(provider: string, model?: Model): JudgmentApi | undefined {
+	if (model && isJudgmentApi(model.api)) return model.api;
+	const apis = catalogJudgmentApis(provider);
+	return apis.length === 1 ? apis[0] : undefined;
+}
+
+/** Base URL field text: what the protocol appends, where the prefilled root came from, and the protocol's help. */
+function nativeRootDescription(api: JudgmentApi, provider: string, root: NativeJudgeRootDefault | undefined): string {
+	const protocol = judgmentProtocol(api);
+	let description = `${protocol.label} appends ${protocol.path}; enter the root before it.`;
+	if (root) {
+		const name = sanitizeDisplayWarning(provider);
+		const source =
+			root.source === "model"
+				? "the model's current route"
+				: root.source === "catalog"
+					? `the catalog's ${protocol.label} root for ${name}`
+					: `${name}'s chat endpoint${root.from ? ` (${sanitizeDisplayWarning(`${root.from.provider}/${root.from.id}`)})` : ""}`;
+		description += ` Prefilled from ${source}; Enter accepts it.`;
+	}
+	if (protocol.rootHelp) description += ` ${protocol.rootHelp}`;
+	return description;
+}
+
+function nativeBaseUrlError(api: JudgmentApi, baseUrl: string): string | undefined {
+	try {
+		validateNativeJudgeEndpointRoot(api, baseUrl);
+		return undefined;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+}
+
+/**
+ * Why `model` cannot serve as a native judge although its API is a judgment API (an endpoint root its
+ * protocol cannot post to); `undefined` otherwise. Models on chat APIs still judge through prompts, so they
+ * get no error here.
+ */
+export function nativeJudgeRouteError(model: Model): string | undefined {
+	if (!isJudgmentApi(model.api)) return undefined;
+	const error = nativeBaseUrlError(model.api, model.baseUrl);
+	return error && `${model.provider}/${model.id} has an invalid native route: ${error} Fix it with Ctrl+R.`;
+}
 
 /** Live preferences and selector operations supplied by the host. */
 export interface ModelHubSource extends ModelBrowserSource {
@@ -159,6 +272,27 @@ export interface ModelHubCallbacks {
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
+	/**
+	 * Declare `model` a native judge on `api` at the endpoint root `baseUrl` (models.yml metadata only; no
+	 * role, fallback or credential changes). Resolves to the reloaded model; a rejection keeps the form open.
+	 * Without it, the Judge screen offers no Ctrl+R.
+	 */
+	onSaveNativeRoute?: (model: Model, api: JudgmentApi, baseUrl: string) => Promise<Model>;
+	/** Declare a model the catalog does not list as a native judge (Ctrl+N); same contract as {@link onSaveNativeRoute}. */
+	onCreateNativeJudgeRoute?: (draft: NativeJudgeRouteDraft) => Promise<Model>;
+	/** Store an API key (with a Cloudflare account ID for Workers AI) for a model created with Ctrl+N. */
+	onSaveNativeJudgeCredential?: (model: Model, credential: { token: string; accountId?: string }) => Promise<void>;
+	/**
+	 * The key source a provider's requests use ahead of a stored API key (models.yml `apiKey`, an environment
+	 * variable, a login), described for display; `undefined` when a key stored by Ctrl+N would be used.
+	 */
+	nativeJudgeKeySource?: (provider: string) => string | undefined;
+	/**
+	 * Send one test judgment through the drafted route (Ctrl+T in the endpoint and key steps) and describe the
+	 * outcome; nothing is saved. `signal` aborts when the form closes or a newer test starts. A rejection shows
+	 * as a failed test. Without it, the forms offer no Ctrl+T.
+	 */
+	onTestNativeRoute?: (test: NativeJudgeRouteTest, signal: AbortSignal) => Promise<{ ok: boolean; message: string }>;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
 	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
@@ -448,6 +582,10 @@ export class ModelHubComponent implements Component {
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
 	#assignmentPending = false;
+	/** Open Ctrl+R / Ctrl+N form; it replaces the body until saved or cancelled. */
+	#nativeRouteEditor: NativeRouteEditor | NativeJudgeCreateEditor | null = null;
+	/** Why the last Judge pick was refused, or what a closed form left unfinished; cleared by the next action. */
+	#judgeNotice: string | undefined;
 	/**
 	 * Last preset ctrl+←/→ tried in this hub, with the settings revision after the
 	 * attempt; steps from it while nothing matches the setup or nothing changed since.
@@ -469,7 +607,10 @@ export class ModelHubComponent implements Component {
 		const rows = Math.max(1, Math.floor(height ?? 10));
 		const lines: string[] = [this.#statusRow(width)];
 		const entry = this.#activeEntry();
-		if (entry.kind === "roles" && this.#assigning === null) {
+		if (this.#nativeRouteEditor) {
+			this.#updateNativePreview();
+			lines.push(...this.#nativeRouteEditor.field.render(width));
+		} else if (entry.kind === "roles" && this.#assigning === null) {
 			lines.push(...this.#renderRolesView(width, rows - 1));
 		} else if (entry.kind === "provider" && entry.locked && this.#assigning === null) {
 			lines.push(...this.#renderLockedView(entry, width, rows - 1));
@@ -532,6 +673,9 @@ export class ModelHubComponent implements Component {
 		this.#browser.onActivate = item => this.#activateItem(item);
 		this.#browser.onCancel = () => this.#callbacks.onCancel();
 		this.#browser.onQueryChange = query => this.#onQueryChanged(query);
+		this.#browser.onSelectionChange = () => {
+			this.#judgeNotice = undefined;
+		};
 
 		// Hydrate synchronously from the current registry snapshot so the first
 		// Enter after opening acts on cached models instead of being dropped
@@ -568,6 +712,7 @@ export class ModelHubComponent implements Component {
 	/** Cancel pending provider refresh timers and the spinner. Host calls this on overlay close. */
 	dispose(): void {
 		this.#disposed = true;
+		this.#nativeRouteEditor?.test?.controller.abort();
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
 		this.#refreshingProviders.clear();
@@ -1219,11 +1364,486 @@ export class ModelHubComponent implements Component {
 	// Assignment flow
 	// ═══════════════════════════════════════════════════════════════════════
 
+	/** The invalid-native-route error of the Judge primary or exact Judge fallback a Roles row shows, if any. */
+	#judgeRowError(row: RolesRow): string | undefined {
+		if ((row.kind !== "role" && row.kind !== "fallback") || row.role !== "judge") return undefined;
+		const model =
+			row.kind === "role"
+				? this.#roles.judge?.model
+				: this.#resolveFallbackEntry(row.role, row.chainIndex)?.item.model;
+		return model && nativeJudgeRouteError(model);
+	}
+
+	/** The model Ctrl+R edits: the Judge pick or role strip in progress, else the highlighted Judge row's model. */
+	#nativeRouteTarget(): ModelBrowserItem | undefined {
+		const strip = this.#strip;
+		if (strip && strip.kind !== "name") {
+			return strip.role === "judge" || strip.chips[strip.index]?.role === "judge" ? strip.item : undefined;
+		}
+		const target = this.#assigning;
+		if (target)
+			return target.kind !== "fallbackKey" && target.role === "judge" ? this.#browser.getSelected() : undefined;
+		if (this.#activeEntry().kind !== "roles") return undefined;
+		const row = this.#rolesRows[this.#roleIndex];
+		if (row?.kind === "fallback" && row.role === "judge")
+			return this.#resolveFallbackEntry(row.role, row.chainIndex)?.item;
+		if (row?.kind !== "role" || row.role !== "judge") return undefined;
+		const model = this.#roles.judge?.model;
+		return model && { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` };
+	}
+
+	/** Where a model created with Ctrl+N lands: the Judge pick in progress, or the highlighted Judge row's. */
+	#nativeJudgeCreateTarget(): AssignTarget | undefined {
+		if (!this.#callbacks.onCreateNativeJudgeRoute) return undefined;
+		const target = this.#assigning;
+		if (target) return target.kind !== "fallbackKey" && target.role === "judge" ? target : undefined;
+		const strip = this.#strip;
+		if (strip && strip.kind !== "name") {
+			return strip.role === "judge" || strip.chips[strip.index]?.role === "judge"
+				? { kind: "role", role: "judge" }
+				: undefined;
+		}
+		if (this.#activeEntry().kind !== "roles") return undefined;
+		const row = this.#rolesRows[this.#roleIndex];
+		if (row?.kind === "role" && row.role === "judge") return { kind: "role", role: "judge" };
+		if (row?.kind === "fallback" && row.role === "judge") return { kind: "fallback", role: "judge", index: null };
+		return undefined;
+	}
+
+	/**
+	 * Native-route feedback for the Judge model in focus: a refusal or unfinished save first, then an invalid
+	 * native route (error), else how the model judges — natively at its endpoint, or through prompts.
+	 */
+	#judgeStatus(): { text: string; error: boolean } | undefined {
+		if (this.#judgeNotice) return { text: sanitizeDisplayWarning(this.#judgeNotice), error: true };
+		const model = this.#nativeRouteTarget()?.model;
+		if (!model) return undefined;
+		const error = nativeJudgeRouteError(model);
+		if (error) return { text: sanitizeDisplayWarning(error), error: true };
+		const selector = `${model.provider}/${model.id}`;
+		if (isJudgmentApi(model.api)) {
+			const path = JUDGMENT_API_PATHS[model.api].replace("{model}", model.requestModelId ?? model.id);
+			return {
+				text: sanitizeDisplayWarning(`${selector} judges natively · POST ${model.baseUrl}${path}`),
+				error: false,
+			};
+		}
+		const declare = this.#callbacks.onSaveNativeRoute ? " · Ctrl+R declares a native route" : "";
+		return {
+			text: sanitizeDisplayWarning(`${selector} judges through prompts (${model.api})${declare}`),
+			error: false,
+		};
+	}
+
+	/** Refuse a Judge pick whose native route cannot post anywhere; chat models (prompted judges) pass. */
+	#allowJudgeModel(model: Model, role: string): boolean {
+		if (role !== "judge") return true;
+		const error = nativeJudgeRouteError(model);
+		if (!error) return true;
+		this.#judgeNotice = error;
+		this.#requestRender();
+		return false;
+	}
+
+	#closeNativeRoute(): void {
+		const editor = this.#nativeRouteEditor;
+		editor?.test?.controller.abort();
+		this.#nativeRouteEditor = null;
+		if (editor?.kind === "create" && editor.saved) {
+			this.#judgeNotice = `${editor.saved.provider}/${editor.saved.id} is saved, but its API key was not stored.`;
+			this.#refreshAfterMutation();
+		}
+		this.#requestRender();
+	}
+
+	#openNativeRoute(): void {
+		const item = this.#nativeRouteTarget();
+		if (!item || !this.#callbacks.onSaveNativeRoute) return;
+		const field = new SelectFormField({
+			theme: formTheme,
+			label: `Native protocol · ${sanitizeDisplayWarning(item.selector)}`,
+			description: `Current API: ${item.model.api}. Choose the judgment protocol the endpoint speaks. This edits only the model's models.yml entry: role assignments, fallbacks and provider credentials stay as they are.`,
+			items: NATIVE_PROTOCOL_ITEMS,
+			currentValue: preselectedJudgmentApi(item.provider, item.model),
+			selectTheme: getSelectListTheme(),
+			hint: `${editorKey("tui.select.confirm")} continue · ${editorKey("tui.select.cancel")} cancel`,
+			onSubmit: value => {
+				const editor = this.#nativeRouteEditor;
+				if (editor?.kind === "edit" && isJudgmentApi(value as Model["api"])) {
+					this.#openNativeEndpoint(editor, value as JudgmentApi);
+				}
+			},
+			onCancel: () => this.#closeNativeRoute(),
+			requestRender: () => this.#requestRender(),
+		});
+		field.focused = true;
+		this.#nativeRouteEditor = { kind: "edit", item, field };
+		this.#judgeNotice = undefined;
+		this.#requestRender();
+	}
+
+	#openNativeEndpoint(editor: NativeRouteEditor, api: JudgmentApi): void {
+		const preview = new Text("", 0, 0);
+		const { model } = editor.item;
+		const root = nativeJudgeRootDefault(api, model.provider, this.#registry.getAll("all"), model);
+		const field = new TextFormField({
+			theme: formTheme,
+			label: `Native API base URL · ${sanitizeDisplayWarning(editor.item.selector)}`,
+			description: nativeRootDescription(api, model.provider, root),
+			// An existing native root that no longer validates is still offered, so it can be fixed in place.
+			initialValue: root?.baseUrl ?? (isJudgmentApi(model.api) ? model.baseUrl : undefined),
+			empty: "reject",
+			validate: value => nativeBaseUrlError(api, value),
+			summary: [preview],
+			hint: `${editorKey("tui.input.submit")} save route${this.#nativeTestHint()} · ${editorKey("tui.select.cancel")} cancel`,
+			onCancel: () => this.#closeNativeRoute(),
+			requestRender: () => this.#requestRender(),
+			onSubmit: async value => {
+				const save = this.#callbacks.onSaveNativeRoute;
+				if (!save || this.#assignmentPending) return;
+				this.#assignmentPending = true;
+				this.#requestRender();
+				try {
+					const model = await save(editor.item.model, api, value);
+					if (this.#disposed) return;
+					const selector = `${model.provider}/${model.id}`;
+					const strip = this.#strip;
+					if (strip && strip.kind !== "name" && modelsAreEqual(strip.item.model, model)) {
+						strip.item = { provider: model.provider, id: model.id, model, selector };
+					}
+					editor.test?.controller.abort();
+					this.#nativeRouteEditor = null;
+					this.#refreshAfterMutation();
+					if (this.#assigning) {
+						this.#setCandidateItems(this.#availableItems);
+						this.#browser.selectSelector(selector);
+					}
+				} finally {
+					this.#assignmentPending = false;
+					if (!this.#disposed) this.#requestRender();
+				}
+			},
+		});
+		field.focused = true;
+		editor.api = api;
+		editor.field = field;
+		editor.preview = preview;
+		this.#updateNativePreview();
+		this.#requestRender();
+	}
+
+	#openNativeJudgeCreate(): void {
+		const target = this.#nativeJudgeCreateTarget();
+		if (!target) return;
+		const providers = [...new Set(this.#registry.getAll("all").map(model => model.provider))];
+		const field = new TextFormField({
+			theme: formTheme,
+			label: "Provider namespace",
+			description:
+				"An existing provider (its credentials and settings are shared, never replaced) or a new lowercase ID: letters and digits, single hyphens or underscores, starting with a letter.",
+			empty: "reject",
+			validate: value => {
+				try {
+					validateNativeJudgeProviderId(value, providers);
+					return undefined;
+				} catch (error) {
+					return error instanceof Error ? error.message : String(error);
+				}
+			},
+			hint: `${editorKey("tui.input.submit")} continue · ${editorKey("tui.select.cancel")} cancel`,
+			onCancel: () => this.#closeNativeRoute(),
+			requestRender: () => this.#requestRender(),
+			onSubmit: value => {
+				const editor = this.#nativeRouteEditor;
+				if (editor?.kind !== "create") return;
+				editor.draft.provider = validateNativeJudgeProviderId(value, providers);
+				this.#openNativeJudgeCreateStep(editor, "id");
+			},
+		});
+		field.focused = true;
+		this.#nativeRouteEditor = { kind: "create", target, draft: {}, step: "provider", field };
+		this.#judgeNotice = undefined;
+		this.#requestRender();
+	}
+
+	#openNativeJudgeCreateStep(editor: NativeJudgeCreateEditor, step: Exclude<NativeJudgeCreateStep, "provider">): void {
+		editor.step = step;
+		editor.preview = undefined;
+		if (step === "protocol") {
+			const field = new SelectFormField({
+				theme: formTheme,
+				label: "Native protocol",
+				description:
+					"Choose the judgment protocol the endpoint speaks. Saving sends no request and assigns no role or fallback.",
+				items: NATIVE_PROTOCOL_ITEMS,
+				currentValue: editor.draft.api ?? preselectedJudgmentApi(editor.draft.provider ?? ""),
+				selectTheme: getSelectListTheme(),
+				hint: `${editorKey("tui.select.confirm")} continue · ${editorKey("tui.select.cancel")} cancel`,
+				onSubmit: value => {
+					if (!isJudgmentApi(value as Model["api"])) return;
+					editor.api = editor.draft.api = value as JudgmentApi;
+					this.#openNativeJudgeCreateStep(editor, "baseUrl");
+				},
+				onCancel: () => this.#closeNativeRoute(),
+				requestRender: () => this.#requestRender(),
+			});
+			field.focused = true;
+			editor.field = field;
+			this.#requestRender();
+			return;
+		}
+		const api = editor.api;
+		let label: string;
+		let description: string;
+		let secret = false;
+		let empty: "reject" | "submit" = "reject";
+		let initialValue: string | undefined;
+		switch (step) {
+			case "id":
+				label = "Model ID";
+				description =
+					"The exact model ID the endpoint serves, nested paths included (e.g. @cf/cloudflare/clef). It is sent verbatim.";
+				initialValue = editor.draft.id;
+				break;
+			case "baseUrl": {
+				label = "Native API base URL";
+				const provider = editor.draft.provider ?? "";
+				const root = api ? nativeJudgeRootDefault(api, provider, this.#registry.getAll("all")) : undefined;
+				description = api ? nativeRootDescription(api, provider, root) : "";
+				initialValue = editor.draft.baseUrl ?? root?.baseUrl;
+				editor.preview = new Text("", 0, 0);
+				break;
+			}
+			case "token": {
+				const keySource = editor.draft.provider && this.#callbacks.nativeJudgeKeySource?.(editor.draft.provider);
+				if (keySource) {
+					// A stored key would be ignored: say which key requests use instead of accepting one.
+					const source = sanitizeDisplayWarning(keySource);
+					const field = new SelectFormField({
+						theme: formTheme,
+						label: "Provider API key",
+						description: `Requests to ${sanitizeDisplayWarning(editor.draft.provider ?? "")} authenticate with ${source}, which takes precedence over a stored key, so no key is asked here.`,
+						items: [{ value: "save", label: "Save model", description: `uses ${source}` }],
+						selectTheme: getSelectListTheme(),
+						hint: `${editorKey("tui.select.confirm")} save model${this.#nativeTestHint()} · ${editorKey("tui.select.cancel")} cancel`,
+						onSubmit: () => this.#saveNativeJudgeCreate(editor),
+						onCancel: () => this.#closeNativeRoute(),
+						requestRender: () => this.#requestRender(),
+					});
+					field.focused = true;
+					editor.token = undefined;
+					editor.field = field;
+					this.#requestRender();
+					return;
+				}
+				label = "Provider API key (optional)";
+				description =
+					"Masked. Stored in the credential store, never in models.yml, alongside any keys the provider already has. Leave blank to use a key already stored for this provider; without one the model stays unavailable.";
+				if (api === "workers-ai-systemone") {
+					description +=
+						" Workers AI also needs the Cloudflare account ID, asked next unless the credential carries it.";
+				}
+				secret = true;
+				empty = "submit";
+				break;
+			}
+			case "accountId":
+				label = "Cloudflare account ID";
+				description = "Stored with the key as one Cloudflare credential.";
+				secret = true;
+				break;
+		}
+		const final = step === "token" || step === "accountId";
+		const field = new TextFormField({
+			theme: formTheme,
+			label,
+			description,
+			initialValue,
+			empty,
+			secret,
+			validate: value => {
+				if (step === "baseUrl" && api) return nativeBaseUrlError(api, value);
+				if (
+					step === "token" &&
+					value.trim() &&
+					api === "workers-ai-systemone" &&
+					!parseCloudflareCredential(value)
+				) {
+					return "Enter a Cloudflare API token or a structured Cloudflare credential.";
+				}
+				return undefined;
+			},
+			summary: editor.preview ? [editor.preview] : undefined,
+			hint: `${editorKey("tui.input.submit")} ${final ? (editor.saved ? "store key" : "save model") : "continue"}${step === "id" ? "" : this.#nativeTestHint()} · ${editorKey("tui.select.cancel")} cancel`,
+			onCancel: () => this.#closeNativeRoute(),
+			requestRender: () => this.#requestRender(),
+			onSubmit: async value => {
+				switch (step) {
+					case "id":
+						editor.draft.id = value.trim();
+						this.#openNativeJudgeCreateStep(editor, "protocol");
+						return;
+					case "baseUrl":
+						editor.draft.baseUrl = validateNativeJudgeEndpointRoot(api!, value);
+						this.#openNativeJudgeCreateStep(editor, "token");
+						return;
+					case "token":
+						editor.token = value.trim() || undefined;
+						if (
+							editor.token &&
+							api === "workers-ai-systemone" &&
+							!parseCloudflareCredential(editor.token)?.accountId
+						) {
+							this.#openNativeJudgeCreateStep(editor, "accountId");
+							return;
+						}
+						break;
+					case "accountId":
+						editor.accountId = value.trim();
+						break;
+				}
+				await this.#saveNativeJudgeCreate(editor);
+			},
+		});
+		field.focused = true;
+		editor.field = field;
+		this.#updateNativePreview();
+		this.#requestRender();
+	}
+
+	/** Save the declaration (once), then the key (retryable), then return to the Judge pick with the model selected. */
+	async #saveNativeJudgeCreate(editor: NativeJudgeCreateEditor): Promise<void> {
+		const create = this.#callbacks.onCreateNativeJudgeRoute;
+		if (!create || this.#assignmentPending) return;
+		const storeCredential = this.#callbacks.onSaveNativeJudgeCredential;
+		if (editor.token && !storeCredential) throw new Error("This host cannot store API keys; leave the key blank.");
+		this.#assignmentPending = true;
+		this.#requestRender();
+		try {
+			if (!editor.saved) {
+				const { provider, id, api, baseUrl } = editor.draft;
+				if (!provider || !id || !api || !baseUrl) throw new Error("Complete every field first.");
+				editor.saved = await create({ provider, id, api, baseUrl });
+			}
+			const model = editor.saved;
+			if (editor.token && storeCredential) {
+				await storeCredential(model, { token: editor.token, accountId: editor.accountId });
+			}
+			if (this.#disposed) return;
+			editor.test?.controller.abort();
+			this.#nativeRouteEditor = null;
+			this.#strip = null;
+			this.#refreshAfterMutation();
+			const target = editor.target;
+			if (target.kind === "fallback") this.#startAssignFallback(target.role, target.index);
+			else if (target.kind === "role") this.#startAssign(target.role);
+			const selector = `${model.provider}/${model.id}`;
+			if (!this.#browser.selectSelector(selector)) {
+				this.#judgeNotice = `${selector} is saved, but provider ${model.provider} has no usable API key, so it cannot be picked yet.`;
+			}
+		} finally {
+			this.#assignmentPending = false;
+			if (!this.#disposed) this.#requestRender();
+		}
+	}
+
+	#nativeEditorSubmitLabel(): string {
+		const editor = this.#nativeRouteEditor;
+		if (editor?.kind === "create") {
+			if (editor.step !== "token" && editor.step !== "accountId") return "Continue";
+			return editor.saved ? "Store key" : "Save model";
+		}
+		return editor?.field instanceof TextFormField ? "Save route" : "Continue";
+	}
+
+	/** Live `POST` preview under the base URL field: the typed root plus the protocol's path. */
+	#updateNativePreview(): void {
+		const editor = this.#nativeRouteEditor;
+		if (!editor?.api || !editor.preview || !(editor.field instanceof TextFormField)) return;
+		const root = editor.field.getValue().trim().replace(/\/+$/, "");
+		const model =
+			editor.kind === "edit" ? (editor.item.model.requestModelId ?? editor.item.id) : (editor.draft.id ?? "<model>");
+		editor.preview.setText(`POST ${root || "<base URL>"}${JUDGMENT_API_PATHS[editor.api].replace("{model}", model)}`);
+	}
+
+	/** Whether the open form has a complete route to test: past the protocol step, with a host that can test. */
+	#canTestNativeRoute(): boolean {
+		const editor = this.#nativeRouteEditor;
+		if (!editor?.api || !this.#callbacks.onTestNativeRoute) return false;
+		return editor.kind === "edit" ? editor.field instanceof TextFormField : editor.step !== "protocol";
+	}
+
+	#nativeTestHint(): string {
+		return this.#callbacks.onTestNativeRoute ? ` · ${formatKeyHint("ctrl+t")} test route` : "";
+	}
+
+	/**
+	 * Ctrl+T: send the route the form would save (the typed root on the endpoint step, the typed key on the
+	 * key steps) to the host's test, replacing any test in flight. An invalid root stays a field error.
+	 */
+	#testNativeRoute(): void {
+		const editor = this.#nativeRouteEditor;
+		const test = this.#callbacks.onTestNativeRoute;
+		const api = editor?.api;
+		if (!editor || !api || !test || !this.#canTestNativeRoute()) return;
+		const field = editor.field;
+		const typed = field instanceof TextFormField ? field.getValue() : "";
+		let baseUrl = editor.kind === "create" ? editor.draft.baseUrl : undefined;
+		if (editor.kind === "edit" || editor.step === "baseUrl") {
+			const error = nativeBaseUrlError(api, typed);
+			if (error) {
+				field.setError(error);
+				return;
+			}
+			baseUrl = validateNativeJudgeEndpointRoot(api, typed);
+		}
+		if (!baseUrl) return;
+		let request: NativeJudgeRouteTest;
+		if (editor.kind === "edit") {
+			const { model } = editor.item;
+			request = { model, route: { provider: model.provider, id: model.id, api, baseUrl } };
+		} else {
+			const { provider, id } = editor.draft;
+			if (!provider || !id) return;
+			const token = editor.step === "token" ? typed.trim() : editor.token;
+			const accountId = editor.step === "accountId" ? typed.trim() : editor.accountId;
+			request = {
+				route: { provider, id, api, baseUrl },
+				...(token ? { credential: accountId ? { token, accountId } : { token } } : {}),
+			};
+		}
+		editor.test?.controller.abort();
+		const state: NativeRouteTestState = { controller: new AbortController() };
+		editor.test = state;
+		this.#requestRender();
+		test(request, state.controller.signal)
+			.then(
+				result => {
+					state.result = result;
+				},
+				error => {
+					state.result = { ok: false, message: error instanceof Error ? error.message : String(error) };
+				},
+			)
+			.finally(() => {
+				if (!this.#disposed && editor.test === state && !state.controller.signal.aborted) this.#requestRender();
+			});
+	}
+
+	/** The route test's status line: in flight, passed, or failed. */
+	#nativeTestStatus(): { text: string; style: "accent" | "success" | "error" } | undefined {
+		const test = this.#nativeRouteEditor?.test;
+		if (!test) return undefined;
+		if (!test.result) return { text: "Testing native route…", style: "accent" };
+		return { text: sanitizeDisplayWarning(test.result.message), style: test.result.ok ? "success" : "error" };
+	}
+
 	#activateItem(item: ModelBrowserItem): void {
 		// Also reached from the browser's own native list events, which bypass handleInput.
 		this.#nativeVersion++;
 		if (this.#assigning) {
 			const target = this.#assigning;
+			if (target.kind !== "fallbackKey" && !this.#allowJudgeModel(item.model, target.role)) return;
 			this.#assigning = null;
 			if (target.kind === "role") {
 				this.#assignRole(item, target.role, true);
@@ -1288,6 +1908,7 @@ export class ModelHubComponent implements Component {
 	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
 	 */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
+		if (!this.#allowJudgeModel(item.model, role)) return;
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
 			this.#openScopeStrip(item, role, returnToRoles);
 			return;
@@ -1976,6 +2597,25 @@ export class ModelHubComponent implements Component {
 			routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
 			return;
 		}
+		if (this.#nativeRouteEditor) {
+			if (matchesKey(data, "ctrl+t") && this.#canTestNativeRoute()) {
+				this.#testNativeRoute();
+				return;
+			}
+			this.#nativeRouteEditor.field.handleInput(data);
+			this.#updateNativePreview();
+			this.#requestRender();
+			return;
+		}
+		if (matchesKey(data, "ctrl+r") && this.#callbacks.onSaveNativeRoute && this.#nativeRouteTarget()) {
+			this.#openNativeRoute();
+			return;
+		}
+		if (matchesKey(data, "ctrl+n") && this.#nativeJudgeCreateTarget()) {
+			this.#openNativeJudgeCreate();
+			return;
+		}
+		this.#judgeNotice = undefined;
 
 		if (this.#strip) {
 			this.#handleStripInput(data);
@@ -2329,6 +2969,19 @@ export class ModelHubComponent implements Component {
 			event.col,
 		);
 		const entry = this.#activeEntry();
+		if (this.#nativeRouteEditor) {
+			if (overBody && bodyLine >= 0) {
+				// The field starts under the status row; its columns start past the sidebar and frame border.
+				this.#nativeRouteEditor.field.routeMouse(
+					event,
+					bodyLine,
+					event.col - this.#frame.sidebarWidth(this.#entries) - 5,
+				);
+				this.#updateNativePreview();
+				this.#requestRender();
+			}
+			return true;
+		}
 
 		// Footer strip chips (columns stay in frame coordinates).
 		if (footerColumn !== undefined && this.#strip) {
@@ -2516,8 +3169,23 @@ export class ModelHubComponent implements Component {
 
 	#statusRow(width: number): string {
 		if (this.#assignmentPending) {
-			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
+			return truncateToWidth(
+				theme.fg("accent", this.#nativeRouteEditor ? " Saving native route…" : " Applying model…"),
+				width,
+			);
 		}
+		if (this.#nativeRouteEditor) {
+			const test = this.#nativeTestStatus();
+			if (test) return truncateToWidth(theme.fg(test.style, ` ${test.text}`), width);
+			const title =
+				this.#nativeRouteEditor.kind === "create"
+					? "Add native judge model"
+					: `Judge native route · ${sanitizeDisplayWarning(this.#nativeRouteEditor.item.selector)}`;
+			return truncateToWidth(theme.fg("accent", ` ${title}`), width);
+		}
+		const judge = this.#judgeStatus();
+		if (judge?.error) return truncateToWidth(theme.fg("error", ` ${judge.text}`), width);
+		if (judge && this.#assigning === null) return truncateToWidth(theme.fg("muted", ` ${judge.text}`), width);
 		if (this.#assigning !== null) {
 			const enter = formatKeyHint("enter");
 			const cancel = editorKey("tui.select.cancel");
@@ -2646,6 +3314,7 @@ export class ModelHubComponent implements Component {
 				const branch = theme.fg("dim", `${"".padEnd(tagWidth + 3)}↳`);
 				const selector = selected ? theme.fg("accent", rowDef.selector) : theme.fg("muted", rowDef.selector);
 				let line = ` ${cursor} ${branch} ${selector}`;
+				if (this.#judgeRowError(rowDef)) line += theme.fg("error", " · invalid native route");
 				line = this.#finishRolesRow(line, width, hovered);
 				lines.push(line);
 				continue;
@@ -2684,6 +3353,7 @@ export class ModelHubComponent implements Component {
 			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop} ${cycleIndex + 1}`) : "";
 
 			let line = ` ${cursor} ${dot} ${tagStyled}  ${value}`;
+			if (this.#judgeRowError(rowDef)) line += theme.fg("error", " · invalid native route");
 			const right = [levelStyled, cycleStyled].filter(part => part.length > 0).join("  ");
 			const rightWidth = visibleWidth(right);
 			const lineWidth = visibleWidth(line);
@@ -2857,10 +3527,21 @@ export class ModelHubComponent implements Component {
 	}
 
 	#renderFooter(width: number): string {
+		const editor = this.#nativeRouteEditor;
+		if (editor) {
+			const test = this.#canTestNativeRoute() ? this.#nativeTestHint() : "";
+			const hint = `${formatKeyHint("enter")} ${this.#nativeEditorSubmitLabel().toLowerCase()}${test} · ${editorKey("tui.select.cancel")} cancel`;
+			return this.#frame.renderFooter(width, hint, undefined);
+		}
 		const strip = this.#strip;
+		const route =
+			this.#callbacks.onSaveNativeRoute && this.#nativeRouteTarget()
+				? ` · ${formatKeyHint("ctrl+r")} native route`
+				: "";
+		const create = this.#nativeJudgeCreateTarget() ? ` · ${formatKeyHint("ctrl+n")} add native judge` : "";
 		return this.#frame.renderFooter(
 			width,
-			this.#footerHint(),
+			this.#footerHint() + route + create,
 			strip ? () => this.#renderStrip(width, strip) : undefined,
 		);
 	}
@@ -2930,12 +3611,48 @@ export class ModelHubComponent implements Component {
 	// Native (TSP) description
 	// ═══════════════════════════════════════════════════════════════════════
 
-	/** A `picker` is its own sheet: the backend mounts it in `layer` without an `overlay` wrapper. */
+	/** A `picker` is its own sheet: the backend mounts it in `layer` without an `overlay` wrapper. So is the native route form. */
 	nativeSheet(cx: DescribeContext): boolean {
-		return cx.supports("picker");
+		return this.#nativeRouteEditor !== null || cx.supports("picker");
 	}
 
 	describe(cx: DescribeContext): NativeNode {
+		const editor = this.#nativeRouteEditor;
+		if (editor) {
+			this.#updateNativePreview();
+			const test = this.#nativeTestStatus();
+			return node(
+				"overlay",
+				{
+					role: "omp.overlay.model-hub.native-route",
+					head: editor.kind === "create" ? "Add native judge model" : "Judge native route",
+					anchor: "center",
+					size: "md",
+					modal: true,
+				},
+				[
+					col(
+						[
+							editor.field,
+							...(test ? [text([span(test.text, test.style)], { wrap: "word" })] : []),
+							this.#assignmentPending
+								? node("spinner", { label: "Saving native route…" })
+								: actionBar([
+										actionButton("Cancel", "nativeRouteCancel", { keys: "escape" }),
+										...(this.#canTestNativeRoute()
+											? [actionButton("Test route", "nativeRouteTest", { keys: "ctrl+t" })]
+											: []),
+										actionButton(this.#nativeEditorSubmitLabel(), "nativeRouteSubmit", {
+											keys: "enter",
+											tone: "accent",
+										}),
+									]),
+						],
+						{ gap: "md" },
+					),
+				],
+			);
+		}
 		const usePicker = cx.supports("picker");
 		const cached = this.#nativeCache;
 		if (cached?.version === this.#nativeVersion && cached.picker === usePicker) return cached.node;
@@ -2947,7 +3664,15 @@ export class ModelHubComponent implements Component {
 		const footer: NativeChild[] = [];
 		const strip = this.#describeStrip();
 		if (strip) footer.push(strip);
-		footer.push(hintsRow(this.#footerHints()));
+		footer.push(
+			hintsRow([
+				...this.#footerHints(),
+				this.#callbacks.onSaveNativeRoute && this.#nativeRouteTarget()
+					? { keys: ["ctrl+r"], label: "native route" }
+					: undefined,
+				this.#nativeJudgeCreateTarget() ? { keys: ["ctrl+n"], label: "add native judge" } : undefined,
+			]),
+		);
 		const described = describeHubFrame(
 			"omp.overlay.model-hub",
 			"Models",
@@ -2960,6 +3685,23 @@ export class ModelHubComponent implements Component {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
+		const editor = this.#nativeRouteEditor;
+		if (editor) {
+			if (this.#assignmentPending) return;
+			if (event.type === "action" && event.act === "nativeRouteCancel") this.#closeNativeRoute();
+			else if (event.type === "action" && event.act === "nativeRouteTest") this.#testNativeRoute();
+			else if (event.type === "action" && event.act === "nativeRouteSubmit") {
+				if (editor.field instanceof TextFormField) editor.field.submit();
+				else editor.field.selectList.handleInput("\n");
+			} else if (editor.field instanceof SelectFormField && (event.type === "select" || event.type === "activate")) {
+				editor.field.selectList.handleNativeEvent(event);
+			} else if (editor.field instanceof TextFormField && (event.type === "edit" || event.type === "undo")) {
+				editor.field.input.handleNativeEvent(event);
+			}
+			this.#updateNativePreview();
+			this.#requestRender();
+			return;
+		}
 		const picked = pickerEvent(event);
 		if (picked) {
 			this.#handlePickerEvent(picked);
@@ -3393,7 +4135,9 @@ export class ModelHubComponent implements Component {
 
 	/** What the hub is doing when it is more than browsing: applying, assigning, refreshing, a config error. */
 	#pickerSubtitle(entry: SidebarEntry, rolesView: boolean): TspPickerProps["subtitle"] {
-		if (this.#assignmentPending) return "Applying model…";
+		if (this.#assignmentPending) return this.#nativeRouteEditor ? "Saving native route…" : "Applying model…";
+		const judge = this.#judgeStatus();
+		if (judge?.error) return [span(judge.text, "error")];
 		const assigning = this.#assigning;
 		if (assigning !== null) {
 			if (assigning.kind === "fallbackKey") return "New fallback chain — pick the model it protects";
@@ -3405,8 +4149,13 @@ export class ModelHubComponent implements Component {
 					: assigning.index === null
 						? "Adding fallback for"
 						: "Replacing fallback of";
-			return [span(`${verb} `), span(label, "strong")];
+			return compact([
+				span(`${verb} `),
+				span(label, "strong"),
+				judge ? span(` · ${judge.text}`, "muted") : undefined,
+			]);
 		}
+		if (judge) return [span(judge.text, "muted")];
 		if (this.#configError && entry.kind !== "provider") return [span(this.#configError, "error")];
 		if (entry.kind === "provider" && entry.providerId && this.#refreshingProviders.has(entry.providerId)) {
 			return `${entry.label} · refreshing model list…`;
@@ -3531,6 +4280,13 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		const cancel = (label: string): TspPickerAction => ({ ...CLOSE_ACTION, label });
 		if (this.#assignmentPending) return [CLOSE_ACTION];
+		const route =
+			this.#callbacks.onSaveNativeRoute && this.#nativeRouteTarget()
+				? pickerAction("nativeRoute", "Native route", "ctrl+r")
+				: undefined;
+		const create = this.#nativeJudgeCreateTarget()
+			? pickerAction("nativeJudgeCreate", "Add native judge", "ctrl+n")
+			: undefined;
 		if (strip) {
 			const apply =
 				strip.kind === "name"
@@ -3553,7 +4309,7 @@ export class ModelHubComponent implements Component {
 							"enter",
 							{ primary: true },
 						);
-			return [apply, cancel(strip.kind === "thinking" ? "Keep" : "Cancel")];
+			return compact([apply, route, create, cancel(strip.kind === "thinking" ? "Keep" : "Cancel")]);
 		}
 		const refresh =
 			entry.kind === "provider" && !entry.locked ? pickerAction("refresh", "Refresh provider", "f5") : undefined;
@@ -3564,7 +4320,18 @@ export class ModelHubComponent implements Component {
 					: this.#assigning.kind === "fallbackKey"
 						? "Pick protected model"
 						: "Assign";
-			return compact([pickerAction("assign", label, "enter", { primary: true }), refresh, cancel("Cancel")]);
+			const selected = this.#browser.getSelected()?.model;
+			const invalid =
+				this.#assigning.kind !== "fallbackKey" && this.#assigning.role === "judge" && selected
+					? nativeJudgeRouteError(selected)
+					: undefined;
+			return compact([
+				pickerAction("assign", label, "enter", { primary: true, ...(invalid ? { disabled: invalid } : {}) }),
+				route,
+				create,
+				refresh,
+				cancel("Cancel"),
+			]);
 		}
 		if (rolesView) {
 			const row = this.#rolesRows[this.#roleIndex];
@@ -3621,7 +4388,7 @@ export class ModelHubComponent implements Component {
 					actions.push(roleAction("pick", "New role", "enter", true));
 					break;
 			}
-			return compact([...actions, CLOSE_ACTION]);
+			return compact([...actions, route, create, CLOSE_ACTION]);
 		}
 		if (lockedView) {
 			return entry.oauth
@@ -3978,6 +4745,12 @@ export class ModelHubComponent implements Component {
 				return;
 			case "compactionPoint":
 				this.#submitNameStrip();
+				return;
+			case "nativeRoute":
+				if (this.#callbacks.onSaveNativeRoute && this.#nativeRouteTarget()) this.#openNativeRoute();
+				return;
+			case "nativeJudgeCreate":
+				this.#openNativeJudgeCreate();
 				return;
 			case "cancel":
 				if (this.#strip) this.#closeStrip();

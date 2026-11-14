@@ -3,6 +3,7 @@
  */
 
 import type { FluentType } from "@oh-my-pi/omptype";
+import { isJudgmentApi } from "@oh-my-pi/pi-ai/judgment/native";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { type ModelKind, servedKinds } from "@oh-my-pi/pi-catalog/types";
@@ -20,6 +21,7 @@ export type ProviderValidationMode = "models-config" | "runtime-register";
 export interface ProviderValidationModel {
 	id: string;
 	api?: Api;
+	baseUrl?: string;
 	kind?: ModelKind;
 	contextWindow?: number;
 	supportsTools?: boolean;
@@ -149,13 +151,25 @@ export function validateProviderConfiguration(
 			}
 		}
 	} else {
-		if (!config.baseUrl) {
+		// A models.yml list of native judges that each name their own endpoint needs no provider-wide
+		// `baseUrl`; its key comes from the credential store (or, under a built-in provider ID, that provider's own
+		// environment variable). A new namespace has no environment variable of its own.
+		const nativeOnly =
+			mode === "models-config" &&
+			models.every(model => {
+				const api = model.api ?? config.api;
+				return api !== undefined && isJudgmentApi(api) && !!model.baseUrl;
+			});
+		if (!config.baseUrl && !nativeOnly) {
 			throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
 		}
 		const requiresAuth =
 			mode === "runtime-register"
 				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none" && (config.auth ?? "apiKey") !== "oauth";
+				: !nativeOnly &&
+					!config.apiKey &&
+					(config.auth ?? "apiKey") !== "none" &&
+					(config.auth ?? "apiKey") !== "oauth";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"

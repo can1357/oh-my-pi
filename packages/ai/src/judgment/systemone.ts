@@ -119,8 +119,10 @@ function wireQuestions(questions: Questions): Record<string, WireQuestion> {
 }
 
 /** A System One dialect posting the verbatim request to `path` under the base URL with the key as bearer. */
-function systemOneWire(path: string): JudgmentWire {
+function systemOneWire(label: string, path: string): JudgmentWire {
 	return {
+		label,
+		path,
 		target: (baseUrl, _model, key) => ({ url: `${baseUrl}${path}`, token: key }),
 		encode: (request, model) => ({ state: request.state, model, questions: wireQuestions(request.questions) }),
 		decode: decodeSystemOne,
@@ -129,7 +131,7 @@ function systemOneWire(path: string): JudgmentWire {
 
 /** TypeSafe's own route, shared by every System One server. */
 export const typesafeWire: JudgmentWire = {
-	...systemOneWire("/v1/systemone"),
+	...systemOneWire("TypeSafe SystemOne", "/v1/systemone"),
 	images: { mimeTypes: ["image/png", "image/jpeg"] },
 	supportsImageAssets: true,
 	imagesRequireOptIn: true,
@@ -165,7 +167,7 @@ export const typesafeWire: JudgmentWire = {
 
 /** OpenRouter Decisions: System One body under `/api/alpha`, with image parts preserved in state. */
 export const openrouterDecisionsWire: JudgmentWire = {
-	...systemOneWire("/decisions"),
+	...systemOneWire("OpenRouter Decisions", "/decisions"),
 	images: {},
 	imagesRequireOptIn: true,
 	boxes: true,
@@ -187,6 +189,9 @@ export const openrouterDecisionsWire: JudgmentWire = {
 
 /** Cloudflare Workers AI decision models (Clef) through the account-scoped `ai/run` route. */
 export const workersAiWire: JudgmentWire = {
+	label: "Workers AI SystemOne",
+	path: "/{model}",
+	rootHelp: "Keep <account> in the root to fill it from the credential's account ID or CLOUDFLARE_ACCOUNT_ID.",
 	// Clef's `images` extension: https://developers.cloudflare.com/workers-ai/models/clef/
 	images: {
 		mimeTypes: ["image/png", "image/jpeg", "image/webp"],
@@ -226,7 +231,7 @@ function encodeWithImageDataUrls(request: JudgmentRequest, model: string): Recor
 
 /** Liquid AI decision models (`d1.1`, `d1-ultra`). */
 export const liquidWire: JudgmentWire = {
-	...systemOneWire("/decisions/v1/systemone"),
+	...systemOneWire("Liquid SystemOne", "/decisions/v1/systemone"),
 	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements. The documented 4.5 MB cap covers the
 	// whole JSON body; 3 MB of images is 4 MB as base64, leaving room for state and questions.
 	images: {
@@ -257,7 +262,7 @@ function describeMediaDataUrls(value: unknown): unknown {
 
 /** Nace Drex decision models (`drex-max-v1.1`, `drex-max-finance`, `drex-v2.0`). */
 export const naceWire: JudgmentWire = {
-	...systemOneWire("/v1/systemone"),
+	...systemOneWire("Nace SystemOne", "/v1/systemone"),
 	// https://console.nace.ai/docs/drex/api-reference/systemone: at most 8 images of at most 40 megapixels,
 	// with state, questions and images serialized together at most 4 MiB; 3 MB of images is 4 MB as base64,
 	// leaving room for state and questions.

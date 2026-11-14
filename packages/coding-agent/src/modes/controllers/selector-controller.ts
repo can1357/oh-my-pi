@@ -1,13 +1,15 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, AuthStorage, ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import {
+	$env,
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
@@ -37,6 +39,9 @@ import {
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
+import { finalizeCustomModel } from "../../config/custom-models";
+import type { ModelRegistry } from "../../config/model-registry";
+import { formatNativeJudgeProbe, probeNativeJudgeRoute } from "../../judgment/probe";
 import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
 import { createPluginSettingsHost } from "../../extensibility/plugins/settings-host";
@@ -116,7 +121,11 @@ import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
-import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
+import {
+	ModelHubComponent,
+	type ModelRoleSelectionScope,
+	type NativeJudgeRouteTest,
+} from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatSessionContinuationNotice } from "../persistence-failure";
 import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
@@ -192,6 +201,82 @@ interface OpenMenu {
 /** Return input to the current editor-slot owner after a fullscreen overlay closes. */
 export function focusActiveEditorArea(ctx: InteractiveModeContext): void {
 	ctx.ui.setFocus(ctx.editorContainer.children[0] ?? ctx.editor);
+}
+
+/**
+ * The key a provider's requests use ahead of a newly stored API key, described for display, or `undefined`
+ * when a stored key would be used. Mirrors the auth precedence: `--api-key`, models.yml `apiKey`, OAuth,
+ * a key stored by `/login`, and the provider's environment variable all outrank a plain stored key.
+ */
+function nativeJudgeKeySource(authStorage: AuthStorage, provider: string): string | undefined {
+	const source = authStorage.keys.source(provider);
+	switch (source?.kind) {
+		case "runtime":
+			return "the --api-key flag";
+		case "config":
+			return `the apiKey configured for ${provider} in models.yml`;
+		case "oauth":
+			return `the OAuth login for ${provider}`;
+		case "env":
+			return source.envVar ? `the ${source.envVar} environment variable` : `the environment key for ${provider}`;
+		case "api_key":
+			return authStorage.credentials
+				.list(provider)
+				.some(
+					row =>
+						row.disabledCause === null && row.credential.type === "api_key" && row.credential.source === "login",
+				)
+				? `the key stored by /login for ${provider}`
+				: undefined;
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * The credential store key for a token typed into the Ctrl+N form: the token itself, or for Workers AI a
+ * Cloudflare credential carrying the account ID (typed, inside the token, or from `CLOUDFLARE_ACCOUNT_ID`).
+ */
+function nativeJudgeCredentialKey(api: Api, credential: { token: string; accountId?: string }): string {
+	const key = credential.token.trim();
+	if (api !== "workers-ai-systemone") return key;
+	const parsed = parseCloudflareCredential(key);
+	const accountId = credential.accountId?.trim() || parsed?.accountId || $env.CLOUDFLARE_ACCOUNT_ID?.trim();
+	if (!parsed || !accountId) throw new Error("Workers AI needs a Cloudflare API token and account ID.");
+	return serializeCloudflareCredential({ ...parsed, accountId });
+}
+
+/**
+ * Send one test judgment through a drafted native route, authenticated as the saved route would be: the
+ * provider's resolved key and headers, or — for Ctrl+N — the typed token when no key source outranks it.
+ * Nothing is saved or stored, and the judge chain (cooldowns, cache, usage ledger) is bypassed.
+ */
+async function testNativeJudgeRoute(
+	registry: ModelRegistry,
+	test: NativeJudgeRouteTest,
+	signal: AbortSignal,
+): Promise<{ ok: boolean; message: string }> {
+	const { route } = test;
+	const model = test.model
+		? { ...test.model, api: route.api, baseUrl: route.baseUrl }
+		: finalizeCustomModel(
+				{ id: route.id, provider: route.provider, api: route.api, baseUrl: route.baseUrl },
+				{ useDefaults: true },
+			);
+	let apiKey: ApiKey;
+	if (test.credential?.token.trim() && !nativeJudgeKeySource(registry.authStorage, route.provider)) {
+		apiKey = nativeJudgeCredentialKey(route.api, test.credential);
+	} else {
+		if (!(await registry.getApiKey(model, undefined, { signal }))) {
+			throw new Error(`${route.provider} has no usable API key; enter one or log in first.`);
+		}
+		apiKey = registry.resolver(model);
+	}
+	const headers = test.model
+		? await registry.resolveModelHeaders(model, signal)
+		: await registry.getProviderHeaders(route.provider);
+	const result = await probeNativeJudgeRoute(model, { apiKey, headers, signal });
+	return { ok: result.ok, message: formatNativeJudgeProbe(`${route.provider}/${route.id}`, result) };
 }
 
 export class SelectorController {
@@ -1133,6 +1218,39 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onSaveNativeRoute: async (model, api, baseUrl) => {
+					const saved = await this.ctx.session.modelRegistry.saveNativeJudgeRoute(model, api, baseUrl);
+					this.ctx.showStatus(`Native judge route saved for ${saved.provider}/${saved.id}`);
+					return saved;
+				},
+				onCreateNativeJudgeRoute: async draft => {
+					const saved = await this.ctx.session.modelRegistry.createNativeJudgeRoute(draft);
+					this.ctx.showStatus(`Native judge model added: ${saved.provider}/${saved.id}`);
+					return saved;
+				},
+				onSaveNativeJudgeCredential: async (model, credential) => {
+					if (!credential.token.trim()) return;
+					const authStorage = this.ctx.session.modelRegistry.authStorage;
+					const keySource = nativeJudgeKeySource(authStorage, model.provider);
+					if (keySource) {
+						throw new Error(`${model.provider} requests use ${keySource}; a stored key would be ignored.`);
+					}
+					const key = nativeJudgeCredentialKey(model.api, credential);
+					try {
+						// Adds a credential; the provider's existing keys stay.
+						await authStorage.credentials.upsert(model.provider, {
+							type: "api_key",
+							key,
+						});
+					} catch {
+						// Credential stores may echo the submitted secret in their errors.
+						throw new Error(`Storing the API key for ${model.provider} failed.`);
+					}
+					this.ctx.showStatus(`API key stored for ${model.provider}`);
+				},
+				nativeJudgeKeySource: provider =>
+					nativeJudgeKeySource(this.ctx.session.modelRegistry.authStorage, provider),
+				onTestNativeRoute: (test, signal) => testNativeJudgeRoute(this.ctx.session.modelRegistry, test, signal),
 
 				onLoginRequest: providerId => {
 					done();

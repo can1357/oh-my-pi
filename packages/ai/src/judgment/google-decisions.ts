@@ -94,6 +94,8 @@ function decodeAnswer(entry: Record<string, unknown>): Answer | undefined {
 
 /** The Gemini API's `/v1beta/decisions` route. */
 export const googleDecisionsWire: JudgmentWire = {
+	label: "Gemini Decisions",
+	path: "/decisions",
 	// https://aistudio.google.com/docs/decisions-api#input: inline data up to 100 MB per request, counted as
 	// base64. `maxTotalBytes` counts decoded bytes, which base64 grows by 4/3.
 	images: {

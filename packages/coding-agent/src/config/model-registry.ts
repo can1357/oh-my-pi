@@ -3,6 +3,12 @@ import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	type JudgmentApi,
+	type NativeJudgeRouteDraft,
+	validateNativeJudgeEndpointRoot,
+	validateNativeJudgeProviderId,
+} from "@oh-my-pi/pi-ai/judgment/native";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
@@ -858,6 +864,111 @@ export class ModelRegistry {
 		this.#reloadStaticModelsForRefresh(options);
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
+	}
+
+	/**
+	 * Declare the catalog model `model` a native judge: write `api` and the endpoint root `baseUrl` to its
+	 * `providers.<provider>.models[]` row in models.yml (adding the row when absent), then reload offline.
+	 * Provider credentials, headers, sibling rows and role settings are left alone; an existing
+	 * `modelOverrides` entry for the model has its `api` retargeted and a `kind` the api cannot serve dropped,
+	 * so it cannot undo the route.
+	 * @returns the reloaded model.
+	 */
+	async saveNativeJudgeRoute(model: Model<Api>, api: JudgmentApi, baseUrl: string): Promise<Model<Api>> {
+		this.#assertNativeRouteEditable();
+		const endpoint = validateNativeJudgeEndpointRoot(api, baseUrl);
+		const current = this.find(model.provider, model.id);
+		if (current?.provider !== model.provider || current.id !== model.id) {
+			throw new Error(`${model.provider}/${model.id} is no longer in the catalog.`);
+		}
+		await this.#modelsConfigFile.update(config => {
+			const providers = (config.providers ??= {});
+			const provider = (providers[current.provider] ??= {});
+			const models = (provider.models ??= []);
+			const declarations = models.filter(candidate => candidate.id === current.id);
+			if (declarations.length > 1) {
+				throw new Error(`Remove the duplicate declarations of ${current.provider}/${current.id} first.`);
+			}
+			let declaration = declarations[0];
+			if (!declaration) {
+				declaration = { id: current.id };
+				models.push(declaration);
+			}
+			declaration.api = api;
+			declaration.baseUrl = endpoint;
+			if (declaration.kind !== undefined && !apiServesKind(api, declaration.kind)) delete declaration.kind;
+			const override = provider.modelOverrides?.[current.id];
+			if (override) {
+				if (override.api !== undefined) override.api = api;
+				if (override.kind !== undefined && !apiServesKind(api, override.kind)) delete override.kind;
+			}
+		});
+		return this.#reloadNativeJudgeRoute(current.provider, current.id, api, endpoint);
+	}
+
+	/**
+	 * Declare a model the catalog does not list as a native judge: append `{ id, api, baseUrl }` to
+	 * `providers.<provider>.models[]` in models.yml, then reload offline. A new provider namespace needs no
+	 * provider-wide `baseUrl` or `apiKey`; its key resolves from stored credentials or the environment.
+	 * Re-declaring the exact same route is a no-op reload, so a retry after a failed reload is safe.
+	 * @returns the reloaded model.
+	 */
+	async createNativeJudgeRoute(draft: NativeJudgeRouteDraft): Promise<Model<Api>> {
+		this.#assertNativeRouteEditable();
+		const providerId = validateNativeJudgeProviderId(draft.provider, this.#knownStaticProviders());
+		const id = draft.id.trim();
+		if (
+			!id ||
+			/[\s\\?#]/.test(id) ||
+			id.split("/").some(segment => !segment || segment === "." || segment === "..")
+		) {
+			throw new Error("Enter a model ID without whitespace, `\\`, `?`, `#`, or empty or dot path segments.");
+		}
+		const { api } = draft;
+		const endpoint = validateNativeJudgeEndpointRoot(api, draft.baseUrl);
+		const unchanged = Symbol("unchanged");
+		try {
+			await this.#modelsConfigFile.update(config => {
+				const providers = (config.providers ??= {});
+				validateNativeJudgeProviderId(providerId, Object.keys(providers));
+				const provider = (providers[providerId] ??= {});
+				const declaration = provider.models?.find(candidate => candidate.id === id);
+				if (declaration) {
+					if (declaration.api === api && declaration.baseUrl === endpoint) throw unchanged;
+					throw new Error(`${providerId}/${id} is already declared; edit its native route instead.`);
+				}
+				if (this.getProviderModels(providerId).some(model => model.id === id)) {
+					throw new Error(`${providerId}/${id} is already in the catalog; edit its native route instead.`);
+				}
+				(provider.models ??= []).push({ id, api, baseUrl: endpoint });
+			});
+		} catch (error) {
+			if (error !== unchanged) throw error;
+		}
+		return this.#reloadNativeJudgeRoute(providerId, id, api, endpoint);
+	}
+
+	#assertNativeRouteEditable(): void {
+		if (this.#ignoreLocalModelConfig) throw new Error("Native judge routes cannot be edited in gateway mode.");
+		// A mirror's catalog follows its owner's reloads asynchronously, so it could not confirm the write.
+		if (this.#owner) throw new Error("Native judge routes can only be edited from the main session.");
+	}
+
+	/** Reload models.yml offline after a native route write and return the route's model as now composed. */
+	async #reloadNativeJudgeRoute(provider: string, id: string, api: JudgmentApi, baseUrl: string): Promise<Model<Api>> {
+		// The write may land within the mtime granularity of the previous load.
+		this.#lastStaticLoadMtime = null;
+		await this.refresh("offline");
+		if (this.#configError) {
+			throw new Error(`The native route was saved, but ${this.#modelsConfigFile.path()} failed to reload.`);
+		}
+		const model = this.getProviderModels(provider).find(candidate => candidate.id === id);
+		if (model?.api !== api || model.baseUrl !== baseUrl) {
+			throw new Error(
+				`The native route for ${provider}/${id} was saved, but another declaration or override takes precedence.`,
+			);
+		}
+		return model;
 	}
 
 	/**
@@ -3453,7 +3564,7 @@ export class ModelRegistry {
 					: providerConfig.compat;
 				const model = buildCustomModelOverlay(
 					providerName,
-					providerConfig.baseUrl!,
+					providerConfig.baseUrl,
 					providerConfig.api as Api | undefined,
 					providerConfig.headers,
 					providerConfig.apiKey,

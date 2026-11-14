@@ -28,6 +28,7 @@ import {
 	resolveJudgmentImageInput,
 } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { resolveJudgmentQuestionsMax } from "@oh-my-pi/pi-catalog/compat/judgment-questions";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env, isRecord, parseImageMetadata, tryParseJson } from "@oh-my-pi/pi-utils";
@@ -80,6 +81,163 @@ export type JudgmentApi = keyof typeof JUDGMENT_WIRES;
 /** Whether a catalog API answers judgments natively. */
 export function isJudgmentApi(api: Api): api is JudgmentApi {
 	return Object.hasOwn(JUDGMENT_WIRES, api);
+}
+
+/** A judgment API as a user picks it: its display label, the path it appends, and help for its endpoint root. */
+export interface JudgmentProtocol {
+	api: JudgmentApi;
+	label: string;
+	path: string;
+	rootHelp?: string;
+}
+
+/** Every judgment API, in {@link JUDGMENT_WIRES} order; adding a wire there is all it takes to list it. */
+export const JUDGMENT_PROTOCOLS: readonly JudgmentProtocol[] = (Object.keys(JUDGMENT_WIRES) as JudgmentApi[]).map(api =>
+	judgmentProtocol(api),
+);
+
+/** Request path each judgment API appends to its `baseUrl`; `{model}` stands for the wire model id. */
+export const JUDGMENT_API_PATHS = Object.fromEntries(
+	JUDGMENT_PROTOCOLS.map(protocol => [protocol.api, protocol.path]),
+) as Readonly<Record<JudgmentApi, string>>;
+
+/** The protocol entry for one judgment API. */
+export function judgmentProtocol(api: JudgmentApi): JudgmentProtocol {
+	const { label, path, rootHelp } = JUDGMENT_WIRES[api];
+	return rootHelp === undefined ? { api, label, path } : { api, label, path, rootHelp };
+}
+
+/** The judgment APIs the catalog seeds `provider` with, in seed order. */
+export function catalogJudgmentApis(provider: string): JudgmentApi[] {
+	const apis = new Set<JudgmentApi>();
+	for (const row of seedModels(provider)) if (isJudgmentApi(row.api)) apis.add(row.api);
+	return [...apis];
+}
+
+/** A default endpoint root for a native judge, and where it came from. */
+export interface NativeJudgeRootDefault {
+	baseUrl: string;
+	/** `model`: the model's own route; `catalog`: the provider's catalog seed; `chat`: the provider's chat root. */
+	source: "model" | "catalog" | "chat";
+	/** For `chat`, the model whose `baseUrl` supplied the root. */
+	from?: Model;
+}
+
+/**
+ * The endpoint root to propose for `api` under `provider`: the model's own root when it already speaks `api`,
+ * else the catalog's seed root for that provider and protocol, else — for protocols on an OpenAI-compatible
+ * root — the `baseUrl` of one of the provider's OpenAI-compatible chat models (`model` first, then `models`).
+ * Only roots {@link validateNativeJudgeEndpointRoot} accepts are proposed.
+ */
+export function nativeJudgeRootDefault(
+	api: JudgmentApi,
+	provider: string,
+	models: readonly Model[],
+	model?: Model,
+): NativeJudgeRootDefault | undefined {
+	const valid = (baseUrl: string | undefined): string | undefined => {
+		if (!baseUrl) return undefined;
+		try {
+			return validateNativeJudgeEndpointRoot(api, baseUrl);
+		} catch {
+			return undefined;
+		}
+	};
+	if (model?.api === api) {
+		const baseUrl = valid(model.baseUrl);
+		if (baseUrl) return { baseUrl, source: "model" };
+	}
+	for (const row of seedModels(provider)) {
+		const baseUrl = row.api === api ? valid(row.baseUrl) : undefined;
+		if (baseUrl) return { baseUrl, source: "catalog" };
+	}
+	if (!JUDGMENT_WIRES[api].chatRoot) return undefined;
+	for (const candidate of model ? [model, ...models] : models) {
+		if (candidate.provider !== provider) continue;
+		if (candidate.api !== "openai-completions" && candidate.api !== "openai-responses") continue;
+		const baseUrl = valid(candidate.baseUrl);
+		if (baseUrl) return { baseUrl, source: "chat", from: candidate };
+	}
+	return undefined;
+}
+
+/** A native judge model declaration: the exact provider/model id and the endpoint its API posts to. */
+export interface NativeJudgeRouteDraft {
+	provider: string;
+	id: string;
+	api: JudgmentApi;
+	baseUrl: string;
+}
+
+/** Provider ids that would shadow object prototype keys or selector keywords. */
+const RESERVED_PROVIDER_IDS: Record<string, boolean> = {
+	default: true,
+	inherit: true,
+	prototype: true,
+	constructor: true,
+	tostring: true,
+	tolocalestring: true,
+	valueof: true,
+	hasownproperty: true,
+	isprototypeof: true,
+	propertyisenumerable: true,
+};
+
+/**
+ * Validate a provider namespace for a new native judge declaration: canonical lowercase, not reserved, and not a
+ * case variant of an `existing` provider (which would split one provider's credentials across two namespaces).
+ * @returns the trimmed id.
+ * @throws {Error} naming the problem.
+ */
+export function validateNativeJudgeProviderId(provider: string, existing: Iterable<string> = []): string {
+	const id = provider.trim();
+	if (!/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/.test(id)) {
+		throw new Error(
+			"Use a lowercase provider ID starting with a letter, with letters, digits, and single hyphens or underscores.",
+		);
+	}
+	if (Object.hasOwn(RESERVED_PROVIDER_IDS, id)) throw new Error("That provider ID is reserved.");
+	for (const other of existing) {
+		if (other !== id && other.toLowerCase() === id) {
+			throw new Error(`The provider ID differs from the existing provider "${other}" only by capitalization.`);
+		}
+	}
+	return id;
+}
+
+/**
+ * Validate the `baseUrl` of a native judge: an HTTP(S) root without credentials, query or fragment, to which
+ * {@link JUDGMENT_API_PATHS} appends the operation. Workers AI roots may keep the `<account>` placeholder.
+ * @returns the trimmed root without trailing slashes.
+ * @throws {Error} naming the problem.
+ */
+export function validateNativeJudgeEndpointRoot(api: JudgmentApi, baseUrl: string): string {
+	if (!isJudgmentApi(api)) throw new Error("Select a supported native judgment protocol.");
+	const endpoint = baseUrl.trim().replace(/\/+$/, "");
+	let parsed: URL;
+	try {
+		parsed = new URL(endpoint);
+	} catch {
+		throw new Error("Enter an absolute HTTP or HTTPS endpoint root.");
+	}
+	if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+		throw new Error("The endpoint root must use HTTP or HTTPS.");
+	}
+	if (parsed.username || parsed.password || endpoint.includes("?") || endpoint.includes("#")) {
+		throw new Error("The endpoint root must not contain credentials, a query, or a fragment.");
+	}
+	const pathname = parsed.pathname.replace(/\/+$/, "");
+	const templated = api === "workers-ai-systemone" ? pathname.replaceAll("%3Caccount%3E", "") : pathname;
+	if (/%3C|%3E|[{}]|%7B|%7D/i.test(templated) || /\s/.test(endpoint)) {
+		throw new Error("Enter an endpoint root, not a templated URL.");
+	}
+	if (
+		/\/(?:systemone|decisions)$/i.test(pathname) ||
+		(api === "workers-ai-systemone" && /\/ai\/run\/./i.test(pathname))
+	) {
+		throw new Error(`Enter the endpoint root; ${api} appends ${JUDGMENT_API_PATHS[api]} itself.`);
+	}
+	return endpoint;
 }
 
 /** Whether both the native protocol and catalog model support image input. */
@@ -194,6 +352,8 @@ export interface NativeJudgeConnection {
 	/** Static headers attached to judgment requests (e.g. proxy routing, gateway auth). */
 	headers?: Record<string, string>;
 	fetch?: FetchImpl;
+	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
+	timeoutMs?: number;
 }
 
 export interface NativeJudgeOptions extends NativeJudgeConnection {
@@ -205,8 +365,6 @@ export interface NativeJudgeOptions extends NativeJudgeConnection {
 	baseUrl?: string;
 	/** Wire model id; defaults to {@link typesafeModel}. */
 	model?: string;
-	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
-	timeoutMs?: number;
 	/**
 	 * Most questions per request the endpoint accepts, a positive integer; larger
 	 * requests are split. Unset: no cap.

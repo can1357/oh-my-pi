@@ -5,6 +5,7 @@
 ### Added
 
 - Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added `JUDGMENT_PROTOCOLS` and `judgmentProtocol` (each judgment API's label, request path and root help, taken from its wire definition), `JUDGMENT_API_PATHS` (derived from them), `catalogJudgmentApis` and `nativeJudgeRootDefault` (default endpoint roots from the model, the catalog seed or the provider's chat root), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models, and `timeoutMs` to `NativeJudgeConnection` so `createNativeJudge` callers can set the per-attempt timeout ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

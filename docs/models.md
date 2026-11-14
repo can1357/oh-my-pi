@@ -319,6 +319,29 @@ A configured `kind`, explicit or implied by a runner API, outranks the bundled c
 
 Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
 
+#### Native judge routes in `/models`
+
+Open `/models` → **Roles** → **Judge** to declare native judge routes without editing models.yml by hand. While a Judge row, an exact Judge fallback, or a Judge candidate is highlighted, the status line says how that model judges: natively (with the `POST` URL it will call), through prompts (a chat model), or, in red, that its native route is invalid. A model whose native API has an invalid endpoint root is marked on its Roles row and cannot be picked for Judge; prompted chat and tiny judges stay assignable.
+
+- **Native route** (`Ctrl+R`) declares the highlighted catalog model a native judge: choose its protocol, then its endpoint root. The form previews the request URL as you type.
+- **Add native judge** (`Ctrl+N`) declares a model the catalog does not list: a provider namespace (an existing one, or a new lowercase ID), the exact model ID (nested IDs such as `@cf/cloudflare/clef` are kept verbatim), the protocol, the endpoint root, and an optional API key.
+
+| Protocol | `api` | Appends to the root |
+| --- | --- | --- |
+| TypeSafe SystemOne | `typesafe` | `/v1/systemone` |
+| OpenRouter Decisions | `openrouter-decisions` | `/decisions` (root `https://openrouter.ai/api/alpha`) |
+| OpenAI Decisions | `openai-decisions` | `/decisions` |
+| Gemini Decisions | `google-decisions` | `/decisions` (root `https://generativelanguage.googleapis.com/v1beta`) |
+| Workers AI SystemOne | `workers-ai-systemone` | `/{model}` (root `https://api.cloudflare.com/client/v4/accounts/<account>/ai/run`) |
+| Liquid SystemOne | `liquid-systemone` | `/decisions/v1/systemone` |
+| Nace SystemOne | `nace-systemone` | `/v1/systemone` |
+
+omp proposes what it already knows, and Enter accepts it (the field stays editable and says where the value came from). The protocol is preselected from the model's current judgment API, else the provider's only judgment API in the catalog. The root is prefilled from, in order: the model's own root when it already speaks the chosen protocol; the catalog's root for that provider and protocol (OpenRouter, Liquid, Nace, TypeSafe, Workers AI with its `<account>` placeholder, …); and, for OpenAI Decisions, the `baseUrl` of one of the provider's OpenAI-compatible chat models (e.g. a gateway's `…/v1`). `Ctrl+N` derives the same defaults for an existing or catalog provider; a new provider ID gets none.
+
+The root must be an absolute HTTP(S) URL without credentials, a query, a fragment, or the protocol's own path; only Workers AI keeps the `<account>` placeholder, filled from the credential's account ID or `CLOUDFLARE_ACCOUNT_ID`. Saving sends no request to the endpoint. **Test route** (`Ctrl+T`, on the endpoint step of either form and on the key steps of `Ctrl+N`) sends one yes/no question to the drafted route, authenticated as the saved model would be (on `Ctrl+N`, a typed key is used unless a higher-precedence key applies), and the status line reports the latency or why it failed: a refused key (401/403), billing (402), a root or model the endpoint does not serve (404), a response that is not the protocol's judgment, transient failures on every attempt, or a timeout. When the endpoint reports serving a different model than the one requested (an alias or gateway routing), the test still passes and names it. The test saves nothing and bypasses the judge chain's cooldowns, cache and usage ledger.
+
+Both actions write only `providers.<provider>.models[]` in the active models config (`models.yml`, `models.yaml`, or a configured JSON file), under a file lock, preserving every other field: `Ctrl+R` sets `api` and `baseUrl` on the model's row (adding `{ id, api, baseUrl }` when it has none, and retargeting an `api` the model's `modelOverrides` entry sets), `Ctrl+N` appends `{ id, api, baseUrl }`. A bundled model keeps its other metadata, including its wire `requestModelId`. Neither action assigns a role, changes a fallback chain or the active model; the saved model is selected in the Judge picker and `Enter` assigns it. The optional `Ctrl+N` key is stored in the credential store, never in models.yml, next to any keys the provider already has; for Workers AI a plain token also asks for the account ID. A route under an existing provider shares that provider's key precedence: when a key that outranks a stored one already applies (`--api-key`, the provider's models.yml `apiKey`, an OAuth or `/login` credential, or the provider's environment variable), the form names that source and asks for no key. A new provider ID has no environment variable, so its key must come from the credential store. Without a usable key the model is declared but not selectable. Re-entering an identical `Ctrl+N` declaration only reloads it, so it can be repeated to add a key later.
+
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
@@ -336,8 +359,8 @@ Loading models.yml checks a `modelOverrides` `kind` only against an api the file
 
 Required:
 
-- `baseUrl`
-- `apiKey` unless `auth: none` or `auth: oauth`
+- `baseUrl`, unless every model is a judgment-API model with its own `baseUrl`
+- `apiKey` unless `auth: none` or `auth: oauth`, or every model is a judgment-API model with its own `baseUrl` (the key then comes from the credential store; under a built-in provider ID, that provider's usual environment variable also works, but a new provider ID has no environment variable)
 - `api` at provider level or each model
 
 ### Override-only provider (`models` missing or empty)

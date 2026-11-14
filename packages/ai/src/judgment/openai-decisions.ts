@@ -104,6 +104,9 @@ function decodeAnswer(entry: Record<string, unknown>): Answer | undefined {
 
 /** OpenAI's `/v1/decisions` route. */
 export const openaiDecisionsWire: JudgmentWire = {
+	label: "OpenAI Decisions",
+	path: "/decisions",
+	chatRoot: true,
 	// https://developers.openai.com/api/reference/resources/decisions/methods/create/
 	images: { maxCount: 128 },
 	target: (baseUrl, _model, key) => ({ url: `${baseUrl}/decisions`, token: key }),

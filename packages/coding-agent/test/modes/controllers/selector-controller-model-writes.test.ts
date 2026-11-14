@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -45,12 +46,16 @@ describe("SelectorController model hub writes", () => {
 		tempDir.removeSync();
 	});
 
-	function start(settings: Settings, initial: Model): { controller: SelectorController; showError: () => unknown } {
+	function start(
+		settings: Settings,
+		initial: Model,
+		modelRegistry = new ModelRegistry(authStorage),
+	): { controller: SelectorController; showError: () => unknown } {
 		const live = new AgentSession({
 			agent: new Agent({ initialState: { model: initial, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.inMemory(),
 			settings,
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 			obfuscator: new SecretObfuscator([]),
 		});
 		session = live;
@@ -134,5 +139,117 @@ describe("SelectorController model hub writes", () => {
 
 		expect(await refreshed.promise).toBe(1_050_000);
 		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("adds a native judge model to models config and its key to the credential store, assigning nothing", async () => {
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const modelsPath = tempDir.join("models.json");
+		await authStorage.credentials.upsert("new-native", { type: "api_key", key: "existing-native-key" });
+		const { controller, showError } = start(
+			settings,
+			model("claude-sonnet-4-5"),
+			new ModelRegistry(authStorage, modelsPath),
+		);
+		const callbacks = openModelHub(controller);
+
+		const saved = await callbacks.onCreateNativeJudgeRoute!({
+			provider: "new-native",
+			id: "nested/native/judge",
+			api: "openai-decisions",
+			baseUrl: "https://native.example/v1",
+		});
+		await callbacks.onSaveNativeJudgeCredential!(saved, { token: "new-native-key" });
+
+		expect(saved).toMatchObject({ kind: "judge", api: "openai-decisions" });
+		expect(settings.getModelRole("judge")).toBeUndefined();
+		expect(
+			authStorage.credentials
+				.list("new-native")
+				.map(row => (row.credential.type === "api_key" ? row.credential.key : row.credential.type))
+				.sort(),
+		).toEqual(["existing-native-key", "new-native-key"]);
+		const document = await Bun.file(modelsPath).text();
+		expect(document).not.toContain("native-key");
+		expect(JSON.parse(document)).toEqual({
+			providers: {
+				"new-native": {
+					models: [{ id: "nested/native/judge", api: "openai-decisions", baseUrl: "https://native.example/v1" }],
+				},
+			},
+		});
+		expect(new ModelRegistry(authStorage, modelsPath).getAvailable("all")).toContainEqual(
+			expect.objectContaining({ provider: "new-native", id: "nested/native/judge" }),
+		);
+		expect(session?.model?.id).toBe("claude-sonnet-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("stores a Workers AI key with its account ID as one Cloudflare credential and hides store errors' secrets", async () => {
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const { controller } = start(settings, model("claude-sonnet-4-5"));
+		const callbacks = openModelHub(controller);
+		const target = getBundledModel("cloudflare-workers-ai", "@cf/cloudflare/clef");
+		if (!target) throw new Error("Expected the bundled Workers AI judge");
+
+		await callbacks.onSaveNativeJudgeCredential!(target, { token: "cf-token", accountId: "cf-account" });
+		await callbacks.onSaveNativeJudgeCredential!(target, {
+			token: serializeCloudflareCredential({ token: "cf-token-2", accountId: "embedded-account" }),
+		});
+		expect(
+			authStorage.credentials
+				.list("cloudflare-workers-ai")
+				.map(row =>
+					row.credential.type === "api_key" ? parseCloudflareCredential(row.credential.key) : undefined,
+				),
+		).toEqual(
+			expect.arrayContaining([
+				{ token: "cf-token", accountId: "cf-account" },
+				{ token: "cf-token-2", accountId: "embedded-account" },
+			]),
+		);
+
+		vi.spyOn(authStorage.credentials, "upsert").mockRejectedValue(new Error("store echoed private-token"));
+		const failure = await callbacks.onSaveNativeJudgeCredential!(target, {
+			token: "private-token",
+			accountId: "a",
+		}).then(
+			() => undefined,
+			(error: Error) => error,
+		);
+		expect(failure?.message).toBe("Storing the API key for cloudflare-workers-ai failed.");
+	});
+
+	it("names the key that outranks a stored one and refuses to store a key that would be ignored", async () => {
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const { controller } = start(settings, model("claude-sonnet-4-5"));
+		const callbacks = openModelHub(controller);
+		const keySource = callbacks.nativeJudgeKeySource!;
+		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		try {
+			Bun.env.OPENAI_API_KEY = "env-key";
+			authStorage.keys.setConfig("config-native", "config-key");
+			await authStorage.credentials.upsert("login-native", { type: "api_key", key: "login-key", source: "login" });
+			await authStorage.credentials.upsert("stored-native", { type: "api_key", key: "stored-key" });
+
+			expect(keySource("anthropic")).toBe("the --api-key flag");
+			expect(keySource("config-native")).toBe("the apiKey configured for config-native in models.yml");
+			expect(keySource("openai")).toBe("the OPENAI_API_KEY environment variable");
+			expect(keySource("login-native")).toBe("the key stored by /login for login-native");
+			// Only a plain stored key (or none) lets a newly stored key take part.
+			expect(keySource("stored-native")).toBeUndefined();
+			expect(keySource("new-native")).toBeUndefined();
+
+			const failure = await callbacks.onSaveNativeJudgeCredential!(model("claude-sonnet-4-5"), {
+				token: "ignored-key",
+			}).then(
+				() => undefined,
+				(error: Error) => error,
+			);
+			expect(failure?.message).toBe("anthropic requests use the --api-key flag; a stored key would be ignored.");
+			expect(authStorage.credentials.list("anthropic")).toEqual([]);
+		} finally {
+			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+		}
 	});
 });
