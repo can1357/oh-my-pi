@@ -417,6 +417,17 @@ auth:
 
 Edits apply to a running session at once: stored credentials come back on the next lookup and a newly unpaused provider's model list refreshes, as after a login. With an auth broker, set it on the broker host too (`omp auth-broker serve` reads it at startup): the broker drops a paused provider's credentials before clients see them.
 
+### Unattributed refusal pause
+
+When Google Antigravity answers with a 429 that names no quota (no retry delay, reset time, `QuotaFailure`, `RetryInfo` or known quota reason), the request is refused rather than rate limited. omp keeps that refusal on the account that received it: it is not retried, sent to another endpoint, or moved to another account, and no account is marked as out of quota. omp then pauses every account of the provider for `auth.unattributedRefusalCooldownMinutes` (default `30`), so retries, subagents, new turns and usage probes do not repeat the refused request from the rest of the pool. Processes sharing the credential store share the pause. Set it to `0` to skip the pause; the refusal still ends the request on its account. Only your global config, `--config` files and runtime overrides count, as for `auth.unpausedProviders`. Pick it under **Unattributed Refusal Pause** in `/settings`, or in `~/.omp/agent/config.yml`:
+
+```yaml
+auth:
+   unattributedRefusalCooldownMinutes: 10
+```
+
+Edits apply to the next refusal; a running pause keeps its deadline.
+
 ## Resume picker scope
 
 By default, `omp --resume` and `/resume` include sessions from other worktrees of

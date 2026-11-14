@@ -12,6 +12,8 @@ import {
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
+	isUnattributedRejection,
+	isUnattributedRejectionText,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseJsonBody,
@@ -867,6 +869,10 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
+	// An unattributed Antigravity refusal is neither a usage limit (no sibling
+	// may be exposed to it) nor transient (replaying it re-sends the refused
+	// request on the same account): it surfaces as a plain 429 failure.
+	if (isUnattributedRejection(error)) kinds &= ~(Flag.Transient | Flag.UsageLimit);
 	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
 }
 
@@ -1103,6 +1109,7 @@ export function classifyMessage(message: {
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
 	}
+	if (isUnattributedRejectionText(classificationMessage)) kinds &= ~(Flag.Transient | Flag.UsageLimit);
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 
 	message.errorId = id;

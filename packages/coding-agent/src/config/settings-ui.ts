@@ -19,7 +19,7 @@ import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
 import { cfgToolsRestrictedFolders } from "../tools/settings";
-import { cfgAuthUnpausedProviders } from "./model-settings";
+import { cfgAuthUnattributedRefusalCooldownMinutes, cfgAuthUnpausedProviders } from "./model-settings";
 
 /** Condition over the global settings; hidden (false) until they are initialized. */
 function whenSettings(test: (settings: Settings) => boolean): () => boolean {
@@ -45,6 +45,9 @@ const CONDITIONS: Record<string, () => boolean> = {
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
 	unpausedProvidersNotProject: whenSettings(s => cfgAuthUnpausedProviders.provenance(s) !== "project"),
+	unattributedRefusalCooldownNotProject: whenSettings(
+		s => cfgAuthUnattributedRefusalCooldownMinutes.provenance(s) !== "project",
+	),
 };
 
 /** Description suffix telling the panel user that an environment variable is in play. */

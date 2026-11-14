@@ -12,6 +12,14 @@
 - Pasting styled content into the composer now preserves Markdown formatting and places embedded images at their original positions, while code copied from editors remains plain text.
 - Added the `session_clear` hook and extension event, emitted when `/clear` resets the current session context without changing its session ID.
 - Added path-scoped Bash allow rules, project and configuration overlay precedence, and environment-variable controls through `bash.allowedEnvVars` and per-rule `env` settings.
+- Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
+- Added `auth.unattributedRefusalCooldownMinutes` (**Unattributed Refusal Pause** in `/settings`, default 30) to set how long a Google Antigravity 429 that names no quota pauses every account of the provider; `0` skips the pause while the refusal still stays on its account. Project settings cannot set it ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
+- Todo tool status line now displays task count for multiple targets
+- Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.
+- Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
+- Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
+- Added the `session_clear` hook and extension event, emitted after `/clear` resets the current session context without changing its session ID.
+- Added path-scoped entries for `bash.patterns` and `bashInterceptor.patterns`, project/config overlay precedence, and environment-variable-aware allow rules through `bash.allowedEnvVars` and per-rule `env` settings.
 - Subagents now preserve `@upstream` provider pinning when inheriting models.
 - Added deletion of individual prompts from Ctrl+R history with the Delete key.
 - Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict or disable auxiliary services outside the active model’s provider.
@@ -37,6 +45,13 @@
 - Language servers now recognize edits made shortly after a file is created, including on macOS.
 - Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
 - Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
+- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
+- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
+- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
+- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
+- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
+- A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- Gemini `web_search` on Google Antigravity no longer retries a 429 that names no quota or sends it through every pooled account: the search fails on the account that received it, as chat and image requests already do, while 429s that name a quota still retry and rotate ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 

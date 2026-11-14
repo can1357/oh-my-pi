@@ -12,6 +12,7 @@ export type RateLimitReason =
 	| "CONCURRENT_LIMIT"
 	| "MODEL_CAPACITY_EXHAUSTED"
 	| "SERVER_ERROR"
+	| "UNATTRIBUTED_REJECTION"
 	| "UNKNOWN";
 
 const QUOTA_EXHAUSTED_BACKOFF_MS = 30 * 60 * 1000; // 30 min
@@ -134,6 +135,92 @@ const GOOGLE_RPC_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailu
 const GOOGLE_RPC_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
+
+/**
+ * Text of the error for a Cloud Code Assist 429 that names no quota. The
+ * classifiers key off it so the verdict survives the trip from a thrown error
+ * to a finalized (possibly prefixed) assistant `errorMessage`.
+ */
+export const UNATTRIBUTED_REJECTION_PREFIX =
+	"Cloud Code Assist refused this request (429 without quota details); not retrying on other accounts";
+const ANTIGRAVITY_QUOTA_RESET_PATTERN = /quota will reset|exhausted your capacity/i;
+
+/**
+ * Whether a Google Antigravity 429 fails to identify a quota. A 429 is a
+ * quota limit only when it says so: retry timing (a `Retry-After` header or a
+ * body retry hint), a `RetryInfo` / `QuotaFailure` detail or a known
+ * `ErrorInfo` reason (anything {@link parseGoogleRpcRateLimitReason}
+ * classifies), or the daily-quota text ("quota will reset", "exhausted your
+ * capacity"). Anything else, such as the bare `RESOURCE_EXHAUSTED` "check
+ * quota" body Google returns for requests it refuses on client-fingerprint
+ * grounds, is a refusal: rotating it through the pool only exposes every
+ * sibling account to it, so it fails on the account that received it.
+ */
+export function isUnattributedAntigravity429(
+	provider: string | undefined,
+	status: number | undefined,
+	headers: Headers | undefined,
+	body: string,
+): boolean {
+	if (provider !== "google-antigravity" || status !== 429) return false;
+	if (extractRetryHint(headers, body) !== undefined) return false;
+	if (ANTIGRAVITY_QUOTA_RESET_PATTERN.test(body)) return false;
+	if (parseGoogleRpcRateLimitReason(body) !== undefined) return false;
+	// A QuotaFailure or RetryInfo the parser above could not place into a window still names a quota.
+	const details = asRecord(parseJsonBody(body)?.error)?.details;
+	return !(
+		Array.isArray(details) &&
+		details.some(value => {
+			const type = asRecord(value)?.["@type"];
+			return type === GOOGLE_RPC_QUOTA_FAILURE_TYPE || type === GOOGLE_RPC_RETRY_INFO_TYPE;
+		})
+	);
+}
+
+/** A failed Cloud Code Assist response, as {@link classifyCloudCodeAssistFailure} reports it. */
+export interface CloudCodeAssistFailure {
+	/** Whether the failure is an {@link isUnattributedAntigravity429} refusal. */
+	unattributed: boolean;
+	/** The caller's message, led by {@link UNATTRIBUTED_REJECTION_PREFIX} when `unattributed`. */
+	message: string;
+}
+
+/**
+ * Classifies a failed Cloud Code Assist response for a caller that builds its
+ * own error from it (chat stream, image generation, web search). An
+ * {@link isUnattributedAntigravity429} refusal gets
+ * {@link UNATTRIBUTED_REJECTION_PREFIX} ahead of `message`: that prefix is the
+ * marker {@link isUnattributedRejection} reads, so the retry, rotation, and
+ * credential-block layers keep the error on the account that received it
+ * instead of replaying it through the pool.
+ */
+export function classifyCloudCodeAssistFailure(
+	provider: string | undefined,
+	status: number | undefined,
+	headers: Headers | undefined,
+	body: string,
+	message: string,
+): CloudCodeAssistFailure {
+	const unattributed = isUnattributedAntigravity429(provider, status, headers, body);
+	return { unattributed, message: unattributed ? `${UNATTRIBUTED_REJECTION_PREFIX}. ${message}` : message };
+}
+
+/** Whether an error message reports an {@link isUnattributedAntigravity429} refusal. */
+export function isUnattributedRejectionText(message: string | undefined): boolean {
+	return message?.includes(UNATTRIBUTED_REJECTION_PREFIX) === true;
+}
+
+/** Whether an error, or an assistant message's `errorMessage`, reports an {@link isUnattributedAntigravity429} refusal. */
+export function isUnattributedRejection(error: unknown): boolean {
+	if (typeof error === "string") return isUnattributedRejectionText(error);
+	if (!error || typeof error !== "object") return false;
+	if ("message" in error && typeof error.message === "string" && isUnattributedRejectionText(error.message)) {
+		return true;
+	}
+	return "errorMessage" in error && typeof error.errorMessage === "string"
+		? isUnattributedRejectionText(error.errorMessage)
+		: false;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -270,6 +357,7 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
  * Explicit details such as "quota exceeded" retain their normal classification.
  */
 export function parseRateLimitReason(errorMessage: string): RateLimitReason {
+	if (isUnattributedRejectionText(errorMessage)) return "UNATTRIBUTED_REJECTION";
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return structuredReason;
 	const lowerWithStatus = errorMessage.toLowerCase();
@@ -480,6 +568,8 @@ export function isBillingCapUsageLimit(status: number | undefined, message: stri
  *     layer so transient or non-quota responses don't burn sibling credentials.
  */
 export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
+	// Refused without quota attribution: no sibling account may be exposed to it.
+	if (isUnattributedRejectionText(message)) return false;
 	const structuredReason = message ? parseGoogleRpcRateLimitReason(message) : undefined;
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isConcurrencyCapExclusion(status, message)) return false;
@@ -532,6 +622,7 @@ export function isOpaqueStatusBody(message: string): boolean {
  * {@link isUsageLimitOutcome} uses it for the account-rotation decision.
  */
 export function matchesUsageLimitText(errorMessage: string): boolean {
+	if (isUnattributedRejectionText(errorMessage)) return false;
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;

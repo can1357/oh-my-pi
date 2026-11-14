@@ -34,6 +34,7 @@ import {
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
+import { setProviderCooldownMs } from "@oh-my-pi/pi-ai/auth/provider-cooldown";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -46,6 +47,7 @@ import {
 	cfgAuthAccountPolicies,
 	cfgAuthBrokerToken,
 	cfgAuthBrokerUrl,
+	cfgOperatorUnattributedRefusalCooldownMinutes,
 	cfgOperatorUnpausedProviders,
 } from "../config/model-settings";
 import { cfgRetryUsageReservePct } from "./settings";
@@ -138,19 +140,22 @@ const cfgAuthStorageSettings = combine({
 	accountPolicies: cfgAuthAccountPolicies,
 	usageReservePct: cfgRetryUsageReservePct,
 	unpausedProviders: cfgOperatorUnpausedProviders,
+	refusalCooldownMinutes: cfgOperatorUnattributedRefusalCooldownMinutes,
 });
 
 /**
- * Applies the operator's `auth.unpausedProviders` (never a project layer's) to this process.
- * The pause set is process-wide: while a settings instance drives effects (`bindEffects`), its
- * effect owns it and other instances leave it alone. Commands that build auth storage from
- * read-only or resolved settings, with nothing bound, call this themselves, or the providers
- * stay paused there. Loaded credential pools refilter on their next read, so order does not matter.
+ * Applies the operator's `auth.unpausedProviders` and `auth.unattributedRefusalCooldownMinutes`
+ * (never a project layer's) to this process. Both are process-wide: while a settings instance
+ * drives effects (`bindEffects`), its effects own them and other instances leave them alone.
+ * Commands that build auth storage from read-only or resolved settings, with nothing bound, call
+ * this themselves, or the providers stay paused and the refusal pause keeps its default there.
+ * Loaded credential pools refilter on their next read, so order does not matter.
  */
-export function applyUnpausedProviders(settings: Settings): void {
+export function applyOperatorAuthSettings(settings: Settings): void {
 	const owner = effectsSettings();
 	if (owner !== undefined && owner !== settings) return;
 	setUnpausedProviders(cfgOperatorUnpausedProviders.get(settings));
+	setProviderCooldownMs(cfgOperatorUnattributedRefusalCooldownMinutes.get(settings) * 60_000);
 }
 
 /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
@@ -167,6 +172,8 @@ export interface AuthStorageSettingsSync {
  * - `auth.unpausedProviders` (operator layers only) re-applies which paused providers are back
  *   on — loaded credential pools refilter on their next read — and refreshes `modelRegistry`'s
  *   catalog for each newly unpaused provider, as a login does.
+ * - `auth.unattributedRefusalCooldownMinutes` (operator layers only) sets the pause later
+ *   unattributed refusals start.
  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
  *   broker with startup precedence (env → config.yml → token file; project layers
  *   never redirect credentials), and swap the credential store in place when the
@@ -219,7 +226,7 @@ export function createAuthStorageSettingsSync(
 	};
 
 	const applyUnpaused = async (added: readonly string[]) => {
-		applyUnpausedProviders(settings);
+		applyOperatorAuthSettings(settings);
 		if (!modelRegistry) return;
 		try {
 			await Promise.all(added.map(provider => modelRegistry.refreshProvider(provider, "online")));
@@ -234,11 +241,13 @@ export function createAuthStorageSettingsSync(
 			next.usageReservePct !== previous.usageReservePct ||
 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
 		const unpausedChanged = !Bun.deepEquals(next.unpausedProviders, previous.unpausedProviders);
+		const cooldownChanged = next.refusalCooldownMinutes !== previous.refusalCooldownMinutes;
 		const unpausedAdded = next.unpausedProviders.filter(provider => !previous.unpausedProviders.includes(provider));
 		pending = pending.then(async () => {
 			if (brokerChanged) await applyBroker();
 			if (policiesChanged) await applyPolicies();
 			if (unpausedChanged) await applyUnpaused(unpausedAdded);
+			else if (cooldownChanged) applyOperatorAuthSettings(settings);
 		});
 		return pending;
 	});
