@@ -4,7 +4,11 @@
 
 ### Added
 
-- Added `mixHex` for blending two hex colors ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved retry-hint extraction for Cloud Code Assist quota reset information, including compound durations and reset timestamps.
 
 ## [18.19.0] - 2026-11-12
 
