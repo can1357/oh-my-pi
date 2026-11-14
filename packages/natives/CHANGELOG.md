@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS `axSetValue` refusing every option of a Chromium `<select>` (Chrome, Electron) with an empty option list: options are matched by the text Chromium reports as their value, the menu is opened when the closed popup publishes only its chosen option, and the menu is closed afterwards with Escape only when, after `AXCancel`, it neither reports closing nor leaves the window list within 300 ms, as a Chromium menu that ignores the cancel does, instead of being left open with your keystrokes when no option matched ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS posting Escape to an application whose background menu had already closed, or whose menu windows could not be read, when closing a menu a click opened: Escape now goes only to a menu window listed right before it, so it cannot cancel a dialog or form in the app instead ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
