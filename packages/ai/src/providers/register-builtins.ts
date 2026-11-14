@@ -300,6 +300,12 @@ export const streamDevin = createLazyProviderStream(
 	mod => mod.streamDevin,
 );
 
+/** Stream the Antigravity CLI (`agy acp`) through the shared watchdog. */
+export const streamAntigravityCli = createLazyProviderStream(
+	() => import("./antigravity-cli"),
+	mod => mod.streamAntigravityCli,
+);
+
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */
 export const streamAppleFoundationModels = createLazyProviderStream(
 	() => import("./apple-foundation-models"),

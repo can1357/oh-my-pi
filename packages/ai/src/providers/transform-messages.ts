@@ -569,6 +569,7 @@ const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"factory-droid-agent": false,
 	"gitlab-duo-agent": false,
 	"devin-agent": false,
+	"antigravity-acp": false,
 };
 
 /**
