@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
@@ -229,5 +230,43 @@ describe("AuthBrokerRefresher", () => {
 		await refresher.tick();
 		expect(refreshSpy).toHaveBeenCalledTimes(1);
 		expect(store!.getOAuth("anthropic")?.access).toBe("fresh");
+	});
+
+	test("leaves expiring Antigravity accounts to on-use refresh and refreshes other providers", async () => {
+		// Antigravity is paused in its auth rules, which hides its accounts from the sweep anyway;
+		// lift the pause so the sweep sees them and must skip them itself.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		const now = Date.now();
+		const expiring = now + 60_000;
+		await store!.saveOAuth("anthropic", { access: "a-old", refresh: "a-refresh", expires: expiring, accountId: "a" });
+		storage = new AuthStorage(store!, { usageProviderResolver: () => undefined });
+		await storage.credentials.set(
+			"google-antigravity",
+			[0, 1, 2].map(index => ({
+				type: "oauth" as const,
+				access: `ag-old-${index}`,
+				refresh: `ag-refresh-${index}`,
+				expires: expiring,
+				accountId: `ag-${index}`,
+				projectId: `project-${index}`,
+				email: `ag-${index}@example.test`,
+			})),
+		);
+		expect(storage.credentials.list("google-antigravity")).toHaveLength(3);
+		const refreshed: string[] = [];
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (provider, credentials) => {
+			refreshed.push(`${provider}:${credentials.refresh}`);
+			return { ...credentials, access: `${credentials.access}-fresh`, expires: now + 2 * 60 * 60_000 };
+		});
+		const refresher = new AuthBrokerRefresher({ storage, refreshSkewMs: 5 * 60_000, now: () => now });
+
+		await refresher.tick();
+		expect(refreshed).toEqual(["anthropic:a-refresh"]);
+
+		// Using one Antigravity account refreshes exactly that account.
+		const [first] = storage.credentials.list("google-antigravity");
+		const access = await storage.oauth.accessById("google-antigravity", first!.id);
+		expect(access?.ok).toBe(true);
+		expect(refreshed).toEqual(["anthropic:a-refresh", "google-antigravity:ag-refresh-0"]);
 	});
 });
