@@ -10,3 +10,4 @@ Nothing you started running and no answer owed? Returns at once.
 - A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to {{longest}}.
 {{/if}}
 Results and messages auto-deliver. NEVER poll while work remains.
+Pending wakeup timers are not jobs: finish this turn instead of waiting or polling for them.

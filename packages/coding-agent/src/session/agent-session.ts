@@ -404,6 +404,8 @@ import {
 	LAUNCH_COMPLETION_MESSAGE_TYPE,
 	type LaunchCompletionEntry,
 } from "./launch-completion";
+import type { WakeupDelivery } from "../async/wakeup-manager";
+import { buildWakeupMessage } from "./wakeup-delivery";
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
@@ -1358,6 +1360,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	#deferredExtensionLoader: (() => Promise<void>) | undefined;
 	#deferredExtensionLoad: Promise<void> | undefined;
+	#extensionStartupComplete = false;
 	#activeAgentContinue: ActiveAgentContinue | undefined;
 	#agentContinueSchedulerToken = 0;
 
@@ -1430,6 +1433,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	};
 	/** Transitions requested from outside and not yet released (queued, running, or awaiting nested ones). */
 	#queuedSessionTransitions = 0;
+	/** Set when a transition suspends wakeups; only then does the drained queue restore them. */
+	#wakeupsSuspendedByTransition = false;
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
 	readonly #sessionTransitionScope: Disposable = {
 		[Symbol.dispose]: () => {
@@ -2224,6 +2229,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
 		});
 		this.#evalToolSession = config.evalToolSession;
+		if (config.evalToolSession?.wakeupManager) {
+			const wakeups = config.evalToolSession.wakeupManager;
+			this.addDisposer(() => wakeups.suspend());
+		}
 		const initialEvalStateContext = this.#buildEvalStateContextMessage(this.agent.state.messages);
 		if (initialEvalStateContext) {
 			// Persist the startup snapshot at the slot this process sends it from, so
@@ -2608,6 +2617,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
 		});
+		if (config.evalToolSession?.wakeupManager) {
+			const wakeups = config.evalToolSession.wakeupManager;
+			this.yieldQueue.register<WakeupDelivery>("wakeup", {
+				isStale: entry => this.#isDisposed || !wakeups.isCurrent(entry),
+				build: buildWakeupMessage,
+			});
+		}
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
 		// injection boundary; all but broadcasts and progress notes also expose a
@@ -2620,7 +2636,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// are dropped by the drain, so they must not cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
-			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable("wakeup");
 		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
 		// instead of sitting behind it. Deferred wakes are not peeked: no
 		// boundary injection would drain them. Foreground tools are unaffected.
@@ -6372,6 +6389,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Before anything awaits: a reload keeps the session id, so only the transition itself can supersede
 		// a pending idle check or an in-flight recap that belong to the transcript being replaced.
 		this.#idleMaintenance?.invalidate();
+		this.#evalToolSession?.wakeupManager?.suspend();
+		this.#wakeupsSuspendedByTransition = true;
+		this.yieldQueue.clear("wakeup");
 		if (this.#sessionTransitionDepth++ === 0) {
 			const settled = Promise.withResolvers<void>();
 			this.#sessionTransitionSettled = settled.promise;
@@ -6454,6 +6474,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		turn.released = true;
 		if (fromOutside) this.#queuedSessionTransitions--;
 		done.resolve();
+		// Only now is the queue empty: a hook enabled() reads isSessionTransitioning, so the scope's
+		// disposal (one transition done, others may still be queued) is too early to restore timers.
+		// A transition that failed before suspending (switchSession's auth check) leaves live timers
+		// and in-flight schedules alone.
+		if (this.isSessionTransitioning || !this.#wakeupsSuspendedByTransition) return;
+		this.#wakeupsSuspendedByTransition = false;
+		void this.#evalToolSession?.wakeupManager?.activate().catch(() => {
+			logger.warn("Could not restore session wakeups after transition");
+		});
 	}
 
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
@@ -7782,6 +7811,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Whether startup-deferred extensions are still unbound (loading or not yet started). */
 	get hasPendingDeferredExtensions(): boolean {
 		return this.#deferredExtensionLoader !== undefined || this.#deferredExtensionLoad !== undefined;
+	}
+
+	/** UI availability alone does not mean restored startup authorization is ready. */
+	get hasCompletedExtensionStartup(): boolean {
+		return this.#extensionStartupComplete;
+	}
+
+	/** Called by the mode host only after every initial session_start handler settles. */
+	async completeExtensionStartup(): Promise<void> {
+		if (this.#extensionStartupComplete || this.#isDisposed) return;
+		await this.#tools.runToolRegistryMutation(async () => {
+			this.#extensionStartupComplete = true;
+		});
+		if (this.#isDisposed) return;
+		try {
+			await this.#evalToolSession?.wakeupManager?.activate();
+		} catch {
+			logger.warn("Could not restore session wakeups after extension startup");
+		}
 	}
 
 	/**

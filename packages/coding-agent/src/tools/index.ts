@@ -78,6 +78,8 @@ import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
+import { WakeupTool } from "./wakeup";
+import type { WakeupManager } from "../async/wakeup-manager";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
@@ -231,6 +233,8 @@ export interface ToolSession {
 	 * false for print, RPC, ACP, and subagent sessions. See `CreateAgentSessionOptions.tuiTranscript`.
 	 */
 	tuiTranscript?: boolean;
+	/** Timer scheduler owned only by a persistent top-level interactive session. */
+	wakeupManager?: WakeupManager;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -613,6 +617,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
 	wait: s => new WaitTool(s),
+	wakeup: WakeupTool.createIf,
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
@@ -784,6 +789,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		// Without an edit tool, bash is the remaining way to modify existing files.
 		if (name === "edit") return !editDisabled;
 		if (name === "bash") return editDisabled || cfgBashEnabled.get(session.settings);
+		if (name === "wakeup") return session.wakeupManager !== undefined && session.tuiTranscript === true;
 		if (name === "eval") return allowEval;
 		if (name === "debug") return cfgDebugEnabled.get(session.settings);
 		if (name === "ida") return cfgIdaAvailable.get(session.settings);

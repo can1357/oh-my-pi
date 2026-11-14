@@ -241,6 +241,8 @@ export interface SessionStorage {
 	 * another process writes a session.
 	 */
 	claimSession?(sessionId: string, sessionPath: string): (() => void) | null;
+	/** Same ownership lease, but throws instead of failing open if the OS lock is unavailable. */
+	claimSessionStrict?(sessionId: string, sessionPath: string): (() => void) | null;
 	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
@@ -1368,6 +1370,15 @@ export class FileSessionStorage implements SessionStorage {
 	 * owned, so it never moves a session off its file.
 	 */
 	claimSession(sessionId: string, sessionPath: string): (() => void) | null {
+		return this.#claimSession(sessionId, sessionPath, false);
+	}
+
+	/** Security-sensitive callers require a real OS lease, never the best-effort fallback. */
+	claimSessionStrict(sessionId: string, sessionPath: string): (() => void) | null {
+		return this.#claimSession(sessionId, sessionPath, true);
+	}
+
+	#claimSession(sessionId: string, sessionPath: string, strict: boolean): (() => void) | null {
 		const onDisk = readSessionHeaderIdSync(sessionPath);
 		if (onDisk !== undefined && onDisk !== sessionId) return null;
 		let held = sessionLeases.get(sessionId);
@@ -1376,6 +1387,7 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				lease = tryAcquireSessionLease(sessionId);
 			} catch (err) {
+				if (strict) throw err;
 				logger.debug("Session ownership lease unavailable", { sessionId, error: toError(err).message });
 				return () => {};
 			}

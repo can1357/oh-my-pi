@@ -20,7 +20,8 @@ import { PipeStreams, shellBuiltins } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
-import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { WAKEUP_CHECK_MAX_BYTES, WAKEUP_CHECK_TIMEOUT_MS, type WakeupCheckResult } from "../async/wakeup-manager";
+import { applyDirenvPreflight, type BashResult, executeBash, executeBashStdoutDigest } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
@@ -859,6 +860,64 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {}
+
+	/**
+	 * A hash-only bash invocation for the wakeup scheduler. The caller MUST
+	 * wrap this tool in the ordinary approval/extension pipeline on every run.
+	 * Kept out of the tool registry: models cannot select this execution mode.
+	 */
+	createWakeupCheck(command: string, cwd: string, timeoutMs: number): AgentTool {
+		const parameters = type({ command: "string", cwd: "string", timeout: "number" });
+		const timeout = Math.min(WAKEUP_CHECK_TIMEOUT_MS, timeoutMs) / 1000;
+		return {
+			name: this.name,
+			label: this.label,
+			description: this.description,
+			parameters,
+			approval: this.approval,
+			formatApprovalDetails: this.formatApprovalDetails,
+			readsSkillUris: this.readsSkillUris,
+			execute: async (id, args, signal, _onUpdate, context) => {
+				signal?.throwIfAborted();
+				const input = parameters.assert(args);
+				if (input.command !== command || input.cwd !== cwd || input.timeout !== timeout)
+					throw new ToolError(
+						"Conditional check input was revised; schedule a new wakeup with an explicit baseline",
+					);
+				if (this.session.isToolActive?.("bash") !== true)
+					throw new ToolError("Conditional wakeup requires an active bash tool");
+				if (cfgBashInterceptorEnabled.get(this.session.settings)) {
+					const intercepted = checkBashInterception(
+						command,
+						context?.toolNames ?? [],
+						cfgBashInterceptorPatterns.get(this.session.settings),
+						command,
+					);
+					if (intercepted.block) throw new ToolError(intercepted.message ?? "Command blocked");
+				}
+				const approval = this.approval({ command });
+				const tier = typeof approval === "string" ? approval : approval.tier;
+				// Settles only after native termination, so the scheduler's check
+				// serialization cannot overlap a cancelled run's process tree.
+				const result = await executeBashStdoutDigest(command, {
+					cwd,
+					timeout: Math.min(WAKEUP_CHECK_TIMEOUT_MS, timeoutMs),
+					maxBytes: WAKEUP_CHECK_MAX_BYTES,
+					signal,
+					env: this.#sessionEnv(id),
+					gitGuard: cfgBashGitGuard.get(this.session.settings),
+					filesystem: this.#urlFilesystem(signal, tier).shellFilesystem(),
+				});
+				const check: WakeupCheckResult = {
+					hash: result.hash,
+					exitCode: result.exitCode,
+					timedOut: result.timedOut,
+					overflow: result.overflow,
+				};
+				return { content: [], details: check };
+			},
+		};
+	}
 
 	/**
 	 * URL filesystem for one embedded-shell run: this session's context, cancelled by the run's own

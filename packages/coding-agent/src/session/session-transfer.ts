@@ -33,6 +33,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
+import { cancelPendingWakeups } from "../async/wakeup-manager";
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
@@ -535,12 +536,15 @@ async function removeSessionFiles(sessionFile: string): Promise<void> {
 }
 
 /**
- * Open a session through `open`, record its arrival, and close it. A failure
- * after the session landed removes it again, so the caller can roll back.
+ * Open a session through `open`, disarm the wakeups it arrived with, record its arrival, and close it.
+ * `archiveOwner` is the session id the archive's wakeup records were scheduled under; a fork takes a new
+ * id but keeps those records' owner. A failure after the session landed removes it again, so the caller
+ * can roll back.
  */
 async function placeSession(
 	open: () => Promise<SessionManager>,
 	arrival: SessionTransferDetails,
+	archiveOwner: string,
 ): Promise<{ sessionFile: string; id: string }> {
 	let placed: string | undefined;
 	try {
@@ -548,6 +552,8 @@ async function placeSession(
 		placed = manager.getSessionFile();
 		const id = manager.getSessionId();
 		try {
+			// Saved timers (and their shell checks) came from the archive, not from this machine's user.
+			cancelPendingWakeups(manager, archiveOwner);
 			await appendTransferNotice(manager, arrival);
 		} finally {
 			await manager.close();
@@ -566,7 +572,7 @@ async function placeSession(
  * layout, every blob's sha256) before anything is written. Blobs go into the
  * local blob store; the journal and artifacts are staged in a temp directory
  * and moved with {@link SessionManager.openRelocated}, which rewrites the
- * header `cwd`. An `arrived` marker is appended.
+ * header `cwd`. Pending wakeups the archive carried are cancelled, and an `arrived` marker is appended.
  *
  * One live copy: local copies of the same session whose entries are a prefix
  * of the incoming ones are replaced (restored if placing fails); if any local
@@ -608,7 +614,7 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 		}
 
 		if (diverged) {
-			const placed = await placeSession(() => SessionManager.forkFrom(stagedFile, cwd, sessionDir), arrival);
+			const placed = await placeSession(() => SessionManager.forkFrom(stagedFile, cwd, sessionDir), arrival, id);
 			logger.info("Unpacked session as a fork of a diverged local copy", { parent: id, ...placed });
 			return { ...placed, mode: "forked" };
 		}
@@ -622,6 +628,7 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 				placed = await placeSession(
 					() => SessionManager.openRelocated(stagedFile, recordedCwd, cwd, sessionDir),
 					arrival,
+					id,
 				);
 			} catch (error) {
 				await restoreAside(aside);

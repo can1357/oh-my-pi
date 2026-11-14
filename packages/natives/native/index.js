@@ -87,6 +87,7 @@ export const encodeSixel = nativeBindings.encodeSixel ?? missingNativeExport("en
 export const encodeSixelAsync = nativeBindings.encodeSixelAsync ?? missingNativeExport("encodeSixelAsync");
 export const execReplace = nativeBindings.execReplace ?? missingNativeExport("execReplace");
 export const executeShell = nativeBindings.executeShell ?? missingNativeExport("executeShell");
+export const executeShellStdout = nativeBindings.executeShellStdout ?? missingNativeExport("executeShellStdout");
 export const expandWindowsLongPath = nativeBindings.expandWindowsLongPath ?? missingNativeExport("expandWindowsLongPath");
 export const extractInlineSloppyRegions = nativeBindings.extractInlineSloppyRegions ?? missingNativeExport("extractInlineSloppyRegions");
 export const extractSegments = nativeBindings.extractSegments ?? missingNativeExport("extractSegments");

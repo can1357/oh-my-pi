@@ -22,15 +22,58 @@ import type { DaemonSnapshot } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
 import { card, type CardToolResult as ToolResult, firstText, safe } from "./result-card";
 
+/**
+ * Display-safe wakeup timer row for the `proc://` table. Carries no prompt or
+ * check command: only what the table shows.
+ */
+export interface WakeupTimerSnapshot {
+	id: string;
+	state: "scheduled" | "cancelled" | "claimed";
+	/** Epoch ms of the next delivery or conditional check. */
+	dueAt: number;
+	/** Epoch ms after which a conditional wakeup delivers regardless of output. */
+	deadline?: number;
+}
+
 export interface ProcReadDetails {
 	jobs?: JobSnapshot[];
 	agents?: AgentActivitySnapshot[];
 	daemons?: DaemonSnapshot[];
+	wakeups?: WakeupTimerSnapshot[];
 	job?: JobSnapshot;
 	daemon?: DaemonSnapshot;
 	log?: string;
 	terminalRows?: string[];
 }
+
+/** Shown when the `proc://` table has no jobs, services, agents, or timers. */
+export const PROC_EMPTY_TEXT = "No background jobs, services, or wakeup timers.";
+
+function isoSeconds(at: number): string {
+	return new Date(at).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/** `due <time> (in 4m)`; a scheduled timer past due reads `overdue`, a deadline is appended. */
+function wakeupDueText(wakeup: WakeupTimerSnapshot, now = Date.now()): string {
+	let due = `due ${isoSeconds(wakeup.dueAt)}`;
+	if (wakeup.state === "scheduled") {
+		const delta = wakeup.dueAt - now;
+		due += delta > 0 ? ` (in ${formatDuration(delta)})` : ` (overdue ${formatDuration(-delta)})`;
+	}
+	return wakeup.deadline === undefined ? due : `${due} · deadline ${isoSeconds(wakeup.deadline)}`;
+}
+
+const WAKEUP_TONE: Record<WakeupTimerSnapshot["state"], TspTone> = {
+	scheduled: "info",
+	claimed: "success",
+	cancelled: "warning",
+};
+
+const WAKEUP_COLOR: Record<WakeupTimerSnapshot["state"], ToolUIColor> = {
+	scheduled: "accent",
+	claimed: "success",
+	cancelled: "warning",
+};
 
 export type ProcWriteDetails =
 	| CoordinationDetails
@@ -235,18 +278,21 @@ export function renderProcRead(
 			if (output.length > limit) visible.unshift(theme.fg("dim", `  … ${output.length - limit} earlier lines`));
 			return [header, ...visible];
 		}
-		if (id && !details?.jobs && !details?.daemons && !details?.agents) {
+		if (id && !details?.jobs && !details?.daemons && !details?.agents && !details?.wakeups) {
 			return [header, ...preview(firstText(result), expanded, theme, "toolOutput")];
 		}
 		const jobs = details?.jobs ?? [];
 		const services = details?.daemons ?? [];
 		const agents = details?.agents ?? [];
+		const wakeups = details?.wakeups ?? [];
 		const meta = [
 			`${jobs.length} jobs`,
 			`${services.length} services`,
 			...(agents.length ? [`${agents.length} agents`] : []),
+			...(wakeups.length ? [`${wakeups.length} timers`] : []),
 		];
 		const listHeader = renderStatusLine({ icon: "info", title, meta }, theme);
+		const now = Date.now();
 		const items = [
 			...jobs.map(job => ({ label: jobRow(job, theme) })),
 			...services.map(service => ({
@@ -254,6 +300,9 @@ export function renderProcRead(
 			})),
 			...agents.map(agent => ({
 				label: `${formatBadge("agent", agent.live ? "accent" : "warning", theme)} ${theme.fg("toolOutput", safe(agent.id))} ${theme.fg("dim", formatDuration(agent.ageMs))}`,
+			})),
+			...wakeups.map(wakeup => ({
+				label: `${formatBadge("wakeup", "accent", theme)} ${theme.fg("toolOutput", safe(wakeup.id))} ${formatBadge(wakeup.state, WAKEUP_COLOR[wakeup.state] ?? "warning", theme)} ${theme.fg("dim", wakeupDueText(wakeup, now))}`,
 			})),
 		];
 		return [
@@ -268,7 +317,7 @@ export function renderProcRead(
 				},
 				theme,
 			),
-			...(items.length ? [] : [theme.fg("dim", "No background jobs or services.")]),
+			...(items.length ? [] : [theme.fg("dim", PROC_EMPTY_TEXT)]),
 		];
 	}, options);
 }
@@ -444,12 +493,14 @@ export function describeProcRead(
 		const output = details.terminalRows?.join("\n") ?? details.log ?? "";
 		return { head, body: [ansi(output, { follow: daemon.exitedAt === undefined, role: "omp.tool.proc.log" })] };
 	}
-	if (id && !details?.jobs && !details?.daemons && !details?.agents) {
+	if (id && !details?.jobs && !details?.daemons && !details?.agents && !details?.wakeups) {
 		return { head, body: compact<NativeChild>([quotedPreview(firstText(result), "toolOutput")]) };
 	}
 	const jobs = details?.jobs ?? [];
 	const services = details?.daemons ?? [];
 	const agents = details?.agents ?? [];
+	const wakeups = details?.wakeups ?? [];
+	const now = Date.now();
 	const items: NativeNode[] = [
 		...jobs.map(job => jobItem(job)),
 		...services.map(service =>
@@ -480,11 +531,25 @@ export function describeProcRead(
 				`agent:${agent.id}`,
 			),
 		),
+		...wakeups.map(wakeup =>
+			node(
+				"item",
+				{
+					label: [span("wakeup", "accent"), span(" "), span(safe(wakeup.id), "toolOutput")],
+					detail: [span(wakeupDueText(wakeup, now), "muted")],
+					value: [span(wakeup.state, WAKEUP_TONE[wakeup.state] ?? "warning")],
+					tone: WAKEUP_TONE[wakeup.state] ?? "warning",
+				},
+				undefined,
+				`wakeup:${wakeup.id}`,
+			),
+		),
 	];
 	const counts = [`${jobs.length} jobs`, `${services.length} services`];
 	if (agents.length) counts.push(`${agents.length} agents`);
+	if (wakeups.length) counts.push(`${wakeups.length} timers`);
 	return {
 		head: toolHead(title, id ? span(safe(id), "accent") : undefined, counts.join(" · ")),
-		body: [node("list", { empty: "No background jobs or services.", role: "omp.tool.proc.table" }, items)],
+		body: [node("list", { empty: PROC_EMPTY_TEXT, role: "omp.tool.proc.table" }, items)],
 	};
 }

@@ -274,7 +274,7 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
-	it("advertises stdin and modes as service-only while kill remains available for jobs and agents", async () => {
+	it("advertises stdin and modes as service-only while kill remains available for jobs, agents, and wakeups", async () => {
 		const router = new InternalUrlRouter();
 		const help = router
 			.describe({
@@ -286,7 +286,7 @@ describe("proc:// background jobs", () => {
 				subagent: false,
 			})
 			.find(line => line.startsWith("proc://"));
-		expect(help).toMatch(/\/kill[^;]*jobs, agents, and services/);
+		expect(help).toMatch(/\/kill[^;]*jobs, agents, wakeups, and services/);
 		// Service controls live in the on-demand reference (`xd://read/urls`), never unqualified in the always-on line.
 		expect(help).not.toContain("stdin");
 		const reference = router.reference().find(line => line.startsWith("proc://"));

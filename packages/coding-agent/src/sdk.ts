@@ -52,6 +52,7 @@ import {
 	formatAdvisorMemoryPrompt,
 } from "./advisor";
 import { AsyncJobManager, type AsyncJobManagerApi } from "./async";
+import { WakeupManager, type WakeupCheckResult } from "./async/wakeup-manager";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
@@ -2781,6 +2782,54 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? undefined
 				: startSpotlightExperiment(settings, sessionManager, () => toolSession.getActiveModel?.()?.provider);
 		if (spotlightExperiment) toolSession.spotlight = spotlightExperiment;
+		let wakeupUIReady = false;
+		if (
+			tuiTranscript &&
+			options.hasUI === true &&
+			sessionManager.getSessionFile() &&
+			sessionManager.supportsExclusiveOwnership()
+		) {
+			const manager = new WakeupManager({
+				journal: sessionManager,
+				cwd: () => sessionManager.getCwd(),
+				enabled: () =>
+					wakeupUIReady &&
+					session?.hasCompletedExtensionStartup === true &&
+					!session.isDisposed &&
+					!session.isSessionTransitioning,
+				claimOwnership: () => sessionManager.claimExclusiveOwnership(),
+				refreshJournal: () => sessionManager.refreshExclusiveJournal(),
+				check: async (command, cwd, timeoutMs, signal) => {
+					await session.loadDeferredExtensions();
+					signal.throwIfAborted();
+					if (!session?.getEvalBridgeToolNames().includes("bash") || !session.hasBuiltInTool("bash"))
+						throw new Error(
+							"Conditional wakeup requires the enabled native bash tool, not an extension replacement",
+						);
+					const native = new BashTool(toolSession).createWakeupCheck(command, cwd, timeoutMs);
+					const guarded = new ExtensionToolWrapper(native, extensionRunner);
+					const result = await guarded.execute(
+						`wakeup_${Bun.randomUUIDv7()}`,
+						{
+							command,
+							cwd,
+							timeout: timeoutMs / 1000,
+						},
+						signal,
+						undefined,
+						toolContextStore.getContext(),
+					);
+					if (result.isError) throw new Error("Conditional check was rejected");
+					return result.details as WakeupCheckResult;
+				},
+				deliver: async delivery => {
+					await session.loadDeferredExtensions();
+					if (manager.isCurrent(delivery)) await session.yieldQueue.enqueueWithReceipt("wakeup", delivery);
+				},
+			});
+			toolSession.wakeupManager = manager;
+			startupCleanup.defer(() => manager.suspend());
+		}
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
@@ -4756,6 +4805,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 			toolContextStore.setUIContext(uiContext, hasUI);
+			if (toolSession.wakeupManager && wakeupUIReady !== hasUI) {
+				wakeupUIReady = hasUI;
+				if (hasUI && session.hasCompletedExtensionStartup) {
+					void toolSession.wakeupManager.activate().catch(() => {
+						logger.warn("Could not restore session wakeups");
+					});
+				} else toolSession.wakeupManager.suspend();
+			}
 		};
 
 		const initialTools = initialToolNames
@@ -5093,6 +5150,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The primary may carry a dormant xd:// write transport. Advisors use
 			// their own configured tool slate, so a selected write is always full.
 			deviceOnlyWrite: undefined,
+			wakeupManager: undefined,
+			tuiTranscript: false,
 			pendingFullWriteDescription: undefined,
 			get cwd() {
 				return sessionManager.getCwd();

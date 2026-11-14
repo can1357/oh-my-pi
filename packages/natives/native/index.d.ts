@@ -2196,6 +2196,16 @@ export declare function execReplace(argv: Array<string>): void
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
 
+/**
+ * Execute an embedded bash command, delivering only its stdout, as raw bytes.
+ *
+ * Creates a fresh session for each call. `on_stdout` receives stdout exactly
+ * as the command wrote it: never decoded, never merged with stderr, never
+ * minimized. Stderr is drained and discarded. A cancelled or timed-out run
+ * resolves only after its processes have been terminated.
+ */
+export declare function executeShellStdout(options: ShellStdoutOptions, onStdout: (error: Error | null, chunk: Uint8Array) => void): Promise<ShellRunResult>
+
 /** Expand Windows 8.3 components without resolving symlinks or junctions. */
 export declare function expandWindowsLongPath(path: string): string
 
@@ -3991,6 +4001,29 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+}
+
+/**
+ * Options for [`execute_shell_stdout`]: [`ShellExecuteOptions`] without a
+ * minimizer, whose rewrite contract presumes merged decoded text.
+ */
+export interface ShellStdoutOptions {
+  /** Command string to execute in the shell. */
+  command: string
+  /** Working directory for the command. */
+  cwd?: string
+  /** Environment variables to apply for this command only. */
+  env?: Record<string, string>
+  /** Environment variables to apply once per session. */
+  sessionEnv?: Record<string, string>
+  /** Timeout in milliseconds before cancelling the command. */
+  timeoutMs?: number
+  /** Optional snapshot file to source on session creation. */
+  snapshotPath?: string
+  /** Abort signal for cancelling the operation. */
+  signal?: unknown
+  /** Filesystem backing the command (native when absent). */
+  filesystem?: ShellFilesystem
 }
 
 /** Native non-executing visualization transformations. */

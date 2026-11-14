@@ -6,6 +6,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	executeShellStdout,
 	type MinimizerOptions,
 	type PipeStreams,
 	PtySession,
@@ -1063,6 +1064,102 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 	}
+}
+
+export interface BashStdoutDigestOptions {
+	cwd?: string;
+	/** Native deadline in milliseconds. */
+	timeout: number;
+	/** Stdout byte ceiling; the first byte past it aborts the run and reports `overflow`. */
+	maxBytes: number;
+	signal?: AbortSignal;
+	/** Additional environment variables to inject. */
+	env?: Record<string, string>;
+	/** Arm the embedded shell's git guard builtin. */
+	gitGuard?: boolean;
+	/** Filesystem backing the embedded shell; required for a `scheme://` cwd. */
+	filesystem?: ShellFilesystem;
+}
+
+export interface BashStdoutDigest {
+	/** SHA-256 (hex) of the exact stdout bytes; meaningless when `overflow`. */
+	hash: string;
+	/** Stdout crossed `maxBytes`. */
+	overflow: boolean;
+	exitCode: number | undefined;
+	cancelled: boolean;
+	timedOut: boolean;
+}
+
+/**
+ * Hash-only command run for conditional wakeups. Hashes and counts stdout as
+ * the raw bytes the command wrote, before any decoding, so distinct binary
+ * outputs never collapse into one digest. Stderr is discarded natively; no
+ * output, artifact, terminal graphics or minimizer original is retained.
+ *
+ * Runs on a fresh one-shot embedded shell with the same session env, snapshot,
+ * direnv preflight, git guard and injected filesystem as {@link executeBash}.
+ * The promise settles only once the native run has — including the
+ * termination of a cancelled or timed-out process tree — so a caller that
+ * serializes checks on it never overlaps two process trees. A caller-visible
+ * deadline must therefore race this promise rather than await it.
+ */
+export async function executeBashStdoutDigest(
+	command: string,
+	options: BashStdoutDigestOptions,
+): Promise<BashStdoutDigest> {
+	const settings = await Settings.init();
+	const { shell, env: shellEnv, prefix } = settings.getShellConfig();
+	const commandCwd = resolveShellCwd(options.cwd);
+	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
+	if (virtualCwd && !options.filesystem) {
+		throw new Error(`Working directory ${commandCwd} needs the embedded shell with an injected filesystem`);
+	}
+	const [snapshotPath, preflight] = await Promise.all([
+		isBashShell(shell) ? getOrCreateSnapshot(shell, shellEnv) : null,
+		applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
+			callerEnv: options.env,
+			signal: options.signal,
+			timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
+			callerTimeoutMs: options.timeout,
+			direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
+			commandPrefix: prefix,
+		}),
+	]);
+
+	const hasher = new Bun.CryptoHasher("sha256");
+	let bytes = 0;
+	let overflow = false;
+	const overflowAbort = new AbortController();
+	const result = await executeShellStdout(
+		{
+			command: preflight.command,
+			cwd: commandCwd,
+			env: buildNonInteractiveEnv(preflight.env),
+			sessionEnv: options.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv,
+			snapshotPath: snapshotPath ?? undefined,
+			timeoutMs: options.timeout,
+			signal: options.signal ? AbortSignal.any([options.signal, overflowAbort.signal]) : overflowAbort.signal,
+			filesystem: options.filesystem,
+		},
+		(err, chunk) => {
+			if (err || overflow) return;
+			bytes += chunk.byteLength;
+			if (bytes > options.maxBytes) {
+				overflow = true;
+				overflowAbort.abort();
+				return;
+			}
+			hasher.update(chunk);
+		},
+	);
+	return {
+		hash: hasher.digest("hex"),
+		overflow,
+		exitCode: result.exitCode,
+		cancelled: result.cancelled,
+		timedOut: result.timedOut,
+	};
 }
 
 function buildSessionKey(
