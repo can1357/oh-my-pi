@@ -4105,7 +4105,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * refusal (#3591) or an abandoned length-stop recovery. Retained until the next
 	 * run starts so post-settle readers ({@link getLastAssistantMessage}: print
 	 * mode, task executor) still see the terminal error instead of a silently
-	 * successful-looking state.
+	 * successful-looking state, and manual retry can resume the failed request.
+	 * Cleared when the conversation is replaced.
 	 */
 	#prunedTerminalFailure: AssistantMessage | undefined = undefined;
 
@@ -7005,6 +7006,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#releaseRetainedSessionMemory(): void {
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
+		this.#prunedTerminalFailure = undefined;
 		this.#tools.releaseRestoredTranscript();
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
@@ -7105,6 +7107,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// calls, and error state. agent.reset() keeps the model and system prompt.
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
+		this.#prunedTerminalFailure = undefined;
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
@@ -7158,6 +7161,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		resetCapabilities();
 		this.#transcriptEpoch++;
 		await this.refreshBaseSystemPrompt();
+		await this.#extensionRunner?.emit({ type: "session_clear" });
 
 		return { droppedCount };
 	}
@@ -12354,6 +12358,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			try {
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
+				this.#prunedTerminalFailure = undefined;
 				this.tokenRate.reset();
 				if (options?.drop && previousSessionFile) {
 					try {
@@ -13471,7 +13476,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Retry the last failed assistant turn when the session is idle. */
 	async retry(): Promise<boolean> {
-		const didRetry = await this.#recovery.retry();
+		const didRetry = await this.#recovery.retry(this.#prunedTerminalFailure);
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
 		if (didRetry) this.#advisors.autoResumeSuppressed = false;
@@ -14057,6 +14062,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * only known once its file is loaded). A session created with `allowSessionModelFallback` (and
 	 * `retry.modelFallback` on) instead keeps its current model and reports a
 	 * warning. Reloading the current session keeps the current model.
+	 *
+	 * With `onCwdChange`, a target whose recorded directory is missing or cannot be
+	 * entered throws `Cannot resume session: …` and the current session stays active.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
 	async switchSession(
@@ -14201,7 +14209,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
 					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
-						throw SESSION_CWD_CHANGE_REJECTED;
+						// setSessionFile kept the current cwd because the recorded one cannot be
+						// entered; resuming here would point tools at the wrong project.
+						throw new Error(
+							`Cannot resume session: its directory ${recordedCwd} is missing or cannot be entered`,
+						);
 					}
 				}
 			}
@@ -14355,6 +14367,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#persistRebuiltEvalStateContext(this.agent.state.messages);
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
+				this.#prunedTerminalFailure = undefined;
 			}
 			this.#reconnectToAgent();
 			try {
@@ -14624,6 +14637,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
+			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
@@ -14750,6 +14764,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
 
+			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
@@ -15083,6 +15098,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#bash.markSessionTransition(bashTransition);
 			branchTransitioned = true;
+			this.#prunedTerminalFailure = undefined;
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}
