@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,7 @@ import {
 	unwrapTranscript,
 } from "@oh-my-pi/pi-ai/transcription";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { googleAntigravityModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
@@ -139,12 +140,18 @@ describe("google-gemini-cli-transcribe runner", () => {
 			if (!url.includes(":streamGenerateContent")) return new Response("version: 2.26.0\n");
 			return streamCalls++ === 0 ? new Response("unavailable", { status: 503 }) : sse("Hello.");
 		});
-		const result = await transcribeAudio(
-			model,
-			{ audio: AUDIO, mimeType: "audio/webm", responseFormat: "json" },
-			{ apiKey: CREDENTIAL, fetch },
-		);
-		expect(result.text).toBe("Hello.");
+		// Antigravity is paused in its auth rules; its transport stays for when it is turned back on.
+		const unpaused = vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		try {
+			const result = await transcribeAudio(
+				model,
+				{ audio: AUDIO, mimeType: "audio/webm", responseFormat: "json" },
+				{ apiKey: CREDENTIAL, fetch },
+			);
+			expect(result.text).toBe("Hello.");
+		} finally {
+			unpaused.mockRestore();
+		}
 		expect(urls.filter(url => url.includes(":streamGenerateContent"))).toEqual([
 			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
 			"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",

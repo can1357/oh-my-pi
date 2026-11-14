@@ -15,7 +15,10 @@ use super::{
 	GitRepo,
 	filter::WorktreeFilter,
 	normalize_path,
-	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
+	open::{
+		load_index_at, load_index_or_empty, load_index_or_head, status_with_fresh_index,
+		status_with_index,
+	},
 	read::literal_pathspec,
 };
 use crate::{
@@ -199,7 +202,8 @@ impl GitRepo {
 			.transpose()
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
-		run_commit_hook(self, "pre-commit", &[])?;
+		let index_path = options.index_path.as_deref();
+		run_commit_hook(self, "pre-commit", &[], index_path)?;
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit", err))?;
@@ -207,7 +211,26 @@ impl GitRepo {
 			.try_peel_to_id()
 			.map_err(|err| Error::backend("git commit", err))?
 			.map(|id| id.detach());
-		let index = load_index_or_head(&repo, "git commit")?;
+		if let Some(expected) = options.expected_head.as_deref() {
+			let expected = repo
+				.rev_parse_single(expected)
+				.map_err(|err| Error::backend("git commit resolve expected HEAD", err))?
+				.detach();
+			if old_commit != Some(expected) {
+				return Err(Error::HeadMoved {
+					expected: expected.to_hex().to_string(),
+					actual:   old_commit.map(|id| id.to_hex().to_string()),
+				});
+			}
+		}
+		let index = match index_path {
+			// An alternate index that does not exist is a caller error, never a
+			// silent fallback to the repository's index.
+			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
+				Error::backend("git commit", format!("index file not found: {}", path.display()))
+			})?,
+			None => load_index_or_head(&repo, "git commit")?,
+		};
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
@@ -267,7 +290,7 @@ impl GitRepo {
 		};
 		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
 		fs::write(&message_path, message)?;
-		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()])?;
+		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()], index_path)?;
 		let message = fs::read_to_string(&message_path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let id = if sign {
@@ -304,7 +327,7 @@ impl GitRepo {
 				deref:  true,
 			})
 			.map_err(|err| Error::backend("git commit", err))?;
-		let _ = run_commit_hook(self, "post-commit", &[]);
+		let _ = run_commit_hook(self, "post-commit", &[], index_path);
 		Ok(id.to_hex().to_string())
 	}
 
@@ -1005,7 +1028,14 @@ impl GitRepo {
 	}
 }
 
-fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<()> {
+/// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
+/// commit is built from an alternate index, as `git commit --only` does.
+fn run_commit_hook(
+	repository: &GitRepo,
+	name: &str,
+	args: &[&OsStr],
+	index_path: Option<&Path>,
+) -> Result<()> {
 	let Some(hook) = repository.hook_path(name)? else {
 		return Ok(());
 	};
@@ -1021,6 +1051,9 @@ fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<
 	#[cfg(not(windows))]
 	let mut command = Command::new(&hook);
 	super::cli::detach_from_terminal(&mut command);
+	if let Some(index_path) = index_path {
+		command.env("GIT_INDEX_FILE", index_path);
+	}
 	let output = command
 		.args(args)
 		.current_dir(repository.root())
@@ -2293,6 +2326,108 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+	}
+
+	/// Build `<git_dir>/alt-index` from HEAD plus a changed `a`, leaving the
+	/// repository's own index untouched.
+	fn alternate_index(temp: &TempDir) -> PathBuf {
+		let alt = temp.path().join(".git").join("alt-index");
+		let alt_str = alt.to_str().unwrap();
+		let blob = {
+			fs::write(temp.path().join("a.tmp"), "alt\n").unwrap();
+			let id = git(temp.path(), &["hash-object", "-w", "a.tmp"]);
+			fs::remove_file(temp.path().join("a.tmp")).unwrap();
+			id
+		};
+		let run = |args: &[&str]| {
+			let output = Command::new("git")
+				.arg("-C")
+				.arg(temp.path())
+				.args(args)
+				.env("GIT_INDEX_FILE", alt_str)
+				.output()
+				.unwrap();
+			assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		};
+		run(&["read-tree", "HEAD"]);
+		run(&["update-index", "--cacheinfo", &format!("100644,{blob},a")]);
+		alt
+	}
+
+	#[test]
+	fn commit_from_alternate_index_leaves_real_index_untouched() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join("b"), "staged\n").unwrap();
+		git(temp.path(), &["add", "b"]);
+		let real_index = temp.path().join(".git").join("index");
+		let before = fs::read(&real_index).unwrap();
+		let alt = alternate_index(&temp);
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let id = repo
+			.commit_create("alt", &CommitOptions {
+				index_path: Some(alt.clone()),
+				expected_head: Some(head),
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "alt");
+		assert_eq!(git(temp.path(), &["show", "HEAD:b"]), "two");
+		assert_eq!(fs::read(&real_index).unwrap(), before);
+		let missing = repo.commit_create("missing", &CommitOptions {
+			index_path: Some(temp.path().join(".git").join("nope")),
+			allow_empty: true,
+			..Default::default()
+		});
+		assert!(missing.is_err());
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
+	}
+
+	#[test]
+	fn commit_expected_head_mismatch_is_head_moved() {
+		let (temp, repo) = fixture();
+		let base = git(temp.path(), &["rev-parse", "HEAD"]);
+		git(temp.path(), &["commit", "-q", "--allow-empty", "-m", "moved"]);
+		let moved = git(temp.path(), &["rev-parse", "HEAD"]);
+		let alt = alternate_index(&temp);
+		for amend in [false, true] {
+			let err = repo
+				.commit_create("stale", &CommitOptions {
+					index_path: Some(alt.clone()),
+					expected_head: Some(base.clone()),
+					amend,
+					..Default::default()
+				})
+				.unwrap_err();
+			assert_eq!(err.kind(), "HeadMoved");
+			assert!(matches!(&err, Error::HeadMoved { expected, actual }
+				if *expected == base && actual.as_deref() == Some(moved.as_str())));
+			assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), moved);
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn commit_hooks_see_alternate_index() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		let hook = temp.path().join(".git").join("hooks").join("pre-commit");
+		fs::create_dir_all(hook.parent().unwrap()).unwrap();
+		let seen = temp.path().join(".git").join("seen-index");
+		fs::write(
+			&hook,
+			format!("#!/bin/sh\nprintf %s \"$GIT_INDEX_FILE\" > '{}'\n", seen.display()),
+		)
+		.unwrap();
+		fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+		let alt = alternate_index(&temp);
+		repo
+			.commit_create("hooked", &CommitOptions {
+				index_path: Some(alt.clone()),
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(fs::read_to_string(&seen).unwrap(), alt.to_str().unwrap());
 	}
 
 	#[cfg(unix)]

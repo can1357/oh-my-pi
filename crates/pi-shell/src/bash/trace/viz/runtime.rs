@@ -24,6 +24,9 @@ pub(crate) trait VizSource {
 	fn unit_count(&self) -> usize;
 	fn unit(&self, index: usize) -> Option<SourceUnit<'_>>;
 	fn cache(&self) -> &Cache;
+	/// Whether the script may still be streaming in: a live run that has
+	/// not finished. A stored snapshot is final, whatever its status.
+	fn streaming(&self) -> bool;
 }
 pub(crate) struct SourceUnit<'a> {
 	pub index:      u32,
