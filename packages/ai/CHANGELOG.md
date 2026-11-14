@@ -21,6 +21,7 @@
 - Fixed native judges retrying a gateway's HTTP 502 `upstream_credentials_exhausted` (every upstream key for the model failed) three times: that response is now sent once, while other 502s are still retried ([#19158](https://github.com/can1357/oh-my-pi/pull/19158) by [@Xytronix](https://github.com/Xytronix))
 - Fixed `streamSimple`, `completeSimple`, and auth-gateway chat routes dropping `stopSequences` and `frequencyPenalty` before reaching supporting providers ([#19198](https://github.com/can1357/oh-my-pi/pull/19198) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Gemini, Vertex, Gemini CLI, and Antigravity requests so extensions and response-header diagnostics are told when a response arrives, including a resumed long answer and a regional Vertex fallback, before the answer is read ([#19199](https://github.com/can1357/oh-my-pi/pull/19199) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Muse sessions on Meta, Muse Code and OpenCode Go failing every turn with "reasoning `encrypted_content` was not issued to this caller" after a key rotation, credential switch or idle resume: the request is retried once without the stale reasoning, and later turns no longer send it ([#17341](https://github.com/can1357/oh-my-pi/issues/17341))
 
 ## [18.20.0] - 2026-11-12
 
