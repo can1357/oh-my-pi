@@ -36,6 +36,19 @@ pub(in crate::server) fn execution_settings(
 	(HostSettings::from_con(ctx), ShellSettings::from_con(ctx), SandboxSettings::from_con(ctx))
 }
 
+/// Ensures production URL resolvers and FREEZE share one [`SchemeGeneration`].
+fn install_scheme_generation(
+	bridges: &mut RegistryBridges,
+	ext_host_config: &mut ExtHostConfig,
+) -> Arc<crate::SchemeGeneration> {
+	let generation = Arc::new(crate::SchemeGeneration::new());
+	if bridges.host_resources.is_none() {
+		bridges.host_resources = Some(Arc::clone(&generation) as Arc<dyn crate::HostResources>);
+	}
+	ext_host_config.bind_scheme_generation(Arc::clone(&generation));
+	generation
+}
+
 pub(in crate::server) async fn start_memory_runtime(
 	settings: &HostSettings,
 	data_dir: &Path,
@@ -222,8 +235,9 @@ impl EnvServer {
 		mut ext_host_config: ExtHostConfig,
 		con: &Ctx,
 		convars: Arc<dyn ControlAuthorityFactory>,
-		bridges: RegistryBridges,
+		mut bridges: RegistryBridges,
 	) -> Result<Self, EnvdError> {
+		let scheme_generation = install_scheme_generation(&mut bridges, &mut ext_host_config);
 		let workspace = WorkspaceHost::open(root)?;
 		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3")).map_err(EnvdError::state)?;
 		mcp.bind_config_paths(
@@ -316,6 +330,8 @@ impl EnvServer {
 			.bind(Arc::new(WeakExtensionCallbackDispatcher {
 				supervisor: Arc::downgrade(&ext_hosts),
 			}));
+		scheme_generation.bind_callbacks(Arc::clone(&control_bindings.callbacks)
+			as Arc<dyn crate::exthost::dispatch::CallbackDispatcher>);
 		let sites = SiteMaterializer::open(state_dir.join("ext"), blobs.store().clone())
 			.map_err(EnvdError::blob)?;
 		let materializations = ResourceMaterializer::open(
@@ -484,8 +500,9 @@ impl EnvServer {
 		approval_mode: Option<crate::tool_settings::ApprovalMode>,
 		con: &Ctx,
 		convars: Arc<dyn ControlAuthorityFactory>,
-		bridges: RegistryBridges,
+		mut bridges: RegistryBridges,
 	) -> Result<Self, EnvdError> {
+		let scheme_generation = install_scheme_generation(&mut bridges, &mut ext_host_config);
 		let workspace = WorkspaceHost::open(root)?;
 		let root = workspace.root().to_path_buf();
 		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3")).map_err(EnvdError::state)?;
@@ -621,6 +638,8 @@ impl EnvServer {
 			.bind(Arc::new(WeakExtensionCallbackDispatcher {
 				supervisor: Arc::downgrade(&ext_hosts),
 			}));
+		scheme_generation.bind_callbacks(Arc::clone(&control_bindings.callbacks)
+			as Arc<dyn crate::exthost::dispatch::CallbackDispatcher>);
 		let sites = SiteMaterializer::open(state_dir.join("ext"), blobs.store().clone())
 			.map_err(EnvdError::blob)?;
 		let materializations = ResourceMaterializer::open(
@@ -779,9 +798,10 @@ impl EnvServer {
 		approval_mode: Option<crate::tool_settings::ApprovalMode>,
 		con: &Ctx,
 		convars: Arc<dyn ControlAuthorityFactory>,
-		bridges: RegistryBridges,
+		mut bridges: RegistryBridges,
 		owner: EnvClient,
 	) -> Result<Self, EnvdError> {
+		let scheme_generation = install_scheme_generation(&mut bridges, &mut ext_host_config);
 		let owner_info = owner.info().ok_or(EnvdError::MissingOwnerHello)?;
 		let workspace = WorkspaceHost::open(root)?;
 		let root = workspace.root().to_path_buf();
@@ -863,6 +883,8 @@ impl EnvServer {
 			.bind(Arc::new(WeakExtensionCallbackDispatcher {
 				supervisor: Arc::downgrade(&ext_hosts),
 			}));
+		scheme_generation.bind_callbacks(Arc::clone(&control_bindings.callbacks)
+			as Arc<dyn crate::exthost::dispatch::CallbackDispatcher>);
 
 		let sites = SiteMaterializer::open(state_dir.join("ext"), blobs.store().clone())
 			.map_err(EnvdError::blob)?;

@@ -419,6 +419,8 @@ pub struct ExtHostConfig {
 	domain_control:         Arc<DomainControlSlot>,
 	/// Late-bound, generation-fenced device availability destination.
 	availability_sink:      Arc<Mutex<Option<Arc<dyn AvailabilitySink>>>>,
+	/// Envd-owned declared-scheme generation folded at FREEZE (ADR 0050 S2).
+	scheme_generation:      Option<Arc<crate::tool_url::scheme_generation::SchemeGeneration>>,
 }
 impl ExtHostConfig {
 	/// Builds the production configuration from authenticated session context.
@@ -449,7 +451,16 @@ impl ExtHostConfig {
 			quota_runtime: ControlQuotaRuntime::new(),
 			domain_control: DomainControlSlot::new(),
 			availability_sink: Arc::new(Mutex::new(None)),
+			scheme_generation: None,
 		}
+	}
+
+	/// Installs the envd-owned scheme generation that FREEZE folds into.
+	pub fn bind_scheme_generation(
+		&mut self,
+		generation: Arc<crate::tool_url::scheme_generation::SchemeGeneration>,
+	) {
+		self.scheme_generation = Some(generation);
 	}
 
 	/// Binds this supervisor configuration to the Environment's sole DATA
@@ -1052,6 +1063,19 @@ fn control_manifest_snapshot(spec: &ExtHostSpec) -> Result<Str, ExtHostError> {
 		.requires()
 		.map(|service| serde_json::json!([service.name.as_str(), service.rev]))
 		.collect::<Vec<_>>();
+	let schemes = spec
+		.manifest
+		.schemes
+		.iter()
+		.map(|claim| {
+			serde_json::json!({
+				"name": claim.name.as_str(),
+				"description": claim.description.as_ref().map(Str::as_str),
+				"immutable": claim.immutable,
+				"writable": claim.writable,
+			})
+		})
+		.collect::<Vec<_>>();
 	let mut snapshot = serde_json::json!({
 		"extension": spec.key.extension().as_str(),
 		"tools": tools,
@@ -1059,6 +1083,7 @@ fn control_manifest_snapshot(spec: &ExtHostSpec) -> Result<Str, ExtHostError> {
 		"capabilities": spec.data_grants.iter().collect::<Vec<_>>(),
 		"services": services,
 		"requires": requires,
+		"schemes": schemes,
 		"trust_runtime_declarations": spec.manifest.runtime_declarations_trusted(),
 	});
 	if spec.manifest.has_uniform_declarations() {
@@ -1428,6 +1453,7 @@ async fn freeze_control_registry(
 	manifest: &ExtensionManifest,
 	settings: &serde_json::Map<String, serde_json::Value>,
 	timeout: Duration,
+	scheme_generation: Option<&Arc<crate::tool_url::scheme_generation::SchemeGeneration>>,
 ) -> Result<Arc<SealedRegistryEvidence>, ExtHostError> {
 	let mut authority = python_registration_authority(
 		&HostKey::new(identity.layer.clone(), identity.tier.clone(), identity.extension.clone()),
@@ -1449,10 +1475,54 @@ async fn freeze_control_registry(
 		.await
 		.map_err(ExtHostError::protocol)?;
 	normalize_control_availability(manifest, &mut payload)?;
+	if let Some(generation) = scheme_generation {
+		fold_declared_schemes(generation, &identity, &payload)?;
+	}
 	let evidence = seal_registry_evidence(identity, session, manifest, payload)
 		.map_err(ExtHostError::protocol)?;
 	ensure_committed_argument_tools(&evidence.tools)?;
 	Ok(Arc::new(evidence))
+}
+
+fn fold_declared_schemes(
+	generation: &crate::tool_url::scheme_generation::SchemeGeneration,
+	identity: &Arc<ControlConnectionIdentity>,
+	payload: &serde_json::Value,
+) -> Result<(), ExtHostError> {
+	use crate::tool_url::scheme_generation::SchemeClaim;
+	let Some(rows) = payload.get("schemes") else {
+		return Ok(());
+	};
+	let rows = rows
+		.as_array()
+		.ok_or_else(|| ExtHostError::protocol(Str::new_static("FREEZE schemes must be an array")))?;
+	let mut claims = Vec::with_capacity(rows.len());
+	for row in rows {
+		let name = row
+			.get("name")
+			.and_then(serde_json::Value::as_str)
+			.ok_or_else(|| {
+				ExtHostError::protocol(Str::new_static("FREEZE schemes[].name must be a string"))
+			})?;
+		claims.push(SchemeClaim {
+			scheme:      Str::new(name),
+			description: row
+				.get("description")
+				.and_then(serde_json::Value::as_str)
+				.map(Str::new),
+			writable:    row
+				.get("writable")
+				.and_then(serde_json::Value::as_bool)
+				.unwrap_or(false),
+			immutable:   row
+				.get("immutable")
+				.and_then(serde_json::Value::as_bool)
+				.unwrap_or(false),
+		});
+	}
+	generation
+		.replace_owner(identity.extension.clone(), Some(Arc::clone(identity)), claims)
+		.map_err(|error| ExtHostError::protocol(Str::from(error.to_string())))
 }
 
 fn evidence_availability(evidence: &SealedRegistryEvidence) -> AvailabilityBatch {
@@ -1801,6 +1871,7 @@ impl ExtHostSupervisor {
 					&extension.manifest,
 					&extension.settings,
 					config.spawn_timeout,
+					config.scheme_generation.as_ref(),
 				),
 			)
 			.await
@@ -4065,6 +4136,7 @@ async fn refresh_control_generation(
 		&activation.manifest,
 		&activation.settings,
 		activation.lifecycle_timeout,
+		None,
 	)
 	.await?;
 	if let Some(previous) = frozen_registry.lock().get(&(
@@ -4685,6 +4757,7 @@ mod tests {
 			&manifest,
 			&serde_json::Map::new(),
 			budget,
+			None,
 		)
 		.await;
 		peer.abort();

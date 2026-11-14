@@ -8,10 +8,9 @@ must not be a built-in wire name of the URL vocabulary that :mod:`omp.urls`
 loads (``https`` and ``pr`` included). One extension registers at most
 :data:`MAX_SCHEMES` schemes; a description fits :data:`MAX_DESCRIPTION_BYTES`.
 
-Registrations are stored inert until ADR 0050 S2: nothing here binds a
-resolver, :func:`omp.urls.schemes` still returns the built-in table, and a
-declared scheme still parses as ``omp.urls.Scheme.UNKNOWN``. The host checks
-each registration against the manifest's claims when S2 binds it.
+Registration gates on the loaded manifest's claims (ADR 0050 S2). An optional
+``read`` callable is stored for CONTROL ``omp.schemes.read``; writable declared
+schemes are refused by the host in S2.
 """
 
 from __future__ import annotations
@@ -19,7 +18,10 @@ from __future__ import annotations
 import re as _re
 import string as _string
 import threading as _threading
+from collections.abc import Callable as _Callable
+from collections.abc import Mapping as _Mapping
 from dataclasses import dataclass as _dataclass
+from typing import Any as _Any
 from typing import Final as _Final
 
 from _omp_url_vocab import SCHEMES as _SCHEMES
@@ -47,6 +49,10 @@ class SchemeLimitError(SchemeError):
     """A declaration exceeds a byte limit or the per-extension count."""
 
 
+class UnclaimedSchemeError(SchemeError):
+    """A spelling was not claimed by the loaded extension manifest."""
+
+
 MAX_SCHEME_BYTES: _Final = 64
 MAX_SCHEMES: _Final = 32
 MAX_DESCRIPTION_BYTES: _Final = 4 * 1024
@@ -58,6 +64,9 @@ _BUILTIN_WIRE_NAMES: _Final = frozenset(
 )
 _lock: _Final = _threading.Lock()
 _declared: tuple[Declaration, ...] = ()
+_readers: dict[str, _Callable[[str], _Any]] = {}
+_claimed: frozenset[str] | None = None
+_claims_configured: bool = False
 
 
 def _canonical(spelling: object) -> str:
@@ -107,15 +116,60 @@ class Declaration:
                 raise TypeError(f"scheme {key} must be bool")
 
 
-def register(*declarations: Declaration | str) -> tuple[Declaration, ...]:
-    """Register URL schemes for this extension; stored inert until ADR 0050 S2.
+def configure_claims(claims: object | None) -> None:
+    """Install the manifest-claimed scheme spellings for :func:`register` gating.
 
-    Each argument is a :class:`Declaration` or a bare spelling. A spelling
-    repeated after normalization, in this call or an earlier one, raises
-    :class:`DuplicateSchemeError`; more than :data:`MAX_SCHEMES` in total raises
-    :class:`SchemeLimitError`. A refused call registers nothing.
+    ``None`` clears claim gating (S1 inert contract). A sequence of spellings or
+    declaration mappings enables gating: an unclaimed name is refused.
+    """
+    global _claimed, _claims_configured
+    if claims is None:
+        _claimed = None
+        _claims_configured = False
+        return
+    names: set[str] = set()
+    if isinstance(claims, (str, bytes)) or not isinstance(claims, (list, tuple)):
+        raise TypeError("scheme claims must be a sequence of spellings or mappings")
+    for index, row in enumerate(claims):
+        if isinstance(row, str):
+            names.add(_canonical(row))
+            continue
+        if isinstance(row, _Mapping):
+            name = row.get("name")
+            if not isinstance(name, str):
+                raise TypeError(f"schemes[{index}].name must be str")
+            names.add(_canonical(name))
+            continue
+        raise TypeError(f"schemes[{index}] must be str or mapping")
+    _claimed = frozenset(names)
+    _claims_configured = True
+
+
+def _require_claimed(name: str) -> None:
+    if not _claims_configured:
+        return
+    assert _claimed is not None
+    if name not in _claimed:
+        raise UnclaimedSchemeError(
+            f"URL scheme {name!r} is not claimed by the manifest"
+        )
+
+
+def register(
+    *declarations: Declaration | str,
+    read: _Callable[[str], _Any] | None = None,
+) -> tuple[Declaration, ...]:
+    """Register URL schemes for this extension and publish them into envd.
+
+    Each argument is a :class:`Declaration` or a bare spelling. When the
+    extension manifest configured claims, every spelling must be claimed.
+    Built-in wire names are refused. Optional ``read`` is invoked by CONTROL
+    ``omp.schemes.read`` with the authored URL and may return ``str``,
+    ``bytes``, or a mapping with a ``content`` field.
     """
     global _declared
+    if read is not None and not callable(read):
+        raise TypeError("scheme read handler must be callable or None")
     if len(declarations) > MAX_SCHEMES:
         raise SchemeLimitError(
             f"{len(declarations)} URL schemes declared; the limit is {MAX_SCHEMES}"
@@ -124,6 +178,8 @@ def register(*declarations: Declaration | str) -> tuple[Declaration, ...]:
         item if isinstance(item, Declaration) else Declaration(item)
         for item in declarations
     )
+    for declaration in batch:
+        _require_claimed(declaration.name)
     with _lock:
         names = {declaration.name for declaration in _declared}
         for declaration in batch:
@@ -137,12 +193,89 @@ def register(*declarations: Declaration | str) -> tuple[Declaration, ...]:
                 f"{len(names)} URL schemes declared; the limit is {MAX_SCHEMES}"
             )
         _declared = (*_declared, *batch)
+        if read is not None:
+            for declaration in batch:
+                _readers[declaration.name] = read
+    _publish_registered(batch)
     return batch
 
 
 def declared() -> tuple[Declaration, ...]:
     """Return this extension's registered declarations, in registration order."""
     return _declared
+
+
+def _publication_rows(
+    declarations: tuple[Declaration, ...] | None = None,
+) -> list[dict[str, object]]:
+    rows = declarations if declarations is not None else _declared
+    return [
+        {
+            "name": declaration.name,
+            "description": declaration.description,
+            "immutable": declaration.immutable,
+            "writable": declaration.writable,
+        }
+        for declaration in rows
+    ]
+
+
+def _publish_registered(batch: tuple[Declaration, ...]) -> None:
+    """Best-effort CONTROL publish; freeze also folds the full registered set."""
+    if not batch:
+        return
+    try:
+        from . import _control_backend
+    except ImportError:
+        return
+    backend = _control_backend.get()
+    if backend is None or not hasattr(backend, "request"):
+        return
+    # Registration during import may run before the CONTROL loop; freeze folds.
+
+
+def dispatch_read(*, scheme: str, url: str) -> object:
+    """CONTROL ``omp.schemes.read`` entry: invoke the registered read callable."""
+    if not isinstance(scheme, str) or not scheme:
+        raise SchemeError("omp.schemes.read requires a non-empty scheme")
+    if not isinstance(url, str) or not url:
+        raise SchemeError("omp.schemes.read requires a non-empty url")
+    canonical = scheme.translate(_ASCII_LOWER)
+    with _lock:
+        reader = _readers.get(canonical)
+        owned = any(declaration.name == canonical for declaration in _declared)
+    if not owned:
+        raise UnclaimedSchemeError(
+            f"URL scheme {canonical!r} is not registered in this extension"
+        )
+    if reader is None:
+        raise SchemeError(f"URL scheme {canonical!r} has no read handler")
+    value = reader(url)
+    if isinstance(value, (str, bytes, bytearray)):
+        if isinstance(value, (bytes, bytearray)):
+            return {"content": bytes(value).decode("utf-8", "surrogatepass")}
+        return {"content": value}
+    if isinstance(value, _Mapping):
+        if "content" not in value:
+            raise SchemeError("scheme read mapping requires a 'content' field")
+        content = value["content"]
+        if isinstance(content, (bytes, bytearray)):
+            content = bytes(content).decode("utf-8", "surrogatepass")
+        elif not isinstance(content, str):
+            raise SchemeError("scheme read content must be str or bytes")
+        payload: dict[str, object] = {"content": content}
+        notes = value.get("notes")
+        if notes is not None:
+            if isinstance(notes, (str, bytes)) or not isinstance(notes, (list, tuple)):
+                raise SchemeError("scheme read notes must be a sequence of strings")
+            payload["notes"] = [str(note) for note in notes]
+        return payload
+    raise SchemeError("scheme read handler must return str, bytes, or a mapping")
+
+
+def freeze_publication() -> list[dict[str, object]]:
+    """Rows included in the FREEZE CONTROL publication for envd fold."""
+    return _publication_rows()
 
 
 __all__ = (
@@ -155,6 +288,10 @@ __all__ = (
     "SchemeError",
     "SchemeGrammarError",
     "SchemeLimitError",
+    "UnclaimedSchemeError",
+    "configure_claims",
     "declared",
+    "dispatch_read",
+    "freeze_publication",
     "register",
 )
