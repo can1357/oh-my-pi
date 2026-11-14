@@ -1323,12 +1323,12 @@ describe("tool-owned dynamic approval declarations", () => {
 
 		// `&&` inside `${…}` and `{ … }` groups stays within its clause too.
 		expect(
-			formatApprovalPrompt(bash, { command: "git status && echo ${x:-a&&b} && { true && cd /tmp; }" }).split("\n"),
+			formatApprovalPrompt(bash, { command: `git status && echo \${x:-a&&b} && { true && cd /tmp; }` }).split("\n"),
 		).toEqual([
 			"Allow tool: bash",
 			"Command:",
 			"  ✓ git status (allowed: git status*)",
-			"  ? echo ${x:-a&&b} (requires approval)",
+			`  ? echo \${x:-a&&b} (requires approval)`,
 			"  ? { true && cd /tmp; } (requires approval)",
 		]);
 

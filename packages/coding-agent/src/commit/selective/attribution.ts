@@ -215,16 +215,14 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 				over.add(item.by);
 			}
 			if (region.j2 === region.j1) continue;
-			const added = step.after
-				.slice(region.j1, region.j2)
-				.map((text): Item => ({
-					text,
-					alive: true,
-					by: step.actor,
-					over: [...over],
-					step: stepIndex,
-					hint: step.hint,
-				}));
+			const added = step.after.slice(region.j1, region.j2).map((text): Item => ({
+				text,
+				alive: true,
+				by: step.actor,
+				over: [...over],
+				step: stepIndex,
+				hint: step.hint,
+			}));
 			const at =
 				region.i2 > region.i1
 					? aliveAt[region.i2 - 1] + 1
