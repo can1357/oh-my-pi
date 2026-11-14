@@ -669,6 +669,14 @@ pub(super) fn since_last_click() -> Option<Duration> {
 		.min()
 }
 
+/// Whether ⌘ or ⌃ ([`SWITCH_MODIFIERS`]) is held now, as while the user picks
+/// an app in the ⌘-Tab switcher.
+fn switch_modifier_held() -> bool {
+	// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only query.
+	let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
+	flags & SWITCH_MODIFIERS != 0
+}
+
 /// What one reading sees of how the user could be switching apps. Typing,
 /// Shift and Caps Lock pick no app, so none of them appear here.
 #[derive(Clone, Copy)]
@@ -2283,6 +2291,35 @@ fn hand_back_through_typing(
 	Ok(handed)
 }
 
+/// [`request_after_check`] for the make-key records while the takeover monitor
+/// is behind, asked again with a fresh timestamp while `WindowServer` refuses
+/// it and nothing shows a choice, up to [`TAKEOVER_HAND_BACK_TRIES`] requests:
+/// such a refusal came from input that picked nothing, such as typing. Each
+/// request is checked first: `chose` reads the user's choices without the
+/// monitor, and `in_front` whether their app is still the front one. `None`
+/// when `chose` stood the records down; `UserActed` when nothing was sent for
+/// another reason (`WindowServer` kept refusing, or another app came forward).
+fn rekey_unless_chosen(
+	mut now: impl FnMut() -> u64,
+	mut chose: impl FnMut() -> bool,
+	mut in_front: impl FnMut() -> bool,
+	mut request: impl FnMut(u64) -> CoreResult<FrontRequest>,
+) -> CoreResult<Option<FrontRequest>> {
+	let mut chosen = false;
+	let mut handed = None;
+	for _ in 0..TAKEOVER_HAND_BACK_TRIES {
+		let undisturbed = || {
+			chosen = chose();
+			!chosen && in_front()
+		};
+		handed = request_after_check(&mut now, undisturbed, &mut request)?;
+		if handed != Some(FrontRequest::UserActed) {
+			break;
+		}
+	}
+	Ok(handed.or_else(|| (!chosen).then_some(FrontRequest::UserActed)))
+}
+
 /// Makes `psn` the front process unless the user pressed a key or clicked
 /// after `since` ([`control::uptime_ns`]). `WindowServer` decides on its own
 /// event clock, so polling delays cannot hide that input. It counts keys and
@@ -2556,12 +2593,35 @@ pub(super) fn with_foreground<T>(
 			},
 		}
 		handed_back.set(true);
+		// While the monitor is behind, a choice since `since` is read without
+		// it: one it has counted already, a press on the HID counters, a ⌘ or ⌃
+		// held now, or another window of their app focused, as a window picked
+		// from the keyboard is (read once: AX can block). Keys another process
+		// posts to the HID event tap are counted by `WindowServer` but never
+		// seen by the monitor, so such typing keeps it behind for as long as it
+		// lasts.
+		let rekey_unseen = |key| {
+			let picked = ax::focused_window_id(previous_pid)
+				.is_some_and(|focused| focused != key && !(same_app && focused == wid));
+			rekey_unless_chosen(
+				control::uptime_ns,
+				|| {
+					picked
+						|| control::user_choices() != since.0
+						|| PointerPresses::now().user_pressed_since(since.1)
+						|| switch_modifier_held()
+				},
+				|| front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn),
+				|asked| make_window_key_unless_user_acted(spi, previous.psn, key, asked),
+			)
+		};
 		keyboard.set(Some(give_key_back(
 			previous_key,
 			same_app,
 			|| ax::focused_window_id(previous_pid),
 			|| user_choice(since.0, since.1),
 			|key| make_exact_window_key(spi, previous.psn, key),
+			rekey_unseen,
 			// The user's own key window gets no route to it in the refusal.
 			|key| await_window_focused(spi, previous_pid, key, previous.psn, ForegroundInput::Keys),
 		)?));
@@ -2675,15 +2735,22 @@ const fn hands_focus_back(return_focus: bool, user_chose: bool, now: FocusAfterT
 /// windows) kept a key window that its `AXFocusedWindow` reports truthfully,
 /// and one already key there is left alone. A click or shortcut of the user's
 /// is their choice and keeps the records back (`choice`, counted from
-/// [`choice_baseline`]); while the monitor has not caught up, whether they made
-/// one is unknown, and nothing is sent either. A previous app that showed no
-/// window gets only its front status back.
+/// [`choice_baseline`]). Typing is no choice, but while it streams the
+/// monitor may not catch up, and typing it never sees (keys another process
+/// posts) keeps it behind for good; an app left in front without its key
+/// window would then show the user's window inactive. So while the monitor
+/// is behind, `rekey_unseen` makes the window key unless a choice shows
+/// without it ([`rekey_unless_chosen`]), and says what it did: `None` when a
+/// choice showed, `UserActed` when nothing was sent for another reason. Sent
+/// records are confirmed as on the monitor's own path. A previous app that
+/// showed no window gets only its front status back.
 fn give_key_back(
 	previous_key: Option<u32>,
 	same_app: bool,
 	key_window: impl FnOnce() -> Option<u32>,
 	choice: impl FnOnce() -> UserChoice,
 	make_key: impl FnOnce(u32) -> CoreResult<()>,
+	rekey_unseen: impl FnOnce(u32) -> CoreResult<Option<FrontRequest>>,
 	confirm: impl FnOnce(u32) -> CoreResult<()>,
 ) -> CoreResult<DesktopKeyboardReturn> {
 	let Some(key) = previous_key else {
@@ -2695,7 +2762,11 @@ fn give_key_back(
 	}
 	match choice() {
 		UserChoice::Made => return Ok(DesktopKeyboardReturn::LeftAsChosen),
-		UserChoice::Pending => return Ok(DesktopKeyboardReturn::NotSent),
+		UserChoice::Pending => match rekey_unseen(key)? {
+			Some(FrontRequest::Done) => {},
+			Some(FrontRequest::UserActed) => return Ok(DesktopKeyboardReturn::NotSent),
+			None => return Ok(DesktopKeyboardReturn::LeftAsChosen),
+		},
 		UserChoice::None => make_key(key)?,
 	}
 	confirm(key)?;
@@ -4596,6 +4667,10 @@ mod tests {
 					Ok(())
 				},
 				|key| {
+					acts.borrow_mut().push(("make key unless chosen", key));
+					Ok(Some(FrontRequest::Done))
+				},
+				|key| {
 					acts.borrow_mut().push(("confirm", key));
 					Ok(())
 				},
@@ -4614,15 +4689,16 @@ mod tests {
 			(Some(Kept), vec![("confirm", previous)])
 		);
 		assert_eq!(run(Some(previous), true, Some(other), UserChoice::None), rekeyed);
-		// A click or shortcut after the request is the user's choice; with one
-		// the monitor may not have counted yet, nothing is sent either.
+		// A click or shortcut after the request is the user's choice.
 		assert_eq!(
 			run(Some(previous), false, Some(previous), UserChoice::Made),
 			(Some(LeftAsChosen), vec![])
 		);
+		// Typing the monitor has not caught up with is no choice: the window is
+		// made key unless one shows without the monitor.
 		assert_eq!(
 			run(Some(previous), false, Some(previous), UserChoice::Pending),
-			(Some(NotSent), vec![])
+			(Some(HandedBack), vec![("make key unless chosen", previous), ("confirm", previous)])
 		);
 		// A previous app with no window gets only its front back.
 		assert_eq!(run(None, false, Some(previous), UserChoice::None), (Some(FrontOnly), vec![]));
@@ -4638,6 +4714,7 @@ mod tests {
 			|| Some(previous),
 			|| UserChoice::None,
 			|_| Err(DesktopError::input_failed("window 7 rejected its make-key record")),
+			|_| panic!("the monitor caught up"),
 			|_| panic!("nothing to confirm after a rejected record"),
 		);
 		assert!(rejected.is_err());
@@ -4647,9 +4724,92 @@ mod tests {
 			|| Some(previous),
 			|| UserChoice::None,
 			|_| Ok(()),
+			|_| panic!("the monitor caught up"),
 			|_| Err(DesktopError::input_failed("window 7 could not be confirmed")),
 		);
 		assert!(unconfirmed.is_err());
+	}
+
+	#[test]
+	fn typing_the_monitor_has_not_seen_still_gets_the_key_window_back_but_a_choice_wins() {
+		use std::cell::{Cell, RefCell};
+
+		use DesktopKeyboardReturn::{HandedBack, LeftAsChosen, NotSent};
+		use FrontRequest::{Done, UserActed};
+		// While the monitor is behind, the checked request decides.
+		let pending = |outcome: Option<FrontRequest>| {
+			let confirmed = Cell::new(false);
+			let returned = give_key_back(
+				Some(7),
+				false,
+				|| Some(7),
+				|| UserChoice::Pending,
+				|_| panic!("the unconditional records wait for the monitor to catch up"),
+				|_| Ok(outcome),
+				|_| {
+					confirmed.set(true);
+					Ok(())
+				},
+			);
+			(returned.ok(), confirmed.get())
+		};
+		// Typing alone: the window is key again.
+		assert_eq!(pending(Some(Done)), (Some(HandedBack), true));
+		// A click, a counted shortcut or a held ⌘ or ⌃ showed: nothing is
+		// pulled back.
+		assert_eq!(pending(None), (Some(LeftAsChosen), false));
+		// `WindowServer` kept refusing, or another app came forward by itself:
+		// nothing was sent, and no choice is claimed.
+		assert_eq!(pending(Some(UserActed)), (Some(NotSent), false));
+
+		// Refusals while nothing shows a choice are typing: a fresh timestamp
+		// each time, up to `TAKEOVER_HAND_BACK_TRIES` requests.
+		let clock = Cell::new(0);
+		let stamps = RefCell::new(Vec::new());
+		let handed = rekey_unless_chosen(
+			|| {
+				clock.update(|v| v + 1);
+				clock.get()
+			},
+			|| false,
+			|| true,
+			|since| {
+				stamps.borrow_mut().push(since);
+				Ok(if since < 3 { UserActed } else { Done })
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(Done)));
+		assert_eq!(*stamps.borrow(), [1, 2, 3]);
+		let requests = Cell::new(0);
+		let refused = |chose: bool, in_front: bool| {
+			let checks = Cell::new(0);
+			requests.set(0);
+			rekey_unless_chosen(
+				|| 1,
+				|| {
+					checks.update(|v| v + 1);
+					checks.get() > 1 && chose
+				},
+				|| checks.get() == 1 || in_front,
+				|_| {
+					requests.update(|v| v + 1);
+					Ok(UserActed)
+				},
+			)
+			.ok()
+		};
+		assert_eq!(refused(false, true), Some(Some(UserActed)));
+		assert_eq!(requests.get(), TAKEOVER_HAND_BACK_TRIES);
+		// A choice after a refusal stops the requests and is named as one.
+		assert_eq!(refused(true, true), Some(None));
+		assert_eq!(requests.get(), 1);
+		// Another app that came forward by itself is no choice of theirs.
+		assert_eq!(refused(false, false), Some(Some(UserActed)));
+		assert_eq!(requests.get(), 1);
+		// A choice before the first request sends nothing.
+		let handed =
+			rekey_unless_chosen(|| 1, || true, || true, |_| panic!("no request after a choice"));
+		assert_eq!(handed.ok(), Some(None));
 	}
 
 	#[test]
