@@ -1837,6 +1837,10 @@ export function sessionModelDiscoveryProviders(
  * If neither the subagent nor the parent has working auth, returns the
  * primary resolution unchanged so the existing error path still surfaces
  * a meaningful failure downstream.
+ *
+ * `exactOnly` lists (per-call `model` candidates) walk their own candidates
+ * for working credentials even without a parent pattern, matching each one
+ * exactly; they never fall back to a model outside the list.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1869,7 +1873,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 		if (fallback.model) return { ...fallback, authFallbackUsed: true };
 	}
-	if (!primary.model || !parentActiveModelPattern) {
+	if (!primary.model || (!parentActiveModelPattern && !options?.exactOnly)) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
@@ -1879,13 +1883,19 @@ export async function resolveModelOverrideWithAuthFallback(
 	}
 	// The ordered override list is the caller's own fallback chain: an
 	// authenticated later entry beats the parent's model.
-	for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
-		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+	const candidatePatterns = options?.exactOnly
+		? modelPatterns
+		: resolveConfiguredModelPatterns(modelPatterns, settings);
+	for (const pattern of candidatePatterns) {
+		const candidate = resolveModelOverride([pattern], lookupRegistry, settings, options);
 		if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
 		const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
 		if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
 			return { ...candidate, authFallbackUsed: false };
 		}
+	}
+	if (options?.exactOnly || !parentActiveModelPattern) {
+		return { ...primary, authFallbackUsed: false };
 	}
 
 	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);

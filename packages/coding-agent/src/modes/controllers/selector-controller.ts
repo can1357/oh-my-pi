@@ -1854,7 +1854,7 @@ export class SelectorController {
 			getPlanModeState: () => this.ctx.session.getPlanModeState(),
 		};
 		const askTool = new AskTool(toolSession);
-		const context = this.ctx.session.buildAskReanswerContext(uiContext);
+		const context = this.ctx.session.buildToolContext(uiContext);
 		try {
 			return await askTool.execute("tree-reanswer", { html }, undefined, undefined, context);
 		} catch (error) {
