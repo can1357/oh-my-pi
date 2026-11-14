@@ -17,6 +17,7 @@ import {
 	rebuildScopedModels,
 	resolveScopedModels,
 } from "@oh-my-pi/pi-coding-agent/main";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -1967,6 +1968,35 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			await session.switchSession(next, { onModelFallback: message => reported.push(message) });
 			expect(reported).toEqual([warning]);
 			expect(notices).toHaveLength(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("a switch rolled back after it was announced keeps the replies the restored conversation expects", async () => {
+		let api: ExtensionAPI | undefined;
+		let releaseHan: (() => boolean) | undefined;
+		const bridge: ExtensionFactory = pi => {
+			api = pi;
+			// Asked for the target conversation as the switch is announced.
+			pi.on("session_switch", () => {
+				releaseHan = pi.replies.expect("@mesh/han", { promised: true });
+			});
+		};
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), hasUI: true, extensions: [bridge] });
+		try {
+			const releaseLeia = api?.replies.expect("@mesh/leia", { promised: true });
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			// The host's fallback report is the last step of the switch; its failure rolls the switch back.
+			const failingHost = () => {
+				throw new Error("host could not re-render");
+			};
+			await expect(session.switchSession(target, { onModelFallback: failingHost })).rejects.toThrow(
+				"host could not re-render",
+			);
+			expect(session.sessionFile).not.toBe(target);
+			expect(releaseHan?.()).toBe(false);
+			expect(releaseLeia?.()).toBe(true);
 		} finally {
 			await session.dispose();
 		}

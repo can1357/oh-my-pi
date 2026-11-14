@@ -74,6 +74,30 @@ Important constraint from `loader.ts`:
 - `pi.exec()` is directly available during load; provider registration is queued until session setup
 - child sessions reuse imported factories but bind fresh APIs and extension registrations; module-level variables remain shared across those sessions
 
+### Suspension and teardown
+
+A live `disabledExtensions` edit suspends a loaded extension in place instead of unloading it: it keeps its module state, but stops contributing event handlers, tools, commands, renderers, link schemes and file fallbacks until it is resumed. Its factory and `session_start` do not run again on resume. A startup-deferred extension that a live edit disabled before it was bound joins the session suspended; a load that `session_start` never reached gets it when it is first resumed. What an extension registers outside its session state through the extension API (for example URL schemes or expected replies) follows the same rule: it stops acting while the load is suspended and acts again on resume. It is released when the load is torn down: on session shutdown, when the factory throws, or when a startup-deferred extension is never bound into the session (the session went away first, or a step before the binding failed). Anything registered after teardown is released immediately. When `createAgentSession` fails before its session exists, the loads it created itself are torn down, but loads the caller passed in `preloadedExtensions` are only suspended, since the caller may retry with them (the interactive auto-resume fallback does); the session that adopts them resumes them, and their `pi.onSuspensionChange` listeners hear of it once the session's mode has wired the extension actions they may call. Once the session exists, a startup failure disposes it, which ends every load like any session end (`session_shutdown` runs), preloaded ones included: their module state has seen the shutdown, so they are not reused.
+
+A suspended extension receives no events, so it cannot learn about its suspension from `on(...)`. `pi.onSuspensionChange(listener)` calls `listener(true)` when this load is suspended and `listener(false)` when it is resumed. Use it to pause work the extension drives itself, such as a socket or a timer. It returns the unsubscribe, and listeners are dropped when the load is torn down:
+
+Keep start and stop idempotent: a load a failed startup suspended hears its resume when the retry's session is initialized, before its first `session_start`.
+
+```ts
+export default function (pi: ExtensionAPI) {
+	let socket: Socket | undefined;
+	const start = () => {
+		socket ??= connect();
+	};
+	const stop = () => {
+		socket?.end();
+		socket = undefined;
+	};
+	pi.on("session_start", start);
+	pi.onSuspensionChange(suspended => (suspended ? stop() : start()));
+	pi.on("session_shutdown", stop);
+}
+```
+
 ## Quick start
 
 ```ts
@@ -136,6 +160,9 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `onSuspensionChange`
+- `replies.expect` (replies `wait` blocks for)
+- `registerUrlScheme`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -364,6 +391,208 @@ re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
 
+### Expected replies (`pi.replies`)
+
+`pi.replies.expect(peerId, options?)` records that this session's agent awaits a reply from a peer
+the built-in tools cannot see, such as an agent in another process reached through a bridge.
+`peerId` is an opaque display id (for example `@murmur/leia`); it need not name a registered agent.
+It returns the release function.
+
+- While an expectation is unreleased, `wait` blocks for the reply instead of returning "Nothing to
+  wait for". A message reaching the agent mid-wait, such as the answer injected with
+  `deliverAs: "steer"`, ends the wait as usual; a wait that runs out names the peers still awaited.
+- Expect before you send, since an answer can arrive before the send returns, and release at once
+  if the send fails.
+- Release once the answer has reached the transcript (its `message_start` event), or when the peer
+  is gone. `sendMessage` and `sendUserMessage` only queue the answer; a release right after them
+  would end a blocked `wait` with "no longer owes a reply" before the steer could interrupt it.
+  Releasing the last expectation a blocked `wait` depended on ends it, naming the peer. Release is
+  idempotent and returns `true` only when that call dropped a recorded expectation; each `expect`
+  call is its own expectation.
+- An expectation counts only in the agent run it was recorded in, like an unanswered IRC question.
+  `{ promised: true }` marks a peer that promised a later answer (like an IRC progress note): it
+  stays awaited in later runs until released.
+- Expectations belong to this session: another session's `wait` never sees them. They follow the
+  extension load (see [Suspension and teardown](#suspension-and-teardown)): while a live
+  `disabledExtensions` edit suspends it they stop counting, so a `wait` blocked only on them ends,
+  and on resume the unreleased ones count again. Teardown (session shutdown, a factory that throws)
+  releases them, and an `expect` made after it records nothing. They also belong to the
+  conversation: when the session replaces it (`/new`, resuming another session or reloading a
+  changed one, a branch or a fork at an entry, `/btw`, `/clear`) it drops them all, promised ones
+  included, as on `/tree` navigation to another point; a checkpoint rewind drops those recorded
+  since the checkpoint, except those recorded by the rewind's own tool batch, whose calls stay in
+  the conversation. Ones an extension records once it hears of the change (the event announcing
+  it) are kept. A fork of the whole session keeps them, since it keeps the conversation, as does a
+  branch whose `session_before_branch` hook asks to keep the live conversation
+  (`skipConversationRestore`).
+
+The bridge pattern: expect when the agent asks a remote peer. Each answer that reaches the
+transcript settles one question, the oldest, since each `expect` call is its own expectation. A
+failed send withdraws only its own expectation, and a peer that leaves releases all of its. An
+expectation the session dropped with its conversation releases to `false`, so an answer skips it
+and settles the oldest question still awaited.
+
+```ts
+const PEER_ANSWER = "peer-answer";
+const awaiting = new Map<string, Array<() => boolean>>();
+/** Record that `peer` owes an answer; the returned function withdraws just this one. */
+const expectAnswer = (peer: string): (() => void) => {
+	const undo = pi.replies.expect(peer);
+	const queue = awaiting.get(peer) ?? [];
+	queue.push(undo);
+	awaiting.set(peer, queue);
+	return () => {
+		const index = queue.indexOf(undo);
+		if (index !== -1) queue.splice(index, 1);
+		undo();
+	};
+};
+/** An answer from `peer` reached the transcript: it settles that peer's oldest question still awaited. */
+const answered = (peer: string) => {
+	const queue = awaiting.get(peer) ?? [];
+	while (queue.length > 0) if (queue.shift()?.()) break;
+};
+/** The peer is gone: nothing it owes can arrive any more. */
+const peerLeft = (peer: string) => {
+	for (const undo of awaiting.get(peer)?.splice(0) ?? []) undo();
+	awaiting.delete(peer);
+};
+
+pi.registerTool({
+	name: "ask_peer",
+	label: "Ask peer",
+	description: "Ask a peer agent in another process",
+	parameters: z.object({ peer: z.string(), question: z.string() }),
+	async execute(_id, { peer, question }) {
+		// Expect first: the answer can arrive before the send resolves.
+		const withdraw = expectAnswer(peer);
+		try {
+			await bridge.send(peer, question);
+		} catch (error) {
+			withdraw();
+			throw error;
+		}
+		return { content: [{ type: "text", text: `Asked ${peer}. Call wait for the answer.` }] };
+	},
+});
+
+bridge.onAnswer((peer, text) => {
+	// Queued only: the steer still has to end a running `wait`, so release on delivery below.
+	pi.sendMessage(
+		{ customType: PEER_ANSWER, content: `${peer} replied: ${text}`, display: true, details: { peer } },
+		{ deliverAs: "steer", triggerTurn: true },
+	);
+});
+
+pi.on("message_start", async event => {
+	const message = event.message;
+	if (message.role !== "custom" || message.customType !== PEER_ANSWER) return;
+	const peer: unknown =
+		typeof message.details === "object" && message.details !== null
+			? Reflect.get(message.details, "peer")
+			: undefined;
+	if (typeof peer === "string") answered(peer);
+});
+
+bridge.onPeerLeft(peerLeft);
+```
+
+### Internal URL schemes (`registerUrlScheme`)
+
+`pi.registerUrlScheme(handler)` routes `<scheme>://…` URLs to your handler, the same
+`ProtocolHandler` interface the built-in schemes (`local://`, `agent://`, …) implement. It
+returns a release function.
+
+```ts
+import type { ExtensionAPI, ProtocolHandler } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	const notes = new Map<string, string>();
+	const handler: ProtocolHandler = {
+		scheme: "notes",
+		spec: {
+			backing: "remote",
+			selectors: "none",
+			immutable: false,
+			write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
+		},
+		async resolve(url, context) {
+			// context?.cwd / sessionId / session identify the calling session.
+			return { url: url.href, content: notes.get(url.host) ?? "", contentType: "text/plain" };
+		},
+		async write(url, content) {
+			notes.set(url.host, content);
+		},
+		async complete() {
+			return [...notes.keys()].map(value => ({ value }));
+		},
+	};
+	pi.registerUrlScheme(handler);
+}
+```
+
+- **Routing.** `read notes://x` calls `resolve`; `write notes://x` calls `write` when
+  `spec.write.via` is `"handler"` (the handler must have `write()` exactly then); composer tab
+  completion after `notes://` calls `complete(query)`. Optional `locate`, `enumerate`,
+  `readDirectory`, `promptDoc` and `promptReference` hooks work as for built-in schemes.
+- **Context.** Each call receives the caller in `context`. `read` passes the tool session's
+  `ResolveContext` (`cwd`, `sessionId`, `sessionFile`, `settings`, `agentRegistry`, the tool
+  `session`, `signal`); `write` passes a `WriteContext` (`cwd`, the tool `session`, `signal`,
+  `toolCall`); composer completion passes the focused session's `cwd`, `sessionId` and
+  `sessionFile` (no tool `session`). Other callers may pass less, so treat every field as optional.
+- **Write approval.** The write tool gates an extension scheme like any built-in non-file
+  scheme: approval asks `spec.write.tier(url, content, session)`, a scheme without `spec.write`
+  is denied at the gate as read-only, the plan-mode guard applies to handler writes unless
+  `spec.write.scope` is `"coordination"`, `"reply"` or `"device"`, and `payload: "text"` strips
+  copied hashline prefixes. Choose `scope` and `tier` as honestly as a built-in scheme would.
+- **Ownership.** The URL router is one per process, shared by every session in it (an ACP or SDK
+  host may run many). A scheme belongs to one extension source for the whole process: its
+  resolved entry path, or for an inline SDK factory the factory function itself (inline source
+  ids such as `<inline-0>` restart in every session, so two unrelated factories never share a
+  scheme). The first source to register a scheme holds it until its last registration goes, so
+  another source's `registerUrlScheme` for it throws in every session, whichever session that
+  source loads in. `registerUrlScheme` also throws for invalid syntax (`^[a-z][a-z0-9+.-]+$`
+  after lowercasing: at least two characters, so no scheme captures a Windows drive path such as
+  `C:/notes.txt`), an OMP-owned scheme, a standard one (`http`, `https`, `file`, …), or one
+  registered outside extensions (an RPC host URI scheme).
+- **Per-session routing.** Every load of the holding source may register the scheme: subagent
+  sessions load the same extensions, so the root and each subagent call `registerUrlScheme` with
+  the same scheme, and each session keeps its own handler. A call whose context names the
+  calling session (`sessionId`, or the tool `session`) goes to that session's own registration.
+  omp's own callers name it for every URL a user or model supplies: `read`, `write`, `edit`,
+  composer completion, the display targets `read` and `grep` locate, links in assistant messages
+  (the focused session), and the internal URLs MCP tool arguments are located to. A session with no active registration of
+  the scheme gets no service: `resolve`, `write`, `enumerate` and `readDirectory` throw
+  `<scheme>:// is not available in this session`, and `complete`, `locate` and `locateSync`
+  find nothing. A call that names no session goes to the earliest active registration. A query
+  hook (`complete`, `enumerate`, `readDirectory`) reaches a session's own handler whenever any
+  active registration defines it, so registrations need not share one hook set; the hooks the spec
+  governs (`write`, `locate`, `locateSync`) follow the earliest active registration's spec.
+- **Process-global parts.** The scheme's `spec` (including `spec.write.tier`), its
+  `promptDoc` and its `promptReference` (the `xd://read/urls` entry) carry no caller, so they come
+  from the earliest active registration (for `promptDoc` and `promptReference`, the earliest that
+  defines one, looked up on each call) and apply to
+  every session in the process: the scheme is advertised in the system prompt of every session
+  while any registration is active, including sessions that have none of their own and so get no
+  service.
+- **Startup.** An extension that registers a URL scheme always binds before the session starts,
+  never after the first prompt, so its `promptDoc` and composer completion are there from the
+  start.
+- **RPC hosts.** `set_host_uri_schemes` fails for a scheme an extension holds (suspended
+  registrations included), and an extension cannot register a scheme an RPC host holds. Neither
+  replaces the other's handler.
+- **Suspension.** While a live `disabledExtensions` edit suspends the load, its registrations stop
+  serving: calls from its session find no service, other sessions' registrations serve on, and the
+  scheme leaves the router when no active registration is left. On resume the registration serves
+  its session again and the scheme returns to the router. Another source still cannot take the
+  scheme while it is suspended.
+- **Teardown.** A registration is released when its load is torn down — session shutdown, a
+  factory that throws, or a startup-deferred bind finishing after its session was disposed — or
+  when you call the returned function. Releasing twice is a no-op, and a stale release never
+  removes a later owner's handler. A `createAgentSession` that fails before its session exists only
+  suspends the loads a caller passed in `preloadedExtensions` (see [Suspension and teardown](#suspension-and-teardown)): their
+  scheme leaves the router until a session adopts them.
+
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:
@@ -522,8 +751,8 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_shutdown` / `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
-shortcuts, composer shapes, or file fallbacks is loaded after the composer
-accepts input, once a previous launch has recorded that about its current
+shortcuts, composer shapes, file fallbacks, or URL schemes is loaded after the
+composer accepts input, once a previous launch has recorded that about its current
 source. Its `session_start` still runs (it is delivered when the extension
 binds), and the first submitted message and every model turn wait until it is
 loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply from
