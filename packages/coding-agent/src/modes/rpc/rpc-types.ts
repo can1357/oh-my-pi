@@ -122,7 +122,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort_retry" }
 
 	// Bash
-	| { id?: string; type: "bash"; command: string }
+	| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
 	| { id?: string; type: "abort_bash" }
 
 	// Session
@@ -379,6 +379,8 @@ export interface RpcReadyFrame {
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
+	/** `bash` accepts `excludeFromContext`; older runtimes omit this capability. Require exactly `true`. */
+	supportsBashExcludeFromContext?: boolean;
 }
 
 export interface RpcChunkFrame {
@@ -795,6 +797,14 @@ export type RpcExtensionUIRequest =
 			title: string;
 			options: string[];
 			optionDetails?: RpcExtensionUISelectOptionDetail[];
+			/** Index into `options` to focus first. */
+			initialIndex?: number;
+			/** Marker style for the first `markableCount` options. */
+			selectionMarker?: "radio" | "checkbox";
+			/** For `checkbox`: indices into `options` currently checked. */
+			checkedIndices?: number[];
+			/** Leading options that get a marker; trailing ones are actions. */
+			markableCount?: number;
 			timeout?: number;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }

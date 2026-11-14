@@ -204,7 +204,7 @@ fn get_substrings(
 		let count = |r: Range<usize>| mb_count(arg.get(r).unwrap_or_default(), utf8);
 		let before = count(0..whole.start);
 		let mbegin = before + ksh;
-		let mend = before + count(whole.clone()) + ksh - 1;
+		let mend = before + count(whole) + ksh - 1;
 		params::setnparam(ex, b"MBEGIN", Number::Int(mbegin), mbegin.to_string().as_bytes(), 10)?;
 		params::setnparam(ex, b"MEND", Number::Int(mend), mend.to_string().as_bytes(), 10)?;
 		if nelem > 0 {
@@ -242,15 +242,16 @@ pub fn pcre_match(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			.filter(|_| ops.hasarg(b'v'))
 			.unwrap_or(&b"MATCH"[..]),
 	);
-	let mut start = 0;
-	if ops.hasarg(b'n') {
+	let start = if ops.hasarg(b'n') {
 		let n = ops.arg(b'n').unwrap_or_default();
 		let Some(n) = getposint(n) else {
 			ctx.usage(format!("integer expected: {}", n.as_bstr()));
 			return done(1);
 		};
-		start = n;
-	}
+		n
+	} else {
+		0
+	};
 	let want_offset = ops.isset(b'b');
 	let re = match compiled(&pattern, opts) {
 		Ok(re) => re,

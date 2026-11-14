@@ -352,12 +352,11 @@ fn parse_class(s: &[u8], start: usize) -> (Cpattern, usize) {
 				ip += 1;
 				out.push(META + PP_RANGE);
 				push1(&mut out);
+				out.push(a(ip));
 				if a(ip) == META {
-					out.push(a(ip));
 					out.push(a(ip + 1));
 					ip += 2;
 				} else {
-					out.push(a(ip));
 					ip += 1;
 				}
 			} else {
@@ -425,10 +424,8 @@ pub fn mb_patmatchrange(
 				18 | 19 => {
 					// `[:INCOMPLETE:]`, `[:INVALID:]`: never with ZMB_VALID.
 				},
-				PP_FIRST..=17 => {
-					if mb_class(swtype, ch, &env) {
-						return true;
-					}
+				PP_FIRST..=17 if mb_class(swtype, ch, &env) => {
+					return true;
 				},
 				_ => {},
 			}

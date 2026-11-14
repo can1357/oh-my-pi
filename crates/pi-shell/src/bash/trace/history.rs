@@ -60,13 +60,7 @@ pub const HISTORY_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const HISTORY_BYTES: usize = 8 * 1024 * 1024;
 
 fn bounded(bytes: &[u8]) -> BString {
-	let mut end = bytes.len().min(super::ARG_BYTES);
-	if let Ok(text) = std::str::from_utf8(bytes) {
-		while !text.is_char_boundary(end) {
-			end -= 1;
-		}
-	}
-	bytes[..end].into()
+	text::cut(bytes, super::ARG_BYTES).into()
 }
 /// Maximum coalesced output entry, limiting a single replay step.
 const OUTPUT_CHUNK: usize = 16 * 1024;
@@ -86,7 +80,7 @@ pub struct HistoryEvent {
 	/// Actual segmented submission index, absent for a single session run.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub segment:        Option<u32>,
-	/// This real root RunEnd is the finalized logical call boundary.
+	/// This real root `RunEnd` is the finalized logical call boundary.
 	#[serde(rename = "logicalEnd", skip_serializing_if = "std::ops::Not::not")]
 	#[serde(default)]
 	pub logical_end:    bool,

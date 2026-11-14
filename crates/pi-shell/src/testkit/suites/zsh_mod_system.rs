@@ -22,6 +22,7 @@ fn zsh(src: &str) -> (String, String, i32) {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "macOS has no O_NOATIME")]
 fn zsh_mod_system_option_and_argument_errors() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/system; sysread -i x; sysread -c 1a; sysread 1a; sysread -s -1 x; sysread -s \
@@ -81,6 +82,7 @@ fn zsh_mod_system_flock_argument_errors() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "`strerror` text is macOS libc's")]
 fn zsh_mod_system_syserror() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/system; syserror ENOENT; syserror -p \"x: \" 2; syserror -e v EBADF; print -r \
@@ -91,6 +93,38 @@ fn zsh_mod_system_syserror() {
 		err,
 		"No such file or directory\nx: No such file or directory\nUnknown error: \
 		 999\nzsh:syserror:1: not an identifier: 1v\n"
+	);
+	assert_eq!(st, 0);
+}
+
+/// `syserror` (the recorded errno) after a write to a pipe whose reader has
+/// gone: `EPIPE`, not 0.
+#[test]
+fn zsh_mod_system_syswrite_to_a_closed_pipe_is_epipe() {
+	let (out, err, st) = zsh(
+		"zmodload zsh/system; { syswrite x; echo \"st=$?\" >&2; syserror; syserror -e v; echo \
+		 \"[$v]\" >&2; } | :",
+	);
+	assert_eq!(out, "");
+	assert_eq!(err, "st=2\nBroken pipe\n[Broken pipe]\n");
+	assert_eq!(st, 0);
+}
+
+/// `syserror` prints glibc's texts on Linux and, from its own table, off
+/// Unix: a number the table has always had, one it once lacked (`EIO`,
+/// `EPIPE`), and one outside it.
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "`strerror` text is macOS libc's")]
+fn zsh_mod_system_syserror_texts_match_glibc() {
+	let (out, err, st) = zsh(
+		"zmodload zsh/system; syserror ENOENT; syserror EIO; syserror 32; syserror ELOOP; syserror \
+		 41; syserror ENOTRECOVERABLE; syserror 134; syserror 0",
+	);
+	assert_eq!(out, "");
+	assert_eq!(
+		err,
+		"No such file or directory\nInput/output error\nBroken pipe\nToo many levels of symbolic \
+		 links\nUnknown error 41\nState not recoverable\nUnknown error 134\nSuccess\n"
 	);
 	assert_eq!(st, 0);
 }

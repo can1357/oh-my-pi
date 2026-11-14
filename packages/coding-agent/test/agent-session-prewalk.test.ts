@@ -9,6 +9,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -863,69 +867,76 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(primary.id);
 	});
 
-	it("does not switch on a read-only xd:// device dispatched through write (issue #7312)", async () => {
-		const primary = modelOrThrow("claude-sonnet-4-5");
-		const target = modelOrThrow("claude-sonnet-4-6");
+	it.each([
+		{ tier: "read", tool: "lsp" },
+		{ tier: "exec", tool: "bun-test" },
+	])(
+		"does not switch on a $tier-tier xd:// device dispatched through write (issues #7312, #19002)",
+		async ({ tier, tool }) => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
 
-		// A read-only lsp navigation is dispatched as `write xd://lsp`; the write
-		// result carries the wrapped tool's read tier. Like a bash step, it must
-		// not arm the hand-off — the model keeps reasoning about code shape on the
-		// strong model. Mirrors the bounded-continuation flow: one continuation,
-		// four turns, all primary, then a clean stop.
-		const readDeviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
-			{
-				name: "write",
-				label: "Write",
-				description: "Dispatch a read-only device",
-				parameters: writeToolSchema,
-				async execute() {
-					return {
-						content: [{ type: "text", text: "references" }],
-						details: { xdev: { tool: "lsp", mode: "execute", tier: "read" } },
-					};
+			// A read-only lsp navigation or an exec-tier test run is dispatched as
+			// `write xd://<device>`; the write result carries the wrapped tool's tier.
+			// Like a direct bash step, neither mutates the workspace through `write`,
+			// so neither may arm the hand-off — the model keeps investigating on the
+			// strong model. Mirrors the bounded-continuation flow: one continuation,
+			// four turns, all primary, then a clean stop.
+			const deviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
+				{
+					name: "write",
+					label: "Write",
+					description: "Dispatch a non-mutating device",
+					parameters: writeToolSchema,
+					async execute() {
+						return {
+							content: [{ type: "text", text: "device output" }],
+							details: { xdev: { tool, mode: "execute", tier } },
+						};
+					},
+				};
+			const mock = createMockModel({
+				responses: [
+					toolCall("t1", "record"),
+					toolCall("t2", "write"),
+					{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+					{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+				],
+			});
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [recordTool as AgentTool, deviceWrite as AgentTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
 				},
-			};
-		const mock = createMockModel({
-			responses: [
-				toolCall("t1", "record"),
-				toolCall("t2", "write"),
-				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
-				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
-			],
-		});
-		const requested: string[] = [];
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model: primary,
-				systemPrompt: ["Test"],
-				tools: [recordTool as AgentTool, readDeviceWrite as AgentTool],
-				messages: [],
-				thinkingLevel: Effort.Medium,
-			},
-			convertToLlm,
-			streamFn: (model, context, options) => {
-				requested.push(`${model.provider}/${model.id}`);
-				return mock.stream(model, context, options);
-			},
-		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[recordTool.name, recordTool as AgentTool],
-				[readDeviceWrite.name, readDeviceWrite as AgentTool],
-			]),
-			prewalk: { target },
-		});
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[recordTool.name, recordTool as AgentTool],
+					[deviceWrite.name, deviceWrite as AgentTool],
+				]),
+				prewalk: { target },
+			});
 
-		await session.prompt("investigate the code shape");
+			await session.prompt("investigate the code shape");
 
-		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
-		expect(session.model?.id).toBe(primary.id);
-	});
+			expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+			expect(session.model?.id).toBe(primary.id);
+		},
+	);
 
 	it.each([
 		{ readOnlyHint: true, thirdTurnModel: "claude-sonnet-4-5" },
@@ -991,6 +1002,60 @@ describe("AgentSession prewalk", () => {
 			expect(created.session.model?.id).toBe(created.target.id);
 		},
 	);
+
+	it("does not switch when a subagent messages its parent through write agent://", async () => {
+		// A delegate that tells its parent which files it owns has not started
+		// implementing yet: the real write tool's peer message must keep the plan on
+		// the primary, and the real file write that follows is what hands off.
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		const agents = AgentRegistry.global();
+		const parent = createLifecycleSession([{ content: ["noted"] }], { armed: false });
+		agents.register({ id: "Main", displayName: "Main", kind: "main", session: parent.session });
+		const workerTools: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getAgentId: () => "Worker",
+			agentRegistry: agents,
+		};
+		const write = new WriteTool(workerTools);
+		const writeCall = (id: string, args: { path: string; content: string }): MockResponse => ({
+			content: [{ type: "toolCall", id, name: "write", arguments: args }],
+			stopReason: "toolUse",
+		});
+		const worker = createLifecycleSession(
+			[
+				toolCall("todo", "todo"),
+				writeCall("message", { path: "agent://Main", content: "I own impl.txt." }),
+				writeCall("implementation", { path: "impl.txt", content: "implemented\n" }),
+				{ content: ["done"] },
+			],
+			{
+				tools: [todoTool, write as AgentTool],
+				registry: new Map<string, AgentTool>([
+					[todoTool.name, todoTool],
+					[write.name, write as AgentTool],
+				]),
+			},
+		);
+		try {
+			await worker.session.prompt("coordinate with the parent, then implement");
+			await parent.session.waitForIdle();
+			const parentTranscript = JSON.stringify(parent.session.messages);
+			expect(parentTranscript).toContain("I own impl.txt.");
+		} finally {
+			await parent.session.dispose();
+			IrcBus.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+		}
+		expect(await Bun.file(path.join(tempDir.path(), "impl.txt")).text()).toBe("implemented\n");
+		const primaryId = worker.primary.id;
+		expect(worker.requested).toEqual([primaryId, primaryId, primaryId, worker.target.id]);
+		expect(worker.session.model?.id).toBe(worker.target.id);
+	});
 
 	it("switches on a write-tier xd:// device dispatched through write (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");

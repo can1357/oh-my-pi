@@ -102,6 +102,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 				resetTranscriptAnchors++;
 			},
 			restorePendingToolResults() {},
+			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},
 		},
 		statusLine: {

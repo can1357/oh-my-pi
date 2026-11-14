@@ -54,10 +54,12 @@ fn term_size(zw: &mut Zw<'_, '_>) -> (i64, i64) {
 		.map(|v| zw_int(&v))
 		.filter(|&c| c > 0);
 	let or = |v: Option<i64>, t: usize, d: i64| {
-		v.unwrap_or(if t > 0 {
-			i64::try_from(t).unwrap_or(d)
-		} else {
-			d
+		v.unwrap_or_else(|| {
+			if t > 0 {
+				i64::try_from(t).unwrap_or(d)
+			} else {
+				d
+			}
 		})
 	};
 	(or(cols, tc, 80), or(lines, tl, 24))

@@ -59,6 +59,8 @@ export interface SpotlightClientOptions {
 	/** Budget of one {@link SpotlightClient.rank} call. */
 	timeoutMs: number;
 	credential?: StencilCredential;
+	/** Whether this request is permitted by the active session's auxiliary-model policy. */
+	allowRequest?: () => boolean;
 	fetch?: typeof fetch;
 }
 
@@ -74,7 +76,15 @@ export class SpotlightClient {
 	/** The credential was created here, so close() releases its auth store; an injected one stays the caller's. */
 	#ownsCredential: boolean;
 	#fetch: typeof fetch;
+	#allowRequest: () => boolean;
 	#warming?: Promise<void>;
+	/** The last ranking found no credential; cleared once one resolves, so a later loss is reported again. */
+	#credentialMissing = false;
+	/**
+	 * Called when a ranking finds no Stencil credential, once per loss: the first such ranking, then again only
+	 * after a credential resolved in between.
+	 */
+	onCredentialMissing?: () => void;
 
 	constructor(options: SpotlightClientOptions) {
 		this.url = options.url || DEFAULT_SPOTLIGHT_URL;
@@ -83,6 +93,7 @@ export class SpotlightClient {
 		this.#credential = options.credential ?? new StencilCredential();
 		this.#ownsCredential = options.credential === undefined;
 		this.#fetch = options.fetch ?? fetch;
+		this.#allowRequest = options.allowRequest ?? (() => true);
 	}
 
 	/**
@@ -93,8 +104,27 @@ export class SpotlightClient {
 	 * score every item of every question (status 200, code `bad_reply`).
 	 */
 	async rank(request: SpotlightRequest, signal?: AbortSignal, timeoutMs = this.#timeoutMs): Promise<SpotlightReply> {
+		if (!this.#allowRequest()) throw new SpotlightError("spotlight: disabled by model policy", 0, "policy");
 		const token = await this.#credential.resolve();
-		if (!token) throw new SpotlightError(StencilCredential.missingMessage, 0, "no_credential");
+		if (!token) {
+			if (!this.#credentialMissing) {
+				this.#credentialMissing = true;
+				logger.warn("spotlight: no Stencil credential; shaping falls back to unranked rules until sign-in");
+				this.onCredentialMissing?.();
+			}
+			throw new SpotlightError(StencilCredential.missingMessage, 0, "no_credential");
+		}
+		this.#credentialMissing = false;
+		return this.#post(token, request, signal, timeoutMs);
+	}
+
+	async #post(
+		token: string,
+		request: SpotlightRequest,
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+	): Promise<SpotlightReply> {
+		if (!this.#allowRequest()) throw new SpotlightError("spotlight: disabled by model policy", 0, "policy");
 		const questions: Record<string, { probe: string }> = {};
 		for (const id in request.questions) questions[id] = { probe: request.questions[id] };
 		const body = JSON.stringify({
@@ -157,23 +187,31 @@ export class SpotlightClient {
 	/**
 	 * Wakes the endpoint in the background so the session's first real ranking doesn't pay the cold start; at most
 	 * one warm-up in flight per client (a later call, e.g. after a timed-out ranking, wakes it again), failures
-	 * logged only.
+	 * logged only. A missing credential is left for the first real ranking to report.
 	 */
 	warm(): void {
-		if (this.#warming) return;
-		this.#warming = this.rank(
-			{
-				state: { task: "warm-up" },
-				source: "true",
-				items: ["ok"],
-				questions: { q: "The most important line in this output is: `" },
-			},
-			undefined,
-			WARM_TIMEOUT_MS,
-		).then(
-			reply => logger.debug("spotlight warm", { ms: reply.ms }),
-			error => logger.debug("spotlight warm failed", { error: String(error) }),
-		);
+		if (this.#warming || !this.#allowRequest()) return;
+		this.#warming = this.#credential
+			.resolve()
+			.then(async token => {
+				if (!token) {
+					logger.debug("spotlight warm skipped: no credential");
+					return;
+				}
+				const reply = await this.#post(
+					token,
+					{
+						state: { task: "warm-up" },
+						source: "true",
+						items: ["ok"],
+						questions: { q: "The most important line in this output is: `" },
+					},
+					undefined,
+					WARM_TIMEOUT_MS,
+				);
+				logger.debug("spotlight warm", { ms: reply.ms });
+			})
+			.catch(error => logger.debug("spotlight warm failed", { error: String(error) }));
 		void this.#warming.finally(() => {
 			this.#warming = undefined;
 		});

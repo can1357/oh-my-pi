@@ -3,6 +3,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import { ptree } from "@oh-my-pi/pi-utils";
+import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
@@ -52,6 +53,51 @@ const USER_AGENTS = [
  */
 const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
+/** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
+const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;
+
+/**
+ * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field
+ * outside `<template>`. Bun's HTMLRewriter tokenizes the page as a browser does, so a form quoted in
+ * a comment, script, raw-text element or attribute is no field. A field gets an attribute named with
+ * a fresh nonce, which the page cannot already carry; a tag cut off by the end of the page is
+ * written back as text, so its mark never reaches the output.
+ */
+function hasChallengeForm(html: string): boolean {
+	if (html.length > CHALLENGE_PAGE_MAX_CHARS) return false;
+	const mark = `data-omp-challenge-${crypto.randomUUID()}`;
+	const output = new HTMLRewriter()
+		.on("input[name]", {
+			element(input) {
+				if (decodeEntities(input.getAttribute("name") ?? "") === "js_challenge") input.setAttribute(mark, "");
+			},
+		})
+		.on("template input[name]", {
+			element(input) {
+				input.removeAttribute(mark);
+			},
+		})
+		.transform(html);
+	return output.includes(mark);
+}
+
+/**
+ * Name the bot protection whose challenge or block page an HTML response is. A 2xx page counts
+ * only from Cloudflare's header or a live challenge form, since an article can quote any marker
+ * as text; vendor markers in the body count on an error status.
+ */
+function botWallOf(response: Response, contentType: string, content: string): string | undefined {
+	if (!contentType.includes("html")) return undefined;
+	if (response.headers.get("cf-mitigated") === "challenge") return "Cloudflare";
+	if (hasChallengeForm(content)) return "JavaScript challenge";
+	if (response.ok) return undefined;
+	if (content.includes("_cf_chl_opt")) return "Cloudflare";
+	if (content.includes("captcha-delivery.com")) return "DataDome";
+	if (content.includes("px-captcha")) return "PerimeterX";
+	if (content.includes("blocked by network security")) return "network security block";
+	return undefined;
+}
+
 /**
  * Collapse blank-line runs and trim. Never shortens content: URL reads page the preview
  * themselves, and selectors, artifacts, and URL search must see the whole body.
@@ -87,6 +133,11 @@ export interface LoadPageResult {
 	error?: string;
 	/** True when the body read was skipped via skipBodyForContentType. */
 	bodySkipped?: boolean;
+	/**
+	 * Bot protection that answered with its challenge or block page instead of the page. Such a
+	 * response is never `ok`, whatever its status, so a caller checking `ok` does not take it as content.
+	 */
+	blockedBy?: string;
 }
 
 const RETRY_AFTER_MAX_MS = 10_000;
@@ -108,6 +159,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 	const { timeout = 20, headers = {}, maxBytes = MAX_BYTES, signal, method = "GET", body } = options;
 
 	let lastError: string | undefined;
+	let lastBlockedResponse: LoadPageResult | undefined;
 	let retried429 = false;
 	// Header names are case-insensitive, so a caller's header replaces ours whatever its spelling.
 	const callerHeaders = new Headers(headers);
@@ -150,6 +202,19 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			const lastAgent = !rotates || attempt === USER_AGENTS.length - 1;
 			if (!lastAgent && BLOCKED_STATUSES.has(response.status)) {
 				void response.body?.cancel().catch(() => {});
+				// A refusal whose header names its wall is kept in case later agents fare no better; its
+				// body is not read, so rotation costs what it did. A 2xx challenge kept later wins.
+				const headerWall = lastBlockedResponse ? undefined : botWallOf(response, contentType, "");
+				if (headerWall) {
+					lastBlockedResponse = {
+						content: "",
+						contentType,
+						finalUrl,
+						ok: false,
+						status: response.status,
+						blockedBy: headerWall,
+					};
+				}
 				continue;
 			}
 
@@ -176,6 +241,11 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const responseBody = await readBodyCapped(response, maxBytes);
 			if (!responseBody) {
+				// Once a wall is known, an error under another agent only means trying the next one.
+				if (!response.ok && lastBlockedResponse) {
+					if (!lastAgent) continue;
+					return lastBlockedResponse;
+				}
 				// A successful response can still be bodyless (HTTP 204, or a null
 				// body stream): keep the transport's own success verdict instead of
 				// rewriting it, so the caller's status handling (a 204 is a valid
@@ -184,33 +254,34 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			}
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
-
-			if (!response.ok) {
-				return {
-					content,
-					contentType,
-					finalUrl,
-					ok: false,
-					status: response.status,
-					truncated: responseBody.truncated,
-				};
-			}
-
-			return {
+			const blockedBy = botWallOf(response, contentType, content);
+			const result: LoadPageResult = {
 				content,
 				contentType,
 				finalUrl,
-				ok: true,
+				ok: response.ok && !blockedBy,
 				status: response.status,
 				truncated: responseBody.truncated,
+				blockedBy,
 			};
+			if (blockedBy && !lastAgent) {
+				// A 2xx challenge outranks a refusal's wall: remote readers can still get past it.
+				if (!lastBlockedResponse || response.ok) lastBlockedResponse = result;
+				continue;
+			}
+			// The last agent's error yields to a saved wall, unless both are walls and the saved one is a refusal.
+			if (!response.ok && lastBlockedResponse && (!blockedBy || (lastBlockedResponse.status ?? 0) < 300)) {
+				if (!lastAgent) continue;
+				return lastBlockedResponse;
+			}
+			return result;
 		} catch (error) {
 			if (signal?.aborted) {
 				throw new ToolAbortError();
 			}
 			lastError = error instanceof Error ? error.message : String(error);
 			if (attempt === USER_AGENTS.length - 1) {
-				return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
+				return lastBlockedResponse ?? { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
 			}
 		}
 	}

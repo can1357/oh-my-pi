@@ -7,6 +7,14 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
+# Only Darwin links need an SDK. The env file is empty on mac hosts so rustc
+# keeps native Xcode discovery; Linux cross links get an absolute SDKROOT
+# before rustc could fall back to the unavailable xcrun.
+_DARWIN_RUSTC_ENV_FILES = select({
+    "@platforms//os:macos": ["//bazel/toolchains/darwin:rustc_sdk_env"],
+    "//conditions:default": [],
+})
+
 rust_binary(
     name = "generate_syntax_set",
     srcs = [
@@ -16,6 +24,7 @@ rust_binary(
     compile_data = glob(["src/syntaxes/*.sublime-syntax"]),
     crate_root = "src/syntaxes/generate.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     deps = ["@crates//:syntect"],
 )
 
@@ -67,6 +76,7 @@ rust_binary(
     ],
     crate_root = "src/oauth_callback/relay.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = [
         "-Ccodegen-units=1",
         "-Copt-level=z",
@@ -97,6 +107,7 @@ rust_binary(
     ],
     crate_root = "src/desktop/macos/release_helper.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = [
         "-Ccodegen-units=1",
         "-Copt-level=z",
@@ -152,6 +163,7 @@ rust_shared_library(
             "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
         },
     }),
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = select({
         "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
         "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
@@ -164,9 +176,11 @@ rust_shared_library(
         # nothing — napi-sys v3 imports node.exe via raw-dylib.
         # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
         # x86_64; every shipped darwin addon carries a signature.
+        # -install_name: otherwise the addon's id is its sandbox output path.
         "@platforms//os:macos": [
             "-Clink-arg=-Wl,-undefined,dynamic_lookup",
             "-Clink-arg=-Wl,-adhoc_codesign",
+            "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
         ],
         "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
         "//conditions:default": [],
@@ -210,6 +224,7 @@ rust_test(
     ],
     crate_root = "src/oauth_callback/relay.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
 )
 
 rust_test(

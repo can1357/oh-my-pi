@@ -230,7 +230,7 @@ pub fn check_param(c: &mut Comp, s: &mut Vec<u8>, set: bool, test: bool) -> Opti
 			let mut ripre = c.core.ripre.take().unwrap_or_default();
 			ripre.extend_from_slice(pre);
 			c.core.ripre = Some(ripre);
-			let mut ipre = c.core.ipre.take().map(Vec::from).unwrap_or_default();
+			let mut ipre = c.core.ipre.take().map_or_default(Vec::from);
 			ipre.extend_from_slice(pre);
 			untokenize(&mut ipre);
 			c.core.ipre = Some(ipre.into());
@@ -338,7 +338,7 @@ pub fn ctokenize(p: &mut [u8]) {
 /// tokenized unless `untok`), with the lengths of the ignored prefix and
 /// of the prefix.
 pub fn comp_str(c: &Comp, untok: bool) -> (BString, i32, i32) {
-	let get = |s: &Option<BString>| s.as_ref().map(|s| s.to_vec()).unwrap_or_default();
+	let get = |s: &Option<BString>| s.as_ref().map_or_default(|s| s.to_vec());
 	let mut p = get(&c.complete.compprefix);
 	let mut s = get(&c.complete.compsuffix);
 	let ip = get(&c.complete.compiprefix);
@@ -374,7 +374,7 @@ pub const fn comp_quoting_string(stype: u8) -> &'static [u8] {
 pub fn set_comp_sep(ex: &mut Expander<'_, '_>, c: &mut Comp) -> i32 {
 	let (full, lip, lp) = comp_str(c, true);
 	let (lip, noffs) = (usize::try_from(lip).unwrap_or(0), usize::try_from(lp).unwrap_or(0));
-	let mut foo: Vec<Vec<u8>> = Vec::new();
+	let mut wordlist: Vec<Vec<u8>> = Vec::new();
 	let (owe, owb) = (c.tricky.we, c.tricky.wb);
 	let (mut swb, mut swe, mut soffs) = (0i32, 0i32, 0i32);
 	let mut got = false;
@@ -501,8 +501,8 @@ pub fn set_comp_sep(ex: &mut Expander<'_, '_>, c: &mut Comp) -> i32 {
 					}
 					p += 1;
 				}
+				lsq = 0;
 				if qttype == qt::SINGLE {
-					lsq = 0;
 					for &ch in &ts {
 						if sq != 0 && ch == SNULL {
 							sq -= qa;
@@ -512,23 +512,21 @@ pub fn set_comp_sep(ex: &mut Expander<'_, '_>, c: &mut Comp) -> i32 {
 							lsq += qa;
 						}
 					}
-				} else {
-					lsq = 0;
 				}
-				foo.push(ts);
+				wordlist.push(ts);
 				true
 			},
 			_ => false,
 		};
 		if !got && lx.lexflags() == 0 {
 			got = true;
-			cur = i32::try_from(foo.len()).unwrap_or(0) - 1;
+			cur = i32::try_from(wordlist.len()).unwrap_or(0) - 1;
 			let z = lx.z();
 			swb = z.wb - dq - sq - dolq;
 			swe = z.we - dq - sq - dolq;
 			sqq = lsq;
 			soffs = zcs - swb - css;
-			if has && let Some(w) = foo.last_mut() {
+			if has && let Some(w) = wordlist.last_mut() {
 				// Take out the `x`.
 				if let Ok(o) = usize::try_from(soffs)
 					&& o < w.len()
@@ -710,7 +708,7 @@ pub fn set_comp_sep(ex: &mut Expander<'_, '_>, c: &mut Comp) -> i32 {
 	}
 	c.complete.compprefix = Some(pre.into());
 	c.complete.compsuffix = Some(suf.into());
-	let get = |s: &Option<BString>| s.as_ref().map(|s| s.to_vec()).unwrap_or_default();
+	let get = |s: &Option<BString>| s.as_ref().map_or_default(|s| s.to_vec());
 	let mut qip = get(&c.complete.compqiprefix);
 	qip.extend_from_slice(&get(&c.complete.compiprefix));
 	qip.extend_from_slice(&multiquote(ex, c, &qp, true));
@@ -721,8 +719,8 @@ pub fn set_comp_sep(ex: &mut Expander<'_, '_>, c: &mut Comp) -> i32 {
 	c.complete.compqisuffix = Some(qis.into());
 	c.complete.compiprefix = Some(BString::default());
 	c.complete.compisuffix = Some(BString::default());
-	let n = foo.len();
-	c.complete.compwords = foo
+	let n = wordlist.len();
+	c.complete.compwords = wordlist
 		.into_iter()
 		.map(|mut w| {
 			untokenize(&mut w);

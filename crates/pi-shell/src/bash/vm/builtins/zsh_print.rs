@@ -424,12 +424,11 @@ pub fn expand_prompt_in(
 	cmdstack: Vec<&'static str>,
 ) -> X<Vec<u8>> {
 	use crate::bash::vm::state;
-	let (percent, bang, subst) = match opts {
-		Some(o) => o,
-		None => {
-			let mut zopt = |o: ZshOpt| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
-			(zopt(ZshOpt::Promptpercent)?, zopt(ZshOpt::Promptbang)?, zopt(ZshOpt::Promptsubst)?)
-		},
+	let (percent, bang, subst) = if let Some(o) = opts {
+		o
+	} else {
+		let mut zopt = |o: ZshOpt| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
+		(zopt(ZshOpt::Promptpercent)?, zopt(ZshOpt::Promptbang)?, zopt(ZshOpt::Promptsubst)?)
 	};
 	let text = if subst {
 		let status = ex.vp.status;
@@ -843,11 +842,13 @@ fn columns(
 	} else {
 		let l = widths.iter().copied().max().unwrap_or(0);
 		sc = l + 2;
+		// zsh's `zterm_columns`: `$COLUMNS`, else 80 (no terminal size).
 		let cols = match zx(ctx, |ex| params::getsparam(ex, b"COLUMNS"))? {
 			Ok(Some(v)) => strtol_all(&v)
 				.and_then(|v| usize::try_from(v).ok())
-				.unwrap_or(0),
-			_ => 0,
+				.filter(|&c| c > 0)
+				.unwrap_or(80),
+			_ => 80,
 		};
 		nc = ((cols + 1) / sc).max(1);
 		nr = argc.div_ceil(nc);

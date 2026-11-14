@@ -60,6 +60,8 @@ interface TestSession {
 	systemPrompts: string[][];
 	promptCacheKeys: (string | undefined)[];
 	rebuild: Mock<(toolNames: string[]) => Promise<string>>;
+	/** Changes a non-roster prompt input (e.g. a model switch), so the next rebuild breaks the prefix anyway. */
+	changePromptInputs: () => void;
 }
 
 function newSession(
@@ -83,9 +85,10 @@ function newSession(
 	const contexts: Message[][] = [];
 	const systemPrompts: string[][] = [];
 	const promptCacheKeys: (string | undefined)[] = [];
+	let promptInputs = "";
 	const rebuilder = {
 		async rebuildSystemPrompt(toolNames: string[]): Promise<string> {
-			return `tools:${toolNames.join(",")}`;
+			return `tools:${toolNames.join(",")}${promptInputs}`;
 		},
 	};
 	const rebuild = vi.spyOn(rebuilder, "rebuildSystemPrompt");
@@ -126,7 +129,16 @@ function newSession(
 			systemPrompt: [await rebuilder.rebuildSystemPrompt(toolNames)],
 		}),
 	});
-	return { session, contexts, systemPrompts, promptCacheKeys, rebuild };
+	return {
+		session,
+		contexts,
+		systemPrompts,
+		promptCacheKeys,
+		rebuild,
+		changePromptInputs: () => {
+			promptInputs = ";changed";
+		},
+	};
 }
 
 function providerText(messages: Message[]): string {
@@ -452,8 +464,10 @@ describe("prefix-bound tool roster changes", () => {
 
 		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
 		await harness.session.setActiveToolPresentation(["read", "bash"], []);
-		// A later full rebuild (e.g. the model-cycle round trip's syncAfterModelChange)
-		// re-renders the complete roster, subsuming the queued delta.
+		// A later full rebuild that changes the prompt anyway (e.g. the model-cycle
+		// round trip's syncAfterModelChange) re-renders the complete roster,
+		// subsuming the queued delta.
+		harness.changePromptInputs();
 		await harness.session.refreshBaseSystemPrompt();
 
 		await harness.session.prompt("second");
@@ -464,7 +478,23 @@ describe("prefix-bound tool roster changes", () => {
 		expect(notices).toHaveLength(0);
 		const secondRequest = providerText(harness.contexts[1]);
 		expect(secondRequest).not.toContain("Tool availability changed.");
-		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash"]);
+		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash;changed"]);
+	});
+
+	it("keeps a pending roster change out of the prompt across a rebuild that changes nothing else", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+		// e.g. a body-only skill update: re-rendering the bound roster reproduces the prompt.
+		await harness.session.refreshBaseSystemPrompt();
+
+		await harness.session.prompt("second");
+
+		expect(harness.systemPrompts[1]).toEqual(harness.systemPrompts[0]);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
 	});
 
 	it("does not ship a roster notice when a rebuild clears the delta during pre-prompt compaction", async () => {
@@ -486,6 +516,7 @@ describe("prefix-bound tool roster changes", () => {
 		const rebuildDuringCompaction = vi
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementation(async () => {
+				harness.changePromptInputs();
 				await harness.session.refreshBaseSystemPrompt();
 			});
 
@@ -517,6 +548,7 @@ describe("prefix-bound tool roster changes", () => {
 		const rebuildDuringCompaction = vi
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementation(async () => {
+				harness.changePromptInputs();
 				await harness.session.refreshBaseSystemPrompt();
 			});
 
@@ -547,6 +579,7 @@ describe("prefix-bound tool roster changes", () => {
 		// buildSystemPromptForAgentStart before emitBeforeAgentStart sets the
 		// per-turn override. The rebuilt base must not clear the delta outright: the
 		// override registered moments later hides that base from the wire.
+		harness.changePromptInputs();
 		await harness.session.refreshBaseSystemPrompt();
 
 		await harness.session.prompt("second");
@@ -595,12 +628,13 @@ describe("prefix-bound tool roster changes", () => {
 		await harness.session.prompt("first");
 
 		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+		harness.changePromptInputs();
 		await harness.session.refreshBaseSystemPrompt();
 		await harness.session.setActiveToolPresentation(["read"], []);
 
 		await harness.session.prompt("second");
 
-		expect(harness.systemPrompts[1]).toEqual(["tools:read,bash"]);
+		expect(harness.systemPrompts[1]).toEqual(["tools:read,bash;changed"]);
 		const notices = harness.session.agent.state.messages.filter(
 			message => message.role === "custom" && message.customType === "tool-roster-notice",
 		);

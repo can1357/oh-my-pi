@@ -36,15 +36,24 @@ export interface MnemopiEmbeddingProvider {
 export interface MnemopiEmbeddingRuntimeOptions {
 	disabled?: boolean;
 	model?: string;
+	/** Whether the resolved remote embedding endpoint may be called. */
+	allowRemote?: (baseUrl: string) => boolean;
+	/** Whether local inference and loading an uncached local model are allowed. */
+	allowLocal?: () => boolean;
+	allowLocalLoad?: () => boolean;
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider | ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>);
 	/** Override `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS`. `0` disables the cap. See `config.embeddingMaxInputChars`. */
 	maxInputChars?: number;
+	/** Override `MNEMOPI_EMBEDDING_BATCH_SIZE`: max texts per embedding API request. */
+	batchSize?: number;
 }
 
 export interface MnemopiLlmRuntimeOptions {
 	enabled?: boolean;
+	/** Whether a configured remote endpoint may be called at request time. */
+	allowRemote?: () => boolean;
 	baseUrl?: string;
 	apiKey?: ApiKey;
 	model?: string | Model<Api>;
@@ -66,14 +75,19 @@ export interface MnemopiRuntimeOptions {
 export interface ResolvedMnemopiEmbeddingRuntimeOptions {
 	disabled?: boolean;
 	model?: string;
+	allowRemote?: (baseUrl: string) => boolean;
+	allowLocal?: () => boolean;
+	allowLocalLoad?: () => boolean;
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider;
 	maxInputChars?: number;
+	batchSize?: number;
 }
 
 export interface ResolvedMnemopiLlmRuntimeOptions {
 	enabled?: boolean;
+	allowRemote?: () => boolean;
 	baseUrl?: string;
 	apiKey?: ApiKey;
 	model?: string | Model<Api>;

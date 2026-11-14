@@ -78,7 +78,7 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		};
 		if let Some(search) = search {
 			let cwd = ctx.vp.cwd.clone();
-			for cand in candidates(&search, file, &cwd) {
+			for cand in candidates(&search, file, &cwd, ctx.k.engine.config().platform, &[]) {
 				if let ProbeResult::Stat(Some(st)) =
 					ctx.probe(Probe::Stat { path: cand.clone(), follow: true })?
 					&& st.kind == StatKind::File
@@ -187,7 +187,8 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		}
 	} else if path.is_none() {
 		let search = ctx.scalar(b"PATH")?.unwrap_or_default();
-		for dir in search.split(|&c| c == b':') {
+		let separator = crate::bash::vm::probe::path_separator(ctx.k.engine.config().platform);
+		for dir in search.split(|&c| c == separator) {
 			let cand = if dir.is_empty() || dir == b"." {
 				absolute(&cwd, file)
 			} else {
@@ -637,6 +638,10 @@ fn is_child(ctx: &mut Ctx<'_, '_>, pid: Vpid) -> bool {
 	if ctx.vp.jobs.by_vpid(pid).is_some_and(|j| !j.inherited) {
 		return true;
 	}
+	// A subshell copies `$!`, not its parent's children.
+	if !ctx.k.started(ctx.cx.store, ctx.vp.vpid, pid) {
+		return false;
+	}
 	match ctx.k.proc_state(ctx.cx.store, pid) {
 		Some(crate::bash::vm::ProcState::Exited(_)) => true,
 		Some(crate::bash::vm::ProcState::Running) => ctx.vp.last_bg.is(pid),
@@ -679,6 +684,7 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 	if let Some(last) = ctx.vp.last_bg.vpid()
 		&& ctx.vp.jobs.by_vpid(last).is_none()
 		&& ctx.k.proc_state(ctx.cx.store, last) == Some(crate::bash::vm::ProcState::Running)
+		&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, last)
 	{
 		list.push(last);
 	}
@@ -702,7 +708,8 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 				&& matches!(
 					ctx.k.proc_state(ctx.cx.store, pid),
 					Some(crate::bash::vm::ProcState::Exited(_))
-				))
+				)
+				&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, pid))
 			.then_some(pid)
 		});
 		if let Some(pid) = kept {
@@ -723,7 +730,8 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 					.or_else(|| {
 						(ctx.vp.last_bg.is(p)
 							&& ctx.k.proc_state(ctx.cx.store, p)
-								== Some(crate::bash::vm::ProcState::Running))
+								== Some(crate::bash::vm::ProcState::Running)
+							&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, p))
 						.then_some(p)
 					}),
 				None => super::jobs::spec(ctx, a)

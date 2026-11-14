@@ -1474,7 +1474,7 @@ mod tests {
 	/// The settings of a sort that compares collation keys, or None where ICU
 	/// has no collator for the locale.
 	fn collating_settings() -> Option<GlobalSettings> {
-		let locale = super::super::Locale::try_from_str("en").expect("locale");
+		let locale = icu_locale_core::Locale::try_from_str("en").expect("locale");
 		let collator =
 			super::super::CollatorBorrowed::try_new((&locale).into(), Default::default()).ok()?;
 		let mut settings = GlobalSettings::default();
@@ -3482,13 +3482,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, 
 use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
-use icu_collator::{
-	CollatorBorrowed,
-	options::{AlternateHandling, CollatorOptions, Strength},
-};
-use icu_locale_core::Locale;
+use icu_collator::CollatorBorrowed;
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
-use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
@@ -3508,11 +3503,9 @@ use uucore::{
 	version_cmp::version_cmp,
 };
 
-#[cfg(unix)]
-use crate::locale::locale_loadable;
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available},
-	locale::{numeric_symbols, parse_locale_name, shell_locale},
+	locale::{collation_locale_failed, numeric_symbols, shell_collator, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
 		tmp_dir::{TmpDirWrapper, TmpFile},
@@ -4935,36 +4928,6 @@ impl FieldSelector {
 	}
 }
 
-/// Collators built so far, by locale. Building one resolves the locale's
-/// tailoring through ICU's fallback chain, which repeated calls skip. `None`
-/// records a locale ICU could not build a collator for.
-static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
-	LazyLock::new(Default::default);
-
-/// The collator for the shell's LC_COLLATE, or `None` to compare text by
-/// bytes: the locale must be UTF-8 (uucore's rule) and loadable by the system
-/// (GNU falls back to byte order otherwise).
-fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
-	let (locale, utf8) = parse_locale_name(shell_locale(host, "LC_COLLATE")?)?;
-	if !utf8 || locale_failed_to_set(host) {
-		return None;
-	}
-	COLLATORS
-		.lock()
-		.entry(locale)
-		.or_insert_with_key(|locale| {
-			// Shift punctuation behind letters, but retain its quaternary
-			// distinctions for `-u` and `-c` instead of treating paths as equal.
-			let mut options = CollatorOptions::default();
-			options.alternate_handling = Some(AlternateHandling::Shifted);
-			options.strength = Some(Strength::Quaternary);
-			CollatorBorrowed::try_new(locale.into(), options)
-				.ok()
-				.map(Arc::new)
-		})
-		.clone()
-}
-
 /// Decimal point and thousands separator for the shell's LC_NUMERIC.
 fn detect_numeric_locale(host: &Host) -> NumericLocaleSettings {
 	let symbols = numeric_symbols(host);
@@ -5382,17 +5345,6 @@ fn default_merge_batch_size() -> usize {
 	}
 }
 
-#[cfg(not(unix))]
-fn locale_failed_to_set(host: &Host) -> bool {
-	host.var("LC_ALL") == Some("missing")
-}
-
-#[cfg(unix)]
-fn locale_failed_to_set(host: &Host) -> bool {
-	shell_locale(host, "LC_COLLATE")
-		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
-}
-
 fn key_zero_width(selector: &FieldSelector) -> bool {
 	let Some(to) = &selector.to else {
 		return false;
@@ -5428,7 +5380,7 @@ fn emit_debug_warnings(
 	flags: &GlobalOptionFlags,
 	legacy_warnings: &[LegacyKeyWarning],
 ) {
-	if locale_failed_to_set(host) {
+	if collation_locale_failed(host) {
 		show_error!(&mut host.stderr, "{}", "failed to set locale");
 	}
 
@@ -6988,6 +6940,8 @@ fn format_error_message(error: &ParseSizeError, s: &str, option: &str) -> String
 mod tests {
 
 	use super::*;
+	#[cfg(unix)]
+	use crate::locale::locale_loadable;
 	use crate::host::run_util;
 
 	fn tokenize_helper(line: &[u8], separator: Option<u8>) -> Vec<Field> {

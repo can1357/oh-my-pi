@@ -10,6 +10,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -21,6 +22,7 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -1437,6 +1439,40 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("lists extension modules configured for the requested project, not the ACP process", async () => {
+		const harness = await createHarness();
+		const other = path.join(harness.cwdA, "other");
+		const target = path.join(harness.cwdB, "fleet");
+		await Bun.write(path.join(other, "package.json"), JSON.stringify({ omp: { extensions: ["./wrong.ts"] } }));
+		await Bun.write(path.join(other, "wrong.ts"), "export default function wrong() {}\n");
+		await Bun.write(path.join(target, "package.json"), JSON.stringify({ omp: { extensions: ["./hello.ts"] } }));
+		await Bun.write(path.join(target, "hello.ts"), "export default function hello() {}\n");
+		await Bun.write(path.join(harness.cwdA, ".omp", "config.yml"), "extensions:\n  - ./other\n");
+		await Bun.write(
+			path.join(harness.cwdB, ".omp", "config.yml"),
+			"extensions:\n  - ./fleet\ndisabledExtensions:\n  - extension-module:hello\n",
+		);
+		cfgExtensions.set(Settings.instance, [other]);
+
+		const result = await harness.agent.extMethod("_omp/extensions", { cwd: harness.cwdB });
+		expect(result.extensions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "extension-module:hello",
+					path: path.join(target, "hello.ts"),
+					state: "disabled",
+					disabledReason: "item-disabled",
+					source: expect.objectContaining({ level: "project" }),
+				}),
+			]),
+		);
+		expect(result.extensions).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: "extension-module:wrong" })]),
+		);
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("steers a running turn through _session/steering", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -1791,6 +1827,109 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("adds background subagent spend to usage_update cost (#19102)", async () => {
+		const harness = await createHarness();
+		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(live.sessionId)!;
+		(session as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		session.sessionManager.appendMessage(costing(1));
+		// A blocking `task` result carries its child's $0.30; a background spawn's carries nothing.
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "blocking",
+			toolName: "task",
+			content: [{ type: "text", text: "done" }],
+			details: { usage: costing(0.3).usage },
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await session.sessionManager.ensureOnDisk();
+		const artifacts = session.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = (id: string, cost: number): AgentRef => ({
+			id,
+			displayName: id,
+			kind: "sub",
+			status: "parked",
+			session: null,
+			sessionFile: path.join(artifacts, `${id}.jsonl`),
+			generation: 0,
+			createdAt: 0,
+			lastActivity: 0,
+			history: { metrics: { tokens: 1, requests: 1, tools: 0, cost, durationMs: 0 } },
+		});
+		// ACP registers the root itself as `kind: "main"` under `acp:<id>`; it is not part of its own tree.
+		const rootRef: AgentRef = {
+			...child(`acp:${live.sessionId}`, 1.3),
+			kind: "main",
+			sessionFile: session.sessionManager.getSessionFile()!,
+		};
+		const list = spyOn(AgentRegistry.global(), "list").mockReturnValue([
+			rootRef,
+			child("Blocking", 0.3),
+			child("Background", 0.2),
+		]);
+		try {
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+		} finally {
+			list.mockRestore();
+		}
+
+		const usageUpdates = harness.updates.filter(
+			update => update.sessionId === live.sessionId && update.update.sessionUpdate === "usage_update",
+		);
+		const last = usageUpdates.at(-1)?.update as { cost?: { amount: number } } | undefined;
+		expect(last?.cost?.amount).toBeCloseTo(1.5, 10);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("counts a loaded session's persisted background subagent spend (#19102)", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		stored.sessionManager.appendMessage({ role: "user", content: "spawn", timestamp: Date.now() });
+		stored.sessionManager.appendMessage(costing(1));
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+		// A background child from before the restart: only its own transcript records its spend.
+		const artifacts = stored.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = SessionManager.create(harness.cwdA, artifacts);
+		child.appendMessage({ role: "user", content: "probe", timestamp: Date.now() });
+		child.appendMessage(costing(0.2));
+		await child.ensureOnDisk();
+		await child.flush();
+		await child.close();
+
+		try {
+			await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+			const loaded = harness.sessions.at(-1)!;
+			(loaded as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+			await harness.agent.prompt({ sessionId: stored.sessionId, prompt: [{ type: "text", text: "ping" }] });
+
+			const last = harness.updates
+				.filter(update => update.sessionId === stored.sessionId && update.update.sessionUpdate === "usage_update")
+				.at(-1)?.update as { cost?: { amount: number } } | undefined;
+			expect(last?.cost?.amount).toBeCloseTo(1.2, 10);
+		} finally {
+			for (const ref of AgentRegistry.global().list()) {
+				if (ref.sessionFile?.startsWith(artifacts)) AgentRegistry.global().unregister(ref.id);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("loads a session stored under a legacy/hashed project directory (#7779)", async () => {
@@ -3541,7 +3680,7 @@ describe("ACP agent", () => {
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledTimes(1);
 		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledWith(
-			expect.objectContaining({ askDialog: expect.any(Function) }),
+			expect.objectContaining({ formDialog: expect.any(Function) }),
 			true,
 		);
 
@@ -3881,6 +4020,129 @@ describe("ACP agent", () => {
 			}
 		});
 
+		const DEPLOY_FORM = `<form>
+  <p>Staging is green; production has a pending migration.</p>
+  <fieldset>
+    <legend>Target</legend>
+    <label><input type="radio" name="target" value="staging" checked> Staging</label>
+    <label><input type="radio" name="target" value="prod"> Production</label>
+  </fieldset>
+  <fieldset>
+    <legend>Checks</legend>
+    <label><input type="checkbox" name="checks" value="lint" checked> Lint</label>
+    <label><input type="checkbox" name="checks" value="e2e"> E2E</label>
+  </fieldset>
+  <label><input type="checkbox" name="notify" value="yes"> Notify the channel</label>
+  <label>Replicas <input type="number" name="replicas" value="2" min="1" max="5" required></label>
+  <label>Notes <textarea name="notes" placeholder="Anything else?"></textarea></label>
+  <input type="hidden" name="source" value="ci">
+</form>`;
+
+		it("translates an HTML form into one elicitation with a property per field", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { target: "prod", checks: ["lint", "e2e", "bogus"], notify: true, replicas: 3, notes: "ship it" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form", FORM_CAPABILITIES);
+
+			const result = await ctx.formDialog!(DEPLOY_FORM);
+
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
+			expect(request.message).toContain("Staging is green; production has a pending migration.");
+			expect(request.requestedSchema.required).toEqual(["replicas"]);
+			expect(request.requestedSchema.properties).toEqual({
+				target: {
+					type: "string",
+					title: "Target",
+					oneOf: [
+						{ const: "staging", title: "Staging" },
+						{ const: "prod", title: "Production" },
+					],
+					default: "staging",
+				},
+				target__other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
+				checks: {
+					type: "array",
+					title: "Checks",
+					items: {
+						anyOf: [
+							{ const: "lint", title: "Lint" },
+							{ const: "e2e", title: "E2E" },
+						],
+					},
+					default: ["lint"],
+				},
+				checks__other: {
+					type: "string",
+					title: "Checks — Other",
+					description: "Another answer, added to those checked",
+				},
+				notify: { type: "boolean", title: "Notify the channel", default: false },
+				replicas: { type: "number", title: "Replicas", minimum: 1, maximum: 5, default: 2 },
+				notes: { type: "string", title: "Notes", description: "Anything else?" },
+			});
+			expect(result).toEqual({
+				data: {
+					source: "ci",
+					target: "prod",
+					checks: ["lint", "e2e"],
+					notify: "yes",
+					replicas: 3,
+					notes: "ship it",
+				},
+			});
+		});
+
+		it("folds a group's Other text into its value", async () => {
+			const { connection } = createElicitConnection(async () => ({
+				action: "accept",
+				content: {
+					target: "staging",
+					target__other: " canary ",
+					checks: ["lint"],
+					checks__other: "smoke",
+					replicas: 2,
+				},
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-other", FORM_CAPABILITIES);
+
+			const result = await ctx.formDialog!(DEPLOY_FORM);
+
+			expect(result?.data).toMatchObject({ target: "canary", checks: ["lint", "smoke"] });
+		});
+
+		it("returns undefined when a form elicitation is cancelled", async () => {
+			const { connection } = createElicitConnection(async () => ({ action: "cancel" }));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-cancel", FORM_CAPABILITIES);
+
+			expect(await ctx.formDialog!(DEPLOY_FORM)).toBeUndefined();
+		});
+
+		it("submits the form's defaults when a form elicitation times out", async () => {
+			vi.useFakeTimers();
+			try {
+				const { promise: never } = Promise.withResolvers<CreateElicitationResponse>();
+				const { connection } = createElicitConnection(() => never);
+				const ctx = createAcpExtensionUiContext(connection, () => "session-form-timeout", FORM_CAPABILITIES);
+				const onTimeout = vi.fn();
+
+				const pending = ctx.formDialog!(DEPLOY_FORM, { timeout: 10, onTimeout });
+				await Promise.resolve();
+				vi.advanceTimersByTime(10);
+				await Promise.resolve();
+
+				expect(await pending).toEqual({
+					data: { source: "ci", target: "staging", checks: ["lint"], replicas: 2, notes: "" },
+					timedOut: true,
+				});
+				expect(onTimeout).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		it("translates select to a single-property string-enum elicitation", async () => {
 			const { connection, calls } = createElicitConnection(async () => ({
 				action: "accept",
@@ -4051,6 +4313,25 @@ describe("ACP agent", () => {
 			expect(await ctx.confirm("X", "Y")).toBe(false);
 			expect(await ctx.input("X")).toBeUndefined();
 			expect(calls).toHaveLength(3);
+		});
+
+		it("rejects form and ask dialogs with the client's error instead of reporting a cancel", async () => {
+			const clientError = new RequestError(-32602, "Unsupported ACP elicitation form");
+			const { connection } = createElicitConnection(async () => {
+				throw clientError;
+			});
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-reject", FORM_CAPABILITIES);
+
+			const formError = await ctx.formDialog!(DEPLOY_FORM).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			expect(formError).toBeInstanceOf(Error);
+			expect((formError as Error).message).toContain("Unsupported ACP elicitation form");
+			expect((formError as Error).cause).toBe(clientError);
+			await expect(
+				ctx.askDialog!([{ id: "choice", question: "Choose", options: [{ label: "A" }] }]),
+			).rejects.toThrow("Unsupported ACP elicitation form");
 		});
 
 		it("skips the SDK call entirely when dialogOptions.signal is already aborted", async () => {

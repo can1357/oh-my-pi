@@ -1,3 +1,5 @@
+import { advanceRegexAfterEmptyMatch } from "./regex";
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Deterministic replacement generation
 // ═══════════════════════════════════════════════════════════════════════════
@@ -94,7 +96,7 @@ export function regexRematchesInContext(candidate: string, regex: RegExp, ctx: R
 		// re-redacted on a later pass — not a fixed point.
 		if (matchEnd > spanStart) return true;
 		// Zero-width matches do not advance lastIndex; step past to avoid a loop.
-		if (m[0].length === 0) regex.lastIndex++;
+		if (m[0].length === 0) advanceRegexAfterEmptyMatch(regex, probe);
 	}
 	return false;
 }

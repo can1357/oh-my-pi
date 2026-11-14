@@ -6,5 +6,4 @@ export type { LspStartupServerInfo, LspWarmupOptions, LspWarmupResult } from "./
 export { discoverStartupLspServers, getLspStatus, LSP_READONLY_ACTIONS, warmupLspServers } from "./servers";
 export { LspTool } from "./tool";
 export type { LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
-export type { WritethroughCallback, WritethroughDeferredHandle, WritethroughOptions } from "./writethrough";
-export { createLspWritethrough, flushLspWritethroughBatch, writethroughNoop } from "./writethrough";
+export * from "./writethrough";

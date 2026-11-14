@@ -175,6 +175,38 @@ setTerminalHeadless(false);
 		expect(await sessionDirs(name)).toEqual([]);
 	}, 15_000);
 
+	it.skipIf(process.platform === "win32")(
+		"runs a file target with bun, not the compiled omp binary's own executable",
+		async () => {
+			using dir = TempDir.createSync("@omp-tui-compiled-fixture-");
+			// Stands in for the compiled omp: it takes the entry path as its prompt.
+			const fakeOmp = dir.join("omp");
+			await Bun.write(fakeOmp, '#!/bin/sh\nprintf "OMP-PROMPT=%s" "$1"\n');
+			await fs.chmod(fakeOmp, 0o755);
+			const file = dir.join("entry.ts");
+			await Bun.write(
+				file,
+				'process.stdout.write("ENTRY=" + JSON.stringify(process.argv.slice(2))); process.stdin.resume();',
+			);
+			const name = `compiled-${crypto.randomUUID()}`;
+			const { execPath } = process;
+			const compiled = process.env.PI_COMPILED;
+			// isCompiledBinary() honors PI_COMPILED.
+			process.env.PI_COMPILED = "1";
+			process.execPath = fakeOmp;
+			try {
+				await execute({ op: "start", name, file, args: ["--help"], timeout: 0.2 });
+			} finally {
+				process.execPath = execPath;
+				if (compiled === undefined) delete process.env.PI_COMPILED;
+				else process.env.PI_COMPILED = compiled;
+			}
+			await waitForScreen(name, 'ENTRY=["--help"]');
+			await execute({ op: "stop", name });
+		},
+		15_000,
+	);
+
 	it("cleans up a failed executable launch and permits reusing its session name", async () => {
 		const name = `missing-${crypto.randomUUID()}`;
 		await expect(

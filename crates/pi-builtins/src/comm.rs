@@ -7,13 +7,18 @@ use std::{
 	ffi::{OsStr, OsString},
 	io::{self, BufRead, BufReader, Read, Write},
 	path::Path,
+	sync::Arc,
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use icu_collator::CollatorBorrowed;
 use pi_vfs::BlockingFs;
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, format_usage, matches_parser};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser},
+	locale::shell_collator,
+};
 
 mod options {
 	pub const COLUMN_1: &str = "1";
@@ -43,6 +48,25 @@ impl FileNumber {
 	}
 }
 
+/// The order `sort` writes lines in for the shell's `LC_COLLATE`: its
+/// collation with bytes breaking ties, or bytes alone. Line endings are left
+/// out of the comparison, as GNU's are.
+struct LineOrder {
+	collator: Option<Arc<CollatorBorrowed<'static>>>,
+	ending:   u8,
+}
+
+impl LineOrder {
+	fn cmp(&self, a: &[u8], b: &[u8]) -> Ordering {
+		let a = a.strip_suffix(&[self.ending]).unwrap_or(a);
+		let b = b.strip_suffix(&[self.ending]).unwrap_or(b);
+		match &self.collator {
+			Some(collator) => collator.compare_utf8(a, b).then_with(|| a.cmp(b)),
+			None => a.cmp(b),
+		}
+	}
+}
+
 struct OrderChecker {
 	last_line:   Vec<u8>,
 	file_num:    FileNumber,
@@ -55,12 +79,12 @@ impl OrderChecker {
 		Self { last_line: Vec::new(), file_num, check_order, has_error: false }
 	}
 
-	fn verify_order(&mut self, line: &[u8], stderr: &mut impl Write) -> bool {
+	fn verify_order(&mut self, line: &[u8], order: &LineOrder, stderr: &mut impl Write) -> bool {
 		if self.last_line.is_empty() {
 			self.last_line = line.to_vec();
 			return true;
 		}
-		let ordered = line >= self.last_line.as_slice();
+		let ordered = order.cmp(line, &self.last_line).is_ge();
 		if !ordered && !self.has_error {
 			let _ = writeln!(stderr, "comm: file {} is not in sorted order", self.file_num.as_str());
 			self.has_error = true;
@@ -138,6 +162,7 @@ fn compare(
 	name2: &OsStr,
 	delim: &str,
 	opts: &ArgMatches,
+	order: &LineOrder,
 	identical: bool,
 	stdout: &mut impl Write,
 	stderr: &mut impl Write,
@@ -162,11 +187,11 @@ fn compare(
 		let ord = match (na, nb) {
 			(0, _) => Ordering::Greater,
 			(_, 0) => Ordering::Less,
-			_ => ra.cmp(&rb),
+			_ => order.cmp(&ra, &rb),
 		};
 		match ord {
 			Ordering::Less => {
-				if should_check && !c1.verify_order(&ra, stderr) {
+				if should_check && !c1.verify_order(&ra, order, stderr) {
 					break;
 				}
 				if !opts.get_flag(options::COLUMN_1) {
@@ -177,7 +202,7 @@ fn compare(
 				n1 += 1;
 			},
 			Ordering::Greater => {
-				if should_check && !c2.verify_order(&rb, stderr) {
+				if should_check && !c2.verify_order(&rb, order, stderr) {
 					break;
 				}
 				if !opts.get_flag(options::COLUMN_2) {
@@ -190,7 +215,7 @@ fn compare(
 			},
 			Ordering::Equal => {
 				if should_check
-					&& (!c1.verify_order(&ra, stderr) || !c2.verify_order(&rb, stderr))
+					&& (!c1.verify_order(&ra, order, stderr) || !c2.verify_order(&rb, order, stderr))
 				{
 					break;
 				}
@@ -279,6 +304,7 @@ impl Utility for Comm {
 			files_identical(&fs, &path1, &path2).unwrap_or(false)
 		};
 		let ending = LineEnding::from_zero_flag(self.matches.get_flag(options::ZERO_TERMINATED));
+		let order = LineOrder { collator: shell_collator(host), ending: ending.into() };
 		// Taken before the `LineReader`s below hold `&mut host.stdin`; a
 		// method borrow of `host` would otherwise conflict with them.
 		let mut stdout = host.stdout_writer();
@@ -321,6 +347,7 @@ impl Utility for Comm {
 			name2,
 			delim,
 			&self.matches,
+			&order,
 			identical,
 			&mut stdout,
 			&mut host.stderr,
@@ -358,8 +385,8 @@ fn app() -> Command {
 mod tests {
 	use std::fs;
 
-	use super::Comm;
-	use crate::host::run_util;
+	use super::{Comm, app};
+	use crate::host::{Host, Utility, run_util};
 
 	#[test]
 	fn compares_three_columns_and_resolves_relative_paths() {
@@ -409,6 +436,32 @@ mod tests {
 		let (code, capture) = run_util::<Comm>(&["--check-order", "a", "b"], "", dir.path());
 		assert_eq!(code, 1);
 		assert!(capture.err().contains("file 1 is not in sorted order"));
+	}
+
+	// Failure mode: `comm` merged by bytes while `sort` ordered by the shell's
+	// collation, so under a UTF-8 locale `comm -12` on two `sort` outputs
+	// warned "not in sorted order" and dropped common lines.
+	#[cfg(unix)]
+	#[test]
+	fn merges_lines_in_the_shell_collation() {
+		if !crate::locale::locale_loadable("en_US.UTF-8", libc::LC_ALL_MASK) {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		// en_US order, as `sort` writes it: case and punctuation sort after
+		// letters and digits, unlike byte order.
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(dir.path().join("a"), "a\nB\nPASS3-r140\nPASS3-r14-moe\n").unwrap();
+		fs::write(dir.path().join("b"), "B\nPASS3-r14-moe\nzzz\n").unwrap();
+		let matches = app().try_get_matches_from(["comm", "-12", "a", "b"]).unwrap();
+		let (mut host, capture) = Host::for_test("comm", "", dir.path());
+		host.set_test_var("LANG", "en_US.UTF-8");
+
+		let code = Comm { matches }.run(&mut host);
+
+		assert_eq!(capture.err(), "");
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "B\nPASS3-r14-moe\n");
 	}
 
 	#[test]

@@ -50,8 +50,10 @@ export class WidthAwareText implements Component {
 		this.#inner.invalidate();
 	}
 
-	/** The formatted text stays: the inner `Text` renders from it, so dropping it would free nothing. */
 	releaseRenderCaches(): void {
+		this.#cachedContentWidth = -1;
+		this.#cachedText = undefined;
+		this.#inner.setText("");
 		this.#inner.releaseRenderCaches();
 	}
 

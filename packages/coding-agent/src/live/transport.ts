@@ -230,6 +230,7 @@ export class CodexLiveTransport {
 			"Content-Type": "application/json",
 		});
 		const fetchImpl = wrapFetchForProxy(fetch, LIVE_PROVIDER);
+		this.#options.signal?.throwIfAborted();
 		const response = await fetchImpl(SIGNALING_URL, {
 			method: "POST",
 			headers,
@@ -257,6 +258,7 @@ export class CodexLiveTransport {
 	async #connectSideband(callId: string, access: OAuthAccess, attestation: string | undefined): Promise<void> {
 		let failure = new Error("Codex live sideband connection failed");
 		for (let attempt = 0; attempt < SIDEBAND_CONNECT_ATTEMPTS; attempt++) {
+			this.#options.signal?.throwIfAborted();
 			try {
 				await this.#openSideband(callId, access, attestation);
 				return;

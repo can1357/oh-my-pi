@@ -56,16 +56,38 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	CLOUDSDK_CORE_DISABLE_PROMPTS: "1",
 };
 
-const WINDOWS_UTF8_ENV_DEFAULT_GROUPS: ReadonlyArray<ReadonlyArray<readonly [key: string, value: string]>> = [
-	[
-		["PYTHONIOENCODING", "utf-8"],
-		["PYTHONUTF8", "1"],
-	],
-	[
-		["LANG", "C.UTF-8"],
-		["LC_ALL", "C.UTF-8"],
-	],
-];
+/**
+ * Locale pinned for agent commands: byte-order collation, `C` numbers, dates,
+ * and English messages like `C`, but UTF-8 text, which `C` would split into bytes.
+ */
+const AGENT_LOCALE_ENV: Readonly<Record<string, string>> = {
+	LANG: "C.UTF-8",
+	LC_ALL: "C.UTF-8",
+};
+
+/**
+ * {@link AGENT_LOCALE_ENV} for macOS, which ships no `C.UTF-8` (`initdb` and
+ * `perl` reject it): every category is `C` but `LC_CTYPE`, whose `en_US.UTF-8`
+ * is macOS's plain `UTF-8` character table. `LC_ALL` is empty, which POSIX
+ * reads as unset, so an inherited `LC_ALL` cannot mask the categories, and each
+ * category is named so an inherited `LC_*` cannot leak through.
+ */
+const DARWIN_AGENT_LOCALE_ENV: Readonly<Record<string, string>> = {
+	LANG: "C",
+	LC_ALL: "",
+	LC_COLLATE: "C",
+	LC_CTYPE: "en_US.UTF-8",
+	LC_MESSAGES: "C",
+	LC_MONETARY: "C",
+	LC_NUMERIC: "C",
+	LC_TIME: "C",
+};
+
+/** Python stdio defaults for Windows, where the console code page is not UTF-8. */
+const WINDOWS_PYTHON_UTF8_ENV: Readonly<Record<string, string>> = {
+	PYTHONIOENCODING: "utf-8",
+	PYTHONUTF8: "1",
+};
 
 function hasEnvValue(
 	env: Record<string, string | undefined> | undefined,
@@ -83,6 +105,17 @@ function hasEnvValue(
 	return false;
 }
 
+function hasEnvGroupValue(
+	env: Record<string, string | undefined> | undefined,
+	group: Readonly<Record<string, string>>,
+	platform: NodeJS.Platform,
+): boolean {
+	for (const key in group) {
+		if (hasEnvValue(env, key, platform)) return true;
+	}
+	return false;
+}
+
 function hasLocaleEnvValue(env: Record<string, string | undefined> | undefined, platform: NodeJS.Platform): boolean {
 	if (!env) return false;
 	for (const [key, value] of Object.entries(env)) {
@@ -93,47 +126,47 @@ function hasLocaleEnvValue(env: Record<string, string | undefined> | undefined, 
 	return false;
 }
 
-function hasEnvGroupValue(
-	env: Record<string, string | undefined> | undefined,
-	group: ReadonlyArray<readonly [key: string, value: string]>,
-	platform: NodeJS.Platform,
-): boolean {
-	if (group.some(([key]) => key === "LC_ALL") && hasLocaleEnvValue(env, platform)) return true;
-	for (const [key] of group) {
-		if (hasEnvValue(env, key, platform)) return true;
-	}
-	return false;
-}
-
 /** Copy of the base env with `CI` removed, for the `PI_BASH_NO_CI` opt-out. */
 function withoutCI(env: Readonly<Record<string, string>>): Record<string, string> {
 	const { CI: _ci, ...rest } = env;
 	return rest;
 }
 
+/** Options for {@link buildNonInteractiveEnv}. */
+export interface NonInteractiveEnvOptions {
+	/** Env the child inherits from the launcher. */
+	baseEnv?: Record<string, string | undefined>;
+	platform?: NodeJS.Platform;
+	/** Keep the inherited locale instead of pinning {@link AGENT_LOCALE_ENV}: user-typed `!` commands. */
+	inheritLocale?: boolean;
+}
+
 /** Builds the per-command environment for non-interactive child processes. */
 export function buildNonInteractiveEnv(
 	overrides?: Record<string, string>,
-	baseEnv: Record<string, string | undefined> = Bun.env,
-	platform: NodeJS.Platform = process.platform,
+	{ baseEnv = Bun.env, platform = process.platform, inheritLocale = false }: NonInteractiveEnvOptions = {},
 ): Record<string, string> {
 	// `PI_BASH_NO_CI` (and its legacy alias) opts out of the automatic `CI=true`
 	// injection. Mirrors the session-env gate in `procmgr.ts` so the opt-out
 	// reaches the per-command env, which otherwise overrides the session value.
-	const base =
-		baseEnv.PI_BASH_NO_CI || baseEnv.CLAUDE_BASH_NO_CI ? withoutCI(NON_INTERACTIVE_ENV) : NON_INTERACTIVE_ENV;
-	if (platform !== "win32") {
-		return overrides ? { ...base, ...overrides } : base;
+	const env: Record<string, string> =
+		baseEnv.PI_BASH_NO_CI || baseEnv.CLAUDE_BASH_NO_CI ? withoutCI(NON_INTERACTIVE_ENV) : { ...NON_INTERACTIVE_ENV };
+
+	// Agent commands pin the locale whatever the launcher inherited, so sort
+	// order, number formats, and messages do not vary by machine; a locale in
+	// the command's own env opts out. Inherited-locale commands still get UTF-8
+	// on Windows when nothing names a locale.
+	const pinLocale = !inheritLocale || (platform === "win32" && !hasLocaleEnvValue(baseEnv, platform));
+	if (pinLocale && !hasLocaleEnvValue(overrides, platform)) {
+		Object.assign(env, platform === "darwin" ? DARWIN_AGENT_LOCALE_ENV : AGENT_LOCALE_ENV);
 	}
 
-	const env: Record<string, string> = { ...base };
-	for (const group of WINDOWS_UTF8_ENV_DEFAULT_GROUPS) {
-		if (hasEnvGroupValue(baseEnv, group, platform) || hasEnvGroupValue(overrides, group, platform)) {
-			continue;
-		}
-		for (const [key, value] of group) {
-			env[key] = value;
-		}
+	if (
+		platform === "win32" &&
+		!hasEnvGroupValue(baseEnv, WINDOWS_PYTHON_UTF8_ENV, platform) &&
+		!hasEnvGroupValue(overrides, WINDOWS_PYTHON_UTF8_ENV, platform)
+	) {
+		Object.assign(env, WINDOWS_PYTHON_UTF8_ENV);
 	}
 	return overrides ? { ...env, ...overrides } : env;
 }

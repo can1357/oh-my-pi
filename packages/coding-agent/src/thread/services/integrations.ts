@@ -2,7 +2,8 @@
  * Integrations bridged into subagent worker threads.
  *
  * - **MCP** (`"mcp-manager"`): a main `MCPManager` crosses by reference; the worker gets a
- *   {@link RemoteMCPManager}. Tools come back as plain views ({@link toWorkerCustomTool}) whose
+ *   {@link RemoteMCPManager}. Tools come back as plain views ({@link toWorkerCustomTool}), re-sent
+ *   only when main's tool views changed since the worker's last read for that view, whose
  *   `execute` runs the main-side MCP tool (streaming `onUpdate` and abort signals cross), tool and
  *   notification subscriptions are held on main per worker and dropped when it exits, and the
  *   worker's `MCPManager.instance()/load()/available()` answer from main's process global. A worker
@@ -12,11 +13,13 @@
  * - **`LocalProtocolOptions`** (`"local-protocol-options"`): a main-side options object reaches a
  *   worker with synchronous getters (`rpcSync`), since `resolveLocalRoot` reads them synchronously;
  *   a worker-side one reaches main as a snapshot of its current values.
- * - **Prepared extensions** (`"prepared-extension"`): a `PreparedExtension` crosses as its module
- *   path; the receiver re-imports the module on first bind, so the factory runs in the receiving
- *   thread against that thread's `ExtensionAPI`. Model providers such factories register in a
- *   worker are dropped by the worker's model-registry mirror: the parent bound the same prepared
- *   extensions to main's registry, which the mirror follows (see `./auth`).
+ * - **Prepared extensions** (`"prepared-extension"`): a module-backed `PreparedExtension` crosses as
+ *   its module path; the receiver re-imports the module on first bind, so the factory runs in the
+ *   receiving thread against that thread's `ExtensionAPI`. An inline factory has no module to import
+ *   (its `<inline-N>` path is only a source id): it crosses without a factory, and the sender warns
+ *   once per extension that worker-thread subagents run without it. Model providers such factories
+ *   register in a worker are dropped by the worker's model-registry mirror: the parent bound the same
+ *   prepared extensions to main's registry, which the mirror follows (see `./auth`).
  *
  * Main-side values that are plain functions (no type to match a codec on) are converted by
  * {@link bridgeIntegrationOptions} before an `ExecutorOptions` object crosses a link.
@@ -27,14 +30,15 @@ import type { CustomTool } from "../../extensibility/custom-tools/types";
 import { importExtensionModule } from "../../extensibility/extensions/loader";
 import type { ExtensionFactory, PreparedExtension } from "../../extensibility/extensions/types";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
-import { MCPManager, type MCPManagerApi, type MCPManagerGlobal } from "../../mcp/manager";
+import { MCPManager, type MCPManagerApi, type MCPManagerGlobal, type MCPToolScope } from "../../mcp/manager";
 import type { ExecutorOptions } from "../../task/executor";
 import { isMainThread } from "../identity";
 import type { MainThreadLink, WorkerThreadLink } from "../protocol";
 import { type RpcCodec, type RpcServe, rpcSync } from "../rpc";
+import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { trackWorkerSubscription } from "./support";
 import type { ThreadService, WorkerPeer } from "../services";
-import { MCP_MANAGER_KIND, type McpManagerProtocol, RemoteMCPManager } from "./mcp-remote";
+import { MCP_MANAGER_KIND, type McpManagerProtocol, type McpToolsReply, RemoteMCPManager } from "./mcp-remote";
 import { toWorkerTelemetryConfig } from "./telemetry";
 import { toolContextCodec } from "./tool-context";
 
@@ -253,15 +257,32 @@ function isWirePreparedExtension(value: unknown): value is WirePreparedExtension
 	);
 }
 
+/** Inline prepared extensions this thread already reported as missing from worker-thread subagents. */
+const reportedInlineExtensions = new WeakSet<PreparedExtension>();
+
+/**
+ * An inline factory is a closure of the session that created it: no other thread can rebuild it, so
+ * only in-process child sessions rebind it. Warn once per extension, by source id and function name,
+ * instead of silently binding the receiver without its hooks.
+ */
+function reportInlineTransfer(prepared: PreparedExtension): void {
+	if (reportedInlineExtensions.has(prepared)) return;
+	reportedInlineExtensions.add(prepared);
+	logger.warn("Inline extension unavailable in worker-thread subagents; use an extension file to inherit it", {
+		extension: prepared.path,
+		factory: prepared.factory?.name || undefined,
+	});
+}
+
 const preparedExtensionCodec: RpcCodec<PreparedExtension> = {
 	kind: PREPARED_EXTENSION_KIND,
 	is: isPreparedExtension,
-	encode: prepared => ({
-		path: prepared.path,
-		resolvedPath: prepared.resolvedPath,
-		error: prepared.error,
-		loadable: prepared.factory !== null,
-	}),
+	encode: prepared => {
+		// Only a module path can be re-imported by the receiver; an `<inline-N>` source id never can.
+		const loadable = prepared.factory !== null && isFilesystemSourcePath(prepared.resolvedPath);
+		if (prepared.factory !== null && !loadable) reportInlineTransfer(prepared);
+		return { path: prepared.path, resolvedPath: prepared.resolvedPath, error: prepared.error, loadable };
+	},
 	decode: data => {
 		if (!isWirePreparedExtension(data)) throw new Error("prepared-extension: malformed wire value");
 		return {
@@ -304,9 +325,19 @@ function settleQuietly(result: unknown): void {
 	}
 }
 
+/** `scope`'s tools as worker views, omitted when `knownVersion` is still current. */
+function toolsReply(manager: MCPManager, knownVersion: number, scope: MCPToolScope | undefined): McpToolsReply {
+	const version = manager.toolViewsRevision;
+	if (version === knownVersion) return { version };
+	return { version, tools: manager.getTools(scope).map(tool => toWorkerCustomTool(tool)) };
+}
+
 function serveMcpManager(state: PeerIntegrationState): RpcServe<MCPManager, McpManagerProtocol> {
 	return {
-		tools: manager => manager.getTools().map(tool => toWorkerCustomTool(tool)),
+		tools: toolsReply,
+		openToolScope: (manager, scope, seed) => manager.openToolScope(scope, seed),
+		trackToolCall: (manager, scope, toolCallId) =>
+			trackWorkerSubscription(state.subscriptions, manager.trackToolCall(scope, toolCallId)),
 		onToolsChanged: (manager, listener) =>
 			trackWorkerSubscription(
 				state.subscriptions,

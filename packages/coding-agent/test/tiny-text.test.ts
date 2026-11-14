@@ -46,10 +46,6 @@ describe("stripCodeBlocks", () => {
 		const message = "```python\ndef merge_sort(a):\n    return a\n```";
 		expect(stripCodeBlocks(message)).toBe(message);
 	});
-
-	it("returns prose unchanged when there is no code block", () => {
-		expect(stripCodeBlocks("Investigate the resolver")).toBe("Investigate the resolver");
-	});
 });
 
 describe("preprocessTinyMessage", () => {

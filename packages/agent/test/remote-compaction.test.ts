@@ -2828,8 +2828,10 @@ describe("compact() remote compaction failure handling", () => {
 			]);
 		};
 
+		const loadExtraContext = vi.fn(async () => ["fresh pre-compaction memory"]);
 		const result = await compact(preparation, model, "test-key", undefined, undefined, {
 			fetch: fetchMock,
+			loadExtraContext,
 		});
 
 		const input = requestBody?.input ?? [];
@@ -2860,6 +2862,7 @@ describe("compact() remote compaction failure handling", () => {
 		const remote = getCompactionV2PreserveData(result.preserveData);
 		expect(remote?.usedTokens).toBe(55);
 		expect(remote?.replacementHistory.at(-1)).toEqual(compactionItem);
+		expect(loadExtraContext).not.toHaveBeenCalled();
 		expect(result.summary).toBe(
 			"Remote compaction preserved provider-native history for this session. Compaction processed 55 input tokens.",
 		);
@@ -3558,10 +3561,14 @@ describe("compact() remote compaction failure handling", () => {
 			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
 		});
 		const requestedUrls: string[] = [];
-		const fetchMock: FetchImpl = async input => {
+		const loadExtraContext = vi.fn(async () => ["fresh pre-compaction memory"]);
+		const fallbackBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
 			const url = String(input);
 			requestedUrls.push(url);
 			if (url === preparation.settings.remoteEndpoint) {
+				if (typeof init?.body !== "string") throw new Error("missing fallback request body");
+				fallbackBodies.push(JSON.parse(init.body));
 				const summary =
 					requestedUrls.filter(requested => requested === url).length === 1
 						? "configured remote history summary"
@@ -3571,7 +3578,11 @@ describe("compact() remote compaction failure handling", () => {
 			return new Response("native compaction unavailable", { status: 400, statusText: "Bad Request" });
 		};
 
-		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			extraContext: ["extension context"],
+			loadExtraContext,
+		});
 
 		expect(requestedUrls.map(url => new URL(url).pathname)).toEqual([
 			"/v1/responses",
@@ -3582,6 +3593,42 @@ describe("compact() remote compaction failure handling", () => {
 		expect(result.summary).toContain("configured remote history summary");
 		expect(result.shortSummary).toBe("configured remote short summary");
 		expect(completeSpy).not.toHaveBeenCalled();
+		expect(loadExtraContext).toHaveBeenCalledTimes(1);
+		expect(
+			fallbackBodies[0]?.messages.some(
+				message =>
+					message.role === "user" &&
+					message.content.includes("extension context") &&
+					message.content.includes("fresh pre-compaction memory"),
+			),
+		).toBe(true);
+	});
+
+	test("cancels before the fallback request when recall is aborted", async () => {
+		const preparation = makePreparation();
+		preparation.settings = {
+			...preparation.settings,
+			remoteEndpoint: "http://summary.test/v1/chat/completions",
+			remoteStreamingV2Enabled: true,
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const controller = new AbortController();
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			requestedUrls.push(String(input));
+			return new Response("native unavailable", { status: 400 });
+		};
+
+		await expect(
+			compact(preparation, model, "test-key", undefined, controller.signal, {
+				fetch: fetchMock,
+				loadExtraContext: async () => {
+					controller.abort(new Error("recall cancelled"));
+					return undefined;
+				},
+			}),
+		).rejects.toThrow("recall cancelled");
+		expect(requestedUrls).not.toContain(preparation.settings.remoteEndpoint);
 	});
 
 	test("native compaction server failure rejects without generic summarization", async () => {

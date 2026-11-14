@@ -117,15 +117,16 @@ fn parse_cvdef(args: &[BString]) -> Result<Cvdef, String> {
 		let mut bs = false;
 
 		// The exclusion list.
-		let mut xor = None;
-		if at(p, 0) == b'(' {
+		let mut xor = if at(p, 0) == b'(' {
 			let mut list = Vec::new();
 			let Some(e) = xor_list(p, 0, &mut list) else {
 				return invalid("invalid argument");
 			};
 			k = e;
-			xor = Some(list);
-		}
+			Some(list)
+		} else {
+			None
+		};
 		let multi = at(p, k) == b'*';
 		if multi {
 			k += 1;
@@ -314,7 +315,7 @@ fn cv_next(d: &Cvdef, s: &[u8], from: usize) -> (Option<usize>, Option<usize>, O
 /// The argument at `s[a..]` ending before the separator at `sp - 1` (zsh
 /// cuts the string there, which leaves it whole when that is before `a`).
 fn arg_upto(s: &[u8], a: usize, sp: usize) -> &[u8] {
-	if sp >= a + 1 { &s[a..sp - 1] } else { &s[a..] }
+	if sp > a { &s[a..sp - 1] } else { &s[a..] }
 }
 
 /// zsh `cv_parse_word`: parse the current word (and with `-w` the other

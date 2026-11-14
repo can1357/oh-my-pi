@@ -22,7 +22,6 @@ use std::{
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use futures::{StreamExt, stream};
 use grep_cli::DecompressionMatcher;
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
@@ -67,7 +66,7 @@ use pi_walker::{
 )]
 pub(crate) struct Rg {
 	/// A pattern to search for. May be repeated.
-	#[arg(short = 'e', long = "regexp", value_name = "PATTERN")]
+	#[arg(short = 'e', long = "regexp", value_name = "PATTERN", allow_hyphen_values = true)]
 	patterns: Vec<String>,
 
 	/// Read patterns from a file, one pattern per line.
@@ -1778,7 +1777,7 @@ fn dir_search<M: Clone>(
 	})
 }
 
-/// Searches the files below `root` on parallel workers, writing each file's
+/// Searches the files below `root` ([`exec::adaptive`]: inline, then on parallel workers), writing each file's
 /// output in path order.
 #[allow(
 	clippy::too_many_arguments,
@@ -1803,16 +1802,14 @@ async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, 
 	else {
 		return Ok(SearchOutcome { any_match: false, had_error });
 	};
-	let workers = if cli.line_buffered && !cli.no_line_buffered {
-		1
-	} else {
-		parallelism
-	};
+	let line_buffered = cli.line_buffered && !cli.no_line_buffered;
+	let workers = if line_buffered { 1 } else { parallelism };
 	let halt = HaltOnDrop::new();
 	let shared = dir_search(host, cli, matcher, searcher, operand, root, show_names, opts, &halt, false);
 	let mut any_match = false;
 	let mut failed = None;
-	let mut results = exec::ordered(stream::iter(paths), workers, workers, || shared.worker(), {
+	let mut pace = host.output_pace();
+	let mut results = exec::adaptive(paths.into_iter(), workers, exec::INLINE_BUDGET, || shared.worker(), {
 		let shared = Arc::clone(&shared);
 		move |mut worker: Worker, path: PathBuf| {
 			let shared = Arc::clone(&shared);
@@ -1829,7 +1826,15 @@ async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, 
 			break;
 		}
 		let _ = host.stderr.write_all(&found.err);
-		if let Err(error) = deliver(host, out).await {
+		let delivered = if line_buffered || !results.next_ready() {
+			deliver(host, out).await
+		} else {
+			match out.flush() {
+				Ok(()) => host.pace_output(&mut pace).await,
+				Err(error) => Err(error),
+			}
+		};
+		if let Err(error) = delivered {
 			failed = Some(error);
 			break;
 		}
@@ -2308,6 +2313,14 @@ mod tests {
 		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
+	}
+
+	/// `-e` exists so a pattern may start with `-` (ripgrep); clap used to
+	/// read `-e --canary` as an unknown `--canary` flag and exit 2.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn regexp_operand_may_start_with_a_dash() {
+		let (code, out, err) = run(&["-e", "--canary", "-"], "x --canary\ny\n").await;
+		assert_eq!((code, out.as_str()), (0, "x --canary\n"), "{err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

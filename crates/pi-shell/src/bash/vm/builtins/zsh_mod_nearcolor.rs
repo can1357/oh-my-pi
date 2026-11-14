@@ -16,7 +16,7 @@ struct Cielab {
 /// root is unnecessary for comparisons).
 fn deltae(x: Cielab, y: Cielab) -> f64 {
 	let (dl, da, db) = (x.l - y.l, x.a - y.a, x.b - y.b);
-	dl * dl + da * da + db * db
+	f64::mul_add(db, db, f64::mul_add(da, da, dl * dl))
 }
 
 /// zsh `RGBtoLAB` (observer 2°, illuminant D65).
@@ -33,15 +33,15 @@ fn rgb_to_lab(red: i32, green: i32, blue: i32) -> Cielab {
 	let (r, g, b) = (lin(red), lin(green), lin(blue));
 	let f = |t: f64| {
 		if t > 0.008856 {
-			t.powf(1.0 / 3.0)
+			t.cbrt()
 		} else {
-			(7.787 * t) + (16.0 / 116.0)
+			7.787f64.mul_add(t, 16.0 / 116.0)
 		}
 	};
-	let x = f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 95.047);
-	let y = f((r * 0.2126 + g * 0.7152 + b * 0.0722) / 100.0);
-	let z = f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 108.883);
-	Cielab { l: (116.0 * y) - 16.0, a: 500.0 * (x - y), b: 200.0 * (y - z) }
+	let x = f(f64::mul_add(b, 0.1805, f64::mul_add(g, 0.3576, r * 0.4124)) / 95.047);
+	let y = f(f64::mul_add(b, 0.0722, f64::mul_add(g, 0.7152, r * 0.2126)) / 100.0);
+	let z = f(f64::mul_add(b, 0.9505, f64::mul_add(g, 0.1192, r * 0.0193)) / 108.883);
+	Cielab { l: 116.0f64.mul_add(y, -16.0), a: 500.0 * (x - y), b: 200.0 * (y - z) }
 }
 
 /// The nearest of a terminal's colour cube plus grey ramp: `component`

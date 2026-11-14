@@ -91,7 +91,7 @@ Set `display.subagentLivePreview: true` to add a second line under each row show
 
 Enable `tui.mouse` to click live subagent cards and jump-list rows directly in the main session, without opening the Hub first. A click focuses that card's most recent agent (a jump-list row focuses its exact agent); focusing a parked agent revives it. Hovering a live target lights it up first, so you can see what a click will open.
 
-Only rows currently in the live viewport are clickable — retired transcript rows live in terminal scrollback, where clicks cannot map back to content. Enabling capture changes terminal gestures while on: text selection becomes Shift+drag and wheel scroll becomes Shift+wheel. Off by default.
+Only rows currently in the live viewport are clickable — retired transcript rows live in terminal scrollback, where clicks cannot map back to content. Enabling capture changes terminal gestures while on: text selection becomes Shift+drag, and the terminal reports wheel ticks to omp instead of scrolling, so plain wheel scrolling stops; scroll with the terminal's keyboard scrollback keys or turn capture off. Off by default.
 
 ## Persisted agents and advisors
 

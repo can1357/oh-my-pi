@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +6,7 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as discoveryHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { getActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import { dispatchRpcSkillPrompt } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -530,6 +531,84 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 
 		expect(await readText(session, `skill://${SKILL}/missing.md`)).toContain("File not found");
 		expect(rediscoveries).not.toHaveBeenCalled();
+	});
+
+	it("a skill created after the session started is readable and joins the session's list", async () => {
+		const session = await startSession();
+		expect(session.skills.some(entry => entry.name === "new-skill")).toBe(false);
+
+		writeProjectSkill(tempDir, "new-skill", "Body of the new skill.");
+
+		expect(await readText(session, "skill://new-skill")).toContain("Body of the new skill.");
+		expect(session.skills.some(entry => entry.name === "new-skill")).toBe(true);
+		expect(getActiveSkills()).toBe(session.skills);
+	});
+
+	it("a skill found for one session leaves another session's process-wide skills published", async () => {
+		const first = await startSession();
+		const otherDir = makeExtraDir("pi-skill-new-other-");
+		writeProjectSkill(otherDir, "other-skill", "Other session's skill.");
+		const second = await startSession({ cwd: otherDir });
+		expect(getActiveSkills()).toBe(second.skills);
+
+		writeProjectSkill(tempDir, "new-skill", "Body of the new skill.");
+
+		expect(await readText(first, "skill://new-skill")).toContain("Body of the new skill.");
+		expect(getActiveSkills()).toBe(second.skills);
+	});
+
+	it("a name no skill owns rediscovers at most once per interval", async () => {
+		const session = await startSession();
+		const skills = session.skills;
+		const rediscoveries = countRediscoveries();
+		const start = Date.now();
+		try {
+			setSystemTime(start);
+			for (let attempt = 0; attempt < 3; attempt++) {
+				expect(await readText(session, "skill://no-such-skill")).toContain("Unknown skill: no-such-skill");
+			}
+			expect(rediscoveries).toHaveBeenCalledTimes(1);
+			// A pass that found no new skill keeps the list (and the prompt built from it).
+			expect(session.skills).toBe(skills);
+
+			// Within the interval a skill created since the last pass is not seen yet; once it passes, it is.
+			writeProjectSkill(tempDir, "no-such-skill", "Created after the miss.");
+			setSystemTime(start + 1_999);
+			expect(await readText(session, "skill://no-such-skill")).toContain("Unknown skill: no-such-skill");
+			setSystemTime(start + 2_000);
+			expect(await readText(session, "skill://no-such-skill")).toContain("Created after the miss.");
+			expect(rediscoveries).toHaveBeenCalledTimes(2);
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	it("a copied list resolves a namespaced skill the holder's current list gained, and bare paths in the older skill", async () => {
+		const skill = (name: string, dir: string): AgentSession["skills"][number] => ({
+			name,
+			description: `${name} skill.`,
+			filePath: path.join(dir, "SKILL.md"),
+			baseDir: dir,
+			source: "project",
+		});
+		const firstDir = path.join(tempDir, "first", "calendar");
+		const secondDir = path.join(tempDir, "second", "calendar");
+		fs.mkdirSync(firstDir, { recursive: true });
+		fs.mkdirSync(secondDir, { recursive: true });
+		fs.writeFileSync(path.join(firstDir, "SKILL.md"), "First calendar skill.\n");
+		fs.writeFileSync(path.join(firstDir, "notes.md"), "First calendar notes.\n");
+		fs.writeFileSync(path.join(secondDir, "SKILL.md"), "Second calendar skill.\n");
+		const bare = skill("calendar", firstDir);
+		const captured = [bare];
+		const current = [bare, skill("calendar/calendar", secondDir)];
+		const toolSession = { skills: captured, skillRediscoveryHost: () => ({ skills: current }) };
+		const context = { skills: captured, session: toolSession as unknown as ToolSession };
+		const handler = new SkillProtocolHandler();
+
+		const namespaced = await handler.resolve(parseInternalUrl("skill://calendar/calendar"), context);
+		expect(namespaced.content).toContain("Second calendar skill.");
+		const inside = await handler.resolve(parseInternalUrl("skill://calendar/notes.md"), context);
+		expect(inside.content).toContain("First calendar notes.");
 	});
 
 	it("lookups through a copy of the skill list taken before the upgrade rediscover once", async () => {

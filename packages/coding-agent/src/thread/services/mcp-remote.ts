@@ -7,7 +7,7 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { CustomTool } from "../../extensibility/custom-tools/types";
-import type { MCPManagerApi } from "../../mcp/manager";
+import type { MCPManagerApi, MCPToolScope } from "../../mcp/manager";
 import type { MCPRequestOptions, MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "../../mcp/types";
 import type { RemoteObject, RpcMethod } from "../rpc";
 
@@ -17,10 +17,21 @@ export const MCP_MANAGER_KIND = "mcp-manager";
 /** Listener for server notification frames. */
 export type McpNotificationListener = (serverName: string, method: string, params: unknown) => void;
 
+/** Reply to {@link McpManagerProtocol.tools}. */
+export interface McpToolsReply {
+	/** Version of main's tool views; it changes whenever any session's view may have. */
+	readonly version: number;
+	/** The current tools; omitted when the caller already holds `version`. */
+	readonly tools?: CustomTool<TSchema, MCPToolDetails>[];
+}
+
 /** Protocol a {@link RemoteMCPManager} speaks to its main-thread manager. */
 export type McpManagerProtocol = {
-	/** Current tools as plain cross-thread views (data + `execute` running on main). */
-	tools: RpcMethod<[], CustomTool<TSchema, MCPToolDetails>[]>;
+	/** One scope's tools as plain cross-thread views (data + `execute` running on main), unless `knownVersion` is current. */
+	tools: RpcMethod<[knownVersion: number, scope: MCPToolScope | undefined], McpToolsReply>;
+	openToolScope: RpcMethod<[scope: MCPToolScope, seed: MCPToolScope | undefined], void>;
+	/** Attribute a tool call; the returned release is synchronous for the worker. */
+	trackToolCall: RpcMethod<[scope: MCPToolScope, toolCallId: string], () => void>;
 	/** Subscribe; the returned unsubscribe is synchronous for the worker. */
 	onToolsChanged: RpcMethod<[listener: () => void], () => void>;
 	onNotification: RpcMethod<[listener: McpNotificationListener], () => void>;
@@ -42,13 +53,31 @@ export type McpManagerProtocol = {
 /** Worker-side proxy of one main-thread `MCPManager`. */
 export class RemoteMCPManager implements MCPManagerApi {
 	readonly #remote: RemoteObject<McpManagerProtocol>;
+	/** Each scope's tool views at the version main last sent them; absent before the first fetch. */
+	#toolsByScope = new Map<
+		MCPToolScope | undefined,
+		{ version: number; tools: CustomTool<TSchema, MCPToolDetails>[] }
+	>();
 
 	constructor(remote: RemoteObject<McpManagerProtocol>) {
 		this.#remote = remote;
 	}
 
-	getTools(): CustomTool<TSchema, MCPToolDetails>[] {
-		return this.#remote.callSync("tools");
+	/** `scope`'s current tools; the views cross only when main's tool views changed since this scope's last call. */
+	getTools(scope?: MCPToolScope): CustomTool<TSchema, MCPToolDetails>[] {
+		const cached = this.#toolsByScope.get(scope);
+		const reply = this.#remote.callSync("tools", cached?.version ?? 0, scope);
+		if (!reply.tools) return cached?.tools ?? [];
+		this.#toolsByScope.set(scope, { version: reply.version, tools: reply.tools });
+		return reply.tools;
+	}
+
+	openToolScope(scope: MCPToolScope, seed?: MCPToolScope): void {
+		this.#remote.callSync("openToolScope", scope, seed);
+	}
+
+	trackToolCall(scope: MCPToolScope, toolCallId: string): () => void {
+		return this.#remote.callSync("trackToolCall", scope, toolCallId);
 	}
 
 	addToolsChangedListener(listener: () => void): () => void {

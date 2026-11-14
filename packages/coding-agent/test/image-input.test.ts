@@ -71,6 +71,26 @@ describe("readImageMetadata", () => {
 		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
 	});
 
+	it("rejects a JPEG truncated before its EOI marker", async () => {
+		// Bun.Image pads a truncated JPEG's missing scan rows and decodes it
+		// anyway, so the read path has to notice the missing EOI marker itself.
+		const intact = Buffer.from(
+			await new Bun.Image(
+				Buffer.from(
+					"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+					"base64",
+				),
+			)
+				.jpeg()
+				.bytes(),
+		);
+		const imagePath = path.join(testDir, "truncated.jpg");
+		fs.writeFileSync(imagePath, intact.subarray(0, intact.length - 8));
+
+		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
+		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
+	});
+
 	it("labels the file as PNG when its display image is re-encoded as WebP", async () => {
 		const imagePath = path.join(testDir, "known.png");
 		await Bun.write(

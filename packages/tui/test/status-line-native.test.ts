@@ -169,7 +169,7 @@ function cacheStatusLine(
 			getSessionId: () => "",
 			getUsageStatistics: () => NO_USAGE,
 		},
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		getContextUsage: () => undefined,
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,

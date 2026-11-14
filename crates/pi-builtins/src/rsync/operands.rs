@@ -420,7 +420,7 @@ fn hostspec<'a>(
 /// Windows operands that name local paths even though they contain a `:`:
 /// drive-letter and UNC paths, and anything with a `\` before its first `:`.
 fn is_windows_local(arg: &[u8]) -> bool {
-	if arg.len() >= 2 && arg[0].is_ascii_alphabetic() && arg[1] == b':' {
+	if arg.len() >= 2 && arg[0].is_ascii_alphabetic() && arg[1] == b':' && arg.get(2) != Some(&b':') {
 		return true;
 	}
 	if arg.starts_with(b"\\\\") {
@@ -986,6 +986,7 @@ mod tests {
 		assert!(is_windows_local(b"dir\\sub:file"));
 		assert!(!is_windows_local(b"host:path"));
 		assert!(!is_windows_local(b"ab:c\\d"));
+		assert!(!is_windows_local(b"h::module/path"));
 	}
 
 	#[cfg(windows)]
@@ -996,6 +997,8 @@ mod tests {
 		assert_eq!(strs(&got.sources), ["C:\\src"]);
 		let got = ok(&["\\\\srv\\share\\x", "host:y"]);
 		assert_eq!(got.remote, shell(None, "host"));
+		let got = ok(&["h::module/path", "dest"]);
+		assert_eq!(got.remote, daemon(None, "h", None));
 	}
 
 	#[test]

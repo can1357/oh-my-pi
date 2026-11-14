@@ -1,0 +1,30 @@
+[package]
+name = "jaq-json"
+version = "2.0.3"
+authors = ["Michael Färber <michael.faerber@gedenkt.at>"]
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+description = "JSON values for jaq"
+repository = "https://github.com/01mf02/jaq"
+
+[features]
+default = ["std"]
+sync = []
+std = ["jaq-core/std", "jaq-std/std"]
+
+[dependencies]
+jaq-core = { version = "3.1.1", default-features = false }
+jaq-std = { version = "3.0.3", default-features = false }
+
+bstr = { version = "1", default-features = false }
+bytes = { version = "1", default-features = false }
+foldhash = { version = "0.1", default-features = false }
+indexmap = { version = "2.0", default-features = false }
+num-bigint = { version = "0.4.6", default-features = false }
+num-traits = { version = "0.2.19", default-features = false }
+ryu = "1.0.20"
+self_cell = "1.2.0"
+
+[lints]
+workspace = true

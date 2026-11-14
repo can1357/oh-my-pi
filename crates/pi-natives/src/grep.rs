@@ -7,7 +7,7 @@
 //! `pi_walker::grep` owns compilation, scanning, walking, and result selection;
 //! this module decodes options and converts results.
 
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 use grep_matcher::Matcher;
 use napi::{
@@ -216,6 +216,9 @@ pub struct GrepResult {
 	pub limit_reached:      Option<bool>,
 	/// Number of files skipped because they exceed the size limit.
 	pub skipped_oversized:  Option<u32>,
+	/// Paths, relative to the search root, of files skipped as binary although
+	/// their content matches; search one as an explicit path to read it as text.
+	pub binary_matches:     Option<Vec<String>>,
 }
 
 const fn to_mode(mode: Option<GrepOutputMode>) -> pi_walker::grep::Mode {
@@ -365,8 +368,6 @@ async fn grep_async(
 	stream: Option<GrepStreamCallback>,
 	on_match: Option<ThreadsafeFunction<GrepMatch>>,
 ) -> Result<GrepResult> {
-	let engine = Engine::compile(&request.pattern, request.ignore_case, request.multiline)
-		.map_err(Error::from_reason)?;
 	let root = pi_walker::fs::absolute(Path::new(&request.path))
 		.map_err(|err| Error::from_reason(format!("Failed to resolve cwd: {err}")))?;
 	let fs = pi_walker::Fs::new(&filesystem, &root);
@@ -378,7 +379,6 @@ async fn grep_async(
 		None => (None, None),
 	};
 	let opts = pi_walker::grep::GrepOptions {
-		multiline: request.multiline,
 		glob: request.glob,
 		recursive: request.recursive,
 		exclude: request.exclude,
@@ -396,7 +396,12 @@ async fn grep_async(
 			..Default::default()
 		},
 		sink,
-		..pi_walker::grep::GrepOptions::new(Arc::new(engine))
+		..pi_walker::grep::GrepOptions::compile(
+			request.pattern,
+			request.ignore_case,
+			request.multiline,
+		)
+		.map_err(Error::from_reason)?
 	};
 	let search = pi_walker::grep::grep(&fs, &root, opts);
 	let result = match batches {
@@ -427,6 +432,7 @@ async fn grep_async(
 		limit_reached: result.limit_reached.then_some(true),
 		skipped_oversized: (result.skipped_oversized > 0)
 			.then(|| clamp_u32(result.skipped_oversized)),
+		binary_matches: (!result.binary_matches.is_empty()).then_some(result.binary_matches),
 	})
 }
 

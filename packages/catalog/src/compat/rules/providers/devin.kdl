@@ -12,25 +12,17 @@ provider "devin" {
 	// Cascade catalog is credential-scoped (gated per account/team), so catalog
 	// generation never fetches it: baking one account's roster into the shared
 	// bundle would misstate every other account's entitlements and leave zombie
-	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
-	// SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
-	// seed's `default-model` (`swe-1-6`) must resolve synchronously at boot;
+	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). SWE-1.6
+	// is verified live against `GetCliModelConfigs` (SWE-1.6 Fast is retired);
+	// the seed's `default-model` (`swe-1-6`) must resolve synchronously at boot;
 	// discovery then replaces the seed and the account default it marks wins. Field
 	// shape mirrors `devinModelSpec` so seeded and discovered rows are
 	// indistinguishable downstream.
 	seed api="devin-agent" base-url="https://server.codeium.com" bundle="always" {
-		model "swe-1-6-fast" name="SWE-1.6 Fast" {
-			reasoning #true
-			// SWE-1.6 lanes ignore inline images despite upstream `supports_images`
-			// (see DEVIN_IMAGE_BLIND_UIDS in ../discovery/devin.ts).
-			input "text"
-			supports-tools #true
-			cost input=0.3 output=1.5 cache-read=0.03 cache-write=0
-			limits context=200000 max-tokens=128000
-			supports-parallel-tool-calls #true
-		}
 		model "swe-1-6" name="SWE-1.6" {
 			reasoning #true
+			// SWE-1.6 ignores inline images despite upstream `supports_images`
+			// (see DEVIN_IMAGE_BLIND_UIDS in ../discovery/devin.ts).
 			input "text"
 			supports-tools #true
 			// Included in the Coding Plan: upstream reports no cost dimensions.
@@ -41,27 +33,70 @@ provider "devin" {
 	}
 
 
-	// Devin omits cost dimensions for plan-included models on lower tiers
-	// (PRO reports $0 for SWE-2, SWE-1.7, and GLM-5.2 High). `cost-fallback`
-	// seeds the enterprise-tier list price only when upstream reports no
-	// token price, so accounts whose discovery does carry dimensions keep
-	// their real rates. None of these models publishes a cache-write rate.
+	// Cascade rejects `temperature: 0` with an opaque `invalid_argument`
+	// ("an internal error occurred") while any positive value is accepted;
+	// 0.0001 is the smallest verified accepted. Local features that pin 0 for
+	// deterministic decoding (session titles, Mnemopi memory extraction) would
+	// otherwise fail and silently fall back to the next model (issue #18423).
+	temperature-floor 0.0001
 
-	// SWE-2: enterprise promo is 75% off list through 2026-12-31; list
-	// pricing ($3/$15, $0.30 cache read) applies from 2027-01-01.
-	models "swe-2*" {
+	// Enterprise (ACUs) fallback prices: https://docs.devin.ai/desktop/models
+	// (as of 2026-11-05). Seed only when upstream reports no token price.
+	// Self-serve SWE-2 Flash is free until 2026-12-04 18:00 UTC; SWE-2 in
+	// Desktop/CLI through 2026-11-30. Account-specific token rates stay intact.
+
+	// SWE-2 promo ends at 2027-01-01 08:00 UTC (midnight Pacific after 2026-12-31).
+	// residue: the family's logical id plus its raw effort uids, which stay
+	// standalone when a row arrives without `modelFamilyMetadata`.
+	models "swe-2" "swe-2-medium" "swe-2-high" "swe-2-max" {
 		cost-fallback {
-			input 0.75
-			output 3.75
-			cache-read 0.075
+			input 0.5
+			output 2.5
+			cache-read 0.05
 			cache-write 0
 			effective-rates {
 				list-price {
-					effective-from "2027-01-01T00:00:00Z"
+					effective-from "2027-01-01T08:00:00Z"
 					input 3
 					output 15
 					cache-read 0.3
 					cache-write 0
+				}
+			}
+		}
+	}
+
+	// SWE-2 Fast (wire uids `swe-2-<effort>-lightning`): the docs publish no
+	// price, but GetCliModelConfigs reports $1 input / $0.10 cached input /
+	// $5 output (2026-11-06), twice SWE-2's promo rate. No end date or list
+	// price is published for it.
+	// residue: the logical fast lane plus its raw uids, as for SWE-2 above.
+	models "swe-2-fast" "swe-2-medium-lightning" "swe-2-high-lightning" "swe-2-max-lightning" {
+		cost-fallback {
+			input 1
+			output 5
+			cache-read 0.1
+			cache-write 0
+		}
+	}
+
+	// SWE-2 Flash: enterprise promo is 25% off until 2026-11-18 18:00 UTC.
+	// All three variants then use the same list price. Discovery exposes the
+	// family as `swe-2-flash`, distinct from SWE-2 and Fusion pairings.
+	// residue: the logical id plus its raw effort uids, as for SWE-2 above.
+	models "swe-2-flash" "swe-2-flash-medium" "swe-2-flash-high" "swe-2-flash-max" {
+		cost-fallback {
+			input 0.075
+			output 0.375
+			cache-read 0.0075
+			cache-write 0.09375
+			effective-rates {
+				list-price {
+					effective-from "2026-11-18T18:00:00Z"
+					input 0.1
+					output 0.5
+					cache-read 0.01
+					cache-write 0.125
 				}
 			}
 		}
@@ -91,7 +126,7 @@ provider "devin" {
 	// `GetCliModelConfigs` and the v2alpha models endpoint carry none. Chat
 	// usage reports cache-write tokens for Claude and GPT-5.6+ (Gemini
 	// reports none), and the card bills them at 1.25x input. Earlier GPT,
-	// Grok, Kimi, GLM, DeepSeek, and SWE rows publish no cache-write rate.
+	// Grok, Kimi, GLM, DeepSeek, and earlier SWE rows publish no cache-write rate.
 	// The GPT selector stops at the next major generation, like the tiers
 	// below, so an unpublished generation records no cache-write price.
 	class "anthropic" {

@@ -12,7 +12,16 @@ import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } fr
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isRecord,
+	logger,
+	popLoopPhase,
+	postmortem,
+	prompt,
+	pushLoopPhase,
+	sanitizeText,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	AsyncJobError,
@@ -59,7 +68,7 @@ import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionStateApi } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
-import type { MCPManagerApi } from "../mcp/manager";
+import type { MCPManagerApi, MCPToolScope } from "../mcp/manager";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
@@ -82,11 +91,13 @@ import {
 	type PromptOptions,
 } from "../session/agent-session";
 import { isLocalAgentSession } from "../session/agent-session-handle";
+import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { type ArtifactManagerApi, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import type { CostGateApi } from "../session/cost-gate";
-import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
+import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
+import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -124,6 +135,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { recordStepsSent, type StepProgress } from "./steps";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
@@ -169,6 +181,7 @@ import {
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import {
 	cfgCompactionModelThresholdsEnabled,
@@ -439,6 +452,12 @@ export interface ExecutorOptions {
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
+	/**
+	 * Every step prompt of a stepped spawn (`renderStepPrompts` in `./steps`):
+	 * {@link task} already carries the first, the run sends each later one once
+	 * the previous one was delivered. Absent for a single-prompt assignment.
+	 */
+	steps?: string[];
 	assignment?: string;
 	preparedSession?: PreparedSeanceSession;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
@@ -471,6 +490,8 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/** Active parent provider, independent of whether parent-model auth fallback is allowed. */
+	parentActiveProvider?: string;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -568,6 +589,8 @@ export interface ExecutorOptions {
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManagerApi;
+	/** The spawning session's view of {@link mcpManager}; the child's view starts from it. */
+	mcpToolScope?: MCPToolScope;
 	/** User-authorized model agents available to this child and its descendants. */
 	inheritedSessionAgents?: CreateAgentSessionOptions["inheritedSessionAgents"];
 	authStorage?: AuthStorage;
@@ -986,7 +1009,7 @@ function getUsageTokens(usage: unknown): number {
 }
 
 /**
- * Create proxy tools that reuse the parent's MCP connections.
+ * Create proxy tools that reuse the parent's MCP connections, as `scope` sees them.
  *
  * Each proxy delegates to the current source `MCPTool`/`DeferredMCPTool` rather
  * than rebuilding a raw `tools/call` request, so the Task/subagent path shares
@@ -999,8 +1022,8 @@ function getUsageTokens(usage: unknown): number {
  * including timeout=0; a second Task deadline would silently cap longer calls.
  * The proxy only races caller cancellation around source execution.
  */
-export function createMCPProxyTools(mcpManager: MCPManagerApi): CustomTool[] {
-	return mcpManager.getTools().map(tool => {
+export function createMCPProxyTools(mcpManager: MCPManagerApi, scope: MCPToolScope): CustomTool[] {
+	return mcpManager.getTools(scope).map(tool => {
 		const serverName = tool.mcpServerName ?? "";
 		const mcpToolName = tool.mcpToolName ?? "";
 		return {
@@ -1018,7 +1041,7 @@ export function createMCPProxyTools(mcpManager: MCPManagerApi): CustomTool[] {
 				// Re-resolve by raw MCP metadata so a reconnect that replaced the
 				// source instance is picked up; the display name alone is not enough.
 				const source = mcpManager
-					.getTools()
+					.getTools(scope)
 					.find(t => t.mcpServerName === serverName && t.mcpToolName === mcpToolName);
 				if (!source?.execute) {
 					return {
@@ -1026,8 +1049,15 @@ export function createMCPProxyTools(mcpManager: MCPManagerApi): CustomTool[] {
 						details: { serverName, mcpToolName, isError: true },
 					};
 				}
+				// Provider tool-call IDs are unique only within one agent run. Use a
+				// cross-worker invocation token for both tracking and observation so a
+				// sibling's identical provider ID cannot replace this call's attribution.
+				// The proxy's caller still sees the original provider ID; MCP tools use
+				// this internal value only to find their observer's scope.
+				const invocationId = `${toolCallId}:${crypto.randomUUID()}`;
+				const release = mcpManager.trackToolCall(scope, invocationId);
 				try {
-					return await untilAborted(signal, source.execute(toolCallId, params, onUpdate, ctx, signal));
+					return await untilAborted(signal, source.execute(invocationId, params, onUpdate, ctx, signal));
 				} catch (error) {
 					if (error instanceof ToolAbortError) {
 						throw error;
@@ -1044,6 +1074,8 @@ export function createMCPProxyTools(mcpManager: MCPManagerApi): CustomTool[] {
 						],
 						details: { serverName, mcpToolName, isError: true },
 					};
+				} finally {
+					release();
 				}
 			},
 		};
@@ -1055,18 +1087,32 @@ export type MCPToolFollowerSession = Pick<AgentSession, "refreshMCPTools" | "add
 
 /** Subscription created by {@link followMCPTools}; bind it to the session the proxies went into. */
 export interface MCPToolFollower {
+	/** The child's view of the manager; sessions it spawns start from it. */
+	readonly scope: MCPToolScope;
+	/** Mint the child's proxy tools from its own view of the manager. */
+	proxyTools(): CustomTool[];
 	/** Attach the created session; replays any change seen since subscribing, then follows later ones. */
 	bind(session: MCPToolFollowerSession): void;
 	/** Drop the subscription when the session was never created. */
 	dispose(): void;
 }
 
+/** Which view of the shared manager a child session gets. */
+export interface MCPToolView {
+	/** The child session's id: a revived session reopens the view it had. */
+	scope: MCPToolScope;
+	/** View a newly opened one starts from: the spawning session's (default: the owner's). */
+	seed?: MCPToolScope;
+}
+
 /**
- * Keep a child session's MCP proxy tools in step with the parent's shared
- * manager. A child gets a spawn-time {@link createMCPProxyTools} snapshot and
- * never owns the manager's single-slot tool callback, so without this a
- * `/mcp reload` — or a server added, removed, or reconnected later — only
- * reaches the owning session and every live subagent keeps its stale set.
+ * Give a child session its own view of the parent's shared manager and keep
+ * its MCP proxy tools in step with it. A child gets a spawn-time
+ * {@link MCPToolFollower.proxyTools} snapshot and never owns the manager's
+ * single-slot tool callback, so without this a `/mcp reload` — or a server
+ * added, removed, or reconnected later — only reaches the owning session and
+ * every live subagent keeps its stale set. Tools another session's calls make
+ * a server add stay out of this view (see {@link MCPManagerApi.getTools}).
  *
  * Subscribe BEFORE building the child's proxies: a change landing while the
  * session is still being created is recorded and replayed on {@link
@@ -1078,7 +1124,13 @@ export interface MCPToolFollower {
  * so those tools win, and every rebind must keep dropping them, or the first
  * reload would replace the child's own tool with the MCP capability.
  */
-export function followMCPTools(mcpManager: MCPManagerApi, reservedNames?: ReadonlySet<string>): MCPToolFollower {
+export function followMCPTools(
+	mcpManager: MCPManagerApi,
+	view: MCPToolView,
+	reservedNames?: ReadonlySet<string>,
+): MCPToolFollower {
+	const { scope } = view;
+	mcpManager.openToolScope(scope, view.seed);
 	let session: MCPToolFollowerSession | undefined;
 	let pending = false;
 	let scheduled = false;
@@ -1086,7 +1138,7 @@ export function followMCPTools(mcpManager: MCPManagerApi, reservedNames?: Readon
 		scheduled = false;
 		if (!session || !pending) return;
 		pending = false;
-		const proxies = createMCPProxyTools(mcpManager);
+		const proxies = createMCPProxyTools(mcpManager, scope);
 		const tools = reservedNames?.size ? proxies.filter(tool => !reservedNames.has(tool.name)) : proxies;
 		session.refreshMCPTools(tools).catch(error => {
 			logger.warn("Subagent MCP tool refresh failed", {
@@ -1104,6 +1156,8 @@ export function followMCPTools(mcpManager: MCPManagerApi, reservedNames?: Readon
 		if (session) schedule();
 	});
 	return {
+		scope,
+		proxyTools: () => createMCPProxyTools(mcpManager, scope),
 		bind(next) {
 			session = next;
 			next.addDisposer(unsubscribe);
@@ -1262,6 +1316,8 @@ interface RunMonitorArgs {
 	modelRegistry?: ModelRegistry;
 	/** Parent settings for tiny-model label generation. */
 	settings?: Settings;
+	parentActiveModelPattern?: string;
+	parentActiveProvider?: string;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1328,6 +1384,14 @@ interface SubagentRunMonitor {
 	yieldTurnStopRequested(): boolean;
 	/** Resolves when the yield turn-stop session abort has settled (immediately when none fired). */
 	waitForYieldTurnStop(): Promise<void>;
+	/**
+	 * While held, a successful terminal `yield` stops the free-running turn
+	 * (like a yield with owner async work pending) instead of ending the run,
+	 * so the driver can send the next step. A failed yield still ends it.
+	 */
+	holdForSteps(held: boolean): void;
+	/** Clear the latched yield before the next step's prompt, so that step must deliver its own. */
+	beginStep(): void;
 	/** The abort kind for this run, when an abort was requested. */
 	abortKind(): AbortReason | undefined;
 	terminalError(): string | undefined;
@@ -1441,6 +1505,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldAcceptedAt: number | undefined;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
+	/** Later steps remain: see {@link SubagentRunMonitor.holdForSteps}. */
+	let stepsHeld = false;
+	/** The latest yield reported an error (`status: "aborted"`). */
+	let yieldFailed = false;
 
 	// Accumulate usage incrementally from message_end events (no memory for streaming events)
 	const accumulatedUsage: Usage = {
@@ -1471,7 +1539,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const abortActiveSession = (): Promise<void> => {
 		const session = activeSession;
 		if (!session) return Promise.resolve();
-		activeSessionAbortPromise ??= session.abort().catch(error => {
+		// A process shutdown cuts the turn off instead of stopping it: label it as
+		// interrupted so `omp --restore` (and `/restart`) goes on with it.
+		const options = abortReason === "shutdown" ? { reason: INTERRUPTED_TURN_ERROR } : undefined;
+		activeSessionAbortPromise ??= session.abort(options).catch(error => {
 			logger.debug("Subagent session abort cleanup failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -1700,7 +1771,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
 	if (!args.description && args.modelRegistry && args.settings && labelSource) {
-		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal)
+		generateTaskLabel(
+			labelSource,
+			args.modelRegistry,
+			args.settings,
+			id,
+			abortSignal,
+			args.parentActiveModelPattern,
+			args.parentActiveProvider,
+		)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
 				progress.description = label;
@@ -1784,6 +1863,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// the pin without terminating the run, so re-prompting loops
 			// forever: take the section as the final report it was asked for.
 			yieldCalled = !incremental || finalYieldForced || item?.complete === true || item?.status === "aborted";
+			yieldFailed = item?.status === "aborted";
 			yieldCallPending = false;
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
@@ -2018,9 +2098,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
 					endsRun = wantsTerminate || forcedFinalYield;
 					if (endsRun) {
-						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
-							// Terminal yield with owner jobs still pending: park the
-							// run behind the quiescence barrier instead of completing
+						if (event.toolName === "yield" && (sessionHasPendingAsyncWork() || (stepsHeld && !yieldFailed))) {
+							// Terminal yield with owner jobs still pending, or a step's
+							// yield while later steps remain: park the run behind the
+							// quiescence barrier and the next step instead of completing
 							// it (see requestYieldTurnStop).
 							requestYieldTurnStop();
 						} else {
@@ -2184,11 +2265,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
 					// Track latest per-turn context size so the UI can show
-					// "current context", not just cumulative billing volume.
+					// "current context", not just cumulative billing volume. A
+					// segmented provider response bills every continuation request,
+					// so `totalTokens` overshoots the occupied window; the reported
+					// `contextTokens` (or billable total minus orchestration) is the
+					// same accounting the session's own context estimate uses.
 					if (role === "assistant") {
-						const perTurnTotal = getNumberField(messageUsage, "totalTokens");
-						if (perTurnTotal !== undefined && perTurnTotal > 0) {
-							progress.contextTokens = perTurnTotal;
+						const occupied = usageContextTokens(messageUsage);
+						if (occupied > 0) {
+							progress.contextTokens = occupied;
 						}
 					}
 				}
@@ -2363,6 +2448,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 			}
 		},
+		holdForSteps: (held: boolean) => {
+			stepsHeld = held;
+		},
+		beginStep: () => {
+			yieldCalled = false;
+			yieldFailed = false;
+			yieldAcceptedAt = undefined;
+			yieldInvalidatedByAsync = false;
+		},
 		// A soft stop that never escalated still identifies as a budget abort so
 		// the lifecycle can park the agent as resumable instead of killing it.
 		abortKind: () => abortReason ?? (budgetStopRequested ? "budget" : undefined),
@@ -2451,6 +2545,11 @@ const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
 
 class PromptDispatchError extends Error {}
 
+/** Failures no retry, reminder or notice turn can recover: they end the run. */
+function endsRun(err: unknown): boolean {
+	return err instanceof PromptDispatchError || err instanceof CostCapError;
+}
+
 /**
  * Drive one assignment through a live session: send the prompt (with `restore`,
  * go on with the turn the previous process left unfinished instead:
@@ -2479,15 +2578,27 @@ async function driveSessionToResult(
 		onPromptBusy?: () => Promise<void>;
 		/** Go on with the interrupted turn instead of sending `task`, which only labels the run. */
 		restore?: boolean;
+		/**
+		 * Step prompts of a stepped spawn (see `./steps`): the first `sent` went
+		 * out already (`task`; with `restore`, the interrupted turn is the last of
+		 * them); each later one is sent once the previous one was delivered.
+		 */
+		steps?: StepProgress;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore } = options;
+	const { solutionSpace, onPromptBusy, restore, steps } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
 	let error: string | undefined;
 	let aborted = false;
 	let abortReasonText: string | undefined;
+	// Cost-cap refusals are terminal: no retry or reminder can be sent until the cap is raised.
+	const refusalBefore = session.costCapRefusal;
+	const costCapRefusal = (): CostCapRefusal | undefined => {
+		const refusal = session.costCapRefusal;
+		return refusal !== refusalBefore ? refusal : undefined;
+	};
 	const checkAbort = () => {
 		if (abortSignal.aborted) {
 			aborted = monitor.isAbortedRun();
@@ -2536,6 +2647,8 @@ async function driveSessionToResult(
 			} catch (err) {
 				if (!(err instanceof PromptDroppedError)) throw err;
 			}
+			const refusal = costCapRefusal();
+			if (refusal) throw new CostCapError(refusal);
 			if (forceFinalYield) monitor.markFinalYieldForced(false);
 			if (attempt === MAX_PROMPT_DISPATCH_ATTEMPTS) {
 				throw new PromptDispatchError(`${label} dropped before provider dispatch after ${attempt} attempts`);
@@ -2554,8 +2667,28 @@ async function driveSessionToResult(
 		}
 	};
 
-	try {
+	/**
+	 * Send one turn's prompt and wait for idle. A budget stop or a yield
+	 * turn-stop (terminal yield parked behind the async quiescence barrier or
+	 * the next step) cancels the free-running turn by aborting the session,
+	 * which can surface here as a rejected prompt. Swallow it and drive the
+	 * barrier/forced final yield/next step below; real caller/timeout aborts
+	 * (monitor signal) and genuine failures propagate.
+	 */
+	const runTurn = async (send: () => Promise<void>): Promise<void> => {
 		try {
+			await send();
+			await awaitAbortable(session.waitForIdle());
+		} catch (err) {
+			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
+			if (!recoverableStop || abortSignal.aborted || endsRun(err)) throw err;
+		}
+	};
+
+	try {
+		if (steps && !restore) recordStepsSent(session.sessionManager, steps.sent, steps.prompts);
+		monitor.holdForSteps(steps !== undefined && steps.sent < steps.prompts.length);
+		await runTurn(async () => {
 			// An IRC wake may own the session when this turn dispatches. Its prompt
 			// wins the race and this prompt throws AgentBusyError; back off through
 			// the caller hook and retry. Bounded so a wedged worker still resolves
@@ -2565,24 +2698,14 @@ async function driveSessionToResult(
 				try {
 					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
 					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
-					break;
+					return;
 				} catch (error) {
 					promptAttempts++;
 					if (!(error instanceof AgentBusyError) || promptAttempts >= 3 || !onPromptBusy) throw error;
 					await onPromptBusy();
 				}
 			}
-			await awaitAbortable(session.waitForIdle());
-		} catch (err) {
-			// A budget stop or a yield turn-stop (terminal yield parked behind
-			// the async quiescence barrier) cancels the free-running turn by
-			// aborting the session, which can surface here as a rejected
-			// prompt. Swallow it and drive the barrier/forced final yield
-			// below; real caller/timeout aborts (monitor signal) and genuine
-			// failures keep the old path.
-			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
-			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
-		}
+		});
 
 		// The forced final turn must answer through `yield`, or with no tools at all.
 		const reminderToolChoice = structured ? buildNamedToolChoice("yield", session.model) : "none";
@@ -2637,7 +2760,7 @@ async function driveSessionToResult(
 					);
 					await awaitAbortable(session.waitForIdle());
 				} catch (err) {
-					if (err instanceof PromptDispatchError) throw err;
+					if (endsRun(err)) throw err;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
 						// Benign control-flow exit — user cancel (^C) or compaction aborting
 						// pending operations both surface here as ToolAbortError. The outer
@@ -2681,59 +2804,82 @@ async function driveSessionToResult(
 		// what it is waiting on so it can stand by or cancel the job. A turn
 		// without a yield settles its pending jobs without an extra notice.
 		// Runs that exhaust the ladder with no pending work, or hit a terminal
-		// model error, skip the barrier; teardown reaps their jobs.
-		let asyncPendingNoticeSent = false;
-		while (!abortSignal.aborted) {
-			if (!monitor.yieldCalled()) {
-				await runYieldLadder();
-				if (
-					!monitor.yieldCalled() &&
-					(monitor.budgetStopRequested() ||
-						session.getLastAssistantMessage()?.stopReason === "error" ||
-						!session.hasPendingAsyncWork())
-				)
-					break;
-			}
-			// Let the parked yield's turn-stop session abort settle before
-			// prompting again (mirrors waitForBudgetStop).
-			await awaitAbortable(monitor.waitForYieldTurnStop());
-			if (!session.hasPendingAsyncWork()) {
-				if (monitor.yieldCalled()) break;
-				continue;
-			}
-			if (!monitor.yieldCalled()) {
-				await awaitAbortable(session.settleAsyncWork());
-				continue;
-			}
-			if (!asyncPendingNoticeSent) {
-				asyncPendingNoticeSent = true;
-				const running = session.getAsyncJobSnapshot()?.running ?? [];
-				if (running.length > 0) {
-					const jobs = running.map(job => `${job.id}${job.label ? ` (${job.label})` : ""}`).join(", ");
-					const notice = prompt.render(subagentAsyncPendingTemplate, {
-						count: running.length,
-						multiple: running.length > 1,
-						jobs,
-					});
-					try {
-						await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
-						await awaitAbortable(session.waitForIdle());
-					} catch (err) {
-						if (abortSignal.aborted || err instanceof ToolAbortError || err instanceof PromptDispatchError)
-							throw err;
-						// Other notice-turn failures leave the pending jobs to settle passively.
-						logger.warn("Subagent async-pending notice failed", {
-							error: err instanceof Error ? err.message : String(err),
-						});
-					}
-					// Re-evaluate: the notice turn may have cancelled, watched, or
-					// absorbed the jobs — or already re-yielded.
+		// model error, skip the barrier; teardown reaps their jobs. Each step
+		// settles the same way before the next one is sent.
+		const settle = async (): Promise<void> => {
+			let asyncPendingNoticeSent = false;
+			while (!abortSignal.aborted) {
+				if (!monitor.yieldCalled()) {
+					await runYieldLadder();
+					if (
+						!monitor.yieldCalled() &&
+						(monitor.budgetStopRequested() ||
+							session.getLastAssistantMessage()?.stopReason === "error" ||
+							!session.hasPendingAsyncWork())
+					)
+						break;
+				}
+				// Let the parked yield's turn-stop session abort settle before
+				// prompting again (mirrors waitForBudgetStop).
+				await awaitAbortable(monitor.waitForYieldTurnStop());
+				if (!session.hasPendingAsyncWork()) {
+					if (monitor.yieldCalled()) break;
 					continue;
 				}
+				if (!monitor.yieldCalled()) {
+					await awaitAbortable(session.settleAsyncWork());
+					continue;
+				}
+				if (!asyncPendingNoticeSent) {
+					asyncPendingNoticeSent = true;
+					const running = session.getAsyncJobSnapshot()?.running ?? [];
+					if (running.length > 0) {
+						const jobs = running.map(job => `${job.id}${job.label ? ` (${job.label})` : ""}`).join(", ");
+						const notice = prompt.render(subagentAsyncPendingTemplate, {
+							count: running.length,
+							multiple: running.length > 1,
+							jobs,
+						});
+						try {
+							await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
+							await awaitAbortable(session.waitForIdle());
+						} catch (err) {
+							if (abortSignal.aborted || err instanceof ToolAbortError || endsRun(err)) throw err;
+							// Other notice-turn failures leave the pending jobs to settle passively.
+							logger.warn("Subagent async-pending notice failed", {
+								error: err instanceof Error ? err.message : String(err),
+							});
+						}
+						// Re-evaluate: the notice turn may have cancelled, watched, or
+						// absorbed the jobs — or already re-yielded.
+						continue;
+					}
+				}
+				await awaitAbortable(session.settleAsyncWork());
+				// Results delivered during the settle invalidated the recorded
+				// yield: the next iteration's ladder demands a fresh one.
 			}
-			await awaitAbortable(session.settleAsyncWork());
-			// Results delivered during the settle invalidated the recorded
-			// yield: the next iteration's ladder demands a fresh one.
+		};
+		await settle();
+
+		// Send each remaining step once the previous one was delivered: an
+		// accepted yield, or without `yield` a clean final message. A step that
+		// failed, was cut short by a budget stop, or ended the run (a failed
+		// yield terminates it) ends the chain with its result as the run's.
+		for (let next = steps?.sent ?? 0; steps && next < steps.prompts.length; next++) {
+			const delivered = structured
+				? monitor.yieldCalled()
+				: session.getLastAssistantMessage()?.stopReason === "stop";
+			if (!delivered || abortSignal.aborted || monitor.budgetStopRequested()) break;
+			monitor.holdForSteps(next + 1 < steps.prompts.length);
+			monitor.beginStep();
+			resetYieldTurnState(session.getToolByName("yield"));
+			recordStepsSent(session.sessionManager, next + 1);
+			const stepPrompt = steps.prompts[next];
+			await runTurn(() =>
+				dispatchPrompt(stepPrompt, { attribution: "agent", solutionSpace }, `step prompt ${next + 1}`),
+			);
+			await settle();
 		}
 
 		if (!monitor.yieldCalled()) {
@@ -2773,6 +2919,14 @@ async function driveSessionToResult(
 			exitCode = 1;
 		}
 
+		// The cap refused a request mid-run (the loop stops before the model call
+		// without throwing): its message is why the run produced no result.
+		const refusal = costCapRefusal();
+		if (!delivered && refusal && !aborted) {
+			exitCode = 1;
+			error ??= refusal.message;
+		}
+
 		// A recorded yield that async-result deliveries superseded and the
 		// model never refreshed is stale: fail the run instead of letting the
 		// parent act on a payload that predates the background job outcomes
@@ -2790,7 +2944,13 @@ async function driveSessionToResult(
 		} else {
 			exitCode = 1;
 			if (!abortSignal.aborted) {
-				error = err instanceof Error ? err.stack || err.message : String(err);
+				// A cost-cap refusal is a reason for the parent, not a crash to diagnose.
+				error =
+					err instanceof CostCapError
+						? err.message
+						: err instanceof Error
+							? err.stack || err.message
+							: String(err);
 			}
 		}
 	} finally {
@@ -3603,7 +3763,7 @@ export async function finalizeSubagentLifecycle(args: {
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
-	const disposeSession = async (): Promise<void> => {
+	const disposeSession = async (options?: AgentSessionDisposeOptions): Promise<void> => {
 		// On a graceful finish (e.g. a `yield`) the advisor's review of the final
 		// turn was enqueued at turn end but may still be draining. Give it a
 		// chance to land in the transcript before the runtime is torn down —
@@ -3613,7 +3773,7 @@ export async function finalizeSubagentLifecycle(args: {
 			args.session.prepareForHeadlessAdvisorDrain();
 			await args.session.waitForAdvisorCatchup(Math.max(0, cleanupDeadlineAt - Date.now()));
 		}
-		const disposal = args.session.dispose();
+		const disposal = args.session.dispose(options);
 		const remainingMs = Math.max(0, cleanupDeadlineAt - Date.now());
 		try {
 			await untilAborted(AbortSignal.timeout(remainingMs), () => disposal);
@@ -3639,22 +3799,24 @@ export async function finalizeSubagentLifecycle(args: {
 	// An aborted run leaves a consistent session with its transcript on disk, so
 	// a kept-alive agent with a reviver stays resumable like a finished one.
 	// Manager shutdown also preserves the transcript, but disposes and unregisters
-	// the process-local session (restorable as parked). An explicit kill (Agent
-	// Hub, RPC `cancel_subagent`, collab, vibe) publishes the `aborted` tombstone
-	// before the run observes its abort, and stays terminal.
+	// the process-local session (restorable as parked); its exit is recorded as a
+	// process exit, so `omp --restore` goes on with the turn the shutdown cut off.
+	// An explicit kill (Agent Hub, RPC `cancel_subagent`, collab, vibe) publishes
+	// the `aborted` tombstone before the run observes its abort, and stays terminal.
 	const resumableAbort =
 		args.abortKind !== "shutdown" && args.keepAlive && args.reviveSession !== null && ref?.status !== "aborted";
 	if (args.aborted && !resumableAbort) {
+		const shutdownDispose = args.abortKind === "shutdown" ? { reason: postmortem.Reason.EXIT } : undefined;
 		if (ref && ownsRef) {
-			if (args.abortKind === "shutdown") {
+			if (shutdownDispose) {
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref);
+					await AgentLifecycleManager.global().release(args.id, ref, { dispose: shutdownDispose });
 				} catch (error) {
 					logger.warn("runSubagent: failed to release session during manager shutdown", {
 						id: args.id,
 						error: String(error),
 					});
-					await disposeSession();
+					await disposeSession(shutdownDispose);
 					registry.unregister(args.id, ref);
 				}
 			} else {
@@ -3671,7 +3833,7 @@ export async function finalizeSubagentLifecycle(args: {
 				}
 			}
 		} else {
-			await disposeSession();
+			await disposeSession(shutdownDispose);
 		}
 		await releaseOwnedResources();
 		return;
@@ -3716,6 +3878,8 @@ export interface FollowUpTurnOptions {
 	 * `message` (`omp --restore`: {@link AgentSession.restoreInterruptedTurn}).
 	 */
 	restore?: boolean;
+	/** With {@link restore}: the interrupted run's step progress; its unsent prompts follow the restored turn. */
+	steps?: StepProgress;
 	index?: number;
 	description?: string;
 	/** Explicit pre-expansion model role alias retained from the original run. */
@@ -3922,6 +4086,7 @@ async function driveFollowUpTurn(
 			outcome = await driveSessionToResult(session, monitor, message, {
 				structured,
 				restore: options.restore,
+				steps: options.steps,
 				onPromptBusy: async () => {
 					attemptUnsubscribe();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -4041,16 +4206,18 @@ function buildSubagentSessionOptions(
 	settings: Settings,
 	sessionManager: SessionManager,
 	expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+	mcpFollower: MCPToolFollower | undefined,
 	launch?: SubagentLaunchInputs,
 ): CreateAgentSessionOptions {
 	const inputs = spec.prompt;
 	// MCP proxies are minted per build, not captured in the spec: a kept-alive
 	// subagent revived after `/mcp reload` must see the manager's current tools.
-	const mcpTools = spec.options.mcpManager ? createMCPProxyTools(spec.options.mcpManager) : [];
+	const mcpTools = mcpFollower?.proxyTools() ?? [];
 	const customTools = spec.options.customTools ?? [];
 	return {
 		...spec.options,
 		mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
+		mcpToolScope: mcpFollower?.scope,
 		customTools: customTools.length > 0 ? customTools : undefined,
 		settings,
 		sessionManager,
@@ -4255,7 +4422,10 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		}
 		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
 		const mcpManager = capture.spec.options.mcpManager;
-		const mcpFollower = mcpManager ? followMCPTools(mcpManager, explicitSubagentToolNames(capture.spec)) : undefined;
+		// The revived session reopens its own view, keeping the tools its earlier requests rendered.
+		const mcpFollower = mcpManager
+			? followMCPTools(mcpManager, { scope: reopened.getSessionId() }, explicitSubagentToolNames(capture.spec))
+			: undefined;
 		let revived: AgentSession;
 		// Account pools are owner policy: take the live exact-name entry, as
 		// dispatch and persisted revival do, never the spawn-time copy.
@@ -4277,6 +4447,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 					restoreSubagentSettings(capture.settings),
 					reopened,
 					expectedAgentRef,
+					mcpFollower,
 				);
 				({ session: revived } = await createAgentSession({
 					...options,
@@ -4533,6 +4704,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		description: options.description,
 		modelRegistry: options.modelRegistry,
 		settings,
+		parentActiveModelPattern: options.parentActiveModelPattern,
+		parentActiveProvider: options.parentActiveProvider,
 		modelOverride,
 		modelRole,
 		modelRoute: options.modelRoute,
@@ -4650,6 +4823,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (options.perCallModelGrants) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 			}
+			const allowedProvider = cfgOffline.get(settings)
+				? (options.parentActiveProvider ??
+					(options.parentActiveModelPattern
+						? resolveModelOverride([options.parentActiveModelPattern], modelRegistry, settings).model?.provider
+						: undefined) ??
+					null)
+				: undefined;
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
@@ -4672,9 +4852,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					modelRegistry,
 					settings,
 					id,
-					options.perCallModelGrants ? { exactOnly: true } : undefined,
+					{ exactOnly: !!options.perCallModelGrants, allowedProvider },
 				),
 			);
+			if (cfgOffline.get(settings) && !model) {
+				throw new Error("Offline mode: no subagent model is available on the active parent provider.");
+			}
 			if (options.perCallModelGrants && !model) {
 				throw new PerCallModelError(
 					`Requested exact model ${JSON.stringify(modelPatterns)} is unavailable. Use an exact provider/model[:level] selector; do not substitute another model.`,
@@ -4717,8 +4900,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
-				inheritedFallbackChain: inheritedRetryFallbackChain,
+				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings).filter(
+					candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider,
+				),
+				inheritedFallbackChain:
+					allowedProvider === undefined
+						? inheritedRetryFallbackChain
+						: inheritedRetryFallbackChain?.filter(entry => {
+								const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
+								return candidate?.provider === allowedProvider;
+							}),
 				model,
 				authFallbackUsed,
 			});
@@ -4890,14 +5081,19 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					modelPatternDefaultFallbackChain:
 						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
-					...(perCallModelGrants
+					...(perCallModelGrants || allowedProvider !== undefined
 						? {
-								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
 								assertDispatchModel: (dispatchModel: Model) => {
-									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
-									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+									if (allowedProvider !== undefined && dispatchModel.provider !== allowedProvider) {
+										throw new Error("Offline mode: subagent dispatch must use the active parent provider.");
+									}
+									if (perCallModelGrants) {
+										assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+										if (spawnEffortCeiling)
+											assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+									}
 								},
-								disableModelFallback: true,
+								...(perCallModelGrants ? { disableModelFallback: true } : {}),
 								disableServerSideFallback: true,
 							}
 						: {}),
@@ -4982,13 +5178,17 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Subscribe before the builder mints proxies so a manager change during
 			// session startup is replayed on bind instead of lost.
 			const mcpFollower = mcpManager
-				? followMCPTools(mcpManager, explicitSubagentToolNames(sessionSpec))
+				? followMCPTools(
+						mcpManager,
+						{ scope: sessionManager.getSessionId(), seed: options.mcpToolScope },
+						explicitSubagentToolNames(sessionSpec),
+					)
 				: undefined;
 			let session: AgentSession;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
 			try {
 				sessionPromise = createAgentSession(
-					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, {
+					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, mcpFollower, {
 						workPoolYieldItems: options.workPoolYieldItems ?? [],
 						// A revived session restores the tier history it persisted (including
 						// tiers a provider rejected or an extension changed since spawn); only
@@ -5212,6 +5412,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const outcome = await driveSessionToResult(session, monitor, task, {
 				solutionSpace: options.solutionSpace,
 				structured,
+				steps: options.steps?.length ? { prompts: options.steps, sent: 1 } : undefined,
 			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left

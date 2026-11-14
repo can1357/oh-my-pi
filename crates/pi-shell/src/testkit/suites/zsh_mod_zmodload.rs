@@ -115,8 +115,17 @@ fn builtins_autoload_their_module() {
 	let (out, ..) = zsh("zmodload -e zsh/zutil; echo $?; zstyle; zmodload; zmodload -lF zsh/zutil");
 	assert_eq!(
 		out,
-		"1\nzsh/complete\nzsh/main\nzsh/zle\nzsh/zutil\n-b:zformat\n-b:zparseopts\n-b:zregexparse\\
-		 n+b:zstyle\n"
+		concat!(
+			"1\n",
+			"zsh/complete\n",
+			"zsh/main\n",
+			"zsh/zle\n",
+			"zsh/zutil\n",
+			"-b:zformat\n",
+			"-b:zparseopts\n",
+			"-b:zregexparse\n",
+			"+b:zstyle\n",
+		)
 	);
 	assert_eq!(
 		zsh("zmodload -ub zstyle; zstyle :a b c"),
@@ -238,9 +247,12 @@ fn typeset_h_on_module_special() {
 			 zsh/datetime; zmodload zsh/datetime; print ${(t)EPOCHSECONDS}"
 		),
 		(
-			"integer-readonly-hideval-special\ninteger-readonly-hide-hideval-special\\
-			 ninteger-readonly-hide-hideval-special\n"
-				.into(),
+			concat!(
+				"integer-readonly-hideval-special\n",
+				"integer-readonly-hide-hideval-special\n",
+				"integer-readonly-hide-hideval-special\n",
+			)
+			.into(),
 			String::new(),
 			0
 		)
@@ -281,9 +293,20 @@ fn module_param_blocked_by_existing_param() {
 			 ${(t)EPOCHSECONDS}"
 		),
 		(
-			"scrooble\n0\na\nb\nst=2\n+b:strftime\n-p:EPOCHSECONDS\n+p:EPOCHREALTIME\n+p:epochtime\\
-			 nst=0\ninteger-readonly-hide-hideval-special\n"
-				.into(),
+			concat!(
+				"scrooble\n",
+				"0\n",
+				"a\n",
+				"b\n",
+				"st=2\n",
+				"+b:strftime\n",
+				"-p:EPOCHSECONDS\n",
+				"+p:EPOCHREALTIME\n",
+				"+p:epochtime\n",
+				"st=0\n",
+				"integer-readonly-hide-hideval-special\n",
+			)
+			.into(),
 			"zsh:1: Can't add module parameter `EPOCHSECONDS': parameter already \
 			 exists\nzsh:zsh/datetime:1: error when adding parameter `EPOCHSECONDS'\n"
 				.into(),

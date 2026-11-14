@@ -120,6 +120,7 @@ function remoteUnsubscribe(unsubscribe: () => void): () => void {
  * registry mirror batch, or a new run here ({@link invalidateRemoteAuthAvailability}).
  * Catalog availability asks `keys.source`/`keys.keyless` for every provider of the catalog,
  * and sync callbacks need a provider domain, so one call each would cost a round trip apiece.
+ * A provider the table lacks costs one small call for its own entry, kept with the table.
  */
 class RemoteAuthAvailability {
 	readonly #remote: AuthRemote;
@@ -153,9 +154,17 @@ class RemoteAuthAvailability {
 
 	/** `provider`'s entry, asking main about it when the table lacks it. */
 	of(provider: string): ProviderAuthAvailability {
-		const cached = this.#table?.get(provider);
+		const table = this.#table;
+		const cached = table?.get(provider);
 		if (cached) return cached;
 		this.#askedProviders.add(provider);
+		if (table) {
+			// A catalog pass meets the providers missing from the table one by one; rebuilding the
+			// whole table for each cost main a pass over every provider apiece.
+			const entry = this.#remote.callSync("keys.availabilityOf", provider);
+			table.set(provider, entry);
+			return entry;
+		}
 		const entry = this.#fetch().get(provider);
 		if (!entry) throw new Error(`keys.availability omitted the requested provider ${provider}`);
 		return entry;
@@ -245,6 +254,9 @@ class RemoteCredentials implements CredentialsApi {
 	}
 	hasOAuth(provider: string): boolean {
 		return this.#remote.callSync("credentials.hasOAuth", provider);
+	}
+	hasSubscription(provider: string): boolean {
+		return this.#remote.callSync("credentials.hasSubscription", provider);
 	}
 	getOAuth(provider: string): OAuthCredential | undefined {
 		return this.#remote.callSync("credentials.getOAuth", provider);
@@ -342,9 +354,11 @@ class RemoteKeys implements KeysApi {
 
 class RemoteOAuth implements OAuthApi {
 	readonly #remote: AuthRemote;
+	readonly #availability: RemoteAuthAvailability;
 
-	constructor(remote: AuthRemote) {
+	constructor(remote: AuthRemote, availability: RemoteAuthAvailability) {
 		this.#remote = remote;
+		this.#availability = availability;
 	}
 
 	async login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined> {
@@ -369,6 +383,8 @@ class RemoteOAuth implements OAuthApi {
 		return this.#remote.callSync("oauth.accounts", provider, sessionId);
 	}
 	identity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
+		// Read once per assistant turn; without a stored OAuth credential main answers `undefined`.
+		if (!this.#availability.of(provider).oauth) return undefined;
 		return this.#remote.callSync("oauth.identity", provider, sessionId);
 	}
 	policy(provider: string, identity: OAuthAccountIdentity): AuthAccountPolicy | undefined {
@@ -473,6 +489,8 @@ class RemoteUsage implements UsageApi {
 		headers: Record<string, string>,
 		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
 	): boolean {
+		// Once per response; without a stored OAuth credential main ingests nothing.
+		if (!this.#availability.of(provider).oauth) return false;
 		return this.#remote.callSync("usage.ingestHeaders", provider, headers, options);
 	}
 	invalidate(provider?: string, signal?: AbortSignal): Promise<void> {
@@ -497,16 +515,24 @@ class RemoteUsage implements UsageApi {
 		return this.#remote.callSync("usage.reportingModelIds", provider, modelIds, reports);
 	}
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void {
-		// The main thread calls these hooks synchronously while ranking and ingesting headers.
-		if (usageProvider.parseRateLimitHeaders || usageProvider.supports) {
-			throw new Error(
-				`Usage provider ${provider} has synchronous hooks and must be registered on the main thread, not a subagent worker`,
-			);
-		}
+		assertWorkerUsageProvider(provider, usageProvider);
 		this.#remote.notify("usage.setProvider", provider, usageProvider, apiKey);
 	}
 	removeProvider(provider: Provider): void {
 		this.#remote.notify("usage.removeProvider", provider);
+	}
+	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void {
+		for (const [provider, usageProvider] of providers) assertWorkerUsageProvider(provider, usageProvider);
+		this.#remote.notify("usage.replaceConfiguredProviders", [...providers]);
+	}
+}
+
+/** The main thread calls these hooks synchronously while ranking and ingesting headers. */
+function assertWorkerUsageProvider(provider: Provider, usageProvider: UsageProvider): void {
+	if (usageProvider.parseRateLimitHeaders || usageProvider.supports) {
+		throw new Error(
+			`Usage provider ${provider} has synchronous hooks and must be registered on the main thread, not a subagent worker`,
+		);
 	}
 }
 
@@ -632,7 +658,7 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
 		const availability = new RemoteAuthAvailability(remote);
 		this.credentials = new RemoteCredentials(remote);
 		this.keys = new RemoteKeys(remote, availability);
-		this.oauth = new RemoteOAuth(remote);
+		this.oauth = new RemoteOAuth(remote, availability);
 		this.sessions = new RemoteSessions(remote, availability);
 		this.usage = new RemoteUsage(remote, availability);
 		this.health = new RemoteHealth(remote, availability);

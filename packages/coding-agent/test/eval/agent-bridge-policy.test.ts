@@ -377,6 +377,23 @@ describe("runEvalAgent", () => {
 		).rejects.toThrow(error);
 		expect(runSpy).not.toHaveBeenCalled();
 	});
+
+	it.each(["", "   "])("treats a blank agent() model (%p) as omitted", async model => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession({
+			activeModel: "p/current",
+			modelString: "p/fallback",
+			settings: Settings.isolated({ "task.perCallModel": "off", "task.isolation.enabled": false }),
+		});
+
+		await runEvalAgentAndWait({ prompt: "work", model }, { session });
+
+		// The gate stays off: the agent's own frontmatter model applies and no per-call route is recorded.
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/current"]);
+		expect(runSpy.mock.calls[0]?.[0]?.perCallModelGrants).toBeUndefined();
+	});
+
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
 		const sessionSchema = { type: "object" };

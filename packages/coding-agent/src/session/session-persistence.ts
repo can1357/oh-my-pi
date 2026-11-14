@@ -1,5 +1,5 @@
 import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import { countNewlines, isRecord } from "@oh-my-pi/pi-utils";
+import { countNewlines, isRecord, stringifyJson } from "@oh-my-pi/pi-utils";
 import { PRESERVE_KEY as SNAPCOMPACT_PRESERVE_KEY } from "@oh-my-pi/snapcompact";
 import {
 	type BlobStore,
@@ -568,5 +568,30 @@ function stripSpilledMcpStructuredContent(entry: FileEntry): FileEntry {
 
 export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
 	const projected = stripSpilledMcpStructuredContent(stripReplayedReasoningSignatures(entry));
-	return truncateForPersistence(projected, blobStore) as FileEntry;
+	try {
+		return truncateForPersistence(projected, blobStore) as FileEntry;
+	} catch (error) {
+		// The walk probes fields such as `data` and `type` with `in` and plain
+		// reads, so it also reaches non-enumerable and inherited accessors that
+		// the JSONL line never holds. Tool `details` can keep a library object
+		// whose getter throws (firecrawl-js `SearchData.data`). Left unhandled,
+		// that latches a disk failure, and every later rewrite of the session
+		// meets the same entry, so nothing persists for the rest of the process.
+		// Retry once on the plain JSON of the entry: it holds the fields the
+		// line would serialize, and no accessors.
+		let json: string | undefined;
+		try {
+			json = stringifyJson(projected);
+		} catch {
+			throw error;
+		}
+		if (json === undefined) throw error;
+		try {
+			return truncateForPersistence(JSON.parse(json), blobStore) as FileEntry;
+		} catch {
+			// A cause the clone does not remove (blob I/O) fails again: keep the
+			// first error so the logged cause stays stable.
+			throw error;
+		}
+	}
 }

@@ -43,7 +43,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		authStorage.keys.setRuntime("venice", "test-key");
+		authStorage.keys.setRuntime("deepseek", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -524,11 +524,22 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 			blocksDropped: 0,
 			tokensFreed: 0,
 		});
-		const notices = collectNotices();
-		await triggerMaintenance();
-		const warning = notices.find(n => n.source === NOTICE_SOURCE && n.message.includes("fixed context"));
-		expect(warning?.message).toContain("compaction.modelThresholds");
-		expect(warning?.message).not.toContain("clear large tool output");
+		const compactSpy = vi.spyOn(snapcompact, "compact");
+		// The fixed-context gate blocks before any pass starts, so no
+		// auto_compaction_end fires; wait for the warning itself.
+		const { promise: warned, resolve: onWarned } = Promise.withResolvers<string>();
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === NOTICE_SOURCE && event.message.includes("fixed context")) {
+				onWarned(event.message);
+			}
+		});
+		const assistantMsg = highUsageAssistant();
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		const warning = await warned;
+		await session.waitForIdle();
+		expect(warning).toContain("compaction.modelThresholds");
+		expect(warning).not.toContain("clear large tool output");
+		expect(compactSpy).not.toHaveBeenCalled();
 	});
 
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {
@@ -674,7 +685,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 	it("skips the frame rescue when the active model's wire strips image input", async () => {
 		// Declares image input, so only the wire predicate tells it apart from a vision model.
-		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("venice", "deepseek-v4-1-flash") });
+		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("deepseek", "deepseek-v4-flash") });
 		vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });

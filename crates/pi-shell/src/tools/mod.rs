@@ -54,6 +54,27 @@ const GIT: ToolRef = ToolRef(3);
 /// Every extra that runs command lines; `argv[0]` names it.
 const EXTRA: ToolRef = ToolRef(4);
 
+/// The switch that hands `nohup` to the system binary.
+const NOHUP_OFF: &str = "PI_DISABLE_NOHUP_BUILTIN";
+
+/// The commands pi adds to bash's own builtins, sorted.
+///
+/// `timeout`, `nohup` and the extras [`ExtrasGate`] offers, in a shell whose
+/// starting environment turns on the switches `on` names ([`flag_on`] of
+/// their values). Not `git`, whose layers wrap the binary. omp's bash tool
+/// lists them to the model.
+pub fn builtins(on: impl Fn(&str) -> bool) -> Vec<&'static str> {
+	let extras = ExtrasGate::from_switches(&on);
+	let mut names: Vec<&'static str> = pi_builtins::extras::extras()
+		.filter(|&(name, kind)| extras.allows(name, kind))
+		.map(|(name, _)| name)
+		.chain(["timeout"])
+		.chain((!on(NOHUP_OFF)).then_some("nohup"))
+		.collect();
+	names.sort_unstable();
+	names
+}
+
 /// Which tools a session offers; fixed when the session starts, as pi
 /// registers its builtins once per shell.
 #[derive(Clone, Default)]
@@ -91,11 +112,12 @@ impl ToolConfig {
 				.find(|(k, _)| k == name.as_bytes())
 				.and_then(|(_, v)| v.to_str().ok())
 		};
+		let on = |name: &str| flag_on(var(name));
 		Self {
-			nohup: !flag_on(var("PI_DISABLE_NOHUP_BUILTIN")),
+			nohup: !on(NOHUP_OFF),
 			git: GitLayers::from_env(var),
 			vfs,
-			extras: ExtrasGate::from_env(var),
+			extras: ExtrasGate::from_switches(on),
 			runtime: Some(runtime),
 			reported_error: ReportedError::default(),
 		}
@@ -570,5 +592,37 @@ mod tests {
 		assert_eq!(no_utils.lookup("xargs".into()), None);
 		assert!(no_utils.native_extra("sort".into()).is_none());
 		assert_eq!(no_utils.lookup("timeout".into()), Some(TIMEOUT));
+	}
+
+	/// `builtins` lists exactly the names a session started with the same
+	/// switches resolves to pi (a tool or an extra), so the model is never
+	/// told a system binary is pi's, or the reverse.
+	#[test]
+	fn builtins_are_what_the_session_resolves() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.build()
+			.expect("runtime");
+		let candidates: Vec<&str> = pi_builtins::extras::extras()
+			.map(|(name, _)| name)
+			.chain(["timeout", "nohup"])
+			.collect();
+		for pairs in [&[][..], &[("PI_DISABLE_UUTILS_BUILTINS", "1"), (NOHUP_OFF, "true")], &[
+			("PI_DISABLE_UUTILS_DESTRUCTIVE", "1"),
+			("PI_DISABLE_MV_BUILTIN", "0"),
+		]] {
+			let env: Vec<(BString, BString)> =
+				pairs.iter().map(|&(k, v)| (k.into(), v.into())).collect();
+			let config = ToolConfig::from_env(&env, None, runtime.handle().clone());
+			let mut resolved: Vec<&str> = candidates
+				.iter()
+				.copied()
+				.filter(|&name| {
+					config.lookup(name.into()).is_some() || config.native_extra(name.into()).is_some()
+				})
+				.collect();
+			resolved.sort_unstable();
+			let on = |name: &str| flag_on(pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v));
+			assert_eq!(builtins(on), resolved, "{pairs:?}");
+		}
 	}
 }

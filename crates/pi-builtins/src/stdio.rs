@@ -184,6 +184,11 @@ impl AsyncOut {
 		self.shared.handle.is_terminal()
 	}
 
+	/// Bytes written and not yet delivered.
+	pub fn pending_len(&self) -> usize {
+		self.shared.pending.lock().len()
+	}
+
 	/// Delivers the pending bytes: all of them when `full` or when the
 	/// destination is not a regular file, else only once 64 KiB are pending.
 	/// Returns at once when nothing is due.
@@ -487,6 +492,20 @@ impl Source {
 	/// Size and type reported at open, when known.
 	pub fn metadata(&self) -> Option<&pi_vfs::Metadata> {
 		self.metadata.as_ref()
+	}
+
+	/// The identity of the file behind the opened handle, read from the handle
+	/// rather than from the path it was opened by.
+	///
+	/// [`Source::metadata`] is the stat taken before the open, which a name
+	/// replaced in between makes stale; this one names the file that was
+	/// actually opened. A descriptor or an in-process stream has no identity
+	/// beyond the one recorded at open, and is reported from that.
+	pub async fn handle_metadata(&self) -> Option<pi_vfs::Metadata> {
+		match &self.repr {
+			Repr::File(file) => file.metadata_async().await.ok(),
+			_ => self.metadata.clone(),
+		}
 	}
 }
 

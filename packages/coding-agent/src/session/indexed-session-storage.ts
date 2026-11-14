@@ -9,7 +9,6 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
-import { isAssistantMessageLine } from "./session-entries";
 import { enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
@@ -18,6 +17,7 @@ import {
 	type SessionTitleUpdate,
 	titleUpdateFromSlot,
 } from "./session-title-slot";
+import { purgeDeletedSessionRows } from "./session-db-purge";
 
 export interface SessionStorageIndexEntry {
 	path: string;
@@ -303,11 +303,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
-	async hasAssistantTurn(path: string): Promise<boolean> {
+	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
 		for (const line of (await this.readText(path)).split("\n")) {
-			if (isAssistantMessageLine(line)) return true;
+			if (visit(line)) return;
 		}
-		return false;
 	}
 
 	async writeText(path: string, content: string): Promise<void> {
@@ -413,10 +412,22 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+	async deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
+		// Purge history/stats rows before the transcript is gone (#18674).
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		try {
+			purgeDeletedSessionRows(sessionPath, {
+				content: await this.readText(sessionPath),
+				historyDbPath: options?.historyDbPath,
+				statsDbPath: options?.statsDbPath,
+			});
+		} catch {}
 
 		const artifactsDir = sessionPath.slice(0, -6);
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;

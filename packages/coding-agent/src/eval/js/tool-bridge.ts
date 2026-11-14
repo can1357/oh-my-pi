@@ -24,6 +24,7 @@ import {
 	runEvalJudgmentBatch,
 } from "../judgment-batch-bridge";
 import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
+import { EVAL_SHELL_BRIDGE_NAME, type EvalShellResult, runEvalShell } from "../shell-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
 	type EvalHandleSnapshot,
@@ -51,6 +52,8 @@ export type { JsStatusEvent } from "./shared/types";
 export interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
+	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
+	cellTimeoutMs?: number;
 	emitStatus?: (event: JsStatusEvent) => void;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
@@ -65,6 +68,7 @@ export interface ToolBridgeOptions {
 type ToolValue =
 	| string
 	| EvalBudgetResult
+	| EvalShellResult
 	| EvalAgentHandleResult
 	| EvalCompletionHandleResult
 	| EvalJudgmentResult
@@ -234,6 +238,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					session: options.session,
 					toolCallId,
 					signal: options.signal,
+					cellTimeoutMs: options.cellTimeoutMs,
 					context: options.session.getToolContext?.(),
 				}),
 			);
@@ -266,6 +271,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	if (name === EVAL_BUDGET_BRIDGE_NAME) {
 		return await runEvalBudget(args, options);
+	}
+	if (name === EVAL_SHELL_BRIDGE_NAME) {
+		return await runEvalShell(args, options);
 	}
 	if (name === EVAL_WAIT_BRIDGE_NAME) {
 		return await runEvalWait(args, options);

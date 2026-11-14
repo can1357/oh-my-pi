@@ -52,7 +52,12 @@ export type LocalModelInitializer = (options: LocalModelInitOptions) => Promise<
 const QUERY_CACHE_MAX = 512;
 
 let providerOverride: EmbeddingProvider | null = null;
-let localModelPromise: Promise<LocalEmbeddingModel> | null = null;
+// Local encoders are cached per resolved fastembed model id: two Mnemopi instances
+// in one process configured with different local models must each load their own
+// encoder instead of reusing whichever model happened to initialize first. A failed
+// init evicts only that model's entry so other models' encoders stay warm.
+const localModelPromises = new Map<string, Promise<LocalEmbeddingModel>>();
+const readyLocalModels = new Set<string>();
 let localModelInitializer: LocalModelInitializer = defaultLocalModelInitializer;
 let apiCallCount = 0;
 const queryCache = new LRUCache<string, Vector>({ max: QUERY_CACHE_MAX });
@@ -330,17 +335,21 @@ export function fastembedModelName(modelName: string): StandardEmbeddingModel | 
 }
 
 async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
-	if (isApiModel(defaultModel()) || embeddingsDisabled() || inTestRuntime()) {
+	const configuredModel = defaultModel();
+	if (isApiModel(configuredModel) || embeddingsDisabled() || inTestRuntime()) {
 		return null;
-	}
-	if (localModelPromise !== null) {
-		return localModelPromise;
 	}
 
-	const modelName = fastembedModelName(defaultModel());
-	if (modelName === null) {
+	const modelName = fastembedModelName(configuredModel);
+	if (modelName === null || activeEmbeddingOptions()?.allowLocal?.() === false) {
 		return null;
 	}
+	if (activeEmbeddingOptions()?.allowLocalLoad?.() === false && !readyLocalModels.has(modelName)) return null;
+	const cached = localModelPromises.get(modelName);
+	if (cached !== undefined) {
+		return cached;
+	}
+
 	const cacheDir = getFastembedCacheDir();
 	mkdirSync(cacheDir, { recursive: true });
 	const loading = localModelInitializer({
@@ -348,21 +357,71 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 		cacheDir,
 		showDownloadProgress: false,
 	});
-	localModelPromise = loading;
+	localModelPromises.set(modelName, loading);
 	try {
-		return await loading;
+		const model = await loading;
+		if (localModelPromises.get(modelName) === loading) readyLocalModels.add(modelName);
+		return model;
 	} catch (error) {
 		logger[mnemopiDebugEnabled() ? "warn" : "debug"]("mnemopi: local embedding model failed to load", {
 			model: modelName,
 			error: String(error),
 		});
-		if (localModelPromise === loading) localModelPromise = null;
+		if (localModelPromises.get(modelName) === loading) localModelPromises.delete(modelName);
 		return null;
 	}
 }
 
+const DEFAULT_EMBEDDING_BATCH_SIZE = 64;
+
+/**
+ * Max texts per `/embeddings` request. Some hosted providers cap the inputs per
+ * request (DashScope: 10), and a rejected request fails the whole call. Reads the
+ * runtime scope's `embeddings.batchSize`, then `MNEMOPI_EMBEDDING_BATCH_SIZE`, then 64.
+ */
+function embeddingBatchSize(): number {
+	return (
+		positiveBatchSize(activeEmbeddingOptions()?.batchSize) ??
+		positiveBatchSize(Number.parseInt($env.MNEMOPI_EMBEDDING_BATCH_SIZE ?? "", 10)) ??
+		DEFAULT_EMBEDDING_BATCH_SIZE
+	);
+}
+
+/** Floors a configured size to a whole request cap; undefined unless it is at least 1. */
+function positiveBatchSize(value: number | undefined): number | undefined {
+	if (value === undefined || !Number.isFinite(value)) return undefined;
+	const size = Math.floor(value);
+	return size >= 1 ? size : undefined;
+}
+
+// Same level policy as the local-model failures: debug, or warn when runtime debug is on.
+function logEmbeddingRejection(status: number, body: string): void {
+	logger[mnemopiDebugEnabled() ? "warn" : "debug"]("mnemopi embedding request rejected", {
+		status,
+		body: body.slice(0, 300),
+	});
+}
+
 async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
+	const size = embeddingBatchSize();
+	if (texts.length <= size) {
+		return embedApiBatch(texts);
+	}
+	const matrix: EmbeddingMatrix = [];
+	for (let offset = 0; offset < texts.length; offset += size) {
+		const part = await embedApiBatch(texts.slice(offset, offset + size));
+		if (part === null) {
+			return null;
+		}
+		matrix.push(...part);
+	}
+	return matrix;
+}
+
+async function embedApiBatch(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
 	const baseUrl = embeddingBaseUrl();
+	const allowRemote = activeEmbeddingOptions()?.allowRemote;
+	if (allowRemote?.(baseUrl) === false) return null;
 	const isCustom = !hostMatchesUrl(baseUrl, "openrouter");
 	const apiKey = embeddingApiKey();
 	if (!isCustom && !embeddingKeyConfigured(apiKey)) {
@@ -390,26 +449,41 @@ async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | nul
 				signal: AbortSignal.timeout(30000),
 				maxAttempts: 3,
 				defaultDelayMs: attempt => 2 ** attempt * 1000,
+				fetch: (input, init) => {
+					if (allowRemote?.(baseUrl) === false) throw new Error("Remote embedding provider is not allowed");
+					return fetch(input, init);
+				},
 			});
 			if (res.status === 401) {
-				throw new ProviderHttpError("mnemopi embedding request unauthorized (401)", 401, { headers: res.headers });
+				// Keep the provider's denial text: the log can only show what the error carries.
+				const detail = (await res.text().catch(() => "")).trim();
+				throw new ProviderHttpError(detail || "mnemopi embedding request unauthorized (401)", 401, {
+					headers: res.headers,
+				});
 			}
 			return res;
 		});
 		if (!response.ok) {
+			logEmbeddingRejection(response.status, await response.text().catch(() => ""));
 			return null;
 		}
 		const data = (await response.json()) as { data?: Array<{ embedding: number[] }> };
 		return withLoopPhase("mnemopi.embed", () => {
 			const { data: rows } = data;
-			if (rows === undefined) {
+			// A short or long matrix would stamp vectors onto the wrong memories.
+			if (rows === undefined || rows.length !== texts.length) {
 				return null;
 			}
 			apiCallCount += 1;
 			return rows.map(row => new Float32Array(row.embedding));
 		});
 	} catch (error) {
-		logger.debug("mnemopi embedding request failed", { status: extractHttpStatusFromError(error) });
+		const status = extractHttpStatusFromError(error);
+		if (status === undefined) {
+			logger.debug("mnemopi embedding request failed", { error: String(error) });
+		} else {
+			logEmbeddingRejection(status, error instanceof Error ? error.message : "");
+		}
 		return null;
 	}
 }
@@ -434,7 +508,8 @@ export const setEmbeddingProvider = setEmbeddingProviderForTests;
 
 export function setLocalModelInitializerForTests(initializer: LocalModelInitializer | null | undefined): void {
 	localModelInitializer = initializer ?? defaultLocalModelInitializer;
-	localModelPromise = null;
+	localModelPromises.clear();
+	readyLocalModels.clear();
 	queryCache.clear();
 }
 
@@ -450,7 +525,8 @@ export const setLocalModelInitializer = setLocalModelInitializerForTests;
 
 export function resetEmbeddingProviderForTests(): void {
 	providerOverride = null;
-	localModelPromise = null;
+	localModelPromises.clear();
+	readyLocalModels.clear();
 	localModelInitializer = defaultLocalModelInitializer;
 	apiCallCount = 0;
 	queryCache.clear();
@@ -465,22 +541,24 @@ export async function available(): Promise<boolean> {
 	const active = activeEmbeddingOptions();
 	const activeProvider = resolveEmbeddingProvider(active?.provider);
 	if (activeProvider !== undefined) {
-		return providerAvailable(activeProvider);
+		return active?.allowRemote?.("") === false ? false : providerAvailable(activeProvider);
 	}
 	if (providerOverride !== null) {
-		return providerAvailable(providerOverride);
+		return active?.allowRemote?.("") === false ? false : providerAvailable(providerOverride);
 	}
 	if (isApiModel(defaultModel())) {
+		if (active?.allowRemote?.(embeddingBaseUrl()) === false) return false;
 		const baseUrl = active?.apiUrl ?? ($env.MNEMOPI_EMBEDDING_API_URL || $env.OPENROUTER_BASE_URL);
 		if (baseUrl !== undefined && baseUrl !== "" && !hostMatchesUrl(baseUrl, "openrouter")) {
 			return true;
 		}
 		return embeddingKeyConfigured();
 	}
-	if (inTestRuntime()) {
+	if (inTestRuntime() || active?.allowLocal?.() === false) {
 		return false;
 	}
-	return fastembedModelName(defaultModel()) !== null;
+	const model = fastembedModelName(defaultModel());
+	return model !== null && (active?.allowLocalLoad?.() !== false || readyLocalModels.has(model));
 }
 
 export function availableApi(): boolean {
@@ -509,8 +587,10 @@ export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix |
 		return null;
 	}
 	texts = capInputs(texts);
-	const activeProvider = resolveEmbeddingProvider(activeEmbeddingOptions()?.provider);
+	const options = activeEmbeddingOptions();
+	const activeProvider = resolveEmbeddingProvider(options?.provider);
 	if (activeProvider !== undefined) {
+		if (options?.allowRemote?.("") === false) return null;
 		try {
 			return await collectMatrix(await activeProvider.embed(texts));
 		} catch {
@@ -518,6 +598,7 @@ export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix |
 		}
 	}
 	if (providerOverride !== null) {
+		if (options?.allowRemote?.("") === false) return null;
 		try {
 			return await collectMatrix(await providerOverride.embed(texts));
 		} catch {
@@ -535,7 +616,7 @@ export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix |
 		}
 	}
 	const model = await getLocalModel();
-	if (model === null) {
+	if (model === null || activeEmbeddingOptions()?.allowLocal?.() === false) {
 		return null;
 	}
 	try {

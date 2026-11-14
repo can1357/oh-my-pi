@@ -36,10 +36,31 @@ fn zsh_mod_example_builtin_shows_and_sets_its_parameters() {
 	assert_eq!(
 		out,
 		format!(
-			"{SETUP}+b:example\n+C:ex\n+c:len\n+f:length\n+f:sum\n+p:exarr\n+p:exint\n+p:exstr\\
-			 nOptions: afgls\nArguments: a b\nName: example\n\nInteger Parameter: 42\nString Parameter: \
-			 example\nArray Parameter: example array\n2 a a b\nOptions: \nArguments: q r\nName: \
-			 example\n\nInteger Parameter: 2\nString Parameter: a\nArray Parameter: a b\n2 q q r\n"
+			"{SETUP}{}",
+			concat!(
+				"+b:example\n",
+				"+C:ex\n",
+				"+c:len\n",
+				"+f:length\n",
+				"+f:sum\n",
+				"+p:exarr\n",
+				"+p:exint\n",
+				"+p:exstr\n",
+				"Options: afgls\n",
+				"Arguments: a b\n",
+				"Name: example\n",
+				"\nInteger Parameter: 42\n",
+				"String Parameter: example\n",
+				"Array Parameter: example array\n",
+				"2 a a b\n",
+				"Options: \n",
+				"Arguments: q r\n",
+				"Name: example\n",
+				"\nInteger Parameter: 2\n",
+				"String Parameter: a\n",
+				"Array Parameter: a b\n",
+				"2 q q r\n",
+			)
 		)
 	);
 	assert_eq!(st, 0);
@@ -111,15 +132,15 @@ fn zsh_mod_example_math_functions() {
 #[test]
 fn zsh_mod_example_wrapper_sets_globdots_for_example_functions() {
 	let host = FakeHost::new();
-	host.fs.add_dir("/w");
-	host.fs.add_file("/w/.a", b"", 0o644);
-	host.fs.add_file("/w/b", b"", 0o644);
+	host.fs.add_dir("/work");
+	host.fs.add_file("/work/.a", b"", 0o644);
+	host.fs.add_file("/work/b", b"", 0o644);
 	let (out, err, st) = zsh_on(
 		host,
-		"zmodload zsh/example; f(){ echo /w/*; }; examplef(){ echo /w/*; }; f; examplef; f; [[ -o \
-		 globdots ]] || echo off",
+		"zmodload zsh/example; f(){ echo /work/*; }; examplef(){ echo /work/*; }; f; examplef; f; \
+		 [[ -o globdots ]] || echo off",
 	);
 	assert_eq!(err, "");
-	assert_eq!(out, format!("{SETUP}/w/b\n/w/.a /w/b\n/w/b\noff\n"));
+	assert_eq!(out, format!("{SETUP}/work/b\n/work/.a /work/b\n/work/b\noff\n"));
 	assert_eq!(st, 0);
 }

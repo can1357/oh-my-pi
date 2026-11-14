@@ -51,9 +51,10 @@ export const MUX_PING_RESULT = "pong";
 
 /**
  * Notification on a bound link: kill that link's server process. Sent by
- * `lsp reload` when the generic reload path decides the server is wedged —
- * a plain per-session `shutdown`/`exit` is intercepted by the mux so the
- * process can linger for reuse.
+ * `lsp reload` when the generic reload path decides the server is wedged, or
+ * when the link's configuration was superseded — a plain per-session
+ * `shutdown`/`exit` is intercepted by the mux so the process can linger for
+ * reuse.
  */
 export const MUX_RESTART_METHOD = "omp/muxRestartServer";
 

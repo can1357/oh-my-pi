@@ -248,11 +248,13 @@ A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`;
 
 | Value           | Behavior                                                                                                                                                                                                    |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight (the bundled seance agent's own `model` is separate; see below). The field stays in the task schema.                  |
+| `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight (the bundled seance agent's own `model` is separate; see below). The task schema does not advertise the field, but a sent one still reaches preflight; an empty task `model` (`""` or `[]`) counts as omitted. |
 | `eval`          | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing. |
 | `on`            | Accepted everywhere.                                                                                                                                                                                        |
 
 Only the operator's layers can turn it on: a project's `task.perCallModel` can lower the mode (`on` → `eval` → `off`) but never raise it.
+
+A `model` that is empty or whitespace, or an empty array, counts as omitted for every per-call selector: a task item, flat call, `agent()` or `workpool()` uses the agent's configured model instead of failing the gate.
 
 A per-call `model` is exactly one `provider/model-id[@upstream][:level]` (for example `anthropic/claude-sonnet-4-5:high`). The optional `@upstream` pin is supported only by aggregators and is part of the model identity: pinned and unpinned routes are different models for approval. The optional `:level` is clamped to a level the model supports, still bounded by `task.maxEffort`; a literal catalog id wins over splitting a level-shaped suffix. Role aliases (including `@default` and a legacy `pi/<role>` naming a built-in or configured custom role), arrays, comma lists, globs and partial ids fail preflight; when `task.perCallModel` refuses the call, that error is reported first. It is matched literally against the available chat models; there is no fuzzy resolution, and a non-chat model is rejected with that reason.
 

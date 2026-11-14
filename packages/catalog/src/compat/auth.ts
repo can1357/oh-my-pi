@@ -19,6 +19,16 @@ export function authPolicyFor(provider: string): CompiledAuthProvider | undefine
 	return byId[provider];
 }
 
+/** Why `provider` is turned off (`disabled "<reason>"`): it offers no login and no credential reaches it. */
+export function providerDisabledReason(provider: string): string | undefined {
+	return byId[provider]?.disabled;
+}
+
+/** The account risk a new login must accept first (`login-warning "<text>"`), if declared. */
+export function providerLoginWarning(provider: string): string | undefined {
+	return byId[provider]?.loginWarning;
+}
+
 /** Every hook name referenced anywhere in the auth stratum, for registry completeness checks. */
 export function authHookNames(): Record<string, string[]> {
 	const names: Record<string, string[]> = {};

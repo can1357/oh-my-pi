@@ -153,7 +153,7 @@ import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -1690,13 +1690,16 @@ function rememberPrefixDroppedThinking(
 
 /**
  * Replay keys of the thinking blocks in the request's latest assistant turn.
- * Anthropic validates every assistant message after the last user message
- * carrying more than tool results as one "latest assistant message" (its error
- * indices count blocks across that whole run).
+ * Anthropic validates the last run of assistant messages, joined only by tool
+ * results, as one "latest assistant message" (its error indices count blocks
+ * across that whole run), even when user messages follow it: a steer or a
+ * reminder sent after the turn's tool results, or the next prompt.
  */
 function latestAssistantTurnThinkingKeys(params: MessageCreateParamsStreaming): string[] {
 	const keys: string[] = [];
-	for (let index = params.messages.length - 1; index >= 0; index--) {
+	let index = params.messages.length - 1;
+	while (index >= 0 && params.messages[index]!.role !== "assistant") index--;
+	for (; index >= 0; index--) {
 		const message = params.messages[index]!;
 		if (message.role !== "assistant") {
 			const toolResultsOnly =
@@ -2073,6 +2076,11 @@ const streamAnthropicOnce = (
 			}
 
 			let clientArgs: AnthropicClientOptionsArgs | undefined;
+			// Claude Code version the current client advertises on the wire. Captured
+			// when the client is built so a `claude_code_version_too_old` rejection is
+			// judged against the version that request sent, not the process-wide
+			// adopted one (concurrent first requests would otherwise race).
+			let sentClaudeCodeVersion = getClaudeCodeVersion();
 			let requestExtraBetas: readonly string[] = [];
 			let clientDefaultHeaders: Record<string, string> | undefined;
 			// Rebuild headers when a retry changes the advertised beta set.
@@ -2243,6 +2251,7 @@ const streamAnthropicOnce = (
 					disableStrictTools,
 					dropPromptCacheBetas: dropCacheControl || dropCacheControlOptions,
 				};
+				sentClaudeCodeVersion = getClaudeCodeVersion();
 				const created = createClient(model, clientArgs);
 				clientDefaultHeaders = created.defaultHeaders;
 				return created;
@@ -3375,12 +3384,13 @@ const streamAnthropicOnce = (
 						isOAuthToken &&
 						clientArgs &&
 						firstTokenTime === undefined &&
-						adoptRequiredClaudeCodeVersion(streamFailure)
+						adoptRequiredClaudeCodeVersion(streamFailure, sentClaudeCodeVersion)
 					) {
 						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
 							model: model.id,
 							version: getClaudeCodeVersion(),
 						});
+						sentClaudeCodeVersion = getClaudeCodeVersion();
 						client = createClient(model, { ...clientArgs, disableStrictTools }).client;
 						// The version only changes client headers; a redemption keeps its frozen body.
 						if (!usingFallbackCredit) params = await prepareParams();
@@ -5931,10 +5941,7 @@ export function convertAnthropicMessages(
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
 					: undefined;
-			const hasProviderControls =
-				payload?.clearAt !== undefined ||
-				payload?.effort !== undefined ||
-				(payload?.toolChanges !== undefined && payload.toolChanges.length > 0);
+			const hasProviderControls = hasAnthropicMessageControls(msg);
 
 			let content: string | ContentBlockParam[];
 			if (typeof msg.content === "string") {

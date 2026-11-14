@@ -4,15 +4,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$envExact,
+	$otelEnv,
+	claimOmpOtelEnvFileEntry,
 	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
 	setInteractiveHost,
 	stripGitRepoLocationEnv,
+	withOmpOtelEnv,
 } from "@oh-my-pi/pi-utils/env";
 
 const tempDirs: string[] = [];
+
+// Every variable `dirs.ts` consults to pick the profile, agent dir or config/state roots. A probe child
+// must not inherit any of them from the developer's shell (e.g. OMP_PROFILE beats PI_PROFILE, and a
+// named profile ignores PI_CODING_AGENT_DIR), or it would read a different agent dir than its fixture.
+const DIR_RESOLUTION_ENV_RESET = {
+	OMP_PROFILE: undefined,
+	PI_PROFILE: undefined,
+	PI_CONFIG_DIR: undefined,
+	XDG_DATA_HOME: undefined,
+	XDG_STATE_HOME: undefined,
+	XDG_CACHE_HOME: undefined,
+};
+
 const runtimeProbePath = path.join(import.meta.dir, "fixtures", "test-runtime-probe.ts");
 
 afterEach(() => {
@@ -409,5 +425,236 @@ describe("$envExact", () => {
 			delete process.env[name];
 		}
 		expect($envExact(name)).toBeUndefined();
+	});
+});
+
+describe("OTEL_* from omp's own .env files", () => {
+	interface ProbeResult {
+		bunEnv: Record<string, string | null>;
+		otelEnv: Record<string, string | null>;
+		insideWindow: Record<string, string | null>;
+		afterWindow: Record<string, string | null>;
+		bashChildEnv: Record<string, string>;
+	}
+
+	// The dotenv loader runs at module load, so each case needs a fresh process
+	// whose agent dir and HOME are temp dirs.
+	async function runProbe(shellEnv: Record<string, string>): Promise<ProbeResult> {
+		const home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-utils-otel-home-"));
+		const agentDir = path.join(home, "agent");
+		const cwd = path.join(home, "project");
+		tempDirs.push(home);
+		await Bun.write(
+			path.join(agentDir, ".env"),
+			[
+				"OTEL_PROBE_AGENT=agent",
+				"OTEL_PROBE_SHELL=agent-file",
+				"OTEL_PROBE_BOTH=agent",
+				"PLAIN_PROBE_AGENT=plain",
+			].join("\n"),
+		);
+		await Bun.write(
+			path.join(home, ".env"),
+			["OTEL_PROBE_HOME=home", "OTEL_PROBE_AGENT=home-loses", "OTEL_PROBE_CONFIG=home-loses"].join("\n"),
+		);
+		await Bun.write(path.join(home, ".omp", ".env"), ["OTEL_PROBE_CONFIG=config-root"].join("\n"));
+		await Bun.write(path.join(cwd, ".env"), ["OTEL_PROBE_PROJECT=project", "OTEL_PROBE_BOTH=project"].join("\n"));
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const names = [
+			"OTEL_PROBE_AGENT",
+			"OTEL_PROBE_HOME",
+			"OTEL_PROBE_SHELL",
+			"OTEL_PROBE_BOTH",
+			"OTEL_PROBE_PROJECT",
+			"OTEL_PROBE_CONFIG",
+			"PLAIN_PROBE_AGENT",
+		];
+		const script = [
+			`import { $otelEnv, withOmpOtelEnv } from ${JSON.stringify(envModulePath)};`,
+			`const names = ${JSON.stringify(names)};`,
+			"const pick = read => Object.fromEntries(names.map(name => [name, read(name) ?? null]));",
+			"const insideWindow = withOmpOtelEnv(() => pick(name => process.env[name]));",
+			"const bash = Bun.spawn(['bash', '-c', 'env'], { env: process.env, stdout: 'pipe' });",
+			"const bashText = await new Response(bash.stdout).text();",
+			"const bashChildEnv = Object.fromEntries(bashText.split('\\n').filter(line => line.startsWith('OTEL_PROBE_') || line.startsWith('PLAIN_PROBE_')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));",
+			"process.stdout.write(JSON.stringify({",
+			"  bunEnv: pick(name => Bun.env[name]),",
+			"  otelEnv: pick(name => $otelEnv(name)),",
+			"  insideWindow,",
+			"  afterWindow: pick(name => process.env[name]),",
+			"  bashChildEnv,",
+			"}));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--no-env-file", "--eval", script], {
+			cwd,
+			env: {
+				...process.env,
+				HOME: home,
+				USERPROFILE: home,
+				PI_CODING_AGENT_DIR: agentDir,
+				...DIR_RESOLUTION_ENV_RESET,
+				OTEL_PROBE_CONFIG: undefined,
+				OTEL_PROBE_AGENT: undefined,
+				OTEL_PROBE_HOME: undefined,
+				OTEL_PROBE_SHELL: undefined,
+				OTEL_PROBE_BOTH: undefined,
+				OTEL_PROBE_PROJECT: undefined,
+				PLAIN_PROBE_AGENT: undefined,
+				...shellEnv,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return JSON.parse(stdout);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"keeps agent/home .env OTEL_* out of Bun.env and any child, but readable through $otelEnv",
+		async () => {
+			const result = await runProbe({});
+			// Neither the agent nor the home file reaches the process environment;
+			// the project .env keeps its existing behavior (loaded into Bun.env), and
+			// non-OTEL names from the agent file are untouched.
+			expect(result.bunEnv).toEqual({
+				OTEL_PROBE_AGENT: null,
+				OTEL_PROBE_HOME: null,
+				OTEL_PROBE_SHELL: null,
+				OTEL_PROBE_BOTH: "project",
+				OTEL_PROBE_PROJECT: "project",
+				OTEL_PROBE_CONFIG: null,
+				PLAIN_PROBE_AGENT: "plain",
+			});
+			// agent beats home; config root beats home; project beats agent.
+			expect(result.otelEnv).toEqual({
+				OTEL_PROBE_AGENT: "agent",
+				OTEL_PROBE_HOME: "home",
+				OTEL_PROBE_SHELL: "agent-file",
+				OTEL_PROBE_BOTH: "project",
+				OTEL_PROBE_PROJECT: "project",
+				OTEL_PROBE_CONFIG: "config-root",
+				PLAIN_PROBE_AGENT: "plain",
+			});
+			// The SDK-facing window exposes the file values, then removes them.
+			expect(result.insideWindow).toMatchObject({
+				OTEL_PROBE_AGENT: "agent",
+				OTEL_PROBE_HOME: "home",
+				OTEL_PROBE_SHELL: "agent-file",
+				OTEL_PROBE_BOTH: "project",
+			});
+			expect(result.afterWindow).toEqual(result.bunEnv);
+			// A bash child handed the live environment sees none of the file-owned values.
+			expect(result.bashChildEnv).toEqual({
+				OTEL_PROBE_BOTH: "project",
+				OTEL_PROBE_PROJECT: "project",
+				PLAIN_PROBE_AGENT: "plain",
+			});
+		},
+		20_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"lets a shell-exported OTEL_* win in Bun.env and $otelEnv",
+		async () => {
+			const result = await runProbe({ OTEL_PROBE_SHELL: "from-shell" });
+			expect(result.bunEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.otelEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.insideWindow.OTEL_PROBE_SHELL).toBe("from-shell");
+			expect(result.afterWindow.OTEL_PROBE_SHELL).toBe("from-shell");
+			// Still visible to children, as any exported variable is.
+			expect(result.bashChildEnv.OTEL_PROBE_SHELL).toBe("from-shell");
+			// The agent-file-only names stay private.
+			expect(result.bashChildEnv.OTEL_PROBE_AGENT).toBeUndefined();
+		},
+		20_000,
+	);
+
+	describe("claimOmpOtelEnvFileEntry", () => {
+		it("claims only OTEL_* names and applies the live value first", () => {
+			expect(claimOmpOtelEnvFileEntry("PLAIN_CLAIM_PROBE", "x", "linux")).toBe(false);
+			expect(claimOmpOtelEnvFileEntry("otel_lower_claim_probe", "x", "linux")).toBe(false);
+			expect($otelEnv("PLAIN_CLAIM_PROBE")).toBeUndefined();
+
+			process.env.OTEL_CLAIM_LIVE_PROBE = "live";
+			try {
+				expect(claimOmpOtelEnvFileEntry("OTEL_CLAIM_LIVE_PROBE", "file", "linux")).toBe(true);
+				expect($otelEnv("OTEL_CLAIM_LIVE_PROBE")).toBe("live");
+			} finally {
+				delete process.env.OTEL_CLAIM_LIVE_PROBE;
+			}
+			// The file value was dropped, not deferred.
+			expect($otelEnv("OTEL_CLAIM_LIVE_PROBE")).toBeUndefined();
+		});
+
+		it("keeps the first non-empty value across files", () => {
+			claimOmpOtelEnvFileEntry("OTEL_CLAIM_ORDER_PROBE", "first", "linux");
+			claimOmpOtelEnvFileEntry("OTEL_CLAIM_ORDER_PROBE", "second", "linux");
+			expect($otelEnv("OTEL_CLAIM_ORDER_PROBE")).toBe("first");
+		});
+
+		it("folds a lowercase name to its upper-case form on win32 only", () => {
+			expect(claimOmpOtelEnvFileEntry("otel_claim_win_probe", "win", "win32")).toBe(true);
+			expect(Bun.env.otel_claim_win_probe).toBeUndefined();
+			expect(Bun.env.OTEL_CLAIM_WIN_PROBE).toBeUndefined();
+			withOmpOtelEnv(() => {
+				expect(process.env.OTEL_CLAIM_WIN_PROBE).toBe("win");
+			});
+			expect(process.env.OTEL_CLAIM_WIN_PROBE).toBeUndefined();
+		});
+	});
+
+	describe("withOmpOtelEnv", () => {
+		it("exposes file values only inside the callback and returns its result", () => {
+			claimOmpOtelEnvFileEntry("OTEL_WINDOW_PROBE_A", "a", "linux");
+			expect(process.env.OTEL_WINDOW_PROBE_A).toBeUndefined();
+			const result = withOmpOtelEnv(() => {
+				expect(process.env.OTEL_WINDOW_PROBE_A).toBe("a");
+				return 42;
+			});
+			expect(result).toBe(42);
+			expect(process.env.OTEL_WINDOW_PROBE_A).toBeUndefined();
+		});
+
+		it("removes the values when the callback throws", () => {
+			claimOmpOtelEnvFileEntry("OTEL_WINDOW_PROBE_THROW", "t", "linux");
+			expect(() =>
+				withOmpOtelEnv(() => {
+					expect(process.env.OTEL_WINDOW_PROBE_THROW).toBe("t");
+					throw new Error("boom");
+				}),
+			).toThrow("boom");
+			expect(process.env.OTEL_WINDOW_PROBE_THROW).toBeUndefined();
+		});
+
+		it("restores a name that was set to the empty string instead of deleting it", () => {
+			claimOmpOtelEnvFileEntry("OTEL_WINDOW_PROBE_EMPTY", "file", "linux");
+			process.env.OTEL_WINDOW_PROBE_EMPTY = "";
+			try {
+				withOmpOtelEnv(() => {
+					expect(process.env.OTEL_WINDOW_PROBE_EMPTY).toBe("file");
+				});
+				expect(process.env.OTEL_WINDOW_PROBE_EMPTY).toBe("");
+			} finally {
+				delete process.env.OTEL_WINDOW_PROBE_EMPTY;
+			}
+		});
+
+		it("never overwrites or deletes a name that is already set", () => {
+			claimOmpOtelEnvFileEntry("OTEL_WINDOW_PROBE_SET", "file", "linux");
+			process.env.OTEL_WINDOW_PROBE_SET = "live";
+			try {
+				withOmpOtelEnv(() => {
+					expect(process.env.OTEL_WINDOW_PROBE_SET).toBe("live");
+				});
+				expect(process.env.OTEL_WINDOW_PROBE_SET).toBe("live");
+			} finally {
+				delete process.env.OTEL_WINDOW_PROBE_SET;
+			}
+		});
 	});
 });

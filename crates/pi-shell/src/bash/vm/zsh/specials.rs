@@ -21,7 +21,9 @@
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
-use bstr::{BString, ByteSlice};
+use std::sync::LazyLock;
+
+use bstr::{BStr, BString, ByteSlice};
 use hashbrown::HashMap;
 use strum::IntoEnumIterator;
 
@@ -31,6 +33,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
+	ids::Platform,
 	store::{Attrs, Key, KeyBuf, MiscKey, Record, Table, VarValue},
 	syntax::zsh::tok::span,
 	vm::{
@@ -110,6 +113,21 @@ impl Tie {
 			Self::Fignore => "FIGNORE",
 			Self::ZshEvalContext => "ZSH_EVAL_CONTEXT",
 			Self::Watch => "WATCH",
+		}
+	}
+
+	/// The separator joining the array into the scalar: `;` for the
+	/// directory lists on Windows, whose paths hold `:` (`C:\…`) and whose
+	/// `PATH` other programs read with `;`.
+	pub const fn separator(self, platform: Platform) -> u8 {
+		if matches!(platform, Platform::Windows)
+			&& matches!(
+				self,
+				Self::Path | Self::Fpath | Self::Cdpath | Self::Manpath | Self::ModulePath
+			) {
+			b';'
+		} else {
+			b':'
 		}
 	}
 }
@@ -366,8 +384,41 @@ pub const NAMES: &[u8] = b"argv * @ # ARGC ? status $ ! - 0 _ LINENO PPID RANDOM
 	zsh_eval_context ZSH_EVAL_CONTEXT options functions functions_source functrace funcsourcetrace funcfiletrace aliases galiases saliases commands \
 	parameters builtins modules jobstates jobtexts jobdirs nameddirs userdirs mapfile EPOCHSECONDS EPOCHREALTIME epochtime langinfo terminfo termcap zsh_scheduled_events errnos sysparams exint exstr exarr zcurses_colors zcurses_attrs zcurses_keycodes zcurses_windows ZCURSES_COLORS ZCURSES_COLOR_PAIRS watch WATCH ZSH_VERSION ZSH_PATCHLEVEL ZSH_NAME ZSH_ARGZERO";
 
+/// [`scan`]'s answers for every name it knows ([`NAMES`], the tie
+/// scalars, [`PLAIN`], [`PROMPTS`], [`VERSION`], the ZLE and completion
+/// specials): every variable access asks [`lookup`], and most names are
+/// not special.
+static TABLE: LazyLock<HashMap<&'static [u8], Special>> = LazyLock::new(|| {
+	word_list(NAMES)
+		.chain(
+			Tie::ALL
+				.iter()
+				.flat_map(|t| [t.array().as_bytes(), t.scalar().as_bytes()]),
+		)
+		.chain(word_list(PLAIN))
+		.chain(word_list(PROMPTS))
+		.chain(word_list(VERSION))
+		.chain(crate::bash::vm::zle::params::NAMES.iter().copied())
+		.chain(crate::bash::vm::zle::comp::complete::NAMES.iter().copied())
+		.filter_map(|name| scan(name).map(|sp| (name, sp)))
+		.collect()
+});
+
 /// The special `name` names in zsh dialect.
 pub fn lookup(name: &[u8]) -> Option<Special> {
+	let found = TABLE.get(name).copied();
+	debug_assert_eq!(
+		found,
+		scan(name),
+		"`{}` is special but missing from the names TABLE is built from",
+		BStr::new(name)
+	);
+	found
+}
+
+/// The special `name` names in zsh dialect, by its definition (see
+/// [`TABLE`]).
+fn scan(name: &[u8]) -> Option<Special> {
 	Some(match name {
 		b"argv" => Special::Argv,
 		b"*" | b"@" => Special::Star,
@@ -648,15 +699,18 @@ impl Special {
 	/// variable it shadows). A stored `_` (imported from the environment,
 	/// or bash's own `$_`) is no bash value zsh code loses: zsh ignores it.
 	pub const fn is_backed_by(self, _name: &[u8]) -> bool {
-		// An imported `HISTSIZE`/`SAVEHIST` is the special's initial value.
-		self.is_plain() || matches!(self, Self::Underscore | Self::Histsize | Self::Savehist)
+		// An imported `HISTSIZE`/`SAVEHIST` is the special's initial value;
+		// `USERNAME` (always in a Windows environment, kept for the programs
+		// the shell runs) names the user the special does.
+		self.is_plain()
+			|| matches!(self, Self::Underscore | Self::Histsize | Self::Savehist | Self::Username)
 	}
 
 	/// The built-in tie partner and separator.
-	pub const fn tie_partner(self) -> Option<(&'static str, u8)> {
+	pub const fn tie_partner(self, platform: Platform) -> Option<(&'static str, u8)> {
 		match self {
-			Self::TiedScalar(t) => Some((t.array(), b':')),
-			Self::TiedArray(t) => Some((t.scalar(), b':')),
+			Self::TiedScalar(t) => Some((t.array(), t.separator(platform))),
+			Self::TiedArray(t) => Some((t.scalar(), t.separator(platform))),
 			_ => None,
 		}
 	}
@@ -691,12 +745,13 @@ fn num(n: impl std::fmt::Display) -> BString {
 pub fn param(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<Param> {
 	let value = get(ex, sp)?;
 	let mut flags = sp.flags();
-	let mut base = 0;
-	if sp == Special::Seconds {
+	let base = if sp == Special::Seconds {
 		let (ty, b) = seconds_type(ex)?;
 		flags = flags.without(PmFlags::INTEGER).with(ty);
-		base = b;
-	}
+		b
+	} else {
+		0
+	};
 	let value = value.unwrap_or_else(|| {
 		flags = flags.with(PmFlags::UNSET);
 		match flags.type_bits() {
@@ -705,7 +760,7 @@ pub fn param(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<Param> {
 			_ => PValue::Scalar(BString::default()),
 		}
 	});
-	let mut p = Param::special(name, flags, value, sp);
+	let mut p = Param::special(name, flags, value, sp, ex.k.engine.config().platform);
 	p.base = base;
 	if let Special::Comp(cp) = sp {
 		// zsh/complete's are locals of the completion function
@@ -1042,9 +1097,9 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 			crate::bash::vm::builtins::zsh_mod_sched::scheduled_events(ex.cx.store, ex.vp)?,
 		))),
 		Special::Example(p) => crate::bash::vm::builtins::zsh_mod_example::param_get(ex, p),
-		Special::Curses(p) => crate::bash::vm::builtins::zsh_mod_curses::param_get(ex, p),
-		Special::Zle(z) => crate::bash::vm::zle::params::get(ex, z),
-		Special::Comp(c) => crate::bash::vm::zle::comp::complete::get(ex, c),
+		Special::Curses(p) => Ok(Some(crate::bash::vm::builtins::zsh_mod_curses::param_get(ex, p))),
+		Special::Zle(z) => Ok(crate::bash::vm::zle::params::get(ex, z)),
+		Special::Comp(c) => Ok(crate::bash::vm::zle::comp::complete::get(ex, c)),
 		Special::TiedArray(Tie::ZshEvalContext) => Ok(Some(PValue::Array(eval_context(ex.vp)))),
 		Special::TiedScalar(Tie::ZshEvalContext) => {
 			scalar(BString::from(eval_context(ex.vp).join(&b":"[..])))
@@ -1054,8 +1109,9 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 			let Some(v) = state::lookup(&ex.k.root, ex.cx.store, ex.vp, t.scalar().as_bytes())? else {
 				return Ok(None);
 			};
+			let sep = t.separator(ex.k.engine.config().platform);
 			Ok(Some(PValue::Array(match v.as_scalar() {
-				Some(s) if !s.is_empty() => s.split(|&c| c == b':').map(BString::from).collect(),
+				Some(s) if !s.is_empty() => s.split(|&c| c == sep).map(BString::from).collect(),
 				_ => Vec::new(),
 			})))
 		},
@@ -1218,7 +1274,10 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 		Special::EpochSeconds => scalar(num(ex.cx.host.wall().secs)),
 		Special::EpochRealtime => {
 			let now = ex.cx.host.wall();
-			scalar(BString::from(format!("{:.10}", now.secs as f64 + f64::from(now.nanos) * 1e-9)))
+			scalar(BString::from(format!(
+				"{:.10}",
+				f64::mul_add(f64::from(now.nanos), 1e-9, now.secs as f64)
+			)))
 		},
 		Special::Epochtime => {
 			let now = ex.cx.host.wall();
@@ -1393,15 +1452,34 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 		}
 		Err(Stop::Probe(probe))
 	};
-	let mut entries = HashMap::new();
-	for dir in path.split(|&c| c == b':') {
+	let platform = ex.k.engine.config().platform;
+	let windows = platform == Platform::Windows;
+	// Every directory's listing is asked first, and the table is built only
+	// once all are answered: each answer re-runs the expansion, which
+	// otherwise rebuilt the names of every directory listed before it.
+	let mut lists: Vec<(&[u8], usize)> = Vec::new();
+	for dir in path.split(|&c| c == crate::bash::vm::probe::path_separator(platform)) {
 		// zsh `isrelative`: not absolute, or with a `.` or `..` component.
-		if dir.first() != Some(&b'/') || dir.split(|&c| c == b'/').any(|c| c == b"." || c == b"..") {
+		let absolute = dir.first() == Some(&b'/')
+			|| (windows && crate::bash::vm::probe::is_windows_absolute(dir));
+		if !absolute
+			|| dir
+				.split(|&c| c == b'/' || (windows && c == b'\\'))
+				.any(|c| c == b"." || c == b"..")
+		{
 			continue;
 		}
-		let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
-		let req = Box::new(FsReq::ReadDir { path: BString::from(dir) });
-		let Atom::List(names) = ask(ex, Probe::Fs { seq, req })? else {
+		if ex.log.get(ex.cursor).is_none() {
+			let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
+			let req = Box::new(FsReq::ReadDir { path: BString::from(dir) });
+			return Err(Stop::Probe(Probe::Fs { seq, req }));
+		}
+		lists.push((dir, ex.cursor));
+		ex.cursor += 1;
+	}
+	let mut entries = HashMap::new();
+	for (dir, at) in lists {
+		let Some(Atom::List(names)) = ex.log.get(at).cloned() else {
 			continue;
 		};
 		for name in names {
@@ -1485,28 +1563,27 @@ fn funcstack_levels(ex: &Expander<'_, '_>) -> Vec<FuncLevel> {
 		.filter(|c| !matches!(c.kind, CallKind::Args(_)));
 	let mut out: Vec<FuncLevel> = Vec::new();
 	for c in calls {
-		let (caller, base) = match out.last() {
-			Some(p) => (p.name.clone(), if p.source { 0 } else { p.flineno }),
-			None => {
-				let top = match &c.kind {
-					// A `.` file at the top: the script's name (`zsh` for a
-					// `-c` string).
-					CallKind::Source { .. } => {
-						match ex
-							.vp
-							.runs
-							.front()
-							.and_then(|r| r.chain.links.first())
-							.map(|l| &l.origin)
-						{
-							Some(Origin::File(path)) => path.clone(),
-							_ => BString::from("zsh"),
-						}
-					},
-					_ => ex.k.argv0.clone(),
-				};
-				(top, 0)
-			},
+		let (caller, base) = if let Some(p) = out.last() {
+			(p.name.clone(), if p.source { 0 } else { p.flineno })
+		} else {
+			let top = match &c.kind {
+				// A `.` file at the top: the script's name (`zsh` for a
+				// `-c` string).
+				CallKind::Source { .. } => {
+					match ex
+						.vp
+						.runs
+						.front()
+						.and_then(|r| r.chain.links.first())
+						.map(|l| &l.origin)
+					{
+						Some(Origin::File(path)) => path.clone(),
+						_ => BString::from("zsh"),
+					}
+				},
+				_ => ex.k.argv0.clone(),
+			};
+			(top, 0)
 		};
 		out.push(match &c.kind {
 			CallKind::Function { name, file, line, .. } => FuncLevel {
@@ -1648,7 +1725,8 @@ pub fn set(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8], value: PValue) -
 			crate::bash::vm::builtins::zsh_mod_example::param_set(ex, p, value)?;
 		},
 		Special::TiedArray(t) => {
-			let joined = BString::from(as_array(value).join(&b":"[..]));
+			let sep = t.separator(ex.k.engine.config().platform);
+			let joined = BString::from(as_array(value).join(&[sep][..]));
 			let attrs = state::lookup_declared(&ex.k.root, ex.cx.store, ex.vp, t.scalar().as_bytes())?
 				.map_or(crate::bash::store::Attrs::NONE, |v| v.attrs)
 				.without(crate::bash::store::Attrs::INVISIBLE);
@@ -1801,7 +1879,7 @@ fn set_functions(ex: &mut Expander<'_, '_>, value: PValue) -> X<()> {
 ///
 /// # Errors
 /// That failure.
-pub fn check_id_prefix(ex: &mut Expander<'_, '_>, name: &[u8], value: &[u8]) -> X<()> {
+pub fn check_id_prefix(ex: &Expander<'_, '_>, name: &[u8], value: &[u8]) -> X<()> {
 	match lookup(name) {
 		Some(sp @ (Special::Uid | Special::Euid | Special::Gid | Special::Egid)) => {
 			set_id(ex, sp, super::params::parse_int(value))
@@ -1814,7 +1892,7 @@ pub fn check_id_prefix(ex: &mut Expander<'_, '_>, name: &[u8], value: &[u8]) -> 
 /// friends. An unprivileged shell may only keep the ids it has (anything
 /// else is `EPERM`, a fatal `failed to change user ID`); really changing
 /// the shell's identity is not supported.
-fn set_id(ex: &mut Expander<'_, '_>, sp: Special, want: i64) -> X<()> {
+fn set_id(ex: &Expander<'_, '_>, sp: Special, want: i64) -> X<()> {
 	let user = ex.cx.host.user();
 	let (what, have) = match sp {
 		Special::Uid => ("user ID", i64::from(user.uid)),
@@ -1903,7 +1981,10 @@ pub fn unset(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<()> {
 		// zsh/langinfo has no unset function: the association stays.
 		Special::Langinfo => Ok(()),
 		Special::Zle(z) => crate::bash::vm::zle::params::unset(ex, z),
-		Special::Comp(c) => crate::bash::vm::zle::comp::complete::unset(ex, c),
+		Special::Comp(c) => {
+			crate::bash::vm::zle::comp::complete::unset(ex, c);
+			Ok(())
+		},
 		Special::Example(p) => crate::bash::vm::builtins::zsh_mod_example::param_unset(ex, p),
 		_ if sp.readonly() => Err(Stop::Fail(Diag::Readonly { name: BString::from(name) })),
 		// zsh/parameter's unset functions change nothing (`unset dirstack`

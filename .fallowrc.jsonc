@@ -22,8 +22,8 @@
 			"packages/natives/native/index.js",
 			// Embedded HTML asset shipped as a static template, not a code module.
 			"packages/coding-agent/src/export/html/template.js",
-			// Generated/owned upstream — see packages/ai/scripts/generate-models.ts.
-			"packages/ai/src/models.json"
+			// Generated/owned upstream — see packages/catalog/scripts/generate-models.ts.
+			"packages/catalog/src/models.json"
 		],
 		"ignoreImports": true
 	},

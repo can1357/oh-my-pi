@@ -18,6 +18,31 @@ fn run(src: &str) -> (String, String, i32) {
 const LOOP: &str = "while :; do\n    :;\ndone";
 
 #[test]
+fn queued_children_keep_positional_values_and_counts() {
+	let (out, err, status) = run(
+		"for h in one two; do set -- \"$h\"; ( echo \"pos:$1:$#\"; printf '<%s>\\n' \"$@\" ) & \
+		 done; set -- final extra; wait",
+	);
+	let mut lines: Vec<_> = out.lines().collect();
+	lines.sort_unstable();
+	assert_eq!(lines, ["<one>", "<two>", "pos:one:1", "pos:two:1"]);
+	assert_eq!(err, "");
+	assert_eq!(status, 0);
+}
+
+#[test]
+fn background_fork_bindings_survive_restoring_running_frames() {
+	let src = b"\n\nf() {\n echo \"old:$LINENO\"\n}\nv=before; set -- one; \
+	            ( f; echo \"$v:$1:${later-absent}\" ) & \
+	            f() { echo new; }; v=after; set -- two; later=new; wait";
+	let out = run_script(FakeHost::new(), src, &[], Fault::Snapshot { every: 1 });
+	assert_eq!(out.stdout, b"old:4\nbefore:one:absent\n");
+	assert!(out.stderr.is_empty());
+	assert_eq!(out.status, 0);
+	assert!(out.snapshots > 0);
+}
+
+#[test]
 fn wait_returns_when_a_job_stops_and_fg_resumes_it() {
 	let (out, err, _) = run(
 		"set -m; { kill -STOP $BASHPID; exit 7; } & wait %1; kill -l $?; jobs; fg %1; echo $?; \

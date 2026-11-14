@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -170,23 +170,66 @@ describe("AgentSession queued steer delivery", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
-	it("rejects a continue shortcut while streaming without queuing a user message", async () => {
-		const { session } = await createSession([{ content: ["host answer"] }]);
-		let checked = false;
-		session.agent.setOnBeforeYield(async () => {
-			if (checked) return;
-			checked = true;
-			expect(session.isStreaming).toBe(true);
-			await expect(session.resume()).rejects.toThrow(AgentBusyError);
-			expect(session.agent.popLastSteer()).toBeUndefined();
-			expect(session.agent.popLastFollowUp()).toBeUndefined();
-		});
+	// `.`/`c` on a running turn interrupts it and continues. A host driving the
+	// session to a result (the subagent executor) awaits the interrupted prompt,
+	// then waitForIdle(): reporting idle between the interrupt and the
+	// continuation would end its run on the interrupted turn.
+	it("resume interrupts a streaming request and reruns the unanswered prompt without an idle gap", async () => {
+		const turnStarted = Promise.withResolvers<void>();
+		const { session, mock } = await createSession([
+			() => {
+				turnStarted.resolve();
+				return { content: ["slow response"], delayMs: 60_000 };
+			},
+			{ content: ["resumed"] },
+		]);
 
-		await session.prompt("hello");
-		expect(checked).toBe(true);
-		expect(
-			session.state.messages.some(message => message.role === "user" && message.content === manualContinuePrompt),
-		).toBe(false);
+		const run = session.prompt("hello");
+		await turnStarted.promise;
+		const resumed = session.resume();
+		await run;
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+		expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain("<system-notice>");
+		expect(session.getLastAssistantMessage()?.content).toEqual([{ type: "text", text: "resumed" }]);
+		await resumed;
+	});
+
+	it("resume interrupts a running tool and continues with the hidden directive without an idle gap", async () => {
+		const toolStarted = Promise.withResolvers<void>();
+		const { session, mock } = await createSession([
+			{ content: ["checking", { type: "toolCall", id: "pause", name: "pause", arguments: {} }] },
+			{ content: ["resumed"] },
+		]);
+		const schema = type({});
+		const tool: AgentTool<typeof schema> = {
+			name: "pause",
+			label: "Pause",
+			description: "Wait for interruption",
+			parameters: schema,
+			async execute(_id, _params, signal) {
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				toolStarted.resolve();
+				await aborted.promise;
+				return { content: [{ type: "text", text: "interrupted" }], details: {} };
+			},
+		};
+		session.agent.setTools([tool]);
+
+		const run = session.prompt("hello");
+		await withTimeout(toolStarted.promise, 2_000, "tool did not start");
+		const resumed = session.resume();
+		await run;
+		await withTimeout(session.waitForIdle(), 2_000, "continuation did not finish");
+
+		expect(mock.calls.length).toBe(2);
+		expect(JSON.stringify(mock.calls[1].context.messages)).toContain(
+			JSON.stringify(manualContinuePrompt).slice(1, -1),
+		);
+		expect(session.getLastAssistantMessage()?.content).toEqual([{ type: "text", text: "resumed" }]);
+		await resumed;
 	});
 
 	it("persists an agent-authored steer with its steering marker", async () => {

@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
+import type { WatchedFilesForwarder } from "./watched-files";
 
 // =============================================================================
 // Tool Schema
@@ -352,11 +353,19 @@ export interface ServerConfig {
 	capabilities?: ServerCapabilities;
 	/**
 	 * Marks a dedicated linter/formatter server (e.g. Biome, efm-langserver, ruff).
-	 * Excluded from type-intelligence (definition, hover, references), but preferred
-	 * over type-checkers when selecting the `formatOnWrite` formatter, so a configured
-	 * external formatter wins for file types a type-checker also claims.
+	 * Ranked after other matching servers for single-server actions (definition, hover,
+	 * references, …), so it serves them only when no non-linter server claims the file; such
+	 * requests then fail with the server's own error if it does not implement the method.
+	 * Preferred over type-checkers when selecting the `formatOnWrite` formatter, so a
+	 * configured external formatter wins for file types a type-checker also claims.
 	 */
 	isLinter?: boolean;
+	/**
+	 * Advertise `workspace/didChangeWatchedFiles` dynamic registration, so the
+	 * server hands file watching to omp instead of running its own watcher.
+	 * On unless `false`.
+	 */
+	watchFiles?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;
 	/**
@@ -406,6 +415,11 @@ export interface OpenFile {
 	 * reconcile treats the document as dirty and resyncs from disk.
 	 */
 	syncedHash?: number | bigint;
+	/**
+	 * The disk text a reconcile last read: its stat stamp and text hash. While the stamp is
+	 * unchanged and `hash` equals `syncedHash`, the server already holds the disk text.
+	 */
+	disk?: { stamp: string; hash: number | bigint };
 	/** When an OMP operation last used this document; long-unused documents close before the next open. */
 	lastUsedAt: number;
 	/** When OMP last reopened this document (an idle close, or a diagnostics reopen); absent for a first open. */
@@ -444,6 +458,10 @@ export interface LspClient {
 	proc: LspTransport;
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/publishDiagnostics` notifications. */
+	publishedDiagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/diagnostic` pull requests. */
+	pulledDiagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
 	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
 	publishesDocumentVersions?: boolean;
@@ -456,6 +474,8 @@ export interface LspClient {
 	buildStatusSeq?: number;
 	/** Dynamic capability registrations keyed by the server-provided registration ID. */
 	dynamicCapabilityRegistrations?: Map<string, string>;
+	/** Reports changes to the files the server registered to watch; absent on mux-shared servers, whose mux owns it. */
+	watchedFiles?: WatchedFilesForwarder;
 	openFiles: Map<string, OpenFile>;
 	/**
 	 * Documents OMP closed and will reopen (for idleness, or mid diagnostics reopen),
@@ -481,6 +501,19 @@ export interface LspClient {
 	projectLoaded: Promise<void>;
 	/** Call to signal that project loading has completed */
 	resolveProjectLoaded: () => void;
+}
+
+/** LSP `FileChangeType` values for workspace/didChangeWatchedFiles notifications. */
+export enum FileChangeType {
+	Created = 1,
+	Changed = 2,
+	Deleted = 3,
+}
+
+/** One entry of a workspace/didChangeWatchedFiles notification. */
+export interface FileEvent {
+	uri: string;
+	type: FileChangeType;
 }
 
 // =============================================================================

@@ -31,7 +31,7 @@ describe("/ratchet slash command", () => {
 		expect(result).toHaveProperty("prompt");
 		const { prompt } = result as { prompt: string };
 		expect(prompt).toContain("<ratchet-request>\nthe inbox router in src/router, lower cost\n</ratchet-request>");
-		expect(prompt).toContain("ONE batched `ask`");
+		expect(prompt).not.toContain("No `ask` in this session");
 	});
 
 	it("tells a session without ask to only continue fully approved flows", async () => {

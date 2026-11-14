@@ -235,7 +235,7 @@ export class ComposerPredictionController {
 		let outcome: PredictionOutcome;
 		let offered: number | undefined;
 		try {
-			const { replyText, assistantMessage } = await source.session.runEphemeralTurn({
+			const { replyText } = await source.session.runEphemeralTurn({
 				promptText: prompt.render(composerPredictionPrompt, {
 					skip: SKIP_REPLY,
 					choices: alternatives ? MAX_PREDICTION_CHOICES : undefined,
@@ -243,9 +243,8 @@ export class ComposerPredictionController {
 				maxTokens: source.session.ephemeralMaxTokensPreservesRequest() ? PREDICTION_MAX_TOKENS : undefined,
 				minimizeEffort: true,
 				signal: AbortSignal.any([abort.signal, deadline]),
+				onUsage: message => this.#recordUsage(source, message),
 			});
-			// Paid for even when the reply arrives too late to show.
-			this.#recordUsage(source, assistantMessage);
 			const choices = parseReply(replyText, alternatives);
 			outcome = this.#offer(source, abort, choices);
 			if (outcome === "offered") offered = choices?.length;
@@ -279,6 +278,7 @@ export class ComposerPredictionController {
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
 				},
 				{ sessionId: source.sessionId, parentId: source.leafId },
 			);

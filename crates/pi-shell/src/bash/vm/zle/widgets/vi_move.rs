@@ -20,7 +20,7 @@ use crate::bash::vm::zle::{
 };
 
 /// zsh `ZC_inblank`: any white space, newlines included.
-pub(super) fn inblank(c: char) -> bool {
+pub(super) const fn inblank(c: char) -> bool {
 	c.is_whitespace()
 }
 
@@ -480,7 +480,7 @@ pub fn vigotomarkline(_zw: &mut Zw<'_, '_>) -> WResult {
 
 /// zsh `visualmode`: toggle the character-wise region (from the line-wise
 /// one); while an operator reads its range, force a character-wise one.
-pub fn visual_mode(ed: &mut Editor) -> i32 {
+pub const fn visual_mode(ed: &mut Editor) -> i32 {
 	if ed.ls.virangeflag {
 		ed.prefixflag = true;
 		ed.zmod.flags &= !modflags::LINE;
@@ -499,7 +499,7 @@ pub fn visual_mode(ed: &mut Editor) -> i32 {
 }
 
 /// zsh `visuallinemode`: [`visual_mode`] for the line-wise region.
-pub fn visual_line_mode(ed: &mut Editor) -> i32 {
+pub const fn visual_line_mode(ed: &mut Editor) -> i32 {
 	if ed.ls.virangeflag {
 		ed.prefixflag = true;
 		ed.zmod.flags &= !modflags::CHAR;
@@ -518,12 +518,12 @@ pub fn visual_line_mode(ed: &mut Editor) -> i32 {
 }
 
 /// Widget `visual-mode`.
-pub fn visualmode(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn visualmode(zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(visual_mode(zw.ed))
 }
 
 /// Widget `visual-line-mode`.
-pub fn visuallinemode(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn visuallinemode(zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(visual_line_mode(zw.ed))
 }
 

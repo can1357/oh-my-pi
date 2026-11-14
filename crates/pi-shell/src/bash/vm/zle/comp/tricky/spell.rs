@@ -141,7 +141,7 @@ pub fn spckword(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, cmd: bool, k: SpK) -> WResu
 		},
 	};
 	if cmd {
-		let known = |v: &Vec<Vec<u8>>| v.iter().any(|n| *n == s);
+		let known = |v: &Vec<Vec<u8>>| v.contains(&s);
 		if known(&tables.funcs)
 			|| known(&tables.builtins)
 			|| known(&tables.cmdnam)
@@ -221,7 +221,7 @@ pub fn spckword(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, cmd: bool, k: SpK) -> WResu
 		job.kind = Kind::Equals;
 		return fs_part(zw, Box::default(), job, k);
 	}
-	job.guess = job.s.clone();
+	job.guess.clone_from(&job.s);
 	if matches!(job.s[0], TILDE | STRING) {
 		job.ic = job.s[0];
 		job.t += 1;
@@ -598,7 +598,7 @@ pub fn spdist(s: &[u8], t: &[u8], thresh: i32, dvorak: bool) -> i32 {
 		return 0;
 	}
 	let (mut p, mut q) = (0, 0);
-	while p < s.len() && at(s, p).to_ascii_lowercase() == at(t, q).to_ascii_lowercase() {
+	while p < s.len() && at(s, p).eq_ignore_ascii_case(&at(t, q)) {
 		p += 1;
 		q += 1;
 	}

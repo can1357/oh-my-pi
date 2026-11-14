@@ -16,6 +16,91 @@ fn run(src: &str) -> (String, String) {
 }
 
 #[test]
+fn background_children_keep_each_loop_value() {
+	let (out, err) = run("for h in alpha beta; do ( echo \"bg:$h\" ) & done; wait");
+	let mut lines: Vec<_> = out.lines().collect();
+	lines.sort_unstable();
+	assert_eq!(lines, ["bg:alpha", "bg:beta"]);
+	assert_eq!(err, "");
+}
+
+#[test]
+fn background_children_keep_absent_and_unset_globals() {
+	let (out, err) = run(
+		"unset later; kept=before; ( echo \"${later-absent}:${kept-absent}\" ) & later=after; unset \
+		 kept; wait",
+	);
+	assert_eq!(out, "absent:before\n");
+	assert_eq!(err, "");
+}
+
+#[test]
+fn background_children_keep_function_locals_and_arguments() {
+	let (out, err) = run(
+		"v=global; f() { local v=local; ( echo \"$v:$1:$#\"; printf '<%s>\\n' \"$@\" ) & v=changed; \
+		 set -- changed; }; f one 'two words'; wait; echo \"$v\"",
+	);
+	let mut lines: Vec<_> = out.lines().collect();
+	lines.sort_unstable();
+	assert_eq!(lines, ["<one>", "<two words>", "global", "local:one:2"]);
+	assert_eq!(err, "");
+}
+
+#[test]
+fn nested_background_children_keep_overlays_and_isolate_writes() {
+	let (out, err) = run(
+		"v=root; a=(root); ( v=outer; a[0]=outer; ( echo \"nested:$v:${a[0]}\"; v+=child; \
+		 a[0]+=child; echo \"child:$v:${a[0]}\" ) & v=changed; a[0]=changed; wait; echo \
+		 \"outer:$v:${a[0]}\" ); echo \"root:$v:${a[0]}\"",
+	);
+	assert_eq!(
+		out,
+		"nested:outer:outer\nchild:outerchild:outerchild\nouter:changed:changed\nroot:root:root\n"
+	);
+	assert_eq!(err, "");
+}
+
+#[test]
+fn background_children_keep_function_definitions_and_shell_options() {
+	let (out, err) = run(
+		"f() { echo old; }; set +f; shopt -u nullglob; ( f; type -t later; case $- in *f*) echo \
+		 noglob;; *) echo glob;; esac; shopt -q nullglob; echo \"nullglob:$?\" ) & f() { echo new; \
+		 }; later() { :; }; set -f; shopt -s nullglob; wait",
+	);
+	assert_eq!(out, "old\nglob\nnullglob:1\n");
+	assert_eq!(err, "");
+}
+
+#[test]
+fn background_children_keep_aliases_traps_umask_and_command_hashes() {
+	let (out, err) = run(
+		"alias tag='echo old'; trap 'echo old' USR1; umask 022; hash -p /old tool; ( alias tag; \
+		 trap -p USR1; umask; hash -t tool; type -t printf ) & alias tag='echo new'; trap 'echo \
+		 new' USR1; umask 077; hash -p /new tool; enable -n printf; wait",
+	);
+	assert_eq!(out, "alias tag='echo old'\ntrap -- 'echo old' SIGUSR1\n0022\n/old\nbuiltin\n");
+	assert_eq!(err, "");
+}
+
+#[test]
+fn background_self_referencing_local_reads_the_fork_global() {
+	let (out, err) = run("v=before; f() { local -n v=v; ( echo \"$v\" ) & }; f; v=after; wait");
+	assert_eq!(out, "before\n");
+	assert!(err.contains("circular name reference"), "{err}");
+}
+
+#[test]
+fn child_global_edits_start_from_fork_values_and_specials_stay_computed() {
+	let (out, err) = run(
+		"v=before; a=(before); ( v+=child; a[0]+=child; echo \"$v:${a[0]}:$BASH_SUBSHELL\"; ( echo \
+		 \"depth:$BASH_SUBSHELL\" ); false; echo \"status:$?\" ) & v=after; a[0]=after; wait; echo \
+		 \"$v:${a[0]}\"",
+	);
+	assert_eq!(out, "beforechild:beforechild:1\ndepth:2\nstatus:1\nafter:after\n");
+	assert_eq!(err, "");
+}
+
+#[test]
 fn attributes_apply_on_every_assignment() {
 	let (out, err) = run(
 		"a=4+1; typeset -i a; a+=37; echo $a\ndeclare -ia iarr=(2 2 3); iarr+=1; declare -p \
@@ -414,12 +499,12 @@ fn read_a_and_mapfile_need_an_indexed_array() {
 #[test]
 fn dollar_question_carries_into_eval_source_and_substitutions() {
 	let fs = MemFs::new();
-	fs.add_file("/w/s", b"echo \"src-in=$?\"\n", 0o644);
-	fs.add_file("/w/c", b"# only a comment\n", 0o644);
+	fs.add_file("/work/s", b"echo \"src-in=$?\"\n", 0o644);
+	fs.add_file("/work/c", b"# only a comment\n", 0o644);
 	let src = "false; eval 'echo in=$?'; false; eval '#c'; echo comment=$?; false; eval ' '; echo \
 	           blank=$?; false; eval 'x=$?'; echo x=$x; (exit 3); eval 'eval \"echo \
-	           nested=\\$?\"'; f() { return 4; }; f; eval 'echo fn=$?'; false; . /w/s; false; . \
-	           /w/c; echo comment-src=$?; false; x=$(); echo empty-cs=$?; false; x=$( ); echo \
+	           nested=\\$?\"'; f() { return 4; }; f; eval 'echo fn=$?'; false; . /work/s; false; . \
+	           /work/c; echo comment-src=$?; false; x=$(); echo empty-cs=$?; false; x=$( ); echo \
 	           blank-cs=$?; (exit 3); x=$(echo $?); echo inner=$x";
 	let out = run_script(FakeHost::new().with_fs(fs), src.as_bytes(), &[], Fault::None);
 	assert_eq!(String::from_utf8_lossy(&out.stderr), "");
@@ -449,11 +534,11 @@ fn dollar_question_carries_into_eval_source_and_substitutions() {
 #[test]
 fn mapfile_callbacks_read_the_input_after_their_line() {
 	let fs = MemFs::new();
-	fs.add_file("/w/lines", b"1\n2\n3\n4\n", 0o644);
+	fs.add_file("/work/lines", b"1\n2\n3\n4\n", 0o644);
 	let src = "cb() { read -r x; echo \"cb:$1:$2:$x\"; }; printf '1\\n2\\n3\\n4\\n' | { mapfile -t \
 	           -C cb -c 1 arr; echo \"arr=${arr[*]}\"; }; { mapfile -t -C cb -c 1 arr; echo \
-	           \"arr=${arr[*]}\"; } < /w/lines; { mapfile -t -C cb -c 2 -n 3 arr; read -r rest; \
-	           echo \"arr=${arr[*]} rest=$rest\"; } < /w/lines";
+	           \"arr=${arr[*]}\"; } < /work/lines; { mapfile -t -C cb -c 2 -n 3 arr; read -r rest; \
+	           echo \"arr=${arr[*]} rest=$rest\"; } < /work/lines";
 	let out = run_script(FakeHost::new().with_fs(fs), src.as_bytes(), &[], Fault::None);
 	assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 	assert_eq!(

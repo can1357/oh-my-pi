@@ -178,15 +178,24 @@ describe("auth thread service", () => {
 		const answered = new Set(keyless.mock.calls.map(([provider]) => provider));
 		for (const provider of [PROVIDER, "anthropic", "openai"]) expect(answered.has(provider)).toBe(true);
 
-		// A provider main did not list costs one more batch, then rides along in every later one.
+		// A provider main did not list costs an answer of its own, not another batch.
 		expect(await probe.sourceKinds([PROVIDER, "unit-other"])).toEqual([undefined, undefined]);
 		expect(await probe.sourceKinds([PROVIDER, "unit-other", "anthropic"])).toHaveLength(3);
-		expect(batches).toHaveBeenCalledTimes(2);
+		expect(batches).toHaveBeenCalledTimes(1);
 
 		// The generation bump reaches the worker before this probe call (frames are ordered).
 		await storeAccounts();
 		expect(await probe.sourceKinds([PROVIDER, "unit-other"])).toEqual(["oauth", undefined]);
-		expect(batches).toHaveBeenCalledTimes(3);
+		expect(batches).toHaveBeenCalledTimes(2);
+	});
+
+	it("resolves a worker's OAuth identity from main once main stores an account after the worker saw none", async () => {
+		expect(await probe.accountId(PROVIDER, "pinned")).toBeUndefined();
+
+		const { b } = await storeAccounts();
+		expect(storage.sessions.pin(PROVIDER, "pinned", b)).toBe(true);
+		expect(await probe.key(PROVIDER, "pinned")).toBe("access-b");
+		expect(await probe.accountId(PROVIDER, "pinned")).toBe("acc-b");
 	});
 
 	it("mirrors the main ModelRegistry locally over the shared AuthStorage", async () => {

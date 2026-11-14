@@ -28,7 +28,12 @@ pub(super) const LOCAL: &[Case] = &[
 	c("archive_ii_stale", 0, "stale", &["-aii", "src/", "dst/"]),
 	c("archive_into_dir", 0, "", &["-ai", "src", "dst/"]),
 	c("recursive_only", 0, "", &["-r", "src/", "dst/"]),
-	u("recursive_verbose", 0, "", &["-rv", "src/", "dst/"]),
+	// Without incremental recursion: with it, whether the reference's generator
+	// finds the forwarded subdirectory lists waiting after its first list (and so
+	// whether `skipping non-regular file "sub/unsafe"` precedes the top-level
+	// names, one frame fewer) is a race against its receiver's startup that -r
+	// leaves too little generator work to settle (10–50% either way, by load).
+	c("recursive_verbose", 0, "", &["-rv", "--no-inc-recursive", "src/", "dst/"]),
 	c("rlt", 0, "", &["-rlti", "src/", "dst/"]),
 	c("archive_verbose", 0, "", &["-av", "src/", "dst/"]),
 	c("archive_vv_stale", 0, "stale", &["-avv", "src/", "dst/"]),

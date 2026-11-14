@@ -5,7 +5,7 @@ import { setTranscriptPresenters } from "../src/chat/transcript-presentation";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { getThemeByName, initTheme, type Theme } from "../src/theme";
 import { globToolRenderer } from "../src/tools/glob";
-import { grepToolRenderer } from "../src/tools/grep";
+import { type GrepToolDetails, grepToolRenderer } from "../src/tools/grep";
 import { lspToolRenderer } from "../src/tools/lsp";
 import { readToolRenderer } from "../src/tools/read";
 import type { RenderResultOptions } from "../src/tools/renderer";
@@ -53,6 +53,10 @@ function codeStarts(children: readonly NativeChild[] | undefined): (number | und
 }
 
 describe("grep native view", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
 	const display = [
 		"# src/",
 		"## a.ts",
@@ -71,6 +75,23 @@ describe("grep native view", () => {
 		content: [{ type: "text", text: display }],
 		details: { matchCount: 4, fileCount: 3, displayContent: display },
 	};
+
+	it("preserves regex escapes while coloring literals and operators as native spans", () => {
+		const pattern = String.raw`file\.ts|\d+`;
+		const view = grepToolRenderer.describeCall({ pattern });
+		const target = view.tool?.target;
+		if (target === undefined || typeof target === "string") {
+			throw new Error("Regex header must carry syntax-colored spans");
+		}
+
+		expect(plain(target)).toBe(pattern);
+		const escapedLiteral = target.find(part => part.t === String.raw`\.`);
+		const operators = target.find(part => part.t.includes("|"));
+		expect(escapedLiteral?.s).toBeDefined();
+		expect(operators?.s).toBeDefined();
+		expect(escapedLiteral?.s).not.toBe(operators?.s);
+		expect(target.some(part => part.t.includes("\x1b"))).toBe(false);
+	});
 
 	it("shows the first two files while collapsed and every file expanded", () => {
 		const small = grepToolRenderer.describeResult(result, collapsed, { pattern: "hit" });
@@ -106,7 +127,13 @@ describe("grep native view", () => {
 		const view = grepToolRenderer.describeResult(
 			{
 				content: [{ type: "text", text: single }],
-				details: { matchCount: 2, fileCount: 1, files: ["src/a.ts"], displayContent: single },
+				details: {
+					matchCount: 2,
+					fileCount: 1,
+					scopePath: "src/a.ts",
+					files: ["src/a.ts"],
+					displayContent: single,
+				},
 			},
 			expanded,
 			{ pattern: "hit" },
@@ -116,6 +143,23 @@ describe("grep native view", () => {
 		const kinds = (body[0]!.c ?? []).filter(isNode).map(n => n.k);
 		expect(kinds).toEqual(["row", "code"]);
 		expect(codeProps(body[0]!.c).map(p => p.nums)).toEqual([[9, 10, 40]]);
+	});
+
+	it("omits the file count only when the header already names the single searched file", () => {
+		const meta = (details: GrepToolDetails) =>
+			grepToolRenderer
+				.describeResult({ content: [{ type: "text", text: "" }], details }, expanded, { pattern: "hit" })
+				.tool?.meta?.map(plain);
+		const single = { matchCount: 2, fileCount: 1, displayContent: "*10│hit\n*40│far" };
+		// A single-file search prints no `#` headers; its scope already names the file.
+		expect(meta({ ...single, scopePath: "src/a.ts" })).toEqual(["in src/a.ts", "2 matches"]);
+		// No scope in the header: `1 file` is the only file information left.
+		expect(meta(single)).toEqual(["2 matches · 1 file"]);
+		// A directory search matching one file prints its header and keeps the count.
+		expect(meta({ matchCount: 1, fileCount: 1, scopePath: "src", displayContent: "## src/a.ts\n*10│hit" })).toEqual([
+			"in src",
+			"1 match · 1 file",
+		]);
 	});
 });
 

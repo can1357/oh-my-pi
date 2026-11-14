@@ -146,8 +146,8 @@ fn workspace_tree_options(config: &WorkspaceConfig) -> pi_walker::walk::TreeOpti
 		skip_node_modules: config.prune_excluded_dirs,
 		follow: pi_walker::walk::Follow::Never,
 		detail: pi_walker::Detail::Full,
-		// Entries past `max_depth` are walked only to find AGENTS.md, so they need
-		// names, not per-entry metadata syscalls.
+		// Entries past `max_depth` are walked only to find AGENTS.md, so they
+		// need names, not per-entry metadata syscalls.
 		detail_max_depth: Some(config.max_depth),
 		// File-level ignore rules must not hide AGENTS.md.
 		unignored_name: config.collect_agents_md.then_some(AGENTS_MD_FILENAME),

@@ -4,15 +4,17 @@
 //!
 //! SHTTY itself, and the shell's normal terminal modes (zsh `shttyinfo`),
 //! belong to job control (`jobctl`), which opens the terminal at
-//! interactive startup: ZLE borrows them.
+//! interactive startup: ZLE borrows them. A `zpty` command edits on its
+//! pty's slave instead, with modes of its own.
 
 use std::task::{Context, Poll};
 
+use super::zle_mut;
 use crate::bash::{
 	event::WaitKey,
 	fd::FdRef,
-	term::{CtlChar, SetWhen, TermFlag},
-	vm::{Cx, Kernel, jobctl},
+	term::{CtlChar, SetWhen, TermFlag, Termios},
+	vm::{Cx, Kernel, Vproc, jobctl},
 };
 
 /// The descriptor number that stands for the editing terminal: in a
@@ -26,6 +28,8 @@ pub const FD: i32 = -1;
 pub struct Tty {
 	/// SHTTY as an engine file (reads are non-blocking polls).
 	pub file:    FdRef,
+	/// Where its normal modes (zsh `shttyinfo`) live.
+	home:        Home,
 	/// Display bytes not written yet (zsh's buffered `shout`).
 	pub out:     Vec<u8>,
 	/// zsh `eofchar`: the terminal's EOF character while editing.
@@ -48,6 +52,7 @@ impl Clone for Tty {
 	fn clone(&self) -> Self {
 		Self {
 			file:    self.file.clone(),
+			home:    self.home.clone(),
 			out:     Vec::new(),
 			eofchar: self.eofchar,
 			raw:     self.raw,
@@ -58,13 +63,45 @@ impl Clone for Tty {
 	}
 }
 
+/// Where a [`Tty`]'s normal modes (zsh `shttyinfo`) live.
+#[derive(Clone)]
+enum Home {
+	/// The shell's terminal: job control keeps its modes
+	/// ([`jobctl::shell_modes`]).
+	Shell,
+	/// A `zpty` command's terminal, whose modes zsh's zpty child reads when
+	/// it makes the slave its SHTTY (`init_io`); `None` when they could not
+	/// be read.
+	Session(Option<Termios>),
+}
+
 impl Tty {
-	/// The editing terminal: job control's SHTTY; `None` without one (not
-	/// interactive on a terminal: no line editor).
-	pub fn open(k: &Kernel) -> Option<Self> {
-		let file = jobctl::shtty_file(k)?;
+	/// Give `vp`'s editor its terminal unless it has one: in a `zpty`
+	/// command's session the pty's slave, else job control's SHTTY; none
+	/// without either (not interactive on a terminal: no line editor).
+	pub fn attach(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+		if zle_mut(k, cx, vp).tty.is_some() {
+			return;
+		}
+		let tty = Self::open(k, cx, vp);
+		zle_mut(k, cx, vp).tty = tty;
+	}
+
+	/// The terminal [`Self::attach`] gives `vp`'s editor.
+	fn open(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Option<Self> {
+		let (file, home) = match jobctl::session_terminal(vp) {
+			Some(file) => {
+				let modes = match (file.os_handle(), cx.host.terminal()) {
+					(Some(h), Some(term)) => term.attrs(h).ok(),
+					_ => None,
+				};
+				(file, Home::Session(modes))
+			},
+			None => (jobctl::shtty_file(k)?, Home::Shell),
+		};
 		Some(Self {
 			file,
+			home,
 			out: Vec::new(),
 			eofchar: None,
 			raw: false,
@@ -89,17 +126,17 @@ impl Tty {
 		};
 		if self.fetch {
 			if let Ok(now) = term.attrs(h) {
-				jobctl::set_shell_modes(k, now);
+				self.set_modes(k, now);
 			}
 			self.fetch = false;
 		}
-		let Some(mut sh) = jobctl::shell_modes(k).cloned() else {
+		let Some(mut sh) = self.modes(k).cloned() else {
 			return;
 		};
 		sh.set(TermFlag::Icanon, true);
 		sh.set(TermFlag::Echo, true);
 		sh.set(TermFlag::Flusho, false);
-		jobctl::set_shell_modes(k, sh.clone());
+		self.set_modes(k, sh.clone());
 		let mut ti = sh;
 		if !flowcontrol {
 			ti.set(TermFlag::Ixon, false);
@@ -137,11 +174,27 @@ impl Tty {
 		let Some(h) = self.file.os_handle() else {
 			return;
 		};
-		let (Some(term), Some(sh)) = (cx.host.terminal(), jobctl::shell_modes(k)) else {
+		let (Some(term), Some(sh)) = (cx.host.terminal(), self.modes(k)) else {
 			return;
 		};
 		let _ = term.set_attrs(h, sh, SetWhen::Drain);
 		self.raw = false;
+	}
+
+	/// The terminal's normal modes (zsh `shttyinfo`).
+	const fn modes<'a>(&'a self, k: &'a Kernel) -> Option<&'a Termios> {
+		match &self.home {
+			Home::Shell => jobctl::shell_modes(k),
+			Home::Session(modes) => modes.as_ref(),
+		}
+	}
+
+	/// Replace the terminal's normal modes (zsh `gettyinfo(&shttyinfo)`).
+	fn set_modes(&mut self, k: &mut Kernel, modes: Termios) {
+		match &mut self.home {
+			Home::Shell => jobctl::set_shell_modes(k, modes),
+			Home::Session(own) => *own = Some(modes),
+		}
 	}
 
 	/// The terminal's size, read again (zsh `adjustwinsize`); `None`

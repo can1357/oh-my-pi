@@ -22,6 +22,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 		}
 
 		entry.id = generateId(ids);
+		ids.add(entry.id);
 		entry.parentId = prevId;
 		prevId = entry.id;
 
@@ -63,12 +64,15 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 export function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find(e => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
+	const hasNonHeaderEntries = entries.some(e => e.type !== "session");
+	const unindexed =
+		hasNonHeaderEntries && entries.every(e => e.type === "session" || typeof e.id !== "string" || e.id.length === 0);
 
-	if (version >= CURRENT_SESSION_VERSION) return false;
+	if (version >= CURRENT_SESSION_VERSION && !unindexed) return false;
 
-	if (version < 2) migrateV1ToV2(entries);
+	if (version < 2 || unindexed) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
-
+	else if (header) header.version = CURRENT_SESSION_VERSION;
 	return true;
 }
 

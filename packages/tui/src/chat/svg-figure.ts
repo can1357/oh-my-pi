@@ -114,6 +114,11 @@ export interface SvgFigureOptions {
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
 	/**
+	 * Also release a re-raster's previous image (a cell size, theme or room change), for an
+	 * owner with no scrollback copy that could still show it, such as a form.
+	 */
+	releaseSuperseded?: boolean;
+	/**
 	 * Rows the figure may fill, fallback code included, read on every render;
 	 * zero hides it. Unset or `undefined` takes a share of the terminal viewport.
 	 */
@@ -255,10 +260,22 @@ export class SvgFigure implements Component {
 		this.#fallback = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#placeholder = undefined;
+		this.#image?.component.releaseRenderCaches();
+		this.#fallback?.md.releaseRenderCaches();
+		if (this.#fallback) this.#fallback.clip = undefined;
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+	}
+
+	/** Retire the drawn raster as soon as no frame shows it: for an owner that is closing for good. */
+	release(): void {
+		this.#image?.component.release();
 	}
 
 	debugState(): Record<string, unknown> {
@@ -387,6 +404,8 @@ export class SvgFigure implements Component {
 		// re-raster of the same source (cell size, theme or room change) may still be
 		// standing in scrollback, so the residency sweep keeps deciding for it.
 		if (previous && previous.source !== attempt.source) this.#options.budget?.release(previous.key);
+		else if (previous && this.#options.releaseSuperseded && this.#image?.raster === previous)
+			this.#image.component.release();
 		this.#options.onChange();
 	}
 

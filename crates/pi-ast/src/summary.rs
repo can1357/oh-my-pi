@@ -1022,6 +1022,18 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_markdown_nested_past_scanner_state_buffer() {
+		// 355 nested `- ` list items open more blocks than tree-sitter-md's
+		// scanner state fits in tree-sitter's 1024-byte serialization buffer;
+		// tree-sitter-md 0.5.3 overran it (abort in debug, SEGV in release).
+		let code = format!("{}**Total**: 4100\nTARGET_MARKER_XYZ\n", "- ".repeat(355));
+
+		let language = parse_code_status(&code, None, Some("notes.md")).unwrap();
+
+		assert_eq!(language, Some(SupportLang::Markdown));
+	}
+
+	#[test]
 	fn summarizes_emacs_lisp_defun_body() {
 		let code = "(defun greet (name)\n  \"Doc.\"\n  (let ((message (format \"Hello %s\" \
 		            name)))\n    (message \"%s\" message)\n    message)\n)\n";

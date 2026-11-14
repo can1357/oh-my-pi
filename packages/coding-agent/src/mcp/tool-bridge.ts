@@ -44,6 +44,13 @@ import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
 
 /**
+ * Told about every MCP tool call when it starts, by tool-call id; returns the
+ * callback the call awaits before it returns its result. Lets the owning
+ * manager settle the tool-list changes the call provoked into the caller's view.
+ */
+export type MCPToolCallObserver = (toolCallId: string) => () => Promise<void>;
+
+/**
  * Network-level and stale-session errors that warrant a reconnect + single retry.
  * Conservative: only catches errors where the server is likely alive but the
  * connection object is stale (dead SSE, expired session, refused after restart).
@@ -254,11 +261,33 @@ function formatStructuredContent(structured: Record<string, unknown>): string {
 }
 
 /**
- * True when a text block already carries the structured payload verbatim. A
- * spec-compliant server duplicates `structuredContent` into a TextContent block
- * for back-compat; detecting that avoids emitting the JSON twice.
+ * True when a trimmed text block carries a value: a verbatim string echo, or a
+ * JSON block parsing to a deep-equal value. `parsed` is `undefined` when the
+ * block is not JSON (`JSON.parse` never yields `undefined` itself).
+ */
+function textCarries(trimmed: string, parsed: unknown, value: unknown): boolean {
+	return (typeof value === "string" && trimmed === value) || (parsed !== undefined && Bun.deepEquals(parsed, value));
+}
+
+/**
+ * True when text already carries the structured payload. Beyond a verbatim
+ * echo, this covers the MCP SDK's `{ result: value }` wrapper for non-object
+ * tool returns: the SDK auto-wraps list/string returns, so `structuredContent`
+ * never verbatim-matches the `content` text blocks that carry the same value.
+ *
+ * A partial match does NOT count: if content covers only part of the wrapped
+ * payload (extra items, extra keys), the rendering is kept so the model still
+ * sees the full structured result.
+ *
+ * Out of scope: the Python SDK's `_convert_to_content` flattens nested lists via
+ * `chain.from_iterable` (`[[1,2],[3]]` → 3 blocks vs 2), drops `None` items, and
+ * whitespace-padded item strings fail the verbatim comparison — those shapes still render.
  */
 function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+	const wrapped =
+		Object.hasOwn(structured, "result") && Object.keys(structured).length === 1 ? structured.result : undefined;
+	const wrappedItems = Array.isArray(wrapped) ? wrapped : undefined;
+	const blocks: Array<{ trimmed: string; parsed: unknown }> = [];
 	for (const item of content) {
 		if (item.type !== "text") continue;
 		const trimmed = item.text.trim();
@@ -267,11 +296,21 @@ function structuredContentAlreadyInText(structured: Record<string, unknown>, con
 		try {
 			parsed = JSON.parse(trimmed);
 		} catch {
-			continue;
+			parsed = undefined;
 		}
-		if (Bun.deepEquals(parsed, structured)) return true;
+		if (textCarries(trimmed, parsed, structured)) return true;
+		if (wrapped !== undefined && textCarries(trimmed, parsed, wrapped)) return true;
+		blocks.push({ trimmed, parsed });
 	}
-	return false;
+	return (
+		wrappedItems !== undefined &&
+		blocks.length > 0 &&
+		wrappedItems.length === blocks.length &&
+		wrappedItems.every((value, i) => {
+			const block = blocks[i];
+			return block !== undefined && value !== undefined && textCarries(block.trimmed, block.parsed, value);
+		})
+	);
 }
 
 /** Build a CustomToolResult from a callTool response. */
@@ -738,14 +777,20 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly formatApprovalDetails = formatApprovalArguments;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
+	static fromTools(
+		connection: MCPServerConnection,
+		tools: MCPToolDefinition[],
+		reconnect?: MCPReconnect,
+		observeCall?: MCPToolCallObserver,
+	): MCPTool[] {
+		return tools.map(tool => new MCPTool(connection, tool, reconnect, observeCall));
 	}
 
 	constructor(
 		private connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
 		private readonly reconnect?: MCPReconnect,
+		private readonly observeCall?: MCPToolCallObserver,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
 		this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
@@ -774,7 +819,21 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
+		params: unknown,
+		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+		ctx: CustomToolContext,
+		signal?: AbortSignal,
+	): Promise<CustomToolResult<MCPToolDetails>> {
+		const settle = this.observeCall?.(toolCallId);
+		try {
+			return await this.#call(params, onUpdate, ctx, signal);
+		} finally {
+			await settle?.();
+		}
+	}
+
+	async #call(
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
 		_ctx: CustomToolContext,
@@ -880,8 +939,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		reconnect?: MCPReconnect,
+		observeCall?: MCPToolCallObserver,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect, observeCall));
 	}
 
 	constructor(
@@ -890,6 +950,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		private readonly reconnect?: MCPReconnect,
+		private readonly observeCall?: MCPToolCallObserver,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
 		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
@@ -920,7 +981,21 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
+		params: unknown,
+		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+		ctx: CustomToolContext,
+		signal?: AbortSignal,
+	): Promise<CustomToolResult<MCPToolDetails>> {
+		const settle = this.observeCall?.(toolCallId);
+		try {
+			return await this.#call(params, onUpdate, ctx, signal);
+		} finally {
+			await settle?.();
+		}
+	}
+
+	async #call(
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
 		_ctx: CustomToolContext,

@@ -3,8 +3,9 @@
  *
  * Speaks NDJSON with `runner.py` over stdin/stdout. One subprocess per kernel
  * instance; sessions reuse a single subprocess across executions. Cancellation
- * is `kill("SIGINT")` which raises a real `KeyboardInterrupt` inside user
- * code. Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
+ * writes `{"type":"interrupt","id":…}` naming the execution, then sends
+ * `kill("SIGINT")`, which interrupts that cell with a `KeyboardInterrupt`.
+ * Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
  * timeout.
  */
 import * as path from "node:path";
@@ -212,6 +213,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 			languageName: "Python",
 			traceIpc: TRACE_IPC,
 			exitPayload: JSON.stringify({ type: "exit" }),
+			interruptPayload: msgId => JSON.stringify({ type: "interrupt", id: msgId }),
 			interruptEscalationMs: INTERRUPT_ESCALATION_MS,
 			shutdownGraceMs: SHUTDOWN_GRACE_MS,
 			buildPayload: (code, msgId, opts) =>

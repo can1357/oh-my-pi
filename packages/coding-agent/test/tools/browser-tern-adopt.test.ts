@@ -153,7 +153,8 @@ describe("Tern block adoption", () => {
 });
 
 describe("Tern open result", () => {
-	const envKeys = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN"];
+	// PI_TERMINAL_OWNER_PID: a test run from an interactive omp's bash tool inherits that omp's claim on the pane.
+	const envKeys = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_TERMINAL_OWNER_PID"];
 	let savedEnv: Map<string, string | undefined>;
 
 	beforeEach(() => {
@@ -167,10 +168,11 @@ describe("Tern open result", () => {
 		}
 	});
 
-	async function open(fake: FakeDaemon, name: string, app?: { target: string }): Promise<string> {
+	async function open(fake: FakeDaemon, name: string, target?: string): Promise<string> {
 		process.env.TERN_PANE_SOCKET = fake.socketPath;
 		process.env.TERN_PANE = String(PANE);
 		delete process.env.PI_BROWSER_TERN;
+		delete process.env.PI_TERMINAL_OWNER_PID;
 		const session: ToolSession = {
 			cwd: "/tmp",
 			hasUI: false,
@@ -180,7 +182,7 @@ describe("Tern open result", () => {
 		};
 		opened.push(name);
 		const result = await createBrowserPrelude(session).invoke(
-			{ action: "open", name, timeout: 5, ...(app ? { app } : {}) },
+			{ action: "open", name, timeout: 5, ...(target ? { target } : {}) },
 			{ session, toolCallId: "tern-open-result" },
 		);
 		return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
@@ -194,7 +196,7 @@ describe("Tern open result", () => {
 	});
 
 	it("names the user's adopted block and that closing releases it", async () => {
-		const text = await open(await startWindow({ shown: true }), "adopted", { target: "Docs C" });
+		const text = await open(await startWindow({ shown: true }), "adopted", "Docs C");
 		expect(text).toStartWith('Opened tab "adopted" on the user\'s Tern browser block 7 (docked)');
 		expect(text).toContain("user's own Tern browser block 7");
 		expect(text).toContain("releases it");

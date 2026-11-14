@@ -50,10 +50,8 @@ function toolResult(callId: string, toolName: string, text: string, isError = fa
 	};
 }
 
-it("does not wedge a repaired orphan-output note between a call and its output (#11473)", () => {
-	// One turn: model issued parallel `todo` (call_00) + `bash` (call_01). `todo`
-	// failed omp-side arg validation, so the native-replay snapshot (dt:false)
-	// carries only the landed `bash` call; `todo` survives as an orphan result.
+it("pairs a call missing from a native snapshot before sending its result (#11473)", () => {
+	// A tool call omitted from a native snapshot still has a block and a result.
 	const assistant: AssistantMessage = {
 		role: "assistant",
 		content: [
@@ -92,87 +90,22 @@ it("does not wedge a repaired orphan-output note between a call and its output (
 		repairOrphanOutputs: true,
 		nativeHistory: { replay: true, filterReasoning: false },
 	});
-	const types = items.map(wireType);
-
-	// The orphan result is preserved as an assistant note (call_id + output text).
-	const note = items.find(item => {
-		if (!item || typeof item !== "object") return false;
-		const candidate = item as { type?: unknown; role?: unknown; content?: unknown };
-		return (
-			candidate.type === "message" &&
-			candidate.role === "assistant" &&
-			typeof candidate.content === "string" &&
-			candidate.content.includes("call_00")
-		);
-	}) as { content?: string } | undefined;
-	expect(note?.content).toContain("[Orphan tool result; call_id=call_00]");
-	expect(note?.content).toContain("Invalid todo arguments");
-
-	// Invariant: no message sits between a function_call and a function_call_output.
-	// Before the fix the note landed at index 2, wedged inside the bash batch.
-	const firstOutput = types.indexOf("function_call_output");
-	const lastCall = types.lastIndexOf("function_call");
-	expect(firstOutput).toBeGreaterThanOrEqual(0);
-	expect(lastCall).toBeLessThan(firstOutput);
-	expect(types.slice(lastCall + 1, firstOutput)).toEqual([]);
-});
-
-it("hoists a repaired orphan-output note from between two outputs (#13083)", () => {
-	// The native snapshot retains the first and third calls while the middle
-	// call's result survives independently. Output repair turns that result into
-	// a note after the first paired output.
-	const assistant: AssistantMessage = {
-		role: "assistant",
-		content: [
-			{ type: "toolCall", id: "call_00", name: "read", arguments: { path: "a" } },
-			{ type: "toolCall", id: "call_01", name: "bash", arguments: { command: "pwd" } },
-			{ type: "toolCall", id: "call_02", name: "todo", arguments: {} },
-		],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: zeroUsage,
-		stopReason: "toolUse",
-		providerPayload: createOpenAIResponsesHistoryPayload(
-			model.provider,
-			[
-				{ type: "reasoning", id: "rs_2", summary: [], content: [] },
-				{ type: "function_call", call_id: "call_00", name: "read", arguments: "{}" },
-				{ type: "function_call", call_id: "call_02", name: "todo", arguments: "{}" },
-			],
-			true,
-		),
-		timestamp: 1,
-	};
-	const context: Context = {
-		messages: [
-			assistant,
-			toolResult("call_00", "read", "file contents"),
-			toolResult("call_01", "bash", "working directory"),
-			toolResult("call_02", "todo", "task updated"),
-			{ role: "user", content: "continue", timestamp: 5 },
-		],
-	};
-
-	const items = buildResponsesInput({
-		model,
-		context,
-		strictResponsesPairing: false,
-		supportsImageDetailOriginal: false,
-		repairOrphanOutputs: true,
-		nativeHistory: { replay: true, filterReasoning: false },
-	});
-
 	expect(items.map(wireType)).toEqual([
 		"reasoning",
-		"message",
 		"function_call",
 		"function_call",
 		"function_call_output",
 		"function_call_output",
 		"message:user",
 	]);
-	expect(JSON.stringify(items[1])).toContain("[Orphan tool result; call_id=call_01]");
+	expect(JSON.stringify(items)).not.toContain("[Orphan tool result; call_id=call_00]");
+	expect(items.find(item => item.type === "function_call" && item.call_id === "call_00")).toMatchObject({
+		name: "todo",
+		arguments: "{}",
+	});
+	expect(items.find(item => item.type === "function_call_output" && item.call_id === "call_00")).toMatchObject({
+		output: "Invalid todo arguments: op must be operation to apply",
+	});
 });
 
 it("leaves commentary between completed sequential tool rounds in place (#13083)", () => {

@@ -51,6 +51,15 @@ pub const SYS_PROFILE: &str = "/etc/profile";
 /// bash's `PATH` when the environment has none (`DEFAULT_PATH_VALUE`).
 pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.";
 
+/// [`DEFAULT_PATH`] joined with the shell's `$PATH` separator.
+pub const fn default_path(platform: crate::bash::ids::Platform) -> &'static str {
+	if matches!(platform, crate::bash::ids::Platform::Windows) {
+		"/usr/local/bin;/usr/local/sbin;/usr/bin;/usr/sbin;/bin;/sbin;."
+	} else {
+		DEFAULT_PATH
+	}
+}
+
 /// `bash -o` / `bash -O` as the last argument: bash lists the options (the
 /// values at that point of the parse) and goes on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

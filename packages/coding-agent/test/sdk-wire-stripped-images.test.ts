@@ -14,7 +14,7 @@ function sseDone(): Response {
 		id: "gen-1",
 		object: "chat.completion.chunk",
 		created: 0,
-		model: "deepseek-v4-1-flash",
+		model: "deepseek-v4-flash",
 		choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
 		usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
 	};
@@ -35,7 +35,7 @@ describe("session image replacement on a wire that strips images", () => {
 	it("replaces history images with text before the provider transforms run", async () => {
 		using tempDir = TempDir.createSync("@pi-wire-stripped-images-");
 		// Declares image input; `compat.stripImageInput` drops images on the wire.
-		const model = getBundledModel("venice", "deepseek-v4-1-flash");
+		const model = getBundledModel("deepseek", "deepseek-v4-flash");
 		const bodies: string[] = [];
 		const fetchStub = Object.assign(
 			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => {

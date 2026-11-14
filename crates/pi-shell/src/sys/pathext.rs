@@ -44,6 +44,11 @@ impl Pathext {
 		Self { exts }
 	}
 
+	/// The normalized suffixes, each with its leading dot.
+	pub fn into_extensions(self) -> Vec<String> {
+		self.exts
+	}
+
 	/// From the process's `PATHEXT`.
 	pub fn from_env() -> Self {
 		Self::parse(std::env::var_os("PATHEXT").as_deref())

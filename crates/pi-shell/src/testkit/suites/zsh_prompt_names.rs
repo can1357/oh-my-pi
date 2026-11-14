@@ -159,9 +159,13 @@ fn attributes_for_xterm_256color() {
 	);
 	assert_eq!(
 		out,
-		"\x1b[1mb\x1b[0mx\x1b[4mu\x1b[24ms\x1b[7ms\x1b[27mk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\\
-		 x1b[38;5;123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\x1b[38;2;255;0;0mt\x1b[K\x1b[1m\n\x1b[1m\\
-		 x1b[38;2;255;0;0m\x1b[32mx\x1b[0m\x1b[38;2;0;0;2m\x1b[39m\n\x1b[4m\n\x1b[0m\x1b[4my\n"
+		concat!(
+			"\x1b[1mb\x1b[0mx\x1b[4mu\x1b[24ms\x1b[7ms\x1b[27mk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m",
+			"\x1b[38;5;123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\x1b[38;2;255;0;0mt\x1b[K\x1b[1m\n",
+			"\x1b[1m\x1b[38;2;255;0;0m\x1b[32mx\x1b[0m\x1b[38;2;0;0;2m\x1b[39m\n",
+			"\x1b[4m\n",
+			"\x1b[0m\x1b[4my\n",
+		)
 	);
 	assert_eq!(st, 0);
 }
@@ -173,8 +177,12 @@ fn attributes_for_dumb() {
 	);
 	assert_eq!(
 		out,
-		"bxussk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\x1b[3123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\\
-		 x1b[38;2;255;0;0mt\x1b[1m\n\x1b[32mx\x1b[39m\n\ny\n"
+		concat!(
+			"bxussk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\x1b[3123mn\x1b[39m\x1b[38;2;255;0;",
+			"0mt\x1b[39m\x1b[38;2;255;0;0mt\x1b[1m\n",
+			"\x1b[32mx\x1b[39m\n",
+			"\ny\n",
+		)
 	);
 	assert_eq!(st, 0);
 }
@@ -187,8 +195,14 @@ fn bookmarks_file_registers_named_directories() {
 	);
 	assert_eq!(
 		out,
-		"st=0\ncfg=/tmp/pn/h/.config\ndl=/tmp/pn/h/Downloads\ndot=/tmp/pn/h/.dotfiles\n~dot/zsh\\
-		 n~dl /tmp/pn/h/Downloads\n"
+		concat!(
+			"st=0\n",
+			"cfg=/tmp/pn/h/.config\n",
+			"dl=/tmp/pn/h/Downloads\n",
+			"dot=/tmp/pn/h/.dotfiles\n",
+			"~dot/zsh\n",
+			"~dl /tmp/pn/h/Downloads\n",
+		)
 	);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);

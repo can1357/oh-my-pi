@@ -168,16 +168,20 @@ export function collectOnlineTinyCandidates(
 /**
  * Expand one model's own `retry.fallbackChains` transitively.
  *
- * Does not merge role/`default` chains into the seed via
- * `expandDefaultRetryFallbackChains` — title generation appends the active
- * session model separately from tiny/commit/smol role collection, so its
- * recovery path must consult only the configured model-keyed / wildcard /
+ * With a role hint, use the role's configured chain even when the role has no
+ * configured primary, else the configured `default` chain, which roles that are
+ * not model kinds inherit as in `collectOnlineTinyCandidates`. Only configured
+ * chains apply: a role's built-in priority list never adds fallbacks, so a
+ * retry cannot move to a model the user did not select. Model-keyed and
+ * wildcard chains retain their precedence.
+ * Without a role hint, consult only the configured model-keyed / wildcard /
  * matching-role keys that `resolveRetryFallbackChainKey` already selects.
  */
 export function expandOnlineTinyModelFallbacks(
 	model: Model<Api>,
 	settings: Settings,
 	availableModels: Model<Api>[],
+	role?: string,
 ): Model<Api>[] {
 	const seen = new Set<string>([candidateKey(model)]);
 	const out: OnlineTinyCandidate[] = [{ role: "current", model }];
@@ -186,13 +190,15 @@ export function expandOnlineTinyModelFallbacks(
 	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (!configuredChains || typeof configuredChains !== "object") return [model];
 
-	const context = createFallbackContext(configuredChains, settings, availableModels);
+	const chains = role ? expandDefaultRetryFallbackChains(configuredChains, [role]) : configuredChains;
+	const context = createFallbackContext(chains, settings, availableModels);
 	expandFallbackCandidates(
 		[
 			{
 				role: "current",
 				model,
-				selector: formatModelStringWithRouting(model),
+				selector: (role && settings.getModelRole(role)) || formatModelStringWithRouting(model),
+				roleHint: role,
 			},
 		],
 		context,

@@ -19,7 +19,7 @@ use crate::bash::vm::{
 };
 
 /// zselect's three fd sets, in `select(2)` order.
-const FDCHAR: [u8; 3] = [b'r', b'w', b'e'];
+const FDCHAR: [u8; 3] = *b"rwe";
 
 /// zsh `handle_digits`: add the fd `arg` starts with to `set`; `false`
 /// after the message.

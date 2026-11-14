@@ -30,7 +30,6 @@ import { SUBAGENT_WORKER_ARG } from "../cli/worker-selectors";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { cfgTaskWorkerThreads } from "../task/settings";
-import { firstSharedModule, SubagentCodeChangedError } from "./code-skew";
 import { isMainThread, type ThreadId } from "./identity";
 import type { MainThreadLink, SubagentWorkerInit } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
@@ -55,12 +54,12 @@ const DEFAULT_IDLE_MS = 60_000;
  * handful of them share the main thread fine; past this, the main thread (which also
  * drives the TUI) gets its first helper, and one more per doubling.
  */
-export const SUBAGENT_WORKER_THRESHOLD = 4;
+export const SUBAGENT_WORKER_THRESHOLD = 9;
 
 /**
  * Worker threads the pool may use with `inFlight` subagent runs main placed (counting the
- * one being placed): 0 below `threshold`, then one per doubling — [4,8) → 1, [8,16) → 2,
- * [16,32) → 3, … — capped at `maxWorkers`.
+ * one being placed): 0 below `threshold`, then one per doubling — [9,18) → 1, [18,36) → 2,
+ * [36,72) → 3, … — capped at `maxWorkers`.
  */
 export function allowedSubagentWorkers(
 	inFlight: number,
@@ -154,14 +153,9 @@ export class SubagentWorker implements WorkerPeer {
 			const data: unknown = event.data;
 			if (isFrame(data)) frames?.(data);
 			else if (isSubagentWorkerLog(data)) receiveWorkerLog(this.threadId, data);
-			else if (typeof data === "object" && data !== null && Reflect.get(data, "type") === "subagent-worker-ready") {
-				const changed: unknown = Reflect.get(data, "changedModules");
-				const shared = Array.isArray(changed)
-					? firstSharedModule(changed.filter(item => typeof item === "string"))
-					: undefined;
-				if (shared === undefined) this.#handshake.resolve();
-				else this.#handshake.reject(new SubagentCodeChangedError(shared));
-			} else logger.warn("Subagent worker sent an unknown message", { threadId: this.threadId });
+			else if (typeof data === "object" && data !== null && Reflect.get(data, "type") === "subagent-worker-ready")
+				this.#handshake.resolve();
+			else logger.warn("Subagent worker sent an unknown message", { threadId: this.threadId });
 		});
 		this.link = new RpcLink(
 			{
@@ -258,7 +252,6 @@ export class SubagentWorker implements WorkerPeer {
 				threadId: this.threadId,
 				replyPort,
 				counter,
-				mainStartedAt: performance.timeOrigin,
 			};
 			this.#worker.postMessage(init, [replyPort]);
 			await Promise.race([this.#handshake.promise, deadline.promise]);
@@ -279,8 +272,6 @@ export class SubagentWorker implements WorkerPeer {
 		} catch (error) {
 			const reason = `start failed: ${error instanceof Error ? error.message : String(error)}`;
 			this.#die(reason);
-			// Callers fall back to running on the main thread on exactly this error.
-			if (error instanceof SubagentCodeChangedError) throw error;
 			throw new Error(`Subagent worker ${this.threadId} ${reason}`, { cause: error });
 		} finally {
 			clearTimeout(timer);
@@ -372,8 +363,6 @@ export class SubagentWorkerPool {
 	/** Prewarm spawns scheduled for the next macrotask. */
 	#pendingSpawns = 0;
 	#disposed = false;
-	/** Set once a new worker loaded code that differs from the main thread's; no run is placed on a worker after. */
-	#codeChanged: SubagentCodeChangedError | undefined;
 
 	constructor(options: SubagentWorkerPoolOptions) {
 		this.#options = options;
@@ -396,22 +385,17 @@ export class SubagentWorkerPool {
 	 * over-spawn: among the main thread and the first {@link allowedSubagentWorkers} worker
 	 * slots, the one with the fewest runs in flight, starting a worker for an empty slot.
 	 * Ties go to an existing worker over the main thread (which also drives the TUI), and to
-	 * the main thread over starting a worker. Once omp's code changed on disk
-	 * ({@link SubagentCodeChangedError}) every run stays on the main thread until restart.
-	 * A worker placement's worker may still be starting; {@link settle} waits for it.
+	 * the main thread over starting a worker. A worker placement's worker may still be
+	 * starting; {@link settle} waits for it.
 	 */
 	place(): SubagentPlacement {
 		if (this.#disposed) throw new Error("Subagent worker pool is disposed");
-		const worker = this.#codeChanged ? undefined : this.#select();
+		const worker = this.#select();
 		if (!worker) return { worker: undefined, release: this.beginMainRun() };
 		return { worker, release: worker.beginRun() };
 	}
 
-	/**
-	 * Wait until `placement`'s worker is ready. A worker that turned out to run changed code
-	 * hands the run back to the main thread (the returned placement); any other start failure
-	 * releases the placement and rejects.
-	 */
+	/** Wait until `placement`'s worker is ready; a failed start releases the placement and rejects. */
 	async settle(placement: SubagentPlacement): Promise<SubagentPlacement> {
 		const worker = placement.worker;
 		if (!worker) return placement;
@@ -419,7 +403,6 @@ export class SubagentWorkerPool {
 			await worker.ready;
 		} catch (error) {
 			placement.release();
-			if (error instanceof SubagentCodeChangedError) return { worker: undefined, release: this.beginMainRun() };
 			throw error;
 		}
 		return placement;
@@ -452,7 +435,7 @@ export class SubagentWorkerPool {
 	 * it booted; an idle worker those spawns may use gets its idle countdown restarted.
 	 */
 	prewarm(expectedSpawns = 1): void {
-		if (this.#disposed || this.#codeChanged) return;
+		if (this.#disposed) return;
 		const slots = this.#slots(this.runsInFlight + Math.max(1, expectedSpawns));
 		let slot = 0;
 		for (const worker of this.#workers.values()) {
@@ -464,7 +447,7 @@ export class SubagentWorkerPool {
 			this.#pendingSpawns++;
 			setImmediate(() => {
 				this.#pendingSpawns--;
-				if (this.#disposed || this.#codeChanged || this.#workers.size >= slots) return;
+				if (this.#disposed || this.#workers.size >= slots) return;
 				this.#spawn(true);
 			});
 		}
@@ -530,13 +513,6 @@ export class SubagentWorkerPool {
 			onLoadChange: changed => this.#onLoadChange(changed),
 		});
 		if (worker.alive) this.#workers.set(worker.threadId, worker);
-		worker.ready.catch(error => {
-			if (!(error instanceof SubagentCodeChangedError) || this.#codeChanged) return;
-			this.#codeChanged = error;
-			logger.warn("Subagents run on the main thread until omp restarts: its code changed on disk", {
-				module: error.modulePath,
-			});
-		});
 		return worker;
 	}
 

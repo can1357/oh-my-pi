@@ -106,12 +106,11 @@ fn list(ctx: &mut Ctx<'_, '_>, args: &[BString], platform: Platform) -> R {
 		let rest = &arg[end..];
 		if end == 0 || !arg[..end].iter().any(u8::is_ascii_digit) {
 			let name = rest.strip_prefix(b"SIG").unwrap_or(rest);
-			match sig_number(name, platform, true) {
-				Some(n) => ctx.out(format!("{n}\n").as_bytes()),
-				None => {
-					ctx.usage(format!("unknown signal: SIG{}", name.as_bstr()));
-					status += 1;
-				},
+			if let Some(n) = sig_number(name, platform, true) {
+				ctx.out(format!("{n}\n").as_bytes());
+			} else {
+				ctx.usage(format!("unknown signal: SIG{}", name.as_bstr()));
+				status += 1;
 			}
 		} else if !rest.is_empty() {
 			ctx.usage(format!("unknown signal: SIG{}", rest.as_bstr()));

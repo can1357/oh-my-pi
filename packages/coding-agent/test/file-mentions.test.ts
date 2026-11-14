@@ -99,6 +99,21 @@ describe("generateFileMentionMessages path resolution", () => {
 		expect(message.files[0]?.content).toContain("present");
 	});
 
+	test("treats an internal-scheme URL mention as prose instead of aborting", async () => {
+		const cwd = await createTempDir();
+		await Bun.write(path.join(cwd, "real.txt"), "hello");
+
+		const mentions = extractFileMentions("Ignore this text: @local://x and @vault://n, but read @real.txt");
+		expect(mentions).toContain("local://x");
+		const messages = await generateFileMentionMessages(mentions, cwd);
+		expect(messages).toHaveLength(1);
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+		expect(message.files.map(f => f.path)).toEqual(["real.txt"]);
+	});
+
 	test("resolves quoted paths containing spaces", async () => {
 		const cwd = await createTempDir();
 		await fs.mkdir(path.join(cwd, "My Folder"), { recursive: true });

@@ -68,18 +68,7 @@ pub fn gosmacstransposechars(zw: &mut Zw<'_, '_>) -> WResult {
 pub fn pound_insert(ed: &mut Editor) -> i32 {
 	ed.cs = 0;
 	utils::vifirstnonblank(ed);
-	if ed.line.get(ed.cs) != Some(&'#') {
-		utils::insert_at_cs(ed, &['#']);
-		ed.cs -= 1;
-		ed.cs = utils::findeol(ed);
-		while ed.cs != ed.line.len() {
-			ed.cs += 1;
-			utils::vifirstnonblank(ed);
-			utils::insert_at_cs(ed, &['#']);
-			ed.cs -= 1;
-			ed.cs = utils::findeol(ed);
-		}
-	} else {
+	if ed.line.get(ed.cs) == Some(&'#') {
 		utils::foredel(ed, 1, 0);
 		ed.cs = utils::findeol(ed);
 		while ed.cs != ed.line.len() {
@@ -88,6 +77,17 @@ pub fn pound_insert(ed: &mut Editor) -> i32 {
 			if ed.line.get(ed.cs) == Some(&'#') {
 				utils::foredel(ed, 1, 0);
 			}
+			ed.cs = utils::findeol(ed);
+		}
+	} else {
+		utils::insert_at_cs(ed, &['#']);
+		ed.cs -= 1;
+		ed.cs = utils::findeol(ed);
+		while ed.cs != ed.line.len() {
+			ed.cs += 1;
+			utils::vifirstnonblank(ed);
+			utils::insert_at_cs(ed, &['#']);
+			ed.cs -= 1;
 			ed.cs = utils::findeol(ed);
 		}
 	}
@@ -249,7 +249,7 @@ pub fn quoteline(zw: &mut Zw<'_, '_>) -> WResult {
 }
 
 /// Widget `deactivate-region` (zsh `deactivateregion`).
-pub fn deactivateregion(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn deactivateregion(zw: &mut Zw<'_, '_>) -> WResult {
 	zw.ed.region_active = 0;
 	WResult::Done(0)
 }

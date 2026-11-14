@@ -34,7 +34,7 @@ interface DelegationBiasCacheEntry {
 const delegationBiasCache = new WeakMap<Model, DelegationBiasCacheEntry>();
 
 /**
- * Delegation bias for a built model; `eager` when no rule assigns one.
+ * Delegation bias for a built model; `balanced` when no rule assigns one.
  * Callers: system-prompt and tool-description rendering in the coding agent.
  *
  * Results are cached by model object. Every cascade input is checked before a
@@ -67,7 +67,7 @@ export function resolveDelegationBias(model: Model): DelegationBias {
 		...(identity.family !== undefined && { family: identity.family }),
 		...(identity.revision !== undefined && { revision: identity.revision }),
 	}).catalog.delegationBias;
-	const bias = isDelegationBias(resolved) ? resolved : "eager";
+	const bias = isDelegationBias(resolved) ? resolved : "balanced";
 	delegationBiasCache.set(model, {
 		provider: model.provider,
 		api: model.api,

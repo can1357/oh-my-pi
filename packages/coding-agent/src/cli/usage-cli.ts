@@ -777,8 +777,8 @@ function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 
 /**
  * Saved resets expiring within 24 hours on accounts worth restoring: what the
- * provider's `autoRedeem` setting does with each one, whether it is eligible
- * now, and the `/usage reset` target that spends it now when the provider allows.
+ * governing window's auto-redeem setting does with each one, whether it is
+ * eligible now, and the `/usage reset` target that spends it now when the provider allows.
  */
 function formatResetExpiryBanner(
 	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
@@ -1116,7 +1116,7 @@ async function loadUsageSources(
 	settings: Settings,
 	authStorage: AuthStorage,
 ): Promise<ModelRegistry> {
-	const modelRegistry = new ModelRegistry(authStorage);
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 	// Extensions contribute usage providers via `registerProvider(name, { usage })`;
 	// without loading them their accounts land in `accountsWithoutUsage`.
 	await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {

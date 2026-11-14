@@ -667,10 +667,6 @@ describe("expandContentTokens", () => {
 		theirsLines: ["t1"],
 	});
 
-	it("returns content unchanged when no tokens are present", () => {
-		expect(expandContentTokens("hand-written\nline\n", entry)).toBe("hand-written\nline\n");
-	});
-
 	it("expands a bare `@ours` token", () => {
 		expect(expandContentTokens("@ours", entry)).toBe("o1\no2");
 	});

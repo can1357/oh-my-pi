@@ -16,6 +16,12 @@
 //! Every wait is bounded; a timeout reports the output so far. Dropping a
 //! [`Pty`] kills the session's process group.
 //!
+//! [`Pty::settle`] guesses that a shell is done when its output pauses; a
+//! zsh-like shell can say so instead: [`Spawn::zle_sync`] adds a `zle -F`
+//! handler script ([`ZLE_SYNC_SCRIPT`], sourced by the test), and
+//! [`Pty::zle_sync`] returns once the line editor has handled every key
+//! typed and waits for the next one.
+//!
 //! ```ignore
 //! mod pty_support;
 //! use pty_support::{Spawn, TIMEOUT};
@@ -31,12 +37,12 @@
 pub mod vt;
 
 use std::{
-	ffi::{OsStr, OsString},
+	ffi::{CString, OsStr, OsString},
 	fs,
 	io::{self, Read, Write},
 	os::{
 		fd::{AsRawFd, OwnedFd},
-		unix::process::CommandExt,
+		unix::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt},
 	},
 	path::{Path, PathBuf},
 	process::{Child, Command, ExitStatus, Stdio},
@@ -45,7 +51,10 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use pi_shell::{bash::TtyInfo, sys::tty};
+use pi_shell::{
+	bash::{TermFlag, TtyInfo},
+	sys::tty,
+};
 
 pub use self::vt::Screen;
 
@@ -54,6 +63,21 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The real zsh for differential runs.
 pub const REAL_ZSH: &str = "/bin/zsh";
+
+/// The script [`Spawn::zle_sync`] writes into the home directory; a
+/// zsh-like shell (obash as `zsh`, the real zsh) sources it
+/// (`. ~/.zle-sync`) to answer [`Pty::zle_sync`]. It opens a FIFO and
+/// installs a `zle -F` handler on it that answers each request (a line
+/// `N`) with `ESC ] 9999;zle-sync N BEL`, an OSC string terminals (and
+/// [`Screen`]) ignore.
+pub const ZLE_SYNC_SCRIPT: &str = ".zle-sync";
+
+/// The FIFO [`Pty::zle_sync`] writes its requests to, in the home directory.
+const ZLE_SYNC_FIFO: &str = ".zle-sync.fifo";
+
+/// The answer to a [`Pty::zle_sync`] request: `ESC`, this, the request's
+/// number, `BEL`.
+const ZLE_SYNC_TAG: &str = "]9999;zle-sync ";
 
 /// The obash binary under test.
 #[must_use]
@@ -78,6 +102,7 @@ pub struct Spawn {
 	cwd:     Option<PathBuf>,
 	home:    tempfile::TempDir,
 	rc:      Vec<(String, Vec<u8>)>,
+	sync:    bool,
 }
 
 impl Spawn {
@@ -109,6 +134,7 @@ impl Spawn {
 			cwd: None,
 			home,
 			rc: Vec::new(),
+			sync: false,
 		}
 	}
 
@@ -190,6 +216,14 @@ impl Spawn {
 		self
 	}
 
+	/// Have [`Self::spawn`] create the FIFO and write the
+	/// [`ZLE_SYNC_SCRIPT`] that [`Pty::zle_sync`] needs.
+	#[must_use]
+	pub fn zle_sync(mut self) -> Self {
+		self.sync = true;
+		self
+	}
+
 	/// The home directory.
 	#[must_use]
 	pub fn home(&self) -> &Path {
@@ -206,7 +240,28 @@ impl Spawn {
 		for (name, text) in &self.rc {
 			fs::write(self.home.path().join(name), text)?;
 		}
-		let (master, slave, _) = tty::open_pty(Some(TtyInfo { rows: self.rows, cols: self.cols }))?;
+		let sync = if self.sync {
+			let fifo = self.home.path().join(ZLE_SYNC_FIFO);
+			let c_fifo = CString::new(fifo.as_os_str().as_bytes())?;
+			// SAFETY: mkfifo reads a NUL-terminated path.
+			if unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) } == -1 {
+				return Err(io::Error::last_os_error());
+			}
+			// Opened read-write, the FIFO never waits for a writer nor
+			// reads as end of file. The handler reads one request, answers
+			// it on the terminal and leaves the display alone.
+			let quoted = fifo.to_string_lossy().replace('\'', r"'\''");
+			let script = format!(
+				"exec {{_zle_sync_fd}}<>'{quoted}'\n_zle_sync() {{ local n; read -r -u $1 n; print \
+				 -rn -- $'\\e{ZLE_SYNC_TAG}'$n$'\\a'; }}\nzle -F $_zle_sync_fd _zle_sync\n"
+			);
+			fs::write(self.home.path().join(ZLE_SYNC_SCRIPT), script)?;
+			Some(fifo)
+		} else {
+			None
+		};
+		let (master, slave, tty_name) =
+			tty::open_pty(Some(TtyInfo { rows: self.rows, cols: self.cols }))?;
 		let mut cmd = Command::new(&self.program);
 		if let Some(argv0) = &self.argv0 {
 			cmd.arg0(argv0);
@@ -245,12 +300,15 @@ impl Spawn {
 			.spawn(move || read_loop(reader, &sink))?;
 		Ok(Pty {
 			master: fs::File::from(master),
+			tty: PathBuf::from(OsStr::from_bytes(&tty_name)),
 			child,
 			shared,
 			fed: 0,
 			mark: 0,
 			screen: Screen::new(self.rows, self.cols),
 			status: None,
+			sync,
+			syncs: 0,
 			_home: self.home,
 		})
 	}
@@ -284,6 +342,8 @@ fn read_loop(mut master: fs::File, shared: &Shared) {
 /// A running shell on a pty (see the module docs).
 pub struct Pty {
 	master: fs::File,
+	/// The terminal side's device.
+	tty:    PathBuf,
 	child:  Child,
 	shared: Arc<Shared>,
 	/// Output bytes fed to the screen.
@@ -292,6 +352,10 @@ pub struct Pty {
 	mark:   usize,
 	screen: Screen,
 	status: Option<ExitStatus>,
+	/// The [`Spawn::zle_sync`] FIFO.
+	sync:   Option<PathBuf>,
+	/// [`Self::zle_sync`] requests so far.
+	syncs:  u64,
 	_home:  tempfile::TempDir,
 }
 
@@ -446,6 +510,90 @@ impl Pty {
 		})
 	}
 
+	/// Wait until the program has taken the terminal out of canonical
+	/// (line) mode: a line editor reads the keys typed from now on.
+	///
+	/// # Errors
+	///
+	/// When the terminal's modes cannot be read, or `TimedOut` (with the
+	/// output so far).
+	pub fn wait_raw(&mut self, timeout: Duration) -> io::Result<()> {
+		let term = self.open_tty()?;
+		let deadline = Instant::now() + timeout;
+		loop {
+			self.pump()?;
+			// The terminal side's modes: a pty's other side has its own on
+			// Linux.
+			if !tty::attrs(term.as_raw_fd())?.get(TermFlag::Icanon) {
+				return Ok(());
+			}
+			if Instant::now() >= deadline {
+				return Err(self.timeout("non-canonical mode"));
+			}
+			thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	/// Wait until the shell has handled every key typed so far and its line
+	/// editor waits for the next one, the display up to date (needs
+	/// [`Spawn::zle_sync`] and the shell to have sourced
+	/// [`ZLE_SYNC_SCRIPT`]).
+	///
+	/// Once the shell has read the keys, a request goes to the FIFO. ZLE
+	/// serves `zle -F` handlers only while it waits for a key and none is
+	/// typed, so the answer comes after the work the keys started (a
+	/// completion function, a command line) and its output.
+	///
+	/// # Errors
+	///
+	/// When there is no FIFO or no shell has it open, or `TimedOut` (with
+	/// the output so far) when the answer does not come in time.
+	pub fn zle_sync(&mut self, timeout: Duration) -> io::Result<()> {
+		let Some(fifo) = self.sync.clone() else {
+			return Err(io::Error::other("zle_sync needs Spawn::zle_sync"));
+		};
+		let deadline = Instant::now() + timeout;
+		// The shell reads each key before its next wait: were keys still
+		// queued, it could see the request before them.
+		let term = self.open_tty()?;
+		loop {
+			self.pump()?;
+			if unread(&term)? == 0 {
+				break;
+			}
+			if Instant::now() >= deadline {
+				return Err(self.timeout("the shell to read the keys"));
+			}
+			thread::sleep(Duration::from_millis(5));
+		}
+		drop(term);
+		self.syncs += 1;
+		let mut request = fs::OpenOptions::new()
+			.write(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&fifo)
+			.map_err(|e| {
+				io::Error::new(
+					e.kind(),
+					format!("{}: {e} (is ~/{ZLE_SYNC_SCRIPT} sourced?)", fifo.display()),
+				)
+			})?;
+		request.write_all(format!("{}\n", self.syncs).as_bytes())?;
+		drop(request);
+		let answer = format!("\x1b{ZLE_SYNC_TAG}{}\x07", self.syncs);
+		self.read_until(answer, deadline.saturating_duration_since(Instant::now()))?;
+		Ok(())
+	}
+
+	/// The terminal side, opened anew (not as a controlling terminal) to
+	/// query it.
+	fn open_tty(&self) -> io::Result<fs::File> {
+		fs::OpenOptions::new()
+			.read(true)
+			.custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+			.open(&self.tty)
+	}
+
 	/// The screen, with all output so far.
 	///
 	/// # Panics
@@ -570,6 +718,18 @@ pub fn differential(
 	let zsh = screens.pop().unwrap_or_default();
 	let obash = screens.pop().unwrap_or_default();
 	Ok((obash, zsh))
+}
+
+/// Bytes typed on terminal `tty` that no reader has taken yet.
+fn unread(tty: &fs::File) -> io::Result<usize> {
+	let mut n: libc::c_int = 0;
+	// The ioctl request's integer type differs between platforms.
+	let fionread = libc::FIONREAD as _;
+	// SAFETY: FIONREAD stores an int through the pointer.
+	if unsafe { libc::ioctl(tty.as_raw_fd(), fionread, &raw mut n) } == -1 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(usize::try_from(n).unwrap_or(0))
 }
 
 /// The terminal side of a fresh pty, for tests that need a bare one.

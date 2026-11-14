@@ -47,6 +47,22 @@ function createContext(): Context {
 	};
 }
 
+/** Streams one SSE frame per entry; the last frame ends with `STOP`. */
+async function streamParts(model: Model<"google-gemini-cli">, frames: unknown[][]) {
+	const sse = frames
+		.map((parts, index) => {
+			const finishReason = index === frames.length - 1 ? "STOP" : undefined;
+			return `data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts }, finishReason }] } })}\n\n`;
+		})
+		.join("");
+	const fetchMock: FetchImpl = async () =>
+		new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+	return streamGoogleGeminiCli(model, createContext(), {
+		apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+		fetch: fetchMock,
+	}).result();
+}
+
 const VALIDATION_URL = "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbtTOKEN";
 
 const validationRequiredBody = JSON.stringify({
@@ -669,6 +685,60 @@ describe("Google Gemini CLI alignment", () => {
 		expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
 	});
 
+	it("keeps signature-only thought parts as signed thinking blocks and replays them as thought parts", async () => {
+		// An empty `thought: true` part signs thinking of its own: it must neither sign the open
+		// text block (merging the text around it) nor vanish when no block is open.
+		// Replay keeps only well-formed base64 signatures.
+		const [thoughtSig, callSig, loneSig, secondCallSig] = ["VEhPVUdIVA==", "Q0FMTA==", "TE9ORQ==", "Q0FMTDI="];
+		const frame = (parts: unknown[], finishReason?: string) =>
+			`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts }, finishReason }] } })}\n\n`;
+		const sse = [
+			frame([{ text: "answer" }, { thought: true, text: "", thoughtSignature: thoughtSig }, { text: " more" }]),
+			frame([{ functionCall: { name: "read", args: { path: "a.ts" } }, thoughtSignature: callSig }]),
+			frame(
+				[
+					{ thought: true, text: "", thoughtSignature: loneSig },
+					{ functionCall: { name: "read", args: { path: "b.ts" } }, thoughtSignature: secondCallSig },
+				],
+				"STOP",
+			),
+		].join("");
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+		const model: Model<"google-gemini-cli"> = createModel("google-antigravity", "gemini-3.5-flash", true);
+
+		const result = await streamGoogleGeminiCli(model, createContext(), {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toMatchObject([
+			{ type: "text", text: "answer" },
+			{ type: "thinking", thinking: "", thinkingSignature: thoughtSig },
+			{ type: "text", text: " more" },
+			{ type: "toolCall", name: "read", thoughtSignature: callSig },
+			{ type: "thinking", thinking: "", thinkingSignature: loneSig },
+			{ type: "toolCall", name: "read", thoughtSignature: secondCallSig },
+		]);
+		expect(result.content[0]).toEqual({ type: "text", text: "answer" });
+
+		const payload = buildRequest(
+			model,
+			{ messages: [...createContext().messages, result] },
+			"proj-123",
+			{},
+			true,
+		) as { request: { contents: Array<{ role: string; parts: unknown[] }> } };
+		expect(payload.request.contents.find(content => content.role === "model")?.parts).toEqual([
+			{ text: "answer" },
+			{ thought: true, text: "", thoughtSignature: thoughtSig },
+			{ text: " more" },
+			{ functionCall: expect.objectContaining({ name: "read" }), thoughtSignature: callSig },
+			{ thought: true, text: "", thoughtSignature: loneSig },
+			{ functionCall: expect.objectContaining({ name: "read" }), thoughtSignature: secondCallSig },
+		]);
+	});
+
 	it("surfaces account verification failures from model requests", async () => {
 		const fetchMock: FetchImpl = async () => new Response(validationRequiredBody, { status: 403 });
 		const model = createModel("google-antigravity");
@@ -1008,6 +1078,39 @@ describe("Google Gemini CLI alignment", () => {
 
 			expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
 		});
+
+		it("lands held reply text ahead of the thought that ends it", async () => {
+			// "{" is held as a possible planning leak; the thought ends that run of reply text.
+			const result = await streamParts(createModel("google-gemini-cli"), [
+				[{ text: "{" }, { thought: true, text: "plan" }],
+				[{ text: " x: 1 }" }],
+			]);
+
+			expect(result.content).toEqual([
+				{ type: "text", text: "{" },
+				{ type: "thinking", thinking: "plan", summary: true },
+				{ type: "text", text: " x: 1 }" },
+			]);
+		});
+
+		// A trailing signature-only part signs the reply text before it, even while that
+		// text is still held, not the thinking block that was last materialized.
+		for (const [stage, held, rest, text] of [
+			["planning-leak buffer", "{", " x: 1 }", "{ x: 1 }"],
+			["markup healing", "<thi", "", "<thi"],
+		] as const) {
+			it(`signs reply text held by the ${stage} with a trailing signature`, async () => {
+				const result = await streamParts(createModel("google-gemini-cli"), [
+					[{ thought: true, text: "plan" }, { text: held }, { text: "", thoughtSignature: "U0lH" }],
+					rest ? [{ text: rest }] : [],
+				]);
+
+				expect(result.content).toEqual([
+					{ type: "thinking", thinking: "plan", summary: true },
+					{ type: "text", text, textSignature: "U0lH" },
+				]);
+			});
+		}
 
 		it("handles unescaped quotes in leak with trailing response", async () => {
 			const sseChunks = [

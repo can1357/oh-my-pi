@@ -167,11 +167,15 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 		if (!paid || !oauth) throw new Error("xAI pricing policy dropped a model");
 
 		expect(oauth.cost).toEqual(paid.cost);
+		// Both surfaces carry the 4.20-0309 generation card ($1.25 / $0.20 /
+		// $2.50 below 200K prompt tokens; the class `cost-patch` owns it) and its
+		// doubled tier, not the retired 4.5-generation card stencil.so still
+		// reports on the alias (#18404).
 		expect(buildModel(paid).cost.longContext).toEqual({
 			inputThreshold: 200_000,
 			inputThresholdInclusive: true,
-			input: 4,
-			output: 12,
+			input: 2.5,
+			output: 5,
 			cacheRead: 0.4,
 			cacheWrite: 0,
 		});

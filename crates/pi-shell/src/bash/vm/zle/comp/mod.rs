@@ -88,7 +88,7 @@ pub struct Comp {
 	pub groups:        types::Groups,
 	/// The cline arena.
 	pub clines:        types::Clines,
-	/// zle_tricky.c's globals.
+	/// `zle_tricky.c`'s globals.
 	pub tricky:        tricky::State,
 	/// complete.c's globals (the special parameters' values).
 	pub complete:      complete::State,
@@ -194,8 +194,7 @@ pub fn with_taken<T>(
 		.vp
 		.zle
 		.as_deref_mut()
-		.map(|z| std::mem::take(&mut z.comp))
-		.unwrap_or_default();
+		.map_or_default(|z| std::mem::take(&mut z.comp));
 	let r = f(ex, &mut c);
 	if let Some(z) = ex.vp.zle.as_deref_mut() {
 		z.comp = c;

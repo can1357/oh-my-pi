@@ -403,7 +403,7 @@ fn list(ctx: &mut Ctx<'_, '_>, machine: bool) -> R {
 }
 
 /// zsh's `gethostbyaddr(…)->h_name`, else `inet_ntoa`.
-fn name_of(ctx: &mut Ctx<'_, '_>, ip: IpAddr) -> Result<String, super::Need> {
+fn name_of(ctx: &Ctx<'_, '_>, ip: IpAddr) -> Result<String, super::Need> {
 	Ok(match fd_probe(ctx, FdProbe::HostName { addr: ip })? {
 		FdAnswer::Name(Some(n)) => n.to_str_lossy().into_owned(),
 		_ => ip.to_string(),

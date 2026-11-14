@@ -233,6 +233,9 @@ const taskBudgetSchema = type({
 	"remaining?": "number",
 });
 
+// `format` is declared only so `parseRequest` can reject it: the translate
+// path has no structured-output slot, and an undeclared key would be dropped
+// silently.
 const outputConfigSchema = type({
 	"effort?": "'low' | 'medium' | 'high' | 'xhigh' | 'max'",
 	"task_budget?": taskBudgetSchema,
@@ -258,6 +261,8 @@ export const anthropicMessagesRequestSchema = type({
 	// Anthropic clients commonly send `metadata: { user_id }`; the walker
 	// surfaces it on `options.metadata` for downstream provider forwarding.
 	"metadata?": { "[string]": "unknown" },
+	// Pre-GA spelling of `output_config.format`; declared so it is rejected too.
+	"output_format?": "unknown",
 	// Spec fields that the gateway tolerates but doesn't translate yet.
 	"container?": "unknown",
 	"context_management?": "unknown",

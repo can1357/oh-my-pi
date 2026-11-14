@@ -2,6 +2,7 @@
   addDriverRunpath,
   autoPatchelfHook,
   alsa-lib,
+  apple-sdk_27 ? null,
   bun,
   bun2nix,
   callPackage,
@@ -28,6 +29,9 @@
   # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
   # without it, so default to the lean build; opt in via `.override`.
   withWaylandScreencast ? false,
+  # Downstream callers can opt out of the Swift/SDK dependency. The official
+  # Apple Silicon package must include the bridge by default.
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
   # Release builds use fat LTO with one codegen unit, which is slow. Set this
   # to false for faster local builds with thin LTO and 16 codegen units.
   withFatLto ? true,
@@ -41,6 +45,8 @@ let
       craneLib
       withWaylandScreencast
       withFatLto
+      withAppleFm
+      apple-sdk_27
       ;
   };
   inherit (nativeBuild) platform;
@@ -288,6 +294,38 @@ stdenv.mkDerivation {
         echo "$addonDeps" >&2
         exit 1
       fi
+      # Linking against a newer SDK (apple-sdk_27 for the Foundation Models
+      # bridge) must not raise the addon's minimum macOS above the platform
+      # floor; only the embedded bridge targets macOS 27.
+      addonLoadCommands="$(otool -l "packages/natives/native/${platform.addon}")"
+      addonMinos="$(awk '$1 == "cmd" { build = $2 == "LC_BUILD_VERSION" } build && $1 == "minos" { print $2; exit }' <<<"$addonLoadCommands")"
+      darwinFloor=${stdenv.hostPlatform.darwinMinVersion}
+      if [ -z "$addonMinos" ] || [ "$(printf '%s\n' "$addonMinos" "$darwinFloor" | sort -V | tail -n 1)" != "$darwinFloor" ]; then
+        echo "embedded addon requires macOS ''${addonMinos:-unknown}, above the platform floor $darwinFloor" >&2
+        exit 1
+      fi
+    ''}
+    ${lib.optionalString withAppleFm ''
+      # Model/device eligibility is not a build requirement. On macOS 27+,
+      # this exercises materialization/dlopen. On older macOS, unsupported_os
+      # only proves the embedded bridge is non-empty; it is not loaded.
+      HOME="$TMPDIR" bun -e '
+        const native = require("./packages/natives/native/${platform.addon}");
+        const status = JSON.parse(await native.appleFmAvailability());
+        console.log("Apple Foundation Models:", status);
+        const eligibilityReasons = [
+          "unsupported_os",
+          "device_not_eligible",
+          "apple_intelligence_not_enabled",
+          "model_not_ready",
+          "unavailable",
+        ];
+        if (
+          status?.type !== "availability" ||
+          !(status.available === true ||
+            (status.available === false && eligibilityReasons.includes(status.reason)))
+        ) process.exit(1);
+      '
     ''}
     runHook postInstallCheck
   '';

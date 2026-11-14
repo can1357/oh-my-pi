@@ -8,8 +8,14 @@ import {
 	type ContextViewCategory,
 	type ContextViewData,
 	type ContextViewEntry,
+	type ContextViewSourceMarker,
 } from "@oh-my-pi/pi-tui/chrome/context-view-model";
-import { type ContextBreakdown, toolSchemaFragments } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import {
+	type ContextBreakdown,
+	claimPromptSources,
+	type SystemPromptSource,
+	toolSchemaFragments,
+} from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
@@ -107,21 +113,67 @@ function appendToolOutput(state: SnapshotBuildState, toolName: string, entry: Co
 	appendEntry(state, "tool-output", entry);
 }
 
-function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState, skillListingTokens: number): void {
-	for (const [index, block] of session.systemPrompt.entries()) {
+/** Overview notice for sources left in System Prompt because their block changed after the build. */
+function changedPromptNotice(left: readonly SystemPromptSource[]): string | undefined {
+	const files = left.filter(source => source.kind === "instruction-files").length;
+	const skills = left.length - files;
+	const counts = [
+		files ? `${files} instruction file${files === 1 ? "" : "s"}` : undefined,
+		skills ? `${skills} skill${skills === 1 ? "" : "s"}` : undefined,
+	].filter(Boolean);
+	if (counts.length === 0) return undefined;
+	return `${counts.join(" and ")} ${left.length === 1 ? "stays" : "stay"} in System Prompt: the system prompt changed after it was built (e.g. by an extension hook or SDK callback).`;
+}
+
+/**
+ * System blocks with claimed instruction-file and skill fragments moved to their own categories.
+ * Each fragment leaves a colored marker in its block; markers are display-only and carry no tokens.
+ * Returns the Overview notices for sources left in System Prompt.
+ */
+function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): string[] {
+	const tokenizer = session.agent.tokenizer;
+	const effective = session.systemPrompt;
+	const { byBlock: claims, left } = claimPromptSources(effective, session.systemPromptSources);
+	for (const [index, block] of effective.entries()) {
+		const blockClaims = claims.get(index) ?? [];
+		const remaining: string[] = [];
+		const display: string[] = [];
+		const sourceMarkers: ContextViewSourceMarker[] = [];
+		let displayLength = 0;
+		let cursor = 0;
+		for (const source of blockClaims) {
+			const before = block.slice(cursor, source.start);
+			const category = state.categoriesById.get(source.kind)!;
+			const marker = `[Shown in ${category.label}: ${source.label}]`;
+			remaining.push(before);
+			display.push(before, marker);
+			displayLength += before.length;
+			sourceMarkers.push({ start: displayLength, end: displayLength + marker.length, category: source.kind });
+			displayLength += marker.length;
+			cursor = source.end;
+			const text = block.slice(source.start, source.end);
+			appendEntry(state, source.kind, {
+				id: `${source.kind}/${source.id}`,
+				label: source.label,
+				path: source.path,
+				text,
+				tokens: tokenizer.countTokens(text),
+			});
+		}
+		const tail = block.slice(cursor);
+		remaining.push(tail);
+		display.push(tail);
+		const remainingText = remaining.join("");
 		appendEntry(state, "system-prompt", {
 			id: `system-prompt/${index}`,
 			label: `System Block ${index + 1}`,
-			text: block,
-			tokens: session.agent.tokenizer.countTokens(block),
+			text: display.join(""),
+			tokens: tokenizer.countTokens(remainingText),
+			sourceMarkers: sourceMarkers.length > 0 ? sourceMarkers : undefined,
 		});
 	}
-	const skillsCategory = state.categoriesById.get("skills")!;
-	skillsCategory.tokens = skillListingTokens;
-	const systemPromptCategory = state.categoriesById.get("system-prompt")!;
-	// Skills estimates the prompt's skill listing, not full skill files or additional context.
-	// Subtract it only from the category weight; entries retain complete blocks and unscaled estimates.
-	systemPromptCategory.tokens = Math.max(0, systemPromptCategory.tokens - skillListingTokens);
+	const notice = changedPromptNotice(left);
+	return notice ? [notice] : [];
 }
 
 function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuildState): void {
@@ -383,10 +435,10 @@ export function buildSessionContextView(
 		serverToolNamesByCallId: new Map(),
 	};
 
-	appendSystemPromptEntries(session, state, breakdown.categories.find(category => category.id === "skills")!.tokens);
+	const notices = appendSystemPromptEntries(session, state);
 	appendToolDefinitionEntries(session, state);
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);
 
-	return { breakdown, categories };
+	return { breakdown, categories, notices };
 }

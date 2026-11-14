@@ -18,16 +18,17 @@ const cwd = process.cwd();
 const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
 authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
-const askQuestions = [{ id: "target", question: "Where?", options: [{ label: "staging" }, { label: "prod" }] }];
+const askHtml =
+	'<form><p>Where?</p><label><input type="radio" name="target" value="staging" checked> staging</label><label><input type="radio" name="target" value="prod"> prod</label></form>';
 const mock = createMockModel({
 	// A prompt mentioning "slow" announces with a notice that its model call is in flight, then
 	// streams until the test aborts it.
-	// "seed-ask" calls `ask` (not registered here, so it records an error result) with questions
-	// a picker could reopen; "seed-bad-ask" calls it with arguments no picker could use.
+	// "seed-ask" calls `ask` (not registered here, so it records an error result) with a form
+	// the UI could reopen; "seed-bad-ask" calls it with arguments carrying no form.
 	handler: context => {
 		const last = JSON.stringify(context.messages.at(-1)?.content);
 		if (last.includes("seed-ask") || last.includes("seed-bad-ask")) {
-			const args = last.includes("seed-ask") ? { questions: askQuestions } : {};
+			const args = last.includes("seed-ask") ? { html: askHtml } : {};
 			return { content: [{ type: "toolCall", id: "ask-1", name: "ask", arguments: args }] };
 		}
 		if (!last.includes("slow")) return { content: ["Done"] };

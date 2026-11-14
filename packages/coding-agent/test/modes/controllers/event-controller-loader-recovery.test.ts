@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -113,6 +113,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 	});
 
 	afterEach(() => {
+		setSystemTime();
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		resetSettingsForTest();
@@ -174,6 +175,9 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		const { ctx, streamState } = createContext();
 		const controller = new EventController(ctx);
 		const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+		// Spinner ticks land on the shared wall-clock grid (multiples of the 80ms
+		// period); starting on a boundary puts a tick exactly at the 400ms mark.
+		setSystemTime(1_000_000);
 
 		streamState.isStreaming = true;
 		await controller.handleEvent(RETRY_START);

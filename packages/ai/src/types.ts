@@ -40,6 +40,7 @@ import type { ApiKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { FallbackParam, MessageCreateParamsStreaming, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
@@ -88,6 +89,7 @@ export interface ApiOptionsMap {
 	"factory-droid-agent": FactoryDroidOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"antigravity-acp": AntigravityCliOptions;
 	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
@@ -1074,6 +1076,8 @@ export interface ToolCall {
 	 * JSON function tools.
 	 */
 	customWireName?: string;
+	/** Responses API namespace for namespaced function and custom tools. */
+	namespace?: string;
 	/** Provider-native metadata required to execute and faithfully replay this call. */
 	providerMetadata?: ToolCallProviderMetadata;
 }
@@ -1085,6 +1089,13 @@ export interface OpenAIResponsesHistoryPayload {
 	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
+	/**
+	 * Set on a turn whose request was retried after the server refused replayed
+	 * encrypted reasoning (key rotation, another credential). That retry carried
+	 * no encrypted reasoning from earlier turns, and later requests omit it too,
+	 * so the refused blobs are never sent again.
+	 */
+	encryptedReasoningFloor?: boolean;
 }
 
 /** Anthropic `output_config.effort` level. */
@@ -1209,12 +1220,36 @@ export interface GeminiNativeContentPayload {
 	content: { role?: string; parts: Record<string, unknown>[]; [key: string]: unknown };
 }
 
+/** Row counts of an agy conversation store at a turn end; truncating to them rewinds the conversation there. */
+export interface AntigravityCliCheckpoint {
+	steps: number;
+	generations: number;
+	executions: number;
+}
+
+/**
+ * Where an Antigravity CLI (`agy`) step ran. Written and read by the
+ * `antigravity-acp` transport: when the transcript diverges from agy's own
+ * history, it rewinds agy's conversation to the newest turn end whose digest
+ * still matches instead of replaying the whole transcript as text.
+ */
+export interface AntigravityCliPayload {
+	type: "antigravityCli";
+	/** agy conversation (ACP session) the step ran in. */
+	conversationId: string;
+	/** Structural digest of the transcript through this message. */
+	digest: string;
+	/** Present on the step that ended agy's turn. */
+	checkpoint?: AntigravityCliCheckpoint;
+}
+
 export type ProviderPayload =
 	| OpenAIResponsesHistoryPayload
 	| AnthropicMessagePayload
 	| AnthropicCompactionPayload
 	| CursorHistoryPayload
-	| GeminiNativeContentPayload;
+	| GeminiNativeContentPayload
+	| AntigravityCliPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -1227,6 +1262,8 @@ export interface ProviderInputTransformation {
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Original sender and body of a parent-agent IRC steer, for transcript presentation only. */
+	parentIrc?: { from: string; body: string };
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
@@ -1557,11 +1594,22 @@ export interface CursorMcpResourceContent {
 	downloadPath?: string;
 }
 
+/** What the provider knows about an exec frame beyond its arguments. */
+export interface CursorExecFrameContext {
+	/**
+	 * The frame materializes a native StrReplace or Write: Cursor reads the
+	 * whole file and writes it back under the edit's call id. The streamed
+	 * `edit` block owns that id, so the frame surfaces no call of its own, and
+	 * the write reports as `edit` with the diff it made.
+	 */
+	editMaterialization?: boolean;
+}
+
 export interface CursorExecHandlers {
-	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
+	read?: (args: ReadArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<ReadResult>>;
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
 	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
-	write?: (args: WriteArgs) => Promise<CursorExecHandlerResult<WriteResult>>;
+	write?: (args: WriteArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<WriteResult>>;
 	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
 	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
 	shellStream?: (
@@ -1584,6 +1632,16 @@ export interface CursorExecHandlers {
 	 * handler is registered the provider refuses, since it cannot decide.
 	 */
 	mcpApprovalPreflight?: (call: CursorMcpCall) => Promise<boolean>;
+	/**
+	 * How a locally executed MCP call is ordered against the run's other exec
+	 * frames: `"exclusive"` waits for every unfinished earlier frame and holds
+	 * later frames until it finishes, mirroring the agent loop's scheduling of
+	 * the same tool. Resolve it from the tool the call will actually run — the
+	 * frame's name may be an alias the host rewrites onto another tool.
+	 * Without it every MCP call is `"shared"`. Approval probes execute
+	 * nothing, so they are never classified.
+	 */
+	mcpConcurrency?: (call: CursorMcpCall) => "shared" | "exclusive";
 	/**
 	 * Modern Cursor CLI Pi tool frames (`ExecServerMessage` 45-51). They are a
 	 * distinct frame family from the legacy `readArgs`/`shellArgs`/... set, not
@@ -1617,6 +1675,12 @@ export interface CursorExecHandlers {
 	}) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
+	/**
+	 * Settle a native StrReplace or Write the server completed without a
+	 * materializing write (a failed match, a refusal). Its read surfaced no
+	 * call, so nothing else ends the live card.
+	 */
+	editSettled?: (result: ToolResultMessage) => void;
 	onToolResult?: CursorToolResultHandler;
 }
 

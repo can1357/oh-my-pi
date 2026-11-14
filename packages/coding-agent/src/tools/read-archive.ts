@@ -36,6 +36,7 @@ import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
+import { parseJsonSelector, readJson, splitJsonQueryTarget } from "./read-json";
 
 interface ResolvedArchiveReadPath {
 	absolutePath: string;
@@ -194,7 +195,7 @@ async function readArchiveDirectory(
 export async function readArchive(
 	session: ToolSession,
 	readPath: string,
-	parsedSel: ParsedSelector,
+	lineSelector: string | undefined,
 	resolvedArchivePath: ResolvedArchiveReadPath,
 	readPdfPage: (options: PdfPageReadOptions) => Promise<AgentToolResult<ReadToolDetails>>,
 	signal?: AbortSignal,
@@ -213,9 +214,16 @@ export async function readArchive(
 	);
 
 	let archiveSubPath = resolvedArchivePath.archiveSubPath;
-	let sel = parsedSel;
+	let sel = parseSel(lineSelector);
 	let pdfImageRead: PdfImageReadTarget | null = null;
 	let node = archive.getNode(archiveSubPath);
+	// A literal member containing `?` wins; only a miss admits a JSON query.
+	const jsonTarget = node ? null : splitJsonQueryTarget(archiveSubPath);
+	const jsonSelector = jsonTarget ? parseJsonSelector(jsonTarget.queryString) : null;
+	if (jsonTarget && jsonSelector) {
+		archiveSubPath = jsonTarget.jsonPath;
+		node = archive.getNode(archiveSubPath);
+	}
 	if (!node && archiveSubPath) {
 		// `archive.zip:500` / `archive.zip:raw`: the whole subPath is a
 		// selector on the archive root, not a member name. Member names take
@@ -241,6 +249,9 @@ export async function readArchive(
 	}
 
 	if (node.isDirectory) {
+		if (jsonSelector) {
+			throw new ToolError("JSON selectors require a text archive member, not a directory.");
+		}
 		if (isMultiRange(sel)) {
 			throw new ToolError("Multi-range line selectors are not supported for archive directory listings.");
 		}
@@ -250,6 +261,9 @@ export async function readArchive(
 	const entry = await archive.readFile(archiveSubPath);
 	throwIfAborted(signal);
 	if (entry.path.toLowerCase().endsWith(".pdf")) {
+		if (jsonSelector) {
+			throw new ToolError("JSON selectors require a text archive member, not a PDF.");
+		}
 		const memberPath = `${resolvedArchivePath.absolutePath}:${entry.path}`;
 		const pdfDetails: ReadToolDetails = { ...details, resolvedPath: memberPath, fileSize: entry.size };
 		if (pdfImageRead) {
@@ -299,6 +313,9 @@ export async function readArchive(
 	}
 	const text = decodeUtf8Text(entry.bytes);
 	if (text === null) {
+		if (jsonSelector) {
+			throw new ToolError("JSON selectors require a text archive member, not a binary entry.");
+		}
 		return toolResult<ReadToolDetails>(details)
 			.text(
 				prependSuffixResolutionNotice(
@@ -308,6 +325,20 @@ export async function readArchive(
 			)
 			.sourcePath(resolvedArchivePath.absolutePath)
 			.done();
+	}
+
+	if (jsonSelector) {
+		return readJson(
+			session,
+			{
+				absolutePath: `${resolvedArchivePath.absolutePath}:${entry.path}`,
+				content: text,
+				selector: jsonSelector,
+				suffixResolution: resolvedArchivePath.suffixResolution,
+			},
+			lineSelector,
+			signal,
+		);
 	}
 
 	// Archive members are immutable: there is no edit path for bytes inside

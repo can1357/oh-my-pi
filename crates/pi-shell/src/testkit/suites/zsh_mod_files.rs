@@ -96,9 +96,31 @@ mv -f d/k .; print -l $PWD/*(:t)",
 	);
 	assert_eq!(
 		out,
-		"a\nd/g\n1\n1\n1\n1\nd/g\na\n1\n0\na\n0100600\n1\n1\n0100755\n0100700\nd/g\nd/k\nd\nh\nk\nl\\
-		 \
-		 nr\n"
+		concat!(
+			"a\n",
+			"d/g\n",
+			"1\n",
+			"1\n",
+			"1\n",
+			"1\n",
+			"d/g\n",
+			"a\n",
+			"1\n",
+			"0\n",
+			"a\n",
+			"0100600\n",
+			"1\n",
+			"1\n",
+			"0100755\n",
+			"0100700\n",
+			"d/g\n",
+			"d/k\n",
+			"d\n",
+			"h\n",
+			"k\n",
+			"l\n",
+			"r\n",
+		)
 	);
 	assert_eq!(
 		err,

@@ -1,4 +1,5 @@
 {
+	/* COMPUTER_OPTION_VALIDATOR */
 	const validateOptions = (label, options) => {
 		if (options === undefined) return {};
 		if (options === null || typeof options !== "object" || Array.isArray(options)) {
@@ -234,6 +235,14 @@
 			throw new TypeError("computer.run() expects a function or code string");
 		}
 		const opts = validateOptions("computer.run", options);
+		const allowed = ["args", "read_only", "timeout"];
+		const message = unknownOptionsMessage(opts, allowed, "computer.run");
+		if (message) {
+			const error = new Error(message);
+			// Match the host's strict-option ToolError rather than the facade's argument-shape TypeErrors.
+			error.name = "ToolError";
+			throw error;
+		}
 		const args = opts.args ?? [];
 		if (typeof fnOrCode === "string" && (!Array.isArray(args) || args.length > 0)) {
 			throw new TypeError("computer.run() passes args only to a function; a code string receives none");

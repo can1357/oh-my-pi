@@ -1,18 +1,78 @@
 use super::*;
+use crate::bash::syntax::{
+	Features, parse_all,
+	tree::{Comsub, If, IfArm},
+};
+
+/// Each complete command of `src`: its tree and `List` root.
+fn trees(src: &[u8]) -> Vec<(Tree, u32)> {
+	parse_all(src, Features::NONE)
+		.expect("valid bash fixture")
+		.commands
+		.into_iter()
+		.map(|cc| (cc.tree, cc.root.index()))
+		.collect()
+}
+
+/// The first stage of item `i` of `list`.
+fn item(list: List<'_>, i: usize) -> Command<'_> {
+	list
+		.items()
+		.get(i)
+		.unwrap()
+		.and_or()
+		.first()
+		.stages()
+		.first()
+		.unwrap()
+}
+
+/// The first command of a complete command's tree.
+fn root((tree, list): &(Tree, u32)) -> Command<'_> {
+	item(List::at(tree, *list), 0)
+}
+
+fn simple(command: Command<'_>) -> Simple<'_> {
+	let CommandKind::Simple(simple) = command.kind() else {
+		panic!("simple fixture")
+	};
+	simple
+}
+
+fn arm(branch: If<'_>, k: usize) -> IfArm<'_> {
+	branch.arms().nth(k).unwrap()
+}
+
+/// The command substitution a word holds, directly or as the first part of
+/// a double-quoted string.
+fn comsub(word: Word<'_>) -> Comsub<'_> {
+	let first = word.parts().first().unwrap();
+	let part = match first.get() {
+		Part::DQuote(parts) => parts.first().unwrap().get(),
+		other => other,
+	};
+	let Part::Comsub(sub) = part else {
+		panic!("substitution fixture")
+	};
+	sub
+}
 
 fn analyzed(script: &str) -> Analysis {
-	let program = parse_all(script.as_bytes(), Features::NONE).expect("valid bash fixture");
+	let commands = trees(script.as_bytes());
 	let mut walker = Walker::default();
-	for (unit, command) in program.commands.iter().enumerate() {
+	for (unit, (tree, list)) in commands.iter().enumerate() {
 		walker.unit = unit as u32;
-		walker.list(&command.list, Context { restricted: false, background: false, order: 0 });
+		walker.list(List::at(tree, *list), Context {
+			restricted: false,
+			background: false,
+			order:      0,
+		});
 	}
 	walker.finish()
 }
 
 #[test]
 fn literal_source_slots_are_deterministic_disjoint_and_reset_per_unit() {
-	use crate::bash::trace::syntax::UnitSyntax;
 	let program = parse_all(b"sh -c 'echo one; echo two'\necho next\n", Features::NONE).unwrap();
 	let roots: Vec<_> = program.commands.into_iter().map(UnitSyntax::list).collect();
 	let mut walker = Walker::default();
@@ -22,16 +82,13 @@ fn literal_source_slots_are_deterministic_disjoint_and_reset_per_unit() {
 	}
 	let analysis = walker.finish();
 	for (unit, root) in roots.iter().enumerate() {
-		let SyntaxTree::List(list) = &root.tree else {
+		let Root::List(list) = root.tree.view() else {
 			panic!("list fixture")
 		};
-		let CommandKind::Simple(simple) = &list.items[0].and_or.first.stages[0].cmd.kind else {
-			panic!("simple fixture")
-		};
 		let mut slot = 1;
-		for word in &simple.words {
+		for word in simple(item(list, 0)).words() {
 			let body = literal(word).unwrap();
-			assert_eq!(analysis.source_slots[&NodeKey::engine(unit as u32, word.id)], slot);
+			assert_eq!(analysis.source_slots[&NodeKey::engine(unit as u32, word.id())], slot);
 			slot += body.len() as u32 + 1;
 		}
 	}
@@ -39,22 +96,12 @@ fn literal_source_slots_are_deterministic_disjoint_and_reset_per_unit() {
 
 #[test]
 fn source_slot_exhaustion_never_wraps_or_reuses_a_namespace() {
-	let program = parse_all(b"printf x\n", Features::NONE).unwrap();
-	let CommandKind::Simple(simple) = &program.commands[0].list.items[0].and_or.first.stages[0]
-		.cmd
-		.kind
-	else {
-		panic!("simple fixture")
-	};
+	let commands = trees(b"printf x\n");
+	let command = root(&commands[0]);
 	let mut walker = Walker { source_slot: Some(u32::MAX - 1), ..Walker::default() };
 	let context = Context { restricted: false, background: false, order: 0 };
-	let owner = NodeKey::engine(
-		0,
-		program.commands[0].list.items[0].and_or.first.stages[0]
-			.cmd
-			.id,
-	);
-	for word in &simple.words {
+	let owner = NodeKey::engine(0, command.id());
+	for word in simple(command).words() {
 		walker.word(word, owner, context, "arg");
 	}
 	assert!(walker.result.source_slots.is_empty());
@@ -64,11 +111,8 @@ fn source_slot_exhaustion_never_wraps_or_reuses_a_namespace() {
 #[test]
 fn static_program_analysis_keeps_its_own_constants_functions_and_source_keys() {
 	let outer = analyzed("ROOT=/local\necho $ROOT\n");
-	let parsed = parse_all(
-		b"ROOT=/remote\nDEST=\"$ROOT/tree\"\nf() { echo $1 ${2:-none}; }\ncurl \"$DEST\"\n",
-		Features::NONE,
-	)
-	.unwrap();
+	let parsed =
+		trees(b"ROOT=/remote\nDEST=\"$ROOT/tree\"\nf() { echo $1 ${2:-none}; }\ncurl \"$DEST\"\n");
 	let sources = [100, 200, 300, 400];
 	let analysis = super::program(&parsed, 8, &sources);
 	assert_eq!(outer.variables["ROOT"].value.as_deref(), Some("/local"));
@@ -84,8 +128,8 @@ fn static_program_analysis_keeps_its_own_constants_functions_and_source_keys() {
 			.keys()
 			.all(|key| key.unit == 8 && sources.contains(&key.source))
 	);
-	let curl = &parsed.commands[3].list.items[0].and_or.first.stages[0].cmd;
-	let key = NodeKey::nested(8, 400, curl.id);
+	let curl = root(&parsed[3]);
+	let key = NodeKey::nested(8, 400, curl.id());
 	assert!(
 		analysis.effects[&key]
 			.iter()
@@ -95,14 +139,8 @@ fn static_program_analysis_keeps_its_own_constants_functions_and_source_keys() {
 }
 
 fn argument_literal(source: &str) -> Option<String> {
-	let program = parse_all(source.as_bytes(), Features::NONE).expect("valid word fixture");
-	let CommandKind::Simple(simple) = &program.commands[0].list.items[0].and_or.first.stages[0]
-		.cmd
-		.kind
-	else {
-		panic!("simple fixture")
-	};
-	literal(&simple.words[1])
+	let commands = trees(source.as_bytes());
+	literal(simple(root(&commands[0])).words().get(1).unwrap())
 }
 
 #[test]
@@ -212,12 +250,9 @@ fn parameter_operator_contexts_restrict_only_their_own_references() {
 
 #[test]
 fn canonical_command_roots_and_real_parent_provenance_are_respected() {
-	use std::sync::Arc;
-
-	use crate::bash::trace::syntax::SourceParent;
-	let mut program = parse_all(b"X=constant; echo $X\n", Features::NONE).unwrap();
-	let list = program.commands.remove(0).list;
-	let mut syntax = UnitSyntax::new(0, SyntaxTree::List(Arc::new(list)));
+	use crate::bash::trace::syntax::{RootKind, SourceParent, SyntaxTree};
+	let (tree, list) = trees(b"X=constant; echo $X\n").remove(0);
+	let mut syntax = UnitSyntax::new(0, SyntaxTree::new(tree, list, RootKind::List));
 	let mut walker = Walker::default();
 	walker.root(&syntax);
 	assert!(walker.finish().variables["X"].inline);
@@ -226,20 +261,10 @@ fn canonical_command_roots_and_real_parent_provenance_are_respected() {
 	walker.root(&syntax);
 	assert!(!walker.finish().variables["X"].inline);
 
-	let mut program = parse_all(b"echo ${VALUE:-$(date)}\n", Features::NONE).unwrap();
-	let command = program
-		.commands
-		.remove(0)
-		.list
-		.items
-		.remove(0)
-		.and_or
-		.first
-		.stages
-		.remove(0)
-		.cmd;
-	let root_id = command.id;
-	let syntax = UnitSyntax::new(0, SyntaxTree::Command(Arc::new(command)));
+	let parsed = trees(b"echo ${VALUE:-$(date)}\n").remove(0);
+	let command = root(&parsed);
+	let (root_id, node) = (command.id(), command.node());
+	let syntax = UnitSyntax::new(0, SyntaxTree::new(parsed.0, node, RootKind::Command));
 	let mut walker = Walker::default();
 	walker.root(&syntax);
 	let analysis = walker.finish();
@@ -259,85 +284,65 @@ fn no_unannounced_future_assignment_is_assumed() {
 fn branch_conditions_use_final_and_or_keys_in_arm_order() {
 	let source = "if echo setup; false && echo no; then :; elif test x; then :; fi\nwhile echo \
 	              setup; ! false || test x; do :; done\n";
-	let program = parse_all(source.as_bytes(), Features::NONE).unwrap();
+	let program = trees(source.as_bytes());
 	let analysis = analyzed(source);
-	let command = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
-	let CommandKind::If(branch) = &command.kind else {
+	let command = root(&program[0]);
+	let CommandKind::If(branch) = command.kind() else {
 		panic!("if fixture")
 	};
 	let expected: Vec<_> = branch
-		.arms
-		.iter()
-		.map(|arm| NodeKey::engine(0, arm.cond.items.last().unwrap().and_or.id))
+		.arms()
+		.map(|arm| NodeKey::engine(0, arm.cond.items().last().unwrap().and_or().id()))
 		.collect();
-	assert_eq!(analysis.branch_conditions[&NodeKey::engine(0, command.id)], expected);
-	let false_command = &branch.arms[0]
-		.cond
-		.items
-		.last()
-		.unwrap()
-		.and_or
-		.first
-		.stages[0]
-		.cmd;
+	assert_eq!(analysis.branch_conditions[&NodeKey::engine(0, command.id())], expected);
+	let last = arm(branch, 0).cond.items().last().unwrap().and_or();
+	let false_command = last.first().stages().first().unwrap();
 	assert!(
 		analysis
 			.guards
-			.contains(&NodeKey::engine(0, false_command.id))
+			.contains(&NodeKey::engine(0, false_command.id()))
 	);
-	let ordinary = &branch.arms[0].cond.items.last().unwrap().and_or.rest[0]
-		.1
-		.stages[0]
-		.cmd;
-	assert!(!analysis.guards.contains(&NodeKey::engine(0, ordinary.id)));
-	let command = &program.commands[1].list.items[0].and_or.first.stages[0].cmd;
-	let CommandKind::While(loop_) = &command.kind else {
+	let ordinary = last.rest().next().unwrap().1.stages().first().unwrap();
+	assert!(!analysis.guards.contains(&NodeKey::engine(0, ordinary.id())));
+	let command = root(&program[1]);
+	let CommandKind::While(loop_) = command.kind() else {
 		panic!("while fixture")
 	};
-	let condition = &loop_.cond.items.last().unwrap().and_or;
-	assert_eq!(analysis.branch_conditions[&NodeKey::engine(1, command.id)], vec![NodeKey::engine(
-		1,
-		condition.id
-	)]);
-	assert!(
-		analysis
-			.guards
-			.contains(&NodeKey::engine(1, condition.first.stages[0].cmd.id))
-	);
-	assert!(
-		analysis
-			.guards
-			.contains(&NodeKey::engine(1, condition.rest[0].1.stages[0].cmd.id))
-	);
+	let condition = loop_.cond().items().last().unwrap().and_or();
+	assert_eq!(analysis.branch_conditions[&NodeKey::engine(1, command.id())], vec![
+		NodeKey::engine(1, condition.id())
+	]);
+	let first = condition.first().stages().first().unwrap();
+	assert!(analysis.guards.contains(&NodeKey::engine(1, first.id())));
+	let next = condition.rest().next().unwrap().1.stages().first().unwrap();
+	assert!(analysis.guards.contains(&NodeKey::engine(1, next.id())));
 }
 
 #[test]
 fn guards_are_only_the_final_direct_condition_not_nested_pipeline_leaves() {
 	let source = "if echo before; test \"$(false)\"; then :; elif false | true; then :; fi\nwhile \
 	              echo before; [[ x == y ]]; do :; done\n";
-	let program = parse_all(source.as_bytes(), Features::NONE).unwrap();
+	let program = trees(source.as_bytes());
 	let analysis = analyzed(source);
-	let root = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
-	let CommandKind::If(branch) = &root.kind else {
+	let CommandKind::If(branch) = root(&program[0]).kind() else {
 		panic!("if fixture")
 	};
-	let tested = &branch.arms[0].cond.items[1].and_or.first.stages[0].cmd;
-	assert!(analysis.guards.contains(&NodeKey::engine(0, tested.id)));
-	let before = &branch.arms[0].cond.items[0].and_or.first.stages[0].cmd;
-	assert!(!analysis.guards.contains(&NodeKey::engine(0, before.id)));
-	let CommandKind::Simple(simple) = &tested.kind else {
-		panic!("test fixture")
-	};
-	let WordPart::DQuote(parts) = &simple.words[1].parts[0] else {
-		panic!("quote fixture")
-	};
-	let WordPart::Comsub(sub) = &parts[0] else {
-		panic!("substitution fixture")
-	};
-	let nested = &sub.body.items[0].and_or.first.stages[0].cmd;
-	assert!(!analysis.guards.contains(&NodeKey::engine(0, nested.id)));
-	for stage in &branch.arms[1].cond.items[0].and_or.first.stages {
-		assert!(!analysis.guards.contains(&NodeKey::engine(0, stage.cmd.id)));
+	let tested = item(arm(branch, 0).cond, 1);
+	assert!(analysis.guards.contains(&NodeKey::engine(0, tested.id())));
+	let before = item(arm(branch, 0).cond, 0);
+	assert!(!analysis.guards.contains(&NodeKey::engine(0, before.id())));
+	let sub = comsub(simple(tested).words().get(1).unwrap());
+	let nested = item(sub.body(), 0);
+	assert!(!analysis.guards.contains(&NodeKey::engine(0, nested.id())));
+	let pipeline = arm(branch, 1)
+		.cond
+		.items()
+		.first()
+		.unwrap()
+		.and_or()
+		.first();
+	for stage in pipeline.stages() {
+		assert!(!analysis.guards.contains(&NodeKey::engine(0, stage.id())));
 	}
 	assert_eq!(analysis.guards.len(), 2);
 }
@@ -345,89 +350,64 @@ fn guards_are_only_the_final_direct_condition_not_nested_pipeline_leaves() {
 #[test]
 fn ownership_and_spans_use_canonical_ids_including_nested_words() {
 	let source = "X=$(printf '%s' \"${Y:-$(date)}\") >\"$OUT\"\n";
-	let program = parse_all(source.as_bytes(), Features::NONE).unwrap();
+	let program = trees(source.as_bytes());
+	let (tree, list) = &program[0];
 	let mut walker = Walker::default();
-	walker.list(&program.commands[0].list, Context {
+	walker.list(List::at(tree, *list), Context {
 		restricted: false,
 		background: false,
 		order:      0,
 	});
 	let analysis = walker.finish();
-	let root = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
-	let key = NodeKey::engine(0, root.id);
-	let CommandKind::Simple(simple) = &root.kind else {
-		panic!("assignment fixture")
-	};
-	let assignment = &simple.assigns[0];
-	assert_eq!(analysis.owners[&NodeKey::engine(0, assignment.id)], key);
-	let AssignValue::Scalar(word) = &assignment.value else {
+	let command = root(&program[0]);
+	let key = NodeKey::engine(0, command.id());
+	let assignment = simple(command).assigns().first().unwrap();
+	assert_eq!(analysis.owners[&NodeKey::engine(0, assignment.id())], key);
+	let AssignValue::Scalar(word) = assignment.value() else {
 		panic!("scalar fixture")
 	};
-	assert_eq!(analysis.owners[&NodeKey::engine(0, word.id)], key);
-	let WordPart::Comsub(sub) = &word.parts[0] else {
-		panic!("substitution fixture")
-	};
-	let nested = &sub.body.items[0].and_or.first.stages[0].cmd;
-	let CommandKind::Simple(simple) = &nested.kind else {
-		panic!("printf fixture")
-	};
+	assert_eq!(analysis.owners[&NodeKey::engine(0, word.id())], key);
+	let nested = item(comsub(word).body(), 0);
 	assert_eq!(
-		analysis.owners[&NodeKey::engine(0, simple.words[1].id)],
-		NodeKey::engine(0, nested.id)
+		analysis.owners[&NodeKey::engine(0, simple(nested).words().get(1).unwrap().id())],
+		NodeKey::engine(0, nested.id())
 	);
-	assert_eq!(analysis.spans[&key], root.span);
+	assert_eq!(analysis.spans[&key], command.span());
 	assert!(analysis.leaves.contains(&key));
+	let and_or = List::at(tree, *list).items().first().unwrap().and_or();
 	assert!(
 		!analysis
 			.owners
-			.contains_key(&NodeKey::engine(0, program.commands[0].list.items[0].and_or.id))
+			.contains_key(&NodeKey::engine(0, and_or.id()))
 	);
 }
 
 #[test]
 fn command_parents_follow_actual_compound_and_substitution_ancestry() {
 	let source = "if true; then echo \"$(printf '%s' \"$(date)\")\"; fi\necho sibling\n";
-	let program = parse_all(source.as_bytes(), Features::NONE).unwrap();
+	let program = trees(source.as_bytes());
 	let analysis = analyzed(source);
-	let root = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
-	let root_key = NodeKey::engine(0, root.id);
+	let command = root(&program[0]);
+	let root_key = NodeKey::engine(0, command.id());
 	assert!(!analysis.parents.contains_key(&root_key));
-	let CommandKind::If(branch) = &root.kind else {
+	let CommandKind::If(branch) = command.kind() else {
 		panic!("if fixture")
 	};
-	let predicate = &branch.arms[0].cond.items[0].and_or.first.stages[0].cmd;
-	assert_eq!(analysis.parents[&NodeKey::engine(0, predicate.id)], root_key);
-	let echo = &branch.arms[0].body.items[0].and_or.first.stages[0].cmd;
-	let echo_key = NodeKey::engine(0, echo.id);
+	let predicate = item(arm(branch, 0).cond, 0);
+	assert_eq!(analysis.parents[&NodeKey::engine(0, predicate.id())], root_key);
+	let echo = item(arm(branch, 0).body, 0);
+	let echo_key = NodeKey::engine(0, echo.id());
 	assert_eq!(analysis.parents[&echo_key], root_key);
-	let CommandKind::Simple(simple) = &echo.kind else {
-		panic!("echo fixture")
-	};
-	let WordPart::DQuote(parts) = &simple.words[1].parts[0] else {
-		panic!("quote fixture")
-	};
-	let WordPart::Comsub(sub) = &parts[0] else {
-		panic!("substitution fixture")
-	};
-	let printf = &sub.body.items[0].and_or.first.stages[0].cmd;
-	let printf_key = NodeKey::engine(0, printf.id);
+	let printf = item(comsub(simple(echo).words().get(1).unwrap()).body(), 0);
+	let printf_key = NodeKey::engine(0, printf.id());
 	assert_eq!(analysis.parents[&printf_key], echo_key);
-	let CommandKind::Simple(simple) = &printf.kind else {
-		panic!("printf fixture")
-	};
-	let WordPart::DQuote(parts) = &simple.words[2].parts[0] else {
-		panic!("quote fixture")
-	};
-	let WordPart::Comsub(sub) = &parts[0] else {
-		panic!("nested substitution fixture")
-	};
-	let date = &sub.body.items[0].and_or.first.stages[0].cmd;
-	assert_eq!(analysis.parents[&NodeKey::engine(0, date.id)], printf_key);
-	let sibling = &program.commands[1].list.items[0].and_or.first.stages[0].cmd;
+	let date = item(comsub(simple(printf).words().get(2).unwrap()).body(), 0);
+	assert_eq!(analysis.parents[&NodeKey::engine(0, date.id())], printf_key);
+	let sibling = root(&program[1]);
 	assert!(
 		!analysis
 			.parents
-			.contains_key(&NodeKey::engine(1, sibling.id))
+			.contains_key(&NodeKey::engine(1, sibling.id()))
 	);
 }
 
@@ -497,6 +477,31 @@ fn effects_cover_writes_destruction_privilege_background_and_packages() {
 }
 
 #[test]
+fn sd_is_a_write_only_when_it_edits_files_in_place() {
+	for (script, writes) in [
+		("sd foo bar file\n", true),
+		// A file operand that expands at run time still names a file.
+		("sd -f i foo bar \"$file\"\n", true),
+		// After `--`, `-p` is FIND, not the preview flag.
+		("sd -- -p bar file\n", true),
+		("sd foo bar\n", false),
+		// `-n` and `--flags` consume their values, leaving no file operand.
+		("sd -n 1 foo bar\n", false),
+		("sd --flags i foo bar\n", false),
+		("sd -pF foo bar file\n", false),
+		("sd foo bar file --preview\n", false),
+	] {
+		let analysis = analyzed(script);
+		let wrote = analysis
+			.effects
+			.values()
+			.flatten()
+			.any(|effect| effect.kind == EffectKind::Write);
+		assert_eq!(wrote, writes, "{script:?}");
+	}
+}
+
+#[test]
 #[expect(
 	clippy::literal_string_with_formatting_args,
 	reason = "Bash parameter expansion is intentional fixture syntax, not Rust formatting."
@@ -505,9 +510,9 @@ fn function_metadata_and_leaf_identity_follow_typed_structure() {
 	let analysis = analyzed("f() { echo $1 ${3:-none}; g() { echo $9; }; }\n");
 	assert_eq!(analysis.functions["f"], 3);
 	assert_eq!(analysis.functions["g"], 9);
-	let program = parse_all(b"if true; then echo yes; fi\n", Features::NONE).unwrap();
+	let program = trees(b"if true; then echo yes; fi\n");
 	let analysis = analyzed("if true; then echo yes; fi\n");
-	let command = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
-	assert!(!analysis.leaves.contains(&NodeKey::engine(0, command.id)));
+	let command = root(&program[0]);
+	assert!(!analysis.leaves.contains(&NodeKey::engine(0, command.id())));
 	assert_eq!(analysis.leaves.len(), 2);
 }

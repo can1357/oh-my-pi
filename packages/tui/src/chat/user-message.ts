@@ -24,7 +24,7 @@ import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
 import { base64ImageNode, openableImageProps } from "../native/blobs";
-import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -55,6 +55,19 @@ const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_COMMAND_START = "\x1b]133;C\x07";
 const OSC133_COMMAND_DONE = "\x1b]133;D;0\x07";
 const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAND_DONE;
+
+let promptZonesEnabled = true;
+
+/**
+ * Turn the OSC 133 zone marks on user bubbles on or off; bubbles pick it up on
+ * their next render. The host turns them off while a known OSC 7501 terminal
+ * holds a `working` or `blocked` record: `133;A` starts a shell prompt, which
+ * makes the terminal drop that record. A terminal may announce the drop as a
+ * finished command (#17307), once per repaint of a bubble.
+ */
+export function setPromptZonesEnabled(enabled: boolean): void {
+	promptZonesEnabled = enabled;
+}
 
 /** How a user bubble styles its prose and chips (see {@link userBubbleColor}). */
 export interface UserBubbleOptions {
@@ -128,11 +141,12 @@ export function userBubbleColor(
 export class UserMessageComponent extends Container implements ReactionTarget, TranscriptPresentationTarget {
 	#allocation = Number.POSITIVE_INFINITY;
 	// Memoized OSC 133 zone wrapping keyed on the underlying container render
-	// (same source ref ⇒ identical rows ⇒ reuse the wrapped copy). Keeps this
-	// component reference-stable for the transcript's incremental assembly and
-	// never mutates the container's cached array.
+	// (same source ref ⇒ identical rows ⇒ reuse the wrapped copy) and on whether
+	// zones were enabled. Keeps this component reference-stable for the
+	// transcript's incremental assembly and never mutates the container's cached array.
 	#zoneSource: readonly string[] | undefined;
 	#zoneLines: string[] | undefined;
+	#zoneMarked = false;
 	readonly #bgColor: (value: string) => string;
 	readonly #liveSteered: boolean;
 	readonly #synthetic: boolean;
@@ -279,18 +293,33 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		if (this.#reaction !== undefined) badges.push(node("badge", { text: this.#reaction, role: "omp.reaction" }));
 		if (badges.length > 0)
 			children.push(node("row", { gap: "xs", justify: "end", role: "omp.user.badges" }, badges, "badges"));
+		// A phone's long press lists the turn's actions (a desktop keeps the hover toolbar): they need the
+		// prompt's timestamp to find its entry.
+		const hold =
+			!this.#synthetic && hasTranscriptActions() && this.#timestamp !== undefined
+				? {
+						actions: {
+							hold: turnHoldEntries("user", { id: "copy-message", label: "Copy message", icon: "copy" }),
+						},
+					}
+				: {};
 		this.#native = card(
-			{ role: this.#synthetic ? "omp.user.synthetic" : "omp.user", tone: this.#synthetic ? "muted" : "user" },
+			{
+				role: this.#synthetic ? "omp.user.synthetic" : "omp.user",
+				tone: this.#synthetic ? "muted" : "user",
+				...hold,
+			},
 			children,
 		);
 		return this.#native;
 	}
 
-	/** Hover toolbar clicks: omp's own copy and rewind commands. */
+	/** Hover toolbar and hold-menu choices: omp's own copy, rewind, edit, retry and fork commands. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
 		if (event.act === "copy-message") runTranscriptAction({ act: "copy", text: this.#text });
 		else if (event.act === "rewind") runTranscriptAction({ act: "rewind" });
+		else if (this.#timestamp !== undefined) runTurnAction(event.act, { role: "user", at: this.#timestamp });
 	}
 
 	/**
@@ -345,15 +374,18 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 			const emergency = this.#selectEmergencyRow(lines);
 			if (emergency !== undefined) return [emergency];
 		}
-		if (this.#zoneSource === lines && this.#zoneLines !== undefined) {
+		if (this.#zoneSource === lines && this.#zoneLines !== undefined && this.#zoneMarked === promptZonesEnabled) {
 			return this.#zoneLines;
 		}
 		const wrapped = lines.slice();
 		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
-		wrapped[0] = OSC133_ZONE_START + wrapped[0];
-		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		if (promptZonesEnabled) {
+			wrapped[0] = OSC133_ZONE_START + wrapped[0];
+			wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		}
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
+		this.#zoneMarked = promptZonesEnabled;
 		return wrapped;
 	}
 }

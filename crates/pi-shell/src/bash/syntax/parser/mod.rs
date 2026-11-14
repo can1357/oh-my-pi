@@ -12,11 +12,10 @@
 //! [`WordPart`]s; command substitutions are parsed recursively at parse
 //! time, as bash 5.3 does.
 //!
-//! Node ids are assigned after a top-level command is complete
-//! (`finish.rs`), so they do not depend on lexer lookahead.
+//! Node ids are assigned once a top-level command is complete
+//! ([`Tree::assign_ids`]), so they do not depend on lexer lookahead.
 
 mod cursor;
-pub mod finish;
 mod grammar;
 mod lex;
 mod raw;
@@ -28,13 +27,20 @@ use core::fmt;
 pub use self::lex::looks_like_assignment;
 use self::{
 	cursor::{Frame, Skip},
-	lex::{LexState, Tok},
+	lex::{LexState, Tok, TokArena},
 };
 use crate::bash::syntax::{
 	ast::*,
 	features::{AliasLookup, Features, NO_ALIASES},
-	span::{NodeId, Pos, Span},
+	span::{Pos, Span},
+	tree::{
+		Id, Tree,
+		shape::{self, Text},
+	},
 };
+
+/// Short literal runs and names, kept out of the heap up to 24 bytes.
+type SmallBytes = smallvec::SmallVec<[u8; 24]>;
 
 /// A syntax error.
 ///
@@ -179,16 +185,6 @@ struct PendingDoc {
 	quoted: bool,
 }
 
-/// Placeholder stored in `HereDoc::text` until the body is gathered:
-/// `0xff 'H' 'D'` and the sequence number. Real document text is empty or
-/// ends in a newline, so the two never collide.
-pub fn doc_placeholder(seq: u32) -> Vec<u8> {
-	let mut v = Vec::with_capacity(7);
-	v.extend_from_slice(&[0xff, b'H', b'D']);
-	v.extend_from_slice(&seq.to_le_bytes());
-	v
-}
-
 /// Incremental parser over one source.
 ///
 /// The engine parses one top-level command at a time (resuming with
@@ -233,12 +229,19 @@ pub struct Parser<'s> {
 	lx:             LexState,
 	/// One-token lookahead.
 	la:             Option<Tok>,
+	/// Payloads of the current command's tokens.
+	toks:           TokArena<'s>,
 	/// End offset of the last token taken.
 	last_hi:        u32,
 	/// Gathered here-document texts, by sequence number.
 	docs:           Vec<Vec<u8>>,
+	/// Here-document text nodes waiting for their bodies, and the
+	/// sequence numbers of the bodies.
+	doc_nodes:      Vec<(Id<Text>, u32)>,
 	/// Here-documents waiting for the next newline.
 	pending:        Vec<PendingDoc>,
+	/// The syntax of the command being parsed.
+	t:              Tree,
 	/// Open compound commands and their lines (bash `compoundcmd_lineno`).
 	compound:       Vec<(lex::T, u32)>,
 	warnings:       Vec<ParseWarning>,
@@ -249,6 +252,8 @@ pub struct Parser<'s> {
 	last_cond_text: Option<Vec<u8>>,
 	/// Nesting of the raw scanner (`parse_matched_pair`).
 	raw_depth:      u32,
+	/// Nesting of the constructs being parsed ([`MAX_NESTING`]).
+	depth:          u32,
 	/// Top-level `;` offsets collected while scanning `for ((…))`.
 	arith_semis:    Option<Vec<usize>>,
 	/// Line of the `[[` being parsed (bash's `lineno` in its messages).
@@ -304,12 +309,26 @@ pub enum TextMode {
 /// Node ids start at 0 (the word itself). Errors carry bash's message and a
 /// line relative to `src`; the engine adds the context (`command
 /// substitution: `) and the base line.
-pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<Word, ParseError> {
+pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<(Tree, u32), ParseError> {
+	parse_text_at(src, feat, mode, 0)
+}
+
+/// [`parse_text`] of text that starts at offset `base` of a larger
+/// source: every span is an offset into that source.
+pub(crate) fn parse_text_at(
+	src: &[u8],
+	feat: Features,
+	mode: TextMode,
+	base: u32,
+) -> Result<(Tree, u32), ParseError> {
 	let mut p = Parser::new(src, feat, NO_ALIASES);
+	p.base = base;
 	p.virt = 0;
-	let mut word = p.text_word(mode)?;
-	finish::finish_word(&mut word, &p.docs);
-	Ok(word)
+	let word = p.text_word(mode)?;
+	debug_assert_eq!(p.t.scratch_len(), 0, "a builder left children on the scratch stack");
+	p.fill_docs(0);
+	p.t.assign_ids(word.index());
+	Ok((p.t, word.index()))
 }
 
 impl<'s> Parser<'s> {
@@ -340,9 +359,12 @@ impl<'s> Parser<'s> {
 			skip: None,
 			lx: LexState::new(),
 			la: None,
+			toks: TokArena::default(),
 			last_hi: 0,
 			docs: Vec::new(),
+			doc_nodes: Vec::new(),
 			pending: Vec::new(),
+			t: Tree::default(),
 			compound: Vec::new(),
 			warnings: Vec::new(),
 			alias_uses: Vec::new(),
@@ -350,6 +372,7 @@ impl<'s> Parser<'s> {
 			failed: false,
 			last_cond_text: None,
 			raw_depth: 0,
+			depth: 0,
 			arith_semis: None,
 			cond_line: 0,
 			cond_eof: false,
@@ -407,6 +430,27 @@ impl<'s> Parser<'s> {
 		p.buf = &resume.pending;
 		p.pos = 0;
 		p
+	}
+
+	/// Build the next command in `tree`'s buffers (cleared) instead of
+	/// fresh ones. Each command takes the buffers it was built in; a caller
+	/// done with a command hands its tree back here so the next one does
+	/// not allocate. [`Parser::take_tree`] returns buffers no command took.
+	pub fn recycle(&mut self, mut tree: Tree) {
+		if let Some(z) = &mut self.zsh {
+			return z.recycle(tree);
+		}
+		tree.clear();
+		self.t = tree;
+	}
+
+	/// The buffers the next command would be built in (see
+	/// [`Parser::recycle`]).
+	pub fn take_tree(&mut self) -> Tree {
+		if let Some(z) = &mut self.zsh {
+			return z.take_tree();
+		}
+		core::mem::take(&mut self.t)
 	}
 
 	/// Where the next [`Parser::next_command`] starts in the source.
@@ -514,22 +558,97 @@ impl Parser<'_> {
 			}
 		}
 	}
+
+	/// Put the here-document bodies gathered for the registrations from
+	/// `from` on into their text nodes, retiring those registrations: the
+	/// next command's document numbers start over (a backquoted list
+	/// parses its commands into one tree), and a substitution must not
+	/// fill the enclosing command's documents before they are read.
+	fn fill_docs(&mut self, from: usize) {
+		for (node, seq) in self.doc_nodes.drain(from..) {
+			if let Some(text) = self.docs.get(seq as usize) {
+				self.t.set_text(node, text);
+			}
+		}
+	}
+
+	/// Run `f` one nesting level deeper. Past [`MAX_NESTING`] levels the
+	/// command is a syntax error rather than a stack overflow.
+	fn nested<T, E: From<ParseError>>(
+		&mut self,
+		f: impl FnOnce(&mut Self) -> Result<T, E>,
+	) -> Result<T, E> {
+		if self.depth >= MAX_NESTING {
+			return Err(E::from(self.too_deep()));
+		}
+		self.depth += 1;
+		let r = f(self);
+		self.depth -= 1;
+		r
+	}
+
+	/// The error for input nested past [`MAX_NESTING`], here.
+	fn too_deep(&self) -> ParseError {
+		let at = self.off();
+		ParseError::new(
+			Span::new(at, at),
+			self.bash_line(),
+			ParseErrorKind::Message(Box::from(TOO_DEEP)),
+		)
+	}
 }
 
-/// A word with no parts yet, at `lo..hi`.
-const fn empty_word(lo: u32, hi: u32) -> Word {
-	Word { id: NodeId(0), span: Span::new(lo, hi), parts: Vec::new() }
-}
+const TOO_DEEP: &[u8] = b"syntax error: maximum nesting level exceeded";
+
+/// Deepest nesting the parsers accept: compound commands, substitutions
+/// (two levels each: a word and a list), `${…}` operands, `[[ … ]]` groups
+/// and operator chains. Every level costs native stack in the parser and
+/// in each walk of the tree after it (lowering, printing, the trace view),
+/// so a command nested deeper is a syntax error instead of a stack
+/// overflow. The value fits a 2 MiB thread, the default the shells run
+/// on, with room to spare even in a debug build; bash's own parser
+/// rejects compound commands nested a few thousand deep and overflows on
+/// command substitutions.
+pub(crate) const MAX_NESTING: u32 = 400;
 
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a
-/// `$((…))` that is not arithmetic) as one list; spans are shifted by
-/// `base`. Aliases are not expanded.
-fn sub_parse_list(code: &[u8], feat: Features, base: u32) -> PResult<List> {
+/// `$((…))` that is not arithmetic) into `t` as one list; spans are
+/// shifted by `base`, `depth` is the nesting it is parsed at. Aliases are
+/// not expanded. A syntax error yields an empty list, as bash reports it
+/// only when the text runs; text nested past [`MAX_NESTING`] yields
+/// `None`, the caller's syntax error (the stack limit is not bash's).
+fn sub_parse_list(
+	t: &mut Tree,
+	code: &[u8],
+	feat: Features,
+	base: u32,
+	depth: u32,
+) -> Option<Id<shape::List>> {
 	let mut p = Parser::new(code, feat, NO_ALIASES);
 	p.base = base;
-	let mut list = List::default();
-	while let Some(cc) = p.next_command() {
-		list.items.extend(cc?.list.items);
+	p.depth = depth + 1;
+	p.t = core::mem::take(t);
+	let mark = p.t.open();
+	let mut too_deep = depth >= MAX_NESTING;
+	let mut failed = too_deep;
+	while !failed {
+		match p.top_list() {
+			Ok(Some(top)) => {
+				p.fill_docs(0);
+				p.t.kid_items(mark, top.list);
+			},
+			Ok(None) => break,
+			Err(e) => {
+				too_deep = matches!(&e.kind, ParseErrorKind::Message(m) if **m == *TOO_DEEP);
+				failed = true;
+			},
+		}
 	}
-	Ok(list)
+	if failed {
+		p.t.drop_opened(mark);
+	}
+	let list = p.t.list_at(mark);
+	debug_assert_eq!(p.t.opened_len(mark), 0, "a builder left children on the scratch stack");
+	*t = p.t;
+	(!too_deep).then_some(list)
 }

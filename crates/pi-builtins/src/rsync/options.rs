@@ -2135,10 +2135,9 @@ pub(crate) fn log_format_has(format: &[u8], esc: u8) -> bool {
 	false
 }
 
-/// A Windows drive-letter (`C:\x`, `C:/x`, `C:x`) or UNC (`\\server\share`) path,
-/// which is always local there.
+/// A local Windows drive-letter or UNC path; `HOST::MODULE` remains remote.
 fn is_windows_local_path(p: &[u8]) -> bool {
-	(p.len() >= 2 && p[0].is_ascii_alphabetic() && p[1] == b':') || p.starts_with(b"\\\\")
+	(p.len() >= 2 && p[0].is_ascii_alphabetic() && p[1] == b':' && p.get(2) != Some(&b':')) || p.starts_with(b"\\\\")
 }
 
 /// `--confine-root` absoluteness: a leading '/'; on Windows also a leading '\',

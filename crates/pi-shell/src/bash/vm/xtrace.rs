@@ -143,7 +143,7 @@ pub fn emit(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, body: &[
 
 /// Queue `bytes` (a whole trace line, or zsh's pieces of one) for the
 /// trace output.
-pub fn write(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, bytes: Vec<u8>) {
+pub fn write(k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, bytes: Vec<u8>) {
 	let fd = trace_fd(k, cx, vp);
 	vp.out
 		.push_back(PendingWrite { fd, bytes: BString::from(bytes), off: 0 });

@@ -6,7 +6,7 @@ use pi_edit::{
 	files::FileCache,
 	modes::sloppy::{
 		SloppyEngine,
-		apply::{ApplyContext, apply_sloppy, normalize_text},
+		apply::{Applied, ApplyContext, apply_sloppy, normalize_text},
 		parse::extract_inline_sloppy_regions,
 	},
 	path_policy::canonical_key,
@@ -112,7 +112,8 @@ async fn end_sentinels_close_put_bodies_but_stay_literal_in_find() {
 			 End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
 			"ONE\nTWO\nthree\n3.5\nFOUR\n",
 		),
-		// A Find body is matched as written, so a literal sentinel line can be removed.
+		// A Find body is matched as written, so a literal sentinel line can be
+		// removed.
 		("a\n*** End\nb\n", "*** Edit File: a.txt\n*** Find\na\n*** End\n*** Replace\na\n", "a\nb\n"),
 	] {
 		let workspace = Workspace::new(EditMode::Sloppy);
@@ -250,7 +251,7 @@ async fn after_preview_matches_application_and_supports_inline_payloads() {
 }
 
 #[tokio::test]
-async fn after_and_put_use_original_anchors_and_fail_atomically_across_files() {
+async fn after_and_put_use_original_anchors_and_reject_a_missing_anchor_alone() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "anchor\nnext\n");
 	workspace.write("b.txt", "original\n");
@@ -261,19 +262,14 @@ async fn after_and_put_use_original_anchors_and_fail_atomically_across_files() {
 	let invalid =
 		format!("{input}*** Edit File: b.txt\n*** Find\nmissing\n*** Insert After\nadded\n");
 	let writer = DiskWriter::default();
-	workspace
+	let outcome = workspace
 		.apply_json(&json!({ "input": invalid }), &writer)
 		.await
-		.expect_err("a failing sibling prevents every write");
-	assert!(writer.requests.lock().is_empty());
-	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\nnext\n");
-	assert_eq!(workspace.read("b.txt").unwrap(), "original\n");
-
-	workspace
-		.apply_json(&json!({ "input": input }), &writer)
-		.await
-		.expect("mixed actions apply to the original source");
+		.expect("a failing sibling file does not block the others");
+	assert!(outcome.text.contains("Operation 1 did not match b.txt"), "{}", outcome.text);
+	assert_eq!(writer.requests.lock().len(), 1);
 	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\nadded\nchanged\n");
+	assert_eq!(workspace.read("b.txt").unwrap(), "original\n");
 }
 
 #[tokio::test]
@@ -369,26 +365,30 @@ fn correctly_maps_source_spans_across_multi_byte_astral_characters_emoji() {
 fn escalates_the_third_identical_no_op_with_stop_guidance() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let path = dir.path().join("noop.ts");
-	std::fs::write(&path, "const value = current;\n").expect("fixture");
+	let content = "const a = current;\nconst b = current;\n";
+	std::fs::write(&path, content).expect("fixture");
 	let canonical = canonical_key(&path);
 	let store = EditStore::new();
-	let input = "«\nconst value = current;\n»\nconst value = current;";
+	// Two no-op operations per payload still count as one repeat per attempt.
+	let input =
+		"«\nconst a = current;\n»\nconst a = current;\n«\nconst b = current;\n»\nconst b = current;";
 	for attempt in 1..=3 {
 		let mut notes = Vec::new();
-		let error = apply_sloppy("const value = current;\n", input, ApplyContext {
+		let applied = apply_sloppy(content, input, ApplyContext {
 			path:      "noop.ts",
 			notes:     &mut notes,
 			store:     &store,
 			canonical: &canonical,
 			streaming: false,
 		})
-		.expect_err("no-op must fail");
+		.expect("payload parses");
+		let Applied::Unchanged(error) = applied else {
+			panic!("no-op must change nothing: {applied:?}");
+		};
 		if attempt < 3 {
-			assert!(
-				error
-					.to_string()
-					.contains("Operation 1 makes no change to noop.ts.")
-			);
+			let message = error.to_string();
+			assert!(message.contains("Operation 1 makes no change to noop.ts."), "{message}");
+			assert!(message.contains("Operation 2 makes no change to noop.ts."), "{message}");
 		} else {
 			assert!(
 				error

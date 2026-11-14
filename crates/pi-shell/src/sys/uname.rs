@@ -5,6 +5,10 @@ use bstr::BString;
 
 /// `uname`'s system name, release and machine; `None` when the call fails
 /// or the platform has none.
+#[cfg_attr(
+	not(unix),
+	expect(clippy::missing_const_for_fn, reason = "the unix body calls uname(2)")
+)]
 pub fn uname() -> Option<(BString, BString, BString)> {
 	#[cfg(unix)]
 	{

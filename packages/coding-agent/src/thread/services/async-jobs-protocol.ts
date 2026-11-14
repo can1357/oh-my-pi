@@ -157,6 +157,8 @@ export type AsyncJobManagerProtocol = {
 	cancelAndReapOwnerJobs: RpcMethod<[ownerId: string, deadlineAt: number], AsyncJobReapResult>;
 	drainDeliveries: RpcMethod<[options: { timeoutMs?: number; filter?: AsyncJobFilter } | undefined], boolean>;
 	isDeliverySuppressed: RpcMethod<[jobId: string], boolean>;
+	isDeliveryPending: RpcMethod<[jobId: string], boolean>;
+	isDeliverySuperseded: RpcMethod<[jobId: string], boolean>;
 	/** Resolves once the job's run promise settled (immediately for unknown ids). */
 	whenSettled: RpcMethod<[jobId: string], void>;
 	/** The job's abort signal in wire form, or undefined for unknown ids. */

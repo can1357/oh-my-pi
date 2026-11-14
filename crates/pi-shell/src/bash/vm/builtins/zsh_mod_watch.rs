@@ -75,7 +75,9 @@ impl Watch {
 		let entries = w
 			.get(3..)
 			.unwrap_or_default()
-			.chunks_exact(4)
+			.as_chunks::<4>()
+			.0
+			.iter()
 			.map(|c| Login {
 				user: c[0].clone(),
 				line: c[1].clone(),
@@ -127,7 +129,7 @@ fn ucmp(u: &Login, v: &Login) -> Ordering {
 
 /// The host's sessions sorted as zsh's `readwtab` leaves them, with the
 /// utmpx mtime; `None` when the host has no login database.
-fn read_utmp(ex: &mut Expander<'_, '_>) -> Option<(i64, Vec<Login>)> {
+fn read_utmp(ex: &Expander<'_, '_>) -> Option<(i64, Vec<Login>)> {
 	let mut l = ex.cx.host.logins().ok()?;
 	l.entries.sort_by(ucmp);
 	Some((l.mtime, l.entries))
@@ -142,7 +144,7 @@ pub fn dowatch(ex: &mut Expander<'_, '_>) -> X<Vec<u8>> {
 	let mut st = load(ex)?;
 	let utmp = read_utmp(ex);
 	if st.wtab.is_none() {
-		st.wtab = Some(utmp.as_ref().map(|(_, e)| e.clone()).unwrap_or_default());
+		st.wtab = Some(utmp.as_ref().map_or_default(|(_, e)| e.clone()));
 	}
 	let Some((mtime, utab)) = utmp.filter(|(m, _)| *m > st.lastutmpcheck) else {
 		save(ex, &st);
@@ -324,8 +326,9 @@ fn watchlog(
 	for v in watch {
 		let v = v.as_slice();
 		let mut bad = false;
-		let mut i = 0;
-		if !matches!(v.first(), Some(b'@' | b'%')) {
+		let mut i = if matches!(v.first(), Some(b'@' | b'%')) {
+			0
+		} else {
 			let end = v
 				.iter()
 				.position(|&c| c == b'@' || c == b'%')
@@ -333,8 +336,8 @@ fn watchlog(
 			if !watch_match(ex, &v[..end], &u.user, false)? {
 				bad = true;
 			}
-			i = end;
-		}
+			end
+		};
 		loop {
 			match v.get(i) {
 				Some(b'%') => {

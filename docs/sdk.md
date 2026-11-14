@@ -325,7 +325,10 @@ const { session } = await createAgentSession({
 
 ### Extensions
 
-- `extensions`: inline `ExtensionFactory[]`
+- `extensions`: inline `ExtensionFactory[]`. In-process child sessions rebind
+  them; worker-thread subagents cannot import a closure and run without them
+  (see [Extension loading](./extension-loading.md#restricted-children-and-revival)).
+  Hooks that must run there belong in an extension file.
 - `additionalExtensionPaths`: load extra extension files
 - `disableExtensionDiscovery`: disable ambient scanning; explicit paths and
   inline factories still load

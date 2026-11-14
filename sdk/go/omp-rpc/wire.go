@@ -535,9 +535,43 @@ func (v Usage) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), "", v.Extra)
 }
 
+// Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.
+type ParentIrc struct {
+	// Sending parent agent id.
+	From string `json:"from"`
+	// Message body as the parent wrote it.
+	Body string `json:"body"`
+	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
+	// Encoding writes them back, over a declared field with the same key.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (v *ParentIrc) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ParentIrc", v.decodeFrom)
+}
+
+func (v *ParentIrc) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ParentIrc
+	d := fieldDecoder{raw: raw, owner: "ParentIrc", open: true}
+	d.required("from", &out.From)
+	d.required("body", &out.Body)
+	out.Extra = d.rest()
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ParentIrc) MarshalJSON() ([]byte, error) {
+	type plain ParentIrc
+	return encodeObject(plain(v), "", v.Extra)
+}
+
 type UserMessage struct {
 	Content          MessageContent             `json:"content"`
 	Timestamp        float64                    `json:"timestamp"`
+	ParentIrc        *ParentIrc                 `json:"parentIrc,omitempty"`
 	Synthetic        *bool                      `json:"synthetic,omitempty"`
 	Steering         *bool                      `json:"steering,omitempty"`
 	LiveSteered      *bool                      `json:"liveSteered,omitempty"`
@@ -559,6 +593,7 @@ func (v *UserMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("role", "user")
 	d.required("content", &out.Content)
 	d.required("timestamp", &out.Timestamp)
+	d.optional("parentIrc", &out.ParentIrc)
 	d.optional("synthetic", &out.Synthetic)
 	d.optional("steering", &out.Steering)
 	d.optional("liveSteered", &out.LiveSteered)
@@ -1980,7 +2015,6 @@ const (
 	TodoStatusInProgress TodoStatus = "in_progress"
 	TodoStatusCompleted  TodoStatus = "completed"
 	TodoStatusAbandoned  TodoStatus = "abandoned"
-	TodoStatusBlocked    TodoStatus = "blocked"
 )
 
 func (v *TodoStatus) UnmarshalJSON(data []byte) error {
@@ -1989,7 +2023,7 @@ func (v *TodoStatus) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	switch value := TodoStatus(s); value {
-	case TodoStatusPending, TodoStatusInProgress, TodoStatusCompleted, TodoStatusAbandoned, TodoStatusBlocked:
+	case TodoStatusPending, TodoStatusInProgress, TodoStatusCompleted, TodoStatusAbandoned:
 		*v = value
 		return nil
 	}
@@ -2135,10 +2169,8 @@ func (v *SubagentStatus) UnmarshalJSON(data []byte) error {
 type TodoItem struct {
 	Content string     `json:"content"`
 	Status  TodoStatus `json:"status"`
-	// What a `blocked` task is waiting on.
-	Blocker *string  `json:"blocker,omitempty"`
-	Details *string  `json:"details,omitempty"`
-	Notes   []string `json:"notes,omitempty"`
+	Details *string    `json:"details,omitempty"`
+	Notes   []string   `json:"notes,omitempty"`
 }
 
 func (v *TodoItem) UnmarshalJSON(data []byte) error {
@@ -2150,7 +2182,6 @@ func (v *TodoItem) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "TodoItem"}
 	d.required("content", &out.Content)
 	d.required("status", &out.Status)
-	d.optional("blocker", &out.Blocker)
 	d.optional("details", &out.Details)
 	d.optional("notes", &out.Notes)
 	if d.err != nil {
@@ -4698,6 +4729,8 @@ type ReadyEvent struct {
 	SupportedProtocolVersions []int64 `json:"supportedProtocolVersions,omitempty"`
 	MaxFrameBytes             *int64  `json:"maxFrameBytes,omitempty"`
 	MaxReassembledFrameBytes  *int64  `json:"maxReassembledFrameBytes,omitempty"`
+	// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
+	SupportsBashExcludeFromContext *bool `json:"supportsBashExcludeFromContext,omitempty"`
 }
 
 func (v *ReadyEvent) UnmarshalJSON(data []byte) error {
@@ -4712,6 +4745,7 @@ func (v *ReadyEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("supportedProtocolVersions", &out.SupportedProtocolVersions)
 	d.optional("maxFrameBytes", &out.MaxFrameBytes)
 	d.optional("maxReassembledFrameBytes", &out.MaxReassembledFrameBytes)
+	d.optional("supportsBashExcludeFromContext", &out.SupportsBashExcludeFromContext)
 	if d.err != nil {
 		return d.err
 	}
@@ -5636,7 +5670,15 @@ type SelectUiRequest struct {
 	Title         string               `json:"title"`
 	Options       []string             `json:"options"`
 	OptionDetails []SelectOptionDetail `json:"optionDetails,omitempty"`
-	Timeout       *int64               `json:"timeout,omitempty"`
+	// Index into `options` to focus first.
+	InitialIndex *int64 `json:"initialIndex,omitempty"`
+	// Marker style for the first `markableCount` options.
+	SelectionMarker *SelectUiRequestSelectionMarker `json:"selectionMarker,omitempty"`
+	// For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option.
+	CheckedIndices []int64 `json:"checkedIndices,omitempty"`
+	// Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.
+	MarkableCount *int64 `json:"markableCount,omitempty"`
+	Timeout       *int64 `json:"timeout,omitempty"`
 }
 
 func (v *SelectUiRequest) UnmarshalJSON(data []byte) error {
@@ -5652,6 +5694,10 @@ func (v *SelectUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("title", &out.Title)
 	d.required("options", &out.Options)
 	d.optional("optionDetails", &out.OptionDetails)
+	d.optional("initialIndex", &out.InitialIndex)
+	d.optional("selectionMarker", &out.SelectionMarker)
+	d.optional("checkedIndices", &out.CheckedIndices)
+	d.optional("markableCount", &out.MarkableCount)
 	d.optional("timeout", &out.Timeout)
 	if d.err != nil {
 		return d.err
@@ -5663,6 +5709,26 @@ func (v *SelectUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 func (v SelectUiRequest) MarshalJSON() ([]byte, error) {
 	type plain SelectUiRequest
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"select"`, nil)
+}
+
+type SelectUiRequestSelectionMarker string
+
+const (
+	SelectUiRequestSelectionMarkerRadio    SelectUiRequestSelectionMarker = "radio"
+	SelectUiRequestSelectionMarkerCheckbox SelectUiRequestSelectionMarker = "checkbox"
+)
+
+func (v *SelectUiRequestSelectionMarker) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SelectUiRequestSelectionMarker")
+	if err != nil {
+		return err
+	}
+	switch value := SelectUiRequestSelectionMarker(s); value {
+	case SelectUiRequestSelectionMarkerRadio, SelectUiRequestSelectionMarkerCheckbox:
+		*v = value
+		return nil
+	}
+	return unknownValue("SelectUiRequestSelectionMarker", s)
 }
 
 type ConfirmUiRequest struct {
@@ -5763,7 +5829,7 @@ func (v EditorUiRequest) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"editor"`, nil)
 }
 
-// Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.
+// Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.
 type AskUiRequest struct {
 	ID        string        `json:"id"`
 	Questions []AskQuestion `json:"questions"`
@@ -6077,7 +6143,7 @@ func (v *ExtensionUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-// Answer to one `ask` question: exact option labels, plus optional free text.
+// Answer to one `ui.askDialog` question: exact option labels, plus optional free text.
 type AskAnswer struct {
 	ID              string   `json:"id"`
 	SelectedOptions []string `json:"selectedOptions"`
@@ -6157,7 +6223,7 @@ func (v ConfirmUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
-// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).
 type CancelUiResponse struct {
 	ID       string `json:"id"`
 	TimedOut *bool  `json:"timedOut,omitempty"`
@@ -8223,10 +8289,11 @@ func (c Commands) AbortRetry(ctx context.Context) error {
 
 // BashCommand holds the parameters of "bash".
 type BashCommand struct {
-	Command string `json:"command"`
+	Command            string `json:"command"`
+	ExcludeFromContext *bool  `json:"excludeFromContext,omitempty"`
 }
 
-// Bash sends "bash": Run a shell command.
+// Bash sends "bash": Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.
 func (c Commands) Bash(ctx context.Context, p BashCommand) (BashResult, error) {
 	var out BashResult
 	err := c.call(ctx, "bash", p, 0, &out)

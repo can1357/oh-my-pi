@@ -321,13 +321,15 @@ describe("RPC goal command", () => {
 	test("an extension session change aborts the detached run's prompt; the command's own result is unaffected", async () => {
 		const rpc = await start({ continuation: false, script: "slow" });
 		const { results, statusOf, unsubscribe } = watchPromptResults(rpc);
-		const started = Promise.withResolvers<void>();
+		// The loop emits a turn's input as its model call starts. A run aborted before then ends
+		// without calling the model, which would leave the script's stall to the new session's run.
+		const stalled = Promise.withResolvers<void>();
 		const unsubscribeEvents = rpc.onEvent(event => {
-			if (event.type === "agent_start") started.resolve();
+			if (event.type === "message_end" && event.message.role === "user") stalled.resolve();
 		});
 		try {
 			const first = await rpc.prompt("first, stalls");
-			await withTimeout(started.promise, 10_000, "First run never started");
+			await withTimeout(stalled.promise, 10_000, "First run's model call never started");
 			// The command then starts a run of its own in the new session.
 			await rpc.promptAndWait("/goaltest-new-session hello from the new session");
 			// The detached run never yields; its prompt must still be closed, as aborted.

@@ -436,10 +436,8 @@ impl<'a> Run<'a> {
 		chin == chpa
 			|| if self.globflags & GF_IGNCASE != 0 {
 				fold_lower(chin, wide) == fold_lower(chpa, wide)
-			} else if self.globflags & GF_LCMATCHUC != 0 {
-				lower_to_upper(chpa, wide) == Some(chin)
 			} else {
-				false
+				self.globflags & GF_LCMATCHUC != 0 && lower_to_upper(chpa, wide) == Some(chin)
 			}
 	}
 

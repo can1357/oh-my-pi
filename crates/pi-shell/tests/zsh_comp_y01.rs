@@ -187,8 +187,17 @@ const CASES: &[Case] = &[
 			Eval("old_LC_ALL=$LC_ALL; LC_ALL=C"),
 			Test(
 				": sortnobslash/\t",
-				"line: {: sortnobslash/}{}\nDESCRIPTION:{file}\nFI:{\\!foo}\nFI:{\\#foo}\nFI:{Afoo}\\
-				 nFI:{\\\\foo}\nFI:{bfoo}\nFI:{\\|foo}\nFI:{\\~foo}",
+				concat!(
+					"line: {: sortnobslash/}{}\n",
+					"DESCRIPTION:{file}\n",
+					"FI:{\\!foo}\n",
+					"FI:{\\#foo}\n",
+					"FI:{Afoo}\n",
+					"FI:{\\\\foo}\n",
+					"FI:{bfoo}\n",
+					"FI:{\\|foo}\n",
+					"FI:{\\~foo}",
+				),
 			),
 			Eval("LC_ALL=$old_LC_ALL"),
 			Outer(&["rm", "-rf", "sortnobslash"]),
@@ -297,9 +306,35 @@ const CASES: &[Case] = &[
 			Eval("export LC_ALL=C"),
 			Test(
 				"tst \x04",
-				"NO:{<INSERT>menu</INSERT>}\nNO:{a}\nNO:{b}\nNO:{c}\nNO:{d}\nNO:{e}\nNO:{f}\nNO:{g}\\
-				 nNO:{h}\nNO:{i}\nNO:{j}\nNO:{k}\nNO:{l}\nNO:{m}\nNO:{n}\nNO:{o}\nNO:{p}\nNO:{q}\nNO:{r}\nNO:\
-				 {s}\nNO:{t}\nNO:{u}\nNO:{v}\nNO:{w}\nNO:{x}\nNO:{y}\nNO:{z}",
+				concat!(
+					"NO:{<INSERT>menu</INSERT>}\n",
+					"NO:{a}\n",
+					"NO:{b}\n",
+					"NO:{c}\n",
+					"NO:{d}\n",
+					"NO:{e}\n",
+					"NO:{f}\n",
+					"NO:{g}\n",
+					"NO:{h}\n",
+					"NO:{i}\n",
+					"NO:{j}\n",
+					"NO:{k}\n",
+					"NO:{l}\n",
+					"NO:{m}\n",
+					"NO:{n}\n",
+					"NO:{o}\n",
+					"NO:{p}\n",
+					"NO:{q}\n",
+					"NO:{r}\n",
+					"NO:{s}\n",
+					"NO:{t}\n",
+					"NO:{u}\n",
+					"NO:{v}\n",
+					"NO:{w}\n",
+					"NO:{x}\n",
+					"NO:{y}\n",
+					"NO:{z}",
+				),
 			),
 			Eval("export LC_ALL=en_US.UTF-8"),
 		],
@@ -477,9 +512,17 @@ fn c027_menu_select_long_list_starts_menu_selection_for_list_widgets() {
 /// without a trailing clear-to-end-of-line, `TC` and blank texts skipped.
 #[test]
 fn comptest_report_parser() {
-	let log = "junk<WIDGET><complete-word>\r\n<DESCRIPTION>file</DESCRIPTION>\r\\
-	           n<LC><DI><RC>dir1<EC>\n  <LC><FI><RC>a\x1b[K<EC>\n<LC><TC><RC>x<EC>\n<LC><NO><RC>  \
-	           <EC>\n<LBUFFER>: </LBUFFER>\r\n<RBUFFER></RBUFFER>\r\n<WIDGET><finish>\r\n";
+	let log = concat!(
+		"junk<WIDGET><complete-word>\r\n",
+		"<DESCRIPTION>file</DESCRIPTION>\r\n",
+		"<LC><DI><RC>dir1<EC>\n",
+		"  <LC><FI><RC>a\x1b[K<EC>\n",
+		"<LC><TC><RC>x<EC>\n",
+		"<LC><NO><RC>  <EC>\n",
+		"<LBUFFER>: </LBUFFER>\r\n",
+		"<RBUFFER></RBUFFER>\r\n",
+		"<WIDGET><finish>\r\n",
+	);
 	assert_eq!(comp_support::comptest::report(log), [
 		"line: {: }{}",
 		"DESCRIPTION:{file}",

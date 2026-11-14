@@ -670,7 +670,7 @@ const fn extensions(lang: SupportLang) -> &'static [&'static str] {
 		Php => &["php"],
 		Powershell => &["ps1", "psm1"],
 		Proto => &["proto"],
-		Python => &["py", "py3", "pyi", "bzl"],
+		Python => &["py", "py3", "pyi"],
 		R => &["r"],
 		Regex => &[],
 		Ruby => &["rb", "rbw", "gemspec"],

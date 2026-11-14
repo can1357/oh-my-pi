@@ -170,7 +170,9 @@ impl Pcre {
 			core::slice::from_raw_parts(ffi::pcre2_get_ovector_pointer_8(md.0.as_ptr()), 2 * pairs)
 		};
 		Ok(Some(
-			ov.chunks_exact(2)
+			ov.as_chunks::<2>()
+				.0
+				.iter()
 				.map(|p| (p[0] != ffi::PCRE2_UNSET && p[1] != ffi::PCRE2_UNSET).then(|| p[0]..p[1]))
 				.collect(),
 		))

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadMnemopiConfig, type MnemopiBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
@@ -90,5 +91,19 @@ describe("loadMnemopiConfig database path resolution", () => {
 
 		expect(mnemopiConfigFor({ "mnemopi.dbPath": "" }, agentDir).dbPath).toBe(defaultPath);
 		expect(mnemopiConfigFor({ "mnemopi.dbPath": " \t " }, agentDir).dbPath).toBe(defaultPath);
+	});
+
+	it("expands a leading ~ in dbPath to the home directory", () => {
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": "~/mnemopi/custom.db" }).dbPath).toBe(
+			path.join(os.homedir(), "mnemopi", "custom.db"),
+		);
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": "  ~/custom.db  " }).dbPath).toBe(
+			path.join(os.homedir(), "custom.db"),
+		);
+	});
+
+	it("keeps .. in a configured dbPath, which may follow a symlink", () => {
+		const viaLink = ["", "home", "me", "link", "..", "mnemopi.db"].join(path.sep);
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": viaLink }).dbPath).toBe(viaLink);
 	});
 });

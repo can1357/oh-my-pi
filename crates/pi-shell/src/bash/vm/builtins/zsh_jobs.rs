@@ -192,12 +192,7 @@ fn print_listed(ctx: &mut Ctx<'_, '_>, number: u32, lng: u8) -> Result<(), Need>
 	};
 	ctx.out(&line);
 	if lng & 4 != 0 {
-		let wd = ctx
-			.vp
-			.jobs
-			.get(number)
-			.map(|j| j.wd.clone())
-			.unwrap_or_default();
+		let wd = ctx.vp.jobs.get(number).map_or_default(|j| j.wd.clone());
 		let mut out = b"(pwd : ".to_vec();
 		out.extend_from_slice(&printdir(ctx, &wd)?);
 		out.extend_from_slice(b")\n");
@@ -254,8 +249,7 @@ pub fn bin_fg(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: JobFunc)
 	if func == JobFunc::Jobs {
 		jobctl::jobs_listed(ctx.k);
 	}
-	let mut first = None;
-	if args.is_empty() {
+	let mut first = if args.is_empty() {
 		if func == JobFunc::Jobs {
 			let (r, s) = (ops.isset(b'r'), ops.isset(b's'));
 			let picked: Vec<u32> = ctx
@@ -277,8 +271,10 @@ pub fn bin_fg(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: JobFunc)
 			ctx.usage("no current job");
 			return done(1);
 		};
-		first = Some(cur);
-	}
+		Some(cur)
+	} else {
+		None
+	};
 	let posix = ctx.zsh_option(ZshOpt::Posixbuiltins)?;
 	let autocontinue = ctx.zsh_option(ZshOpt::Autocontinue)?;
 	let mut words = args.iter();
@@ -306,12 +302,13 @@ pub fn bin_fg(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: JobFunc)
 			.jobs
 			.get(job)
 			.is_some_and(|j| matches!(j.state, JobState::Stopped(_)));
-		let mut f = func;
 		// `AUTO_CONTINUE`: a stopped job is put in the background, then
 		// disowned.
-		if autocontinue && func == JobFunc::Disown && stopped {
-			f = JobFunc::Bg;
-		}
+		let f = if autocontinue && func == JobFunc::Disown && stopped {
+			JobFunc::Bg
+		} else {
+			func
+		};
 		match f {
 			JobFunc::Fg | JobFunc::Bg => {
 				if f == JobFunc::Bg && !stopped {

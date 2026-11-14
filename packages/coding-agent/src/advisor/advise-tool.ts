@@ -192,6 +192,8 @@ export function compareAdvisorNotes(a: AdvisorNote, b: AdvisorNote): number {
 const ADVISOR_ACK_SENT = "Delivered.";
 /** Held behind the in-progress primary turn; flushed when it completes. */
 const ADVISOR_ACK_DEFERRED = "Queued for the end of the turn. Do not re-raise.";
+/** The review was cancelled (superseded, reset, disposed); its turn is discarded. */
+const ADVISOR_ACK_CANCELLED = "Dropped: this review was cancelled.";
 /** A suppressed note is never described as recorded or queued. */
 const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
 	empty: "Dropped: empty note.",
@@ -287,10 +289,12 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	async execute(
 		_toolCallId: string,
 		args: AdviseParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
+		// A cancelled review emits nothing: its output describes superseded work.
+		if (signal?.aborted) return this.#result(ADVISOR_ACK_CANCELLED, args);
 		const rank = advisorSeverityRank(args.severity);
 		const key = advisorNoteDedupeKey(args.note);
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
