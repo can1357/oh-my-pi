@@ -465,6 +465,11 @@ class StatusLineExternalInputs {
 	modelName: string | undefined = undefined;
 	modelProvider: string | undefined = undefined;
 	modelContextWindow: Model["contextWindow"] | undefined = undefined;
+	accountId: string | undefined = undefined;
+	accountEmail: string | undefined = undefined;
+	accountProjectId: string | undefined = undefined;
+	accountOrgId: string | undefined = undefined;
+	accountOrgName: string | undefined = undefined;
 	modelThinking: Model["thinking"] = undefined;
 	thinkingLevel: unknown = undefined;
 	modelCostRef: unknown = undefined;
@@ -2625,6 +2630,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return { usedTokens, contextWindow };
 	}
 
+	#getActiveAccount(): OAuthAccountIdentity | undefined {
+		const settings = this.#resolveSettings();
+		if (!settings.leftSegments.includes("account") && !settings.rightSegments.includes("account")) {
+			return undefined;
+		}
+		const provider = this.session.state.model?.provider ?? this.session.model?.provider;
+		return provider ? this.host.activeAccount(this.session, provider) : undefined;
+	}
+
 	#buildSegmentContext(
 		width: number,
 		segmentOptions: StatusLineSettings["segmentOptions"],
@@ -2702,8 +2716,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				? this.session.getPromptCacheStatus?.(nowMs, breakdown.usedTokens)
 				: undefined;
 		this.#syncPromptCacheTimer(promptCache, nowMs);
+		const activeAccount = this.#getActiveAccount();
 		return {
 			session: this.session,
+			activeAccount,
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
@@ -2850,6 +2866,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		const model = state.model;
 		const sessionModel = this.session.model;
+		const activeAccount = this.#getActiveAccount();
 		const systemPrompt = this.session.systemPrompt;
 		let systemPromptContentSize = 0;
 		for (const part of systemPrompt ?? EMPTY_STRING_PARTS) {
@@ -2887,6 +2904,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		target.modelName = model?.name;
 		target.modelProvider = model?.provider;
 		target.modelContextWindow = model?.contextWindow;
+		target.accountId = activeAccount?.accountId;
+		target.accountEmail = activeAccount?.email;
+		target.accountProjectId = activeAccount?.projectId;
+		target.accountOrgId = activeAccount?.orgId;
+		target.accountOrgName = activeAccount?.orgName;
 		target.modelThinking = model?.thinking;
 		target.thinkingLevel = state.thinkingLevel;
 		target.modelCostRef = model?.cost;
@@ -2952,6 +2974,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.modelName === right.modelName &&
 			left.modelProvider === right.modelProvider &&
 			left.modelContextWindow === right.modelContextWindow &&
+			left.accountId === right.accountId &&
+			left.accountEmail === right.accountEmail &&
+			left.accountProjectId === right.accountProjectId &&
+			left.accountOrgId === right.accountOrgId &&
+			left.accountOrgName === right.accountOrgName &&
 			left.modelThinking === right.modelThinking &&
 			left.thinkingLevel === right.thinkingLevel &&
 			left.modelCostRef === right.modelCostRef &&
