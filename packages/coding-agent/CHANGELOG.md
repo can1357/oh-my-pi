@@ -392,6 +392,9 @@
 ### Removed
 
 - Removed `/mcp smithery-search`, `/mcp smithery-login` and `/mcp smithery-logout`; Smithery shut down its API on October 31, 2026 ([#18822](https://github.com/can1357/oh-my-pi/pull/18822) by [@samettemizer](https://github.com/samettemizer))
+### Fixed
+
+- A provider error that only reads like a context overflow, such as oMLX's prefill memory guard, now switches to the next `retry.fallbackChains` model when the context fits, instead of failing the turn ([#18889](https://github.com/can1357/oh-my-pi/pull/18889) by [@dagurval](https://github.com/dagurval))
 
 ## [18.18.8] - 2026-11-11
 

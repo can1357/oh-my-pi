@@ -5219,8 +5219,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
 			if (activeGoal) {
-				// Payload rejections get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
-				if (AIError.isPayloadRejection(msg) && this.#recovery.isHardErrorFallbackEligible(msg)) {
+				// Payload rejections and overflows the chain may take get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
+				if (
+					(AIError.isPayloadRejection(msg) || AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) &&
+					this.#recovery.isHardErrorFallbackEligible(msg)
+				) {
 					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
 					if (didRetry) {
 						await emitAgentEndNotification({ willContinue: true });
