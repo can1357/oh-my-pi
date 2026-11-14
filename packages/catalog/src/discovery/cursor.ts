@@ -554,6 +554,9 @@ function normalizeRichCursorModels(
 		// OMP always sends Cursor's zero-data-retention header. Advertising a
 		// retention-required model would expose a route every invocation rejects.
 		if (details.requiresDataRetention === true) continue;
+		// AvailableModels is not filtered by GetUsableModels, so models Cursor
+		// hides from its own picker or serves only to inline Cmd-K edits stay out.
+		if (details.isHidden === true || details.onlySupportsCmdK === true) continue;
 
 		const variants = normalizeRichCursorVariants(details, baseId);
 		if (variants.length === 0) continue;

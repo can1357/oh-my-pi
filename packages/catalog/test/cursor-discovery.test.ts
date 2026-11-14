@@ -543,6 +543,37 @@ describe("fetchCursorUsableModels", () => {
 		expect(models?.some(model => model.id === "composer-2.5")).toBe(true);
 	});
 
+	it("leaves out AvailableModels models Cursor hides or serves only to Cmd-K", async () => {
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-2.5" })],
+		});
+		const lane = (name: string, flags: { isHidden?: boolean; onlySupportsCmdK?: boolean }) =>
+			create(AvailableModelsResponse_ModelDetailsSchema, {
+				name,
+				clientDisplayName: name,
+				supportsAgent: true,
+				legacySlugs: [name],
+				...flags,
+			});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				lane("glm-5p3", {}),
+				lane("hidden-preview", { isHidden: true }),
+				lane("cmdk-fast", { onlySupportsCmdK: true }),
+			],
+		});
+		const rpcBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+		const models = await fetchCursorUsableModels({ apiKey: "account-token", baseUrl: rpcBaseUrl, timeoutMs: 1_000 });
+
+		const ids = models?.map(model => model.id) ?? [];
+		expect(ids).toContain("glm-5p3");
+		expect(ids).not.toContain("hidden-preview");
+		expect(ids).not.toContain("cmdk-fast");
+	});
+
 	it("prices rich lanes from the KDL rate card and leaves uncovered lanes unpriced", async () => {
 		const fastDefinition = create(ModelParameterDefinitionSchema, {
 			id: "fast",
