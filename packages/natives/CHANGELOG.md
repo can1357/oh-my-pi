@@ -16,6 +16,7 @@
 - Reduced memory usage in shell visualization for long multi-line commands ([#18791](https://github.com/can1357/oh-my-pi/issues/18791), [#19177](https://github.com/can1357/oh-my-pi/pull/19177)).
 - Fixed the shell `cp` builtin so symlink-following options used with archive and directory-copy modes correctly override one another without disabling recursion or attribute preservation ([#19215](https://github.com/can1357/oh-my-pi/pull/19215)).
 - Fixed a built-in shell crash when `[ ]` or `test` expressions contained very long `-a`/`-o` chains; excessively deep parenthesized expressions now produce a clear error instead ([#18498](https://github.com/can1357/oh-my-pi/pull/18498)).
+- Fixed native diff and patch round-trips for filenames containing spaces: binary changes no longer fail to apply or land under a truncated path, and paths that cannot be written verbatim are C-quoted like git does ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.0] - 2026-11-12
 

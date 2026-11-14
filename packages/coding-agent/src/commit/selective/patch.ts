@@ -5,6 +5,7 @@
  * selected change lines), so it renders a patch from HEAD content to that content instead of
  * editing hunks of a worktree diff: no offsets to recount, no context drift.
  */
+import { encodeGitDiffPath } from "../../utils/git-diff-paths";
 import { changedRegions } from "./attribution";
 
 /** Context lines around each change, as `git diff` emits by default. */
@@ -45,13 +46,15 @@ export function formatTextPatch(
 	if (before === after) return "";
 	const oldLines = patchLines(before);
 	const newLines = patchLines(after);
-	let out = `diff --git a/${path} b/${path}\n`;
+	const oldPath = encodeGitDiffPath(`a/${path}`);
+	const newPath = encodeGitDiffPath(`b/${path}`);
+	let out = `diff --git ${oldPath} ${newPath}\n`;
 	if (before === null) out += `new file mode ${newFileMode}\n`;
 	if (after === null) out += "deleted file mode 100644\n";
 	const regions = changedRegions(oldLines, newLines);
 	if (regions.length === 0) return out;
-	out += `--- ${before === null ? "/dev/null" : `a/${path}`}\n`;
-	out += `+++ ${after === null ? "/dev/null" : `b/${path}`}\n`;
+	out += `--- ${before === null ? "/dev/null" : oldPath}\n`;
+	out += `+++ ${after === null ? "/dev/null" : newPath}\n`;
 	let first = 0;
 	while (first < regions.length) {
 		let last = first;

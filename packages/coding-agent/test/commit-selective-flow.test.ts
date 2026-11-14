@@ -117,6 +117,41 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
 	});
 
+	it.skipIf(process.platform === "win32")("commits a filename that requires a quoted diff header", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-quoted-"));
+		const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-artifacts-"));
+		tempDirs.push(root, artifacts);
+		await git(root, ["init", "-q", "-b", "main"]);
+		await git(root, ["config", "user.email", "test@example.com"]);
+		await git(root, ["config", "user.name", "Test"]);
+		await git(root, ["config", "commit.gpgSign", "false"]);
+		const filename = 'has"quote.txt';
+		const file = path.join(root, filename);
+		await Bun.write(file, "before\n");
+		await git(root, ["add", "--", filename]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await Bun.write(file, "after\n");
+		const journal = ChangeJournal.at(artifacts);
+		journal.recordChange({
+			agent: "Main",
+			tool: "edit",
+			path: file,
+			before: "before\n",
+			after: "after\n",
+		});
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: quoted filename" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		expect(outcome.paths).toEqual([filename]);
+		expect(await git(root, ["show", `HEAD:${filename}`])).toBe("after\n");
+	});
+
 	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
 		const { root, journal } = await sharedWorkspace();
 		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
