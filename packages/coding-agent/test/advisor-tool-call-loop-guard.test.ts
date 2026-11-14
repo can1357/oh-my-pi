@@ -117,7 +117,7 @@ describe("advisor tool-call loop guard", () => {
 			// this stream; the finite ceiling keeps the disabled control bounded.
 			// `advices` feeds one note per review start, so several advisors (or
 			// several reviews) can each raise their own note; as a function it picks
-				// the note from what the review sees.
+			// the note from what the review sees.
 			const queued = !isReviewStart
 				? undefined
 				: typeof advices === "function"
@@ -133,34 +133,34 @@ describe("advisor tool-call loop guard", () => {
 						content: [
 							advising
 								{
-										type: "toolCall",
-										id: `tc-${turn}`,
-										name: "advise",
-										arguments: adviceArgs,
-									}
-									: { type: "toolCall", id: `tc-${turn}`, name: "read", arguments: { path: "missing.ts" } },
-							],
-							api: advisorMock.api,
-							provider: advisorMock.provider,
-							model: advisorMock.id,
-							usage: zeroUsage,
-							stopReason: "toolUse",
-							timestamp: Date.now(),
-						}
+									type: "toolCall",
+									id: `tc-${turn}`,
+									name: "advise",
+									arguments: adviceArgs,
+								}
+								: { type: "toolCall", id: `tc-${turn}`, name: "read", arguments: { path: "missing.ts" } },
+						],
+						api: advisorMock.api,
+						provider: advisorMock.provider,
+						model: advisorMock.id,
+						usage: zeroUsage,
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					}
 					: {
-							role: "assistant",
-							content: [{ type: "text", text: "Stopped repeating." }],
-							api: advisorMock.api,
-							provider: advisorMock.provider,
-							model: advisorMock.id,
-							usage: zeroUsage,
-							stopReason: "stop",
-							timestamp: Date.now(),
-						};
+						role: "assistant",
+						content: [{ type: "text", text: "Stopped repeating." }],
+						api: advisorMock.api,
+						provider: advisorMock.provider,
+						model: advisorMock.id,
+						usage: zeroUsage,
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-					stream.push({ type: "start", partial: message });
-					stream.push({ type: "done", reason: repeating ? "toolUse" : "stop", message });
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: repeating ? "toolUse" : "stop", message });
 			});
 			return stream;
 		};
@@ -240,7 +240,7 @@ describe("advisor tool-call loop guard", () => {
 					readStarted.resolve();
 					const call = (context as (AgentToolContext & { toolCall?: ToolCallContext }) | undefined)?.toolCall;
 					if (call?.earlierEffectsSettled) {
-							await call.earlierEffectsSettled;
+						await call.earlierEffectsSettled;
 							result = bytes;
 					}
 					return { content: [{ type: "text", text: result }] };
@@ -876,7 +876,7 @@ describe("advisor tool-call loop guard", () => {
 				getApiKey: () => "test-key",
 				initialState: { model: primaryMock, systemPrompt: [], tools: [] },
 				streamFn: primaryMock.stream,
-				}),
+			}),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
