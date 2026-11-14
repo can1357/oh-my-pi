@@ -101,6 +101,8 @@
 ### Fixed
 
 - Fixed `untilAborted` so promises passed to an already-aborted signal are still observed, preventing later rejections from being reported as unhandled.
+- Supported Cloud Code Assist compound `Resets in XhYmZs`, `quotaResetDelay`, and `quotaResetTimeStamp` in `extractRetryHint` ([#17327](https://github.com/can1357/oh-my-pi/pull/17327) by [@ironbabatekkral](https://github.com/ironbabatekkral))
+- Fixed `untilAborted` leaving a promise passed to it unobserved when the signal was already aborted, so its later rejection crashed the process as unhandled ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 
 ## [18.13.3] - 2026-10-28
 
