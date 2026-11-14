@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `mnemopi.recallRelevance` (`auto`/`on`/`off`) to filter automatic memory recall for task relevance through the `judge` role ([#19132](https://github.com/can1357/oh-my-pi/pull/19132) by [@wolfiesch](https://github.com/wolfiesch))
+- Added opt-in `mnemopi.recallRelevance` (`off`/`auto`/`on`, default `off`) to filter automatic memory recall for task relevance through the `judge` role ([#19132](https://github.com/can1357/oh-my-pi/pull/19132) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 

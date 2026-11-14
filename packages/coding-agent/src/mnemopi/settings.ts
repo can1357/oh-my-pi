@@ -108,7 +108,7 @@ export const cfgMnemopiRecallRelevance = register({
 	id: "mnemopi.recallRelevance",
 	type: "enum",
 	values: ["auto", "on", "off"] as const,
-	default: "auto",
+	default: "off",
 	ui: {
 		tab: "memory",
 		group: "Mnemopi",
@@ -119,9 +119,14 @@ export const cfgMnemopiRecallRelevance = register({
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Filter only when the judge role resolves to a native judge backend",
+				description: "Filter only with a native judge backend; otherwise inject every recalled memory",
 			},
-			{ value: "on", label: "On", description: "Always filter, whichever model the judge role resolves to" },
+			{
+				value: "on",
+				label: "On",
+				description:
+					"Filter with whichever model the judge role resolves to; an on-device judge may answer only some memories in time",
+			},
 			{ value: "off", label: "Off", description: "Never filter; inject every recalled memory" },
 		],
 		condition: "mnemopiActive",
