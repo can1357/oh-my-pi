@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- In a compiled omp with no `bun` on PATH, the command `bun` in an eval cell's `Bun.$`, `Bun.spawn` or `child_process` is now bun (the executable re-entered as bun), where Bun's shell previously resolved it to omp itself and started a headless agent with the cell's words as its prompt. An `omp` started from the bash tool or an eval cell with a positional or piped prompt and no `-p` is now refused with an error; pass `-p` to run one on purpose
+- In a compiled omp with no `bun` on PATH, the command `bun` in an eval cell's `Bun.$`, `Bun.spawn` or `child_process` is now bun (the executable re-entered as bun), where Bun's shell previously resolved it to omp itself and started a headless agent with the cell's words as its prompt. An `omp` started from the bash tool or an eval cell with a positional or piped prompt and no `-p` is now refused with an error; pass `-p` to run one on purpose ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [18.20.2] - 2026-11-14
 

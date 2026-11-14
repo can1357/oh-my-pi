@@ -11,6 +11,7 @@
  */
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 
+/** The facts `refuseToolShellAutoPrint` decides on, gathered by `main.ts` before stdin is read. */
 export interface ToolShellLaunch {
 	env: Record<string, string | undefined>;
 	/** `-p`/`--print` given. */
