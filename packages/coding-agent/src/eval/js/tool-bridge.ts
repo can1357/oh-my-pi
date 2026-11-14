@@ -166,7 +166,11 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
  */
 function summarizePreludeResult(session: ToolSession): StatusSummarizer {
 	return (name, args, result, text, hasError) => {
-		if (hasError) return { op: name, error: text.slice(0, 500) };
+		if (hasError) {
+			const details = isRecord(result.details) ? result.details : {};
+			const error = isRecord(details.error) ? details.error : {};
+			return { op: name, error: (typeof error.message === "string" ? error.message : text).slice(0, 500) };
+		}
 		const detail = findEnabledEvalPrelude(session, name)?.status?.(args, result);
 		return detail === undefined ? undefined : { op: name, detail };
 	};

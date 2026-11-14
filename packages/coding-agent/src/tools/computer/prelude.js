@@ -31,6 +31,11 @@
 		if (response && typeof response.text === "string" && response.text.length > 0) {
 			globalThis.__omp_log__("log", response.text);
 		}
+		if (response?.hasError) {
+			const error = new Error(response.details?.error?.message ?? response.text);
+			error.name = response.details?.error?.name ?? "Error";
+			throw error;
+		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
 	};
 	const callValue = async chain => {

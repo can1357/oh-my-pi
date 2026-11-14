@@ -85,6 +85,9 @@ export interface ComputerRunOk {
 	capabilities?: DesktopCapabilities;
 }
 
+/** Supervisor result: successful output, or partial output with `error` describing the failed run. */
+export type ComputerRunResult = ComputerRunOk & { error?: RunErrorPayload };
+
 /** Result of a computer call the user stopped with physical Escape during takeover input. */
 export const ESCAPE_STOPPED_MESSAGE = prompt.render(escapeStoppedMessage);
 
@@ -146,7 +149,7 @@ export type ComputerWorkerOutbound =
 	| { type: "control-revoked"; id: string }
 	| { type: "pong"; id: string }
 	| { type: "result"; id: string; ok: true; payload: ComputerRunOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| { type: "result"; id: string; ok: false; error: RunErrorPayload; output?: ComputerRunOk }
 	| { type: "capabilities"; id: string; ok: true; capabilities: DesktopCapabilities }
 	| { type: "capabilities"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }

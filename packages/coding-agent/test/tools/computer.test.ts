@@ -6,6 +6,7 @@ import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { computerApproval, createComputerPrelude } from "@oh-my-pi/pi-coding-agent/tools/computer";
@@ -483,6 +484,66 @@ afterAll(async () => {
 });
 
 describe("computer prelude", () => {
+	it("keeps partial failure evidence through JavaScript Eval", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
+		const prelude = createComputerPrelude(session, () => supervisor);
+		definitions = [prelude];
+		const statuses: unknown[] = [];
+		try {
+			const result = await executeJs(
+				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')");`,
+				{
+					session,
+					sessionId: crypto.randomUUID(),
+					cwd: process.cwd(),
+					onStatus: event => {
+						statuses.push(event);
+					},
+				},
+			);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("MARK");
+			expect(result.output).toContain("TypeError: stop after act");
+			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
+			expect(statuses).toContainEqual(expect.objectContaining({ op: "computer", error: "stop after act" }));
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("keeps partial failure evidence through Python Eval", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
+		definitions = [createComputerPrelude(session, () => supervisor)];
+		try {
+			const result = await executePython(
+				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')")`,
+				{ toolSession: session, sessionId: crypto.randomUUID(), cwd: process.cwd(), kernelMode: "per-call" },
+			);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("MARK");
+			expect(result.output).toContain("RuntimeError: stop after act");
+			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
+		} finally {
+			await supervisor.close();
+		}
+	});
+
 	it("validates action shapes and maps explicitly read-only runs to read approval", async () => {
 		const prelude = createComputerPrelude(toolSession(), () => ({
 			async run() {
@@ -1591,6 +1652,28 @@ describe("computer worker round trips", () => {
 		);
 		if (!result.ok) throw new Error(result.error.message);
 		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
+	});
+
+	it("keeps partial failure evidence in a worker result", async () => {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		const result = await runWorker(
+			transport,
+			"partial-failure",
+			"console.log('MARK'); await desktop.screenshot(); throw new Error('stop after act')",
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("Expected failed run");
+		expect(result.error.message).toBe("stop after act");
+		expect(result).toMatchObject({
+			output: {
+				displays: expect.arrayContaining([
+					{ type: "text", text: expect.stringContaining("MARK") },
+					expect.objectContaining({ type: "image" }),
+				]),
+				screenshots: [expect.objectContaining({ width: 64, height: 32 })],
+			},
+		});
 	});
 
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
@@ -3363,45 +3446,75 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
-	it("keeps the worker's own error ahead of the stop it reports", async () => {
-		let stops = 0;
-		const partial = "type: 3 of 10 characters were sent before the input was cancelled";
-		const supervisor = new ComputerSupervisor(
-			toolSession(),
-			() => {
-				const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
-				const emit = (message: ComputerWorkerOutbound) => {
-					for (const handler of handlers) handler(message);
-				};
-				return {
-					send: message => {
-						if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
-						if (message.type !== "run") return;
-						stops += 1;
-						const error = { name: "ToolError", message: partial, isToolError: true, isAbort: false };
-						queueMicrotask(() => emit({ type: "result", id: message.id, ok: false, error }));
-					},
-					onMessage: handler => {
-						handlers.add(handler);
-						queueMicrotask(() => emit({ type: "ready" }));
-						return () => handlers.delete(handler);
-					},
-					onError: () => () => {},
-					terminate: async () => {},
-				};
-			},
-			{ startMs: 200, closeMs: 200 },
-			undefined,
-			{ read: () => stops, forget: () => {} },
-		);
-		try {
-			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(
-				`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`,
+	it.each(["no output", "partial error", "partial abort", "reported stop"])(
+		"keeps the worker's own error ahead of the stop it reports: %s",
+		async mode => {
+			let stops = 0;
+			const partial = "type: 3 of 10 characters were sent before the input was cancelled";
+			const output = {
+				displays: [{ type: "text" as const, text: "MARK" }],
+				screenshots: [],
+				returnValue: undefined,
+			};
+			const supervisor = new ComputerSupervisor(
+				toolSession(),
+				() => {
+					const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
+					const emit = (message: ComputerWorkerOutbound) => {
+						for (const handler of handlers) handler(message);
+					};
+					return {
+						send: message => {
+							if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
+							if (message.type !== "run") return;
+							stops += 1;
+							const isAbort = mode === "partial abort";
+							const error = {
+								name: isAbort ? "ToolAbortError" : "ToolError",
+								message: mode === "reported stop" ? ESCAPE_STOPPED_MESSAGE : partial,
+								isToolError: !isAbort,
+								isAbort,
+							};
+							queueMicrotask(() =>
+								emit({
+									type: "result",
+									id: message.id,
+									ok: false,
+									error,
+									...(mode === "no output" ? {} : { output }),
+								}),
+							);
+						},
+						onMessage: handler => {
+							handlers.add(handler);
+							queueMicrotask(() => emit({ type: "ready" }));
+							return () => handlers.delete(handler);
+						},
+						onError: () => () => {},
+						terminate: async () => {},
+					};
+				},
+				{ startMs: 200, closeMs: 200 },
+				undefined,
+				{ read: () => stops, forget: () => {} },
 			);
-		} finally {
-			await supervisor.close();
-		}
-	});
+			try {
+				if (mode === "no output") {
+					await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(partial);
+				} else {
+					const result = await supervisor.run("1", 1_000, snapshot());
+					expect(result.displays).toEqual(output.displays);
+					if (mode === "partial error") expect(result.error?.message).toStartWith(partial);
+					else expect(result.error?.message).toBe(ESCAPE_STOPPED_MESSAGE);
+					expect(result.error?.isAbort).toBe(false);
+					expect(result.error?.name).toBe("ToolError");
+					expect(result.error?.message).toContain(ESCAPE_STOPPED_MESSAGE);
+				}
+			} finally {
+				await supervisor.close();
+			}
+		},
+	);
 
 	it("delivers the user's message and keeps the stop when the native count cannot be read", async () => {
 		let stops = 0;
