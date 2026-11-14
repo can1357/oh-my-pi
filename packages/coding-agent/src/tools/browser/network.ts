@@ -12,6 +12,8 @@ export const RESPONSE_BODY_LIMIT_BYTES = 1024 * 1024;
 const ROUTE_INTERCEPT_PRIORITY = 10;
 const PASS_THROUGH_INTERCEPT_PRIORITY = 0;
 const REQUEST_RECORD = Symbol("omp.browser.requestRecord");
+/** Request types a look waits for after an action; long-lived streams and subresources are excluded. */
+const SETTLE_RESOURCE_TYPES: Record<string, true> = { document: true, fetch: true, xhr: true };
 
 /** URL pattern accepted by persistent tab routes and request filters. */
 export type NetworkPattern = string | RegExp;
@@ -167,6 +169,8 @@ export class BrowserNetworkManager {
 	readonly #routes: StoredRoute[] = [];
 	readonly #records: StoredRequest[] = [];
 	readonly #recordsById = new Map<string, StoredRequest>();
+	/** In-flight settle work is independent of readable log clearing and eviction. */
+	readonly #pendingRequests = new Map<HTTPRequest, number>();
 	#nextSeq = 1;
 	#interceptionEnabled = false;
 	#started = false;
@@ -176,6 +180,12 @@ export class BrowserNetworkManager {
 
 	readonly #onRequest = async (request: HTTPRequest): Promise<void> => {
 		const record = this.#rememberRequest(request);
+		if (
+			SETTLE_RESOURCE_TYPES[record.resourceType] === true &&
+			(record.resourceType !== "document" || request.frame() === this.#page.mainFrame())
+		) {
+			this.#pendingRequests.set(request, record.seq);
+		}
 		if (request.isNavigationRequest() && request.frame() === this.#page.mainFrame()) {
 			this.#pendingNavigations.add(request);
 		}
@@ -228,6 +238,7 @@ export class BrowserNetworkManager {
 
 	readonly #onRequestFinished = (request: HTTPRequest): void => {
 		this.#pendingNavigations.delete(request);
+		this.#pendingRequests.delete(request);
 		const record = (request as RequestWithRecord)[REQUEST_RECORD];
 		if (!record) return;
 		record.durationMs = Math.max(0, Date.now() - record.ts);
@@ -235,6 +246,7 @@ export class BrowserNetworkManager {
 
 	readonly #onRequestFailed = (request: HTTPRequest): void => {
 		this.#pendingNavigations.delete(request);
+		this.#pendingRequests.delete(request);
 		const record = (request as RequestWithRecord)[REQUEST_RECORD];
 		if (!record) return;
 		record.failureText ??= request.failure()?.errorText ?? "request failed";
@@ -266,6 +278,7 @@ export class BrowserNetworkManager {
 		this.#page.off("requestfinished", this.#onRequestFinished);
 		this.#page.off("requestfailed", this.#onRequestFailed);
 		this.#pendingNavigations.clear();
+		this.#pendingRequests.clear();
 		if (this.#interceptionEnabled && !this.#page.isClosed()) {
 			await this.#page.setRequestInterception(false).catch(() => undefined);
 		}
@@ -358,6 +371,19 @@ export class BrowserNetworkManager {
 	clearRequests(): void {
 		this.#records.length = 0;
 		this.#recordsById.clear();
+	}
+
+	/** Sequence assigned to the next request, for an action's request boundary. */
+	get nextRequestSeq(): number {
+		return this.#nextSeq;
+	}
+
+	/** Whether a main-frame document, fetch, or XHR request at or after `since` is still in flight. */
+	hasPendingRequests(since: number): boolean {
+		for (const seq of this.#pendingRequests.values()) {
+			if (seq >= since) return true;
+		}
+		return false;
 	}
 
 	/** Begin collecting subsequent request-log entries for a HAR file. */

@@ -373,6 +373,12 @@ interface OpOptions {
 	 */
 	dialog?: "blocks" | "answers";
 }
+/** Longest a look waits for the effects of the actions before it to land. */
+const SETTLE_TIMEOUT_MS = 3_000;
+/** DOM silence that counts as settled once the action's requests have finished. */
+const SETTLE_QUIET_MS = 150;
+/** Poll cadence while requests started by an action are still in flight. */
+const SETTLE_POLL_MS = 50;
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
 export async function dispatchScroll(
@@ -1038,13 +1044,15 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
  * dispatch a duplicate retry through the stale handle. Puppeteer handles expose
  * `type()` but no `fill()`; the `fill()` semantics mirror the selector-based
  * `tab.fill()`: focus, clear any existing value, then type, or set the value of a
- * colour, date, time or range input directly.
+ * colour, date, time or range input directly. `queryGuard` runs the handle's reads (`text()`, `value()`, …)
+ * when they must not run under `guard`, which marks an action for the tab's next look.
  */
 export function toActionableHandle(
 	handle: ElementHandle,
 	guard?: HandleOpGuard,
 	invalidate?: () => Promise<void>,
 	uploads?: HandleUploads,
+	queryGuard: HandleOpGuard | undefined = guard,
 ): ActionableHandle {
 	const enriched = handle as HandleWithRawMethods;
 	const methods = enriched as unknown as Partial<Record<GuardedHandleMethod, RawHandleMethod>>;
@@ -1232,7 +1240,7 @@ export function toActionableHandle(
 			await uploadThroughHandle(enriched, originals, filePaths, guard, uploads, invalidate);
 		};
 	}
-	return enrichElementQueries(enriched, guard);
+	return enrichElementQueries(enriched, queryGuard ?? guard);
 }
 
 /**
@@ -1707,6 +1715,63 @@ async function resolveObservedElement(observed: ObservedElement): Promise<Elemen
 	}
 }
 
+/**
+ * Page-side wait, run in the isolated world: true once the document has parsed and its nodes,
+ * text and state attributes stay unchanged for `quietMs`; false when `timeoutMs` passes first.
+ * `style`/`class` churn (animations, spinners) does not count as change.
+ */
+function waitForQuietDom(quietMs: number, timeoutMs: number): Promise<boolean> {
+	const win = globalThis as unknown as {
+		document: {
+			readyState: string;
+			addEventListener(type: string, listener: () => void, options: { once: boolean }): void;
+		};
+		MutationObserver: new (callback: () => void) => {
+			observe(target: unknown, options: Record<string, unknown>): void;
+			disconnect(): void;
+		};
+		setTimeout(callback: () => void, ms: number): number;
+		clearTimeout(id: number | undefined): void;
+	};
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	let observer: { disconnect(): void } | undefined;
+	let quietTimer: number | undefined;
+	const finish = (quiet: boolean): void => {
+		observer?.disconnect();
+		win.clearTimeout(quietTimer);
+		win.clearTimeout(deadline);
+		resolve(quiet);
+	};
+	const deadline = win.setTimeout(() => finish(false), timeoutMs);
+	const restart = (): void => {
+		win.clearTimeout(quietTimer);
+		quietTimer = win.setTimeout(() => finish(true), quietMs);
+	};
+	const watch = (): void => {
+		const mutations = new win.MutationObserver(restart);
+		mutations.observe(win.document, {
+			subtree: true,
+			childList: true,
+			characterData: true,
+			attributeFilter: [
+				"hidden",
+				"disabled",
+				"open",
+				"value",
+				"checked",
+				"aria-hidden",
+				"aria-busy",
+				"aria-expanded",
+			],
+		});
+		observer = mutations;
+		restart();
+	};
+	if (win.document.readyState === "loading") win.document.addEventListener("DOMContentLoaded", watch, { once: true });
+	else watch();
+	return promise;
+}
+
 async function collectObservationEntries(
 	core: WorkerCore,
 	frame: Frame,
@@ -1847,6 +1912,11 @@ export class WorkerCore {
 	#webmcp?: WebMcpController;
 	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
+	/** Request boundary of the earliest action since the last look; the next look settles it. */
+	#actionRequestSeq?: number;
+	#actionGeneration = 0;
+	/** The settle a look started, which looks arriving while it runs wait for too. */
+	#settling?: Promise<void>;
 	readonly #recording = new RecordingController();
 	/** Set once the core stops for good: by {@link terminate}, or by a close. */
 	#stopped = false;
@@ -2789,7 +2859,32 @@ export class WorkerCore {
 				awaitNavigation: true,
 				dialog: "blocks",
 			});
+		// An action marks the next look for settling; `input` runs at once, as `op` does (raw input, navigations,
+		// handle and frame actions, dialogs), and `act` keeps the navigation barrier for selector actions.
+		const input = <T>(
+			label: string,
+			perOpMs: number,
+			fn: (sig: AbortSignal) => Promise<T>,
+			selectorOpts?: OpOptions,
+		): Promise<T> =>
+			op(
+				label,
+				perOpMs,
+				sig => {
+					this.#actionRequestSeq ??= this.#requireNetwork().nextRequestSeq;
+					this.#actionGeneration++;
+					return fn(sig);
+				},
+				selectorOpts,
+			);
 		const act = <T>(
+			label: string,
+			perOpMs: number,
+			fn: (sig: AbortSignal) => Promise<T>,
+			selectorOpts?: OpOptions,
+		): Promise<T> => input(label, perOpMs, fn, { dialog: "blocks", ...selectorOpts, awaitNavigation: true });
+		// Reads and waits that shared the navigation barrier with actions keep it without marking an action.
+		const documentOp = <T>(
 			label: string,
 			perOpMs: number,
 			fn: (sig: AbortSignal) => Promise<T>,
@@ -2797,10 +2892,11 @@ export class WorkerCore {
 		): Promise<T> => op(label, perOpMs, fn, { dialog: "blocks", ...selectorOpts, awaitNavigation: true });
 		// Hand user-facing handles the fail-fast per-op guard so their interactive
 		// methods (`.click()`, `.type()`, …) can't outrun the cell budget (issue #9535).
+		// Only the interactive methods count as actions for the next look's settle.
 		const enrich = (handle: ElementHandle): ActionableHandle =>
 			toActionableHandle(
 				handle,
-				(label, fn, dialog = "blocks") => op(label, actionOpMs, fn, { dialog }),
+				(label, fn, dialog = "blocks") => input(label, actionOpMs, fn, { dialog }),
 				async () => {
 					// Raw Puppeteer actions have no AbortSignal. Poison + dispose every
 					// cached handle and stop navigation before reporting a recoverable timeout.
@@ -2821,6 +2917,7 @@ export class WorkerCore {
 						),
 					deliverGuard: (label, fn) => op(label, budgetBound, fn),
 				},
+				(label, fn) => op(label, actionOpMs, fn),
 			);
 		return {
 			name,
@@ -2829,7 +2926,7 @@ export class WorkerCore {
 			url: () => page.url(),
 			title: () => read("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
-				op(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
+				input(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
 					this.#clearElementCache();
 					try {
 						// Default to "load" because dev servers with HMR/WS never reach networkidle.
@@ -2850,12 +2947,17 @@ export class WorkerCore {
 						throw err;
 					}
 				}),
-			observe: opts => read("tab.observe()", quickOpMs, sig => this.#collectObservation({ ...opts, signal: sig })),
+			observe: opts =>
+				read("tab.observe()", quickOpMs, async sig => {
+					await this.#settleAfterAction(sig, quickOpMs);
+					return await this.#collectObservation({ ...opts, signal: sig });
+				}),
 			ariaSnapshot: (selector, opts) =>
 				read(
 					selector ? `tab.ariaSnapshot(${JSON.stringify(selector)})` : "tab.ariaSnapshot()",
 					quickOpMs,
 					async sig => {
+						await this.#settleAfterAction(sig, quickOpMs);
 						let root: ElementHandle | null = null;
 						if (selector) {
 							root = (await untilAborted(sig, () =>
@@ -2991,7 +3093,7 @@ export class WorkerCore {
 			drag: (from, to) => act("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
 			waitFor: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
-				return act(
+				return documentOp(
 					`tab.waitFor(${JSON.stringify(selector)})`,
 					w,
 					async sig => enrich(await this.#resolveActionHandle(selector, w, sig)),
@@ -3001,7 +3103,7 @@ export class WorkerCore {
 			waitForSelector: async (selector, opts) => {
 				opts = selectorWaitOptions(opts);
 				const w = waitMs(opts?.timeout);
-				return act(
+				return documentOp(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
@@ -3045,7 +3147,7 @@ export class WorkerCore {
 			evaluate: (fn, ...args) =>
 				// User code may have side effects and may throw any message, so it waits for a requested navigation but
 				// never runs again.
-				act("tab.evaluate()", INF, sig =>
+				documentOp("tab.evaluate()", INF, sig =>
 					untilAborted(sig, () =>
 						evaluateInRealm(page.mainFrame().mainRealm(), fn as PageFunction, args, false, sig),
 					),
@@ -3106,7 +3208,7 @@ export class WorkerCore {
 			waitForUrl: (pattern, opts) => {
 				assertUrlPattern(pattern);
 				const w = waitMs(opts?.timeout);
-				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
+				return documentOp("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
 			},
 			waitForResponse: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
@@ -3119,7 +3221,7 @@ export class WorkerCore {
 				op("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig), { awaitNavigation: true }),
 			setCookies: (...cookies) => op("tab.setCookies()", actionOpMs, sig => setPageCookies(page, cookies, sig)),
 			clearCookies: opts => op("tab.clearCookies()", actionOpMs, sig => clearPageCookies(page, opts, sig)),
-			storage: (kind, opts) => act("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
+			storage: (kind, opts) => documentOp("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
 			setStorage: (kind, keyOrEntries, value) =>
 				op("tab.setStorage()", actionOpMs, sig => setPageStorage(page, kind, keyOrEntries, value, sig)),
 			clearStorage: kind => op("tab.clearStorage()", actionOpMs, sig => clearPageStorage(page, kind, sig)),
@@ -3172,28 +3274,28 @@ export class WorkerCore {
 			reactRenders: opts => op("tab.reactRenders()", quickOpMs, sig => collectReactRenders(page, opts, sig)),
 			reactSuspense: opts => op("tab.reactSuspense()", quickOpMs, sig => readReactSuspense(page, opts, sig)),
 			back: opts =>
-				op("tab.back()", INF, async sig => {
+				input("tab.back()", INF, async sig => {
 					this.#clearElementCache();
 					return await traverseHistory(page, "back", opts?.waitUntil ?? "load", budgetBound, sig);
 				}),
 			forward: opts =>
-				op("tab.forward()", INF, async sig => {
+				input("tab.forward()", INF, async sig => {
 					this.#clearElementCache();
 					return await traverseHistory(page, "forward", opts?.waitUntil ?? "load", budgetBound, sig);
 				}),
 			reload: opts =>
-				op("tab.reload()", INF, async sig => {
+				input("tab.reload()", INF, async sig => {
 					this.#clearElementCache();
 					return await reloadPage(page, opts?.waitUntil ?? "load", budgetBound, sig);
 				}),
 			pushState: url =>
-				op(`tab.pushState(${JSON.stringify(url)})`, actionOpMs, async sig => {
+				input(`tab.pushState(${JSON.stringify(url)})`, actionOpMs, async sig => {
 					this.#clearElementCache();
 					return await pushState(page, url, sig);
 				}),
-			frames: () => act("tab.frames()", quickOpMs, sig => listFrames(page, sig)),
+			frames: () => documentOp("tab.frames()", quickOpMs, sig => listFrames(page, sig)),
 			frame: selectorOrNameOrUrl =>
-				act(`tab.frame(${JSON.stringify(selectorOrNameOrUrl)})`, quickOpMs, async sig => {
+				documentOp(`tab.frame(${JSON.stringify(selectorOrNameOrUrl)})`, quickOpMs, async sig => {
 					const frame = await resolveFrame(page, selectorOrNameOrUrl, normalizeSelector, sig);
 					return createFrameApi(frame, {
 						quickOpMs,
@@ -3202,6 +3304,7 @@ export class WorkerCore {
 						normalizeSelector,
 						waitMs,
 						op,
+						act: input,
 						captureScreenshot: (target, selector, screenshotSignal) =>
 							captureFrameScreenshot(
 								target,
@@ -3220,7 +3323,9 @@ export class WorkerCore {
 					return this.#requireDialogs().state();
 				}),
 			handleDialog: opts =>
-				op("tab.handleDialog()", actionOpMs, sig => untilAborted(sig, () => this.#requireDialogs().handle(opts))),
+				input("tab.handleDialog()", actionOpMs, sig =>
+					untilAborted(sig, () => this.#requireDialogs().handle(opts)),
+				),
 			setDialogs: policy =>
 				op("tab.setDialogs()", actionOpMs, sig =>
 					untilAborted(sig, () => this.#requireDialogs().setPolicy(policy)),
@@ -3336,7 +3441,7 @@ export class WorkerCore {
 				),
 			waitForText: (text, opts) => {
 				const w = waitMs(opts?.timeout);
-				return act(`tab.waitForText(${JSON.stringify(text)})`, w, sig =>
+				return documentOp(`tab.waitForText(${JSON.stringify(text)})`, w, sig =>
 					waitForPageText(page, text, {
 						timeout: w,
 						selector: opts?.selector ? normalizeSelector(opts.selector) : undefined,
@@ -3431,32 +3536,32 @@ export class WorkerCore {
 				),
 			// A press is held from when it lands; one cut off on its way is released by the helper itself.
 			keyDown: key =>
-				op(`tab.keyDown(${JSON.stringify(key)})`, actionOpMs, async sig => {
+				input(`tab.keyDown(${JSON.stringify(key)})`, actionOpMs, async sig => {
 					await keyDown(page, key, sig);
 					this.#heldKeys.add(key);
 				}),
 			keyUp: key =>
-				op(`tab.keyUp(${JSON.stringify(key)})`, actionOpMs, sig => {
+				input(`tab.keyUp(${JSON.stringify(key)})`, actionOpMs, sig => {
 					this.#heldKeys.delete(key);
 					return keyUp(page, key, sig);
 				}),
-			mouseMove: (x, y, opts) => op("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
+			mouseMove: (x, y, opts) => input("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
 			mouseDown: opts =>
-				op("tab.mouseDown()", actionOpMs, async sig => {
+				input("tab.mouseDown()", actionOpMs, async sig => {
 					await mouseDown(page, opts, sig);
 					this.#heldButtons.add(opts?.button ?? "left");
 				}),
 			mouseUp: opts =>
-				op("tab.mouseUp()", actionOpMs, sig => {
+				input("tab.mouseUp()", actionOpMs, sig => {
 					this.#heldButtons.delete(opts?.button ?? "left");
 					return mouseUp(page, opts, sig);
 				}),
 			// Raw pointer input runs at once, as on main: sent the moment a new document had parsed, a click did not
 			// reach it.
-			clickAt: (x, y, opts) => op("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
-			wheel: (deltaX, deltaY) => op("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
+			clickAt: (x, y, opts) => input("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
+			wheel: (deltaX, deltaY) => input("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
 			highlight: (selector, opts) =>
-				act(
+				documentOp(
 					`tab.highlight(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -3486,8 +3591,61 @@ export class WorkerCore {
 				),
 			clipboardCopy: () => op("tab.clipboardCopy()", actionOpMs, sig => this.#requireEmulation().clipboardCopy(sig)),
 			clipboardPaste: () =>
-				op("tab.clipboardPaste()", actionOpMs, sig => this.#requireEmulation().clipboardPaste(sig)),
+				input("tab.clipboardPaste()", actionOpMs, sig => this.#requireEmulation().clipboardPaste(sig)),
 		};
+	}
+
+	/**
+	 * Before a look, let the actions since the previous look land: the document, fetch and XHR
+	 * requests they started finish, and the DOM then stays quiet for {@link SETTLE_QUIET_MS}. Bounded
+	 * by {@link SETTLE_TIMEOUT_MS}, and by half the look's own `perOpMs` so a short cell still gets its
+	 * page, after which the page is read as it is. A look with no action before it returns at once; a
+	 * look arriving while another one settles waits for that settle.
+	 */
+	async #settleAfterAction(signal: AbortSignal, perOpMs: number): Promise<void> {
+		const since = this.#actionRequestSeq;
+		if (!this.#settling && since !== undefined) {
+			const settling = this.#settle(since, Math.min(SETTLE_TIMEOUT_MS, perOpMs / 2)).finally(() => {
+				this.#actionRequestSeq = undefined;
+				if (this.#settling === settling) this.#settling = undefined;
+			});
+			this.#settling = settling;
+		}
+		const settling = this.#settling;
+		if (settling) await untilAborted(signal, () => settling);
+	}
+
+	/** Wait out {@link #settleAfterAction}'s conditions for requests at or after sequence `since`. */
+	async #settle(since: number, boundMs: number): Promise<void> {
+		const page = this.#requirePage();
+		const network = this.#requireNetwork();
+		const deadline = Date.now() + boundMs;
+		while (!this.#stopped && Date.now() < deadline) {
+			const generation = this.#actionGeneration;
+			if (network.hasPendingRequests(since)) {
+				await Bun.sleep(SETTLE_POLL_MS);
+				continue;
+			}
+			const remaining = deadline - Date.now();
+			// A navigation that commits mid-wait destroys the context; the loop then waits in the new document.
+			const quiet = await withTimeout(
+				Promise.all(page.frames().map(frame => frame.evaluate(waitForQuietDom, SETTLE_QUIET_MS, remaining))),
+				remaining + SETTLE_POLL_MS,
+				"settle wait timed out",
+			).catch(async () => {
+				// The context went away (a navigation commit) or the page refused the call: retry shortly.
+				await Bun.sleep(SETTLE_POLL_MS);
+				return false as const;
+			});
+			if (
+				quiet &&
+				quiet.every(Boolean) &&
+				generation === this.#actionGeneration &&
+				!network.hasPendingRequests(since)
+			) {
+				return;
+			}
+		}
 	}
 
 	async #collectObservation(options: {
