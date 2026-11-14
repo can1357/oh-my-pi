@@ -7,6 +7,8 @@
 ### Added
 
 - Added `setUnpausedProviders()` to `@oh-my-pi/pi-ai/oauth`, allowing applications to re-enable providers paused by authentication rules; loaded credential pools and extension logins recognize the change on their next read.
+- Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- Added `refresh: "valid-only"` to `oauth.accessAll()`: it refreshes no account and reports one whose token needs a refresh as `{ ok: false, skipped: "expired" }` ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

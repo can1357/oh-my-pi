@@ -99,7 +99,10 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 * command-backed credentials that must wait until an actual request.
 	 */
 	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
-	/** Optional dynamic endpoint fetcher. */
+	/**
+	 * Optional dynamic endpoint fetcher. A result passed through
+	 * {@link markPartialDynamicModels} is a subset of the provider's catalog.
+	 */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
@@ -351,12 +354,17 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
+	// A partial roster adds its rows but never stands for the whole catalog: it
+	// prunes nothing, keeps prior cached rows, and is cached non-authoritative.
+	const dynamicFetchPartial = dynamicFetch?.partial === true;
 	const anyRemoteFetchSucceeded = modelsDevFetchSucceeded || dynamicFetchSucceeded;
 	const allConfiguredRemoteFetchesSucceeded =
 		hasRemoteFetcher &&
+		!dynamicFetchPartial &&
 		(!hasModelsDevFetcher || modelsDevFetchSucceeded) &&
 		(!hasDynamicFetcher || dynamicFetchSucceeded);
-	const authoritativeDynamicFetchSucceeded = dynamicModelsAuthoritative && dynamicFetchSucceeded;
+	const authoritativeDynamicFetchSucceeded =
+		dynamicModelsAuthoritative && dynamicFetchSucceeded && !dynamicFetchPartial;
 	const remoteResolutionComplete = authoritativeDynamicFetchSucceeded || allConfiguredRemoteFetchesSucceeded;
 	const preparedCacheModels = remoteResolutionComplete
 		? []
@@ -377,6 +385,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// models.dev snapshots may be empty for one provider and remain authoritative.
 	const cacheAuthoritative = hasDynamicFetcher
 		? dynamicFetchSucceeded &&
+			!dynamicFetchPartial &&
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
@@ -530,13 +539,27 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 	}
 }
 
-/** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
+const partialDynamicResults = new WeakSet<object>();
+
+/**
+ * Mark a `fetchDynamicModels` result as covering only part of the provider's
+ * catalog (e.g. some accounts were not read). The manager then merges it
+ * without pruning, keeps prior cached rows, and caches it non-authoritative so
+ * the short retry applies.
+ */
+export function markPartialDynamicModels<T extends readonly object[]>(models: T): T {
+	partialDynamicResults.add(models);
+	return models;
+}
+
+/** The endpoint's catalog (`models: null` when it answered none), whether it is partial, and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
 	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
+): Promise<{ models: DiscoveredModelSet<TApi> | null; partial?: boolean; error?: string }> {
 	try {
 		const models = await fetcher();
-		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+		if (models === null) return { models: null };
+		return { models: buildDiscoveredModelSpecs<TApi>(models), partial: partialDynamicResults.has(models) };
 	} catch (error) {
 		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}

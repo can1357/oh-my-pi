@@ -1,14 +1,19 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
-import { assertProviderEnabled, getOAuthProvider, loginRiskWarning } from "../registry/oauth";
+import {
+	assertProviderEnabled,
+	getOAuthProvider,
+	loginRiskWarning,
+	normalizeOAuthCredentialExpiry,
+} from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
-import type { OAuthRefresher } from "./refresh";
+import { OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
 import type { CredentialSelector } from "./select";
 import type {
 	AuthAccountPolicy,
@@ -297,7 +302,8 @@ export class OAuthAccounts implements OAuthApi {
 	 * Refreshes credentials through the same broker/local path as
 	 * {@link OAuthAccounts.access}, but does not rank, round-robin, or
 	 * stop after the first usable account. Intended for diagnostics that must
-	 * exercise each stored account exactly once.
+	 * exercise each stored account exactly once. With `refresh: "valid-only"`
+	 * no account is refreshed; one that would need it is reported as skipped.
 	 */
 	async accessAll(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
 		if (this.#deps.overrides.has(provider)) {
@@ -305,9 +311,27 @@ export class OAuthAccounts implements OAuthApi {
 		}
 		const providerKey = providerTypeKey(provider, "oauth");
 		return Promise.all(
-			this.#getStoredOAuthSelections(provider).map(selection =>
-				this.#resolveStoredOAuthAccess(provider, selection, providerKey, options),
-			),
+			this.#getStoredOAuthSelections(provider).map(selection => {
+				if (options?.refresh === "valid-only") {
+					const { expires } = normalizeOAuthCredentialExpiry(provider, selection.credential);
+					// Same freshness test as the refresher: anything it would refresh is skipped.
+					if (Date.now() + OAUTH_REFRESH_SKEW_MS >= expires) {
+						return {
+							ok: false,
+							skipped: "expired",
+							credentialId: selection.credentialId,
+							accountId: selection.credential.accountId,
+							email: selection.credential.email,
+							projectId: selection.credential.projectId,
+							enterpriseUrl: selection.credential.enterpriseUrl,
+							orgId: selection.credential.orgId,
+							orgName: selection.credential.orgName,
+							error: "OAuth access token needs a refresh",
+						} satisfies OAuthAccessResolution;
+					}
+				}
+				return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);
+			}),
 		);
 	}
 

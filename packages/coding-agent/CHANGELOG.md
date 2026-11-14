@@ -37,6 +37,13 @@
 - Language servers now recognize edits made shortly after a file is created, including on macOS.
 - Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
 - Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
+- Fixed Google Antigravity model discovery refreshing every stored account at once with no request behind it; it now reads the accounts whose token is still valid plus the one about to be used, and a roster that left an expired account out adds models without pruning and retries after a short backoff ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
+- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
+- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
+- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
+- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
+- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
+- A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
 
 ## [18.20.0] - 2026-11-12
 
