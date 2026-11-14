@@ -5,9 +5,9 @@ import type { DescribeContext, NativeNode } from "../native/node";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { getThemeEpoch, type Theme } from "../theme/theme";
 import type { Component } from "../tui";
-import { getPaddingX, getWidthConfigEpoch } from "../utils";
+import { getPaddingX, getWidthConfigEpoch, padding } from "../utils";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
-import { getSixelLineMask } from "./sixel";
+import { classifySixelRow, getSixelLineMask } from "./sixel";
 import { formatExpandHint, replaceTabs } from "./render-utils";
 
 /** Which side of an output stream remains visible when the pane is capped. */
@@ -38,6 +38,14 @@ export interface OutputPaneFormatResult {
 	lines: readonly string[];
 	hiddenCount: number;
 	hasSixel: boolean;
+	/**
+	 * Aligned with `lines`: the rows that carry a SIXEL payload. Absent when no
+	 * row does, so payload-free streams never pay for the lookup, and left
+	 * absent by the visual caps, whose wrapped rows no longer map back to a
+	 * source row. A payload row must be emitted byte-for-byte by the caller:
+	 * the wrap stage would split its DCS string.
+	 */
+	sixelRows?: boolean[];
 }
 
 /**
@@ -77,23 +85,67 @@ export function formatOutputPaneLines(options: OutputPaneFormatOptions, theme: T
 	const limit = hasSixel && options.uncapSixel ? undefined : configuredLimit;
 	let visibleLines: readonly string[] = styledLines;
 	let hiddenCount = 0;
+	let sixelRows: boolean[] | undefined = hasSixel ? styledLines.map((_, i) => sixelMask?.[i] === true) : undefined;
 
 	if (limit !== undefined && Number.isFinite(limit)) {
 		const boundedLimit = Math.max(0, Math.floor(limit));
 		if (boundedLimit === 0) {
 			visibleLines = [];
+			sixelRows = undefined;
 			hiddenCount = styledLines.length;
+		} else if (hasSixel) {
+			// A payload row is never wrapped or cut. Routing a DCS through the text
+			// wrapper splits the payload across rows and pads it with spaces, and a
+			// multi-row frame sliced mid-sequence leaves the host terminal inside an
+			// open string that swallows everything after it. The budget therefore
+			// counts the surrounding text rows while every payload row is kept
+			// whole — an eval tool card reaching this with `visual` set used to lose
+			// the frame entirely.
+			const textRowCount = sixelRows?.reduce((count, isSixel) => (isSixel ? count : count + 1), 0) ?? 0;
+			if (textRowCount > boundedLimit) {
+				// Text rows kept, counted from the capped edge; payload rows are
+				// always kept, so only this window decides what is hidden.
+				const firstKept = edge === "tail" ? textRowCount - boundedLimit : 0;
+				const keptLines: string[] = [];
+				const keptMask: boolean[] = [];
+				let textIndex = 0;
+				for (let index = 0; index < styledLines.length; index++) {
+					const isSixel = sixelRows?.[index] === true;
+					if (isSixel) {
+						keptLines.push(styledLines[index]!);
+						keptMask.push(true);
+						continue;
+					}
+					const keep = textIndex >= firstKept && textIndex < firstKept + boundedLimit;
+					textIndex++;
+					if (!keep) continue;
+					keptLines.push(styledLines[index]!);
+					keptMask.push(false);
+				}
+				visibleLines = keptLines;
+				sixelRows = keptMask;
+				hiddenCount = textRowCount - boundedLimit;
+			}
 		} else if (options.visual && edge === "tail") {
+			// The wrapped output is capped below, so the payload survives whole in
+			// the visual window but its position among the surviving rows is no
+			// longer derivable here. The mask is only reported for the paths that
+			// preserve the row-for-row correspondence this caller needs.
 			const visual = truncateToVisualLines(styledLines.join("\n"), boundedLimit, Math.max(1, options.width ?? 1));
 			visibleLines = visual.visualLines;
+			sixelRows = undefined;
 			hiddenCount = visual.skippedCount;
 		} else if (options.visual) {
 			const rendered = new Text(styledLines.join("\n"), 0, 0).render(Math.max(1, options.width ?? 1));
 			visibleLines = rendered.slice(0, boundedLimit);
+			sixelRows = undefined;
 			hiddenCount = Math.max(0, rendered.length - visibleLines.length);
 		} else if (styledLines.length > boundedLimit) {
 			hiddenCount = styledLines.length - boundedLimit;
 			visibleLines = edge === "tail" ? styledLines.slice(-boundedLimit) : styledLines.slice(0, boundedLimit);
+			if (sixelRows) {
+				sixelRows = edge === "tail" ? sixelRows.slice(-boundedLimit) : sixelRows.slice(0, boundedLimit);
+			}
 		}
 	}
 
@@ -114,7 +166,7 @@ export function formatOutputPaneLines(options: OutputPaneFormatOptions, theme: T
 		if (hint) lines.push(hint);
 	}
 
-	return { lines, hiddenCount, hasSixel };
+	return { lines, hiddenCount, hasSixel, sixelRows };
 }
 
 /** Display policy for {@link describeOutputLines}. */
@@ -158,18 +210,24 @@ export class OutputPane implements Component {
 	#options: OutputPaneOptions;
 	#lines: string[] = [];
 	#pendingCarriageReturn = false;
+	// DCS state that entered the row currently being appended to. A streamed row
+	// is re-classified every time a chunk grows it, so the classification is
+	// derived from this entry snapshot (idempotent per row) instead of advancing
+	// a shared classifier, which would reclassify a continuation row as plain
+	// text once its terminator had already been seen and clamp the payload.
+	#sixelRowState = false;
 	#text: Text;
 	/** The content last handed to the inner `Text`, compared by identity. */
 	#renderContent: string | undefined;
 	#native: NativeNode | undefined;
 	/**
-	 * The styled-and-joined content of the last render, kept with the inputs
-	 * that produced it. A pane re-renders every frame while it sits in the live
+	 * The capped and styled rows of the last render, kept with the inputs that
+	 * produced them. A pane re-renders every frame while it sits in the live
 	 * transcript tail, but its content only changes when its rows, presentation,
 	 * width, theme, or image protocol change — so the styling, joining and
 	 * hashing would otherwise be repeated work on every frame.
 	 */
-	#memo = new Memo<string>();
+	#memo = new Memo<OutputPaneFormatResult>();
 
 	constructor(theme: Theme, options: OutputPaneOptions, text = "") {
 		this.#theme = theme;
@@ -185,8 +243,17 @@ export class OutputPane implements Component {
 
 	/** Replace the complete output snapshot with caller-owned immutable rows. */
 	setLines(lines: readonly string[]): void {
+		// The snapshot is a complete row stream: sequence state restarts from its
+		// first row, and its last row's exit state stays in force so a later
+		// append that continues that row is still classified as payload.
+		let inSequence = false;
 		const normalizeLine = this.#options.normalizeLine;
-		const normalized = normalizeLine ? lines.map(line => normalizeLine(line)) : [...lines];
+		const normalized = lines.map(line => {
+			const row = classifySixelRow(line, inSequence);
+			inSequence = row.inSequenceAtExit;
+			return row.isSixel || normalizeLine === undefined ? line : normalizeLine(line);
+		});
+		this.#sixelRowState = inSequence;
 		this.#lines = this.#clampStoredLines(normalized);
 		this.#pendingCarriageReturn = false;
 		this.invalidate();
@@ -317,24 +384,55 @@ export class OutputPane implements Component {
 	render(width: number): readonly string[] {
 		const paddingX = getPaddingX(this.#options.paddingX ?? 0);
 		const contentWidth = Math.max(1, width - paddingX * 2);
-		const content = this.#memo.get([...this.#renderDeps(), contentWidth], () => {
-			const formatted = formatOutputPaneLines(
+		const formatted = this.#memo.get([...this.#renderDeps(), contentWidth], () =>
+			formatOutputPaneLines(
 				{
 					...this.#options,
 					lines: this.#lines,
 					width: contentWidth,
 				},
 				this.#theme,
-			);
-			return `${this.#options.leadingBlank && formatted.lines.length > 0 ? "\n" : ""}${formatted.lines.join("\n")}`;
-		});
-		// The memo hands back the same string while its inputs hold, so the
-		// identity check is a pointer compare — no re-hash of the content.
-		if (content !== this.#renderContent) {
-			this.#renderContent = content;
-			this.#text.setText(content);
+			),
+		);
+		const sixelRows = formatted.sixelRows;
+		if (sixelRows === undefined || !sixelRows.some(Boolean)) {
+			const content = `${this.#options.leadingBlank && formatted.lines.length > 0 ? "\n" : ""}${formatted.lines.join("\n")}`;
+			// The memo hands back the same rows while its inputs hold, so the
+			// identity check is a pointer compare — no re-hash of the content.
+			if (content !== this.#renderContent) {
+				this.#renderContent = content;
+				this.#text.setText(content);
+			}
+			return this.#text.render(width);
 		}
-		return this.#text.render(width);
+		// A payload row may not go through `Text`: `wrapTextWithAnsi` treats the
+		// DCS payload as printable text, so a frame wider than the pane is split
+		// across rows and padded with spaces — the terminal then receives sixel
+		// data containing newlines and blanks and the image is garbled or
+		// dropped. Emit it byte-for-byte and wrap only the rows around it.
+		const rows: string[] = [];
+		let run: string[] = this.#options.leadingBlank === true && formatted.lines.length > 0 ? [""] : [];
+		const flush = (): void => {
+			if (run.length === 0) return;
+			this.#text.setText(run.join("\n"));
+			rows.push(...this.#text.render(width));
+			run = [];
+		};
+		for (let index = 0; index < formatted.lines.length; index++) {
+			const line = formatted.lines[index]!;
+			if (sixelRows[index] === true) {
+				flush();
+				// The payload row bypasses `Text`, so the pane's left margin is
+				// missing on it: the image would start at column 0 while every
+				// other row starts one cell in. The margin goes outside the DCS,
+				// so the payload itself stays byte-for-byte.
+				rows.push(paddingX > 0 ? padding(paddingX) + line : line);
+				continue;
+			}
+			run.push(line);
+		}
+		flush();
+		return rows;
 	}
 
 	invalidate(): void {
@@ -360,12 +458,22 @@ export class OutputPane implements Component {
 
 	#replaceTail(text: string): void {
 		const normalizeLine = this.#options.normalizeLine;
-		const normalized = normalizeLine ? normalizeLine(text) : text;
+		// A payload row keeps its bytes: clamping it would cut the DCS sequence.
+		// The classification is derived from the state that entered this row, so
+		// it holds as the row grows across appends.
+		const isSixelRow = classifySixelRow(text, this.#sixelRowState).isSixel;
+		const normalized = normalizeLine && !isSixelRow ? normalizeLine(text) : text;
 		if (this.#lines.length === 0) this.#lines.push(normalized);
 		else this.#lines[this.#lines.length - 1] = normalized;
 	}
 
 	#startLine(): void {
+		// The row being closed is complete here (appends already landed on it), so
+		// its exit state is the state that enters the row that starts now.
+		const last = this.#lines[this.#lines.length - 1];
+		if (last !== undefined) {
+			this.#sixelRowState = classifySixelRow(last, this.#sixelRowState).inSequenceAtExit;
+		}
 		if (this.#lines.length === 0) this.#lines.push("");
 		this.#lines.push("");
 	}

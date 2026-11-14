@@ -169,6 +169,7 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+- Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, a frame already rendered raw no longer draws its decoded copy again, a frame now ends only at ST so a BEL inside it no longer closes the sequence early (a cancelled frame is dropped), and a frame emitted at a column the row already passed keeps that column ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
