@@ -15,7 +15,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveMermaidAscii } from "./mermaid-cache";
 import type { SlashCommandIconName } from "./symbols";
-import { ensureThemeSync, theme } from "./theme";
+import { composerTextColor, ensureThemeSync, theme } from "./theme";
 import type { Theme } from "./theme-class";
 
 // ============================================================================
@@ -412,7 +412,7 @@ export function getEditorTheme(): EditorTheme {
 		accentColor: (text: string) => theme.fg("accent", text),
 		surfaceColor: (text: string) =>
 			theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", text)),
-		textColor: (text: string) => theme.fgResolved("text", text),
+		textColor: composerTextColor,
 		selectList: getSelectListTheme(),
 		symbols: getSymbolTheme(),
 		hintStyle: (text: string) => theme.fg("dim", text),
