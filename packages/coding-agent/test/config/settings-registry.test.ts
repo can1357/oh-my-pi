@@ -496,4 +496,58 @@ describe("settings registry", () => {
 			await dir.remove();
 		}
 	});
+
+	it("keeps every bash.patterns rule a path-scoped entry carries inside its scope", async () => {
+		const dir = TempDir.createSync("@omp-path-scoped-bash-deny-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const repoA = path.join(dir.path(), "repo-a");
+			const prod = path.join(repoA, "prod");
+			const other = path.join(dir.path(), "other");
+			fs.mkdirSync(prod, { recursive: true });
+			fs.mkdirSync(other, { recursive: true });
+
+			// `path: ~` is YAML null, so that entry names no usable path.
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				[
+					"bash:",
+					"  patterns:",
+					`    - path: ${JSON.stringify(repoA)}`,
+					'      match: "rm -rf *"',
+					"      approval: deny",
+					"      patterns:",
+					'        - match: "make*"',
+					"          approval: allow",
+					`        - path: ${JSON.stringify(prod)}`,
+					'          match: "terraform apply*"',
+					"          approval: deny",
+					"    - path: ~",
+					'      match: "curl *"',
+					"      approval: prompt",
+					"",
+				].join("\n"),
+			);
+
+			const settings = await Settings.loadIsolated({ cwd: prod, agentDir });
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "make*", approval: "allow" },
+				{ match: "terraform apply*", approval: "deny" },
+				{ path: null, match: "curl *", approval: "prompt" },
+			]);
+
+			await settings.reloadForCwd(repoA);
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "make*", approval: "allow" },
+				{ path: null, match: "curl *", approval: "prompt" },
+			]);
+
+			await settings.reloadForCwd(other);
+			expect(cfgBashPatterns.get(settings)).toEqual([{ path: null, match: "curl *", approval: "prompt" }]);
+		} finally {
+			await dir.remove();
+		}
+	});
 });

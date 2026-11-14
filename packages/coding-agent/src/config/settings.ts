@@ -546,23 +546,56 @@ function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setti
 	}
 }
 
-const PATH_SCOPE_KEYS = ["path", "paths", "pathPrefix", "pathPrefixes"] as const;
-
-function hasPathScopeKey(entry: object): boolean {
-	return PATH_SCOPE_KEYS.some(key => Object.hasOwn(entry, key));
+/** Path prefixes a path-scoped array entry names under `path`, `paths`, `pathPrefix`, `pathPrefixes`. */
+function pathScopePrefixes(entry: Record<string, unknown>): string[] {
+	return [
+		...stringArrayFromUnknown(entry.path),
+		...stringArrayFromUnknown(entry.paths),
+		...stringArrayFromUnknown(entry.pathPrefix),
+		...stringArrayFromUnknown(entry.pathPrefixes),
+	];
 }
 
-function objectArrayFromUnknown(value: unknown): Record<string, unknown>[] {
-	if (!Array.isArray(value)) return [];
-	return value.filter(
-		(item): item is Record<string, unknown> =>
-			typeof item === "object" && item !== null && !Array.isArray(item) && !hasPathScopeKey(item),
-	);
-}
+/**
+ * Appends the object `entries` that apply at `cwd` to `resolved`; returns whether any entry is unscoped.
+ * An entry naming no path prefix (none of the scope keys, or only unusable values such as YAML's
+ * `path: ~` = null) is unscoped and passes through unchanged. A scoped entry whose prefix covers `cwd`
+ * contributes its remaining fields as an inline rule, then its nested `values`/`items`/`valuesKey`
+ * entries resolved the same way, so no rule it carries is dropped inside its scope.
+ */
+function resolvePathScopedObjects(
+	entries: readonly unknown[],
+	valuesKey: string,
+	cwd: string,
+	resolved: unknown[],
+): boolean {
+	let hasUnscopedEntry = false;
+	for (const entry of entries) {
+		if (!isRecord(entry)) continue;
+		const prefixes = pathScopePrefixes(entry);
+		if (prefixes.length === 0) {
+			hasUnscopedEntry = true;
+			resolved.push(entry);
+			continue;
+		}
+		if (!prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
 
-function stripPathScopeKeys(entry: Record<string, unknown>): Record<string, unknown> {
-	const { path: _path, paths: _paths, pathPrefix: _prefix, pathPrefixes: _prefixes, ...rest } = entry;
-	return rest;
+		const {
+			path: _path,
+			paths: _paths,
+			pathPrefix: _prefix,
+			pathPrefixes: _prefixes,
+			values,
+			items,
+			[valuesKey]: nested,
+			...inlineRule
+		} = entry;
+		if (Object.keys(inlineRule).length > 0) resolved.push(inlineRule);
+		for (const list of [values, items, nested]) {
+			if (Array.isArray(list)) resolvePathScopedObjects(list, valuesKey, cwd, resolved);
+		}
+	}
+	return hasUnscopedEntry;
 }
 
 /** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
@@ -576,57 +609,32 @@ function resolvePathScopedArray(setting: AnySetting, value: unknown, cwd: string
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
 
-	const itemType = scope.itemType ?? "string";
-	const extract = itemType === "object" ? objectArrayFromUnknown : stringArrayFromUnknown;
 	const resolved: unknown[] = [];
-	let hasUnscopedEntry = false;
+	if (scope.itemType === "object") {
+		const hasUnscopedEntry = resolvePathScopedObjects(value, scope.valuesKey, cwd, resolved);
+		// A list of only scoped entries adds to the default (the built-in interceptor rules) rather than replacing it.
+		if (value.length > 0 && !hasUnscopedEntry && setting.definition.type === "array") {
+			resolved.push(...setting.definition.default);
+		}
+		return resolved;
+	}
+
 	for (const entry of value) {
-		if (itemType === "string" && typeof entry === "string") {
-			hasUnscopedEntry = true;
+		if (typeof entry === "string") {
 			resolved.push(entry);
 			continue;
 		}
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+		if (!isRecord(entry)) continue;
 
-		const scoped: Record<string, unknown> = entry;
-		if (itemType === "object" && !hasPathScopeKey(scoped)) {
-			hasUnscopedEntry = true;
-			resolved.push(scoped);
-			continue;
-		}
-
-		const prefixes = [
-			...stringArrayFromUnknown(scoped.path),
-			...stringArrayFromUnknown(scoped.paths),
-			...stringArrayFromUnknown(scoped.pathPrefix),
-			...stringArrayFromUnknown(scoped.pathPrefixes),
-		];
+		const prefixes = pathScopePrefixes(entry);
 		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
 
-		const extracted = [...extract(scoped.values), ...extract(scoped.items), ...extract(scoped[scope.valuesKey])];
-		if (extracted.length > 0) {
-			resolved.push(...extracted);
-		} else if (
-			itemType === "object" &&
-			!Object.hasOwn(scoped, "values") &&
-			!Object.hasOwn(scoped, "items") &&
-			!Object.hasOwn(scoped, scope.valuesKey)
-		) {
-			const inlineRule = stripPathScopeKeys(scoped);
-			if (Object.keys(inlineRule).length > 0) resolved.push(inlineRule);
-		}
+		resolved.push(
+			...stringArrayFromUnknown(entry.values),
+			...stringArrayFromUnknown(entry.items),
+			...stringArrayFromUnknown(entry[scope.valuesKey]),
+		);
 	}
-
-	if (
-		itemType === "object" &&
-		value.length > 0 &&
-		!hasUnscopedEntry &&
-		setting.definition.type === "array" &&
-		setting.definition.default.length > 0
-	) {
-		resolved.push(...setting.definition.default);
-	}
-
 	return resolved;
 }
 
