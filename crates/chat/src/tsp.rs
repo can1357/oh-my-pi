@@ -25,6 +25,12 @@ use crate::{
 	transcript::REVEAL_HORIZON,
 };
 
+mod effort;
+pub mod prefs;
+
+pub use effort::THINKING_CYCLE;
+pub use prefs::PREFS_ID;
+
 const SURFACE_ID: &str = "omp-chat";
 const COVER_ID: &str = "omp-screen";
 const MAIN_ID: &str = "main";
@@ -60,13 +66,13 @@ struct Cover {
 	/// cover cannot be taken for one of the next.
 	next_seq: u64,
 	acked:    u64,
-	/// Id of the mounted view root; empty when none is.
-	view:     Str,
+	/// The mounted view as last sent; `None` when none is.
+	view:     Option<Node>,
 }
 
 impl Cover {
 	fn new() -> Self {
-		Self { opened: false, next_seq: 1, acked: 0, view: Str::default() }
+		Self { opened: false, next_seq: 1, acked: 0, view: None }
 	}
 
 	fn credit_available(&self, credits: u32) -> bool {
@@ -79,7 +85,7 @@ impl Cover {
 	fn forget(&mut self) {
 		self.opened = false;
 		self.acked = self.next_seq.saturating_sub(1);
-		self.view = Str::default();
+		self.view = None;
 	}
 }
 
@@ -109,6 +115,11 @@ pub struct Surface {
 	composer_cursor:  u32,
 	status_mounted:   bool,
 	status_text:      Str,
+	/// Thinking effort the status band should show; `None` when the model
+	/// cannot reason.
+	effort:           Option<Str>,
+	/// The effort level and glyph kind of the mounted status band.
+	status_effort:    Option<(Str, Option<Kind>)>,
 	approval_id:      Str,
 	form_id:          Str,
 	cover:            Cover,
@@ -237,11 +248,28 @@ impl Surface {
 			composer_cursor: u32::MAX,
 			status_mounted: false,
 			status_text: Str::default(),
+			effort: None,
+			status_effort: None,
 			approval_id: Str::default(),
 			form_id: Str::default(),
 			cover: Cover::new(),
 			events: VecDeque::new(),
 		}
+	}
+
+	/// Sets the thinking effort the status band shows from the next
+	/// [`Self::present`]; `None` when the model cannot reason.
+	pub fn set_effort(&mut self, level: Option<&str>) {
+		if self.effort.as_deref() != level {
+			self.effort = level.map(Str::new);
+		}
+	}
+
+	/// Whether the terminal draws the data-first `prefs` sheet, so a settings
+	/// panel describes itself as one instead of as an `el` form.
+	#[must_use]
+	pub fn draws_prefs(&self) -> bool {
+		self.hello.draws(Kind::Prefs)
 	}
 
 	/// Adopts the capabilities a `hello` reply announced.
@@ -433,11 +461,12 @@ impl Surface {
 	/// cover when `view` is `None`.
 	///
 	/// The session surface stays live underneath: frames for it keep applying
-	/// and nothing is resent when the cover closes. Like
-	/// [`Self::present_form`], a view is identified by the id of its root:
-	/// while that stays the same nothing is sent, and a new id replaces the old
-	/// view in one frame. A cover is mounted only over an opened, unsuspended
-	/// session.
+	/// and nothing is resent when the cover closes. A view is identified by the
+	/// id of its root: while the view stays the same nothing is sent, a view
+	/// whose root changed only its props is updated with one `set` of the
+	/// changed props, any other change to it remounts it, and a new id replaces
+	/// the old view in one frame. A cover is mounted only over an opened,
+	/// unsuspended session.
 	///
 	/// # Errors
 	/// Returns the error writing to the terminal.
@@ -449,7 +478,7 @@ impl Surface {
 		let Some(view) = view else {
 			return self.drop_cover(writer);
 		};
-		if self.cover.opened && self.cover.view == view.id {
+		if self.cover.opened && self.cover.view.as_ref() == Some(view) {
 			return Ok(());
 		}
 		if !self.opened || self.suspended || !self.cover.credit_available(self.hello.credit_limit()) {
@@ -458,8 +487,15 @@ impl Surface {
 		}
 		let mut ops = Vec::with_capacity(2);
 		if self.cover.opened {
-			if !self.cover.view.is_empty() {
-				ops.push(Op::Del(self.cover.view.clone()));
+			match self.cover.view.as_ref() {
+				Some(sent) if sent.id == view.id && sent.k == view.k && sent.c == view.c => {
+					ops.push(Op::Set { id: view.id.clone(), props: changed_props(&sent.p, &view.p) });
+					self.send_cover_frame(writer, ops)?;
+					self.cover.view = Some(view.clone());
+					return Ok(());
+				},
+				Some(sent) => ops.push(Op::Del(sent.id.clone())),
+				None => {},
 			}
 		} else {
 			let open = Open {
@@ -476,7 +512,7 @@ impl Surface {
 		}
 		ops.push(add_node(view.clone(), MAIN_ID));
 		self.send_cover_frame(writer, ops)?;
-		self.cover.view = view.id.clone();
+		self.cover.view = Some(view.clone());
 		Ok(())
 	}
 
@@ -770,18 +806,27 @@ impl Surface {
 	}
 
 	fn status(&mut self, status: &str, ops: &mut Vec<Op>) {
-		let text = Str::new(status);
-		if !self.status_mounted {
-			ops.push(add_node(status_node(text.as_str()), DOCK_ID));
-			self.status_mounted = true;
-			self.status_text = text;
-		} else if self.status_text != text {
-			ops.extend([
-				Op::Del(Str::new_static(STATUS_ID)),
-				add_node(status_node(text.as_str()), DOCK_ID),
-			]);
-			self.status_text = text;
+		let glyph = effort::glyph_kind(&self.hello);
+		let effort_due = match (&self.effort, &self.status_effort) {
+			(Some(level), Some((mounted, kind))) => level != mounted || glyph != *kind,
+			(None, None) => false,
+			_ => true,
+		};
+		if self.status_mounted && self.status_text.as_str() == status && !effort_due {
+			return;
 		}
+		let text = Str::new(status);
+		let mut node = status_node(text.as_str());
+		if let Some(level) = &self.effort {
+			node.c.push(effort::effort_seg(level, glyph));
+		}
+		if self.status_mounted {
+			ops.push(Op::Del(Str::new_static(STATUS_ID)));
+		}
+		ops.push(add_node(node, DOCK_ID));
+		self.status_mounted = true;
+		self.status_text = text;
+		self.status_effort = self.effort.clone().map(|level| (level, glyph));
 	}
 }
 
@@ -829,6 +874,31 @@ fn add(id: &str, parent: &str, kind: Kind, props: Map<String, Value>) -> Op {
 
 fn add_node(node: Node, parent: &str) -> Op {
 	Op::Add { parent: Str::new(parent), before: None, node }
+}
+
+/// A typed props struct as the props map of a wire [`Node`].
+fn typed_props<T: Serialize>(props: &T) -> Map<String, Value> {
+	match serde_json::to_value(props) {
+		Ok(Value::Object(map)) => map,
+		_ => Map::new(),
+	}
+}
+
+/// The `set` props that turn `sent` into `next`: every prop that changed or
+/// appeared, and `null` for every prop that went away.
+fn changed_props(sent: &Map<String, Value>, next: &Map<String, Value>) -> Map<String, Value> {
+	let mut props = Map::new();
+	for (key, value) in next {
+		if sent.get(key) != Some(value) {
+			props.insert(key.clone(), value.clone());
+		}
+	}
+	for key in sent.keys() {
+		if !next.contains_key(key) {
+			props.insert(key.clone(), Value::Null);
+		}
+	}
+	props
 }
 
 fn node_for(block: &RenderedBlock, hello: &Hello) -> (Node, Str) {
@@ -1693,5 +1763,160 @@ mod tests {
 		let nested =
 			Node { id: Str::new_static("f"), k: Kind::El, p: Map::new(), c: vec![picker] };
 		assert!(!surface.draws(&nested), "one kind the terminal lacks keeps the whole view in cells");
+	}
+
+	/// Every frame in one presenter output, in order.
+	fn frames_in(output: &[u8]) -> Vec<Frame> {
+		let mut frames = Vec::new();
+		let mut rest = output;
+		while let Some(start) = rest.windows(2).position(|w| w == b"\x1b_") {
+			let after = &rest[start + 2..];
+			let end = after
+				.windows(2)
+				.position(|w| w == b"\x1b\\")
+				.expect("terminated message");
+			let raw = split(&after[..end]).expect("a TSP message");
+			if raw.verb == "f" {
+				frames.push(serde_json::from_slice(raw.body).expect("valid frame JSON"));
+			}
+			rest = &after[end + 2..];
+		}
+		frames
+	}
+
+	fn leaf(id: &'static str, kind: Kind, props: &[(&str, Value)]) -> Node {
+		Node {
+			id: Str::new_static(id),
+			k:  kind,
+			p:  props
+				.iter()
+				.map(|(key, value)| ((*key).to_owned(), value.clone()))
+				.collect(),
+			c:  Vec::new(),
+		}
+	}
+
+	#[test]
+	fn a_cover_view_whose_root_props_changed_is_updated_with_one_set() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		let first =
+			leaf(PREFS_ID, Kind::Prefs, &[("page", Value::from("a")), ("focus", Value::from("x"))]);
+		surface.present_cover(&mut out, Some(&first)).unwrap();
+		tern.read(&out);
+
+		out.clear();
+		let next =
+			leaf(PREFS_ID, Kind::Prefs, &[("page", Value::from("b")), ("query", Value::from("q"))]);
+		surface.present_cover(&mut out, Some(&next)).unwrap();
+		tern.read(&out);
+		let frames = frames_in(&out);
+		let [frame] = frames.as_slice() else {
+			panic!("one frame updates the view: {frames:?}");
+		};
+		let [Op::Set { id, props }] = frame.ops.as_slice() else {
+			panic!("the view is updated in place, not remounted: {:?}", frame.ops);
+		};
+		assert_eq!(id.as_str(), PREFS_ID);
+		assert_eq!(props.get("focus"), Some(&Value::Null), "a prop that went away is deleted");
+		assert_eq!(props.get("page"), Some(&Value::from("b")));
+		assert_eq!(props.get("query"), Some(&Value::from("q")));
+		assert_eq!(tern.doc(COVER_ID).get(PREFS_ID).map(|node| node.p), Some(next.p.clone()));
+
+		// A changed child cannot be expressed as a `set`: the view is remounted.
+		out.clear();
+		let mut nested = next.clone();
+		nested.c.push(leaf("child", Kind::Text, &[]));
+		surface.incoming(Incoming::Event(Event::Ack { sf: Str::new_static(COVER_ID), s: 2 }));
+		surface.present_cover(&mut out, Some(&nested)).unwrap();
+		tern.read(&out);
+		assert!(
+			frames_in(&out)
+				.iter()
+				.flat_map(|frame| &frame.ops)
+				.any(|op| matches!(op, Op::Del(id) if id.as_str() == PREFS_ID)),
+			"a view whose children changed is replaced"
+		);
+		assert!(tern.doc(COVER_ID).contains("child"));
+		assert_eq!(tern.cover_main(), [PREFS_ID]);
+	}
+
+	/// The effort segment of the status band as the session document holds it.
+	fn effort_seg_in(surface: &mut Surface, level: Option<&str>) -> Option<Node> {
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		surface.set_effort(level);
+		session_present(surface, &mut out, &[]);
+		tern.read(&out);
+		tern.doc(SURFACE_ID).get(effort::EFFORT_SEG_ID)
+	}
+
+	#[test]
+	fn the_status_band_shows_thinking_effort_as_the_kind_tern_draws() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		surface.set_effort(Some("medium"));
+		session_present(&mut surface, &mut out, &[]);
+		tern.read(&out);
+		let seg = tern
+			.doc(SURFACE_ID)
+			.get(effort::EFFORT_SEG_ID)
+			.expect("an effort segment");
+		assert_eq!(seg.k, Kind::Seg);
+		assert_eq!(seg.p.get("text"), Some(&Value::from("medium")));
+		assert_eq!(
+			seg.p
+				.get("actions")
+				.and_then(|actions| actions.get("click")),
+			Some(&Value::from(THINKING_CYCLE)),
+			"a click cycles the level"
+		);
+		let [glyph] = seg.c.as_slice() else {
+			panic!("one glyph: {:?}", seg.c);
+		};
+		assert_eq!(glyph.k, Kind::Effort);
+		assert_eq!(glyph.p.get("level"), Some(&Value::from("medium")));
+
+		// A new level remounts the band with it, on the same surface.
+		out.clear();
+		surface.set_effort(Some("xhigh"));
+		session_present(&mut surface, &mut out, &[]);
+		tern.read(&out);
+		let glyph = tern
+			.doc(SURFACE_ID)
+			.get("status-effort-glyph")
+			.expect("the glyph");
+		assert_eq!(glyph.p.get("level"), Some(&Value::from("xhigh")));
+
+		// A Tern without `effort` gets v1's four-cell blocks meter.
+		let mut narrow = hello(&[]);
+		narrow.kinds.retain(|kind| kind.as_str() != "effort");
+		let mut surface = Surface::new(narrow.clone(), SurfaceMode::Inline, false);
+		let seg = effort_seg_in(&mut surface, Some("medium")).expect("an effort segment");
+		let [meter] = seg.c.as_slice() else {
+			panic!("one meter: {:?}", seg.c);
+		};
+		assert_eq!(meter.k, Kind::Meter);
+		assert_eq!(meter.p.get("style"), Some(&Value::from("blocks")));
+		assert_eq!(meter.p.get("steps"), Some(&Value::from(4)));
+		assert_eq!(meter.p.get("value"), Some(&Value::from(0.5)), "medium fills two of four");
+		let mut surface = Surface::new(narrow.clone(), SurfaceMode::Inline, false);
+		let seg = effort_seg_in(&mut surface, Some("auto")).expect("an effort segment");
+		assert_eq!(seg.c[0].k, Kind::Meter);
+		assert_eq!(seg.c[0].p.get("value"), None, "a level without a rung has no value");
+
+		// Without `meter` either, the level is text alone.
+		narrow.kinds.retain(|kind| kind.as_str() != "meter");
+		let mut surface = Surface::new(narrow, SurfaceMode::Inline, false);
+		let seg = effort_seg_in(&mut surface, Some("medium")).expect("an effort segment");
+		assert!(seg.c.is_empty(), "no glyph the terminal cannot draw: {:?}", seg.c);
+		assert_eq!(seg.p.get("text"), Some(&Value::from("medium")));
+
+		// A model that cannot reason shows no effort.
+		let mut surface = Surface::optimistic(false);
+		assert_eq!(effort_seg_in(&mut surface, None), None);
 	}
 }

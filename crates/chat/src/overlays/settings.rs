@@ -13,6 +13,7 @@ use omp_tui::{
 	cell_width,
 	components::{Input, Tabs},
 	dom,
+	tsp::wire::{Event, Node},
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -20,7 +21,13 @@ use super::{
 	Panel, PanelAnchor, PanelCx, PanelEvent, PanelNote,
 	services::{SettingsChoice, SettingsInventory},
 };
-use crate::tsp::{ElementTag, element_node};
+use crate::tsp::{
+	ElementTag, element_node,
+	prefs::{
+		ChoiceStyle, PrefsControl, PrefsEditing, PrefsOption, PrefsPage, PrefsRow, PrefsSection,
+		PrefsSheet, PrefsValue,
+	},
+};
 const TEXT_FOOTER: &str = "Enter to save · Esc to cancel · Clear field to unset";
 const CHOICE_FOOTER: &str = "Enter to select · Esc to go back";
 const MULTI_FOOTER: &str = "Click/Enter/Space to toggle · Esc to go back";
@@ -28,6 +35,8 @@ const ORDERED_MULTI_FOOTER: &str =
 	"Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back";
 const PROVIDER_FOOTER: &str = "Enter to edit provider · Esc to go back";
 const EMPTY: &str = "(empty)";
+/// `prefs` action of a row without a native control: open its cell editor.
+const PREFS_EDIT: &str = "edit";
 const CHROME_ROWS: u16 = 11;
 
 /// Settings declaration metadata understood by this projection:
@@ -225,7 +234,12 @@ impl SettingRow {
 	}
 
 	fn display(&self) -> Str {
-		let display = match (&self.widget, &self.value) {
+		self.display_of(&self.value)
+	}
+
+	/// `value` as this row shows it.
+	fn display_of(&self, value: &RowValue) -> Str {
+		let display = match (&self.widget, value) {
 			(RowWidget::Boolean, RowValue::Boolean(value)) => {
 				Str::new_static(if *value { "On" } else { "Off" })
 			},
@@ -2058,6 +2072,302 @@ impl SettingsPanel {
 		};
 		PanelEvent::PreviewSetting { convar: row.convar.clone(), value: Str::new(value) }
 	}
+
+	/// Whether Tern can draw the open editor: the provider-limit editors have
+	/// no native control, so while one is open the cell overlay draws.
+	fn editor_is_native(&self) -> bool {
+		!matches!(self.editor, Some(Editor::ProviderList { .. } | Editor::ProviderValue { .. }))
+	}
+
+	/// The settings as Tern's data-first `prefs` sheet: every tab in the
+	/// navigation with its changed count, the shown tab's groups (or the search
+	/// results, grouped by tab) as sections of typed controls, the keyboard
+	/// focus and the open editor. `None` while an editor without a native
+	/// control is open.
+	#[must_use]
+	pub fn tsp_prefs(&self) -> Option<Node> {
+		if !self.editor_is_native() {
+			return None;
+		}
+		let searching = !self.query.is_empty();
+		let mut changed = [0_u32; SETTING_TABS.len()];
+		for row in self
+			.rows
+			.iter()
+			.filter(|row| row.changed() && self.row_visible(row))
+		{
+			if let Some(at) = SETTING_TABS.iter().position(|spec| spec.tab == row.tab) {
+				changed[at] = changed[at].saturating_add(1);
+			}
+		}
+		let pages = SETTING_TABS
+			.iter()
+			.zip(changed)
+			.map(|(spec, changed)| {
+				let id: &'static str = spec.tab.into();
+				PrefsPage {
+					id:      Str::new_static(id),
+					label:   Str::new_static(spec.label),
+					icon:    Some(Str::new_static(id)),
+					changed: (changed > 0).then_some(changed),
+				}
+			})
+			.collect();
+		let page: &'static str = SETTING_TABS[if searching {
+			self.pre_search_tab
+		} else {
+			self.tab
+		}]
+		.tab
+		.into();
+		let mut sections: Vec<PrefsSection> = Vec::new();
+		let mut keys: Vec<(SettingTab, &str)> = Vec::new();
+		for item in &self.items {
+			let Item::Row(index) = item else {
+				continue;
+			};
+			let row = &self.rows[*index];
+			let prefs_row = Self::prefs_row(row);
+			if let Some(at) = keys
+				.iter()
+				.position(|key| *key == (row.tab, row.group.as_str()))
+			{
+				sections[at].rows.push(prefs_row);
+				continue;
+			}
+			let tab: &'static str = row.tab.into();
+			keys.push((row.tab, row.group.as_str()));
+			sections.push(PrefsSection {
+				id:    sf!("{tab}/{}", row.group),
+				title: row.group.clone(),
+				page:  searching.then(|| Str::new_static(tab)),
+				rows:  vec![prefs_row],
+			});
+		}
+		let focus = if self.section_focus {
+			self
+				.visible_groups()
+				.get(self.section_cursor)
+				.map(|group| sf!("{page}/{group}"))
+		} else {
+			self.selected().map(|row| row.convar.clone())
+		};
+		let cursor = self.query_cursor.min(self.query.len());
+		let sheet = PrefsSheet {
+			title: Str::new_static("Settings"),
+			pages,
+			page: Str::new_static(page),
+			query: searching.then(|| Str::new(&self.query)),
+			cursor: searching.then(|| {
+				u32::try_from(xutf::transcoded_len::<xutf::Utf8, xutf::Utf16Le>(
+					&self.query.as_bytes()[..cursor],
+				))
+				.unwrap_or(u32::MAX)
+			}),
+			sections,
+			focus,
+			editing: self.prefs_editing(),
+		};
+		Some(sheet.node())
+	}
+
+	fn prefs_row(row: &SettingRow) -> PrefsRow {
+		let changed = row.changed();
+		PrefsRow {
+			id: row.convar.clone(),
+			label: row.label.clone(),
+			hint: (!row.description.is_empty()).then(|| row.description.clone()),
+			warning: row.warning.clone(),
+			changed,
+			default_label: changed.then(|| row.display_of(&row.default)),
+			control: Self::prefs_control(row),
+		}
+	}
+
+	fn prefs_control(row: &SettingRow) -> PrefsControl {
+		let options = |options: &[Choice]| {
+			options
+				.iter()
+				.map(|option| PrefsOption {
+					value:  option.value.clone(),
+					label:  option.label.clone(),
+					detail: (!option.description.is_empty()).then(|| option.description.clone()),
+				})
+				.collect()
+		};
+		match (&row.widget, &row.value) {
+			(RowWidget::Boolean, RowValue::Boolean(on)) => PrefsControl::Switch { on: *on },
+			(
+				RowWidget::Submenu(choices) | RowWidget::RuntimeSubmenu(_, choices),
+				RowValue::Scalar(value),
+			) => PrefsControl::Choice {
+				value:   value.clone(),
+				options: options(choices),
+				// Live-previewed and described choices keep their menu.
+				style:   if Self::previewable(row)
+					|| choices.iter().any(|choice| !choice.description.is_empty())
+				{
+					ChoiceStyle::Menu
+				} else {
+					ChoiceStyle::Auto
+				},
+				mono:    choices.iter().all(|choice| choice.label == choice.value),
+			},
+			(RowWidget::Text { secret }, RowValue::Text(value)) => PrefsControl::Text {
+				value:  if *secret {
+					row.display()
+				} else {
+					value.clone()
+				},
+				secret: *secret,
+			},
+			(RowWidget::MultiSelect { options: choices, ordered }, RowValue::Multi(values)) => {
+				PrefsControl::Multi {
+					values:  values.clone(),
+					options: options(choices),
+					ordered: *ordered,
+				}
+			},
+			// Provider limits have no native control: the button opens the cell
+			// editor.
+			_ => PrefsControl::Action { label: row.display(), act: Str::new_static(PREFS_EDIT) },
+		}
+	}
+
+	/// The open editor as the sheet draws it: a text row's draft (masked when
+	/// secret), a choice or multi row's highlighted option.
+	fn prefs_editing(&self) -> Option<PrefsEditing> {
+		let editor = self.editor.as_ref()?;
+		let row = self.selected()?;
+		let mut editing =
+			PrefsEditing { row: row.convar.clone(), draft: None, cursor: None, option: None };
+		match (editor, &row.widget) {
+			(Editor::Text { buffer, .. }, RowWidget::Text { secret }) => {
+				editing.draft = Some(if *secret {
+					Str::new("•".repeat(buffer.chars().count()))
+				} else {
+					Str::new(buffer)
+				});
+			},
+			(
+				Editor::Submenu { cursor },
+				RowWidget::Submenu(options) | RowWidget::RuntimeSubmenu(_, options),
+			)
+			| (Editor::Multi { cursor, .. }, RowWidget::MultiSelect { options, .. }) => {
+				editing.option = options.get(*cursor).map(|option| option.value.clone());
+			},
+			_ => return None,
+		}
+		Some(editing)
+	}
+
+	/// Lowers a `prefs` event through the paths the keys take: a `change`
+	/// commits the row's new value (`null` its default) through
+	/// [`Self::stage_commit`], so validation, rollback and `writecfg` are the
+	/// cell UI's; the `page` action switches tabs, `close` cancels the open
+	/// editor or closes the panel, and `edit` opens the row's cell editor.
+	fn tsp_prefs_event(&mut self, event: &Event) -> PanelEvent {
+		match event {
+			Event::Change { item: Some(item), value, .. } => match PrefsValue::decode(value) {
+				Ok(value) => self.prefs_change(item, value.as_ref()),
+				Err(_) => PanelEvent::Ignored,
+			},
+			Event::Action { act, value, .. } => self.prefs_action(act, value.as_deref()),
+			_ => PanelEvent::Ignored,
+		}
+	}
+
+	/// Moves the selection to the shown row of setting `convar`, as a click
+	/// does; `None` when the sheet does not show it.
+	fn select_convar(&mut self, convar: &str) -> Option<usize> {
+		let (at, index) = self
+			.items
+			.iter()
+			.enumerate()
+			.find_map(|(at, item)| match item {
+				Item::Row(index) if self.rows[*index].convar.as_str() == convar => Some((at, *index)),
+				_ => None,
+			})?;
+		self.selected = at;
+		self.section_focus = false;
+		self.clamp_scroll();
+		Some(index)
+	}
+
+	fn prefs_change(&mut self, convar: &str, value: Option<&PrefsValue>) -> PanelEvent {
+		// An open editor owns the input until it closes, as with the keys; one
+		// without a native control is drawn by the cell overlay, not the sheet.
+		if !self.editor_is_native()
+			|| (self.editor.is_some()
+				&& self
+					.selected()
+					.is_none_or(|row| row.convar.as_str() != convar))
+		{
+			return PanelEvent::Ignored;
+		}
+		let Some(index) = self.select_convar(convar) else {
+			return PanelEvent::Ignored;
+		};
+		let row = &self.rows[index];
+		let next = match (value, &row.widget) {
+			(None, _) => row.default.clone(),
+			(Some(PrefsValue::Switch(on)), RowWidget::Boolean) => RowValue::Boolean(*on),
+			(
+				Some(PrefsValue::Text(value)),
+				RowWidget::Submenu(options) | RowWidget::RuntimeSubmenu(_, options),
+			) if options.iter().any(|option| option.value == *value) => RowValue::Scalar(value.clone()),
+			(Some(PrefsValue::Text(value)), RowWidget::Text { .. }) => {
+				RowValue::Text(Str::new(value.trim()))
+			},
+			(Some(PrefsValue::List(values)), RowWidget::MultiSelect { options, .. })
+				if values
+					.iter()
+					.all(|value| options.iter().any(|option| option.value == *value)) =>
+			{
+				RowValue::Multi(values.clone())
+			},
+			_ => return PanelEvent::Ignored,
+		};
+		// A multi editor stays open across changes, as Space keeps it.
+		let keep_editor =
+			matches!(self.editor, Some(Editor::Multi { .. })) && matches!(next, RowValue::Multi(_));
+		self.stage_commit(index, next, !keep_editor)
+	}
+
+	fn prefs_action(&mut self, act: &str, value: Option<&str>) -> PanelEvent {
+		match (act, value) {
+			("page", Some(page)) if self.editor.is_none() => {
+				let Some(tab) = page
+					.parse::<SettingTab>()
+					.ok()
+					.and_then(|tab| SETTING_TABS.iter().position(|spec| spec.tab == tab))
+				else {
+					return PanelEvent::Ignored;
+				};
+				if !self.query.is_empty() {
+					self.end_search(false);
+				}
+				self.select_tab(tab);
+				self.rebuild();
+				PanelEvent::Consumed
+			},
+			("close", None) => PanelEvent::Close,
+			("close", Some(convar)) => {
+				if self.editor.is_some() && self.selected().is_some_and(|row| row.convar == convar) {
+					self.editor_key(Key::Esc)
+				} else {
+					PanelEvent::Ignored
+				}
+			},
+			(PREFS_EDIT, Some(convar)) if self.editor.is_none() => {
+				if self.select_convar(convar).is_none() {
+					return PanelEvent::Ignored;
+				}
+				self.activate()
+			},
+			_ => PanelEvent::Ignored,
+		}
+	}
 }
 
 fn pad(label: &str, width: usize) -> Str {
@@ -2077,11 +2387,19 @@ impl Panel for SettingsPanel {
 	}
 
 	fn tsp_node(&self) -> Option<omp_tui::tsp::wire::Node> {
-		Some(self.tsp_form())
+		self.editor_is_native().then(|| self.tsp_form())
 	}
 
 	fn tsp_change(&mut self, name: &str, value: &serde_json::Value) -> PanelEvent {
 		self.tsp_change(name, value)
+	}
+
+	fn tsp_prefs(&self) -> Option<Node> {
+		self.tsp_prefs()
+	}
+
+	fn tsp_prefs_event(&mut self, event: &Event) -> PanelEvent {
+		self.tsp_prefs_event(event)
 	}
 
 	fn anchor(&self) -> PanelAnchor {
@@ -2397,9 +2715,16 @@ mod tests {
 	use std::sync::Arc;
 
 	use omp_con::{DynamicVarSpec, TypeSpec, VarFlags};
-	use omp_tui::{Mods, Mouse, MouseButton, frame_text};
+	use omp_tui::{
+		Mods, Mouse, MouseButton, frame_text,
+		tsp::{
+			doc::Document,
+			wire::{Frame, Kind, Op},
+		},
+	};
 
 	use super::*;
+	use crate::tsp::PREFS_ID;
 
 	fn choice(value: &'static str, label: &'static str) -> Choice {
 		Choice {
@@ -2931,5 +3256,232 @@ mod tests {
 		assert!(matches!(event, PanelEvent::RunSetting { .. }));
 		assert_eq!(visible_rows(&panel), 2);
 		assert!(text(&mut panel).contains("Dependent"));
+	}
+
+	/// The panel's `prefs` sheet as the reference applier holds it once Tern
+	/// mounted it.
+	fn sheet(panel: &SettingsPanel) -> Node {
+		let mut doc = Document::new("omp-screen");
+		let node = panel.tsp_prefs().expect("a native sheet");
+		let frame = Frame {
+			sf:  Str::new_static("omp-screen"),
+			s:   1,
+			ops: vec![Op::Add { parent: Str::new_static("omp-screen"), before: None, node }],
+		};
+		assert!(doc.apply(&frame).is_empty(), "Tern applies the sheet");
+		doc.get(PREFS_ID).expect("the sheet")
+	}
+
+	/// The control of row `convar` on the sheet.
+	fn control(sheet: &Node, convar: &str) -> Option<JsonValue> {
+		sheet.p["sections"]
+			.as_array()?
+			.iter()
+			.flat_map(|section| section["rows"].as_array().into_iter().flatten())
+			.find(|row| row["id"] == convar)
+			.map(|row| row["control"].clone())
+	}
+
+	/// The sheet row of `convar`.
+	fn sheet_row(sheet: &Node, convar: &str) -> JsonValue {
+		sheet.p["sections"]
+			.as_array()
+			.into_iter()
+			.flatten()
+			.flat_map(|section| section["rows"].as_array().into_iter().flatten())
+			.find(|row| row["id"] == convar)
+			.cloned()
+			.unwrap_or(JsonValue::Null)
+	}
+
+	fn change(item: &str, value: JsonValue) -> Event {
+		Event::Change {
+			sf: Str::new_static("omp-screen"),
+			id: Str::new_static(PREFS_ID),
+			item: Some(Str::new(item)),
+			value,
+			checked: None,
+			name: None,
+			values: None,
+		}
+	}
+
+	fn action(act: &str, value: Option<&str>) -> Event {
+		Event::Action {
+			sf:     Str::new_static("omp-screen"),
+			id:     Str::new_static(PREFS_ID),
+			act:    Str::new(act),
+			value:  value.map(Str::new),
+			mods:   Vec::new(),
+			values: None,
+		}
+	}
+
+	fn run_line(event: &PanelEvent) -> &str {
+		match event {
+			PanelEvent::RunSetting { line, .. } => line.as_str(),
+			other => panic!("expected a settings command, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn the_prefs_sheet_shows_the_shown_tab_as_typed_controls() {
+		let mut panel = SettingsPanel::from_rows(fixture(), &UiContext::default());
+		let shown = sheet(&panel);
+		assert_eq!(shown.k, Kind::Prefs);
+		assert_eq!(shown.p["page"], "appearance");
+		let pages = shown.p["pages"].as_array().expect("pages");
+		assert_eq!(pages.len(), SETTING_TABS.len(), "every tab is a page");
+		assert_eq!(pages[1]["id"], "model");
+		let sections = shown.p["sections"].as_array().expect("sections");
+		let [display] = sections.as_slice() else {
+			panic!("one group on Appearance: {sections:?}");
+		};
+		assert_eq!(display["id"], "appearance/Display");
+		assert_eq!(
+			control(&shown, "internal_show_details"),
+			Some(serde_json::json!({"k": "switch", "on": true}))
+		);
+		assert_eq!(control(&shown, "internal_thinking_level"), None, "other pages stay off it");
+		assert_eq!(shown.p["focus"], "internal_show_details");
+
+		assert_eq!(panel.tsp_prefs_event(&action("page", Some("model"))), PanelEvent::Consumed);
+		let shown = sheet(&panel);
+		assert_eq!(shown.p["page"], "model");
+		assert_eq!(
+			control(&shown, "internal_thinking_level"),
+			Some(serde_json::json!({
+				"k": "choice",
+				"value": "low",
+				"options": [{"value": "low", "label": "Low"}, {"value": "high", "label": "High"}],
+				"style": "auto",
+			}))
+		);
+
+		// The open editor is mirrored: a choice row's highlighted option.
+		panel.key(Key::Enter);
+		panel.key(Key::Down);
+		let shown = sheet(&panel);
+		assert_eq!(
+			shown.p["editing"],
+			serde_json::json!({"row": "internal_thinking_level", "option": "high"})
+		);
+		assert_eq!(
+			panel.tsp_prefs_event(&action("close", Some("internal_thinking_level"))),
+			PanelEvent::Consumed
+		);
+		assert!(panel.editor.is_none(), "closing the menu cancels the editor");
+		assert_eq!(panel.tsp_prefs_event(&action("close", None)), PanelEvent::Close);
+	}
+
+	#[test]
+	fn prefs_changes_commit_through_the_cell_ui_path_and_null_resets() {
+		let mut panel = SettingsPanel::from_rows(fixture(), &UiContext::default());
+		let event = panel.tsp_prefs_event(&change("internal_show_details", JsonValue::Bool(false)));
+		assert_eq!(run_line(&event), "internal_show_details false; writecfg");
+		accept_setting(&mut panel, &event);
+		let shown = sheet(&panel);
+		assert_eq!(control(&shown, "internal_show_details").unwrap()["on"], false);
+		assert_eq!(sheet_row(&shown, "internal_show_details")["changed"], true);
+		assert_eq!(sheet_row(&shown, "internal_show_details")["defaultLabel"], "On");
+		assert_eq!(shown.p["pages"][0]["changed"], 1);
+
+		let event = panel.tsp_prefs_event(&change("internal_show_details", JsonValue::Null));
+		assert_eq!(run_line(&event), "internal_show_details true; writecfg", "null is the default");
+		accept_setting(&mut panel, &event);
+		let shown = sheet(&panel);
+		assert_eq!(control(&shown, "internal_show_details").unwrap()["on"], true);
+		assert_eq!(sheet_row(&shown, "internal_show_details").get("changed"), None);
+		assert_eq!(shown.p["pages"][0].get("changed"), None);
+
+		// A rejected command rolls the row back, as it does for the keys.
+		let event = panel.tsp_prefs_event(&change("internal_show_details", JsonValue::Bool(false)));
+		let PanelEvent::RunSetting { convar, .. } = &event else {
+			panic!("expected a settings command, got {event:?}");
+		};
+		assert!(matches!(
+			panel.notify(PanelNote::SettingResult { convar, error: Some("read-only") }),
+			PanelEvent::Notice(_)
+		));
+		assert_eq!(control(&sheet(&panel), "internal_show_details").unwrap()["on"], true);
+
+		// Values no control of the row sends, and rows the sheet does not show.
+		for (item, value) in [
+			("internal_show_details", JsonValue::from("false")),
+			("internal_show_details", JsonValue::from(3)),
+			("internal_thinking_level", JsonValue::from("high")),
+			("internal_missing", JsonValue::Bool(true)),
+		] {
+			assert_eq!(
+				panel.tsp_prefs_event(&change(item, value.clone())),
+				PanelEvent::Ignored,
+				"{item} = {value}"
+			);
+		}
+	}
+
+	#[test]
+	fn prefs_choice_text_and_multi_changes_are_checked_against_the_row() {
+		let mut panel = SettingsPanel::from_rows(fixture(), &UiContext::default());
+		panel.tsp_prefs_event(&action("page", Some("model")));
+		assert_eq!(
+			panel.tsp_prefs_event(&change("internal_thinking_level", JsonValue::from("max"))),
+			PanelEvent::Ignored,
+			"only a listed option commits"
+		);
+		let event =
+			panel.tsp_prefs_event(&change("internal_thinking_level", JsonValue::from("high")));
+		assert_eq!(run_line(&event), "internal_thinking_level high; writecfg");
+		accept_setting(&mut panel, &event);
+
+		panel.tsp_prefs_event(&action("page", Some("interaction")));
+		let event = panel
+			.tsp_prefs_event(&change("internal_profile_name", JsonValue::from("  Grace Hopper ")));
+		assert_eq!(
+			run_line(&event),
+			"internal_profile_name \"Grace Hopper\"; writecfg",
+			"text is trimmed as Enter trims it"
+		);
+		accept_setting(&mut panel, &event);
+
+		panel.tsp_prefs_event(&action("page", Some("providers")));
+		assert_eq!(
+			panel.tsp_prefs_event(&change("internal_search_engines", serde_json::json!(["z"]))),
+			PanelEvent::Ignored
+		);
+		let event =
+			panel.tsp_prefs_event(&change("internal_search_engines", serde_json::json!(["b", "a"])));
+		assert_eq!(run_line(&event), "internal_search_engines [b a]; writecfg");
+	}
+
+	#[test]
+	fn an_editor_without_a_native_control_hands_the_panel_to_the_cell_overlay() {
+		let setting = row(
+			"Provider Limits",
+			SettingTab::Appearance,
+			"Display",
+			RowWidget::ProviderLimits,
+			RowValue::ProviderLimits(Vec::new()),
+		);
+		let mut panel = SettingsPanel::from_rows(vec![setting], &UiContext::default());
+		let shown = sheet(&panel);
+		assert_eq!(
+			control(&shown, "internal_provider_limits"),
+			Some(serde_json::json!({"k": "action", "label": "Unlimited", "act": "edit"}))
+		);
+		assert_eq!(
+			panel.tsp_prefs_event(&action("edit", Some("internal_provider_limits"))),
+			PanelEvent::Consumed
+		);
+		assert!(matches!(panel.editor, Some(Editor::ProviderList { .. })));
+		assert_eq!(panel.tsp_prefs(), None, "Tern cannot draw this editor");
+		assert_eq!(Panel::tsp_node(&panel), None, "nor can the el form");
+		assert_eq!(
+			panel.tsp_prefs_event(&change("internal_provider_limits", JsonValue::Null)),
+			PanelEvent::Ignored,
+			"the open editor keeps the input"
+		);
+		panel.key(Key::Esc);
+		assert!(panel.tsp_prefs().is_some(), "the sheet returns once the editor closes");
 	}
 }

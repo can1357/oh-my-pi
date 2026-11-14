@@ -45,6 +45,8 @@ const SURFACE: &str = "omp-chat";
 /// Surface id the presenter opens for a full-screen panel
 /// (`omp_chat::tsp::COVER_ID`).
 const COVER: &str = "omp-screen";
+/// Id of the settings `prefs` sheet (`omp_chat::tsp::PREFS_ID`).
+const PREFS: &str = "prefs";
 /// The DA1 answer a terminal that does not speak TSP gives.
 const DA1_REPLY: &[u8] = b"\x1b[?62;4c";
 /// The DA1 request that fences the startup probe.
@@ -101,6 +103,8 @@ struct FakeTern {
 	da1:              Option<Duration>,
 	/// Whether every applied frame is acknowledged.
 	ack:              bool,
+	/// Kinds the `hello` reply announces beyond [`tern_hello`]'s.
+	kinds:            Vec<&'static str>,
 	/// When the DA1 request was first seen.
 	fenced:           Option<Instant>,
 	sent_da1:         bool,
@@ -139,6 +143,8 @@ struct Script {
 	da1:   Option<Duration>,
 	/// Whether frames are acknowledged as they are applied.
 	ack:   bool,
+	/// Kinds the `hello` reply announces beyond [`tern_hello`]'s.
+	kinds: Vec<&'static str>,
 }
 
 impl Script {
@@ -153,6 +159,7 @@ impl Script {
 			hello: HelloTiming::AfterFirstFrame,
 			da1:   Some(Duration::from_millis(30)),
 			ack:   true,
+			kinds: Vec::new(),
 		}
 	}
 
@@ -173,7 +180,14 @@ impl Script {
 			hello: HelloTiming::Never,
 			da1:   Some(Duration::ZERO),
 			ack:   false,
+			kinds: Vec::new(),
 		}
+	}
+
+	/// Announces `kinds` in the `hello` reply too.
+	fn with_kinds(mut self, kinds: &[&'static str]) -> Self {
+		self.kinds.extend_from_slice(kinds);
+		self
 	}
 
 	/// Tern reached through a multiplexer, which swallows APC strings.
@@ -288,6 +302,7 @@ impl FakeTern {
 			hello_replies: 0,
 			da1: script.da1,
 			ack: script.ack,
+			kinds: script.kinds.clone(),
 			fenced: None,
 			sent_da1: false,
 			optimistic_start: false,
@@ -392,7 +407,11 @@ impl FakeTern {
 	/// Sends the replies and acknowledgements the script owes.
 	fn answer(&mut self) {
 		if self.hello_replies < self.queries && self.hello_due() {
-			let hello = serde_json::to_vec(&Reply::Hello(tern_hello())).expect("hello reply");
+			let mut hello = tern_hello();
+			hello
+				.kinds
+				.extend(self.kinds.iter().copied().map(Str::new_static));
+			let hello = serde_json::to_vec(&Reply::Hello(hello)).expect("hello reply");
 			self.write_apc(b"r", &hello);
 			self.hello_replies = self.queries;
 		}
@@ -923,6 +942,13 @@ fn tsp_a_full_screen_panel_covers_the_pane_with_a_screen_surface() {
 	});
 	assert!(!tern.doc.suspended(), "the session stays live under the cover");
 	assert!(!tern.doc.contains("settings"), "the form is not in the session layer");
+	assert!(
+		tern
+			.screen
+			.as_ref()
+			.is_some_and(|screen| !screen.contains(PREFS)),
+		"a Tern without `prefs` keeps the el form"
+	);
 	let covers: Vec<_> = tern
 		.opens()
 		.into_iter()
@@ -946,6 +972,87 @@ fn tsp_a_full_screen_panel_covers_the_pane_with_a_screen_surface() {
 	};
 	assert!(!close.keep, "a screen surface is discarded whatever keep says");
 	assert!(!tern.doc.suspended() && tern.doc.contains("composer"), "the session shows again");
+	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
+	tern.quit();
+}
+
+/// The switch control of settings row `convar` on the `prefs` sheet of the
+/// cover, when the sheet shows that row.
+fn prefs_switch(tern: &FakeTern, convar: &str) -> Option<bool> {
+	let screen = tern.screen.as_ref()?;
+	let sections = prop(screen, PREFS, "sections")?;
+	sections
+		.as_array()?
+		.iter()
+		.filter_map(|section| section.get("rows")?.as_array())
+		.flatten()
+		.find(|row| row.get("id").and_then(Value::as_str) == Some(convar))?
+		.get("control")?
+		.get("on")?
+		.as_bool()
+}
+
+/// The settings panel as a native `prefs` sheet (ADR 0041 phase 3): a Tern
+/// that draws `prefs` gets the sheet on the screen cover, and a `change` from
+/// it commits through the cell UI's path, so the setting reaches the user
+/// `config.cfg` as Enter on the row writes it; a `null` change resets it.
+#[test]
+fn tsp_a_prefs_change_commits_the_setting_like_the_cell_ui() {
+	const ROW: &str = "cl_show_progress";
+	let sandbox = Sandbox::new();
+	let config = sandbox.config_dir().join("config.cfg");
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern().with_kinds(&["prefs"]));
+	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
+	tern.until("the hello reply", |tern| tern.hello_replies > 0);
+
+	tern.write(b"/settings");
+	tern.until("command typed", |tern| {
+		prop(&tern.doc, "composer", "text")
+			.and_then(|text| text.as_str().map(str::to_owned))
+			.is_some_and(|text| text.trim_end() == "/settings")
+	});
+	for _ in 0..4 {
+		tern.write(b"\r");
+		tern.settle(Duration::from_millis(700));
+		if tern.screen.is_some() {
+			break;
+		}
+	}
+	tern.until("settings as a prefs sheet on the cover", |tern| {
+		prefs_switch(tern, ROW) == Some(false)
+	});
+	let screen = tern.screen.as_ref().expect("the cover");
+	assert_eq!(kind_of(screen, PREFS), Kind::Prefs);
+	assert!(!screen.contains("settings"), "no el form beside the sheet");
+	assert_eq!(prop(screen, PREFS, "page"), Some(Value::from("appearance")));
+
+	let change = |value: Value| Event::Change {
+		sf: Str::new_static(COVER),
+		id: Str::new_static(PREFS),
+		item: Some(Str::new_static(ROW)),
+		value,
+		checked: None,
+		name: None,
+		values: None,
+	};
+	let persisted = |value: &str| {
+		fs::read_to_string(&config)
+			.unwrap_or_default()
+			.lines()
+			.any(|line| line.trim() == format!("{ROW} {value}"))
+	};
+	tern.event(&change(Value::Bool(true)));
+	tern.until("the change is written to config.cfg and shown on the sheet", |tern| {
+		persisted("true") && prefs_switch(tern, ROW) == Some(true)
+	});
+
+	tern.event(&change(Value::Null));
+	tern.until("null resets the setting to its default", |tern| {
+		!persisted("true") && prefs_switch(tern, ROW) == Some(false)
+	});
+
+	tern.write(b"\x1b");
+	tern.until("cover closed with the panel", |tern| tern.screen.is_none());
 	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
 	tern.quit();
 }
