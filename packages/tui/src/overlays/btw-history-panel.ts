@@ -67,6 +67,9 @@ interface BtwHistoryPanelOptions {
 	onCopy: (record: BtwHistoryRecord) => void;
 	onCancel: (record: BtwHistoryRecord) => void;
 	canFollowUp?: (record: BtwHistoryRecord) => boolean;
+	/** Promote this answer into a branch; false keeps the sheet's branch hint hidden. */
+	canBranch?: (record: BtwHistoryRecord) => boolean;
+	onBranch?: (record: BtwHistoryRecord) => void;
 	onFollowUp?: (
 		record: BtwHistoryRecord,
 		question: string,
@@ -141,6 +144,7 @@ interface BtwHistoryNativeMemo {
 	notice: string | undefined;
 	followUpPending: boolean;
 	canFollowUp: boolean;
+	canBranch: boolean;
 	copied: boolean;
 	canInject: boolean;
 	latestInject: BtwInjectState | undefined;
@@ -562,6 +566,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 			if (record && getBtwCopyText(record) !== undefined) this.#options.onCopy(record);
 			return;
 		}
+		if (matchesKey(data, "b")) {
+			if (record && this.#options.canBranch?.(record)) this.#options.onBranch?.(record);
+			return;
+		}
 		if (this.#options.inject && matchesAppBtwInject(data)) {
 			this.#sendInject(record);
 			return;
@@ -655,6 +663,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const record = this.#selected();
 		const composer = this.#composer;
 		const canFollowUp = record !== undefined && this.#canFollowUp(record);
+		const canBranch = record !== undefined && this.#options.canBranch?.(record) === true;
 		const copied = record !== undefined && this.#isCopied(record);
 		const canInject = record !== undefined && this.#options.inject?.canSend(record) === true;
 		const latestInject = record && this.#options.inject?.state(record, getBtwTurns(record).length - 1);
@@ -668,6 +677,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			memo.notice === composer?.notice &&
 			memo.followUpPending === this.#followUpPending &&
 			memo.canFollowUp === canFollowUp &&
+			memo.canBranch === canBranch &&
 			memo.copied === copied &&
 			memo.canInject === canInject &&
 			memo.latestInject === latestInject &&
@@ -696,7 +706,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		} else {
 			children.push(this.#describeEmpty());
 		}
-		children.push(this.#describeActions(record, canFollowUp, copied, canInject));
+		children.push(this.#describeActions(record, canFollowUp, canBranch, copied, canInject));
 		// The sheet is the frame (`nativeOverlay`); its last row is the pinned footer.
 		const described = col(children, { gap: "none" });
 		this.#native = {
@@ -708,6 +718,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			notice: composer?.notice,
 			followUpPending: this.#followUpPending,
 			canFollowUp,
+			canBranch,
 			copied,
 			canInject,
 			latestInject,
@@ -726,6 +737,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 					return;
 				case "copy-answer":
 					if (record && getBtwCopyText(record) !== undefined) this.#options.onCopy(record);
+					break;
+				case "branch":
+					if (record && this.#options.canBranch?.(record)) this.#options.onBranch?.(record);
 					break;
 				case "inject":
 					this.#sendInject(record);
@@ -899,6 +913,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#describeActions(
 		record: BtwHistoryRecord | undefined,
 		canFollowUp: boolean,
+		canBranch: boolean,
 		copied: boolean,
 		canInject: boolean,
 	): NativeNode {
@@ -914,6 +929,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const buttons: (NativeNode | null)[] = [];
 		if (running) buttons.push(actionButton("Stop answer", "stop", { keys: hides ? "x" : "escape" }));
 		if (canInject) buttons.push(actionButton("Inject into main", "inject", { keys: appBtwInjectKey() }));
+		if (canBranch) buttons.push(actionButton("Branch to chat", "branch", { keys: "b" }));
 		if (record && getBtwCopyText(record) !== undefined) {
 			buttons.push(actionButton(copied ? "Copy again" : "Copy answer", "copy-answer", { keys: "c" }));
 			if (copied) buttons.push(text([span("✓ Copied", "success")], { role: "omp.btw.copied" }));
@@ -1128,6 +1144,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 					actions.push(theme.fg("success", `✓ copied · ${formatKeyHint("c")} to copy again`));
 				else actions.push(rawKeyHint("c", inner < 40 ? "copy" : "copy answer"));
 			}
+			if (record && this.#options.canBranch?.(record))
+				actions.push(rawKeyHint("b", inner < 40 ? "branch" : "branch to chat"));
 		}
 		const actionLines = wrapTextWithAnsi(actions.join(" · "), inner).slice(0, framed ? 2 : 1);
 		const chrome = framed ? 3 + actionLines.length : height >= 3 ? 2 : 0;

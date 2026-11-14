@@ -32,6 +32,7 @@ export class WebKitUnavailableError extends ToolError {}
 class HostProcessTransport implements TernTransport {
 	readonly product = "WebKit";
 	readonly peer: string;
+	readonly waitsForEvents = true;
 	readonly #executable: string;
 	#child: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	#ended = false;
