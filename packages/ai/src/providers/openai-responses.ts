@@ -1507,6 +1507,14 @@ const streamOpenAIResponsesOnce = (
 				chainState.lastResponseId = undefined;
 				chainState.lastResponseItems = undefined;
 			}
+			// `chained.params` is the body that went on the wire: `onPayload` may
+			// have replaced it, and a fallback retry mutated it in place. Reading
+			// `activeParams` here would record the pre-hook selector.
+			const sentEffort =
+				chained.params.reasoning && "effort" in chained.params.reasoning
+					? chained.params.reasoning.effort
+					: undefined;
+			if (sentEffort != null) output.effort = sentEffort;
 		} catch (error) {
 			if (chainState) resetOpenAIResponsesChainState(chainState);
 			const failure = abortTracker.getLocalAbortReason() ?? error;

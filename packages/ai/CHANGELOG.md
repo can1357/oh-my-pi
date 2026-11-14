@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Assistant messages on `openai-codex-responses` and `openai-responses` now carry the `effort` the request sent on the wire ([#14942](https://github.com/can1357/oh-my-pi/issues/14942), [#18721](https://github.com/can1357/oh-my-pi/pull/18721) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Changed
 
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
