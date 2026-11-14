@@ -12,7 +12,8 @@ use std::{
 	ops::Range,
 	ptr::{self, NonNull},
 	sync::LazyLock,
-	time::Duration,
+	thread,
+	time::{Duration, Instant},
 };
 
 use objc2_app_kit::NSRunningApplication;
@@ -1209,6 +1210,9 @@ impl AxBackend for MacAx {
 			if let Some(current) = copy_date(element, "AXValue") {
 				return set_date_value(element, value, current);
 			}
+			if let Some(current) = copy_number(element, "AXValue") {
+				return set_number_value(element, value, &current);
+			}
 			// Apps commit what reaches their field editor; several (Contacts,
 			// Font Book, System Settings search) echo an AXValue write without
 			// ever taking it, so replace the text the way `typeText` inserts it.
@@ -2129,6 +2133,100 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 	})
 }
 
+/// How long a number write's read-back waits for the value to arrive, for an
+/// app that applies the write a moment after answering it.
+const NUMBER_SETTLE: Duration = Duration::from_millis(500);
+
+/// Number-valued controls (sliders, steppers, level indicators) publish
+/// `AXValue` as a `CFNumber` and refuse the same value written as a
+/// `CFString` (`IllegalArgument`), so the text is parsed and written as a
+/// `CFNumber`, then read back: the app clamps the value to its range or
+/// rounds it to its steps while answering the write, so the call reports
+/// what the control holds.
+fn set_number_value(element: &AXUIElement, text: &str, current: &CFNumber) -> CoreResult<()> {
+	let target = parse_number(text, current)?;
+	let value = CFNumber::new_f64(target);
+	let attribute = CFString::from_str("AXValue");
+	// The probes before can block; a run cancelled meanwhile, or an app the
+	// user used meanwhile, gets nothing written.
+	control::check()?;
+	control::intervention::check_press()?;
+	// SAFETY: The element, attribute and number remain retained for the setter.
+	let error = unsafe { element.set_attribute_value(&attribute, &value) };
+	ax_result(error, "setting AXValue to a number failed; inspect the target before writing again")?;
+	let deadline = Instant::now() + NUMBER_SETTLE;
+	loop {
+		let actual = copy_number(element, "AXValue");
+		if actual
+			.as_deref()
+			.is_some_and(|actual| number_reached(target, actual))
+		{
+			return Ok(());
+		}
+		if Instant::now() >= deadline {
+			return Err(number_readback_error(
+				target,
+				actual.as_deref(),
+				copy_number(element, "AXMinValue").as_deref(),
+				copy_number(element, "AXMaxValue").as_deref(),
+			));
+		}
+		thread::sleep(Duration::from_millis(25));
+	}
+}
+
+/// The number `text` names, or the refusal naming what the control reads.
+fn parse_number(text: &str, current: &CFNumber) -> CoreResult<f64> {
+	text
+		.parse::<f64>()
+		.ok()
+		.filter(|value| value.is_finite())
+		.ok_or_else(|| {
+			DesktopError::ax_failed(format!(
+				"AXValue is a number and {text:?} is not one: write digits such as \"75\" or \"0.5\"; \
+				 it reads {} now; nothing was written",
+				stringify_number(current),
+			))
+		})
+}
+
+/// Within float precision: a control that stores the value as `float` reads
+/// back 0.3 as 0.30000001192092896.
+fn number_reached(target: f64, actual: &CFNumber) -> bool {
+	actual.as_f64().is_some_and(|actual| {
+		(actual - target).abs() <= target.abs().max(1.0) * f64::from(f32::EPSILON)
+	})
+}
+
+/// A read-back that is not the written number: the value the control reached,
+/// and its range bound where that explains it.
+fn number_readback_error(
+	target: f64,
+	actual: Option<&CFNumber>,
+	min: Option<&CFNumber>,
+	max: Option<&CFNumber>,
+) -> DesktopError {
+	let Some(actual) = actual else {
+		return DesktopError::ax_failed(format!(
+			"wrote {target}, but the control's value could not be read back as a number; inspect the \
+			 target before writing again"
+		));
+	};
+	let bound = |bound: Option<&CFNumber>, past: fn(f64, f64) -> bool, name: &str| {
+		bound
+			.filter(|bound| bound.as_f64().is_some_and(|bound| past(target, bound)))
+			.map(|bound| format!(" (its {name} is {})", stringify_number(bound)))
+	};
+	let range = bound(min, |target, min| target < min, "minimum")
+		.or_else(|| bound(max, |target, max| target > max, "maximum"))
+		.unwrap_or_default();
+	DesktopError::ax_failed(format!(
+		"wrote {target}; the control now reads {}{range}. The app may have clamped, rounded or not \
+		 taken it: inspect the target before writing again",
+		stringify_number(actual),
+	))
+}
+
 /// Sets `AXFocused` on `element`; the caller holds the background guard.
 pub(super) fn set_focused(element: &AXUIElement) -> CoreResult<()> {
 	ax_result(focus_element(element), "setting AXFocused=true failed")
@@ -2649,6 +2747,13 @@ fn copy_date(element: &AXUIElement, attribute: &str) -> Option<f64> {
 		.downcast::<CFDate>()
 		.ok()?;
 	Some(value.absolute_time())
+}
+
+/// The attribute's value when it is a `CFNumber`; a `CFBoolean` is not one.
+fn copy_number(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFNumber>> {
+	copy_attribute(element, attribute)?
+		.downcast::<CFNumber>()
+		.ok()
 }
 
 fn copy_string(element: &AXUIElement, attribute: &str) -> Option<String> {
@@ -3533,6 +3638,53 @@ mod tests {
 		assert_eq!(stringify_value(&CFNumber::new_i64(-3)), "-3");
 		assert_eq!(stringify_value(&CFNumber::new_f64(0.185)), "0.185");
 		assert_eq!(stringify_value(&CFNumber::new_f32(0.185)), "0.185");
+	}
+
+	#[test]
+	fn number_text_parses_or_names_what_the_control_reads() {
+		let current = CFNumber::new_f64(12.5);
+		assert_eq!(parse_number("75", &current).unwrap(), 75.0);
+		assert_eq!(parse_number("-2.5", &current).unwrap(), -2.5);
+		assert_eq!(parse_number("1e2", &current).unwrap(), 100.0);
+		for text in ["seventy-five", "", "75%", "NaN", "inf"] {
+			let error = parse_number(text, &current).unwrap_err();
+			assert!(error.message.contains(&format!("{text:?} is not one")), "{}", error.message);
+			assert!(error.message.contains("it reads 12.5 now"), "{}", error.message);
+			assert!(error.message.contains("nothing was written"), "{}", error.message);
+		}
+	}
+
+	#[test]
+	fn a_number_read_back_matches_within_float_precision() {
+		assert!(number_reached(0.3, &CFNumber::new_f32(0.3)));
+		assert!(number_reached(75.0, &CFNumber::new_i64(75)));
+		assert!(!number_reached(75.5, &CFNumber::new_i64(75)));
+		assert!(!number_reached(150.0, &CFNumber::new_f64(100.0)));
+	}
+
+	#[test]
+	fn a_number_read_back_names_the_value_reached_and_the_bound_that_explains_it() {
+		let (min, max) = (CFNumber::new_f64(0.0), CFNumber::new_f64(100.0));
+		let clamped =
+			number_readback_error(150.0, Some(&CFNumber::new_f64(100.0)), Some(&min), Some(&max));
+		assert_eq!(
+			clamped.message,
+			"wrote 150; the control now reads 100 (its maximum is 100). The app may have clamped, \
+			 rounded or not taken it: inspect the target before writing again"
+		);
+		let low = number_readback_error(-5.0, Some(&CFNumber::new_f64(0.0)), Some(&min), Some(&max));
+		assert!(low.message.contains("now reads 0 (its minimum is 0)."), "{}", low.message);
+		let rounded =
+			number_readback_error(42.5, Some(&CFNumber::new_f64(40.0)), Some(&min), Some(&max));
+		assert!(
+			rounded
+				.message
+				.starts_with("wrote 42.5; the control now reads 40."),
+			"{}",
+			rounded.message
+		);
+		let unread = number_readback_error(75.0, None, None, None);
+		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
 	}
 
 	#[test]
