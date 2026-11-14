@@ -3,7 +3,8 @@
  *
  * Mirrors ZCode's desktop "Individual Plan" browser sign-in: an
  * authorization-code flow (no PKCE) against chat.z.ai, a JSON token exchange
- * that yields a short-lived OAuth access token, and a business-API sequence
+ * that yields a short-lived OAuth access token plus the two durable JWTs
+ * banked below for the coding-plan reset routes, and a business-API sequence
  * that provisions a durable `id.secret` API key. The minted key is placed in
  * {@link OAuthCredentials.access}; `getOAuthApiKey` returns it verbatim as the
  * request bearer for the `zai` provider, so no dialect change is needed.
@@ -12,6 +13,7 @@
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import type { AfterExchangeHook } from "../hooks/types";
+import { isRecord } from "../../utils";
 
 const env = (key: string): string | undefined => {
 	const value = process.env[key];
@@ -198,8 +200,33 @@ async function mintZaiApiKey(oauthAccessToken: string, fetchImpl: FetchImpl): Pr
 	return `${apiKey}.${secretKey}`;
 }
 
-/** Replaces the short-lived OAuth token with the durable key minted by the Z.ai business APIs. */
-export const zaiMintKeyHook: AfterExchangeHook = async (credentials, context) => ({
-	...credentials,
-	access: await mintZaiApiKey(credentials.access, context.fetch),
-});
+/**
+ * Replaces the short-lived OAuth token with the durable key minted by the Z.ai
+ * business APIs, first banking the two JWTs the coding-plan reset routes
+ * require (they reject the minted API key with 401). Both come from the token
+ * exchange response: `credentials.access` still holds the MaaS OAuth JWT at
+ * hook time and `context.raw.data.token` is the zcode control-plane JWT. When
+ * either is missing the login still completes — the reset feature just stays
+ * unavailable for that credential.
+ *
+ * The banked JWTs are durable, not short-lived: neither carries an `exp`
+ * claim (observed live: zcodeJwt claims {user_id, token_version, sub, iat};
+ * zaiOauthJwt claims {user_type, user_id, api_key, user_key, customer_id,
+ * username, customer}), and both verified still valid 5+ days after issue.
+ * `refresh: "none"` is therefore safe for this flow — nothing expires to
+ * refresh — and a 401 from the reset routes surfaces as `reauth_required`
+ * (listZaiResetStatus), telling the user to sign in again rather than
+ * retrying dead tokens.
+ */
+export const zaiMintKeyHook: AfterExchangeHook = async (credentials, context) => {
+	const zaiOauthJwt = trimmedString(credentials.access);
+	const zcodeJwt = isRecord(context.raw)
+		? trimmedString(isRecord(context.raw.data) ? context.raw.data.token : undefined)
+		: undefined;
+	const access = await mintZaiApiKey(credentials.access, context.fetch);
+	return {
+		...credentials,
+		access,
+		...(zcodeJwt && zaiOauthJwt ? { zcodeJwt, zaiOauthJwt } : {}),
+	};
+};

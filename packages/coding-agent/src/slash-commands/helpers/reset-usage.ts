@@ -4,6 +4,7 @@
  * `<provider>/<credential id>` target, and map a redeem outcome code to a
  * human message.
  */
+import { zaiResetUsageCredit } from "@oh-my-pi/pi-ai/usage/zai-reset";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "../../session/auth-storage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
@@ -11,11 +12,13 @@ import { summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-disp
 
 const CODEX_PROVIDER_ID = "openai-codex";
 const CLAUDE_PROVIDER_ID = "anthropic";
+const ZAI_PROVIDER_ID = "zai";
 
 /** Provider name shown beside each exact saved-reset account option. */
 export function formatResetProviderName(provider: string): string {
 	if (provider === CODEX_PROVIDER_ID) return "Codex";
 	if (provider === CLAUDE_PROVIDER_ID) return "Claude";
+	if (provider === ZAI_PROVIDER_ID) return "Z.AI";
 	return provider;
 }
 
@@ -24,7 +27,7 @@ export function oneLine(value: string): string {
 	return sanitizeText(value.replace(/[\r\n\t]+/g, " "));
 }
 
-/** Provider id a saved-reset target names; `claude` and `codex` are aliases. */
+/** Provider id a saved-reset target names; `claude`, `codex`, and `z.ai` are aliases. */
 export function normalizeResetProvider(value: string): string | undefined {
 	switch (value.trim().toLowerCase()) {
 		case "anthropic":
@@ -33,6 +36,9 @@ export function normalizeResetProvider(value: string): string | undefined {
 		case "openai-codex":
 		case "codex":
 			return CODEX_PROVIDER_ID;
+		case "zai":
+		case "z.ai":
+			return ZAI_PROVIDER_ID;
 		default:
 			return undefined;
 	}
@@ -52,7 +58,9 @@ export function parseResetUsageTarget(arg: string, command: string): ResetUsageT
 	if (slash <= 0) return { error: `Choose an account with \`${command} <provider>/<credential id>\`.` };
 	const provider = normalizeResetProvider(text.slice(0, slash));
 	if (!provider) {
-		return { error: `Unknown reset provider "${oneLine(text.slice(0, slash))}". Use anthropic or openai-codex.` };
+		return {
+			error: `Unknown reset provider "${oneLine(text.slice(0, slash))}". Use anthropic, openai-codex, or zai.`,
+		};
 	}
 	return {
 		provider,
@@ -85,7 +93,7 @@ export function resolveResetUsageTarget(
 	}
 	if (account.error) {
 		return {
-			error: `${oneLine(account.label)} [${oneLine(account.providerLabel)}]: saved resets unavailable (${oneLine(account.error)}), so nothing was spent.`,
+			error: `${oneLine(account.label)} [${oneLine(account.providerLabel)}]: saved resets unavailable (${oneLine(resetStatusErrorLabel(account.error))}), so nothing was spent.`,
 		};
 	}
 	if (account.redeemableCount <= 0) {
@@ -97,11 +105,18 @@ export function resolveResetUsageTarget(
 	return { account };
 }
 
+/** Human wording for a live reset-status error code; anything else renders as-is. */
+export function resetStatusErrorLabel(error: string): string {
+	if (error === "reauth_required") return "sign-in expired — run /login zai again";
+	if (error === "missing_tokens") return "no sign-in stored — run /login";
+	return error;
+}
+
 /** One listing row: identity, provider, the account's `<provider>/<credential id>` target, and its resets. */
 export function formatResetUsageAccountLine(account: ResetUsageAccount): string {
 	let detail: string;
 	if (account.error) {
-		detail = `unavailable (${oneLine(account.error)})`;
+		detail = `unavailable (${oneLine(resetStatusErrorLabel(account.error))})`;
 	} else {
 		detail = `${account.availableCount} saved, ${account.redeemableCount} usable now`;
 		if (account.expiresAt) detail += `, expires ${oneLine(account.expiresAt)}`;
@@ -116,14 +131,18 @@ export function formatResetUsageAccountLine(account: ResetUsageAccount): string 
 export function toResetUsageAccount(status: ResetCreditAccountStatus): ResetUsageAccount {
 	const provider = status.provider;
 	const providerLabel = formatResetProviderName(provider);
-	const credit = status.nextCreditId
-		? status.credits.find(candidate => candidate.id === status.nextCreditId)
+	const creditId =
+		status.nextCreditId ?? (provider === ZAI_PROVIDER_ID ? zaiResetUsageCredit(status.credits)?.id : undefined);
+	const credit = creditId
+		? status.credits.find(candidate => candidate.id === creditId)
 		: (status.credits.find(candidate => candidate.usable !== false) ?? status.credits[0]);
 	const advertisedRedeemable = status.redeemableCount ?? status.availableCount;
 	const summary = summarizeUsageResetCredits(status);
-	// Claude's listing endpoint chooses the one grant that may be spent.
-	// Never degrade a missing pin into "spend whichever grant is current".
-	const redeemableCount = provider === CLAUDE_PROVIDER_ID && !status.nextCreditId ? 0 : advertisedRedeemable;
+	// Claude's listing endpoint chooses the one grant that may be spent, and Z.AI
+	// spends only the offer a target names. Never degrade a missing pin into
+	// "spend whichever grant is current".
+	const redeemableCount =
+		(provider === CLAUDE_PROVIDER_ID || provider === ZAI_PROVIDER_ID) && !creditId ? 0 : advertisedRedeemable;
 	const identity = status.email ?? status.accountId ?? "account";
 	const organization = status.orgName ?? status.orgId;
 	const label = organization ? `${identity} · ${organization}` : identity;
@@ -145,7 +164,7 @@ export function toResetUsageAccount(status: ResetCreditAccountStatus): ResetUsag
 			...(status.accountId ? { accountId: status.accountId } : {}),
 			...(status.email ? { email: status.email } : {}),
 			...(status.orgId ? { orgId: status.orgId } : {}),
-			...(status.nextCreditId ? { creditId: status.nextCreditId } : {}),
+			...(creditId ? { creditId } : {}),
 		} satisfies ResetCreditTarget,
 		active: status.active,
 		error: status.error,
@@ -192,6 +211,8 @@ export function describeRedeemOutcome(outcome: ResetCreditRedeemOutcome, label: 
 			return `${label}${provider}: couldn't load this account's saved resets (network/auth) — nothing was spent, try again.`;
 		case "nothing_to_reset":
 			return `${label}${provider}: nothing to reset right now — your covered limits aren't constrained, so no credit was spent.`;
+		case "reauth_required":
+			return `${label}${provider}: this account's sign-in expired — run /login ${outcome.provider ?? "zai"} again, then retry.`;
 		case "no_account":
 			return `Could not find the stored account ${label}${provider}.`;
 		case "account_unavailable":

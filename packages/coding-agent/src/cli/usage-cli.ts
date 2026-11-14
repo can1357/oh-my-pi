@@ -1330,16 +1330,17 @@ function identityTextMasker(redaction: Map<string, string>): (text: string) => s
 }
 
 /**
- * `omp usage reset [<provider>/<credential id>]`: list every stored Codex and
- * Claude account's saved resets, or spend one on the named account. Both run in
- * this process with the store's tokens, so a broker client works like the host.
+ * `omp usage reset [<provider>/<credential id>]`: list every stored Codex,
+ * Claude, and Z.AI account's saved resets, or spend one on the named account.
+ * Both run in this process with the store's tokens, so a broker client works
+ * like the host.
  */
 async function runUsageResetCommand(
 	cmd: UsageCommandArgs,
 	settings: Settings,
 	authStorage: AuthStorage,
 ): Promise<void> {
-	let providers = ["openai-codex", "anthropic"];
+	let providers = ["openai-codex", "anthropic", "zai"];
 	if (cmd.target) {
 		const target = parseResetUsageTarget(cmd.target, RESET_COMMAND);
 		if ("error" in target) {
@@ -1357,7 +1358,7 @@ async function runUsageResetCommand(
 		const provider = normalizeResetProvider(cmd.provider);
 		if (!provider) {
 			failUsageReset(
-				"Saved resets exist only for Codex and Claude accounts. Use --provider openai-codex or anthropic.",
+				"Saved resets exist only for Codex, Claude, and Z.AI accounts. Use --provider openai-codex, anthropic, or zai.",
 			);
 			return;
 		}
@@ -1365,15 +1366,15 @@ async function runUsageResetCommand(
 	}
 	const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
 	const baseUrlResolver = (provider: string) => modelRegistry.getProviderBaseUrl(provider);
-	// Codex's listing requests carry no timeout of their own (Claude's discovery
-	// bounds each request), so a stalled endpoint cannot hang a script.
+	// Codex's and Z.AI's listing requests carry no timeout of their own
+	// (Claude's discovery bounds each request), so a stalled endpoint cannot hang a script.
 	const statuses = (
 		await Promise.all(
 			providers.map(provider =>
 				authStorage.resets.list({
 					provider,
 					baseUrlResolver,
-					signal: provider === "openai-codex" ? AbortSignal.timeout(10_000) : undefined,
+					signal: provider === "openai-codex" || provider === "zai" ? AbortSignal.timeout(10_000) : undefined,
 				}),
 			),
 		)

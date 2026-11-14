@@ -59,6 +59,7 @@ import type {
 	RedeemResetCreditOptions,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
+	ResetOpportunityOutcome,
 	ResolvedApiKey,
 	RotateCredentialOptions,
 	StoredAuthCredential,
@@ -133,7 +134,7 @@ export type WireListResetCreditsOptions = Omit<ListResetCreditsOptions, "baseUrl
 	baseUrls?: BaseUrlTable;
 };
 
-/** `resets.redeem` options on the wire. */
+/** `resets.redeem` and `resets.claimOpportunity` options on the wire. */
 export type WireRedeemResetCreditOptions = Omit<RedeemResetCreditOptions, "baseUrlResolver"> & {
 	baseUrls?: BaseUrlTable;
 };
@@ -268,6 +269,7 @@ export type AuthStorageProtocol = {
 
 	"resets.list": RpcMethod<[options?: WireListResetCreditsOptions], ResetCreditAccountStatus[]>;
 	"resets.redeem": RpcMethod<[options: WireRedeemResetCreditOptions], ResetCreditRedeemOutcome>;
+	"resets.claimOpportunity": RpcMethod<[options: WireRedeemResetCreditOptions], ResetOpportunityOutcome>;
 
 	"blocks.list": RpcMethod<[credentialIds: readonly number[]], StoredCredentialBlock[]>;
 	"blocks.upsert": RpcMethod<[block: StoredCredentialBlock], void>;

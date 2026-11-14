@@ -11,6 +11,7 @@ import type {
 } from "../usage";
 import { isRecord } from "../utils";
 import { buildUsageAmount, DAY_MS, HOUR_MS, usageStatus, WEEK_MS } from "./shared";
+import { listZaiResetStatus, zaiResetStatusToInventory, type ZaiResetStatus } from "./zai-reset";
 
 const DEFAULT_ENDPOINT = "https://api.z.ai";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";
@@ -205,6 +206,23 @@ function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
 	return ranked;
 }
 
+/**
+ * Live coding-plan reset offers for the credential, when it carries the login
+ * JWTs. Never rejects and never throws for missing tokens: a credential signed
+ * in before this feature (or via API key) simply reports no reset inventory.
+ */
+async function fetchZaiResetStatus(params: UsageFetchParams, ctx: UsageFetchContext): Promise<ZaiResetStatus | null> {
+	const credential = params.credential;
+	if (!credential.zcodeJwt || !credential.zaiOauthJwt) return null;
+	const outcome = await listZaiResetStatus(
+		{ zcodeJwt: credential.zcodeJwt, zaiOauthJwt: credential.zaiOauthJwt },
+		{ fetchImpl: ctx.fetch, signal: params.signal },
+	);
+	// Any listing failure — unauthorized included — reports no inventory; the
+	// usage report itself never fails (reauth surfaces via the reset listing).
+	return outcome.ok ? outcome.status : null;
+}
+
 async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "zai") return null;
 	const credential = params.credential;
@@ -346,6 +364,12 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 		raw: payload,
 	};
 
+	// Coding-plan reset offers come from the zcode control plane, not the MaaS
+	// quota endpoint, and need the login JWTs (a minted API key gets 401).
+	// Started here so it overlaps the model-usage fetch; it must never fail the
+	// report itself.
+	const resetStatus = fetchZaiResetStatus(params, ctx);
+
 	const modelUsageUrl = buildModelUsageUrl(baseUrl, new Date());
 	try {
 		const response = await ctx.fetch(modelUsageUrl, {
@@ -363,6 +387,11 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 		}
 	} catch (error) {
 		ctx.logger?.debug("ZAI model usage fetch failed", { error: String(error) });
+	}
+
+	const resetStatusResolved = await resetStatus;
+	if (resetStatusResolved) {
+		report.resetCredits = zaiResetStatusToInventory(resetStatusResolved, Date.now());
 	}
 
 	return report;

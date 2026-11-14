@@ -64,6 +64,7 @@ export * from "./usage/opencode-go";
 export * from "./usage/synthetic";
 export * from "./usage/xai-oauth";
 export * from "./usage/zai";
+export * from "./usage/zai-reset";
 export * from "./utils/anthropic-auth";
 export * from "./utils/event-stream";
 export * from "./utils/glyph-codec";

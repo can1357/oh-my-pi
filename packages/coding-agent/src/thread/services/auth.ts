@@ -316,6 +316,10 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			const { baseUrls, ...rest } = options;
 			return storage.resets.redeem({ ...rest, baseUrlResolver: tableResolver(baseUrls) });
 		},
+		"resets.claimOpportunity": (storage, options) => {
+			const { baseUrls, ...rest } = options;
+			return storage.resets.claimOpportunity({ ...rest, baseUrlResolver: tableResolver(baseUrls) });
+		},
 
 		"blocks.list": (storage, credentialIds) => storage.blocks.list(credentialIds),
 		"blocks.upsert": (storage, block) => storage.blocks.upsert(block),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Z.AI sign-in now retains the control-plane tokens the coding-plan reset API needs, and `AuthStorage.resets` lists, claims (`claimOpportunity`), and spends Z.AI reset offers; usage reports carry them as saved-reset credits with their claim-window expiry ([#19166](https://github.com/can1357/oh-my-pi/pull/19166) by [@abilliontokens](https://github.com/abilliontokens))
+
 ### Changed
 
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))

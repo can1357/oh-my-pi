@@ -267,3 +267,178 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 });
+
+const ZAI_USAGE_LIMIT_ERROR =
+	'429 {"type":"error","error":{"type":"rate_limit_error","message":"usage_limit_reached"}} retry-after-ms=259200000';
+
+describe("Z.AI opportunity-claim consent", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let sessions: AgentSession[];
+	let managers: SessionManager[];
+	let tempDir: TempDir;
+
+	const ZAI_ACCOUNT_ID = "zai-acct-1";
+
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+	});
+
+	beforeEach(() => {
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
+		sessions = [];
+		managers = [];
+		tempDir = TempDir.createSync("@pi-zai-reset-");
+	});
+
+	afterEach(async () => {
+		for (const session of sessions.splice(0).reverse()) {
+			await session.dispose();
+		}
+		for (const manager of managers.splice(0).reverse()) {
+			await manager.close();
+		}
+		tempDir.removeSync();
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+	});
+
+	function zaiReport(): UsageReport {
+		const now = Date.now();
+		return {
+			provider: "zai",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "zai:tokens:5h",
+					label: "5 Hour",
+					scope: { provider: "zai", accountId: ZAI_ACCOUNT_ID },
+					window: { id: "5h", label: "5 Hour", resetsAt: now + HOUR },
+					amount: { usedFraction: 1, unit: "percent" },
+				},
+			],
+			metadata: { accountId: ZAI_ACCOUNT_ID, email: EMAIL, limitReached: true },
+		};
+	}
+
+	function zaiStatus(): ResetCreditAccountStatus {
+		return {
+			provider: "zai",
+			credentialId: 1,
+			accountId: ZAI_ACCOUNT_ID,
+			email: EMAIL,
+			active: true,
+			availableCount: 0,
+			credits: [],
+		};
+	}
+
+	function buildZaiSession(options: { autoRedeem: "unset" | "yes"; acpForm?: boolean }) {
+		const model = getTestModel("zai");
+		authStorage.keys.setRuntime("zai", "test-key");
+		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({ accountId: ZAI_ACCOUNT_ID, email: EMAIL });
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => [zaiReport()]);
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [zaiStatus()]);
+		const claimed: ResetCreditTarget[] = [];
+		vi.spyOn(authStorage.resets, "claimOpportunity").mockImplementation(async request => {
+			claimed.push(request.target);
+			return { ok: true, granted: true, code: "granted" };
+		});
+
+		const mock = createMockModel();
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, streamOptions) => {
+				calls++;
+				if (calls === 1) mock.push({ throw: ZAI_USAGE_LIMIT_ERROR });
+				else mock.push({ content: ["recovered after the zai reset pass"], stopReason: "stop" });
+				return mock.stream(requestedModel, context, streamOptions);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 1,
+			"zaiResets.autoRedeem": options.autoRedeem,
+			"claudeResets.autoRedeem": "no",
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const sessionManager = SessionManager.inMemory();
+		managers.push(sessionManager);
+		const coordinator = createCodexAutoRedeemCoordinator();
+		coordinator.resetLockPath = `${tempDir.path()}/agent.db`;
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			codexResetCoordinator: coordinator,
+			extensionRunner:
+				options.acpForm === undefined
+					? undefined
+					: new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry),
+			interactivePrompts: options.acpForm,
+		});
+		sessions.push(session);
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		return { session, claimed, notices };
+	}
+
+	it("never claims an opportunity headlessly while auto-claim is unset", async () => {
+		const { session, claimed, notices } = buildZaiSession({ autoRedeem: "unset" });
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a zai usage limit");
+		await session.waitForIdle();
+
+		expect(claimed).toEqual([]);
+		expect(notices).toContainEqual(expect.stringContaining("auto-claim is unset and no prompt UI is available"));
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
+	it("claims opportunities without prompting when auto-claim is yes", async () => {
+		const { session, claimed } = buildZaiSession({ autoRedeem: "yes" });
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a zai usage limit");
+		await session.waitForIdle();
+
+		expect(claimed).toEqual([{ provider: "zai", credentialId: 1, accountId: ZAI_ACCOUNT_ID, email: EMAIL }]);
+	});
+
+	it("asks an ACP client with form elicitation before the first claim", async () => {
+		const { session, claimed } = buildZaiSession({ autoRedeem: "unset", acpForm: true });
+		const elicitations: string[] = [];
+		const connection = {
+			unstable_createElicitation: async (request: CreateElicitationRequest) => {
+				elicitations.push(request.message);
+				return { action: "decline" };
+			},
+		} as unknown as AgentSideConnection;
+		await initializeExtensions(session, {
+			mode: "rpc",
+			reportSendError: () => {},
+			reportRuntimeError: () => {},
+			uiContext: createAcpExtensionUiContext(connection, () => session.sessionId, {
+				elicitation: { form: {} },
+			}),
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a zai usage limit");
+		await session.waitForIdle();
+
+		expect(elicitations).toEqual([expect.stringContaining("Claim Z.AI coding-plan reset opportunities for")]);
+		expect(claimed).toEqual([]);
+	});
+});

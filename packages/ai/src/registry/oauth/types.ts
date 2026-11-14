@@ -37,6 +37,10 @@ export type OAuthCredentials = {
 	 * surface re-login deadlines before the grant dies.
 	 */
 	authorizedAt?: number;
+	/** ZCode control-plane JWT (`data.token` of the z.ai OAuth exchange); authenticates coding-plan reset calls. */
+	zcodeJwt?: string;
+	/** Z.ai MaaS OAuth JWT (`data.zai.access_token`); `X-Bigmodel-Authorization` for coding-plan reset calls. */
+	zaiOauthJwt?: string;
 };
 
 export type OAuthProvider = OAuthProviderUnion;
