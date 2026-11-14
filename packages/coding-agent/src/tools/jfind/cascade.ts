@@ -171,7 +171,9 @@ function compareRel(a: FileEntry, b: FileEntry): number {
 /**
  * Literal keyword lines from the already-read windows, in selection order.
  * Only windows that matched lexically (`score > 0`) contribute; each matching
- * line becomes one `rel:line` row, capped at {@link LEXICAL_FALLBACK_ROWS}.
+ * line becomes one `rel:line` row. Rows are dealt round-robin across files,
+ * capped at {@link LEXICAL_FALLBACK_ROWS}, so one keyword-dense file cannot
+ * crowd out every other file that was read.
  */
 function fallbackMatches(
 	files: readonly FilePlan[],
@@ -179,25 +181,35 @@ function fallbackMatches(
 	keywords: readonly string[],
 ): FindLexicalMatch[] {
 	if (keywords.length === 0) return [];
-	const out: FindLexicalMatch[] = [];
+	const perFile: FindLexicalMatch[][] = [];
 	for (const plan of files) {
+		const rows: FindLexicalMatch[] = [];
 		for (const passage of plan.passages) {
-			if (passage.score <= 0) continue;
+			if (passage.score <= 0 || rows.length >= LEXICAL_FALLBACK_ROWS) continue;
 			const stripped = lines(plainContent(passage));
-			for (let i = 0; i < stripped.length; i++) {
+			for (let i = 0; i < stripped.length && rows.length < LEXICAL_FALLBACK_ROWS; i++) {
 				const snippet = stripped[i]!;
 				const lower = snippet.toLowerCase();
 				if (!keywords.some(keyword => lower.includes(keyword))) continue;
-				out.push({
+				rows.push({
 					rel: entries[plan.node]!.rel,
 					line: passage.start + i,
 					snippet: takeChars(snippet.trim(), LEXICAL_FALLBACK_SNIPPET),
 				});
-				if (out.length >= LEXICAL_FALLBACK_ROWS) return out;
 			}
 		}
+		if (rows.length > 0) perFile.push(rows);
 	}
-	return out;
+	const out: FindLexicalMatch[] = [];
+	for (let i = 0; ; i++) {
+		let added = false;
+		for (const rows of perFile) {
+			if (i >= rows.length || out.length >= LEXICAL_FALLBACK_ROWS) continue;
+			out.push(rows[i]!);
+			added = true;
+		}
+		if (!added || out.length >= LEXICAL_FALLBACK_ROWS) return out;
+	}
 }
 
 class Cascade {

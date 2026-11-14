@@ -70,12 +70,12 @@ function printReport(cmd: FindCommandArgs, rel: string, result: CascadeResult, e
 			}
 		}
 	}
-		if (coverage === "unavailable" && result.lexicalFallback.length > 0) {
-			console.log(chalk.dim("unranked literal keyword matches (not semantically judged):"));
-			for (const match of result.lexicalFallback) {
-				console.log(`  ${chalk.cyan(`${match.rel}:${match.line}`)}  ${match.snippet}`);
-			}
+	if (coverage === "unavailable" && result.lexicalFallback.length > 0) {
+		console.log(chalk.dim("unranked literal keyword matches (not semantically judged):"));
+		for (const match of result.lexicalFallback) {
+			console.log(`  ${chalk.cyan(`${match.rel}:${match.line}`)}  ${match.snippet}`);
 		}
+	}
 	if (coverage === "partial") {
 		console.log(chalk.yellow(`partial: ${stats.failed} of ${stats.requests} judge requests failed`));
 	}
