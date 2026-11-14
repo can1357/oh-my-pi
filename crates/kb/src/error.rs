@@ -26,8 +26,10 @@ pub enum Error {
 	IndexVersion { version: u32 },
 	#[error("knowledge-base object digest mismatch")]
 	DigestMismatch,
-	#[error("repository changed while SCIP producers were running")]
-	ChangedDuringProducers,
+	#[error("repository HEAD moved while SCIP producers were running")]
+	RevisionChangedDuringProducers,
+	#[error("repository changed while SCIP producers were running: {path}")]
+	ChangedDuringProducers { path: String },
 	#[error("repository changed while building the index")]
 	ChangedDuringBuild,
 	#[error("index has no definitions")]
