@@ -99,7 +99,10 @@ describe("Unicode empty regex matches", () => {
 	it("finishes secret-value collection in both Unicode modes", () => {
 		for (const flags of ["u", "v"]) {
 			const obfuscator = new SecretObfuscator([{ type: "regex", content: "(?:secret)?", flags }]);
-			expect(finishScan(() => obfuscator.obfuscate("😀")), flags).toBe("😀");
+			expect(
+				finishScan(() => obfuscator.obfuscate("😀")),
+				flags,
+			).toBe("😀");
 		}
 	});
 

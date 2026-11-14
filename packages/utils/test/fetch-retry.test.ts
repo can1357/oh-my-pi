@@ -224,8 +224,14 @@ describe("extractRetryHint", () => {
 	});
 
 	it.each([
-		["retryDelay before quotaResetDelay", '{"details":[{"retryDelay":"5s"},{"metadata":{"quotaResetDelay":"3600s"}}]}'],
-		["quotaResetDelay before retryDelay", '{"details":[{"metadata":{"quotaResetDelay":"3600s"}},{"retryDelay":"5s"}]}'],
+		[
+			"retryDelay before quotaResetDelay",
+			'{"details":[{"retryDelay":"5s"},{"metadata":{"quotaResetDelay":"3600s"}}]}',
+		],
+		[
+			"quotaResetDelay before retryDelay",
+			'{"details":[{"metadata":{"quotaResetDelay":"3600s"}},{"retryDelay":"5s"}]}',
+		],
 	])("waits for the longer structured delay when %s", (_label, body) => {
 		expect(extractRetryHint(undefined, body)).toBe(3_600_000);
 	});
