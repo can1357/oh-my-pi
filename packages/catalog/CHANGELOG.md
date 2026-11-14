@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `lfm3-1.7b` to the `local` provider's authored seeds, so `local/lfm3-1.7b` resolves as a selectable model (for example `modelRoles.memory`) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+- Added `unsupported "<backend>" reason="…"` to the seed-row grammar and `seedBackendRefusals(provider, modelId)` to read it, so a reviewed backend restriction on a local model is authored in `rules/providers/local.kdl` instead of per-model TypeScript ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
 - Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
 - Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
 

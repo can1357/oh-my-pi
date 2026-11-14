@@ -4,6 +4,14 @@
 
 ### Added
 
+- Added `lfm3-1.7b` to the local memory models: LiquidAI's LFM3 ONNX export now generates on Windows and Linux ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+
+### Changed
+
+- The MLX backend now skips a model whose pinned `mlx-lm` release cannot load its architecture and falls back to ONNX CPU for that model alone, instead of downloading the MLX weights and failing (`lfm3-1.7b` is the first such entry) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+
+### Added
+
 - Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
 - Todo tool status line now displays task count for multiple targets
 - Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.

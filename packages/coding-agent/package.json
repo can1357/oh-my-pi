@@ -558,7 +558,8 @@
 		"puppeteer-core": "catalog:"
 	},
 	"devDependencies": {
-		"@types/bun": "catalog:"
+		"@types/bun": "catalog:",
+		"onnxruntime-node": "catalog:"
 	},
 	"engines": {
 		"bun": ">=1.4.4"
