@@ -609,8 +609,6 @@ export interface OpenAICompat {
 	stripImageInput?: boolean;
 	/** Whether the gateway requires an `<env>` working directory block in the system prompt. */
 	requiresOpenCodeEnvironment?: boolean;
-	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
-	thinkingLoopGuard?: "gemini" | "deepseek" | "xai";
 }
 
 /**
@@ -1036,8 +1034,6 @@ export interface ResolvedOpenAISharedCompat {
 	stripImageInput: boolean;
 	/** Whether the gateway requires an `<env>` working directory block in the system prompt. */
 	requiresOpenCodeEnvironment?: boolean;
-	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
-	thinkingLoopGuard?: OpenAICompat["thinkingLoopGuard"];
 	/** Flatten/reject leftover root `anyOf`/`oneOf` unions in strict tool schemas (xAI's function-calling validator 400s on them). */
 	rejectRootObjectUnion: boolean;
 	/** Retry without strict tools when the host rejects a strict grammar as too large (OpenRouter-Anthropic compiled-grammar overflow). */
@@ -1121,7 +1117,6 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsSteering"
 			| "stripImageInput"
 			| "requiresOpenCodeEnvironment"
-			| "thinkingLoopGuard"
 			| "whenThinking"
 		>
 	> & {
