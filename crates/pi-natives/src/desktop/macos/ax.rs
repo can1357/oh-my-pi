@@ -3091,11 +3091,12 @@ mod tests {
 	use super::{
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
-		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, is_outside_windows, may_borrow_focus, menu_window, perform_choosing,
+		ValueKind, WindowContent, ax_result, content_owner, create_system_wide,
+		element_action_result, focused_window, is_outside_windows, may_borrow_focus, menu_window,
+		not_settable, number_reached, number_readback_error, parse_number, perform_choosing,
 		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
 		select_attached, standard_window_subrole, stringify_value, takes_inserted_text,
-		target_window, window_records_of,
+		target_window, value_kind, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
