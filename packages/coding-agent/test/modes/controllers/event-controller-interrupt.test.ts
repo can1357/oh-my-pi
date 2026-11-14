@@ -49,9 +49,10 @@ describe("EventController aborted-turn working messages", () => {
 	});
 
 	it("preserves playback across internal continuations and clears it for a user message", async () => {
-		const clear = vi.spyOn(vocalizer, "clear").mockImplementation(() => {});
 		const { ctx } = createContext();
+		// Wiring the session's model source stops prior playback; only turn events are under test.
 		const controller = new EventController(ctx);
+		const clear = vi.spyOn(vocalizer, "clear").mockImplementation(() => {});
 
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent({ type: "turn_start" });

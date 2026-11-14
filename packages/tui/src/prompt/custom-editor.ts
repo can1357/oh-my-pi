@@ -15,6 +15,7 @@ import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
 import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
+import { getNativeBlob, type NativeBlob, nativeBlob, withBlob } from "../native/blobs";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
@@ -457,6 +458,13 @@ export interface TextAttachment {
 export type ComposerChipDescriptor =
 	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
 	| { kind: "paste"; n: number; text: TextAttachment };
+
+/** A draft image's blob id, riding on the image itself so its bytes are hashed once. */
+const kImageBlobId = Symbol("omp.imageBlobId");
+
+interface ImageContentWithBlobId extends ImageContent {
+	[kImageBlobId]?: string;
+}
 
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
@@ -958,8 +966,9 @@ export class CustomEditor extends Editor {
 	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
 	 * color, chips and markers take their token colors, misspellings are marked,
 	 * and queue-composer markers are dimmed/accented, all as ranges over the raw
-	 * buffer instead of painted text. A shell-mode draft is code: only its sigil
-	 * is decorated, hidden behind the mode chip.
+	 * buffer instead of painted text. An image's token or marker names the image's
+	 * blob, so copying it in the terminal copies the image. A shell-mode draft is
+	 * code: only its sigil is decorated, hidden behind the mode chip.
 	 */
 	override describeDecorations = (lines: readonly string[]): readonly TspEditorDecoration[] => {
 		const text = lines.join("\n");
@@ -970,8 +979,9 @@ export class CustomEditor extends Editor {
 		this.#syncComposerTokenPattern();
 		const decor: TspEditorDecoration[] = [];
 		let offset = 0;
-		const mark = (length: number, s: string): string => {
-			decor.push({ from: offset, to: offset + length, s });
+		const mark = (length: number, s: string, blob?: NativeBlob): string => {
+			const range = { from: offset, to: offset + length, s };
+			decor.push(blob ? withBlob(range, blob) : range);
 			offset += length;
 			return "";
 		};
@@ -984,7 +994,10 @@ export class CustomEditor extends Editor {
 				},
 				renderSkill: label => mark(label.length, "customMessageLabel strong"),
 				renderMention: label => mark(label.length, "statusLineModel strong"),
-				renderReference: value => mark(value.length, "accent strong"),
+				renderReference: (value, kind, index) => {
+					const image = kind === "image" ? this.pendingImages[index - 1] : undefined;
+					return mark(value.length, "accent strong", image && this.#imageBlob(image));
+				},
 			},
 			this.atomicTokenPattern,
 		);
@@ -1016,6 +1029,20 @@ export class CustomEditor extends Editor {
 		}
 		return decor.sort((a, b) => a.from - b.from);
 	};
+
+	/**
+	 * The blob of pending image `image`'s bytes: the chips band's while its card shows it, else
+	 * made anew. Its `decor` range owns it, so a deleted token's bytes are released.
+	 */
+	#imageBlob(image: ImageContent): NativeBlob {
+		const tagged = image as ImageContentWithBlobId;
+		const known = tagged[kImageBlobId];
+		const alive = known === undefined ? undefined : getNativeBlob(known);
+		if (alive) return alive;
+		const blob = nativeBlob(Buffer.from(image.data, "base64"), image.mimeType);
+		tagged[kImageBlobId] = blob.id;
+		return blob;
+	}
 
 	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;

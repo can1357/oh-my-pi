@@ -20,6 +20,12 @@ export function compileSecretRegex(pattern: string, flags?: string): RegExp {
 	return new RegExp(resolvedPattern, enforceGlobalFlag(resolvedFlags));
 }
 
+/** Advance after an empty global match without splitting a Unicode code point or repeating a match at end. */
+export function advanceRegexAfterEmptyMatch(regex: RegExp, text: string): void {
+	const codePoint = regex.unicode || regex.unicodeSets ? text.codePointAt(regex.lastIndex) : undefined;
+	regex.lastIndex += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+}
+
 /** Shortest derived literal worth a gate; a shorter one occurs in too much text to skip anything. */
 const MIN_REQUIRED_LITERAL = 3;
 

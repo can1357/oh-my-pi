@@ -7,10 +7,11 @@ const PASTE_EVENT_NAME_BASE64 = Buffer.from("Paste event", "utf8").toString("bas
 
 const IMAGE_MIME_PRIORITY = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 const TEXT_MIME_TYPE = "text/plain";
+const HTML_MIME_TYPE = "text/html";
 /** Kitty's "give me the list of available MIME types" sentinel — see `TARGETS_MIME` in `kitty/clipboard.py`. */
 const MIME_LISTING_TARGET = ".";
 
-type PasteReadKind = "image" | "text";
+type PasteReadKind = "image" | "text" | "html";
 
 export interface Osc5522Packet {
 	metadata: Map<string, string>;
@@ -38,6 +39,10 @@ export interface EnhancedPasteHandlers {
 	write(data: string): void;
 	pasteText(text: string): void;
 	pasteImage(image: ImageContent): void | Promise<void>;
+	/** Whether the paste lands where styled text goes (the composer): HTML on the clipboard is then read. */
+	acceptsHtml(): boolean;
+	/** A rich paste: the clipboard's HTML, styled text with its images (see `html-paste.ts`). */
+	pasteHtml(html: string): void | Promise<void>;
 	showStatus(message: string): void;
 	/**
 	 * Paste from the system clipboard when the terminal's regular clipboard listing offers no
@@ -79,10 +84,15 @@ export function parseOsc5522Packet(data: string): Osc5522Packet | undefined {
 	return { metadata: parseMetadata(metadataRaw), payload };
 }
 
-function choosePasteMime(mimes: readonly string[]): { kind: PasteReadKind; mimeType: string } | undefined {
+/** The type to read: an image by preference, then HTML where `html` is taken, then plain text. */
+function choosePasteMime(
+	mimes: readonly string[],
+	html: boolean,
+): { kind: PasteReadKind; mimeType: string } | undefined {
 	for (const mimeType of IMAGE_MIME_PRIORITY) {
 		if (mimes.includes(mimeType)) return { kind: "image", mimeType };
 	}
+	if (html && mimes.includes(HTML_MIME_TYPE)) return { kind: "html", mimeType: HTML_MIME_TYPE };
 	return mimes.includes(TEXT_MIME_TYPE) ? { kind: "text", mimeType: TEXT_MIME_TYPE } : undefined;
 }
 
@@ -198,6 +208,10 @@ export class EnhancedPasteController {
 			this.#handlers.pasteText(bytes.toString("utf8"));
 			return;
 		}
+		if (state.kind === "html") {
+			await this.#handlers.pasteHtml(bytes.toString("utf8"));
+			return;
+		}
 		await this.#handlers.pasteImage({
 			type: "image",
 			data: bytes.toString("base64"),
@@ -206,7 +220,7 @@ export class EnhancedPasteController {
 	}
 
 	#finishListing(state: PasteListingState): void {
-		const selected = choosePasteMime(state.mimes);
+		const selected = choosePasteMime(state.mimes, this.#handlers.acceptsHtml());
 		if (!selected) {
 			this.#state = undefined;
 			// Native readers use the regular clipboard, not the terminal's primary selection.
