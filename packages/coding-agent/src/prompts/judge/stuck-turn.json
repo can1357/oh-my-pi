@@ -1,0 +1,13 @@
+{
+	"mode": {
+		"instructions": "The state is a coding agent's session so far. `goal` is the user's latest requests. `history` is the whole session, oldest first: the user's messages, the harness's, the agent's replies (its reasoning is not shown) and its tool calls, each with its input and a short `result` note in place of the output. Long texts may be abridged and old calls shortened to one line. Compare the latest turns (about the last three replies and their tool calls) with what the session established before them. What are these turns doing?",
+		"criteria": {
+			"advancing": "they produce results the session did not have, and the work moves: a step completes, a change is made, a test confirms or refutes something",
+			"re_investigating": "they read, grep or debug things earlier turns already covered, without a change to the code or the plan",
+			"retrying": "they repeat variants of the same failing attempt",
+			"off_plan": "they work on something the user did not ask for and the agent's plan does not need",
+			"finished": "the user's request is met; the agent should stop and answer",
+			"unclear": "the turns fit two of these equally well, or the session shows too little of them to tell"
+		}
+	}
+}

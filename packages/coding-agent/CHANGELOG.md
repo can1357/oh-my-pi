@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in stuck-turn detection (`model.stuckTurnGuard.enabled`): after each tool-call turn the `judge` role classifies whether the latest turns re-investigate or retry what the session already established, and after three such turns in a row the model is nudged to act on its findings. `model.stuckTurnGuard.threshold` and `model.stuckTurnGuard.strikes` tune it.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
