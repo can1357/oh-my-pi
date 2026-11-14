@@ -10064,7 +10064,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#eval.flushPending();
 			// This turn carries the assignment: IRC asides parked for it fold in ahead of the message.
 			this.#ircAwaitingAssignment = false;
-			this.#irc.flushPending();
+			this.#irc.flushPending({
+				keepPeerMessages: this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined,
+			});
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();

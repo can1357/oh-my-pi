@@ -310,8 +310,8 @@ export class IrcBridge {
 	}
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
-	flushPending(): void {
-		for (const record of this.drainPending()) {
+	flushPending(options?: { keepPeerMessages?: boolean }): void {
+		for (const record of this.drainPending(options)) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}
