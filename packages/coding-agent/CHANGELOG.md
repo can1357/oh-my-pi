@@ -184,6 +184,9 @@
 - Fixed session saving on Windows to avoid UI stalls caused by repeated session-file access.
 - Fixed automatic chart selection so generated charts use compatible data and chart types.
 - Fixed `bash` previews for `env -i` commands so they display the requested command rather than generated shell setup code.
+### Fixed
+
+- Collab guest prompts retain user attribution and now apply configured magic keywords (for example `orchestrate`). In auto-thinking mode, idle guest prompts and queued user follow-ups are classified for effort unless enabled `ultrathink` selects the highest supported level within the session ceiling. Queued steers keep the current effort without classification unless they contain enabled `ultrathink`, which selects that level for the next model request ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
 
 ## [18.18.9] - 2026-11-11
 

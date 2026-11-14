@@ -52,6 +52,7 @@
 ### Removed
 
 - Removed the `blocked` status from `TodoStatus`, the `blocker` field from `TodoItem`, and the `block`/`unblock` operations from `TodoOperation`.
+- Added `isUserCollabPrompt()` to `chat/messages` to identify user-attributed Collab prompts ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
 
 ## [18.18.9] - 2026-11-11
 

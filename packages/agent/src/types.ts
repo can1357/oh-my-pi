@@ -36,6 +36,8 @@ export type StreamFn = (
 export interface QueuedMessagePreparation {
 	/** Append context after the originals; undefined stops this attempt, retaining originals unless explicitly removed. */
 	commit(): readonly AgentMessage[] | undefined;
+	/** Apply staged effects after the originals are recorded. The batch token is shared by inputs for one model call. */
+	onDelivered?(signal?: AbortSignal, batch?: object): void;
 }
 
 /** Which agent queue a batch came from: steering amends the running task, follow-ups start the next one. */
@@ -335,6 +337,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
 
+	/** Internal to Agent: whether input delivery events must settle before the next model call. */
+	hasPendingQueuedDeliveryCallbacks?: (messages: readonly AgentMessage[]) => boolean;
+
 	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
@@ -426,6 +431,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * provider-bound context.
 	 */
 	syncContextBeforeModelCall?: (context: AgentContext, signal?: AbortSignal) => void | Promise<void>;
+
+	/**
+	 * Copy the agent's current system prompt and tools into the context without running model-call hooks.
+	 * Called after queued delivery callbacks ran, so their configuration changes reach the request; when the
+	 * model, prompt or tools changed the loop prepares the provider call again and re-asks the gate.
+	 */
+	refreshContextAfterDelivery?: (context: AgentContext) => void;
 
 	/**
 	 * Asked after the complete provider context has been built, including
