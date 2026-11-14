@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, type Mock, test, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +9,7 @@ import * as registry from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthPrompt } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { removeWithRetries } from "../../utils/src/temp";
 
-// The real auth rules give google-antigravity a `login-warning`.
+// The real auth rules give google-antigravity a `login-warning`; it is also paused, so the pause is lifted here.
 const PROVIDER = "google-antigravity";
 
 describe("a provider whose login carries an account risk", () => {
@@ -22,6 +23,7 @@ describe("a provider whose login carries an account risk", () => {
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		auth = new AuthStorage(store);
 		providerLogin = vi.fn(async () => ({ access: "acc", refresh: "ref", expires: Date.now() + 3_600_000 }));
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		const original = registry.getProviderDefinition;
 		vi.spyOn(registry, "getProviderDefinition").mockImplementation(id => {
 			const def = original(id);

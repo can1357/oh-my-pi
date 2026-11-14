@@ -103,7 +103,7 @@ function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEdito
 	for (let i = 0; i < a.length; i++) {
 		const x = a[i]!;
 		const y = b[i]!;
-		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx) return false;
+		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx || x.blob !== y.blob) return false;
 	}
 	return true;
 }

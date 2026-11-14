@@ -97,7 +97,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
-import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { SupermemorySessionStateApi } from "../supermemory/state";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -2267,11 +2267,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
 					// Track latest per-turn context size so the UI can show
-					// "current context", not just cumulative billing volume.
+					// "current context", not just cumulative billing volume. A
+					// segmented provider response bills every continuation request,
+					// so `totalTokens` overshoots the occupied window; the reported
+					// `contextTokens` (or billable total minus orchestration) is the
+					// same accounting the session's own context estimate uses.
 					if (role === "assistant") {
-						const perTurnTotal = getNumberField(messageUsage, "totalTokens");
-						if (perTurnTotal !== undefined && perTurnTotal > 0) {
-							progress.contextTokens = perTurnTotal;
+						const occupied = usageContextTokens(messageUsage);
+						if (occupied > 0) {
+							progress.contextTokens = occupied;
 						}
 					}
 				}

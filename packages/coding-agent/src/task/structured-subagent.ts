@@ -1135,6 +1135,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				result,
 				repoRoot: isolationContext.repoRoot,
 				mergeMode: policy.mergeMode,
+				recordFileChange: change => request.session.recordFileChange?.(change),
+				parentAgentId: request.session.getAgentId?.() ?? MAIN_AGENT_ID,
 			});
 			mergeSummary = outcome.summary;
 			changesApplied = outcome.changesApplied;
