@@ -190,6 +190,9 @@ fn errno_of(err: &io::Error, text: &[u8]) -> i32 {
 			K::BrokenPipe => posix::EPIPE,
 			_ if text == b"Input/output error" => posix::EIO,
 			_ if text == b"Bad file descriptor" => posix::EBADF,
+			// A host error of a kind the table lacks (a sharing violation, an
+			// invalid name): still an error, not errno 0 (`Success`).
+			_ if err.raw_os_error().is_some() => posix::EIO,
 			_ => 0,
 		}
 	}
@@ -704,5 +707,14 @@ impl FsPending<FsAns> for WriteAll {
 
 	fn reissuable(&self) -> bool {
 		false
+	}
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+	#[test]
+	fn unmapped_host_errors_are_eio() {
+		let sharing_violation = std::io::Error::from_raw_os_error(32);
+		assert_eq!(super::errno_of(&sharing_violation, b""), super::posix::EIO);
 	}
 }
