@@ -269,6 +269,29 @@ describe("goal runtime", () => {
 		expect(harness.persists.at(-1)?.mode).toBe("goal_paused");
 	});
 
+	it("rejects completing a paused goal and preserves it for resume", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "active",
+				goal: createGoal({ status: "paused", timeUsedSeconds: 202 }),
+			},
+		});
+
+		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow(
+			"cannot complete a paused goal: resume it first",
+		);
+		const paused = harness.getState();
+		expect(paused?.enabled).toBe(false);
+		expect(paused?.goal.status).toBe("paused");
+		expect(paused?.goal.timeUsedSeconds).toBe(202);
+
+		const resumed = await harness.runtime.resumeGoal();
+		expect(resumed.enabled).toBe(true);
+		expect(resumed.goal.status).toBe("active");
+		expect(resumed.goal.timeUsedSeconds).toBe(202);
+	});
+
 	it("auto-pauses active goals when a thread resumes", async () => {
 		const harness = createHarness({
 			state: { enabled: true, mode: "active", goal: createGoal() },
