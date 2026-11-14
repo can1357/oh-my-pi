@@ -192,6 +192,70 @@ describe("bash native run box", () => {
 		expect(card({ trace, cwd: ranIn }, `cd ${ranIn} && echo built`)).toMatch(/\$ cd \S*hoisted-target &&/);
 	});
 
+	it("draws a background result that landed before the first trace as a shell pane without the hoisted cd", () => {
+		// An `async` call returns its background-start result before the trace poll ran once; its
+		// presentation parsed the raw command, so the hoisted directory must not be repeated as `cwd`.
+		const ranIn = path.join(os.tmpdir(), "hoisted-target");
+		const presentation: ShellVizPresentation = {
+			preferences: {
+				view: "pseudo",
+				layers: { color: true, inline: true, idioms: true, effects: true, unwrap: false },
+				split: false,
+				playing: false,
+				speed: 1,
+				expandedNodes: [],
+			},
+			rows: [{ id: "r0", depth: 0, segments: [{ text: `cwd ${ranIn}` }], effects: [] }],
+			original: [],
+			output: "",
+			executing: false,
+			watches: [],
+			timeline: { length: 0, cursor: 0, elapsedNs: 0, durationNs: 0 },
+		};
+		const box = nodes(
+			bashToolRenderer.describeResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" }, cwd: ranIn },
+				},
+				{ ...done, shell: true, shellPresentation: presentation },
+				{ command: `cd ${ranIn} && echo built` },
+			).body,
+		)[0];
+		expect(sections(box)).toEqual(["shell:omp.tool.bash.command", "row:omp.run.foot"]);
+		expect(props(nodes(box?.c)[0]).cwd).toBeUndefined();
+	});
+
+	it("keeps an untraced result's output when a replay cursor was set on its presentation", () => {
+		// Reset/step in the inspector sets a cursor even with no history; the untraced engine has no
+		// replayed output, so the result text must still draw.
+		const presentation: ShellVizPresentation = {
+			preferences: {
+				view: "pseudo",
+				layers: { color: true, inline: true, idioms: true, effects: true, unwrap: false },
+				split: false,
+				cursor: 0,
+				playing: false,
+				speed: 1,
+				expandedNodes: [],
+			},
+			rows: [{ id: "r0", depth: 0, segments: [{ text: 'print("built")' }], effects: [] }],
+			original: [],
+			output: "",
+			executing: false,
+			watches: [],
+			timeline: { length: 0, cursor: 0, elapsedNs: 0, durationNs: 0 },
+		};
+		const box = nodes(
+			bashToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "built" }], details: { exitCode: 0 } },
+				{ ...done, shell: true, shellPresentation: presentation },
+				{ command: "echo built" },
+			).body,
+		)[0];
+		expect(collect(box?.c, "ansi").map(n => props(n).text)).toEqual(["built"]);
+	});
+
 	it("has no target without an intent and no foot before the command starts", () => {
 		const view = bashToolRenderer.describeCall(
 			{ command: "make test", __partialJson: '{"env":{"CI":"1"},"command":"make test' },

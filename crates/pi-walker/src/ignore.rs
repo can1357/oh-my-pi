@@ -6,6 +6,9 @@
 //!   `.git` entry) `.git/info/exclude`. For each of the three kinds the nearest
 //!   directory with a matching rule decides; `.ignore` beats `.gitignore` beats
 //!   the exclude file beats git's global excludes file.
+//! - A walk may name one more per-directory file ([`Sources::custom`], `fd`'s
+//!   `.fdignore`), which beats them all, applies in and out of repositories,
+//!   and is read from every ancestor of the walk root.
 //! - Exclude files above the nearest repository root (`.git` or `.jj`) are not
 //!   consulted; exclude and global rules apply only inside a repository.
 //!   `.gitignore` applies everywhere.
@@ -234,26 +237,60 @@ fn parse_rule(line: &str) -> Option<Rule> {
 	Some(Rule { glob, dir_only, whitelist })
 }
 
+/// Which ignore files a walk honours.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sources {
+	/// `.ignore`, `.gitignore`, `.git/info/exclude`, and git's global
+	/// excludes file.
+	pub(crate) vcs:     bool,
+	/// A per-directory file above all of those (`fd`'s `.fdignore`).
+	pub(crate) custom:  Option<&'static str>,
+	/// Read the ignore files of the root's ancestors.
+	pub(crate) parents: bool,
+}
+
+impl Sources {
+	/// The sources a walk with `opts` honours; `None` when it honours none.
+	pub(crate) const fn of(opts: &crate::walk::Options) -> Option<Self> {
+		if !opts.gitignore && opts.ignore_file.is_none() {
+			return None;
+		}
+		Some(Self {
+			vcs:     opts.gitignore,
+			custom:  opts.ignore_file,
+			parents: !opts.skip_parent_ignores,
+		})
+	}
+}
+
 /// Which ignore-relevant names a directory listing contains.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Names(u8);
 
-const HAS_DOT_IGNORE: u8 = 1;
-const HAS_GITIGNORE: u8 = 2;
-const HAS_GIT_DIR: u8 = 4;
-const HAS_REPO_MARKER: u8 = 8;
+const HAS_CUSTOM: u8 = 1;
+const HAS_DOT_IGNORE: u8 = 2;
+const HAS_GITIGNORE: u8 = 4;
+const HAS_GIT_DIR: u8 = 8;
+const HAS_REPO_MARKER: u8 = 16;
 
-/// Per-directory ignore sources, in precedence order.
-const SOURCES: [&str; 3] = [".ignore", ".gitignore", ".git/info/exclude"];
+/// Per-directory ignore sources after the custom one (index 0), in
+/// precedence order.
+const SOURCES: [&str; 4] = ["", ".ignore", ".gitignore", ".git/info/exclude"];
+
+/// Index of `.git/info/exclude`, which applies only inside a repository.
+const EXCLUDE: usize = 3;
 
 /// Listing names that make each source worth reading: the file itself, or a
 /// `.git` entry for the exclude file.
-const SOURCE_FLAGS: [u8; 3] = [HAS_DOT_IGNORE, HAS_GITIGNORE, HAS_GIT_DIR];
+const SOURCE_FLAGS: [u8; 4] = [HAS_CUSTOM, HAS_DOT_IGNORE, HAS_GITIGNORE, HAS_GIT_DIR];
 
 impl Names {
-	/// Notes `name` (a listed entry of type `file_type`) if it is `.ignore`,
-	/// `.gitignore`, `.git`, or `.jj`.
-	pub(crate) fn record(&mut self, name: &[u8], file_type: FileType) {
+	/// Notes `name` (a listed entry of type `file_type`) if it is `custom`,
+	/// `.ignore`, `.gitignore`, `.git`, or `.jj`.
+	pub(crate) fn record(&mut self, name: &[u8], file_type: FileType, custom: Option<&str>) {
+		if file_type != FileType::Dir && custom.is_some_and(|custom| custom.as_bytes() == name) {
+			self.0 |= HAS_CUSTOM;
+		}
 		if name.len() < 3 || name[0] != b'.' {
 			return;
 		}
@@ -276,13 +313,13 @@ impl Names {
 	}
 }
 
-/// One directory's compiled ignore sources (`.ignore`, `.gitignore`,
-/// `.git/info/exclude`) and, for the listing cache, the stamps they were read
-/// at (default when absent).
+/// One directory's compiled ignore sources (the custom file, `.ignore`,
+/// `.gitignore`, `.git/info/exclude`) and, for the listing cache, the stamps
+/// they were read at (default when absent).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DirIgnores {
-	pub(crate) files:  [Option<Arc<Rules>>; 3],
-	pub(crate) stamps: [Stamp; 3],
+	pub(crate) files:  [Option<Arc<Rules>>; 4],
+	pub(crate) stamps: [Stamp; 4],
 }
 
 /// Reads up to [`MAX_IGNORE_BYTES`] of an opened file into `buf`.
@@ -311,16 +348,22 @@ async fn open_exclude(
 }
 
 impl DirIgnores {
-	/// Reads the sources `names` calls for, relative to the open `dir`;
+	/// Reads the `sources` that `names` calls for, relative to the open `dir`;
 	/// `stamped` also records their stamps.
-	pub(crate) async fn load(session: &mut Session, dir: &Dir, names: Names, stamped: bool) -> Self {
+	pub(crate) async fn load(
+		session: &mut Session,
+		dir: &Dir,
+		names: Names,
+		sources: Sources,
+		stamped: bool,
+	) -> Self {
 		let mut out = Self::default();
 		let mut buf = Vec::new();
-		for (k, _) in Self::source_names(names) {
-			let opened = if k < 2 {
-				session.open_file_at(dir, SOURCES[k].as_bytes()).await
-			} else {
+		for (k, name) in Self::source_names(names, sources) {
+			let opened = if k == EXCLUDE {
 				open_exclude(session, dir).await
+			} else {
+				session.open_file_at(dir, name.as_bytes()).await
 			};
 			let Ok(stamp) = read_opened(opened, &mut buf).await else {
 				continue;
@@ -333,12 +376,23 @@ impl DirIgnores {
 		out
 	}
 
-	/// Paths (relative to the directory) of the sources `names` calls for, in
-	/// source order, for cache revalidation by stat.
-	pub(crate) fn source_names(names: Names) -> impl Iterator<Item = (usize, &'static str)> {
-		(0..SOURCES.len())
-			.filter(move |&k| names.has(SOURCE_FLAGS[k]))
-			.map(|k| (k, SOURCES[k]))
+	/// Paths (relative to the directory) of the `sources` that `names` calls
+	/// for, with their indices, in precedence order; also for cache
+	/// revalidation by stat.
+	pub(crate) fn source_names(
+		names: Names,
+		sources: Sources,
+	) -> impl Iterator<Item = (usize, &'static str)> {
+		(0..SOURCES.len()).filter_map(move |k| {
+			let name = if k == 0 {
+				sources.custom?
+			} else if sources.vcs {
+				SOURCES[k]
+			} else {
+				return None;
+			};
+			names.has(SOURCE_FLAGS[k]).then_some((k, name))
+		})
 	}
 
 	/// The frame for a directory at walk-relative `base` whose listing
@@ -367,8 +421,8 @@ impl DirIgnores {
 #[derive(Debug)]
 pub(crate) struct Frame {
 	parent:             Option<Arc<Self>>,
-	/// `.ignore`, `.gitignore`, `.git/info/exclude`.
-	files:              [Option<Arc<Rules>>; 3],
+	/// The custom file, `.ignore`, `.gitignore`, `.git/info/exclude`.
+	files:              [Option<Arc<Rules>>; 4],
 	/// The frame directory relative to the walk root (empty for the root).
 	base:               Box<[u8]>,
 	/// For frames above the root: the walk root relative to the frame
@@ -397,7 +451,7 @@ impl Drop for Frame {
 impl Frame {
 	fn new(
 		parent: Option<Arc<Self>>,
-		files: [Option<Arc<Rules>>; 3],
+		files: [Option<Arc<Rules>>; 4],
 		has_git: bool,
 		base: Box<[u8]>,
 		up: Box<[u8]>,
@@ -442,50 +496,43 @@ impl Frame {
 /// paths it is matched against.
 #[derive(Debug)]
 pub(crate) struct Ignorer {
-	global: Option<Rules>,
+	sources: Sources,
+	global:  Option<Rules>,
 	/// Root of the global matcher (the process cwd), match spelling.
-	cwd:    Vec<u8>,
+	cwd:     Vec<u8>,
 	/// The walk root, match spelling.
-	root:   Vec<u8>,
+	root:    Vec<u8>,
 }
 
 impl Ignorer {
-	/// Loads git's global excludes file (located like the `ignore` crate:
-	/// `core.excludesFile` from `$GIT_CONFIG_GLOBAL`, `~/.gitconfig`,
-	/// `$XDG_CONFIG_HOME/git/config`, `$GIT_CONFIG_SYSTEM` or
+	/// Loads, for `sources`, git's global excludes file (located like the
+	/// `ignore` crate: `core.excludesFile` from `$GIT_CONFIG_GLOBAL`,
+	/// `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`, `$GIT_CONFIG_SYSTEM` or
 	/// `/etc/gitconfig`, falling back to `$XDG_CONFIG_HOME/git/ignore`) and
-	/// the frames of `root`'s ancestors up to the nearest repository root,
-	/// everything read through `session` on `fs`. `root` is absolute in `fs`'s
-	/// spelling. Returns the ignorer and the root's inherited frame.
+	/// the frames of `root`'s ancestors ([`ancestor_frames`]), everything read
+	/// through `session` on `fs`. `root` is absolute in `fs`'s spelling.
+	/// Returns the ignorer and the root's inherited frame.
 	pub(crate) async fn new(
 		session: &mut Session,
 		_fs: &Fs,
 		root: &Path,
+		sources: Sources,
 	) -> (Self, Option<Arc<Frame>>) {
 		let mut buf = Vec::new();
-		let GitConfigs { configs, home, fallback } = git_configs();
-		let mut excludes = None;
-		for config in configs.into_iter().flatten() {
-			let opened = session.open_file(&config).await;
-			if read_opened(opened, &mut buf).await.is_ok()
-				&& let Some(path) = parse_excludes_file(&buf, home.as_deref())
-			{
-				excludes = Some(path);
-				break;
-			}
-		}
-		let global = match excludes.or(fallback) {
-			Some(p) => {
-				let opened = session.open_file(&p).await;
-				read_opened(opened, &mut buf).await.ok()
-			},
-			None => None,
-		}
-		.map(|_| Rules::parse(&buf))
-		.filter(|rules| !rules.is_empty());
 		let cwd = std::env::current_dir().map_or_default(|cwd| match_spelling(&cwd).into_owned());
-		let ignorer = Self { global, cwd, root: match_spelling(root).into_owned() };
-		(ignorer, ancestor_frames(session, root, &mut buf).await)
+		let root_spelling = match_spelling(root).into_owned();
+		let global = if sources.vcs {
+			global_excludes(session, &mut buf).await
+		} else {
+			None
+		};
+		let ignorer = Self { sources, global, cwd, root: root_spelling };
+		(ignorer, ancestor_frames(session, root, sources, &mut buf).await)
+	}
+
+	/// The ignore files this walk honours.
+	pub(crate) const fn sources(&self) -> Sources {
+		self.sources
 	}
 
 	/// Whether the entry at walk-relative `rel` is ignored by the chain
@@ -502,12 +549,12 @@ impl Ignorer {
 		if !frame.chain_has_matchers && global.is_none() {
 			return false;
 		}
-		let mut found = [Match::None; 3];
+		let mut found = [Match::None; 4];
 		let mut saw_git = false;
 		let mut f = Some(frame);
 		while let Some(cur) = f.filter(|f| f.chain_has_matchers) {
 			for (k, slot) in found.iter_mut().enumerate() {
-				if *slot != Match::None || (k == 2 && (!frame.any_git || saw_git)) {
+				if *slot != Match::None || (k == EXCLUDE && (!frame.any_git || saw_git)) {
 					continue;
 				}
 				if let Some(rules) = &cur.files[k] {
@@ -548,6 +595,25 @@ impl Ignorer {
 	}
 }
 
+/// Git's global excludes file, compiled; `None` when there is none or it
+/// holds no rule.
+async fn global_excludes(session: &mut Session, buf: &mut Vec<u8>) -> Option<Rules> {
+	let GitConfigs { configs, home, fallback } = git_configs();
+	let mut excludes = None;
+	for config in configs.into_iter().flatten() {
+		let opened = session.open_file(&config).await;
+		if read_opened(opened, buf).await.is_ok()
+			&& let Some(path) = parse_excludes_file(buf, home.as_deref())
+		{
+			excludes = Some(path);
+			break;
+		}
+	}
+	let opened = session.open_file(&excludes.or(fallback)?).await;
+	read_opened(opened, buf).await.ok()?;
+	Some(Rules::parse(buf)).filter(|rules| !rules.is_empty())
+}
+
 /// Spelling of an absolute path as gitignore matching sees it: URL segments
 /// percent-decoded to raw names, Windows separators as `/`.
 fn match_spelling(path: &Path) -> Cow<'_, [u8]> {
@@ -581,12 +647,14 @@ fn match_spelling(path: &Path) -> Cow<'_, [u8]> {
 	Cow::Borrowed(bytes)
 }
 
-/// Frames for the directories from the nearest repository root at or above
-/// `root`'s parent down to that parent, minus rules that would ignore `root`.
-/// `None` when no ancestor is a repository root.
+/// Frames for `root`'s ancestors, outermost first, minus rules that would
+/// ignore `root`: the custom file of every ancestor, and the version-control
+/// sources of the ancestors up to the nearest repository root (none when no
+/// ancestor is one). `None` without `sources.parents` or any such file.
 async fn ancestor_frames(
 	session: &mut Session,
 	root: &Path,
+	sources: Sources,
 	buf: &mut Vec<u8>,
 ) -> Option<Arc<Frame>> {
 	async fn exists(session: &mut Session, dir: &Path, name: &str) -> bool {
@@ -594,6 +662,9 @@ async fn ancestor_frames(
 			.stat(&pi_vfs::child_path(dir, OsStr::new(name)), true)
 			.await
 			.is_ok()
+	}
+	if !sources.parents {
+		return None;
 	}
 	// (ancestor, root relative to it).
 	let mut ancestors: Vec<(&Path, Vec<u8>)> = Vec::new();
@@ -611,26 +682,35 @@ async fn ancestor_frames(
 		}
 		up = next;
 		ancestors.push((parent, up.clone()));
-		if exists(session, parent, ".git").await || exists(session, parent, ".jj").await {
+		if sources.vcs
+			&& repo.is_none()
+			&& (exists(session, parent, ".git").await || exists(session, parent, ".jj").await)
+		{
 			repo = Some(ancestors.len() - 1);
-			break;
+			// Only the custom file applies above the repository.
+			if sources.custom.is_none() {
+				break;
+			}
 		}
 		cur = parent;
 	}
 	let mut frame: Option<Arc<Frame>> = None;
-	for (i, (dir, up)) in ancestors[..=repo?].iter().enumerate().rev() {
-		let has_git = i == repo?;
-		let files = [
-			load_ancestor(session, dir, SOURCES[0], up, buf).await,
-			load_ancestor(session, dir, SOURCES[1], up, buf).await,
-			if has_git {
-				load_ancestor(session, dir, SOURCES[2], up, buf).await
-			} else {
-				None
-			},
-		];
-		frame =
-			Some(Arc::new(Frame::new(frame, files, has_git, Box::default(), up.as_slice().into())));
+	for (i, (dir, up)) in ancestors.iter().enumerate().rev() {
+		let has_git = repo == Some(i);
+		let vcs = repo.is_some_and(|repo| i <= repo);
+		let mut files: [Option<Arc<Rules>>; 4] = Default::default();
+		if let Some(custom) = sources.custom {
+			files[0] = load_ancestor(session, dir, custom, up, buf).await;
+		}
+		for k in 1..SOURCES.len() {
+			if vcs && (k != EXCLUDE || has_git) {
+				files[k] = load_ancestor(session, dir, SOURCES[k], up, buf).await;
+			}
+		}
+		if has_git || files.iter().any(Option::is_some) {
+			let up = up.as_slice().into();
+			frame = Some(Arc::new(Frame::new(frame, files, has_git, Box::default(), up)));
+		}
 	}
 	frame
 }

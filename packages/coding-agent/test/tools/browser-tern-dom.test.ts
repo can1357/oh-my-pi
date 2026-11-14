@@ -57,9 +57,11 @@ function actionBudget(tab: TernTab, actionMs: number): void {
 	});
 }
 
-/** The requests in order, each named by its op (a `dom` op by its read). */
+/** The ops sent to the page in order, each named by its op (a `dom` op by its read); event-stream reads left out. */
 function trace(fake: FakeDaemon): string[] {
-	return fake.requests.map(request => String(request.op.op === "dom" ? request.op.read : request.op.op));
+	return fake.requests
+		.filter(request => request.op.op !== "events")
+		.map(request => String(request.op.op === "dom" ? request.op.read : request.op.op));
 }
 
 function domRequests(fake: FakeDaemon, read: string): Fields[] {
@@ -268,7 +270,9 @@ describe("TernTab on native DOM reads", () => {
 		);
 		await tab.fill("#email", "a@b.test");
 		expect(domRequests(fake, "resolve")[0]).toMatchObject({ ref: "e1-6", action: "type" });
-		const actions = fake.requests.filter(request => request.op.op !== "dom").map(request => request.op);
+		const actions = fake.requests
+			.filter(request => request.op.op !== "dom" && request.op.op !== "events")
+			.map(request => request.op);
 		expect(actions).toEqual([
 			{ op: "input", block: 7, events: CLICK_AT_40_20 },
 			{ op: "edit", block: 7, action: "selectAll" },

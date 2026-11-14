@@ -26,8 +26,8 @@ import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
 import { ownsTerminal } from "./browser/terminal-owner";
 import { WebKitUnavailableError } from "./browser/webkit/host";
-import { installWebKitEngine } from "./browser/webkit/install";
-import { resolveWebKitKind, VIEWER_PLATFORMS, webKitEngineToInstall } from "./browser/webkit/kind";
+import { ABKIT_VERSION, installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/install";
+import { resolveWebKitKind, VIEWER_PLATFORMS } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -534,17 +534,23 @@ async function openBrowser(
 	}
 }
 
+/** Engine directories whose update failed in this process: their installed engine runs without another attempt. */
+const failedWebKitUpdates = new Set<string>();
+
 /**
- * Download omp's WebKit engine before an open that needs it while it is
- * missing from its default location ({@link webKitEngineToInstall}): an open
- * with `app: "webkit"`, or one that otherwise ends at managed Chromium
- * (headless, or visible where released engines ship a viewer) while Chromium
- * itself would first be downloaded. With no browser installed, omp's own engine
- * comes before Chrome for Testing. Like that download, it runs before the
- * open's deadline starts.
+ * Download omp's WebKit engine into its default location
+ * ({@link webKitEngineToInstall}) before an open that needs it. A missing
+ * engine is downloaded for an open with `app: "webkit"`, or one that otherwise
+ * ends at managed Chromium (headless, or visible where released engines ship a
+ * viewer) while Chromium itself would first be downloaded: with no browser
+ * installed, omp's own engine comes before Chrome for Testing. An outdated
+ * engine is updated to {@link ABKIT_VERSION} before an open that would run it,
+ * once per process. Like Chrome's download, it runs before the open's deadline
+ * starts.
  *
  * Returns why an automatic download failed, for the open to go on to Chromium
- * saying so; for `app: "webkit"` a failed download throws.
+ * saying so; for `app: "webkit"` a failed download throws. A failed update is
+ * logged, and the open runs the engine already installed.
  */
 async function installWebKitForOpen(
 	session: ToolSession,
@@ -552,11 +558,28 @@ async function installWebKitForOpen(
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	const explicit = params.app === "webkit";
-	const engineDir = webKitEngineToInstall({
+	const pending = await webKitEngineToInstall({
 		settingEnabled: explicit || cfgBrowserWebKit.get(session.settings),
 		settingPath: cfgBrowserWebKitPath.get(session.settings),
 	});
-	if (engineDir === null) return undefined;
+	if (pending === null) return undefined;
+	const { engineDir } = pending;
+	if (pending.outdated) {
+		if (failedWebKitUpdates.has(engineDir)) return undefined;
+		if (!explicit && resolveBrowserKind(params, session).kind !== "webkit") return undefined;
+		try {
+			await untilAborted(signal, () => installWebKitEngine(engineDir));
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			failedWebKitUpdates.add(engineDir);
+			logger.warn("Could not update omp's WebKit engine; running the installed one", {
+				engineDir,
+				version: ABKIT_VERSION,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return undefined;
+	}
 	if (!explicit) {
 		const kind = resolveBrowserKind(params, session);
 		if (kind.kind !== "headless" || params.app === "chromium") return undefined;

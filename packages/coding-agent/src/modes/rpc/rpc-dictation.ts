@@ -36,6 +36,7 @@ export class RpcDictationBridge {
 				settings: current.settings,
 				registry: current.modelRegistry,
 				getSessionId: () => current.sessionId,
+				getSessionProvider: () => current.model?.provider,
 			}),
 	) {
 		this.#session = session;

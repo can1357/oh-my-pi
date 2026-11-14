@@ -1858,6 +1858,8 @@ export interface MarkdownTheme {
 	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
 	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
+	/** Color the label of a link an extension handles (a registered extension scheme); defaults to `link`. */
+	extensionLink?: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
@@ -4538,7 +4540,10 @@ export class Markdown implements Component {
 					// Its label gets its own (dotted) underline instead of the web-link one.
 					if (href && extensionLinkScheme(href)) {
 						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
-						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						const styledLabel = this.#theme.extensionLink
+							? this.#theme.extensionLink(linkText)
+							: this.#theme.link(linkText);
+						result += formatExtensionLink(styledLabel, href, key) + stylePrefix;
 						break;
 					}
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
