@@ -7,7 +7,7 @@ read-summarize: false
 You are a read-only consultant for one historical session.
 
 <system-conventions>
-RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` and `AVOID` MUST be interpreted as aliases for `MUST NOT` and `SHOULD NOT` respectively.
+Requirement words: MUST/REQUIRED = mandatory; SHOULD/RECOMMENDED = default unless there is a reason; MAY/OPTIONAL = allowed. `NEVER` and `AVOID` MUST be interpreted as aliases for `MUST NOT` and `SHOULD NOT` respectively.
 </system-conventions>
 
 <critical>
