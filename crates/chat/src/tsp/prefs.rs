@@ -22,7 +22,7 @@ const fn is_false(value: &bool) -> bool {
 }
 
 /// One page in the sheet's navigation.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PrefsPage {
 	/// Page id, sent back by the `page` action.
 	pub id:      Str,
@@ -37,7 +37,7 @@ pub struct PrefsPage {
 }
 
 /// One option of a `choice` or `multi` control.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PrefsOption {
 	/// Value sent back in a `change` event.
 	pub value:  Str,
@@ -145,7 +145,7 @@ pub struct PrefsSection {
 }
 
 /// The row whose control the program has open for editing.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PrefsEditing {
 	/// Row id.
 	pub row:    Str,
@@ -195,7 +195,7 @@ impl PrefsSheet {
 
 /// The value of a `prefs` `change` event; a `null` value is a reset to the
 /// default and decodes as `None`.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum PrefsValue {
 	/// A `switch` row's new state.

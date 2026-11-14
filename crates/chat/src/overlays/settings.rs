@@ -2075,7 +2075,7 @@ impl SettingsPanel {
 
 	/// Whether Tern can draw the open editor: the provider-limit editors have
 	/// no native control, so while one is open the cell overlay draws.
-	fn editor_is_native(&self) -> bool {
+	const fn editor_is_native(&self) -> bool {
 		!matches!(self.editor, Some(Editor::ProviderList { .. } | Editor::ProviderValue { .. }))
 	}
 
