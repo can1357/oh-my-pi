@@ -103,7 +103,7 @@ function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEdito
 	for (let i = 0; i < a.length; i++) {
 		const x = a[i]!;
 		const y = b[i]!;
-		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx) return false;
+		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx || x.blob !== y.blob) return false;
 	}
 	return true;
 }
@@ -887,6 +887,8 @@ export class Editor implements Component, Focusable {
 	#autocompleteRequestRunning = false;
 	#autocompleteAbortController: AbortController | undefined;
 	#autocompleteWaiters: Array<() => void> = [];
+	/** Discovery pass the shown `^` list rebuilds after (see {@link ModelMentionCompletion.pending}). */
+	#awaitedMentionDiscovery: Promise<void> | undefined;
 	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
 	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
@@ -3471,10 +3473,11 @@ export class Editor implements Component, Focusable {
 		this.#applyUndo();
 	}
 
-	setText(text: string): void {
+	/** Replace the buffer; the caret lands at the end unless `cursor: "start"` (multi-row text only). */
+	setText(text: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
-		this.#setTextInternal(text);
+		this.#setTextInternal(text, options.cursor);
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
@@ -5477,11 +5480,23 @@ export class Editor implements Component, Focusable {
 		this.#invalidateAutocompleteRequests();
 		if (completion.kind === "matched") {
 			this.#showAutocompleteSuggestions(completion.suggestions, "regular");
+			if (completion.pending) this.#refreshModelMentionsAfter(completion.pending);
 		} else {
 			this.#cancelAutocomplete();
 			this.onAutocompleteUpdate?.();
 		}
 		return true;
+	}
+
+	/** Rebuild the shown `^` list from the live token once `pending` discovery settles; one rebuild per pass. */
+	#refreshModelMentionsAfter(pending: Promise<void>): void {
+		if (this.#awaitedMentionDiscovery === pending) return;
+		this.#awaitedMentionDiscovery = pending;
+		void pending.then(() => {
+			if (this.#awaitedMentionDiscovery !== pending) return;
+			this.#awaitedMentionDiscovery = undefined;
+			this.#refreshModelMentionListSync();
+		});
 	}
 
 	/**

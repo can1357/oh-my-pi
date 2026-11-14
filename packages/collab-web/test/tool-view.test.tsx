@@ -186,70 +186,125 @@ describe("ToolView xd:// dispatches", () => {
 	});
 });
 
-describe("ToolView ask renderer", () => {
-	const questions = [
-		{
-			id: "auth",
-			question: "Which auth method?",
-			options: [{ label: "JWT" }, { label: "OAuth2" }],
-		},
-	];
-
-	it("renders the user-added note from a single-question answer", () => {
+describe("ToolView task renderer", () => {
+	it("renders batch items by name with their task or numbered steps", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
-				name="ask"
+				name="task"
 				defaultOpen
-				args={{ questions }}
-				result={{
-					content: [{ type: "text", text: "OAuth2 User added note: keep the redirect short-lived" }],
-					details: {
-						question: "Which auth method?",
-						options: ["JWT", "OAuth2"],
-						multi: false,
-						selectedOptions: ["OAuth2"],
-						note: "keep the redirect short-lived",
-					},
+				args={{
+					context: "# Goal\nship it",
+					tasks: [
+						{ name: "Fixer", agent: "task", task: "Patch the parser.", solutionSpace: "one fix" },
+						{
+							name: "Auditor",
+							agent: "scout",
+							steps: ["Map the callers.", "Report risky ones."],
+							solutionSpace: "open",
+						},
+					],
 				}}
 			/>,
 		);
 
-		expect(html).toContain("<span>OAuth2</span>");
-		expect(html).toContain("keep the redirect short-lived");
+		expect(html).toContain("Fixer");
+		expect(html).toContain("Patch the parser.");
+		expect(html).toContain("2 steps");
+		expect(html).toContain("step 1/2");
+		expect(html).toContain("Map the callers.");
+		expect(html).toContain("step 2/2");
+		expect(html).toContain("Report risky ones.");
+		expect(html).toContain("2 tasks");
 	});
 
-	it("renders per-question notes from results[] answers", () => {
+	it("labels a flat stepped spawn by its first step when unnamed", () => {
+		const html = renderToStaticMarkup(
+			<ToolView name="task" args={{ agent: "task", steps: ["\n  Read the spec.\nThen more", "Write it."] }} />,
+		);
+
+		expect(html).toContain("Read the spec.");
+		expect(html).not.toContain("Then more");
+	});
+});
+
+describe("ToolView ask renderer", () => {
+	const form = `<form>
+<fieldset><legend>Storage backend</legend>
+<label><input type="radio" name="db" value="sqlite" checked> SQLite</label>
+<label><input type="radio" name="db" value="pg"> Postgres</label>
+</fieldset>
+<fieldset><legend>Notes &amp; caveats</legend><textarea name="notes"></textarea></fieldset>
+</form>`;
+
+	it("outlines a pending form by its legends and named field count", () => {
+		const html = renderToStaticMarkup(<ToolView name="ask" defaultOpen args={{ html: form }} />);
+
+		expect(html).toContain("Storage backend");
+		expect(html).toContain("Notes &amp; caveats");
+		expect(html).toContain("2 fields");
+	});
+
+	it("pairs each question with its answer and flags timed-out submissions", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
 				name="ask"
 				defaultOpen
-				args={{
-					questions: [
-						{ id: "db", question: "Storage backend?", options: [{ label: "SQLite" }, { label: "Postgres" }] },
-						{ id: "cache", question: "Cache?", options: [{ label: "Redis" }, { label: "None" }] },
-					],
-				}}
+				args={{ html: form }}
 				result={{
-					content: [{ type: "text", text: "User answers:" }],
+					content: [{ type: "text", text: 'User answers:\n{"db":"pg","notes":""}' }],
 					details: {
-						results: [
-							{
-								id: "db",
-								question: "Storage backend?",
-								multi: false,
-								selectedOptions: ["Postgres"],
-								note: "managed instance",
-							},
-							{ id: "cache", question: "Cache?", multi: false, selectedOptions: ["Redis"] },
+						answers: [
+							{ name: "db", question: "Storage backend", answer: "Postgres" },
+							{ name: "notes", question: "Notes & caveats", answer: "" },
 						],
+						timedOut: true,
 					},
 				}}
 			/>,
 		);
 
 		expect(html).toContain("<span>Postgres</span>");
-		expect(html).toContain("managed instance");
-		// The cache question answered without a note must not leak the db note.
-		expect(html.match(/managed instance/g)?.length).toBe(1);
+		expect(html).toContain("(no answer)");
+		expect(html).toContain("auto-selected after timeout");
+	});
+
+	it("renders selected option notes under the matching answer", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="ask"
+				defaultOpen
+				args={{ html: form }}
+				result={{
+					content: [],
+					details: {
+						answers: [
+							{ name: "notes", question: "Notes & caveats", answer: "none" },
+							{ name: "db", question: "Storage backend", answer: "SQLite, Postgres, managed" },
+						],
+						notes: [
+							{ name: "db", question: "Storage backend", option: "Postgres, managed", text: "Team standard" },
+							{ name: "db", question: "Storage backend", option: 12, text: "ignored malformed note" },
+						],
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain("✎ Postgres, managed: Team standard");
+		expect(html.indexOf("Team standard")).toBeGreaterThan(html.lastIndexOf("Storage backend"));
+		expect(html).not.toContain("ignored malformed note");
+	});
+
+	it("falls back to the result text when details carry no answers", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="ask"
+				defaultOpen
+				args={{ html: "<form></form>" }}
+				result={{ content: [{ type: "text", text: "The form needs at least one named control." }], isError: true }}
+			/>,
+		);
+
+		expect(html).toContain("at least one named control");
 	});
 });

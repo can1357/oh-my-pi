@@ -57,9 +57,10 @@ pub use self::{
 use self::{
 	control::{CANCEL, Ctl, PAUSE, RESUME, SIGNAL, SUSPEND},
 	proc::{Frame, FrameKind, Live, PendingWrite, ScriptKind},
-	state::{Overlay, Root, Var},
+	state::{Root, Var},
 };
 use crate::bash::{
+	Image,
 	diag::{Diag, DiagSite, render},
 	engine::Engine,
 	error::ShellError,
@@ -68,6 +69,7 @@ use crate::bash::{
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
+	image::Records,
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
@@ -78,6 +80,14 @@ const SLICE: u32 = 1024;
 
 /// bash version this engine implements (`$BASH_VERSION`).
 pub const BASH_VERSION: &str = "5.3.0(1)-release";
+
+/// Largest buffer a kernel keeps for reuse (the spare syntax tree, the unit
+/// blob encoder): every ordinary command fits, and a huge one's buffers are
+/// freed instead of held for the shell's lifetime.
+const SPARE_BUFFER_BYTES: usize = 1 << 20;
+
+/// Unit ids [`Kernel::written`] remembers before it starts over.
+const WRITTEN_MAX: usize = 1 << 16;
 
 /// Engine types are `Send`; hosts move shells between threads.
 const _: () = {
@@ -143,6 +153,11 @@ pub struct ShellInit {
 	/// its startup files: `ZSH_EXECUTION_STRING` (the `-c` string) and
 	/// `ZSH_SCRIPT` (the script file).
 	pub zsh_params:  Vec<(BString, BString)>,
+	/// The system zsh's function directories, which a zsh shell's `fpath`
+	/// starts with when the environment sets no `FPATH` (zsh's compiled-in
+	/// `FPATH_DIR` and its subdirectories). `None`: zsh 5.9's default
+	/// layout.
+	pub zsh_fpath:   Option<Vec<BString>>,
 	/// Whose shell it is: a user's, or a program's ([`Profile::Tool`]).
 	pub profile:     Profile,
 }
@@ -194,6 +209,7 @@ impl Default for ShellInit {
 			shell_pid:   0,
 			startup:     Vec::new(),
 			zsh_params:  Vec::new(),
+			zsh_fpath:   None,
 			profile:     Profile::User,
 		}
 	}
@@ -412,9 +428,12 @@ pub struct Kernel {
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
-	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
-	/// `externalize`).
-	pub written:            HashSet<UnitId>,
+	/// Unit blobs known to be in the store ([`Kernel::note_written`]); at
+	/// most [`WRITTEN_MAX`] ids.
+	pub written:            HashSet<UnitId, crate::bash::ids::UnitIdState>,
+	/// Reused buffer for encoding unit blobs ([`Kernel::persist_unit`]); not
+	/// imaged.
+	blob_buf:               Vec<u8>,
 	/// The `next_vpid` value last written as `MiscKey::NextVpid`
 	/// ([`Kernel::vpid`], [`Kernel::sync_root`]).
 	pub written_vpid:       u32,
@@ -432,6 +451,16 @@ pub struct Kernel {
 	/// slice: that kept ~600 bytes per idle vproc; the target is ≤ 2 KiB).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
 	pub spawned:            Vec<Box<Vproc>>,
+	/// The records an asynchronous command's signal ignores
+	/// (`exec::ignore_async_signals`) last turned which (mode, records)
+	/// into: the next one forked from the same records shares them. Held
+	/// weakly, so neither the root's records nor an exited job's stay
+	/// shared through it.
+	pub async_ignored:      Option<(ModeId, Records, Records)>,
+	/// Subshells the host submitted to the root since the last turn (no
+	/// store at hand): `adopt` gives each the root's state then, with its
+	/// script's changes.
+	pending_forks:          Vec<(Vpid, ForkEdits)>,
 	/// `$RANDOM` generator state (written through as `MiscKey::Random` by
 	/// [`Kernel::next_random`] and [`Kernel::seed_random`]).
 	pub rand:               state::Random,
@@ -446,9 +475,21 @@ pub struct Kernel {
 	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
 	pub nofork_units:       exec::NoforkUnits,
+	/// The functions each zsh word code digest (`.zwc`) holds, by path,
+	/// with the modification time and size they were read at
+	/// ([`Kernel::dump_funcs`]): an `$fpath` search asks of the same digests
+	/// for every function it resolves. Per shell, as its host's files are
+	/// (shells sharing an engine may see other files at a path); not imaged.
+	zsh_dumps:              parking_lot::Mutex<HashMap<BString, DumpFuncs>>,
+	/// Syntax-tree buffers of the last command run, lent to the next parse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle); at most
+	/// [`SPARE_BUFFER_BYTES`], see [`Kernel::keep_spare_tree`]); not imaged.
+	pub spare_tree:         crate::bash::syntax::Tree,
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
 	pub arith_recent:       arith::Recent,
+	/// [`arith_recent`](Self::arith_recent) for zsh's evaluator.
+	pub zsh_arith_recent:   zsh::math::Recent,
 	/// The last event clock reading while it is still current
 	/// ([`Kernel::stamp`]): set by a reading that ends a duration or starts a
 	/// command, cleared by [`Kernel::clock_stale`] before anything that can
@@ -470,6 +511,10 @@ pub struct Kernel {
 	/// Pruned there once no vproc carries the label; not imaged (callouts
 	/// do not survive a restore).
 	pub callout_labels:     Vec<(u32, Vpid)>,
+	/// The root's background jobs (their vpids) as its current script
+	/// started: an earlier script's work, which a cancel of this one spares
+	/// (`Shell::apply_requests`). Set at every root run start; not imaged.
+	pub prior_jobs:         Vec<Vpid>,
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
 	pub exited:             Option<RunId>,
@@ -486,6 +531,16 @@ pub struct Kernel {
 	/// scheduler after it (`Shell::adopt`); empty between turns, not
 	/// imaged.
 	pub settled:            Vec<(Vpid, u32)>,
+	/// `(OS pid, vproc, job)`: a job's `$!` names a program a vproc other
+	/// than the job's own runs (a background pipeline's last stage), so
+	/// `kill` of that pid signals that vproc, and finds no process once it
+	/// ended though the job runs on. Dropped when the job ends; not imaged
+	/// (a restored shell signals the job's vproc).
+	pub pid_owners:         Vec<(u32, Vpid, Vpid)>,
+	/// The math options ([`zsh::arith::math_options`]) last read for a vproc
+	/// without an image (the root), with the [`state::Root::opts_gen`] and mode
+	/// they were read under: every `(( ))` asks.
+	pub math_opts:          Option<(u64, ModeId, zsh::math::Options)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
 	pub deferrals:          Vec<proc::Deferral>,
@@ -513,7 +568,39 @@ impl ProcState {
 	}
 }
 
+/// A digest's function names, with the modification time (ns) and size
+/// of the file they were read from.
+type DumpFuncs = ((i64, u64), Arc<std::collections::HashSet<BString>>);
+
 impl Kernel {
+	/// The functions (metafied names) of the digest `path` as this shell
+	/// last read it, while its modification time and size are `stamp`.
+	pub(crate) fn dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+	) -> Option<Arc<std::collections::HashSet<BString>>> {
+		self
+			.zsh_dumps
+			.lock()
+			.get(path)
+			.filter(|(s, _)| *s == stamp)
+			.map(|(_, f)| Arc::clone(f))
+	}
+
+	/// Remember the functions `funcs` of the digest `path` at `stamp`.
+	pub(crate) fn cache_dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+		funcs: Arc<std::collections::HashSet<BString>>,
+	) {
+		self
+			.zsh_dumps
+			.lock()
+			.insert(BString::from(path), (stamp, funcs));
+	}
+
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
 		Self {
@@ -534,30 +621,46 @@ impl Kernel {
 			announced: HashSet::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
-			written: HashSet::new(),
+			written: HashSet::default(),
+			blob_buf: Vec::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
 			argv0,
 			shell_pid,
 			dropped_fs: 0,
 			spawned: Vec::new(),
+			pending_forks: Vec::new(),
+			async_ignored: None,
 			rand: state::Random::new(1),
 			start_ns: 0,
 			startup: Vec::new(),
 			pseudo_traps: exec::PseudoTraps::default(),
 			nofork_units: HashMap::new(),
+			zsh_dumps: parking_lot::Mutex::new(HashMap::new()),
+			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
+			zsh_arith_recent: zsh::math::Recent::default(),
 			clock: None,
 			null_input: None,
 			callout_labels: Vec::new(),
+			prior_jobs: Vec::new(),
 			exited: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
+			pid_owners: Vec::new(),
+			math_opts: None,
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
+	}
+
+	/// Record the root's background jobs as earlier scripts' work
+	/// ([`Kernel::prior_jobs`]), as a root script is about to start.
+	pub fn note_prior_jobs(&mut self, root: &Vproc) {
+		self.prior_jobs.clear();
+		self.prior_jobs.extend(root.jobs.iter().map(|job| job.vpid));
 	}
 
 	/// The redirections `vproc`'s command leaves to the process it spawns,
@@ -588,8 +691,11 @@ impl Kernel {
 		let bang = self.bangs.swap_remove(i);
 		if let Some(pid) = os {
 			self.settled.push((bang.job, pid));
+			if bang.vproc != bang.job {
+				self.pid_owners.push((pid, bang.vproc, bang.job));
+			}
 		}
-		jobctl::bang_settled(self, bang.job, os);
+		jobctl::bang_settled(self, bang.vproc, os);
 		self.ctl.notify();
 	}
 
@@ -626,17 +732,43 @@ impl Kernel {
 	/// once per id: a function body is in the store from its definition on,
 	/// so a shell restored from the store alone keeps its line numbers.
 	pub fn persist_unit(&mut self, store: &mut dyn StateStore, unit: &Unit) {
-		if self.written.contains(&unit.id) {
+		if !self.note_written(unit.id) {
 			return;
 		}
-		let written = postcard::to_stdvec(unit)
+		let mut buf = core::mem::take(&mut self.blob_buf);
+		buf.clear();
+		let written = postcard::to_extend(unit, buf)
 			.map_err(StoreError::Encode)
-			.and_then(|bytes| store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &bytes));
-		match written {
-			Ok(()) => {
-				self.written.insert(unit.id);
-			},
-			Err(err) => self.fail(err),
+			.and_then(|buf| {
+				let put = store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &buf);
+				if buf.capacity() <= SPARE_BUFFER_BYTES {
+					self.blob_buf = buf;
+				}
+				put
+			});
+		if let Err(err) = written {
+			self.written.remove(&unit.id);
+			self.fail(err);
+		}
+	}
+
+	/// Note that `id`'s blob is in the store; `false` when it already was
+	/// known. Past [`WRITTEN_MAX`] ids the set starts over: forgetting one
+	/// only costs writing its blob again, while a long-lived shell compiles
+	/// new units without end.
+	pub(crate) fn note_written(&mut self, id: UnitId) -> bool {
+		if self.written.len() >= WRITTEN_MAX && !self.written.contains(&id) {
+			self.written.clear();
+		}
+		self.written.insert(id)
+	}
+
+	/// Lend `tree`'s buffers to the next parse ([`Kernel::spare_tree`]),
+	/// unless they outgrew [`SPARE_BUFFER_BYTES`]: one huge command's tree
+	/// is freed rather than held for the shell's lifetime.
+	pub(crate) fn keep_spare_tree(&mut self, tree: crate::bash::syntax::Tree) {
+		if tree.heap_bytes() <= SPARE_BUFFER_BYTES {
+			self.spare_tree = tree;
 		}
 	}
 
@@ -663,6 +795,16 @@ impl Kernel {
 		id
 	}
 
+	/// The vproc that runs (or ran) the program OS pid `pid` names when
+	/// that is not its job's own vproc ([`Self::pid_owners`]).
+	pub fn pid_owner(&self, pid: u32) -> Option<Vpid> {
+		self
+			.pid_owners
+			.iter()
+			.find(|&&(p, ..)| p == pid)
+			.map(|&(_, owner, _)| owner)
+	}
+
 	/// Child vproc `vpid` of `parent` ended with `status`; the record stays
 	/// until the status is collected ([`Self::proc_collect`]).
 	pub fn proc_exited(
@@ -672,6 +814,7 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		self.pid_owners.retain(|&(.., job)| job != vpid);
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
@@ -912,11 +1055,11 @@ impl Kernel {
 		let utf8 = locale::is_utf8(self, cx.store, vp);
 		// An in-engine nested shell names itself (its `$0`).
 		let shell_name = match vp
-			.overlay
+			.image
 			.as_ref()
-			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)))
+			.and_then(|image| image.get(Key::Misc(MiscKey::Argv0)))
 		{
-			Some(Some(Record::Misc(name))) => name.as_slice(),
+			Some(Record::Misc(name)) => name.as_slice(),
 			_ => self.argv0.as_slice(),
 		};
 		render(diag, DiagSite { shell_name, origin, line, utf8 })
@@ -1090,14 +1233,12 @@ fn host_stdio(host: &mut dyn Host, cache: &mut [Option<FdRef>; 3]) -> FdTable {
 fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(), StoreError> {
 	let ppid = cx.host.ppid();
 	let need_shell = state::global(cx.store, b"SHELL")?.is_none();
-	let deferred_shell = if need_shell && init.mode.dialect() != crate::bash::ids::Dialect::Zsh {
-		match cx.host.login_shell_initializer() {
+	let deferred_shell = need_shell
+		&& init.mode.dialect() != crate::bash::ids::Dialect::Zsh
+		&& match cx.host.login_shell_initializer() {
 			Some(initializer) => cx.store.defer_scalar(b"SHELL", Attrs::NONE, initializer)?,
 			None => false,
-		}
-	} else {
-		false
-	};
+		};
 	let values = if init.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_startup_values(cx, k.engine.config().platform)
 	} else {
@@ -1137,6 +1278,15 @@ fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(),
 				}
 			}
 		}
+	}
+	if init.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& let Some(dirs) = &init.zsh_fpath
+		&& !init.env.iter().any(|(n, _)| n == "FPATH")
+	{
+		let sep = crate::bash::vm::probe::path_separator(k.engine.config().platform);
+		let joined = bstr::join([sep], dirs);
+		k.root
+			.set_var(cx.store, b"FPATH", Some(Var::scalar(BString::from(joined), Attrs::NONE)));
 	}
 	for (name, value) in &init.zsh_params {
 		k.root
@@ -1180,10 +1330,23 @@ pub fn zsh_startup_values(
 		(b"PSVAR", b""),
 		(b"FIGNORE", b""),
 	];
-	// `MODULE_PATH` is never imported (`PM_DONTIMPORT`).
+	// `MODULE_PATH` is never imported (`PM_DONTIMPORT`). The directory
+	// lists take the platform's separator, as their ties split them.
+	let sep = crate::bash::vm::probe::path_separator(platform);
 	let mut out: Vec<(&'static [u8], Var, bool)> = defaults
 		.into_iter()
-		.map(|(name, value)| (name, Var::scalar(value, Attrs::NONE), name == b"MODULE_PATH"))
+		.map(|(name, value)| {
+			let value: BString = if matches!(name, b"PATH" | b"FPATH") {
+				value
+					.iter()
+					.map(|&c| if c == b':' { sep } else { c })
+					.collect::<Vec<u8>>()
+					.into()
+			} else {
+				value.into()
+			};
+			(name, Var::scalar(value, Attrs::NONE), name == b"MODULE_PATH")
+		})
 		.collect();
 	// `setiparam`: integers.
 	let integers: [(&'static [u8], &[u8]); 3] =
@@ -1193,7 +1356,12 @@ pub fn zsh_startup_values(
 	}
 	// zsh exports `HOME` and `LOGNAME` (`addenv` when not imported).
 	if !user.home.is_empty() {
-		out.push((&b"HOME"[..], Var::scalar(user.home.clone(), Attrs::EXPORT), false));
+		let home = if platform == crate::bash::ids::Platform::Windows {
+			builtins::zsh_dir::windows_spelling(&user.home, &user.home)
+		} else {
+			user.home.clone()
+		};
+		out.push((&b"HOME"[..], Var::scalar(home, Attrs::EXPORT), false));
 	}
 	out.push((&b"LOGNAME"[..], Var::scalar(user.name, Attrs::EXPORT), false));
 	let (_, release, machine) = cx.host.uname().unwrap_or_default();
@@ -1212,7 +1380,10 @@ pub fn zsh_startup_values(
 	} else {
 		"unknown"
 	};
-	let ostype = if macos {
+	let ostype = if platform == crate::bash::ids::Platform::Windows {
+		// MSYS2's zsh, the zsh Windows users and plugins know.
+		BString::from("msys")
+	} else if macos {
 		let mut o = BString::from("darwin");
 		if let Some(major) = release
 			.split(|&c| c == b'.')
@@ -1401,6 +1572,15 @@ impl Shell {
 			.set_misc(cx.store, MiscKey::StartNs, k.start_ns.to_string());
 		k.startup.clone_from(&init.startup);
 		let mut foreign: Vec<BString> = Vec::new();
+		// zsh on Windows keeps directories spelled with `/` (`cd` does), so
+		// `$PWD`, `$HOME` and `~` agree from the start.
+		let zsh_on_windows = init.mode.dialect() == crate::bash::ids::Dialect::Zsh
+			&& engine.config().platform == crate::bash::ids::Platform::Windows;
+		let cwd = if zsh_on_windows {
+			builtins::zsh_dir::windows_spelling(&init.cwd, &init.cwd)
+		} else {
+			init.cwd.clone()
+		};
 		for (name, value) in &init.env {
 			if let Some(func) = name
 				.strip_prefix(b"BASH_FUNC_")
@@ -1408,8 +1588,13 @@ impl Shell {
 			{
 				import_function(&mut k, cx.store, func, value);
 			} else if is_ident(name) {
+				let value = if zsh_on_windows && name == "HOME" {
+					builtins::zsh_dir::windows_spelling(value, value)
+				} else {
+					value.clone()
+				};
 				k.root
-					.set_var(cx.store, name, Some(Var::scalar(value.clone(), Attrs::EXPORT)));
+					.set_var(cx.store, name, Some(Var::scalar(value, Attrs::EXPORT)));
 			} else {
 				let mut entry = name.clone();
 				entry.push(b'=');
@@ -1425,7 +1610,7 @@ impl Shell {
 			);
 		}
 		k.root
-			.set_var(cx.store, b"PWD", Some(Var::scalar(init.cwd.clone(), Attrs::EXPORT)));
+			.set_var(cx.store, b"PWD", Some(Var::scalar(cwd.clone(), Attrs::EXPORT)));
 		let zsh = init.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 		let shlvl = state::global(cx.store, b"SHLVL")?
 			.and_then(|v| v.as_scalar())
@@ -1467,7 +1652,7 @@ impl Shell {
 			.set_misc(cx.store, MiscKey::Argv0, init.argv0.clone());
 		k.root
 			.set_misc(cx.store, MiscKey::ShellPid, shell_pid.to_string());
-		k.root.set_misc(cx.store, MiscKey::Cwd, init.cwd.clone());
+		k.root.set_misc(cx.store, MiscKey::Cwd, cwd.clone());
 		k.root.set_misc(cx.store, MiscKey::Status, "0");
 		k.root
 			.set_misc(cx.store, MiscKey::Mode, <&'static str>::from(init.mode));
@@ -1510,7 +1695,7 @@ impl Shell {
 				fds.set(fd, Some(FdRef::open(file, FdOrigin::Host)));
 			}
 		}
-		let mut root = Vproc::new(vpid, None, fds, init.cwd, None, false);
+		let mut root = Vproc::new(vpid, None, fds, cwd, None, false);
 		root.mode = init.mode;
 		if zsh {
 			let start = mode::ZshStart {
@@ -1591,7 +1776,7 @@ impl Shell {
 		&mut self,
 		parent: usize,
 		script: Script,
-		mut store: Option<&mut dyn StateStore>,
+		store: Option<&mut dyn StateStore>,
 		lineage: Option<crate::bash::host::Lineage>,
 	) -> RunId {
 		let id = RunId(self.k.next_run);
@@ -1623,47 +1808,13 @@ impl Shell {
 			VprocSel::NewSubshell => None,
 			VprocSel::NewSubshellWithStdio(stdio) => Some(stdio),
 		};
+		let edits = ForkEdits {
+			env:          script.env,
+			foreign_env:  script.foreign_env,
+			unexport_env: script.unexport_env,
+			args:         script.args,
+		};
 		let p = &self.procs[parent];
-		let mut overlay = p.overlay.clone().unwrap_or_default();
-		if !script.foreign_env.is_empty() {
-			let mut foreign = match store.as_deref_mut() {
-				Some(store) => match state::record(store, p, Key::Misc(MiscKey::ForeignEnv)) {
-					Ok(Some(Record::Words(entries))) => entries.clone(),
-					Ok(_) => Vec::new(),
-					Err(err) => {
-						self.k.root.fail(err);
-						Vec::new()
-					},
-				},
-				None => match overlay.records.get(&KeyBuf::Misc(MiscKey::ForeignEnv)) {
-					Some(Some(Record::Words(entries))) => entries.clone(),
-					_ => Vec::new(),
-				},
-			};
-			for (name, value) in script.foreign_env {
-				if let Some(name) = name {
-					foreign.retain(|entry| entry.split(|&b| b == b'=').next() != Some(name.as_slice()));
-					if let Some(value) = value {
-						let mut entry = name;
-						entry.push(b'=');
-						entry.extend_from_slice(&value);
-						foreign.push(entry);
-					}
-				} else {
-					foreign.clear();
-				}
-			}
-			overlay
-				.records
-				.insert(KeyBuf::Misc(MiscKey::ForeignEnv), Some(Record::Words(foreign)));
-		}
-		for (name, value) in script.env {
-			if is_ident(&name) {
-				overlay
-					.vars
-					.insert(name, Some(Var::scalar(value, Attrs::EXPORT)));
-			}
-		}
 		let mut fds = p.fds.clone();
 		if let Some(stdio) = stdio {
 			for (fd, s) in stdio.into_iter().enumerate() {
@@ -1676,43 +1827,46 @@ impl Shell {
 		}
 		let cwd = script.cwd.unwrap_or_else(|| p.cwd.clone());
 		let status = p.status;
-		let mut scopes = match store.as_deref_mut() {
-			Some(store) => state::copy_scopes(&self.k.root, store, p).unwrap_or_else(|err| {
-				self.k.root.fail(err);
-				Vec::new()
-			}),
-			None if p.overlay.is_some() => p.scopes.clone(),
-			None => Vec::new(),
-		};
-		for name in script.unexport_env {
-			overlay.vars.insert(name.clone(), None);
-			for scope in &mut scopes {
-				if let Some(Some(var)) = scope.vars.get_mut(&name) {
-					var.attrs = var.attrs.without(Attrs::EXPORT);
+		// The parent's global state now; a host's submission (no store) to
+		// the root takes it when the scheduler adopts the subshell, before
+		// the root runs again.
+		let base = match store {
+			Some(store) => {
+				let image = state::fork_image(&self.k.root, store, p);
+				let scopes = state::copy_scopes(&self.k.root, store, p);
+				match image.and_then(|image| Ok((image, scopes?))) {
+					Ok(base) => Some(base),
+					Err(err) => {
+						self.k.root.fail(err);
+						Some(((Image::default(), None), Vec::new()))
+					},
 				}
-			}
-		}
+			},
+			None => p
+				.image
+				.clone()
+				.map(|image| ((image, p.locale_gen), p.scopes.clone())),
+		};
 		let parent_vpid = p.vpid;
 		// Written as `MiscKey::NextVpid` before the next step returns
 		// (`Kernel::sync_root`).
 		let vpid = Vpid(self.k.next_vpid);
 		self.k.next_vpid += 1;
 		let parent_lineage = self.procs[parent].lineage;
-		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
+		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(Image::default()), true);
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
-		vp.scopes = scopes;
-		if let Some(args) = script.args {
-			// A copied function scope takes precedence over the overlay: install
-			// the script's arguments at that level, as `set --` does.
-			if let Some(store) = store {
-				state::set_positional(&mut self.k.root, store, &mut vp, args);
-			} else if let Some(overlay) = &mut vp.overlay {
-				overlay.positional = Some(args);
-			}
-		}
 		vp.mode = mode;
 		vp.runs.push_back(run);
+		match base {
+			Some(((image, locale_gen), scopes)) => {
+				vp.image = Some(image);
+				vp.locale_gen = locale_gen;
+				vp.scopes = scopes;
+				edits.apply(&mut vp);
+			},
+			None => self.k.pending_forks.push((vpid, edits)),
+		}
 		self.k.spawned.push(Box::new(vp));
 		id
 	}
@@ -1824,6 +1978,19 @@ impl Shell {
 	/// Move children created during the turn into the scheduler and reap
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
+		for (vpid, edits) in std::mem::take(&mut self.k.pending_forks) {
+			let base = state::fork_image(&self.k.root, cx.store, &self.procs[0]);
+			let Some(vp) = self.k.spawned.iter_mut().find(|p| p.vpid == vpid) else {
+				continue;
+			};
+			let (image, locale_gen) = base.unwrap_or_else(|err| {
+				self.k.root.fail(err);
+				(Image::default(), None)
+			});
+			vp.image = Some(image);
+			vp.locale_gen = locale_gen;
+			edits.apply(vp);
+		}
 		for p in &self.k.spawned {
 			let rec = Record::Proc { parent: p.parent, status: None };
 			self
@@ -2000,9 +2167,22 @@ impl Shell {
 		if req & CANCEL != 0 {
 			let sig = self.k.ctl.cancel_signal();
 			let status = sig.exit_status(self.k.engine.config().platform);
+			if self.procs[0].runs.front().is_some_and(|run| !run.started) {
+				// The cancelled script has not started: it started no job.
+				self.k.note_prior_jobs(&self.procs[0]);
+			}
+			// A detached tree (`nohup`) outlives the cancellation, and so does
+			// a background job an earlier script left running: it is no part
+			// of the cancelled command, as bash's interrupt reaches only the
+			// foreground job.
+			let spared: Vec<Vpid> = self
+				.procs
+				.iter()
+				.filter(|p| p.lineage.detached || self.in_prior_job(p.vpid))
+				.map(|p| p.vpid)
+				.collect();
 			for i in (0..self.procs.len()).rev() {
-				// A detached tree (`nohup`) outlives the cancellation.
-				if self.procs[i].lineage.detached {
+				if spared.contains(&self.procs[i].vpid) {
 					continue;
 				}
 				let key = crate::bash::store::TrapKey::Signal(sig);
@@ -2041,13 +2221,7 @@ impl Shell {
 					self.kill(cx, i, sig, status);
 				}
 			}
-			// Calls of the cancelled vprocs are void; a detached tree's go on.
-			let detached: Vec<Vpid> = self
-				.procs
-				.iter()
-				.filter(|p| p.lineage.detached)
-				.map(|p| p.vpid)
-				.collect();
+			// Calls of the cancelled vprocs are void; the spared ones' go on.
 			let kept: Vec<CallId> = self
 				.k
 				.results
@@ -2056,13 +2230,13 @@ impl Shell {
 				.filter(|&id| {
 					self
 						.awaiting(id)
-						.is_some_and(|i| detached.contains(&self.procs[i].vpid))
+						.is_some_and(|i| spared.contains(&self.procs[i].vpid))
 				})
 				.collect();
 			self
 				.k
 				.calls_out
-				.retain(|(_, call)| detached.contains(&call.vpid));
+				.retain(|(_, call)| spared.contains(&call.vpid));
 			self.k.results.retain(|id, _| kept.contains(id));
 			self.k.paused = false;
 		}
@@ -2167,6 +2341,28 @@ impl Shell {
 			}
 		}
 		hits.sort_unstable();
+	}
+
+	/// Whether `vpid` runs in a background job an earlier root script
+	/// started ([`Kernel::prior_jobs`]): it leads one or descends from one.
+	fn in_prior_job(&self, mut vpid: Vpid) -> bool {
+		if self.k.prior_jobs.is_empty() {
+			return false;
+		}
+		loop {
+			if self.k.prior_jobs.contains(&vpid) {
+				return true;
+			}
+			let Some(parent) = self
+				.procs
+				.iter()
+				.find(|p| p.vpid == vpid)
+				.and_then(|p| p.parent)
+			else {
+				return false;
+			};
+			vpid = parent;
+		}
 	}
 
 	/// Whether `vpid` belongs to the job rooted at `root`, excluding nested
@@ -2613,13 +2809,88 @@ fn pause_handles(p: &mut Vproc, on: bool) {
 	}
 }
 
+/// What a submitted script changes in the state its new subshell forks
+/// ([`Script::env`], [`Script::foreign_env`], [`Script::unexport_env`],
+/// [`Script::args`]).
+struct ForkEdits {
+	env:          Vec<(BString, BString)>,
+	foreign_env:  Vec<(Option<BString>, Option<BString>)>,
+	unexport_env: Vec<BString>,
+	args:         Option<Vec<BString>>,
+}
+
+impl ForkEdits {
+	/// Apply the changes to `vp`, a subshell holding its forked state.
+	fn apply(self, vp: &mut Vproc) {
+		// A locale variable among them: the subshell no longer has its
+		// parent's locale values (`state::locale_token`).
+		if self
+			.env
+			.iter()
+			.map(|(name, _)| name)
+			.chain(&self.unexport_env)
+			.any(|name| state::is_locale_name(name))
+		{
+			vp.locale_gen = None;
+		}
+		let Some(image) = vp.image.as_mut() else {
+			return;
+		};
+		if !self.foreign_env.is_empty() {
+			let mut foreign = match image.get(Key::Misc(MiscKey::ForeignEnv)) {
+				Some(Record::Words(entries)) => entries.clone(),
+				_ => Vec::new(),
+			};
+			for (name, value) in self.foreign_env {
+				if let Some(name) = name {
+					foreign.retain(|entry| entry.split(|&b| b == b'=').next() != Some(name.as_slice()));
+					if let Some(value) = value {
+						let mut entry = name;
+						entry.push(b'=');
+						entry.extend_from_slice(&value);
+						foreign.push(entry);
+					}
+				} else {
+					foreign.clear();
+				}
+			}
+			image.put(Key::Misc(MiscKey::ForeignEnv), Record::Words(foreign));
+		}
+		for (name, value) in self.env {
+			if is_ident(&name) {
+				image.set_var(&name, Some(Var::scalar(value, Attrs::EXPORT)));
+			}
+		}
+		for name in self.unexport_env {
+			image.del_var(&name);
+			for scope in &mut vp.scopes {
+				if let Some(Some(var)) = scope.vars.get_mut(&name) {
+					var.attrs = var.attrs.without(Attrs::EXPORT);
+				}
+			}
+		}
+		if let Some(args) = self.args {
+			// A copied function scope takes precedence: install the
+			// script's arguments at that level, as `set --` does.
+			match vp.scopes.iter_mut().rev().find(|s| s.positional.is_some()) {
+				Some(scope) => scope.positional = Some(args),
+				None => {
+					if let Some(image) = vp.image.as_mut() {
+						image.put(Key::Misc(MiscKey::Positional), Record::Words(args));
+					}
+				},
+			}
+		}
+	}
+}
+
 impl Vproc {
 	fn new(
 		vpid: Vpid,
 		parent: Option<Vpid>,
 		fds: FdTable,
 		cwd: BString,
-		overlay: Option<Overlay>,
+		image: Option<Image>,
 		transient: bool,
 	) -> Self {
 		Self {
@@ -2632,12 +2903,14 @@ impl Vproc {
 			cwd,
 			status: 0,
 			pipestatus: Vec::new(),
-			overlay,
+			image,
+			locale_gen: None,
 			out: VecDeque::new(),
 			blocked: None,
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
 			stopped: false,
 			transient,
+			exit_trap_run: false,
 			jobs: proc::JobTable::default(),
 			last_bg: proc::LastBg::default(),
 			getopts: proc::GetoptsState { optind: None, next: None, at: None },
@@ -2718,17 +2991,15 @@ impl Vproc {
 		mut frame: Frame,
 	) -> Self {
 		let vpid = k.vpid(store);
-		let mut vp = Self::new(
-			vpid,
-			Some(self.vpid),
-			fds,
-			self.cwd.clone(),
-			Some(self.overlay.clone().unwrap_or_default()),
-			true,
-		);
+		let (image, locale_gen) = state::fork_image(&k.root, store, self).unwrap_or_else(|err| {
+			k.fail(err);
+			(Image::default(), None)
+		});
+		let mut vp = Self::new(vpid, Some(self.vpid), fds, self.cwd.clone(), Some(image), true);
+		vp.locale_gen = locale_gen;
 		// `$BASH_SUBSHELL`: one more than the parent's (a pipeline stage
 		// or background job adjusts it, `exec::spawn`). The parent's
-		// caught-signal traps stay in the overlay: the child lists them but
+		// caught-signal traps stay in the image: the child lists them but
 		// does not run them (`state::inherited_trap`).
 		set_subshell_depth(&mut vp, subshell_depth(self).saturating_add(1));
 		vp.status = self.status;
@@ -2804,18 +3075,18 @@ pub const fn subshell_depth(vp: &Vproc) -> u32 {
 	vp.subshell
 }
 
-/// Set `vp`'s `$BASH_SUBSHELL` (a vproc without an overlay is the shell
+/// Set `vp`'s `$BASH_SUBSHELL` (a vproc without an image is the shell
 /// itself and stays at zero). Called by `child_running` and by
 /// `exec::spawn` for pipeline stages and background jobs.
 pub const fn set_subshell_depth(vp: &mut Vproc, depth: u32) {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		vp.subshell = depth;
 	}
 }
 
 /// Scope of an assignment made by `vp`.
 pub const fn assign_scope(vp: &Vproc) -> AssignScope {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		AssignScope::Subshell
 	} else {
 		AssignScope::Global

@@ -8,7 +8,14 @@ import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeExtractedFactCategories } from "./consolidate";
-import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
+import {
+	type EmbedItem,
+	insertLiveEmbeddings,
+	type StagedEmbedding,
+	scheduleEmbedding,
+	vecAvailable,
+	vecInsert,
+} from "./helpers";
 import type {
 	BeamEvent,
 	BeamMemoryState,
@@ -407,7 +414,7 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 				// Embed the whole corpus before touching anything stored. embed() handles the provider's
 				// per-request cap; a rejected chunk abandons the rebuild and leaves the stored vectors alone.
 				const toEmbed = live.filter(item => item.content.trim() !== "");
-				const staged: { memoryId: string; json: string }[] = [];
+				const staged: StagedEmbedding[] = [];
 				for (let offset = 0; offset < toEmbed.length; offset += EMBED_REBUILD_BATCH) {
 					const chunk = toEmbed.slice(offset, offset + EMBED_REBUILD_BATCH);
 					const vectors = await embed(chunk.map(item => item.content));
@@ -422,14 +429,18 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 					chunk.forEach((item, index) => {
 						const vector = vectors[index];
 						if (vector !== undefined) {
-							staged.push({ memoryId: item.memoryId, json: JSON.stringify(Array.from(vector)) });
+							staged.push({
+								memoryId: item.memoryId,
+								content: item.content,
+								json: JSON.stringify(Array.from(vector)),
+							});
 						}
 					});
 				}
 
 				transaction(beam.db, () => {
-					// Only stale-model rows go. A vector that a concurrent remember() stamped under the active
-					// model survives, and the INSERT below overwrites any row this rebuild covers.
+					// Only stale-model rows go. A vector that a concurrent remember() or update() stamped
+					// under the active model survives. Each staged insert also revalidates its source text.
 					beam.db.query("DELETE FROM memory_embeddings WHERE model IS NOT ?").run(active);
 					beam.db.run("UPDATE episodic_memory SET binary_vector = NULL");
 					if (vecAvailable(beam.db)) {
@@ -439,10 +450,7 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 							// sqlite-vec cleanup is best-effort; rebuild correctness takes precedence.
 						}
 					}
-					using insertEmbedding = beam.db.prepare(
-						"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
-					);
-					for (const row of staged) insertEmbedding.run(row.memoryId, row.json, active);
+					insertLiveEmbeddings(beam.db, staged, active);
 				});
 				beam.caches.queryCache?.invalidate();
 
@@ -693,37 +701,39 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 
 export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
 	const now = toUtcIso();
-	const working = beam.db.run(
-		`
-			UPDATE working_memory
-			SET valid_until = ?, superseded_by = ?
-			WHERE id = ? AND (session_id = ? OR scope = 'global')
-		`,
-		[now, replacementId, memoryId, beam.sessionId],
-	);
-	if (working.changes > 0) {
-		// Recall filters `valid_until`/`superseded_by` in SQL, but the enhanced path consults the
-		// query cache BEFORE it reaches SQL. Without this the row a caller just retired keeps being
-		// served to an identical query for the rest of the cache TTL -- the one thing an explicit
-		// invalidation is supposed to guarantee against. Every other mutator here already does this;
-		// this one was the omission. Gated on an actual row change, like `forgetWorking`, so a
-		// no-op invalidation never discards a valid cache.
-		invalidateCaches(beam);
-		return true;
-	}
-	const episodic = beam.db.run(
-		`
-			UPDATE episodic_memory
-			SET valid_until = ?, superseded_by = ?
-			WHERE id = ? AND (session_id = ? OR scope = 'global')
-		`,
-		[now, replacementId, memoryId, beam.sessionId],
-	);
-	if (episodic.changes > 0) {
-		invalidateCaches(beam);
-		return true;
-	}
-	return false;
+	const changed = transaction(beam.db, () => {
+		const working = beam.db.run(
+			`
+				UPDATE working_memory
+				SET valid_until = ?, superseded_by = ?
+				WHERE id = ? AND (session_id = ? OR scope = 'global')
+			`,
+			[now, replacementId, memoryId, beam.sessionId],
+		);
+		if (working.changes > 0) {
+			// Retire episodic summaries built from this source: they still carry its text. Siblings
+			// covered by the same summary stay recallable via their (consolidated, never TTL-trimmed)
+			// working rows.
+			beam.db.run(
+				`UPDATE episodic_memory SET valid_until = ?, superseded_by = ?
+				 WHERE (session_id = ? OR scope = 'global')
+				   AND instr(',' || summary_of || ',', ',' || ? || ',') > 0`,
+				[now, replacementId, beam.sessionId, memoryId],
+			);
+			return true;
+		}
+		const episodic = beam.db.run(
+			`
+				UPDATE episodic_memory
+				SET valid_until = ?, superseded_by = ?
+				WHERE id = ? AND (session_id = ? OR scope = 'global')
+			`,
+			[now, replacementId, memoryId, beam.sessionId],
+		);
+		return episodic.changes > 0;
+	});
+	if (changed) invalidateCaches(beam);
+	return changed;
 }
 
 export function getWorkingStats(

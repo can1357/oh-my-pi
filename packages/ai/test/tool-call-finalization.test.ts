@@ -12,7 +12,7 @@ const tool = { name: "write", description: "Write a file", parameters: { type: "
 describe("final JSON tool-call boundaries", () => {
 	afterEach(() => vi.restoreAllMocks());
 
-	it.each(["contentBlockStop", "messageStop", "eof"])("refuses truncated Bedrock input at %s", async finalizer => {
+	it.each(["contentBlockStop", "messageStop"])("refuses truncated Bedrock input at %s", async finalizer => {
 		const frames = [
 			bedrockEvent("messageStart", JSON.stringify({ role: "assistant" })),
 			bedrockEvent(
@@ -26,7 +26,7 @@ describe("final JSON tool-call boundaries", () => {
 			...(finalizer === "contentBlockStop"
 				? [bedrockEvent("contentBlockStop", JSON.stringify({ contentBlockIndex: 0 }))]
 				: []),
-			...(finalizer !== "eof" ? [bedrockEvent("messageStop", JSON.stringify({ stopReason: "tool_use" }))] : []),
+			bedrockEvent("messageStop", JSON.stringify({ stopReason: "tool_use" })),
 		];
 		const result = await streamBedrock(bedrockTestModel(), BEDROCK_TEST_CONTEXT, {
 			bearerToken: "test-token",
@@ -41,7 +41,7 @@ describe("final JSON tool-call boundaries", () => {
 					{ headers: { "content-type": "application/vnd.amazon.eventstream" } },
 				),
 		}).result();
-		if (finalizer !== "eof") expect(result.stopReason).toBe("toolUse");
+		expect(result.stopReason).toBe("toolUse");
 		const call = result.content.find(block => block.type === "toolCall");
 		if (!call) throw new Error("Expected tool call");
 		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });

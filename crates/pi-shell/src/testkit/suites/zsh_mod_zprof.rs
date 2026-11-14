@@ -164,14 +164,16 @@ fn zsh_mod_zprof_names_anonymous_functions_by_file_and_line() {
 	assert!(out.contains("  (anon) [zsh:1]\n"), "{out}");
 	// In a sourced file: the file as given, the definition's line.
 	let host = FakeHost::new();
-	host.fs.add_dir("/t");
+	host.fs.add_dir("/src");
 	host
 		.fs
-		.add_file("/t/anon.zsh", b"f() { () { :; } }\n\n() { :; }\nf\n", 0o644);
+		.add_file("/src/anon.zsh", b"f() { () { :; } }\n\n() { :; }\nf\n", 0o644);
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	let mut rig = Rig::new(host, init);
-	let st = rig
-		.run(Script::command(b"zmodload zsh/zprof; source /t/anon.zsh; zprof".to_vec()), Fault::None);
+	let st = rig.run(
+		Script::command(b"zmodload zsh/zprof; source /src/anon.zsh; zprof".to_vec()),
+		Fault::None,
+	);
 	assert_eq!(String::from_utf8_lossy(&rig.host.stderr.bytes()), "");
 	assert_eq!(st, 0);
 	let out = String::from_utf8_lossy(&rig.host.stdout.bytes()).into_owned();
@@ -188,14 +190,14 @@ fn zsh_mod_zprof_names_anonymous_functions_by_file_and_line() {
 			RULE,
 			RULE,
 			RULE,
-			" 1/1 # # #% # # (anon) [/t/anon.zsh:1] [N]",
+			" 1/1 # # #% # # (anon) [/src/anon.zsh:1] [N]",
 			" 1/1 # # #% # # f [N]",
 			"N) 1 # # #% # # #% f",
 			"N) 1 # # #% # # #% f",
-			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:3]",
-			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:3]",
-			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:1]",
-			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:1]",
+			"N) 1 # # #% # # #% (anon) [/src/anon.zsh:3]",
+			"N) 1 # # #% # # #% (anon) [/src/anon.zsh:3]",
+			"N) 1 # # #% # # #% (anon) [/src/anon.zsh:1]",
+			"N) 1 # # #% # # #% (anon) [/src/anon.zsh:1]",
 			"num calls time self name",
 		])
 	);

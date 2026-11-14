@@ -37,6 +37,18 @@ fn starts_from_the_exported_environment() {
 }
 
 #[test]
+fn nested_shells_do_not_reveal_later_root_bindings() {
+	let (out, err, status) = run(
+		"private=hidden; export kept=before; ( bash -c 'echo \
+		 \"${private-absent}:${later-absent}:$kept\"; type -t added || :' ) & later=after; \
+		 kept=after; added() { :; }; wait",
+	);
+	assert_eq!(status, 0);
+	assert_eq!(out, "absent:absent:before\n");
+	assert_eq!(err, "");
+}
+
+#[test]
 fn takes_its_name_and_arguments() {
 	let (out, ..) = run("bash -c 'echo $0 $# $1' name a b");
 	assert_eq!(out, "name 2 a\n");
@@ -123,19 +135,23 @@ fn failed_exec_and_execfail() {
 fn a_script_without_shebang_starts_from_the_command_environment() {
 	let fs = MemFs::new();
 	fs.add_file(
-		"/w/plain",
+		"/work/plain",
 		b"echo \"$0|$#|$1|$2|[$x][$y][$z]\"; type f a\nnosuch\nexit 23\n",
 		0o755,
 	);
 	let host = FakeHost::new()
 		.with_fs(fs)
 		.with_spawner(Box::new(|_: SpawnSpec<'_>| Err(std::io::Error::from_raw_os_error(ENOEXEC))));
-	let src = "x=1; export y=2; f() { :; }; alias a=b; z=3 /w/plain 'two words' ';lit'; echo st=$?";
+	let src =
+		"x=1; export y=2; f() { :; }; alias a=b; z=3 /work/plain 'two words' ';lit'; echo st=$?";
 	let out = run_script(host, src.as_bytes(), &[], Fault::None);
-	assert_eq!(String::from_utf8_lossy(&out.stdout), "/w/plain|2|two words|;lit|[][2][3]\nst=23\n");
+	assert_eq!(
+		String::from_utf8_lossy(&out.stdout),
+		"/work/plain|2|two words|;lit|[][2][3]\nst=23\n"
+	);
 	assert_eq!(
 		String::from_utf8_lossy(&out.stderr),
-		"/w/plain: line 1: type: f: not found\n/w/plain: line 1: type: a: not found\n/w/plain: line \
-		 2: nosuch: command not found\n"
+		"/work/plain: line 1: type: f: not found\n/work/plain: line 1: type: a: not \
+		 found\n/work/plain: line 2: nosuch: command not found\n"
 	);
 }

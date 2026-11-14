@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -9,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { BuildSessionContextOptions, SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -184,6 +187,32 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
 	});
+	it("reports a target whose recorded directory is gone instead of resuming it here", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-gone-source-");
+		const targetDir = TempDir.createSync("@pi-switch-gone-target-");
+		tempDirs.push(sourceDir, targetDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+		const previousSessionFile = sessionManager.getSessionFile();
+		const goneProject = path.join(targetDir.path(), "project");
+		await fs.mkdir(goneProject);
+		const targetManager = SessionManager.create(goneProject, targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		await fs.rm(goneProject, { recursive: true });
+
+		const onCwdChange = vi.fn(async () => true);
+		await expect(session.switchSession(targetSessionFile!, { onCwdChange })).rejects.toThrow(goneProject);
+
+		expect(onCwdChange).not.toHaveBeenCalled();
+		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+	});
 	it("rejects callback-free switches across project directories", async () => {
 		const sourceDir = TempDir.createSync("@pi-switch-no-callback-source-");
 		const targetDir = TempDir.createSync("@pi-switch-no-callback-target-");
@@ -277,6 +306,60 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
 		expect(session.isDisposed).toBe(true);
 	});
+	it("restores prompt attribution when a switch hook rebuilds the prompt and then fails", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-context-sources-");
+		tempDirs.push(tempDir);
+		const target = SessionManager.create(tempDir.path(), tempDir.path());
+		target.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await target.ensureOnDisk();
+		await target.flush();
+		const targetFile = target.getSessionFile()!;
+		await target.close();
+		const built = (text: string) => ({
+			systemPrompt: [text],
+			sources: {
+				blocks: [text],
+				sources: [
+					{
+						id: "rules",
+						kind: "instruction-files" as const,
+						label: "rules",
+						block: 0,
+						start: 0,
+						end: text.length,
+					},
+				],
+			},
+		});
+		const initial = built("previous rules");
+		const next = built("target rules");
+		const instructionTexts = () =>
+			buildSessionContextView(session)
+				.categories.find(category => category.id === "instruction-files")!
+				.entries.map(entry => entry.text);
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: initial.systemPrompt, tools: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			systemPromptSources: initial.sources,
+			rebuildSystemPrompt: async () => next,
+			extensionRunner: {
+				hasHandlers: () => false,
+				emit: async (event: { type: string }) => {
+					if (event.type !== "session_switch") return;
+					await session.refreshBaseSystemPrompt();
+					expect(instructionTexts()).toEqual(["target rules"]);
+					throw new Error("target hook failed");
+				},
+			} as unknown as ExtensionRunner,
+		});
+		sessions.push(session);
+		await expect(session.switchSession(targetFile)).rejects.toThrow("target hook failed");
+		expect(session.systemPrompt).toEqual(initial.systemPrompt);
+		expect(instructionTexts()).toEqual(["previous rules"]);
+	});
+
 	it("rejects reload when the session-before-switch hook cancels", async () => {
 		const tempDir = TempDir.createSync("@pi-switch-reload-cancel-");
 		tempDirs.push(tempDir);

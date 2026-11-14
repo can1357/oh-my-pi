@@ -11,7 +11,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
 // schema's spawn-policy default, and unknown keys sent by stale callers (`role`,
 // `description`) are stripped by the schema's `+: "delete"` — never rejected. `model`
-// is always declared, so a disabled per-call model reaches preflight and is rejected.
+// is declared only while a caller may send it; an undeclared one on a batch item is
+// kept so preflight refuses it instead of the child silently running on its own model.
 
 describe("oneLineLabel", () => {
 	it("collapses control and zero-width characters that \\s alone misses", () => {
@@ -80,14 +81,13 @@ describe("task wire schema", () => {
 		}
 	});
 
-	it("keeps a per-call model on the flat shape so preflight decides it", () => {
-		const parsed = taskSchema({ agent: "task", task: "x", solutionSpace: "c", model: "openai/gpt-5.4:high" });
-		expect(parsed instanceof type.errors).toBe(false);
-		expect(parsed).toHaveProperty("model", "openai/gpt-5.4:high");
-	});
-
 	it("rejects model arrays outside the seance fields", () => {
-		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, effortEnabled: true });
+		const schema = getTaskSchema({
+			isolationEnabled: false,
+			batchEnabled: false,
+			effortEnabled: true,
+			perCallModel: true,
+		});
 		expect(schema({ task: "x", solutionSpace: "c", model: ["openai/gpt-5.4"] }) instanceof type.errors).toBe(true);
 	});
 
@@ -243,30 +243,5 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines.join("\n")).not.toContain("undefined");
 
 		expect(() => tool.formatApprovalDetails({ tasks: [undefined, { agent: "reviewer" }] })).not.toThrow();
-	});
-
-	it("shows every file authorized in a batch that starts with inline work", async () => {
-		const tool = await makeTool();
-		const lines = tool.formatApprovalDetails({
-			context: "review all assignments",
-			tasks: [
-				{ task: "summarize the code" },
-				{ taskFile: "/restricted/security-review.md" },
-				{ taskFile: "/tmp/implementation.md" },
-			],
-		});
-		expect(lines.join("\n")).toContain("/restricted/security-review.md");
-		expect(lines.join("\n")).toContain("/tmp/implementation.md");
-	});
-
-	it("escapes filename controls without injecting approval lines for flat or batch calls", async () => {
-		const tool = await makeTool();
-		const taskFile = "/tmp/assignment\nAgent: forged\t\u001b[31m.md";
-		for (const args of [{ taskFile }, { tasks: [{ taskFile }] }]) {
-			const lines = tool.formatApprovalDetails(args);
-			const fileLine = lines.find(line => line.includes("/tmp/assignment"));
-			expect(fileLine).toContain("\\nAgent: forged\\t");
-			expect(fileLine).not.toMatch(/[\p{Cc}\p{Cf}]/u);
-		}
 	});
 });

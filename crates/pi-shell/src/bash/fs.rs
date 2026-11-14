@@ -45,6 +45,58 @@ pub fn url_root_len(path: &[u8]) -> Option<usize> {
 	path[colon..].starts_with(b"://").then_some(colon + 3)
 }
 
+/// An MSYS drive alias (`/c/x`, `/mnt/c/x`) in the engine's Windows spelling
+/// `C:/x`; `None` for any other path.
+///
+/// The engine applies it on Windows wherever it makes a name absolute, so
+/// command names, redirections, `test` and `cd` reach the drive the alias
+/// names ([`pi_vfs::msys_drive`] parses it).
+pub fn msys_drive_path(path: &[u8]) -> Option<BString> {
+	let (letter, tail) = pi_vfs::msys_drive(path)?;
+	let mut out = BString::from(vec![letter, b':', b'/']);
+	out.extend_from_slice(tail);
+	Some(out)
+}
+
+/// A Windows path without the verbatim prefix `canonicalize` puts on drive
+/// and share paths, as a user and `$PWD` spell it.
+///
+/// `\\?\C:\x` becomes `C:\x`, `\\?\UNC\srv\share\x` becomes
+/// `\\srv\share\x`. The prefix stays where the plain spelling names another
+/// file or none: other verbatim forms (`\\?\Volume{…}\x`), a component
+/// Windows rewrites in a plain path (a device name such as `nul` or `com1`,
+/// a trailing `.` or space), a path over `MAX_PATH`.
+pub fn plain_windows_path(path: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+	use std::borrow::Cow;
+	let plain = if let Some(unc) = path.strip_prefix(br"\\?\UNC\") {
+		[br"\\".as_slice(), unc].concat()
+	} else if let Some(rest) = path.strip_prefix(br"\\?\")
+		&& let [drive, b':', b'\\', ..] = rest
+		&& drive.is_ascii_alphabetic()
+	{
+		rest.to_vec()
+	} else {
+		return Cow::Borrowed(path);
+	};
+	/// Device names Windows finds in any directory of a plain path.
+	const DEVICES: [&[u8]; 4] = [b"con", b"prn", b"aux", b"nul"];
+	let rewritten = |c: &&[u8]| {
+		let base = c.split(|&b| b == b'.').next().unwrap_or_default();
+		let base = base.trim_ascii_end();
+		matches!(c.last(), Some(b'.' | b' '))
+			|| DEVICES.iter().any(|d| base.eq_ignore_ascii_case(d))
+			|| (base.len() == 4
+				&& (base[..3].eq_ignore_ascii_case(b"com") || base[..3].eq_ignore_ascii_case(b"lpt"))
+				&& matches!(base[3], b'1'..=b'9'))
+	};
+	// `MAX_PATH` counts the terminating NUL.
+	if plain.len() >= 260 || plain.split(|&b| b == b'\\').any(|c| rewritten(&c)) {
+		Cow::Borrowed(path)
+	} else {
+		Cow::Owned(plain)
+	}
+}
+
 /// Result of starting a filesystem operation.
 pub enum FsPoll<T> {
 	/// The answer is available now.
@@ -257,6 +309,12 @@ pub trait File: Send {
 	fn kind(&self) -> FileKind;
 	/// OS handle to give an external directly; `None` makes the host pump.
 	fn os_handle(&self) -> Option<OsHandle>;
+	/// The OS handle an external writes through, when it is not
+	/// [`Self::os_handle`]: a Windows console reads `CONIN$` and writes
+	/// `CONOUT$` (a Unix terminal fd does both).
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		self.os_handle()
+	}
 	/// `fstat(2)` of the open object (`zstat -f`); objects with no host
 	/// metadata refuse with `Unsupported`.
 	fn stat(&self) -> io::Result<Stat> {
@@ -515,3 +573,34 @@ pub enum FsOp {
 }
 
 crate::bash::packed_names::packed_names!(FsOp);
+
+#[cfg(test)]
+mod tests {
+	use super::plain_windows_path;
+
+	/// `cd` and `pwd -P` showed `\\?\C:\…`. Dropping the prefix must not
+	/// change which file the path names: a device-named component, a
+	/// trailing dot or space, an over-long path, or another verbatim form
+	/// keeps it.
+	#[test]
+	fn verbatim_prefixes_go_only_where_the_plain_path_is_the_same_file() {
+		let plain =
+			|p: &str| String::from_utf8(plain_windows_path(p.as_bytes()).into_owned()).unwrap();
+		assert_eq!(plain(r"\\?\C:\Users\b"), r"C:\Users\b");
+		assert_eq!(plain(r"\\?\UNC\srv\share\d"), r"\\srv\share\d");
+		assert_eq!(plain(r"C:\already"), r"C:\already");
+		for kept in [
+			r"\\?\C:\dir\nul",
+			r"\\?\C:\dir\COM1.txt",
+			r"\\?\C:\dir\aux \x",
+			r"\\?\C:\dot.",
+			r"\\?\C:\space ",
+			r"\\?\Volume{0e1c}\x",
+		] {
+			assert_eq!(plain(kept), kept);
+		}
+		assert_eq!(plain(r"\\?\C:\dir\com10"), r"C:\dir\com10");
+		let long = format!(r"\\?\C:\{}", "a".repeat(260));
+		assert_eq!(plain(&long), long);
+	}
+}

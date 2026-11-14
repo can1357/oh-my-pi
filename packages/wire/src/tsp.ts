@@ -131,6 +131,23 @@ export type TspText = string | readonly TspSpan[];
  */
 export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
+/**
+ * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
+ * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
+ * at the row's end).
+ */
+export type TspMenuEntry =
+	| TspAction
+	| { header: string }
+	| {
+			id: TspAction;
+			label?: string;
+			icon?: string;
+			detail?: string;
+			disabled?: boolean | string;
+			danger?: boolean;
+	  };
+
 /** Props every node accepts. */
 export interface TspCommonProps {
 	role?: string;
@@ -142,7 +159,16 @@ export interface TspCommonProps {
 	basis?: "auto" | "content" | number;
 	min?: { w?: TspExtent; h?: TspExtent };
 	max?: { w?: TspExtent; h?: TspExtent };
-	actions?: { click?: TspAction; dblclick?: TspAction; menu?: readonly TspAction[] };
+	/**
+	 * What a pointer does: `menu` lists what a right-click offers; `hold` what a long press on a touch screen
+	 * offers (a phone's hold menu over the lifted node), which a desktop ignores.
+	 */
+	actions?: {
+		click?: TspAction;
+		dblclick?: TspAction;
+		menu?: readonly TspMenuEntry[];
+		hold?: readonly TspMenuEntry[];
+	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
 	aria?: string;
@@ -464,6 +490,8 @@ export interface TspEditorDecoration {
 	to: number;
 	s: string;
 	fx?: TspEffect;
+	/** An image blob the range stands for (an attachment token): copying the range copies the image. */
+	blob?: string;
 }
 export interface TspEditorProps {
 	text?: string;
@@ -519,6 +547,10 @@ export interface TspToastProps {
 	text: string;
 	sub?: string;
 	ttl?: number;
+	/** A button after the text (Undo): clicking it takes the toast down and sends this action for the node. */
+	action?: TspAction;
+	/** The button's text; defaults to the action's name labeled (`undo` → Undo). */
+	label?: string;
 }
 export interface TspRowsProps {
 	/** Width the rows were rendered at. */
@@ -949,12 +981,15 @@ export interface TspShellProps {
 	replayEpoch?: number;
 	/** This mounted call received a real execution-start event, not a settled historical load. */
 	liveOrigin?: boolean;
+	/** The command text is still streaming in: the host marks its write head and the preview follows it. */
+	stream?: boolean;
 	/** Working directory shown ahead of the script when it differs from the project's. */
 	cwd?: string;
 	lang?: "bash" | "zsh";
 	/**
-	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
-	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 * Clamp the command to `lines` drawn lines under an Expand button, the window following the write head
+	 * (`stream`), then the playhead, with the enclosing scope heads pinned; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
 	 */
 	preview?: { lines: number };
 }

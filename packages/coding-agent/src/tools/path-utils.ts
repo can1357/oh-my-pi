@@ -317,19 +317,28 @@ function isInternalUrlPath(filePath: string): boolean {
  *
  * A bare root slash is treated as a workspace-root alias for tool inputs. Users
  * often pass `/` to mean “search from here”, and letting tools escape to the
- * filesystem root is almost never what they intended.
+ * filesystem root is almost never what they intended. A shell `cd` target is
+ * not a tool input: use {@link resolveShellDirectory}.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, true);
+}
+
+/**
+ * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
+ *
+ * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
+ * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ */
+export function resolveShellDirectory(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, false);
+}
+
+function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
 	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-
 	assertNotInternalUrl(expanded, filePath);
-
-	if (/^\/+$/.test(expanded)) {
-		return cwd;
-	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
+	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
+	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
 }
 
@@ -694,6 +703,44 @@ function isExclusionPart(part: string): boolean {
 	return part.length > 1 && part.startsWith("!") && !part.includes("://");
 }
 
+const MISSING_OR_INVALID_URL_CODES = new Set(["ENOENT", "ENOTDIR", "ENAMETOOLONG", "EINVAL"]);
+
+async function probeInternalUrlTarget(
+	url: string,
+	filesystem: InternalUrlFilesystem,
+	requireDirectory = false,
+): Promise<boolean> {
+	try {
+		const stat = await filesystem.stat(url);
+		// A missing JSON field stats as a file of the "null" sentinel. Readers keep
+		// that sentinel; only this probe treats it as not found.
+		if (stat.absent === true) return false;
+		return !requireDirectory || stat.type === "directory";
+	} catch (err) {
+		return !(err instanceof UrlFsError && MISSING_OR_INVALID_URL_CODES.has(err.code));
+	}
+}
+
+async function internalUrlEntryResolves(entry: string, filesystem: InternalUrlFilesystem): Promise<boolean> {
+	const router = InternalUrlRouter.instance();
+	const peeledUrl = router.split(expandPath(entry)).path;
+	if (router.isGlob(peeledUrl)) {
+		let parsedUrl: ParsedSearchPath | undefined;
+		try {
+			parsedUrl = parseUrlSearchPath(peeledUrl);
+		} catch {
+			return false;
+		}
+		if (parsedUrl?.glob !== undefined) {
+			const rawGlobTail = peeledUrl.slice(parsedUrl.basePath.length);
+			if (splitTopLevelDelimitedPath(rawGlobTail, "semicolon").length === 1) {
+				return probeInternalUrlTarget(parsedUrl.basePath, filesystem, true);
+			}
+		}
+	}
+	return probeInternalUrlTarget(peeledUrl, filesystem);
+}
+
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
@@ -702,6 +749,13 @@ export async function splitDelimitedPathEntry(
 		routedUrlPredicate?: (entry: string) => boolean;
 		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
 		exclusionParts?: boolean;
+		/**
+		 * Filesystem that probes a `;` list starting with an internal URL and also
+		 * naming local paths or globs (`artifact://1;src/*.ts`). Search tools pass
+		 * the filesystem they search with. Omit it so a `;` inside one internal
+		 * URL cannot select an extra file.
+		 */
+		mixedLocalPaths?: InternalUrlFilesystem;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -713,6 +767,21 @@ export async function splitDelimitedPathEntry(
 		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
 			? parts
 			: null;
+	}
+	if (options.mixedLocalPaths !== undefined && isInternalUrlPath(normalizedEntry)) {
+		// Before the all-internal branch, which keeps the whole string when any
+		// part is not itself an internal URL. All-URL lists always split. For a
+		// mixed list, probe the range-free URL (or its non-glob base directory)
+		// and split only on confirmed missing or invalid targets so semicolons
+		// inside real URLs and read/permission/size errors stay intact.
+		const isUrlPart = (part: string): boolean =>
+			isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part));
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		if (!parts || parts.length <= 1) return null;
+		if (parts.every(isUrlPart)) return parts;
+		// No resolve cache: a URL that does resolve is read again during the search.
+		// Only mixed `;` lists pay that second read, including ssh:// and mcp://.
+		return (await internalUrlEntryResolves(normalizedEntry, options.mixedLocalPaths)) ? null : parts;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
@@ -791,7 +860,11 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean } = {},
+	options: {
+		splitter?: PathEntrySplitter;
+		exclusionParts?: boolean;
+		mixedLocalPaths?: InternalUrlFilesystem;
+	} = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {

@@ -22,14 +22,16 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { postmortem, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import type { ToolSession } from "../tools";
+import { readSnapshot } from "../commit/selective/journal";
+import type { FileChangeReport, ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
@@ -42,6 +44,7 @@ import {
 	cleanupTaskBranches,
 	type CommitToBranchResult,
 	commitToBranch,
+	type DeltaPatchResult,
 	ensureIsolation,
 	getRepoRoot,
 	mergeTaskBranches,
@@ -173,7 +176,8 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 		const registry = session.modelRegistry;
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
-		return async (diff: string) => generateCommitMessage(diff, registry, settings, sessionId);
+		return async (diff: string) =>
+			generateCommitMessage(diff, registry, settings, sessionId, session.getActiveModel?.()?.provider);
 	};
 }
 
@@ -252,6 +256,8 @@ interface IsolationPatchArtifacts {
 
 interface IsolationPatchCapture {
 	artifacts: IsolationPatchArtifacts;
+	/** The delta written. */
+	delta: DeltaPatchResult;
 	/** {@link deltaFingerprint} of the written delta. */
 	fingerprint: bigint | number;
 }
@@ -262,12 +268,11 @@ interface IsolationPatchCapture {
  * down. Throws when any write fails so nothing captured is ever the only copy.
  */
 async function writeIsolationPatch(
-	isolationDir: string,
-	baseline: WorktreeBaseline,
+	changes: RunChanges,
 	artifactsDir: string,
 	agentId: string,
 ): Promise<IsolationPatchCapture> {
-	const delta = await captureDeltaPatch(isolationDir, baseline);
+	const delta = await changes.delta();
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
 	await Bun.write(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
@@ -278,7 +283,51 @@ async function writeIsolationPatch(
 			nestedPatches: delta.nestedPatches,
 			nestedPatchPaths,
 		},
+		delta,
 		fingerprint: deltaFingerprint(delta.rootPatch, delta.nestedPatches),
+	};
+}
+
+/** How an isolated run's changes are read: relative to the state its workspace opened in. */
+interface RunChanges {
+	/** Every change since the workspace opened. */
+	delta(): Promise<DeltaPatchResult>;
+	/** The baseline the workspace opened in, for branch commits. */
+	baseline(): Promise<WorktreeBaseline>;
+}
+
+/**
+ * Read `workspace`'s changes. A workspace that keeps its own starting state
+ * ({@link IsolationWorkspace.start}) needs nothing taken now; any other gets
+ * its baseline captured before the run begins.
+ */
+async function trackChanges(workspace: IsolationWorkspace, repoRoot: string): Promise<RunChanges> {
+	const start = workspace.start;
+	if (!start) {
+		const baseline = await captureIsolationBaseline(workspace.dir, repoRoot);
+		return {
+			delta: () => captureDeltaPatch(workspace.dir, baseline),
+			baseline: async () => baseline,
+		};
+	}
+	let pending: Promise<WorktreeBaseline> | undefined;
+	const baseline = (): Promise<WorktreeBaseline> => {
+		const read =
+			pending ??
+			start.baseline().catch((err: unknown) => {
+				pending = undefined;
+				throw err;
+			});
+		pending = read;
+		return read;
+	};
+	return {
+		delta: async () => {
+			const rootPatch = await start.rootPatch();
+			if (rootPatch !== undefined) return { rootPatch, nestedPatches: [] };
+			return captureDeltaPatch(workspace.dir, await baseline());
+		},
+		baseline,
 	};
 }
 
@@ -346,6 +395,21 @@ export async function vacateIsolationSlot(baseDir: string): Promise<string | und
 }
 
 /**
+ * The state a workspace opened in, kept by the workspace itself (an ovnfs
+ * checkout's capture), so the runner need not take a baseline when it opens.
+ */
+export interface WorkspaceStart {
+	/**
+	 * The root repo's changes since the workspace opened, as `git diff --binary`
+	 * writes them; `undefined` when only git can tell (they are then diffed
+	 * against {@link baseline}).
+	 */
+	rootPatch(): Promise<string | undefined>;
+	/** The baseline the workspace opened in, read from a copy of that state; for branch commits. */
+	baseline(): Promise<WorktreeBaseline>;
+}
+
+/**
  * The checkout an isolated run works in, from materialisation to teardown:
  * a native copy or mount ({@link nativeWorkspace}) or an ovnfs checkout
  * (`ovnfsWorkspace` in `./ovnfs`). Capture and merge only see {@link dir}.
@@ -353,6 +417,8 @@ export async function vacateIsolationSlot(baseDir: string): Promise<string | und
 export interface IsolationWorkspace {
 	/** The checkout the subagent runs in. */
 	readonly dir: string;
+	/** Set when the workspace keeps the state it opened in; then no baseline is taken at start. */
+	readonly start?: WorkspaceStart;
 	/** Keep the workspace past the run (its changes could not be captured) and say where it stays. */
 	retain(): Promise<RetainedWorkspace>;
 	/** Tear the workspace down. */
@@ -418,7 +484,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * sibling and its path is named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
-	let taskBaseline: WorktreeBaseline | undefined;
+	let changes: RunChanges | undefined;
 	/** Fingerprint of the delta already handed to the caller at run end; release only re-captures on change. */
 	let handedOff: bigint | number | undefined;
 	let workspace: IsolationWorkspace | undefined;
@@ -441,15 +507,16 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return cleanupPromise;
 	};
 	const releaseIsolation = (): Promise<void> => {
-		releasePromise ??= (async () => {
-			if (!workspace || !taskBaseline || retainWorkspace) {
+		if (releasePromise) return releasePromise;
+		releasePromise = (async () => {
+			if (!workspace || !changes || retainWorkspace) {
 				await cleanupHandle();
 				return;
 			}
 			try {
 				let capture: IsolationPatchCapture;
 				try {
-					capture = await writeIsolationPatch(workspace.dir, taskBaseline, opts.artifactsDir, opts.agentId);
+					capture = await writeIsolationPatch(changes, opts.artifactsDir, opts.agentId);
 				} catch (captureErr) {
 					retainWorkspace = true;
 					const retained = await workspace.retain();
@@ -472,10 +539,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				if (capture.fingerprint === handedOff) return;
 				const commitResult = await commitToBranch(
 					workspace.dir,
-					taskBaseline,
+					await changes.baseline(),
 					opts.agentId,
 					opts.description,
 					undefined,
+					capture.delta,
 				);
 				AgentRegistry.global().setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
@@ -486,13 +554,22 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				await cleanupHandle();
 			}
 		})();
+		// Session teardown has only a short grace period. Once the session has
+		// stopped, let a signal exit wait for the final capture and backend stop
+		// rather than abandoning a large sandbox when that grace period expires.
+		const unregister = postmortem.register(`isolation-release:${opts.agentId}`, () => releasePromise, {
+			exitOnly: true,
+			deadlineMs: 120_000,
+			waitMessage: "Finishing isolated task cleanup",
+		});
+		void releasePromise.then(unregister, unregister);
 		return releasePromise;
 	};
 	try {
 		workspace = await opts.openWorkspace(opts.context.repoRoot, opts.agentId);
 		const isolationDir = workspace.dir;
-		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
-		taskBaseline = baseline;
+		const runChanges = await trackChanges(workspace, opts.context.repoRoot);
+		changes = runChanges;
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
@@ -522,13 +599,16 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;
+			let baseline: WorktreeBaseline | undefined;
 			try {
+				baseline = await runChanges.baseline();
 				commitResult = await commitToBranch(
 					isolationDir,
 					baseline,
 					opts.agentId,
 					opts.description,
 					opts.buildCommitMessage?.(),
+					await runChanges.delta(),
 				);
 			} catch (mergeErr) {
 				// Agent succeeded but the branch commit failed. `commitToBranch`
@@ -540,13 +620,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// other copy of those objects — is destroyed by the `finally`
 				// below, so deleting the branch unconditionally turned a
 				// recoverable merge conflict into permanent loss of committed
-				// work (#8868). Delete only when nothing is at stake.
-				const baseSha = baseline.root.headCommit;
+				// work (#8868). Delete only when nothing is at stake. Without a
+				// baseline no branch was started.
 				const branchName = `omp/task/${opts.agentId}`;
-				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+				const rescueBranch = baseline
+					? await rescueTaskBranch(opts.context.repoRoot, branchName, baseline.root.headCommit)
+					: undefined;
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
-					const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+					const capture = await writeIsolationPatch(runChanges, opts.artifactsDir, opts.agentId);
 					return rememberAgentArtifacts({
 						...result,
 						...capture.artifacts,
@@ -603,7 +685,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (result.exitCode === 0) {
 			try {
-				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+				const capture = await writeIsolationPatch(runChanges, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
 				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
 			} catch (patchErr) {
@@ -650,6 +732,24 @@ export interface IsolationMergeOptions {
 	result: SingleResult;
 	repoRoot: string;
 	mergeMode: "patch" | "branch";
+	/**
+	 * Journal each file a patch-mode merge rewrites as the subagent's change
+	 * (see {@link ToolSession.recordFileChange}); the subagent's own edit records
+	 * name its isolated checkout, not this repository.
+	 */
+	recordFileChange?: (change: FileChangeReport) => void;
+	/** Agent id of the session merging the result (the subagent's parent). */
+	parentAgentId?: string;
+}
+
+/** Repo-relative paths a git patch touches (both sides of each `diff --git` header). */
+function patchPaths(patch: string): string[] {
+	const paths = new Set<string>();
+	for (const match of patch.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+		paths.add(match[1]);
+		paths.add(match[2]);
+	}
+	return [...paths];
 }
 
 export interface IsolationMergeOutcome {
@@ -756,31 +856,28 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				hadAnyChanges = false;
 			} else {
 				const normalized = patchText.endsWith("\n") ? patchText : `${patchText}\n`;
-				// Idempotence: declare a no-op only when the reverse patch applies AND
-				// the forward patch does not. `--reverse --check` alone can theoretically
-				// succeed if the file happens to carry the postimage at another location
-				// via git-apply's fuzz factor; requiring the forward check to fail
-				// removes that ambiguity while still catching true already-applied
-				// runs. Reads only — neither call touches the worktree, unlike
-				// `--3way --check`, which exits 0 even when the real apply would
-				// leave conflict markers and unmerged index entries.
-				const [alreadyApplied, forwardApplies] = await Promise.all([
-					repo.canApplyPatch(normalized, { reverse: true }).catch(() => false),
-					repo.canApplyPatch(normalized, {}).catch(() => false),
-				]);
-				hadAnyChanges = false;
-				if (alreadyApplied && !forwardApplies) {
-					changesApplied = true;
-				} else if (forwardApplies) {
-					changesApplied = true;
-					try {
-						await repo.applyPatch(normalized, {});
-						hadAnyChanges = true;
-					} catch {
-						changesApplied = false;
+				const touched = opts.recordFileChange
+					? await Promise.all(
+							patchPaths(normalized).map(async file => {
+								const absolute = path.join(repoRoot, file);
+								return { absolute, before: await readSnapshot(absolute) };
+							}),
+						)
+					: [];
+				({ changesApplied, hadAnyChanges } = await applyRootPatch(repo, repoRoot, normalized));
+				if (changesApplied && hadAnyChanges) {
+					for (const { absolute, before } of touched) {
+						const after = await readSnapshot(absolute);
+						if (!before || !after || before.text === after.text) continue;
+						opts.recordFileChange?.({
+							path: absolute,
+							tool: "task",
+							before: before.text,
+							after: after.text,
+							beforeMtimeMs: before.mtimeMs,
+							agent: { agent: result.id, parent: opts.parentAgentId },
+						});
 					}
-				} else {
-					changesApplied = false;
 				}
 			}
 		}
@@ -812,6 +909,43 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			mergedBranchForNestedPatches: false,
 		};
 	}
+}
+
+/**
+ * Check and apply one isolated run's root patch to the parent worktree.
+ *
+ * Holds the per-repo lock across the checks and the apply: `git apply`
+ * rewrites each touched file whole, so concurrent merge-backs touching the
+ * same file would otherwise read the same preimage and the last writer would
+ * silently drop the others' hunks while every caller reports success.
+ */
+async function applyRootPatch(
+	repo: natives.VcsGitRepo,
+	repoRoot: string,
+	patch: string,
+): Promise<{ changesApplied: boolean; hadAnyChanges: boolean }> {
+	return withRepoLock(repoRoot, async () => {
+		// Idempotence: declare a no-op only when the reverse patch applies AND
+		// the forward patch does not. `--reverse --check` alone can theoretically
+		// succeed if the file happens to carry the postimage at another location
+		// via git-apply's fuzz factor; requiring the forward check to fail
+		// removes that ambiguity while still catching true already-applied
+		// runs. Reads only — neither call touches the worktree, unlike
+		// `--3way --check`, which exits 0 even when the real apply would
+		// leave conflict markers and unmerged index entries.
+		const [alreadyApplied, forwardApplies] = await Promise.all([
+			repo.canApplyPatch(patch, { reverse: true }).catch(() => false),
+			repo.canApplyPatch(patch, {}).catch(() => false),
+		]);
+		if (alreadyApplied && !forwardApplies) return { changesApplied: true, hadAnyChanges: false };
+		if (!forwardApplies) return { changesApplied: false, hadAnyChanges: false };
+		try {
+			await repo.applyPatch(patch, {});
+			return { changesApplied: true, hadAnyChanges: true };
+		} catch {
+			return { changesApplied: false, hadAnyChanges: false };
+		}
+	});
 }
 
 export interface NestedPatchApplyOptions {

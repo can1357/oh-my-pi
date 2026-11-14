@@ -57,6 +57,20 @@ export function registerNativeBlob(bytes: Uint8Array, mime: string): string {
 	return blob.id;
 }
 
+/** The blob of `bytes`; registered, but alive only while something holds it ({@link withBlob}). */
+export function nativeBlob(bytes: Uint8Array, mime: string): NativeBlob {
+	return getOrCreateBlob(bytes, mime);
+}
+
+/**
+ * `value` (an editor `decor` range) naming `blob`, and owning it as an `image` node's props
+ * do: the terminal is sent the bytes while the value is described, and they are released
+ * once it no longer is.
+ */
+export function withBlob<T extends object>(value: T, blob: NativeBlob): T & { blob: string } {
+	return { ...value, blob: blob.id, [kBlob]: blob };
+}
+
 /** A registered blob by id. */
 export function getNativeBlob(id: string): NativeBlob | undefined {
 	return blobs.get(id)?.deref();

@@ -11,6 +11,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
+import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -77,6 +78,9 @@ function makeCtx(
 ): InteractiveModeContext {
 	let leafId: string | null = "leaf-1";
 	let sessionId = "session-1";
+	const editor = new Container();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
 	return {
 		ui: {
 			requestRender: vi.fn(),
@@ -87,6 +91,8 @@ function makeCtx(
 		} as unknown as TUI,
 		keybindings: KeybindingsManager.inMemory(),
 		btwContainer,
+		editor,
+		editorContainer,
 		session,
 		settings: Settings.isolated(settings),
 		sessionManager: {
@@ -138,6 +144,47 @@ describe("BtwPanelComponent", () => {
 });
 
 describe("BtwController", () => {
+	it("returns approval input to the pending prompt after BTW history closes", async () => {
+		const ctx = makeCtx(makeFakeSession(vi.fn()));
+		const editor = { render: () => ["editor"], handleInput: vi.fn() };
+		const approval = vi.fn();
+		const dialog = new ApprovalDialogComponent("Approve cfg:// change?", {
+			onApprove: approval,
+			onDeny: vi.fn(),
+		});
+		const editorContainer = new Container();
+		Object.assign(ctx, { editor, editorContainer });
+		editorContainer.addChild(editor);
+		let focused: typeof editor | ApprovalDialogComponent = editor;
+		let overlay: BtwHistoryPanel | undefined;
+		Object.assign(ctx.ui, {
+			setFocus: (component: typeof editor | ApprovalDialogComponent) => {
+				focused = component;
+			},
+			showOverlay: (component: BtwHistoryPanel) => {
+				overlay = component;
+				return {
+					hide: () => {
+						focused = editor;
+					},
+				};
+			},
+		});
+		const controller = new BtwController(ctx);
+
+		await controller.start("");
+		editorContainer.clear();
+		editorContainer.addChild(dialog);
+		ctx.ui.setFocus(dialog);
+		vi.spyOn(performance, "now").mockReturnValue(performance.now() + APPROVE_ARM_MS + 1);
+		overlay?.handleInput("\x1b");
+		focused.handleInput("\r");
+
+		expect(approval).toHaveBeenCalledTimes(1);
+		expect(editor.handleInput).not.toHaveBeenCalled();
+		await controller.dispose();
+	});
+
 	it("refuses a second question without cancelling a running request viewed in history", async () => {
 		const first = Promise.withResolvers<RunEphemeralTurnResult>();
 		const runEphemeralTurn = vi.fn((_args: RunEphemeralTurnArgs) => first.promise);
@@ -225,6 +272,64 @@ describe("BtwController", () => {
 		expect(answerText(sheetAt(1))).toBeDefined();
 		pending.resolve({ replyText: "Because streaming.", assistantMessage: createAssistantMessage("x") });
 		await drainBtwRequest();
+		await controller.dispose();
+	});
+
+	it("in Tern branches a completed side answer from the history sheet", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
+		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		const controller = new BtwController(ctx);
+
+		await controller.start("Question?");
+		await drainBtwRequest();
+
+		// The sheet is the answer surface in Tern; the inline container stays empty.
+		expect(ctx.btwContainer.children).toHaveLength(0);
+		expect(controller.canBranch()).toBe(true);
+		expect(await controller.handleBranch()).toBe(true);
+		expect(ctx.handleBtwBranch).toHaveBeenCalledTimes(1);
+
+		await controller.dispose();
+	});
+
+	it("in Tern runs the sheet's branch key and drops it once the sheet closes", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
+		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		const controller = new BtwController(ctx);
+		const branch = vi.spyOn(controller, "handleBranch");
+
+		await controller.start("Question?");
+		await drainBtwRequest();
+
+		const sheet = showOverlay.mock.calls[0]?.[0];
+		if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
+
+		expect(controller.canBranch()).toBe(true);
+		expect(controller.handlesBranchKey()).toBe(true);
+		sheet.handleInput("b");
+		expect(branch).toHaveBeenCalledTimes(1);
+		const result = branch.mock.results[0];
+		if (result?.type !== "return") throw new Error("expected the branch operation to return a promise");
+		expect(await result.value).toBe(true);
+		expect(ctx.handleBtwBranch).toHaveBeenCalledTimes(1);
+
+		// The branch has settled: closing, not an in-flight operation, must disable promotion.
+		expect(controller.canBranch()).toBe(true);
+		expect(controller.handlesBranchKey()).toBe(true);
+		sheet.handleInput("\x1b");
+		expect(controller.canBranch()).toBe(false);
+		expect(controller.handlesBranchKey()).toBe(false);
+
 		await controller.dispose();
 	});
 

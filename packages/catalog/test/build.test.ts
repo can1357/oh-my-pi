@@ -571,6 +571,19 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("Morph worker affinity", () => {
+	// Morph is reached only through custom providers, so the base URL alone identifies it.
+	it.each([
+		["openai-completions", completionsSpec],
+		["openai-responses", responsesSpec],
+	] as const)("sends x-session-id only to Morph over %s", (_api, spec) => {
+		const morph = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://api.morphllm.com/v1" }));
+		const other = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://llm.example.com/v1" }));
+		expect(morph.compat.promptCacheSessionHeader).toBe("x-session-id");
+		expect(other.compat.promptCacheSessionHeader).toBeUndefined();
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "firepass" })).compat.wireModelIdMode).toBe("firepass");
@@ -657,10 +670,17 @@ describe("openai-completions wire-quirk compat detection", () => {
 			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
 				.compat.stripImageInput,
 		).toBe(true);
-		// The lineage glob covers dated SKUs, not just the bare id.
+		// The lineage carve-out covers dated SKUs, not just the bare id.
 		expect(
 			resolveModelPolicy(
 				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Hosts that spell the release with a hyphen (Mistral's live roster:
+		// `deepseek-v4-1-flash-1017`) serve the same multimodal weights (#18405).
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "mistral", id: "deepseek-v4-1-flash-1017", input: ["text", "image"] }),
 			).compat.stripImageInput,
 		).toBe(false);
 		// A V4.1 id that also carries a `vision` token matches both exceptions at
@@ -750,25 +770,33 @@ describe("openai-completions wire-quirk compat detection", () => {
 			).compat.supportsForcedToolChoice,
 		).toBe(true);
 	});
-	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
-		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
-		// cannot round-trip encrypted reasoning: the upstream binds
-		// `encrypted_content` to the gateway's caller, so replaying it on a
-		// later tool-call step 400s with "reasoning `encrypted_content` was not
-		// issued to this caller". The deployment contract must stop requesting
-		// it and drop native reasoning items from replay.
-		for (const [provider, id, baseUrl] of [
-			["opencode-zen", "muse-spark-1.3-contributor-free", "https://opencode.ai/zen/v1"],
-			["opencode-go", "muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1"],
-		] as const) {
-			const compat = resolveModelPolicy(
-				responsesSpec({ id, provider, name: "Muse Spark", baseUrl, reasoning: true }),
+	it("replays encrypted reasoning for tested OpenCode Go Muse Spark revisions without changing Zen policy", () => {
+		for (const id of ["muse-spark-1.2-contributor", "muse-spark-1.3-contributor"]) {
+			const go = resolveModelPolicy(
+				responsesSpec({
+					id,
+					provider: "opencode-go",
+					name: `Muse Spark ${id}`,
+					baseUrl: "https://opencode.ai/inference/go/v1",
+					reasoning: true,
+				}),
 			).compat;
-			expect(compat.includeEncryptedReasoning).toBe(false);
-			expect(compat.filterReasoningHistory).toBe(true);
+			expect(go.includeEncryptedReasoning).toBe(true);
+			expect(go.filterReasoningHistory).toBe(false);
 		}
-		// A non-Muse reasoning model on the same gateway keeps the Responses
-		// default replay behavior, so the carve-out is scoped to the broken lane.
+
+		const zen = resolveModelPolicy(
+			responsesSpec({
+				id: "muse-spark-1.3",
+				provider: "opencode-zen",
+				name: "Muse Spark 1.3",
+				baseUrl: "https://opencode.ai/zen/v1",
+				reasoning: true,
+			}),
+		).compat;
+		expect(zen.includeEncryptedReasoning).toBe(false);
+		expect(zen.filterReasoningHistory).toBe(true);
+
 		const other = resolveModelPolicy(
 			responsesSpec({
 				id: "big-pickle",
@@ -1625,7 +1653,7 @@ describe("model cache materialized round trip", () => {
 		}
 	});
 
-	it("ignores rows materialized under a stale build or rules policy without deleting them", async () => {
+	it("keeps rows materialized under another build or rules policy beside this build's row", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
@@ -1636,8 +1664,8 @@ describe("model cache materialized round trip", () => {
 			db.run("UPDATE model_cache SET materialization_policy = ?", ["stale-builder:stale-rules"]);
 			db.close();
 
-			// Another app version's rows read as absent but are not mass-deleted on
-			// open; each provider's next write replaces its own row lazily.
+			// Another app version's rows read as absent and are not mass-deleted on
+			// open; this build's next write adds its own row instead of replacing theirs.
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
 			const countRows = () => {
 				const verified = new Database(dbPath, { readonly: true });
@@ -1650,7 +1678,7 @@ describe("model cache materialized round trip", () => {
 			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)?.models).toHaveLength(1);
 			expect(readModelCache("other-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
-			expect(countRows()).toBe(2);
+			expect(countRows()).toBe(3);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -2302,5 +2330,33 @@ describe("explicit thinking ladders", () => {
 				thinking: { mode: "budget", efforts: [Effort.Low, Effort.High], effortBudgets: { high: 1234 } },
 			}).thinking?.effortBudgets,
 		).toEqual({ high: 1234 });
+	});
+});
+
+describe("Gemini 4 long decodes", () => {
+	// A request capped at a reported per-segment limit (32,768 from the Gemini
+	// API's models.get, 65,536 on Vertex) ends with MAX_TOKENS instead of a
+	// continuation token, so a long answer could never resume.
+	it("lifts the reported per-segment output cap on the Gemini API and Vertex", () => {
+		for (const id of ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"]) {
+			for (const [api, provider, reported] of [
+				["google-generative-ai", "google", 32_768],
+				["google-vertex", "google-vertex", 65_536],
+			] as const) {
+				const model = buildModel({
+					id,
+					name: id,
+					api,
+					provider,
+					baseUrl: "",
+					reasoning: true,
+					input: ["text", "image"],
+					contextWindow: 1_048_576,
+					maxTokens: reported,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				} as ModelSpec<typeof api>);
+				expect(model.maxTokens).toBe(262_144);
+			}
+		}
 	});
 });

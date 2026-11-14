@@ -1,0 +1,23 @@
+opusic-sys 0.7.5 forces CMAKE_INSTALL_LIBDIR=lib for every platform.
+Its additional build-host-gated lib64 search therefore never contains the
+bundled archive and makes cross links warn about a nonexistent directory.
+Search only the directory explicitly configured for installation.
+
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -240,14 +240,6 @@
+ 
+     out_dir.push("lib");
+     println!("cargo:rustc-link-search=native={}", out_dir.display());
+-
+-    // Add lib64 in addition on Linux as some systems may default to lib64
+-    #[cfg(target_os = "linux")]
+-    {
+-        out_dir.pop();
+-        out_dir.push("lib64");
+-        println!("cargo:rustc-link-search=native={}", out_dir.display());
+-    }
+ }
+ 
+ fn run() {

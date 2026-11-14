@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.18.6] - 2026-11-09
+
+### Added
+
+- `actions.hold` (`TspMenuEntry[]`): what a long press on a touch screen offers, beside `actions.menu`; and `toast`'s `action` / `label` props for a button on the toast
+
+## [18.18.0] - 2026-11-07
+
 ### Changed
 
 - `ShellTrace` fields that carry values from the run (argv, assignments, redirect targets, unlocated unit sources, diagnostics) are `ShellTraceBytes`: a string when the bytes are UTF-8, otherwise the raw byte values. `isShellTrace` accepts both forms

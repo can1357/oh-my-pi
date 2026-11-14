@@ -20,6 +20,7 @@ import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-t
  */
 
 import type { ToolSession } from "./index";
+import { getToolConversationState } from "./tool-state";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -326,10 +327,14 @@ async function findRegisteredBlocks(absolutePath: string, entries: readonly Conf
 	let parts: Uint8Array[] = [];
 	let lineBytes = 0;
 	let lineNumber = 1;
+	// Budget the first line's UTF-8 BOM before decoding strips it; it is not
+	// part of the recorded marker, but still counts toward the raw byte bound.
+	let lineByteLimit = maxLineBytes + 3;
 	const takeLine = (): string | null => {
-		const line = lineBytes > maxLineBytes ? null : decoder.decode(Buffer.concat(parts, lineBytes));
+		const line = lineBytes > lineByteLimit ? null : decoder.decode(Buffer.concat(parts, lineBytes));
 		parts = [];
 		lineBytes = 0;
+		lineByteLimit = maxLineBytes;
 		return line;
 	};
 	for await (const chunk of Bun.file(absolutePath).stream()) {
@@ -337,7 +342,7 @@ async function findRegisteredBlocks(absolutePath: string, entries: readonly Conf
 		for (let end = chunk.indexOf(10); ; end = chunk.indexOf(10, start)) {
 			const segment = chunk.subarray(start, end === -1 ? chunk.length : end);
 			lineBytes += segment.length;
-			if (lineBytes <= maxLineBytes) parts.push(segment);
+			if (lineBytes <= lineByteLimit) parts.push(segment);
 			if (end === -1) break;
 			if (feed(takeLine(), lineNumber++)) return found;
 			start = end + 1;
@@ -367,10 +372,11 @@ export async function reconcileRegisteredConflicts(history: ConflictHistory, abs
 	}
 }
 
-/** Lazily attach a `ConflictHistory` to the session and return it. */
+/** The session's `ConflictHistory`, created on first use. */
 export function getConflictHistory(session: ToolSession): ConflictHistory {
-	if (!session.conflictHistory) session.conflictHistory = new ConflictHistory();
-	return session.conflictHistory;
+	const state = getToolConversationState(session);
+	state.conflictHistory ??= new ConflictHistory();
+	return state.conflictHistory;
 }
 
 const CONFLICT_SCOPES = new Set<ConflictScope>(["ours", "theirs", "base"]);

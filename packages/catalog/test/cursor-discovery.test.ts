@@ -375,7 +375,6 @@ describe("fetchCursorUsableModels", () => {
 						variant("claude-4.6-opus-low", "low", false, true, false),
 						variant("claude-4.6-opus-high", "high", false, false, true),
 						variant("claude-4.6-opus-max", "max", true),
-						variant("claude-4.6-opus-medium", "medium", false),
 						variant("claude-4.6-opus-high", "max", true),
 						variant("claude-4.6-opus-xhigh", "xhigh", false),
 						variant("claude-4.6-opus-high", "high", true, false, true, "1m"),
@@ -477,7 +476,6 @@ describe("fetchCursorUsableModels", () => {
 				}),
 			}),
 		);
-		expect(models?.some(model => model.id === "claude-4.6-opus-medium")).toBe(false);
 		expect(models?.some(model => model.id === "claude-4.6-opus-xhigh")).toBe(false);
 		expect(models?.some(model => model.id === "fable-retention")).toBe(false);
 
@@ -488,6 +486,92 @@ describe("fetchCursorUsableModels", () => {
 		expect(rebuiltLane?.supportsTools).toBe(true);
 		expect(rebuiltLane?.cursorModelRoutes).toEqual(lane?.cursorModelRoutes);
 		expect(rebuiltLane?.thinking?.effortRouting).toEqual(lane?.thinking?.effortRouting);
+	});
+
+	it("lists AvailableModels models that GetUsableModels omits", async () => {
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-2.5" })],
+		});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				create(AvailableModelsResponse_ModelDetailsSchema, {
+					name: "glm-5p3-flash",
+					clientDisplayName: "GLM 5.3 Flash",
+					supportsAgent: true,
+					supportsImages: true,
+					contextTokenLimit: 1_000_000,
+					legacySlugs: ["glm-5p3-flash", "glm-5p3-flash-low", "glm-5p3-flash-high", "glm-5p3-flash-max"],
+					variants: [
+						richVariant("glm-5p3-flash-low", { reasoning: "low" }),
+						richVariant("glm-5p3-flash-high", { reasoning: "high" }, { isDefaultNonMaxConfig: true }),
+						richVariant("glm-5p3-flash-max", { reasoning: "max" }),
+					],
+				}),
+			],
+		});
+		const rpcBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+		const models = await fetchCursorUsableModels({
+			apiKey: "account-token",
+			baseUrl: rpcBaseUrl,
+			timeoutMs: 1_000,
+		});
+
+		const lane = models?.find(model => model.id === "glm-5p3-flash");
+		expect(lane?.requestModelId).toBe("glm-5p3-flash-high");
+		expect(lane?.cursorModelRoutes).toEqual({
+			"glm-5p3-flash-low": {
+				modelId: "glm-5p3-flash",
+				parameters: [{ id: "reasoning", value: "low" }],
+			},
+			"glm-5p3-flash-high": {
+				modelId: "glm-5p3-flash",
+				parameters: [{ id: "reasoning", value: "high" }],
+			},
+			"glm-5p3-flash-max": {
+				modelId: "glm-5p3-flash",
+				parameters: [{ id: "reasoning", value: "max" }],
+			},
+		});
+		expect(lane?.thinking?.effortRouting).toEqual({
+			low: "glm-5p3-flash-low",
+			high: "glm-5p3-flash-high",
+			max: "glm-5p3-flash-max",
+		});
+		expect(models?.some(model => model.id === "composer-2.5")).toBe(true);
+	});
+
+	it("leaves out AvailableModels models Cursor hides or serves only to Cmd-K", async () => {
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-2.5" })],
+		});
+		const lane = (name: string, flags: { isHidden?: boolean; onlySupportsCmdK?: boolean }) =>
+			create(AvailableModelsResponse_ModelDetailsSchema, {
+				name,
+				clientDisplayName: name,
+				supportsAgent: true,
+				legacySlugs: [name],
+				...flags,
+			});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				lane("glm-5p3", {}),
+				lane("hidden-preview", { isHidden: true }),
+				lane("cmdk-fast", { onlySupportsCmdK: true }),
+			],
+		});
+		const rpcBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+		const models = await fetchCursorUsableModels({ apiKey: "account-token", baseUrl: rpcBaseUrl, timeoutMs: 1_000 });
+
+		const ids = models?.map(model => model.id) ?? [];
+		expect(ids).toContain("glm-5p3");
+		expect(ids).not.toContain("hidden-preview");
+		expect(ids).not.toContain("cmdk-fast");
 	});
 
 	it("prices rich lanes from the KDL rate card and leaves uncovered lanes unpriced", async () => {

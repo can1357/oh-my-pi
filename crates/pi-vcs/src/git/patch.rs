@@ -26,7 +26,7 @@ use super::{
 	GitRepo,
 	filter::WorktreeFilter,
 	mutate::update_reference,
-	open::{load_index_or_head, status_with_index},
+	open::{load_index_at, load_index_or_head, status_with_index},
 };
 use crate::{
 	error::{Error, Result},
@@ -1348,29 +1348,6 @@ fn index_map_at(
 	index_path: Option<&Path>,
 ) -> Result<BTreeMap<String, FileEntry>> {
 	Ok(load_index_at(repo, index_path)?.map_or_default(|index| index_state_map(&index)))
-}
-
-/// The index at `index_path`, or the repository's when `None`; `None` when an
-/// alternate index does not exist yet.
-fn load_index_at(
-	repo: &gix::Repository,
-	index_path: Option<&Path>,
-) -> Result<Option<gix::index::File>> {
-	let Some(path) = index_path else {
-		return load_index_or_head(repo, "git read index").map(Some);
-	};
-	match fs::metadata(path) {
-		Ok(_) => gix::index::File::at(
-			path,
-			repo.object_hash(),
-			false,
-			gix::index::decode::Options::default(),
-		)
-		.map(Some)
-		.map_err(|err| Error::backend("git read alternate index", err)),
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-		Err(err) => Err(err.into()),
-	}
 }
 
 fn index_state_map(index: &gix::index::State) -> BTreeMap<String, FileEntry> {

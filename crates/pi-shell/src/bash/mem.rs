@@ -165,7 +165,7 @@ impl File for PipeReader {
 	}
 
 	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-		Err(io::Error::from_raw_os_error(29))
+		Err(espipe())
 	}
 
 	fn kind(&self) -> FileKind {
@@ -211,7 +211,7 @@ impl File for PipeWriter {
 	}
 
 	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-		Err(io::Error::from_raw_os_error(29))
+		Err(espipe())
 	}
 
 	fn kind(&self) -> FileKind {
@@ -544,7 +544,7 @@ impl File for Capture {
 	}
 
 	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-		Err(io::Error::from_raw_os_error(29))
+		Err(espipe())
 	}
 
 	fn kind(&self) -> FileKind {
@@ -605,4 +605,12 @@ mod tests {
 		assert_eq!(&buf, b"ll");
 		assert_eq!(a.seek(SeekFrom::Current(-1)).unwrap(), 3);
 	}
+}
+
+/// `ESPIPE`: a pipe cannot seek.
+fn espipe() -> io::Error {
+	#[cfg(unix)]
+	return io::Error::from_raw_os_error(29);
+	#[cfg(not(unix))]
+	return io::Error::from(io::ErrorKind::NotSeekable);
 }

@@ -196,13 +196,42 @@ async function isStaleTarget(
 	return isSkillSuperseded(target.skill, host);
 }
 
+/** {@link findUrlSkill}, or undefined for a name no skill in `skills` owns. */
+function findKnownUrlSkill(url: InternalUrl, skills: readonly Skill[]): UrlSkill | undefined {
+	try {
+		return findUrlSkill(url, skills);
+	} catch (error) {
+		if (error instanceof UnknownSkillError) return undefined;
+		throw error;
+	}
+}
+
+/**
+ * The skill a skill:// URL names in `skills` or, when it moved on since `skills` was taken, in the
+ * holder's current list, which wins where it names the URL more exactly (a namespaced skill added
+ * since, where `skills` only has the bare skill of the namespace's name); else in skills the holder
+ * rediscovers for the name ({@link SkillRediscoveryHost.rediscoverForUnknownName}): one created or
+ * installed after the list was taken.
+ */
+async function findUrlSkillAnew(
+	url: InternalUrl,
+	skills: readonly Skill[],
+	host: SkillRediscoveryHost,
+): Promise<UrlSkill> {
+	const captured = findKnownUrlSkill(url, skills);
+	const current = host.skills !== skills ? findKnownUrlSkill(url, host.skills) : undefined;
+	if (current && (!captured || current.urlPath.length < captured.urlPath.length)) return current;
+	if (captured) return captured;
+	return findUrlSkill(url, (await host.rediscoverForUnknownName?.()) ?? skills);
+}
+
 /**
  * {@link skillTargetPath}, resolved once more when the skill that owns the target is stale. Its
  * stand-in is the same skill of the same plugin ({@link findStaleSkillStandIn}), which a collision
  * can list under another name, at the same path inside it: first from the holder's current list,
  * when it moved on since `context.skills` was taken (a copied tool session, a read that began
  * before a rediscovery), and only if that is stale too from rediscovered skills
- * ({@link rediscoverSkills}).
+ * ({@link rediscoverSkills}). A name no loaded skill owns is looked up anew ({@link findUrlSkillAnew}).
  */
 async function locateSkillTarget(
 	url: InternalUrl,
@@ -212,10 +241,10 @@ async function locateSkillTarget(
 	contain = false,
 ): Promise<LocatedSkillTarget> {
 	const skills = context?.skills ?? getActiveSkills();
-	const named = findUrlSkill(url, skills);
+	const host = contextRediscoveryHost(skills, context);
+	const named = await findUrlSkillAnew(url, skills, host);
 	let target = await skillTargetPath(url, named, directory, create, contain);
 	let stats = await statIfExists(target.path);
-	const host = contextRediscoveryHost(skills, context);
 	if (await isStaleTarget(target, stats, host)) {
 		const held = host.skills !== skills ? findStaleSkillStandIn(named.skill, host.skills) : undefined;
 		if (held) {

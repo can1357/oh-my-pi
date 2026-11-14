@@ -197,7 +197,8 @@ export class HindsightRetainQueue {
 		}
 		if (result.error === undefined) {
 			this.#failures = 0;
-			// Another holder is draining this destination; events it did not list wait for us.
+			// Another holder owns this destination (draining it, or enqueueing a batch
+			// that may still roll back); events it did not list wait for us.
 			if (result.busy) this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
 			return;
 		}

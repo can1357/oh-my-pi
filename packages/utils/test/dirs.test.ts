@@ -5,9 +5,11 @@ import * as path from "node:path";
 import * as nativePath from "@oh-my-pi/pi-natives/path";
 import {
 	__resetProjectDirCacheForTests,
+	directoryExists,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
+	getTestTempDir,
 	localDay,
 	relativePathWithinRoot,
 	setProjectDir,
@@ -51,12 +53,16 @@ describe("project directory state", () => {
 		},
 	);
 
-	it("treats denied stat as probeable rather than missing", async () => {
+	it("keeps forgiving probe defaults and propagates denied stat in strict mode", async () => {
 		const stat = spyOn(fs.promises, "stat").mockRejectedValue(
 			Object.assign(new Error("operation not permitted"), { code: "EACCES" }),
 		);
 		try {
-			expect(await directoryIsMissing(path.join(os.tmpdir(), "blocked"))).toBe(false);
+			const blocked = path.join(os.tmpdir(), "blocked");
+			for (const probe of [directoryExists, directoryIsMissing]) {
+				expect(await probe(blocked)).toBe(false);
+				await expect(probe(blocked, { strict: true })).rejects.toMatchObject({ code: "EACCES" });
+			}
 		} finally {
 			stat.mockRestore();
 		}
@@ -109,5 +115,40 @@ describe("dated log path", () => {
 		if (proc.exitCode === 2) return; // TZ not honored on this platform
 		if (proc.exitCode !== 0) console.error(proc.stderr.toString());
 		expect(proc.exitCode).toBe(0);
+	});
+});
+
+describe("getTestTempDir", () => {
+	it("scopes temp directories by numeric uid when available and falls back to username on platforms without getuid", () => {
+		const originalGetuid = Object.getOwnPropertyDescriptor(process, "getuid");
+		spyOn(os, "tmpdir").mockReturnValue("/tmp/shared");
+		spyOn(os, "userInfo").mockReturnValue({
+			username: "alice",
+			uid: -1,
+			gid: -1,
+			shell: null,
+			homedir: "/Users/alice",
+		});
+		try {
+			Object.defineProperty(process, "getuid", {
+				value: () => 1001,
+				configurable: true,
+				writable: true,
+			});
+			expect(getTestTempDir("omp-test-logs")).toBe(path.join("/tmp/shared", "omp-test-logs-1001"));
+
+			Object.defineProperty(process, "getuid", {
+				value: undefined,
+				configurable: true,
+				writable: true,
+			});
+			expect(getTestTempDir("omp-test-logs")).toBe(path.join("/tmp/shared", "omp-test-logs-alice"));
+		} finally {
+			if (originalGetuid) {
+				Object.defineProperty(process, "getuid", originalGetuid);
+			} else {
+				Reflect.deleteProperty(process, "getuid");
+			}
+		}
 	});
 });

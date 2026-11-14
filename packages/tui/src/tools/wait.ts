@@ -11,6 +11,7 @@ import {
 	formatBadge,
 	formatDuration,
 	formatEmptyMessage,
+	formatExpandHint,
 	formatFeedModelBadge,
 	formatStatusIcon,
 	getPreviewLines,
@@ -22,11 +23,12 @@ import {
 	cappedHeadLines,
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
+	wrapTextWithAnsi,
 } from "../render/render-utils";
 import type { StructuredSubagentOutput } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
-import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
+import type { IrcDeliveryReceipt } from "./irc";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { card as cardNode, compact, elapsed, keyed, md, node, row, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
@@ -54,6 +56,12 @@ export interface JobSnapshot {
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
 	durationMs: number;
+	/**
+	 * When the run settled (epoch ms); absent while it is still running. Lets a
+	 * snapshot tell a result that finished during the call from one recovered
+	 * from an earlier, never-delivered completion (#16052).
+	 */
+	settledAtMs?: number;
 	/** Process exit status when the job reports one. */
 	exitCode?: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
@@ -144,8 +152,6 @@ export interface CoordinationDetails {
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
-	/** Messages consumed by `wait`, oldest first. */
-	waited?: IrcMessage[];
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
@@ -640,15 +646,18 @@ function jobsRenderResult(
 		invalidate() {
 			cached = undefined;
 		},
+		releaseRenderCaches() {
+			cached = undefined;
+			previewRows.clear();
+		},
 	};
 }
 
 // =============================================================================
-// Display-only IRC cards and wait-message results
+// Display-only IRC cards
 // =============================================================================
 
 const BODY_LINES_COLLAPSED = 2;
-const BODY_LINES_EXPANDED = 12;
 const BODY_LINE_WIDTH = 100;
 
 function ircGlyph(theme: Theme): string {
@@ -668,6 +677,7 @@ function bodyLines(
 	body: string,
 	expanded: boolean,
 	theme: Theme,
+	width: number,
 	options: {
 		indent?: string;
 		tone?: "dim" | "toolOutput";
@@ -676,19 +686,32 @@ function bodyLines(
 ): string[] {
 	const indent = options.indent ?? "";
 	const tone = options.tone ?? "toolOutput";
-	const max = expanded ? BODY_LINES_EXPANDED : (options.collapsedLines ?? BODY_LINES_COLLAPSED);
-	const preview = cappedHeadLines(
-		body.split("\n").filter(line => line.trim()),
-		max,
-	);
 	const quote = theme.fg("dim", theme.md.quoteBorder);
-	const lines = preview.lines.map(
-		line =>
-			`${indent}${quote} ${theme.fg(tone, replaceTabs(truncateToWidth(line.trim(), BODY_LINE_WIDTH, Ellipsis.Unicode)))}`,
-	);
-	const hidden = preview.hidden;
-	if (hidden > 0) {
-		lines.push(`${indent}${quote} ${theme.fg("dim", `… +${hidden} more ${hidden === 1 ? "line" : "lines"}`)}`);
+	const prefix = `${indent}${quote} `;
+	const source = body.split("\n").filter(line => line.trim());
+	// Expanded (Ctrl+O) shows the complete message; collapsed is a short preview.
+	const shown = expanded ? source : cappedHeadLines(source, options.collapsedLines ?? BODY_LINES_COLLAPSED).lines;
+	const hidden = source.length - shown.length;
+	const contentWidth = Math.max(1, width - visibleWidth(prefix));
+	// A row is cut when either the fixed cap or the card's own width clips it.
+	const cap = Math.min(BODY_LINE_WIDTH, contentWidth);
+	let cut = false;
+	const lines: string[] = [];
+	for (const line of shown) {
+		const text = replaceTabs(line.trim());
+		// Expanded: soft-wrap to the card width so a long single-line message
+		// shows in full instead of being cut at BODY_LINE_WIDTH.
+		if (expanded) {
+			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${prefix}${theme.fg(tone, row)}`);
+			continue;
+		}
+		cut ||= visibleWidth(text) > cap;
+		lines.push(`${prefix}${theme.fg(tone, truncateToWidth(text, cap, Ellipsis.Unicode))}`);
+	}
+	if (hidden > 0 || cut) {
+		const hint = formatExpandHint(theme, expanded, true);
+		const marker = hidden > 0 ? `… +${hidden} more ${hidden === 1 ? "line" : "lines"}` : "…";
+		lines.push(`${prefix}${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
 	}
 	return lines;
 }
@@ -734,7 +757,7 @@ export function createIrcMessageCard(
 		const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
 		if (body.trim()) {
 			lines.push(
-				...bodyLines(body, expanded, uiTheme, {
+				...bodyLines(body, expanded, uiTheme, width, {
 					indent: "  ",
 					collapsedLines: 3,
 				}),
@@ -838,33 +861,6 @@ function describeJobsResult(
 	};
 }
 
-/** One received message: sender (when the card holds several), terminal-clocked age, markdown body. */
-function describeMessage(msg: IrcMessage, single: boolean): NativeNode[] {
-	const sender = single
-		? []
-		: [text([span(plainText(msg.from), "toolTitle strong"), ...(msg.replyTo ? [span(" reply", "muted")] : [])])];
-	const age = msg.ts
-		? [text([span("received", "dim")]), elapsed(Date.now() - msg.ts), text([span("ago", "dim")])]
-		: [];
-	const head = [...sender, ...age];
-	return compact([head.length > 0 ? row(head, { gap: "xs" }) : undefined, msg.body.trim() ? md(msg.body) : undefined]);
-}
-
-/** Received-messages view: senders head, then each message oldest first. */
-function describeMessages(messages: readonly IrcMessage[]): NativeToolView {
-	const single = messages.length === 1;
-	const senders = [...new Set(messages.map(msg => plainText(msg.from)))];
-	const head: TspSpan[] = [span(`IRC ← ${senders.join(", ")}`, "toolTitle strong")];
-	if (!single) head.push(span(` ${messages.length} messages`, "muted"));
-	else if (messages[0]?.replyTo) head.push(span(" reply", "muted"));
-	return {
-		head,
-		tone: "info",
-		preview: { lines: (BODY_LINES_COLLAPSED + 1) * messages.length },
-		body: messages.flatMap(msg => describeMessage(msg, single)),
-	};
-}
-
 const waitResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /** Render either a received message or a background-job snapshot. */
@@ -892,9 +888,7 @@ export const waitToolRenderer = {
 					inline: true,
 				};
 			}
-			const waited = details?.waited;
-			if (!waited?.length) return describeJobsResult(result, options.isPartial);
-			return describeMessages(waited);
+			return describeJobsResult(result, options.isPartial);
 		});
 	},
 	renderResult(
@@ -913,24 +907,6 @@ export const waitToolRenderer = {
 				0,
 			);
 		}
-		const waited = result.details?.waited;
-		if (!waited?.length) return jobsRenderResult(result, options, uiTheme);
-		return createCachedComponent(
-			() => options.expanded,
-			(width, expanded) =>
-				waited
-					.flatMap(msg => [
-						renderStatusLine(
-							{
-								iconOverride: ircGlyph(uiTheme),
-								title: `IRC ${uiTheme.nav.back} ${replaceTabs(msg.from)}`,
-								meta: [messageAge(msg.ts), ...(msg.replyTo ? ["reply"] : [])],
-							},
-							uiTheme,
-						),
-						...bodyLines(msg.body, expanded, uiTheme, { indent: "  " }),
-					])
-					.map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
-		);
+		return jobsRenderResult(result, options, uiTheme);
 	},
 } satisfies ToolRenderer<object, CoordinationDetails>;

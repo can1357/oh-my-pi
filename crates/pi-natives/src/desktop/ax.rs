@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", test))]
+use std::cell::RefCell;
 use std::{
 	collections::{HashMap, HashSet},
 	fmt::Write as _,
@@ -92,24 +94,32 @@ impl Hash for AxHandle {
 
 #[derive(Debug, Clone)]
 pub struct AxProps {
-	pub role:        String,
-	pub native_role: String,
-	pub title:       Option<String>,
-	pub value:       Option<String>,
-	pub description: Option<String>,
-	pub enabled:     bool,
-	pub focused:     bool,
-	pub bounds:      Option<AxBounds>,
-	pub actions:     Vec<String>,
-	pub child_count: u32,
+	pub role:           String,
+	pub native_role:    String,
+	pub title:          Option<String>,
+	pub value:          Option<String>,
+	pub description:    Option<String>,
+	pub enabled:        bool,
+	pub focused:        bool,
+	pub bounds:         Option<AxBounds>,
+	pub actions:        Vec<String>,
+	pub child_count:    u32,
 	/// Hash of the fields that tell the element apart in its window, compared
 	/// to name the one element left with them once the app has destroyed it;
 	/// `None` where the backend reads none or could not read them all.
-	pub identity:    Option<u64>,
+	pub identity:       Option<u64>,
 	/// The backend failed to read an identifying field or the children of an
 	/// element that is still there, so a read that met it cannot tell whether
 	/// an identity is unique in the window.
-	pub partial:     bool,
+	pub partial:        bool,
+	/// The backend answered the role and every field needed to choose the
+	/// displayed label. Unrelated identity fields may still be unanswered.
+	pub label_complete: bool,
+	/// Whether a row, cell, button or file icon reports itself selected.
+	pub selected:       bool,
+	/// A name the platform derives when the element has neither title nor
+	/// description, such as a window's close button.
+	pub role_name:      Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +176,11 @@ struct Registered {
 	/// role or label gets a new ref.
 	fingerprint: u64,
 	proof:       Option<Proof>,
+	/// Whether an action through the ref is held to the label it was read
+	/// with ([`require_read_as`]): not when its role or chosen label was
+	/// unanswered, nor for a window, whose title names its document.
+	#[cfg(any(target_os = "macos", test))]
+	held:        bool,
 }
 
 pub struct AxRegistry {
@@ -226,10 +241,7 @@ impl AxRegistry {
 		props: &AxProps,
 		uniqueness: Uniqueness,
 	) -> String {
-		let mut hasher = DefaultHasher::new();
-		props.role.hash(&mut hasher);
-		label(props).hash(&mut hasher);
-		let fingerprint = hasher.finish();
+		let fingerprint = fingerprint(props);
 		let identified = handle.identified();
 		let known = if identified {
 			self
@@ -274,6 +286,8 @@ impl AxRegistry {
 			generation,
 			fingerprint,
 			proof,
+			#[cfg(any(target_os = "macos", test))]
+			held: props.label_complete && props.role != "window",
 		});
 		self.enforce_cap();
 		format!("e{id}")
@@ -299,6 +313,28 @@ impl AxRegistry {
 		self
 			.entry(reference)
 			.is_ok_and(|entry| entry.proof.is_some())
+	}
+
+	/// Holds the element action the current request makes on `reference` to
+	/// the role and label the ref was read with ([`require_read_as`]) until the
+	/// scope drops. `None` for a ref that no longer resolves or is not held
+	/// to its label.
+	#[cfg(any(target_os = "macos", test))]
+	pub(crate) fn expect_read_as(&self, reference: &str) -> Option<ReadAsScope> {
+		let fingerprint = self
+			.entry(reference)
+			.ok()
+			.filter(|entry| entry.held)?
+			.fingerprint;
+		READ_AS.with_borrow_mut(|read_as| {
+			*read_as = Some(ReadAs {
+				reference: reference.to_owned(),
+				fingerprint,
+				checked: false,
+				tripped: false,
+			});
+		});
+		Some(ReadAsScope(()))
 	}
 
 	/// Drops expired refs. An identity a newer ref took over keeps pointing at
@@ -345,10 +381,184 @@ fn ref_id(reference: &str) -> Option<u64> {
 	reference.strip_prefix('e')?.parse().ok()
 }
 
+/// The role and label a ref was read with, as [`AxRegistry::register`]
+/// compares them: an element read again with others gets a new ref.
+fn fingerprint(props: &AxProps) -> u64 {
+	label_fingerprint(&props.role, label(props))
+}
+
+fn label_fingerprint(role: &str, label: Option<&str>) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	role.hash(&mut hasher);
+	label.hash(&mut hasher);
+	hasher.finish()
+}
+
+/// The answered role and chosen label, without decoding an unused value or
+/// the broader identity during an action's fingerprint probe.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug)]
+pub(crate) struct AxReadAs {
+	role:  String,
+	label: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl AxReadAs {
+	/// Callers pass only an answered role and fully answered chosen labels.
+	pub(crate) fn from_labels(role: String, labels: [Option<String>; 3]) -> Self {
+		Self {
+			role,
+			label: labels
+				.into_iter()
+				.flatten()
+				.find(|label| !label.trim().is_empty()),
+		}
+	}
+
+	#[cfg(test)]
+	pub(crate) fn from_props(props: AxProps) -> Option<Self> {
+		props
+			.label_complete
+			.then(|| Self::from_labels(props.role, [props.title, props.description, props.role_name]))
+	}
+}
+
+/// The ref the current request acts on, and what it was read as.
+#[cfg(any(target_os = "macos", test))]
+struct ReadAs {
+	reference:   String,
+	fingerprint: u64,
+	/// Whether a backend has checked the element it acts on, so the elements
+	/// the action goes on to touch (a menu's items) are not held to it.
+	checked:     bool,
+	/// Whether the element read otherwise when a backend checked it.
+	tripped:     bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+thread_local! {
+	/// Set by the worker thread for the one request it serves.
+	static READ_AS: RefCell<Option<ReadAs>> = const { RefCell::new(None) };
+}
+
+/// The current request's [`ReadAs`], cleared on drop.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct ReadAsScope(());
+
+#[cfg(any(target_os = "macos", test))]
+impl ReadAsScope {
+	/// Ends the scope: whether a backend refused the action because the
+	/// element read with another role or label.
+	pub(crate) fn finish(self) -> bool {
+		let tripped =
+			READ_AS.with_borrow(|read_as| read_as.as_ref().is_some_and(|read_as| read_as.tripped));
+		drop(self);
+		tripped
+	}
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for ReadAsScope {
+	fn drop(&mut self) {
+		READ_AS.with_borrow_mut(Option::take);
+	}
+}
+
+/// Whether the current request holds an element action to its ref, and
+/// whether the element was checked already.
+#[cfg(any(target_os = "macos", test))]
+fn read_as_state() -> Option<bool> {
+	READ_AS.with_borrow(|read_as| read_as.as_ref().map(|read_as| read_as.checked))
+}
+
+/// Compares the element `props` reads with the current request's ref: what
+/// it reads as now when that is another role or label. A read the app did
+/// not answer, or left the role or a field needed for its label unanswered,
+/// cannot tell, so it passes.
+#[cfg(any(target_os = "macos", test))]
+fn check_read_as(props: Option<&AxReadAs>) -> Option<String> {
+	READ_AS.with_borrow_mut(|read_as| {
+		let read_as = read_as.as_mut()?;
+		read_as.checked = true;
+		let props = props?;
+		let label = props.label.as_deref().map(str::trim);
+		if read_as.fingerprint == label_fingerprint(&props.role, label) {
+			return None;
+		}
+		read_as.tripped = true;
+		let mut message = format!("{} now reads as {}", read_as.reference, props.role);
+		if let Some(label) = label {
+			message.push(' ');
+			push_quoted_label(&mut message, label);
+		}
+		Some(message)
+	})
+}
+
+/// For a backend about to act on the element of the current request's ref,
+/// once it has read the user's front app: `StaleRef`, with nothing sent, when
+/// the element reads with another role or label than the ref was read with.
+/// An app can hand a control's element to another control: Contacts answers
+/// the element read as an address's "City" field as its "Street" field once
+/// the street is typed. `props` reads the element, `None` when the app did
+/// not answer; outside such a request, or once the request's element was
+/// checked, nothing is read.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn require_read_as(
+	props: impl FnOnce() -> CoreResult<Option<AxReadAs>>,
+) -> CoreResult<()> {
+	if read_as_state() != Some(false) {
+		return Ok(());
+	}
+	match check_read_as(props()?.as_ref()) {
+		None => Ok(()),
+		Some(message) => Err(DesktopError::stale_ref(format!(
+			"{message}, not with the role and label it was read with; nothing was sent"
+		))),
+	}
+}
+
+/// [`require_read_as`] for the read-back after a write to the checked
+/// element: a write it confirmed while it reads as another control may have
+/// gone to that one, so it is unconfirmed. A read that fails after the write,
+/// as when the app rebuilt the element, cannot tell: the write's own
+/// read-back stands.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn confirm_read_as(
+	props: impl FnOnce() -> CoreResult<Option<AxReadAs>>,
+) -> CoreResult<()> {
+	if read_as_state() != Some(true) {
+		return Ok(());
+	}
+	match check_read_as(props().ok().flatten().as_ref()) {
+		None => Ok(()),
+		Some(message) => Err(DesktopError::new(
+			ErrorCode::AxUnconfirmed,
+			format!(
+				"the text was written, but {message} after the write, so it may have gone to that \
+				 control: read the window before retrying"
+			),
+		)),
+	}
+}
+
+/// What an `ax()` line says about writing an element's value.
+#[derive(Clone, Copy, Default)]
+enum Writable {
+	#[default]
+	Unmarked,
+	/// A date `setValue` can write.
+	Settable,
+	/// A web page's text field the page declares read-only.
+	ReadOnly,
+}
+
 #[derive(Clone)]
 struct WalkNode {
 	handle:   AxHandle,
 	props:    AxProps,
+	writable: Writable,
 	children: Vec<Self>,
 }
 
@@ -366,6 +576,8 @@ struct WalkState {
 	bounds:      WalkBounds,
 	/// Whether the walk stops when the current operation is cancelled.
 	cancellable: bool,
+	/// Whether the walk reads the states only `ax()` lines print.
+	line_states: bool,
 }
 
 impl WalkState {
@@ -380,12 +592,19 @@ impl WalkState {
 			truncated: false,
 			bounds,
 			cancellable: false,
+			line_states: false,
 		}
 	}
 
 	/// Stops the walk between nodes once the current operation is cancelled.
 	const fn cancellable(mut self) -> Self {
 		self.cancellable = true;
+		self
+	}
+
+	/// Reads the states only `ax()` lines print.
+	const fn line_states(mut self) -> Self {
+		self.line_states = true;
 		self
 	}
 
@@ -409,6 +628,7 @@ fn walk_raw(
 	backend: &mut dyn AxBackend,
 	handle: AxHandle,
 	depth: u32,
+	in_web: bool,
 	state: &mut WalkState,
 ) -> CoreResult<Option<WalkNode>> {
 	if depth > state.max_depth || state.visited >= state.max_nodes {
@@ -421,7 +641,11 @@ fn walk_raw(
 	state.visited += 1;
 	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
 		Ok(node) => node,
-		Err(error) if depth > 0 => {
+		// An app that stops answering would make every node left wait it out,
+		// and every read after a cancel fails the same way.
+		Err(error)
+			if depth > 0 && !matches!(error.code, ErrorCode::Timeout | ErrorCode::Cancelled) =>
+		{
 			state.skipped = state.skipped.saturating_add(1);
 			if error.code == ErrorCode::StaleRef {
 				state.vanished = state.vanished.saturating_add(1);
@@ -431,16 +655,51 @@ fn walk_raw(
 		Err(error) => return Err(error),
 	};
 	state.partial |= props.partial;
+	let in_web = in_web || props.role == "webarea";
+	let writable = if state.line_states {
+		writable(backend, &handle, &props, in_web)
+	} else {
+		Writable::Unmarked
+	};
 	let mut children = Vec::new();
 	for child in child_handles {
-		if let Some(child) = walk_raw(backend, child, depth + 1, state)? {
+		if let Some(child) = walk_raw(backend, child, depth + 1, in_web, state)? {
 			children.push(child);
 		}
 		if state.truncated && state.visited >= state.max_nodes {
 			break;
 		}
 	}
-	Ok(Some(WalkNode { handle, props, children }))
+	Ok(Some(WalkNode { handle, props, writable, children }))
+}
+
+/// Whether a line marks the element's value `(settable)` or `(readonly)`,
+/// asking the backend only about the elements either mark can apply to.
+/// `(settable)` marks a date outside web content, which `setValue` refuses;
+/// sliders, steppers and color wells hold numbers or colors `setValue`
+/// cannot write, and text fields are left unmarked. `(readonly)` marks an
+/// enabled text field or area in a web page that answers its value is not
+/// settable, as a page's `readonly` or `aria-readonly` field does. Outside
+/// web content that answer proves nothing: a terminal's text area takes keys
+/// yet reports its value unsettable. A combo box can be a choice-only popup
+/// with no text to set, so it stays unmarked.
+fn writable(
+	backend: &mut dyn AxBackend,
+	handle: &AxHandle,
+	props: &AxProps,
+	in_web: bool,
+) -> Writable {
+	let role = props.role.as_str();
+	let date = !in_web && matches!(role, "datetimearea" | "datefield" | "timefield");
+	let page_text = in_web && props.enabled && matches!(role, "textfield" | "textarea");
+	if !date && !page_text {
+		return Writable::Unmarked;
+	}
+	match backend.value_settable(handle) {
+		Some(true) if date => Writable::Settable,
+		Some(false) if page_text => Writable::ReadOnly,
+		Some(_) | None => Writable::Unmarked,
+	}
 }
 
 fn named(props: &AxProps) -> bool {
@@ -453,11 +712,20 @@ fn named(props: &AxProps) -> bool {
 /// Back/Forward/Reload among them — carry no `AXTitle` and name themselves
 /// through `AXDescription` alone.
 fn label(props: &AxProps) -> Option<&str> {
-	[props.title.as_deref(), props.description.as_deref()]
-		.into_iter()
-		.flatten()
-		.map(str::trim)
-		.find(|label| !label.is_empty())
+	labelled(props).map(|(label, _)| label)
+}
+/// The label and the element field that holds it in full. A name derived
+/// from a window control's subrole is a word or two and never cut, so its
+/// field never shows in a note.
+fn labelled(props: &AxProps) -> Option<(&str, &'static str)> {
+	[
+		(props.title.as_deref(), "title"),
+		(props.description.as_deref(), "description"),
+		(props.role_name.as_deref(), "role"),
+	]
+	.into_iter()
+	.filter_map(|(label, field)| Some((label?.trim(), field)))
+	.find(|(label, _)| !label.is_empty())
 }
 fn interactable(props: &AxProps) -> bool {
 	!props.actions.is_empty()
@@ -521,14 +789,174 @@ fn filter_node(mut node: WalkNode, all: bool) -> Option<WalkNode> {
 	}
 }
 
-fn escaped_truncated(value: &str, max: usize) -> String {
-	let mut out: String = value.chars().take(max).collect();
-	if value.chars().count() > max {
-		out.push('…');
+/// Characters of a label or value a line shows before cutting it.
+const SHOWN_CHARS: usize = 200;
+
+/// Writes `text` quoted. Only Quartz offers the full-text recovery note:
+/// AT-SPI may already have clipped its value before the formatter sees it.
+/// Other platforms keep their existing 80-character preview.
+fn push_quoted(line: &mut String, text: &str, reference: &str, accessor: &str) {
+	if !cfg!(target_os = "macos") {
+		text_preview(line, text);
+		return;
 	}
-	out.replace('\\', "\\\\")
-		.replace('"', "\\\"")
-		.replace('\n', " ")
+	let total = text.chars().count();
+	let cut = total.checked_sub(SHOWN_CHARS).and_then(|hidden| {
+		let note = format!(
+			"… (+{} chars; (await computer.ref(\"{reference}\")).{accessor})",
+			grouped(hidden)
+		);
+		(note.chars().count() < hidden).then_some(note)
+	});
+	let shown = if cut.is_some() { SHOWN_CHARS } else { total };
+	push_quoted_chars(line, text, shown);
+	if let Some(note) = cut {
+		line.push_str(&note);
+	}
+}
+
+/// The non-Quartz preview, without claiming the backend can recover a suffix.
+fn text_preview(line: &mut String, text: &str) {
+	line.push('"');
+	let mut chars = text.chars();
+	for ch in chars.by_ref().take(80) {
+		match ch {
+			'\\' => line.push_str("\\\\"),
+			'"' => line.push_str("\\\""),
+			'\n' => line.push(' '),
+			ch => line.push(ch),
+		}
+	}
+	if chars.next().is_some() {
+		line.push('…');
+	}
+	line.push('"');
+}
+
+/// Quotes untrusted window metadata without letting it add lines or an
+/// unbounded label to an action error. Unlike an element value, it has no
+/// accessor to offer for the omitted suffix.
+pub(super) fn push_quoted_label(line: &mut String, text: &str) {
+	push_quoted_chars(line, text, SHOWN_CHARS);
+	if text.chars().nth(SHOWN_CHARS).is_some() {
+		line.push('…');
+	}
+}
+
+pub(super) fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
+	line.push('"');
+	for ch in text.chars().take(shown) {
+		match ch {
+			'"' => line.push_str("\\\""),
+			'\\' => line.push_str("\\\\"),
+			'\n' => line.push_str("\\n"),
+			'\r' => line.push_str("\\r"),
+			'\t' => line.push_str("\\t"),
+			ch if ch.is_control() => {
+				let _ = write!(line, "\\u{:04x}", u32::from(ch));
+			},
+			ch => line.push(ch),
+		}
+	}
+	line.push('"');
+}
+
+/// `14230` as `14,230`.
+fn grouped(count: usize) -> String {
+	let digits = count.to_string();
+	let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+	for (index, digit) in digits.chars().enumerate() {
+		if index > 0 && (digits.len() - index).is_multiple_of(3) {
+			out.push(',');
+		}
+		out.push(digit);
+	}
+	out
+}
+
+/// Controls whose own action is a press, so a line never lists it.
+fn pressable(role: &str) -> bool {
+	matches!(
+		role,
+		"button"
+			| "checkbox"
+			| "radio"
+			| "link"
+			| "menuitem"
+			| "menubaritem"
+			| "menubutton"
+			| "popupbutton"
+			| "tab"
+			| "disclosuretriangle"
+	)
+}
+
+/// Longest action name, past its `AX` prefix, a line lists; the standard ones
+/// run to 17 characters (`ScrollRightByPage`).
+const MAX_SHOWN_ACTION: usize = 32;
+
+/// Most actions a line lists: more than an element offers in practice, few
+/// enough that no app can make a line arbitrarily long.
+const MAX_SHOWN_ACTIONS: usize = 16;
+
+/// What a line lists after `actions=`: the macOS actions an element offers
+/// beyond what its role implies. A control's press, a text field's confirm
+/// and cancel, and the actions nearly every element has (scroll into view,
+/// context menu, raise, page scrolls, hover variants) go unlisted, except on a
+/// control without press, which lists all it has. App-defined custom actions
+/// cannot be performed by name and stay unlisted, as does any other
+/// platform's vocabulary, and so does a name that is not one ASCII word of at
+/// most [`MAX_SHOWN_ACTION`] characters, which an app could otherwise use to
+/// write its own lines into the tree. Each name is listed once, and past
+/// [`MAX_SHOWN_ACTIONS`] the list ends with how many it left out and the call
+/// that lists them all, so no app can make one line arbitrarily long.
+fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
+	// Only Quartz accepts names with their AX prefix stripped. AT-SPI action
+	// names are provider-defined, even when they happen to start with AX.
+	if !cfg!(target_os = "macos") {
+		return None;
+	}
+	let role = props.role.as_str();
+	let mut seen = HashSet::new();
+	// Lowercased past an `AX` prefix in any case, as `perform()` takes it.
+	let mut names: Vec<String> = props
+		.actions
+		.iter()
+		.filter_map(|action| {
+			let name = action
+				.get(..2)?
+				.eq_ignore_ascii_case("AX")
+				.then(|| &action[2..])?;
+			(!name.is_empty()
+				&& name.len() <= MAX_SHOWN_ACTION
+				&& name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+			.then(|| name.to_ascii_lowercase())
+		})
+		.filter(|name| seen.insert(name.clone()))
+		.collect();
+	if !pressable(role) || names.iter().any(|name| name == "press") {
+		names.retain(|name| {
+			let implied = match name.as_str() {
+				"press" => pressable(role),
+				"confirm" | "cancel" => matches!(role, "textfield" | "textarea" | "combobox"),
+				"scrolltovisible" | "showmenu" | "raise" | "showalternateui" | "showdefaultui"
+				| "zoomwindow" | "scrollupbypage" | "scrolldownbypage" | "scrollleftbypage"
+				| "scrollrightbypage" => true,
+				_ => false,
+			};
+			!implied
+		});
+	}
+	if names.is_empty() {
+		return None;
+	}
+	let hidden = names.len().saturating_sub(MAX_SHOWN_ACTIONS);
+	names.truncate(MAX_SHOWN_ACTIONS);
+	let mut shown = names.join(",");
+	if hidden > 0 {
+		let _ = write!(shown, "… (+{hidden} more; (await computer.ref(\"{reference}\")).actions())");
+	}
+	Some(shown)
 }
 
 pub fn node_to_napi(reference: String, props: AxProps) -> AxNode {
@@ -557,6 +985,7 @@ fn format_tree(
 	node: WalkNode,
 	depth: usize,
 	window: &DesktopWindow,
+	focus: &mut AppFocus,
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
 	target: &str,
@@ -565,6 +994,13 @@ fn format_tree(
 	text: &mut String,
 	nodes: &mut u32,
 ) {
+	// The root's own AXFocused only reflects app-local focus; report the global
+	// roster flag instead.
+	let (app, focused) = if depth == 0 {
+		(Some(window.app.as_str()), window.focused)
+	} else {
+		(None, focus.holds(backend, &node.handle, &node.props))
+	};
 	let uniqueness = identities.of(&node.props);
 	let reference =
 		registry.register(backend, target, generation, node.handle, &node.props, uniqueness);
@@ -572,20 +1008,14 @@ fn format_tree(
 		text.push('\n');
 	}
 	text.push_str(&"  ".repeat(depth));
-	// The root's own AXFocused only reflects app-local focus; report the global
-	// roster flag instead.
-	let (app, focused) = if depth == 0 {
-		(Some(window.app.as_str()), window.focused)
-	} else {
-		(None, node.props.focused)
-	};
-	write_line(text, &node.props, &reference, app, focused);
+	write_line(text, &node.props, &reference, app, focused, node.writable);
 	*nodes += 1;
 	for child in node.children {
 		format_tree(
 			child,
 			depth + 1,
 			window,
+			focus,
 			backend,
 			registry,
 			target,
@@ -604,24 +1034,38 @@ fn write_line(
 	reference: &str,
 	app: Option<&str>,
 	focused: bool,
+	writable: Writable,
 ) {
 	text.push_str("- ");
 	text.push_str(&props.role);
-	if let Some(label) = label(props) {
-		let _ = write!(text, " \"{}\"", escaped_truncated(label, 80));
+	if let Some((label, field)) = labelled(props) {
+		text.push(' ');
+		push_quoted(text, label, reference, field);
 	}
 	let _ = write!(text, " [ref={reference}]");
 	if let Some(app) = app {
 		let _ = write!(text, " app={app}");
 	}
 	if let Some(value) = props.value.as_deref().filter(|value| !value.is_empty()) {
-		let _ = write!(text, ": \"{}\"", escaped_truncated(value, 80));
+		text.push_str(": ");
+		push_quoted(text, value, reference, "value()");
 	}
 	if !props.enabled {
 		text.push_str(" (disabled)");
 	}
+	match writable {
+		Writable::Unmarked => {},
+		Writable::Settable => text.push_str(" (settable)"),
+		Writable::ReadOnly => text.push_str(" (readonly)"),
+	}
+	if props.selected {
+		text.push_str(" (selected)");
+	}
 	if focused {
 		text.push_str(" (focused)");
+	}
+	if let Some(actions) = shown_actions(props, reference) {
+		let _ = write!(text, " actions={actions}");
 	}
 }
 
@@ -638,7 +1082,9 @@ pub fn element_line(
 	let reference =
 		registry.register(backend, target, generation, handle, &props, Uniqueness::Unknown);
 	let mut line = String::new();
-	write_line(&mut line, &props, &reference, None, props.focused);
+	// The element is its application's focused one, so its own flag holds;
+	// the walk-only `(settable)` and `(readonly)` states are not read.
+	write_line(&mut line, &props, &reference, None, props.focused, Writable::Unmarked);
 	Ok(line)
 }
 
@@ -655,8 +1101,9 @@ pub fn snapshot(
 		options.max_nodes.unwrap_or(800).max(1),
 		options.max_depth.unwrap_or(24),
 		WalkBounds::Skip,
-	);
-	let tree = walk_raw(backend, root.clone(), 0, &mut state)?;
+	)
+	.line_states();
+	let tree = walk_raw(backend, root.clone(), 0, false, &mut state)?;
 	let identities = ReadIdentities::new(&root, tree.as_ref(), &state);
 	let root = tree.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
@@ -666,6 +1113,7 @@ pub fn snapshot(
 			root,
 			0,
 			window,
+			&mut AppFocus::default(),
 			backend,
 			registry,
 			target,
@@ -697,6 +1145,25 @@ const FIND_MAX_NODES: u32 = 5_000;
 /// recursion, deep enough for the levels Electron nests its content in.
 const FIND_MAX_DEPTH: u32 = 64;
 
+/// Accepts printed substrings, compact printed substrings, exact compact native
+/// roles and aliases. Empty compact queries cannot add matches: separator-only
+/// queries must stay empty.
+fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
+	let printed = props.role.to_lowercase();
+	printed.contains(query)
+		|| (!compact.is_empty()
+			&& ((compact.len() != query.len() && printed.contains(compact))
+				|| props
+					.native_role
+					.chars()
+					.filter(|c| !matches!(c, ' ' | '_' | '-'))
+					.flat_map(char::to_lowercase)
+					.eq(compact.chars())
+				|| ROLE_ALIASES
+					.iter()
+					.any(|&(alias, role)| compact == alias && printed == role)))
+}
+
 pub fn query(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -707,15 +1174,19 @@ pub fn query(
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
 	let mut state = WalkState::new(FIND_MAX_NODES, FIND_MAX_DEPTH, WalkBounds::Read);
-	let Some(tree) = walk_raw(backend, root.clone(), 0, &mut state)? else {
+	let Some(tree) = walk_raw(backend, root.clone(), 0, false, &mut state)? else {
 		return Ok(Vec::new());
 	};
 	let identities = ReadIdentities::new(&root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
+	let compact_role = role
+		.as_deref()
+		.map(|role| role.replace([' ', '_', '-'], ""));
 	let title = query.title.as_deref().map(str::to_lowercase);
 	let value = query.value.as_deref().map(str::to_lowercase);
 	let limit = query.limit.unwrap_or(100).min(5_000) as usize;
 	let mut result = Vec::new();
+	let mut focus = AppFocus::default();
 	let mut stack = vec![tree];
 	while let Some(node) = stack.pop() {
 		stack.extend(node.children.iter().rev().cloned());
@@ -723,14 +1194,17 @@ pub fn query(
 			expected
 				.is_none_or(|needle| actual.is_some_and(|text| text.to_lowercase().contains(needle)))
 		};
-		if contains(Some(&node.props.role), role.as_ref())
-			&& contains(label(&node.props), title.as_ref())
+		if role.as_deref().is_none_or(|role| {
+			matches_role(&node.props, role, compact_role.as_deref().unwrap_or(role))
+		}) && contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
 			let uniqueness = identities.of(&node.props);
+			let mut props = node.props;
+			props.focused = focus.holds(backend, &node.handle, &props);
 			let reference =
-				registry.register(backend, target, generation, node.handle, &node.props, uniqueness);
-			result.push(node_to_napi(reference, node.props));
+				registry.register(backend, target, generation, node.handle, &props, uniqueness);
+			result.push(node_to_napi(reference, props));
 			if result.len() >= limit {
 				break;
 			}
@@ -744,13 +1218,52 @@ pub fn register_node(
 	registry: &mut AxRegistry,
 	target: &str,
 	handle: AxHandle,
+	focus: &mut AppFocus,
 ) -> CoreResult<AxNode> {
-	let props = backend.props(&handle)?;
+	let props = node_props(backend, &handle, focus)?;
 	let generation = registry.current_generation(target);
 	let reference =
 		registry.register(backend, target, generation, handle, &props, Uniqueness::Unknown);
 	Ok(node_to_napi(reference, props))
 }
+
+/// The application's focused element for one request: read once, and only
+/// once an element reports itself focused, so reads of unfocused elements
+/// cost no round trip to the app.
+#[derive(Default)]
+pub struct AppFocus {
+	read:  bool,
+	focus: Option<AxHandle>,
+}
+
+impl AppFocus {
+	/// Whether the element `handle` read as `props` holds focus: it reports
+	/// itself focused and, where the backend reports the application's
+	/// focused element, it is that element. A focused table reports every
+	/// cell focused.
+	fn holds(&mut self, backend: &mut dyn AxBackend, handle: &AxHandle, props: &AxProps) -> bool {
+		if !props.focused {
+			return false;
+		}
+		if !self.read {
+			self.focus = backend.focused_within(handle);
+			self.read = true;
+		}
+		self.focus.as_ref().is_none_or(|focus| focus == handle)
+	}
+}
+
+/// An element's props, `focused` only on the application's focused element.
+pub fn node_props(
+	backend: &mut dyn AxBackend,
+	handle: &AxHandle,
+	focus: &mut AppFocus,
+) -> CoreResult<AxProps> {
+	let mut props = backend.props(handle)?;
+	props.focused = focus.holds(backend, handle, &props);
+	Ok(props)
+}
+
 pub fn element_at_node(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -761,7 +1274,7 @@ pub fn element_at_node(
 	let Some(handle) = backend.element_at(x, y)? else {
 		return Ok(None);
 	};
-	register_node(backend, registry, target, handle).map(Some)
+	register_node(backend, registry, target, handle, &mut AppFocus::default()).map(Some)
 }
 
 /// What one tree walk can say about whether each identity is unique in its
@@ -834,7 +1347,7 @@ pub fn refind(
 		WalkBounds::Skip,
 	)
 	.cancellable();
-	let tree = walk_raw(backend, root.clone(), 0, &mut state)?;
+	let tree = walk_raw(backend, root.clone(), 0, false, &mut state)?;
 	// A copy in a part the walk could not read would make the match ambiguous.
 	let Some(walk) = state.whole(&root) else {
 		return Ok(None);
@@ -858,6 +1371,45 @@ pub fn refind(
 	Ok(registry.resolve(&found).is_ok().then_some(found))
 }
 
+/// The one element of `window`, other than the one `reference` names, that
+/// reads with the role and label the ref was read with, registered under the
+/// ref's target: where the control went once the app handed the ref's
+/// element to another control ([`require_read_as`]), as Contacts' "City"
+/// field does when typing the street adds a button to its row. Unlike
+/// [`refind`] it needs no proof, so a copy in a part of the window this walk
+/// could not read stays unseen; the error says it is what this read found.
+/// `None` when zero or several elements match. The walk reads as far as
+/// `find()` does and stops with `Cancelled` once the operation is cancelled.
+pub fn find_read_as(
+	backend: &mut dyn AxBackend,
+	registry: &mut AxRegistry,
+	window: &DesktopWindow,
+	reference: &str,
+) -> CoreResult<Option<String>> {
+	let entry = registry.entry(reference)?;
+	let (read_as, handle, target) =
+		(entry.fingerprint, entry.handle.clone(), entry.target_key.clone());
+	control::check()?;
+	let root = backend.window_root(window)?;
+	let mut state = WalkState::new(FIND_MAX_NODES, FIND_MAX_DEPTH, WalkBounds::Skip).cancellable();
+	let tree = walk_raw(backend, root, 0, false, &mut state)?;
+	let mut matches = Vec::new();
+	let mut stack: Vec<_> = tree.into_iter().collect();
+	while let Some(node) = stack.pop() {
+		stack.extend(node.children);
+		// Identity-only failures do not hide a definite role/label match.
+		if node.handle != handle && node.props.label_complete && fingerprint(&node.props) == read_as {
+			matches.push((node.handle, node.props));
+		}
+	}
+	let Ok([(found, props)]) = <[_; 1]>::try_from(matches) else {
+		return Ok(None);
+	};
+	let generation = registry.current_generation(&target);
+	let found = registry.register(backend, &target, generation, found, &props, Uniqueness::Unknown);
+	Ok(registry.resolve(&found).is_ok().then_some(found))
+}
+
 /// An [`AxProps::identity`] hashed from `fields`, as a backend hashes its own.
 #[cfg(test)]
 pub(crate) fn test_identity(fields: impl Hash) -> u64 {
@@ -869,6 +1421,99 @@ pub(crate) fn test_identity(fields: impl Hash) -> u64 {
 pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()> {
 	backend.perform(handle, "press")
 }
+
+/// Exact equality or a same-length mask is the verdict: a rewritten value has
+/// not been shown to hold what was sent (Contacts regroups a phone number in
+/// the field and stores none of it). The error never quotes the written text,
+/// which the caller already has and which may be a password the field's role
+/// does not reveal; it counts its characters and names what the field reads so
+/// the next step needs no extra read, with the written text replaced wherever
+/// the read-back repeats it (a field that appends to a password still holds the
+/// password). What a secure field reads, or a field that reads back as mask
+/// characters (Qt password fields on macOS report a plain text field), is
+/// described, never quoted.
+pub(crate) fn text_readback(
+	sent: &str,
+	expected: &str,
+	actual: Option<&str>,
+	secure: bool,
+) -> CoreResult<()> {
+	const SHOWN: usize = 200;
+	if actual == Some(expected) {
+		return Ok(());
+	}
+	if actual.is_some_and(|actual| masks(actual, expected)) {
+		return Ok(());
+	}
+	let count = |text: &str| match text.chars().count() {
+		1 => "1 character".to_owned(),
+		count => format!("{count} characters"),
+	};
+	let whole = if sent == expected {
+		String::new()
+	} else {
+		format!(" into a value that should now be {}", count(expected))
+	};
+	let reads = match actual {
+		None if secure => "the secure text field's value could not be confirmed".to_owned(),
+		None => "the field's value could not be read back".to_owned(),
+		Some(actual) => {
+			let reads = match actual {
+				"" => "the field now reads empty".to_owned(),
+				actual if masked(actual) => {
+					format!("the field now reads as a mask of {}", count(actual))
+				},
+				_ if secure => "the secure text field's value is not shown".to_owned(),
+				actual => {
+					let shown = if sent.is_empty() {
+						actual.to_owned()
+					} else {
+						actual.replace(sent, WRITTEN)
+					};
+					format!("the field now reads {:?}", truncate_chars(shown, SHOWN))
+				},
+			};
+			format!("{reads}. The app may have reformatted it or not taken it")
+		},
+	};
+	Err(DesktopError::ax_failed(format!(
+		"wrote {}{whole}, but {reads}; inspect the target before writing again",
+		count(sent),
+	)))
+}
+
+/// What a read-back shows in place of the written text.
+const WRITTEN: &str = "<the written text>";
+
+/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
+/// toolkits fall back on.
+pub(crate) fn masked(actual: &str) -> bool {
+	let mut chars = actual.chars();
+	chars.next().is_some_and(|first| {
+		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
+	})
+}
+
+/// Whether `actual` masks `value`: one mask character per character or UTF-16
+/// unit.
+pub(crate) fn masks(actual: &str, value: &str) -> bool {
+	let shown = actual.chars().count();
+	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
+}
+
+/// `value` cut to `max` characters, the last one an ellipsis when cut.
+pub(crate) fn truncate_chars(value: String, max: usize) -> String {
+	if value.chars().count() <= max {
+		return value;
+	}
+	let mut result: String = value.chars().take(max.saturating_sub(1)).collect();
+	result.push('…');
+	result
+}
+
+/// Query aliases extend the vocabulary without changing printed roles or their
+/// substring matches.
+const ROLE_ALIASES: &[(&str, &str)] = &[("radiobutton", "radio")];
 
 /// Maps a raw `AX*` macOS accessibility role onto the cross-platform role
 /// vocabulary. Compiled only where it has a caller (macOS backend + tests).
@@ -1042,20 +1687,33 @@ mod tests {
 
 	#[derive(Default)]
 	struct Mock {
-		props:        HashMap<u64, AxProps>,
-		children:     HashMap<u64, Vec<u64>>,
+		props:          HashMap<u64, AxProps>,
+		children:       HashMap<u64, Vec<u64>>,
 		/// Nodes read without an identity.
-		unidentified: HashSet<u64>,
+		unidentified:   HashSet<u64>,
 		/// Nodes whose earlier reads are gone, their identity taken over.
-		gone:         HashSet<u64>,
+		gone:           HashSet<u64>,
 		/// Nodes the app destroyed: every read of them is a stale ref.
-		destroyed:    HashSet<u64>,
+		destroyed:      HashSet<u64>,
+		/// Nodes in an app that has stopped answering.
+		unanswering:    HashSet<u64>,
+		/// Nodes whose read the host cancelled.
+		cancelled:      HashSet<u64>,
 		/// Bounds read by tree walks.
-		bounds_reads: u32,
+		bounds_reads:   u32,
 		/// The window element, when not node 1.
-		root:         Option<u64>,
+		root:           Option<u64>,
 		/// Window root lookups.
-		root_reads:   u32,
+		root_reads:     u32,
+		/// The application's focused element.
+		focus:          Option<u64>,
+		/// Application-focus reads made.
+		focus_reads:    u32,
+		/// Each node's answer to whether its value is settable; unanswered
+		/// when absent.
+		settable:       HashMap<u64, bool>,
+		/// Settability questions asked.
+		settable_reads: u32,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -1086,6 +1744,12 @@ mod tests {
 			let id = node(h);
 			if self.destroyed.contains(&id) {
 				return Err(DesktopError::stale_ref(format!("test node {id} was destroyed")));
+			}
+			if self.unanswering.contains(&id) {
+				return Err(DesktopError::timeout(format!("test node {id} did not answer")));
+			}
+			if self.cancelled.contains(&id) {
+				return Err(DesktopError::cancelled(format!("test node {id} read was cancelled")));
 			}
 			self
 				.props
@@ -1158,21 +1822,34 @@ mod tests {
 		fn alive(&mut self, h: &AxHandle) -> bool {
 			!self.gone.contains(&node(h))
 		}
+
+		fn focused_within(&mut self, _: &AxHandle) -> Option<AxHandle> {
+			self.focus_reads += 1;
+			self.focus.map(|id| self.handle(id))
+		}
+
+		fn value_settable(&mut self, h: &AxHandle) -> Option<bool> {
+			self.settable_reads += 1;
+			self.settable.get(&node(h)).copied()
+		}
 	}
 	fn p(role: &str, title: Option<&str>) -> AxProps {
 		AxProps {
-			role:        role.into(),
-			native_role: role.into(),
-			title:       title.map(str::to_string),
-			value:       None,
-			description: None,
-			enabled:     true,
-			focused:     false,
-			bounds:      None,
-			actions:     Vec::new(),
-			child_count: 0,
-			identity:    Some(test_identity((role, title))),
-			partial:     false,
+			role:           role.into(),
+			native_role:    role.into(),
+			title:          title.map(str::to_string),
+			value:          None,
+			description:    None,
+			enabled:        true,
+			focused:        false,
+			bounds:         None,
+			actions:        Vec::new(),
+			child_count:    0,
+			identity:       Some(test_identity((role, title))),
+			partial:        false,
+			label_complete: true,
+			selected:       false,
+			role_name:      None,
 		}
 	}
 	fn window() -> DesktopWindow {
@@ -1859,6 +2536,397 @@ mod tests {
 		assert_eq!(nodes[0].title, None);
 		assert_eq!(nodes[0].description.as_deref(), Some("Reload"));
 	}
+
+	#[test]
+	fn query_accepts_role_aliases_without_widening_printed_substrings() {
+		let mut radio = p(&normalize_role_macos("AXRadioButton"), Some("Choice"));
+		radio.native_role = "AXRadioButton".into();
+		let mut field = p(&normalize_role_macos("AXTextField"), Some("Name"));
+		field.native_role = "AXTextField".into();
+		let mut m = Mock {
+			props: [(1, p("window", None)), (2, radio), (3, field), (4, p("tabgroup", Some("Tabs")))]
+				.into(),
+			children: [(1, vec![2, 3, 4])].into(),
+			..Default::default()
+		};
+		for role in ["radiobutton", "AXRadioButton", "AX_radio-button"] {
+			let nodes = find(&mut m, Some(role), None);
+			assert_eq!(nodes.len(), 1, "{role}");
+			assert_eq!(nodes[0].role, "radio");
+		}
+		assert!(find(&mut m, Some("button"), None).is_empty());
+		let nodes = find(&mut m, Some("text field"), None);
+		assert_eq!(nodes.len(), 1);
+		assert_eq!(nodes[0].role, "textfield");
+		assert!(find(&mut m, Some("unknown-role"), None).is_empty());
+		assert!(find(&mut m, Some("-"), None).is_empty());
+		let nodes = find(&mut m, Some("tab"), None);
+		assert_eq!(nodes.len(), 1);
+		assert_eq!(nodes[0].role, "tabgroup");
+	}
+
+	fn tree(m: &mut Mock) -> String {
+		snapshot(m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+			.unwrap()
+			.text
+	}
+	fn find(m: &mut Mock, role: Option<&str>, title: Option<&str>) -> Vec<AxNode> {
+		query(m, &mut AxRegistry::default(), &window(), &AxQuery {
+			role:  role.map(Into::into),
+			title: title.map(Into::into),
+			value: None,
+			limit: None,
+		})
+		.unwrap()
+	}
+	/// The tree line of `reference`, without its indent.
+	fn line<'a>(text: &'a str, reference: &str) -> &'a str {
+		let tag = format!("[ref={reference}]");
+		text
+			.lines()
+			.find(|line| line.contains(&tag))
+			.unwrap_or_else(|| panic!("no {tag} in\n{text}"))
+			.trim_start()
+	}
+	#[test]
+	#[cfg(target_os = "macos")]
+	fn a_long_value_shows_its_start_and_names_the_call_that_reads_it_whole() {
+		let whole = format!("line one\n\"two\"\t{}", "x".repeat(14_415));
+		let mut note = p("textarea", None);
+		note.value = Some(whole.clone());
+		let mut field = p("textfield", None);
+		field.value = Some("y".repeat(SHOWN_CHARS + 30));
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, note), (3, field)].into(),
+			children: [(1, vec![2, 3])].into(),
+			..Default::default()
+		};
+		assert_eq!(
+			tree(&mut m),
+			format!(
+				"- window \"Title\" [ref=e1] app=Safari (focused)\n  - textarea [ref=e2]: \"line \
+				 one\\n\\\"two\\\"\\t{}\"… (+14,230 chars; (await computer.ref(\"e2\")).value())\n  - \
+				 textfield [ref=e3]: \"{}\"",
+				"x".repeat(SHOWN_CHARS - 15),
+				// Cutting 30 characters would take a longer note.
+				"y".repeat(SHOWN_CHARS + 30),
+			)
+		);
+		let found = find(&mut m, Some("textarea"), None);
+		assert_eq!(found[0].value.as_deref(), Some(whole.as_str()));
+	}
+	#[test]
+	fn only_the_applications_focused_element_is_marked_focused() {
+		// A focused table reports every cell focused.
+		let cell = |title| {
+			let mut cell = p("cell", Some(title));
+			cell.focused = true;
+			cell
+		};
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, p("outline", Some("Files"))),
+				(3, cell("a.txt")),
+				(4, cell("b.txt")),
+			]
+			.into(),
+			children: [(1, vec![2]), (2, vec![3, 4])].into(),
+			focus: Some(4),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert_eq!(line(&text, "e3"), "- cell \"a.txt\" [ref=e3]");
+		assert_eq!(line(&text, "e4"), "- cell \"b.txt\" [ref=e4] (focused)");
+		assert_eq!(m.focus_reads, 1);
+		let found = find(&mut m, Some("cell"), None);
+		assert_eq!(found.iter().map(|node| node.focused).collect::<Vec<_>>(), [false, true]);
+		assert_eq!(m.focus_reads, 2);
+		// Single-element reads share one app-focus read per request.
+		let mut registry = AxRegistry::default();
+		let (a, b) = (m.handle(3), m.handle(4));
+		let mut focus = AppFocus::default();
+		let a = register_node(&mut m, &mut registry, "w", a, &mut focus).unwrap();
+		let b = register_node(&mut m, &mut registry, "w", b, &mut focus).unwrap();
+		assert_eq!((a.focused, b.focused), (false, true));
+		assert_eq!(m.focus_reads, 3);
+		// Without an application focus, an element's own flag stands.
+		m.focus = None;
+		let text = tree(&mut m);
+		assert!(line(&text, "e3").ends_with("(focused)"), "{text}");
+	}
+	#[test]
+	fn the_applications_focus_is_read_only_when_an_element_claims_focus() {
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, p("outline", Some("Files")))].into(),
+			children: [(1, vec![2])].into(),
+			focus: Some(2),
+			..Default::default()
+		};
+		tree(&mut m);
+		find(&mut m, None, None);
+		let outline = m.handle(2);
+		register_node(&mut m, &mut AxRegistry::default(), "w", outline, &mut AppFocus::default())
+			.unwrap();
+		assert_eq!(m.focus_reads, 0);
+	}
+	#[test]
+	fn only_dates_outside_web_content_answering_settable_are_marked_settable() {
+		let mut due = p("datetimearea", Some("Due"));
+		due.value = Some("2026-10-16T09:00:00-04:00".into());
+		let mut volume = p("slider", Some("Volume"));
+		volume.value = Some("0.5".into());
+		let mut name = p("textfield", Some("Name"));
+		name.value = Some("Bench".into());
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, due),
+				(3, p("webarea", Some("Page"))),
+				(4, p("datetimearea", Some("Arrival"))),
+				(5, p("button", Some("Go"))),
+				(6, volume),
+				(7, name),
+				(8, p("datefield", Some("Start"))),
+			]
+			.into(),
+			children: [(1, vec![2, 3, 5, 6, 7, 8]), (3, vec![4])].into(),
+			settable: [(2, true), (4, true), (5, true), (6, true), (7, true), (8, false)].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert!(line(&text, "e2").ends_with("(settable)"), "{text}");
+		// A date answering unsettable is not a read-only page field either.
+		assert_eq!(line(&text, "e8"), "- datefield \"Start\" [ref=e8]");
+		for unsettable in ["e4", "e5", "e6", "e7"] {
+			assert!(!line(&text, unsettable).contains("(settable)"), "{text}");
+		}
+		// Only the two dates outside the page are asked.
+		assert_eq!(m.settable_reads, 2);
+	}
+	#[test]
+	fn only_page_text_fields_answering_unsettable_are_marked_readonly() {
+		let field = |role: &str, title: &str, value: &str| {
+			let mut props = p(role, Some(title));
+			props.value = Some(value.into());
+			props
+		};
+		let mut off = field("textfield", "Off", "off");
+		off.enabled = false;
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, field("textarea", "Terminal", "$ ls")),
+				(3, p("webarea", Some("Page"))),
+				(4, field("textfield", "Name", "alpha")),
+				(5, field("textfield", "Fixed", "fixed")),
+				(6, field("textarea", "Notes", "frozen")),
+				(7, field("combobox", "City", "Oslo")),
+				(8, off),
+				(9, p("button", Some("Go"))),
+			]
+			.into(),
+			children: [(1, vec![2, 3]), (3, vec![4, 5, 6, 7, 8, 9])].into(),
+			settable: [
+				(2, false),
+				(4, true),
+				(5, false),
+				(6, false),
+				(7, false),
+				(8, false),
+				(9, false),
+			]
+			.into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		for readonly in ["e5", "e6"] {
+			assert!(line(&text, readonly).ends_with("(readonly)"), "{text}");
+		}
+		assert_eq!(line(&text, "e8"), "- textfield \"Off\" [ref=e8]: \"off\" (disabled)");
+		// A combo box may be a choice-only popup with no text to set.
+		for unmarked in ["e2", "e4", "e7", "e9"] {
+			assert!(!line(&text, unmarked).contains("(readonly)"), "{text}");
+		}
+		// Only the page's enabled text fields and areas are asked, and only by
+		// `ax()`.
+		assert_eq!(m.settable_reads, 3);
+		find(&mut m, Some("textfield"), None);
+		assert_eq!(m.settable_reads, 3);
+	}
+	#[test]
+	fn selected_rows_and_items_are_marked() {
+		let mut inbox = p("row", Some("Inbox"));
+		inbox.selected = true;
+		let mut b_pdf = p("image", Some("b.pdf"));
+		b_pdf.selected = true;
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, p("outline", Some("Sidebar"))),
+				(3, inbox),
+				(4, p("row", Some("Sent"))),
+				(5, p("list", Some("Files"))),
+				(6, p("image", Some("a.pdf"))),
+				(7, b_pdf),
+			]
+			.into(),
+			children: [(1, vec![2, 5]), (2, vec![3, 4]), (5, vec![6, 7])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		let marked: Vec<_> = text
+			.lines()
+			.filter(|line| line.ends_with(" (selected)"))
+			.map(str::trim_start)
+			.collect();
+		assert_eq!(marked, [
+			"- row \"Inbox\" [ref=e3] (selected)",
+			"- image \"b.pdf\" [ref=e7] (selected)"
+		]);
+	}
+	#[test]
+	#[cfg(target_os = "macos")]
+	fn lines_list_the_actions_a_role_does_not_imply() {
+		let with = |role: &str, title: &str, actions: &[&str]| {
+			let mut props = p(role, Some(title));
+			props.actions = actions.iter().map(|action| (*action).to_owned()).collect();
+			props
+		};
+		// A line break that would forge a line, an overlong name, and a word.
+		let forged =
+			["AXOpen\n- button \"Pay\" [ref=e99]", "AXAbcdefghijklmnopqrstuvwxyzAbcdefgh", "AXPick"];
+		// One name in three spellings, and more names than a line lists, each
+		// twice.
+		let repeated = ["AXOpen", "axopen", "AXOPEN", "AXPick"];
+		let many: Vec<String> = (0..40)
+			.flat_map(|i| [format!("AXAct{i}"), format!("axact{i}")])
+			.collect();
+		let many: Vec<&str> = many.iter().map(String::as_str).collect();
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, with("button", "Save", &["AXPress", "AXShowMenu"])),
+				(3, with("button", "Search", &["AXShowMenu", "AXScrollToVisible"])),
+				(4, with("image", "a.pdf", &["AXOpen", "SomeVendorAction", "AXShowMenu"])),
+				(5, with("statictext", "Yoga", &["AXPress", "AXShowMenu", "AXScrollToVisible"])),
+				(6, with("textfield", "Name", &["AXConfirm", "AXCancel", "Name:Delete\nTarget:0x0"])),
+				(7, with("popover", "Details", &["AXCancel"])),
+				(8, with("button", "Native", &["press", "invoke"])),
+				(9, with("button", "Download", &["AXPress", "AXOpen"])),
+				(10, with("image", "b.pdf", &["axopen", "AXshowMenu"])),
+				(11, with("button", "Upload", &["axpress", "AxOpen"])),
+				(12, with("image", "c.pdf", &forged)),
+				(13, with("image", "d.pdf", &repeated)),
+				(14, with("image", "e.pdf", &many)),
+			]
+			.into(),
+			children: [(1, (2..=14).collect())].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		let actions = |reference| {
+			line(&text, reference)
+				.split_once(" actions=")
+				.map(|(_, actions)| actions)
+		};
+		assert_eq!(actions("e2"), None);
+		assert_eq!(actions("e3"), Some("showmenu,scrolltovisible"));
+		assert_eq!(actions("e4"), Some("open"));
+		assert_eq!(actions("e5"), Some("press"));
+		assert_eq!(actions("e6"), None);
+		assert_eq!(actions("e7"), Some("cancel"));
+		assert_eq!(actions("e8"), None);
+		// A button that presses and opens lists only the open; its press is the
+		// role's own and still performs.
+		assert_eq!(actions("e9"), Some("open"));
+		// An app that spells a standard action in another case gets it listed and
+		// filtered the same, as `perform()` runs it in any case.
+		assert_eq!(actions("e10"), Some("open"));
+		assert_eq!(actions("e11"), Some("open"));
+		// A name that is not one short ASCII word stays off the line, so it
+		// cannot write a line of its own.
+		assert_eq!(actions("e12"), Some("pick"));
+		assert!(!text.contains("Pay"));
+		// Each name is listed once, and a list past the limit names what it left
+		// out and the call that lists it whole, so one element cannot fill the
+		// read.
+		assert_eq!(actions("e13"), Some("open,pick"));
+		let first: Vec<String> = (0..16).map(|i| format!("act{i}")).collect();
+		assert_eq!(
+			actions("e14"),
+			Some(
+				format!("{}… (+24 more; (await computer.ref(\"e14\")).actions())", first.join(","))
+					.as_str()
+			)
+		);
+	}
+	#[test]
+	fn only_quartz_lines_offer_normalized_ax_actions() {
+		let mut image = p("image", Some("Document"));
+		image.actions = vec!["AXOpen".into()];
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, image)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		let element =
+			element_line(&mut m, &mut AxRegistry::default(), "7", AxHandle::Test(2)).unwrap();
+		for rendered in [line(&text, "e2"), element.as_str()] {
+			if cfg!(target_os = "macos") {
+				assert!(rendered.ends_with(" actions=open"), "{rendered}");
+			} else {
+				// Main does not render non-Quartz actions. In particular,
+				// never suggest `open` for the literal AT-SPI name AXOpen.
+				assert!(!rendered.contains(" actions="), "{rendered}");
+			}
+		}
+		assert_eq!(find(&mut m, Some("image"), None)[0].actions, Some(vec!["AXOpen".into()]));
+	}
+	#[test]
+	#[cfg(not(target_os = "macos"))]
+	fn clipped_backend_values_never_offer_full_text_recovery() {
+		let mut document = p("textarea", Some("Document"));
+		// AT-SPI supplies only this prefix of a longer document.
+		document.value = Some("x".repeat(16_384));
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, document)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert_eq!(
+			line(&text, "e2"),
+			format!("- textarea \"Document\" [ref=e2]: \"{}…\"", "x".repeat(80))
+		);
+		let element =
+			element_line(&mut m, &mut AxRegistry::default(), "7", AxHandle::Test(2)).unwrap();
+		assert_eq!(element, format!("- textarea \"Document\" [ref=e1]: \"{}…\"", "x".repeat(80)));
+		assert!(!text.contains("value()"));
+		assert!(!element.contains("value()"));
+		// Labels use the same platform preview, including main's escaping.
+		let mut preview = String::new();
+		push_quoted(&mut preview, "one\n\"two\"\\three", "e2", "title");
+		assert_eq!(preview, "\"one \\\"two\\\"\\\\three\"");
+	}
+	#[test]
+	fn a_window_control_named_only_by_its_subrole_takes_that_name() {
+		let mut close = p("button", None);
+		close.role_name = Some("close".into());
+		close.actions.push("AXPress".into());
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, close)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		assert_eq!(
+			tree(&mut m),
+			"- window \"Title\" [ref=e1] app=Safari (focused)\n  - button \"close\" [ref=e2]"
+		);
+		let found = find(&mut m, None, Some("close"));
+		assert_eq!((found.len(), found[0].title.as_deref()), (1, None));
+	}
 	#[test]
 	fn truncation_sets_flag_and_trailer() {
 		let mut m = Mock {
@@ -1910,6 +2978,25 @@ mod tests {
 		.unwrap();
 		assert_eq!(nodes.len(), 1);
 		assert_eq!(nodes[0].title.as_deref(), Some("Ready"));
+	}
+	#[test]
+	fn an_app_that_stops_answering_fails_the_read_instead_of_skipping_each_node() {
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (3, p("button", Some("Ready")))].into(),
+			children: [(1, vec![2, 3])].into(),
+			unanswering: [2].into(),
+			..Default::default()
+		};
+		let error =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Timeout);
+		m.unanswering.clear();
+		m.cancelled.insert(2);
+		let error =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
 	}
 	#[test]
 	fn bounds_center_hit_test_is_global_and_frameless() {
@@ -1986,5 +3073,99 @@ mod tests {
 		] {
 			assert_eq!(normalize_role_atspi(native, multiline), role);
 		}
+	}
+
+	#[test]
+	fn rewritten_readback_fails_and_names_what_the_field_reads() {
+		let error =
+			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(error.message.contains("wrote 12 characters"), "{}", error.message);
+		assert!(!error.message.contains("555-789-0123"), "{}", error.message);
+		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
+		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
+	}
+
+	#[test]
+	fn inserted_readback_counts_the_whole_value_it_expected() {
+		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(error.message.contains(r#""ac""#), "{}", error.message);
+		for counted in ["wrote 1 character ", "should now be 3 characters"] {
+			assert!(error.message.contains(counted), "{counted}: {}", error.message);
+		}
+		for quoted in [r#""b""#, r#""abc""#] {
+			assert!(!error.message.contains(quoted), "{quoted}: {}", error.message);
+		}
+		let unread = text_readback("b", "abc", None, false).unwrap_err();
+		assert_eq!(unread.code, ErrorCode::AxFailed);
+		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+		assert!(!unread.message.contains(r#""b""#), "{}", unread.message);
+	}
+
+	#[test]
+	fn long_readbacks_are_cut() {
+		let long = "x".repeat(500);
+		let error = text_readback("y", "y", Some(&long), false).unwrap_err();
+		assert!(error.message.len() < 400, "{}", error.message.len());
+		assert!(error.message.contains('…'), "{}", error.message);
+	}
+
+	#[test]
+	fn secure_readbacks_never_quote_the_text() {
+		for actual in [None, Some("••••"), Some(""), Some("sk-hunter")] {
+			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter"), "{}", error.message);
+		}
+		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+	}
+
+	#[test]
+	fn a_same_length_mask_succeeds_whatever_the_role() {
+		for (sent, actual) in [("hunter2", "•••••••"), ("Q", "*"), ("🔑", "••")] {
+			for secure in [false, true] {
+				assert!(text_readback(sent, sent, Some(actual), secure).is_ok());
+			}
+		}
+		// An insertion is checked against the whole value it should leave.
+		assert!(text_readback("abc", "•••abc", Some("••••••"), false).is_ok());
+		assert!(text_readback("abc", "•••abc", Some("•••"), false).is_err());
+	}
+
+	#[test]
+	fn a_different_length_mask_fails_without_quoting_the_text() {
+		for actual in ["••••••", "*"] {
+			for secure in [false, true] {
+				let error = text_readback("hunter2", "hunter2", Some(actual), secure).unwrap_err();
+				assert_eq!(error.code, ErrorCode::AxFailed);
+				assert!(!error.message.contains("hunter2"), "{}", error.message);
+				assert!(!error.message.contains(actual), "{}", error.message);
+			}
+		}
+	}
+
+	#[test]
+	fn an_unreadable_value_still_fails_without_quoting_the_text() {
+		for actual in [None, Some("")] {
+			for secure in [false, true] {
+				let error = text_readback("hunter2", "hunter2", actual, secure).unwrap_err();
+				assert_eq!(error.code, ErrorCode::AxFailed);
+				assert!(!error.message.contains("hunter2"), "{}", error.message);
+			}
+		}
+	}
+
+	#[test]
+	fn a_read_back_that_repeats_the_written_text_hides_it() {
+		// A plain-role password field that appends to what it was given.
+		let error = text_readback("hunter2", "hunter2", Some("hunter2!"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(!error.message.contains("hunter2"), "{}", error.message);
+		assert!(error.message.contains(r#"reads "<the written text>!""#), "{}", error.message);
+		// Typed insertion: the whole value holds the inserted text twice.
+		let error =
+			text_readback("hunter2", "a hunter2", Some("a hunter2hunter2"), false).unwrap_err();
+		assert!(!error.message.contains("hunter2"), "{}", error.message);
 	}
 }

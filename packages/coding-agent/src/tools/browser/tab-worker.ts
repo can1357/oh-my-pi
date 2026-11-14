@@ -10,6 +10,7 @@ import type {
 	CDPSession,
 	ElementHandle,
 	Frame,
+	FrameWaitForFunctionOptions,
 	HTTPRequest,
 	HTTPResponse,
 	JSHandle,
@@ -22,6 +23,7 @@ import type {
 	SerializedAXNode,
 	Target,
 } from "puppeteer-core";
+import { stringifyFunction } from "puppeteer-core/internal/util/Function.js";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
@@ -59,6 +61,7 @@ import {
 import {
 	applyStealthPatches,
 	applyViewport,
+	BROWSER_PAGE_PROTOCOL_TIMEOUT_MS,
 	BROWSER_PROTOCOL_TIMEOUT_MS,
 	browserConnection,
 	connectPuppeteer,
@@ -69,10 +72,13 @@ import {
 	loadPuppeteerInWorker,
 	loadedKnownDevices,
 	loadedNetworkConditions,
+	privateTargetId,
+	puppeteerTimeoutError,
 	readPageViewport,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
 import { assertTabPressArgs } from "./tab-arguments";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
 import {
 	type BrowserCookie,
 	type ClearCookiesOptions,
@@ -99,7 +105,7 @@ import {
 	readReactTree,
 } from "./react/tree";
 import { collectVitals, installVitalsObservers, type VitalsOptions, type VitalsResult } from "./react/vitals";
-import { registerSemanticQueryHandlers } from "./query-handlers";
+import { parseRoleSelector, registerSemanticQueryHandlers } from "./query-handlers";
 import {
 	type ElementQueryHelpers,
 	enrichElementQueries,
@@ -118,7 +124,7 @@ import {
 } from "./queries";
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
-import { applyIgnoreHttpsErrors } from "./open-options";
+import { applyInsecure } from "./open-options";
 import {
 	BrowserNetworkManager,
 	type HarContentPolicy,
@@ -176,6 +182,7 @@ import {
 	dragBetween,
 	fillViaHandle,
 	highlightElement,
+	hoverElement,
 	type HighlightOptions,
 	type InteractionHandle,
 	installCancelledReleaseGuard,
@@ -194,6 +201,7 @@ import {
 	TypingInterruptedError,
 	typeIntoElement,
 	wheel,
+	withLiveElement,
 } from "./interactions";
 import {
 	captureScreenshotBuffer,
@@ -214,7 +222,7 @@ import {
 	screenshotThreshold,
 	whileDrawing,
 } from "./screenshot";
-import { RuntimeDialogController, type DialogPolicy, type DialogState } from "./dialogs";
+import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
 import {
 	type BrowserFrameApi,
 	type BrowserFrameInfo,
@@ -225,6 +233,7 @@ import {
 	resolveFrame,
 } from "./frames";
 import {
+	assertUrlPattern,
 	isNavigatedContextError,
 	type NavigationWaitUntil,
 	navigateMainFrame,
@@ -239,6 +248,7 @@ import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
 	type Observation,
 	type ObservationEntry,
+	isMissingPageGlobal,
 	ownsPage,
 	type ReadyInfo,
 	type RunErrorPayload,
@@ -356,6 +366,12 @@ interface OpOptions {
 	selector?: string;
 	zeroMatchAfterMs?: number;
 	awaitNavigation?: boolean;
+	/**
+	 * How the call meets a confirm or prompt, which stops the page's script until it is answered. Either way a call
+	 * made while one is open fails at once. One that opens during the call: `"blocks"` fails the call (it can only end
+	 * once the dialog is answered); `"answers"` ends it as done (an input the page answered with the dialog).
+	 */
+	dialog?: "blocks" | "answers";
 }
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
@@ -413,10 +429,7 @@ interface TabApi {
 		pattern: string | RegExp | ((response: HTTPResponse) => boolean | Promise<boolean>),
 		opts?: { timeout?: number },
 	): Promise<HTTPResponse>;
-	waitForSelector(
-		selector: string,
-		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
-	): Promise<ActionableHandle | null>;
+	waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<ActionableHandle | null>;
 	waitForNavigation(opts?: {
 		waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 		timeout?: number;
@@ -544,6 +557,15 @@ export function normalizeSelector(selector: string): string {
 		if (name) return `aria/${name.trim()}`;
 		return `aria/${rest}`;
 	}
+	if (selector.startsWith("role/")) {
+		// The role/ handler refuses a selector it cannot fully read. Parsing it here surfaces that as a tool error before
+		// the op, so a wait fails at once instead of at its timeout.
+		try {
+			parseRoleSelector(selector.slice(5));
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
+	}
 	return selector;
 }
 
@@ -569,9 +591,15 @@ export type ActionableHandle = InteractionHandle & ElementQueryHelpers & { fill(
  * A named per-op guard: runs `fn` inside the active run's fail-fast deadline and
  * in-flight tracking (the same wrapper `tab.click(selector)` uses), so a stalled
  * handle action rejects with a named error before the cell budget instead of
- * hanging on puppeteer's protocol timeout.
+ * hanging on puppeteer's protocol timeout. `dialog` says how the action meets a
+ * confirm or prompt (`OpOptions.dialog`): a click or key press that opens one is
+ * done (`"answers"`); any other action fails (`"blocks"`, the default).
  */
-export type HandleOpGuard = <T>(label: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>;
+export type HandleOpGuard = <T>(
+	label: string,
+	fn: (signal: AbortSignal) => Promise<T>,
+	dialog?: "blocks" | "answers",
+) => Promise<T>;
 
 /**
  * Every `ElementHandle` method that dispatches input, pointer/touch, drag, or navigation
@@ -747,6 +775,257 @@ async function adoptElementArgs(
 	return { args: out ?? args, dispose };
 }
 
+type PageFunction = string | ((...args: unknown[]) => unknown);
+
+/**
+ * Evaluate `fn` in `realm` with its element-handle `args` adopted there (see {@link adoptElementArgs}), returning
+ * the value or, with `handle`, a handle to it. Puppeteer evaluates a string as an expression and ignores extra
+ * args; that holds here, without inspecting or adopting otherwise-unused handles.
+ */
+async function evaluateInRealm(
+	realm: Realm,
+	fn: PageFunction,
+	args: unknown[],
+	handle: boolean,
+	signal?: AbortSignal,
+): Promise<unknown> {
+	if (typeof fn === "string") return handle ? realm.evaluateHandle(fn) : realm.evaluate(fn);
+	const { args: adopted, dispose } = await adoptElementArgs(realm, args);
+	try {
+		if (signal) throwIfAborted(signal);
+		return handle ? await realm.evaluateHandle(fn, ...adopted) : await realm.evaluate(fn, ...adopted);
+	} finally {
+		await dispose();
+	}
+}
+type PagePoller = { promise: Promise<unknown>; stop(): void };
+
+/**
+ * Page-side half of the run page's `waitForFunction`: its promise resolves with the first truthy value of
+ * `predicate(...args)`, checked at once and then on every animation frame, DOM mutation, or numeric interval,
+ * or with `undefined` after `ms` (never when `null`). `stop` releases the poller on host cancellation.
+ */
+function waitInPage(
+	predicate: (...args: unknown[]) => unknown,
+	mode: string | number,
+	ms: number | null,
+	...args: unknown[]
+): PagePoller {
+	type Observer = { observe(node: unknown, options: object): void; disconnect(): void };
+	const pageGlobal = globalThis as unknown as {
+		document: unknown;
+		requestAnimationFrame(callback: () => void): number;
+		cancelAnimationFrame(id: number): void;
+		setTimeout(callback: () => void, ms: number): number;
+		clearTimeout(id: number): void;
+		setInterval(callback: () => void, ms: number): number;
+		clearInterval(id: number): void;
+		MutationObserver: new (callback: () => void) => Observer;
+	};
+	// Async functions use the realm's intrinsic Promise even when the page replaces the global constructor.
+	const IntrinsicPromise = (async () => {})().constructor as PromiseConstructor;
+	const { promise, resolve, reject } = IntrinsicPromise.withResolvers<unknown>();
+	// The host attaches to this promise in its next protocol call, after the page's rejection checkpoint.
+	void promise.catch(() => {});
+	let settled = false;
+	let observer: Observer | undefined;
+	let frame: number | undefined;
+	let interval: number | undefined;
+	let timer: number | undefined;
+	const finish = (failed: boolean, value: unknown) => {
+		if (settled) return;
+		settled = true;
+		observer?.disconnect();
+		if (frame !== undefined) pageGlobal.cancelAnimationFrame(frame);
+		if (interval !== undefined) pageGlobal.clearInterval(interval);
+		if (timer !== undefined) pageGlobal.clearTimeout(timer);
+		if (failed) reject(value);
+		else resolve(value);
+	};
+	const check = async () => {
+		if (settled) return;
+		try {
+			const value = await predicate(...args);
+			if (value) finish(false, value);
+		} catch (error) {
+			finish(true, error);
+		}
+		if (!settled && mode === "raf") frame = pageGlobal.requestAnimationFrame(() => void check());
+		if (!settled && typeof mode === "number" && interval === undefined) {
+			interval = pageGlobal.setInterval(() => void check(), mode);
+		}
+	};
+	if (ms !== null) timer = pageGlobal.setTimeout(() => finish(false, undefined), ms);
+	if (mode === "mutation") {
+		observer = new pageGlobal.MutationObserver(() => void check());
+		observer.observe(pageGlobal.document, {
+			attributes: true,
+			characterData: true,
+			childList: true,
+			subtree: true,
+		});
+	}
+	void check();
+	return { promise, stop: () => finish(false, undefined) };
+}
+
+/**
+ * The `page` that `tab.run` code receives. The stealth patch runs Puppeteer's page evaluations in its isolated
+ * world, where page globals and custom-element members do not exist; this page runs the code handed to
+ * `evaluate`, `evaluateHandle`, `$eval`, `$$eval` and `waitForFunction` in the main world, as `tab.evaluate` does.
+ * Their selectors still resolve in the isolated world, and the matches are adopted for the call. Every other
+ * member is the tab's own page, bound to it so Puppeteer's private fields stay reachable; one that returns the
+ * page (`page.on(…)`) returns this page, so a chained call keeps the main world. `signal` ends the run.
+ */
+function createRunPage(page: Page, signal: AbortSignal): Page {
+	const realm = (): Realm => page.mainFrame().mainRealm();
+	const mainWorld = new Map<PropertyKey, unknown>([
+		["evaluate", (fn: PageFunction, ...args: unknown[]) => evaluateInRealm(realm(), fn, args, false)],
+		["evaluateHandle", (fn: PageFunction, ...args: unknown[]) => evaluateInRealm(realm(), fn, args, true)],
+		[
+			"$eval",
+			async (selector: string, fn: PageFunction, ...args: unknown[]) => {
+				const element = await page.$(selector);
+				// Puppeteer's own message for a `$eval` that matches nothing.
+				if (!element) throw new Error(`Error: failed to find element matching selector "${selector}"`);
+				try {
+					return await evaluateInRealm(realm(), fn, [element, ...args], false);
+				} finally {
+					await element.dispose();
+				}
+			},
+		],
+		[
+			"$$eval",
+			async (selector: string, fn: PageFunction, ...args: unknown[]) => {
+				const elements = await page.$$(selector);
+				const target = realm();
+				// Adopt every match at once: one CDP round trip each, run together rather than in turn.
+				const adopted = await Promise.allSettled(elements.map(element => target.adoptHandle(element)));
+				try {
+					const failed = adopted.find(result => result.status === "rejected");
+					if (failed) throw failed.reason;
+					const nodes = adopted.map(result => (result as PromiseFulfilledResult<ElementHandle>).value);
+					const list = await target.evaluateHandle((...found: unknown[]) => found, ...nodes);
+					try {
+						return await evaluateInRealm(target, fn, [list, ...args], false);
+					} finally {
+						await list.dispose();
+					}
+				} finally {
+					await Promise.all([
+						...adopted.map(result => (result.status === "fulfilled" ? result.value.dispose() : undefined)),
+						...elements.map(element => element.dispose()),
+					]);
+				}
+			},
+		],
+		[
+			"waitForFunction",
+			// Puppeteer's own wait installs its query bindings as globals of the world it polls, which every page
+			// script can see in the main world. This evaluates instead, retrying across navigations as its wait does:
+			// All polling stays in the page so protocol latency does not stretch numeric intervals.
+			async (fn: PageFunction, options: FrameWaitForFunctionOptions = {}, ...args: unknown[]) => {
+				const timeout = options.timeout ?? page.getDefaultTimeout();
+				const polling = options.polling ?? 100;
+				if (typeof polling !== "number" && polling !== "raf" && polling !== "mutation") {
+					throw new Error(`Unknown polling option: ${polling}`);
+				}
+				if (typeof polling === "number" && polling < 0) {
+					throw new Error("Cannot poll with non-positive interval");
+				}
+				const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
+				const waitSignal = options.signal ? AbortSignal.any([signal, options.signal]) : signal;
+				const timedOut = () => puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
+				const attempt = async (target: Realm, left: number, evalSignal: AbortSignal): Promise<JSHandle> => {
+					if (waitSignal.aborted) throw waitSignal.reason;
+					const predicate = await target.evaluateHandle(
+						typeof fn === "string" ? `() => (${fn})` : `(${stringifyFunction(fn)})`,
+					);
+					let poller: JSHandle<PagePoller> | undefined;
+					const stop = () => {
+						if (poller) void target.evaluate(held => held.stop(), poller).catch(() => {});
+					};
+					try {
+						throwIfAborted(evalSignal);
+						const ms = Number.isFinite(left) ? left : null;
+						const waitArgs = [predicate, polling, ms, ...args];
+						poller = (await evaluateInRealm(
+							target,
+							waitInPage as PageFunction,
+							waitArgs,
+							true,
+							evalSignal,
+						)) as JSHandle<PagePoller>;
+						evalSignal.addEventListener("abort", stop, { once: true });
+						throwIfAborted(evalSignal);
+						return await target.evaluateHandle(held => held.promise, poller);
+					} finally {
+						evalSignal.removeEventListener("abort", stop);
+						if (poller) {
+							await target.evaluate(held => held.stop(), poller).catch(() => {});
+							await poller.dispose();
+						}
+						await predicate.dispose();
+					}
+				};
+				for (;;) {
+					if (waitSignal.aborted) throw waitSignal.reason;
+					const left = Math.max(0, deadline - Date.now());
+					// The deadline also bounds a predicate that never settles, not only the polls between attempts.
+					const evalSignal = Number.isFinite(left)
+						? AbortSignal.any([waitSignal, AbortSignal.timeout(left)])
+						: waitSignal;
+					try {
+						const target = realm();
+						const pending = attempt(target, left, evalSignal);
+						// The protocol evaluation can finish after the host-side deadline or cancellation won.
+						void pending
+							.then(value => {
+								if (evalSignal.aborted) return value.dispose();
+							})
+							.catch(() => {});
+						const value = await untilAborted(evalSignal, () => pending);
+						let returned = false;
+						try {
+							if (await untilAborted(evalSignal, () => target.evaluate(held => !!held, value))) {
+								throwIfAborted(evalSignal);
+								returned = true;
+								return value;
+							}
+						} finally {
+							if (!returned) {
+								const cleanup = value.dispose();
+								void cleanup.catch(() => {});
+								await untilAborted(evalSignal, () => cleanup);
+							}
+						}
+					} catch (error) {
+						if (waitSignal.aborted) throw waitSignal.reason;
+						if (evalSignal.aborted) throw timedOut();
+						if (!isNavigatedContextError(error)) throw error;
+						if (Date.now() >= deadline) throw timedOut();
+						continue;
+					}
+					if (Date.now() >= deadline) throw timedOut();
+				}
+			},
+		],
+	]);
+	const runPage: Page = new Proxy(page, {
+		get(target, prop) {
+			if (mainWorld.has(prop)) return mainWorld.get(prop);
+			const value = Reflect.get(target, prop, target);
+			if (typeof value !== "function") return value;
+			return (...args: unknown[]) => {
+				const result = Reflect.apply(value, target, args);
+				return result === target ? runPage : result;
+			};
+		},
+	});
+	return runPage;
+}
+
 /**
  * Attach `fill()` to a puppeteer ElementHandle before handing it to user code and,
  * when a `guard` is supplied, route every interactive method ({@link GUARDED_HANDLE_METHODS})
@@ -819,15 +1098,18 @@ export function toActionableHandle(
 		const original = originals.interactive[method];
 		if (!original) continue;
 		methods[method] = (...args) =>
-			guard(`handle.${method}()`, signal =>
-				runGuardedHandleAction(
-					enriched,
-					originals,
-					`handle.${method}()`,
-					signal,
-					() => (method === "press" ? original(args[0], args[1], signal) : original(...args)),
-					invalidate,
-				),
+			guard(
+				`handle.${method}()`,
+				signal =>
+					runGuardedHandleAction(
+						enriched,
+						originals,
+						`handle.${method}()`,
+						signal,
+						() => (method === "press" ? original(args[0], args[1], signal) : original(...args)),
+						invalidate,
+					),
+				method === "press" || method === "tap" ? "answers" : "blocks",
 			);
 	}
 	enriched.type = (text, options) =>
@@ -853,28 +1135,45 @@ export function toActionableHandle(
 			),
 		);
 	enriched.click = options =>
-		guard<void>("handle.click()", signal =>
-			runGuardedHandleAction(
-				enriched,
-				originals,
-				"handle.click()",
-				signal,
-				() =>
-					clickElement(enriched, "handle.click()", signal, {
-						button: options?.button,
-						clickCount: options?.count,
-					}),
-				invalidate,
-			),
+		guard<void>(
+			"handle.click()",
+			signal =>
+				runGuardedHandleAction(
+					enriched,
+					originals,
+					"handle.click()",
+					signal,
+					() =>
+						clickElement(enriched, "handle.click()", signal, {
+							button: options?.button,
+							clickCount: options?.count,
+						}),
+					invalidate,
+				),
+			"answers",
 		);
 	enriched.dblclick = () =>
-		guard<void>("handle.dblclick()", signal =>
+		guard<void>(
+			"handle.dblclick()",
+			signal =>
+				runGuardedHandleAction(
+					enriched,
+					originals,
+					"handle.dblclick()",
+					signal,
+					() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+					invalidate,
+				),
+			"answers",
+		);
+	enriched.hover = () =>
+		guard<void>("handle.hover()", signal =>
 			runGuardedHandleAction(
 				enriched,
 				originals,
-				"handle.dblclick()",
+				"handle.hover()",
 				signal,
-				() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+				() => hoverElement(enriched, signal),
 				invalidate,
 			),
 		);
@@ -1202,7 +1501,14 @@ function errorPayload(error: unknown): RunErrorPayload {
 		};
 	}
 	if (error instanceof Error) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+			isToolError: false,
+			isAbort: false,
+			missingPageGlobal: isMissingPageGlobal(error) || undefined,
+		};
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
 }
@@ -1218,11 +1524,6 @@ function replyError(payload: RunErrorPayload): Error {
 	if (payload.name) err.name = payload.name;
 	if (payload.stack) err.stack = payload.stack;
 	return err;
-}
-
-function privateTargetId(target: Target): string | undefined {
-	const raw = target as unknown as { _targetId?: unknown };
-	return typeof raw._targetId === "string" ? raw._targetId : undefined;
 }
 
 async function targetIdForTarget(target: Target): Promise<string> {
@@ -1544,7 +1845,7 @@ export class WorkerCore {
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
-	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
+	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
 	readonly #recording = new RecordingController();
 	/** Set once the core stops for good: by {@link terminate}, or by a close. */
@@ -1741,7 +2042,7 @@ export class WorkerCore {
 			this.#browser = await connectPuppeteer(puppeteer, {
 				browserWSEndpoint: payload.browserWSEndpoint,
 				defaultViewport: null,
-				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+				protocolTimeout: BROWSER_PAGE_PROTOCOL_TIMEOUT_MS,
 			});
 			// Terminated while it connected: nothing will drop this connection later.
 			if (this.#stopped) {
@@ -1800,25 +2101,29 @@ export class WorkerCore {
 			client.on("Page.javascriptDialogClosed", this.#onDialogClosed);
 			client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
-			if (this.#ownsPage) {
+			if (this.#ownsPage || (payload.mode === "attach" && payload.userDriven)) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
-				// IntersectionObserver, and input acknowledgements. Keep owned tabs
-				// interactive without raising a window; explicit settle-freeze still applies.
+				// IntersectionObserver, and input acknowledgements; in a visible browser a tab
+				// that was never selected drops trusted input outright. Keep the page
+				// interactive without selecting its tab or raising a window, including a user's
+				// page in a background tab; explicit settle-freeze still applies. It ends with
+				// this connection's session (on the relay, with the bridge's last session).
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = new WebMcpController(this.#page);
 			await installVitalsObservers(this.#page);
 			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
-			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
+			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
 				perTab: !this.#userDriven,
+				pageEvents: payload.mode === "attach" && payload.relay === true,
 			});
-			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
+			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(
 				this.#page,
@@ -1893,9 +2198,10 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Tell the omp browser relay this worker drives the adopted page, so the
-	 * relay adds it to the per-window "omp" tab group. Best-effort: plain CDP
-	 * backends (real Chrome, cmux) reject the relay-private method.
+	 * Tell the omp browser relay this worker drives the adopted page, so the relay adds it to the per-window "omp"
+	 * tab group. The supervisor's connect URL claims it already (`?claim=`); an older relay still serving this
+	 * machine ignores that and learns of the claim only here. Best-effort: plain CDP backends (real Chrome, cmux)
+	 * reject the relay-private method.
 	 */
 	async #claimRelayTarget(page: Page): Promise<void> {
 		let session: CDPSession | undefined;
@@ -2050,7 +2356,12 @@ export class WorkerCore {
 			runtime.setCwd(msg.session.cwd);
 			const onFloatingRejection = (reason: unknown): void => this.#recordFloatingRejection(active, reason);
 			runtime.setRunScope({
-				page: bindRunFacade(runPage.page, signal, active.rejectionOwner, onFloatingRejection),
+				page: bindRunFacade(
+					createRunPage(runPage.page, signal),
+					signal,
+					active.rejectionOwner,
+					onFloatingRejection,
+				),
 				browser: bindRunFacade(browser, signal, active.rejectionOwner, onFloatingRejection),
 				tab: bindRunFacade(tabApi, signal, active.rejectionOwner, onFloatingRejection),
 				assert: (cond: unknown, text?: string): void => {
@@ -2295,10 +2606,13 @@ export class WorkerCore {
 			selector !== undefined && opts?.zeroMatchAfterMs !== undefined && parseAriaRefSelector(selector) === null
 				? { selector, afterMs: opts.zeroMatchAfterMs }
 				: undefined;
-		// Fired when the watchdog wins the race (tears down the in-flight action) and in
+		// Fired when the watchdog or a dialog wins the race (tears down the in-flight action) and in
 		// the finally (stops the watchdog's polling once the op settles either way).
 		const earlyAc = new AbortController();
+		const dialogs = opts?.dialog ? this.#dialogs : undefined;
 		try {
+			const openDialog = dialogs?.state();
+			if (openDialog?.open) throw dialogBlocksPageError(label, openDialog, "is open");
 			// A download this op starts before a pending `waitForDownload()` has enabled
 			// tracking would bypass it, so hold the op until tracking applies — within
 			// the op's own deadline, so a stalled enable surfaces as this op's timeout.
@@ -2309,12 +2623,21 @@ export class WorkerCore {
 					arming.catch(() => undefined),
 				);
 			if (opts?.awaitNavigation) await this.#awaitRequestedNavigation(opSignal, perOpTimeoutMs);
-			if (!watchdog) return await fn(opSignal);
+			if (!watchdog && !dialogs) return await fn(opSignal);
 			const racedSignal = AbortSignal.any([opSignal, earlyAc.signal]);
-			return await Promise.race([
-				fn(racedSignal),
-				this.#zeroMatchWatchdog(watchdog.selector, label, watchdog.afterMs, racedSignal),
-			]);
+			const racers = [fn(racedSignal)];
+			if (watchdog) racers.push(this.#zeroMatchWatchdog(watchdog.selector, label, watchdog.afterMs, racedSignal));
+			if (dialogs) {
+				racers.push(
+					// The finally tears the call down once this settles the race.
+					dialogs.whenPending(racedSignal).then(state => {
+						if (opts?.dialog === "blocks") throw dialogBlocksPageError(label, state, "opened");
+						// An "answers" op is an input that resolves to nothing; the dialog is what it did.
+						return undefined as T;
+					}),
+				);
+			}
+			return await Promise.race(racers);
 		} catch (err) {
 			// Fail fast with a named, attributable error instead of the opaque whole-cell timeout:
 			// our per-op deadline fired, or puppeteer's own (equal) timeout fired first — having
@@ -2460,20 +2783,24 @@ export class WorkerCore {
 		// brings, not the one it leaves; `read` also reruns once when a navigation takes its context mid-call. Waits for
 		// events (navigation, response, download), dialogs and network setup run at once: they may be what the
 		// navigation waits on, or must catch its first request.
+		// Both run the page's script, which a confirm or prompt stops until it is answered (`OpOptions.dialog`).
 		const read = <T>(label: string, perOpMs: number, fn: (sig: AbortSignal) => Promise<T>): Promise<T> =>
-			op(label, perOpMs, sig => this.#rereadAfterNavigation(sig, perOpMs, () => fn(sig)), { awaitNavigation: true });
+			op(label, perOpMs, sig => this.#rereadAfterNavigation(sig, perOpMs, () => fn(sig)), {
+				awaitNavigation: true,
+				dialog: "blocks",
+			});
 		const act = <T>(
 			label: string,
 			perOpMs: number,
 			fn: (sig: AbortSignal) => Promise<T>,
 			selectorOpts?: OpOptions,
-		): Promise<T> => op(label, perOpMs, fn, { ...selectorOpts, awaitNavigation: true });
+		): Promise<T> => op(label, perOpMs, fn, { dialog: "blocks", ...selectorOpts, awaitNavigation: true });
 		// Hand user-facing handles the fail-fast per-op guard so their interactive
 		// methods (`.click()`, `.type()`, …) can't outrun the cell budget (issue #9535).
 		const enrich = (handle: ElementHandle): ActionableHandle =>
 			toActionableHandle(
 				handle,
-				(label, fn) => op(label, actionOpMs, fn),
+				(label, fn, dialog = "blocks") => op(label, actionOpMs, fn, { dialog }),
 				async () => {
 					// Raw Puppeteer actions have no AbortSignal. Poison + dispose every
 					// cached handle and stop navigation before reporting a recoverable timeout.
@@ -2582,14 +2909,11 @@ export class WorkerCore {
 							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, click);
 							return;
 						}
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await clickElement(handle, label, sig, click);
-						} finally {
-							void handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							clickElement(handle, label, sig, click),
+						);
 					},
-					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
+					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS, dialog: "answers" },
 				),
 			type: (selector, text) =>
 				act(
@@ -2620,21 +2944,26 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			press: (key, opts) =>
-				act(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
-					assertTabPressArgs(key, opts);
-					const selector = opts?.selector;
-					if (selector) {
-						if (parseAriaRefSelector(selector) !== null) {
-							const handle = await this.#resolveAriaRef(selector);
-							try {
-								await untilAborted(sig, () => handle.focus());
-							} finally {
-								await handle.dispose().catch(() => undefined);
-							}
-						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
-					}
-					await pressKey(page, key, undefined, sig);
-				}),
+				act(
+					`tab.press(${JSON.stringify(key)})`,
+					actionOpMs,
+					async sig => {
+						assertTabPressArgs(key, opts);
+						const selector = opts?.selector;
+						if (selector) {
+							if (parseAriaRefSelector(selector) !== null) {
+								const handle = await this.#resolveAriaRef(selector);
+								try {
+									await untilAborted(sig, () => handle.focus());
+								} finally {
+									await handle.dispose().catch(() => undefined);
+								}
+							} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
+						}
+						await pressKey(page, key, undefined, sig);
+					},
+					{ dialog: "answers" },
+				),
 			scroll: (deltaX, deltaY, opts) =>
 				act("tab.scroll()", actionOpMs, async sig => {
 					if (!opts?.selector) {
@@ -2669,13 +2998,22 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: opts?.timeout === undefined ? ZERO_MATCH_FAIL_FAST_MS : undefined },
 				);
 			},
-			waitForSelector: (selector, opts) => {
+			waitForSelector: async (selector, opts) => {
+				opts = selectorWaitOptions(opts);
 				const w = waitMs(opts?.timeout);
 				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
-						if (parseAriaRefSelector(selector) !== null) return enrich(await this.#resolveAriaRef(selector));
+						const ref = parseAriaRefSelector(selector);
+						if (ref !== null) {
+							const handle = await waitForSelectorHandle(() => resolveAriaRefHandle(page, ref), opts, sig);
+							return handle ? enrich(handle) : null;
+						}
+						if (opts.state === "detached") {
+							const normalized = normalizeSelector(selector);
+							return await waitForDetached(() => page.$(normalized), sig);
+						}
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {
 								timeout: w,
@@ -2689,7 +3027,10 @@ export class WorkerCore {
 					{
 						selector,
 						// `hidden: true` waits for zero matches — that is success, never a fast-fail.
-						zeroMatchAfterMs: opts?.timeout === undefined && !opts?.hidden ? ZERO_MATCH_FAIL_FAST_MS : undefined,
+						zeroMatchAfterMs:
+							opts?.timeout === undefined && !opts?.hidden && opts?.state !== "detached"
+								? ZERO_MATCH_FAIL_FAST_MS
+								: undefined,
 					},
 				);
 			},
@@ -2705,19 +3046,9 @@ export class WorkerCore {
 				// User code may have side effects and may throw any message, so it waits for a requested navigation but
 				// never runs again.
 				act("tab.evaluate()", INF, sig =>
-					untilAborted(sig, async () => {
-						const realm = page.mainFrame().mainRealm();
-						// Puppeteer evaluates strings as expressions and ignores extra args; preserve
-						// that behavior without inspecting or adopting otherwise-unused handles.
-						if (typeof fn === "string") return realm.evaluate(fn);
-						const { args: adopted, dispose } = await adoptElementArgs(realm, args);
-						try {
-							throwIfAborted(sig);
-							return await realm.evaluate(fn as (...a: unknown[]) => unknown, ...adopted);
-						} finally {
-							await dispose();
-						}
-					}),
+					untilAborted(sig, () =>
+						evaluateInRealm(page.mainFrame().mainRealm(), fn as PageFunction, args, false, sig),
+					),
 				) as never,
 			scrollIntoView: selector =>
 				act(
@@ -2773,6 +3104,7 @@ export class WorkerCore {
 				);
 			},
 			waitForUrl: (pattern, opts) => {
+				assertUrlPattern(pattern);
 				const w = waitMs(opts?.timeout);
 				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
 			},
@@ -2782,7 +3114,9 @@ export class WorkerCore {
 			},
 			id: async id => enrich(await this.#resolveCachedHandle(id)),
 			ref: async id => enrich(await this.#resolveAriaRef(id)),
-			cookies: opts => act("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig)),
+			// The browser keeps cookies, so a dialog stopping the page's script does not stop this read.
+			cookies: opts =>
+				op("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig), { awaitNavigation: true }),
 			setCookies: (...cookies) => op("tab.setCookies()", actionOpMs, sig => setPageCookies(page, cookies, sig)),
 			clearCookies: opts => op("tab.clearCookies()", actionOpMs, sig => clearPageCookies(page, opts, sig)),
 			storage: (kind, opts) => act("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
@@ -3039,14 +3373,11 @@ export class WorkerCore {
 					`tab.dblclick(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 });
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 }),
+						);
 					},
-					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
+					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS, dialog: "answers" },
 				),
 			hover: selector =>
 				act(
@@ -3055,7 +3386,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await untilAborted(sig, () => handle.hover());
+							await hoverElement(handle, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
@@ -3081,12 +3412,9 @@ export class WorkerCore {
 					`tab.check(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await setElementChecked(handle, true, `tab.check(${JSON.stringify(selector)})`, sig);
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							setElementChecked(handle, true, `tab.check(${JSON.stringify(selector)})`, sig),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3095,12 +3423,9 @@ export class WorkerCore {
 					`tab.uncheck(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await setElementChecked(handle, false, `tab.uncheck(${JSON.stringify(selector)})`, sig);
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							setElementChecked(handle, false, `tab.uncheck(${JSON.stringify(selector)})`, sig),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3336,8 +3661,6 @@ export class WorkerCore {
 		if (!opts.silent) {
 			const lines = formatScreenshot({
 				saveFullRes,
-				savedMimeType,
-				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
 				capture: { area: screenshotArea(opts), scale: captureScale },
@@ -3466,8 +3789,11 @@ export class WorkerCore {
 		}
 	}
 
-	/** Find what takes a `tab.uploadFile` under the action deadline; the result owns the resolved handle. */
-	async #prepareTabUpload(
+	/**
+	 * Find what takes a `tab.uploadFile` under the action deadline, looking the selector up again when the page
+	 * replaced a chooser trigger before its click ({@link withLiveElement}); the result owns the resolved handle.
+	 */
+	#prepareTabUpload(
 		selector: string,
 		filePaths: string[],
 		label: string,
@@ -3477,29 +3803,35 @@ export class WorkerCore {
 		session: SessionSnapshot,
 	): Promise<PreparedUpload> {
 		const page = this.#requirePage();
-		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
-		try {
-			const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
-			const prepared = await prepareElementUpload(
-				page,
-				handle,
-				absolute,
-				label,
-				route,
-				this.#requireUploads(),
-				signal,
-			);
-			return {
-				...prepared,
-				dispose: async () => {
-					await prepared.dispose();
+		const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
+		return withLiveElement(
+			() => this.#resolveActionHandle(selector, timeoutMs, signal),
+			async handle => {
+				try {
+					const prepared = await prepareElementUpload(
+						page,
+						handle,
+						absolute,
+						label,
+						route,
+						this.#requireUploads(),
+						signal,
+					);
+					return {
+						...prepared,
+						dispose: async () => {
+							await prepared.dispose();
+							await handle.dispose().catch(() => undefined);
+						},
+					};
+				} catch (error) {
 					await handle.dispose().catch(() => undefined);
-				},
-			};
-		} catch (error) {
-			await handle.dispose().catch(() => undefined);
-			throw error;
-		}
+					throw error;
+				}
+			},
+			signal,
+			{ retry: parseAriaRefSelector(selector) === null },
+		);
 	}
 
 	async #waitForUrl(pattern: string | RegExp, timeout: number, signal: AbortSignal): Promise<string> {
@@ -3597,6 +3929,32 @@ export class WorkerCore {
 			this.#requirePage().locator(normalizeSelector(selector)).setTimeout(timeoutMs).waitHandle({ signal: sig }),
 		)) as ElementHandle;
 	}
+
+	/**
+	 * Runs `click` on the element `selector` resolves to, resolving it again whenever the page replaced it before the
+	 * click reached it ({@link withLiveElement}). An `aria-ref` resolves to the replaced node again, so its replacement
+	 * fails at once.
+	 */
+	#clickSelector(
+		selector: string,
+		timeoutMs: number,
+		sig: AbortSignal,
+		click: (handle: ElementHandle) => Promise<void>,
+	): Promise<void> {
+		return withLiveElement(
+			() => this.#resolveActionHandle(selector, timeoutMs, sig),
+			async handle => {
+				try {
+					await click(handle);
+				} finally {
+					void handle.dispose().catch(() => undefined);
+				}
+			},
+			sig,
+			{ retry: parseAriaRefSelector(selector) === null },
+		);
+	}
+
 	#clearElementCache(): void {
 		this.#observedElements.clear();
 		if (this.#elementCache.size === 0) {

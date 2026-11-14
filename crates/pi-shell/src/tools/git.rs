@@ -18,6 +18,7 @@ use crate::{
 		AddRequest, FATAL_EXIT, GitLayers, Outcome, env_redirected,
 		guard::{Decision, REFUSED_EXIT, Review},
 	},
+	sys::pathext::Pathext,
 };
 
 /// What the worker decided.
@@ -220,16 +221,38 @@ fn args_of(args: &[String]) -> Vec<BString> {
 fn git_path(call: &ToolCall) -> Option<BString> {
 	let path = call.env.get(b"PATH")?;
 	let cwd = call.cwd.to_path_lossy();
-	let separator = if cfg!(windows) { ";" } else { ":" };
+	let rules = if cfg!(windows) {
+		let pathext = call.env.get(b"PATHEXT").map(|v| v.to_os_str_lossy());
+		PathRules::Windows(Pathext::parse(pathext.as_deref()))
+	} else {
+		PathRules::Unix
+	};
+	let git = find_git(path, &cwd, &rules)?;
+	Some(BString::from(git.to_string_lossy().as_bytes()))
+}
+
+/// How a `PATH` value names executables.
+enum PathRules {
+	/// `:`-separated; a file with an execute bit.
+	Unix,
+	/// `;`-separated; `git` spelled with a `PATHEXT` suffix (`git.exe`), the
+	/// name Windows can launch.
+	Windows(Pathext),
+}
+
+/// The first `git` in `path`, entries relative to `cwd` (an empty one is
+/// `cwd`), as the file to launch.
+fn find_git(path: &[u8], cwd: &Path, rules: &PathRules) -> Option<PathBuf> {
+	let separator = match rules {
+		PathRules::Unix => ":",
+		PathRules::Windows(_) => ";",
+	};
 	path.split_str(separator).find_map(|dir| {
-		let dir = dir.to_path_lossy();
-		let dir: PathBuf = if dir.as_os_str().is_empty() {
-			cwd.to_path_buf()
-		} else {
-			cwd.join(dir)
-		};
-		let git = dir.join("git");
-		executable(&git).then(|| BString::from(git.to_string_lossy().as_bytes()))
+		let git = cwd.join(dir.to_path_lossy()).join("git");
+		match rules {
+			PathRules::Unix => executable(&git).then_some(git),
+			PathRules::Windows(pathext) => pathext.resolve(git),
+		}
 	})
 }
 
@@ -241,5 +264,25 @@ fn executable(path: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn executable(path: &Path) -> bool {
-	path.with_extension("exe").is_file()
+	path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Windows launches `git.exe`, never the bare `git` it was found as
+	/// (issue #18722); entries without one are skipped.
+	#[test]
+	fn windows_lookup_returns_the_pathext_spelling() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		std::fs::create_dir(temp.path().join("cmd")).expect("create cmd");
+		std::fs::write(temp.path().join("cmd/git.exe"), b"").expect("write git.exe");
+		let rules = PathRules::Windows(Pathext::parse(None));
+		assert_eq!(
+			find_git(b"missing;cmd", temp.path(), &rules),
+			Some(temp.path().join("cmd").join("git.exe"))
+		);
+		assert_eq!(find_git(b"missing", temp.path(), &rules), None);
+	}
 }
