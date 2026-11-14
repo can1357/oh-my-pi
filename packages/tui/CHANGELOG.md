@@ -20,6 +20,7 @@
 - Fixed DEC 2048 in-band resize reports typing `48;rows;cols;…` into the composer on iTerm2 ([#16695](https://github.com/can1357/oh-my-pi/pull/16695) by [@demon-i386](https://github.com/demon-i386))
 - Fixed the working-row shimmer dropping to a few frames a second while omp waits on a tool or the model, on terminals without synchronized output such as tmux 3.6 ([#19032](https://github.com/can1357/oh-my-pi/pull/19032) by [@nategriffin26](https://github.com/nategriffin26))
 - Expanded tool output (Ctrl+O) now shows the complete, soft-wrapped message in IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of the first 12 lines cut at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#18648](https://github.com/can1357/oh-my-pi/pull/18648) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Switched the `/resume` session picker to edge-triggered scrolling, preventing premature list shifting at the vertical midpoint ([#18604](https://github.com/can1357/oh-my-pi/pull/18604) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.20.0] - 2026-11-12
 
@@ -120,7 +121,6 @@
 
 ### Fixed
 
-- Switched the `/resume` session picker to edge-triggered scrolling, preventing premature list shifting at the vertical midpoint ([#18604](https://github.com/can1357/oh-my-pi/pull/18604) by [@SuperUserA](https://github.com/SuperUserA))
 - Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).
 - Fixed the `│` rails of a wrapped box-drawing tree line (`├── **label**: …`) taking the color and weight of the node's leading bold, italic or code span under colorful Markdown; continuation rails now match the first row's rails and the node text keeps its own styling ([#18584](https://github.com/can1357/oh-my-pi/pull/18584) by [@chan1103](https://github.com/chan1103))
 - Fixed relayed Windows terminal events after an event-loop stall so they neither abort the running turn nor type TSP data into the composer ([#18512](https://github.com/can1357/oh-my-pi/issues/18512)).
