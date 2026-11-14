@@ -4013,6 +4013,11 @@ export interface ShellVizOptions {
   speed: number
   selectedNode?: string
   expandedNodes: Array<string>
+  /**
+   * The script is a command still streaming in, not yet run: its
+   * unfinished end is drawn as it will most likely continue.
+   */
+  streaming?: boolean
 }
 
 /**
