@@ -79,6 +79,9 @@ executed experiment; no native runtime tests were rerun here.
     local references and source-review limits.
 13. [S1 implementation and validation](13-required-inventory-s1.md): explicit
     required-check policy, locally executed tests and remaining runtime gaps.
+14. [S2 input snapshots and applicability](14-input-snapshots-s2.md): native CAS
+    capture, canonical input/action keys, trusted supplemental context and
+    observed-stability limits; no joined verification gate.
 
 ## Final comparison
 

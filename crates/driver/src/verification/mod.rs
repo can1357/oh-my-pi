@@ -1,10 +1,11 @@
 //! Source-bound verification policy owned by the production driver.
 //!
-//! This first slice evaluates an explicit inventory of host-observed checks.
+//! Evaluates an explicit inventory of host-observed checks and captures native
+//! source/context identities for conservative applicability keys.
 //! It performs no execution, persistence, model inference or commit admission.
-//! Callers must validate evidence provenance and capture complete input
-//! identities before submitting observations. Later adapters will supply that
-//! joined path.
+//! Callers must validate evidence provenance and admit complete supplemental
+//! input identities before submitting observations. Later adapters will supply
+//! that joined path.
 //!
 //! ```
 //! use omp_core::{Hash32, Str};
@@ -26,9 +27,14 @@
 //! ```
 
 mod policy;
+mod snapshot;
 
 pub use policy::{
 	CheckAssessment, CheckDisposition, CheckObservation, CheckOutcome, CheckRequirement,
 	GateAssessment, GateVerdict, InconclusiveReason, PolicyError, VerificationPolicy,
 	VerificationScope,
+};
+pub use snapshot::{
+	ContextField, SnapshotContext, SnapshotError, VerificationSnapshot,
+	capture_verification_snapshot,
 };

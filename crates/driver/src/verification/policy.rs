@@ -171,6 +171,16 @@ pub struct VerificationPolicy {
 }
 
 impl VerificationPolicy {
+	/// The immutable input and policy identities this inventory assesses.
+	pub const fn scope(&self) -> VerificationScope {
+		self.scope
+	}
+
+	/// Declared checks in assessment order; callers cannot mutate the inventory.
+	pub fn requirements(&self) -> &[CheckRequirement] {
+		&self.checks
+	}
+
 	/// Validates an inventory without executing or trusting any check.
 	///
 	/// At least one check must be required. Optional-only and empty inventories

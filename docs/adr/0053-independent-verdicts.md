@@ -90,7 +90,12 @@ Status: Partially implemented.
   required-check inventory and PASS/FAIL/INCONCLUSIVE reducer. It checks supplied
   scope/evidence identities and retains every declared result. Its public contract
   tests are in `crates/driver/tests/verification_policy.rs`.
-- Not yet implemented: source/environment capture, evidence integrity/provenance
+- S2 adds native CAS source capture and canonical applicability keys in
+  `crates/driver/src/verification/snapshot.rs`. Supplemental dependency,
+  toolchain, environment and test identities are trusted host admissions;
+  unknown categories refuse capture. Matching captures detect observed drift,
+  not atomicity against external writers.
+- Not yet implemented: automatic supplemental-input closure, evidence integrity/provenance
   validation, structured independent verdict, required-gate integration into ADW
   acceptance, durable verification receipts, acceptance criteria and Issue-to-PR
   recipe. The S1 reducer is not a live gate and does not complete D1–D5.

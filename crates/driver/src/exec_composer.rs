@@ -209,6 +209,22 @@ fn repo_pins(root: &Path) -> Result<RepoPins, io::Error> {
 pub struct EnvironmentInputs(EnvClient);
 
 impl EnvironmentInputs {
+	/// Shares the native capture reader without creating a remote backend.
+	pub(crate) fn new(environment: EnvClient) -> Self {
+		Self(environment)
+	}
+
+	/// Verified capture paths and blob lengths, using the execution manifest
+	/// reader.
+	pub(crate) async fn captured_files(&self, manifest: Digest) -> io::Result<Vec<(String, u64)>> {
+		Ok(self
+			.files(manifest)
+			.await?
+			.into_iter()
+			.map(|file| (file.path, file.digest.size))
+			.collect())
+	}
+
 	async fn bytes(&self, digest: Digest) -> io::Result<Bytes> {
 		let download = self
 			.0
