@@ -43,6 +43,7 @@ import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindi
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
+import { refuseToolShellAutoPrint } from "./cli/tool-shell-launch";
 import { runAutoUpdate } from "./cli/auto-update";
 import { managedInstallName } from "./cli/managed-install";
 import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
@@ -1928,6 +1929,20 @@ export async function runRootCommand(
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
 		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		// A launch from inside an omp tool process (OMPCODE=1) with no terminal would run
+		// headless on whatever argv or stdin says, so it is refused unless it asks for
+		// `-p`/`--mode` itself. Decided before stdin is read: a refused launch must not
+		// consume it.
+		const toolShellRefusal = refuseToolShellAutoPrint({
+			env: process.env,
+			print: parsedArgs.print,
+			mode: parsedArgs.mode,
+			stdinIsTerminal: process.stdin.isTTY === true,
+		});
+		if (toolShellRefusal !== undefined) {
+			process.stderr.write(toolShellRefusal);
+			process.exit(2);
+		}
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always

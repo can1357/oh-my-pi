@@ -27,6 +27,7 @@ import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import { jsKernelEnv } from "./kernel-env";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
@@ -498,9 +499,50 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		if (worker.mode !== "process") {
 			throw new Error("JS eval worker smoke fell back from the isolated subprocess");
 		}
+		// Model code in the kernel must see `bun` as bun and carry the tool-process mark.
+		// In a compiled omp with no bun on PATH, Bun's shell would otherwise resolve `bun` to
+		// this executable, which starts omp (kernel-env.ts). `--version` is the only word
+		// that ever follows `bun` here, so a regression prints a version, never an agent.
+		const output = await smokeRun(session, {
+			runId: "smoke-bun",
+			code: "console.log(JSON.stringify({ bun: (await Bun.$`bun --version`.text()).trim(), ompcode: process.env.OMPCODE ?? null }));",
+		});
+		const probe: unknown = JSON.parse(output.trim().split("\n").at(-1) ?? "null");
+		if (!isRecord(probe) || typeof probe.bun !== "string" || !/^\d+\.\d+\.\d+/.test(probe.bun)) {
+			throw new Error(
+				`JS eval worker smoke: \`bun --version\` in the kernel printed ${JSON.stringify(isRecord(probe) ? probe.bun : probe)}, not a bun version`,
+			);
+		}
+		if (probe.ompcode !== "1") {
+			throw new Error(`JS eval worker smoke: kernel lacks OMPCODE=1 (${JSON.stringify(probe)})`);
+		}
 	} finally {
 		await worker.terminate().catch(() => undefined);
 	}
+}
+
+/** Run one cell in a smoke session and return what it printed; the worker speaks the run protocol directly. */
+function smokeRun(session: JsSession, run: { runId: string; code: string }): Promise<string> {
+	const { promise, resolve, reject } = Promise.withResolvers<string>();
+	let text = "";
+	const unsubscribe = session.worker.onMessage(msg => {
+		if (msg.type === "text" && msg.runId === run.runId) {
+			text += msg.chunk;
+			return;
+		}
+		if (msg.type !== "result" || msg.runId !== run.runId) return;
+		unsubscribe();
+		if (msg.ok) resolve(text);
+		else reject(errorFromPayload(msg.error));
+	});
+	session.worker.send({
+		type: "run",
+		runId: run.runId,
+		code: run.code,
+		filename: `${run.runId}.ts`,
+		snapshot: { cwd: session.cwd, sessionId: session.sessionId },
+	});
+	return raceWithTimeout(promise, WORKER_INIT_TIMEOUT_MS, "JS eval worker smoke cell timed out");
 }
 
 function javascriptPreludeSources(session: ToolSession): EvalPreludeSource[] {
@@ -1021,9 +1063,12 @@ function spawnJsWorker(): JsEvalWorkerHandle {
 function spawnBunWorker(): JsEvalWorkerHandle {
 	try {
 		const hostEntry = workerHostEntry();
+		// Both variants run model code under `jsKernelEnv`: the tool-process mark and the
+		// compiled binary's `bun` shim (kernel-env.ts).
+		const env = jsKernelEnv(workerEnvFromParent());
 		const worker = hostEntry
-			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
-			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });
+			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"], env })
+			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module", env });
 		const channel = new MessageChannel();
 		const outbox: WorkerOutboxMessage = { type: "outbox", port: channel.port2 };
 		worker.postMessage(outbox, [channel.port2]);
@@ -1039,7 +1084,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 function spawnJsProcess(): JsEvalWorkerHandle {
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG),
-		env: workerEnvFromParent(),
+		env: jsKernelEnv(workerEnvFromParent()),
 		exitLabel: "JS eval worker",
 		detached: shouldDetachKernel(process.platform),
 		reportCleanExit: true,
