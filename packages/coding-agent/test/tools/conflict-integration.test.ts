@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -834,6 +835,63 @@ describe("write resolves conflicts via conflict://N", () => {
 		await expect(promise).rejects.toThrow(/stale|outside the current file|no longer/i);
 		// File untouched by the failed write.
 		expect(await Bun.file(filePath).text()).toBe("line 1\nresolved by hand\nline N\n");
+	});
+
+	it.each(["conflict://1", "conflict://*"])(
+		"an edit on the block's lines under the pre-%s tag is rejected as stale",
+		async uri => {
+			await Bun.write(path.join(tempDir, "tagged.ts"), TWO_WAY);
+			const session = createTestSession(tempDir);
+			const read = await getTool(session, "read");
+			const write = await getTool(session, "write");
+
+			const readTag = /\[tagged\.ts#([0-9A-F]{4})\]/.exec(
+				getText(await read.execute("read-tagged", { path: "tagged.ts" })),
+			)![1];
+			await write.execute("write-tagged", { path: uri, content: "@ours" });
+
+			const stale = getText(
+				await new EditTool(session, "hashline").execute("edit-stale", {
+					input: `[tagged.ts#${readTag}]\nPUT 3.=3:\n+oldApi(y)\n`,
+				}),
+			);
+			expect(stale).toContain("file changed between read and edit");
+			expect(await Bun.file(path.join(tempDir, "tagged.ts")).text()).toBe("line 1\noldApi(x)\nline N\n");
+		},
+	);
+
+	it("an edit outside the block under the pre-resolution tag lands at its new position", async () => {
+		const filePath = path.join(tempDir, "notes.txt");
+		await Bun.write(
+			filePath,
+			[
+				"alpha line one",
+				"<<<<<<< HEAD",
+				"ours body",
+				"=======",
+				"theirs body",
+				">>>>>>> feat",
+				"omega line seven",
+				"zeta line eight",
+				"",
+			].join("\n"),
+		);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		const readTag = /\[notes\.txt#([0-9A-F]{4})\]/.exec(
+			getText(await read.execute("read-notes", { path: "notes.txt" })),
+		)![1];
+		await write.execute("write-notes", { path: "conflict://1", content: "@ours" });
+
+		const result = getText(
+			await new EditTool(session, "hashline").execute("edit-notes", {
+				input: `[notes.txt#${readTag}]\nPUT 7.=7:\n+omega line changed\n`,
+			}),
+		);
+		expect(result).toContain("Recovered by remapping stale line anchors");
+		expect(await Bun.file(filePath).text()).toBe("alpha line one\nours body\nomega line changed\nzeta line eight\n");
 	});
 
 	it("strips hashline display prefixes from replacement content when hashline mode is active", async () => {
