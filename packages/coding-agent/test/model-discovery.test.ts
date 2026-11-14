@@ -2887,6 +2887,41 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(maxTokensById["openai-test/no-limits"]).toBe(32_768);
 	});
 
+	test("openai-models-list skips a model whose id names two vendors instead of dropping the provider (#18770)", async () => {
+		const ctx = {
+			fetch: (async (input: unknown) => {
+				if (String(input) !== "http://127.0.0.1:9993/v3/models") {
+					throw new Error(`Unexpected URL: ${String(input)}`);
+				}
+				// Eden AI's gateway prefixes each id with the hosting vendor. Rows that
+				// advertise reasoning levels are classified while their spec is prepared.
+				const data = ["vertex/gemini-4-carbon@eu", "amazon/openai.gpt-6.1-sol", "mistral/mistral-large-latest"].map(
+					id => ({
+						id,
+						object: "model",
+						owned_by: id.split("/")[0],
+						...(id.startsWith("mistral/") ? {} : { supported_reasoning_levels: ["low", "high"] }),
+					}),
+				);
+				return new Response(JSON.stringify({ object: "list", data }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) satisfies FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		};
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "eden-ai",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9993/v3",
+				discovery: { type: "openai-models-list", injectV1: false },
+			},
+			ctx,
+		);
+		expect(models.map(model => model.id)).toEqual(["vertex/gemini-4-carbon@eu", "mistral/mistral-large-latest"]);
+	});
+
 	// Runs one `/v1/models` payload through the real `openai-models-list`
 	// discovery path and returns the output cap each row ended up with, so the
 	// precedence assertions below observe the boundary a user sees rather than
