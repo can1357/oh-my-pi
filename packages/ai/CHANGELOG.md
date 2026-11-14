@@ -123,6 +123,7 @@
 - Fixed Codex Responses requests losing tool namespaces and developer-provided additional tools when replayed through the authentication gateway.
 - Fixed Gemini malformed responses being treated as unhandled stop reasons and losing token usage; they are now handled as transient transport errors.
 - Improved Cursor compatibility with TLS-intercepting proxies that block HTTP/2 by falling back to HTTP/1 for subsequent turns.
+- Fixed requests to `.local` LAN endpoints (e.g. `gpu-box.local:8080`) being sent through an egress proxy — `PI_PROXY` or `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` — instead of staying on the local network ([#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
