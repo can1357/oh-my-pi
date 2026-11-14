@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { providerRefreshesOnUseOnly } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -794,6 +795,12 @@ export class CredentialSelector {
 		const forceRefreshIndex = options?.forceRefresh
 			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
 			: undefined;
+		// An on-use-only provider (`refresh { on-use-only #true }`) mints a token
+		// only behind a request that is about to use it. A preflight for a sibling
+		// account has no such request, and one host rotating a whole pool together
+		// is what links those accounts, so only the serving candidate refreshes.
+		const onUseOnlyPreflight = providerRefreshesOnUseOnly(provider);
+		const servingIndex = forceRefreshIndex ?? candidates[0]?.selection.index;
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
@@ -819,6 +826,10 @@ export class CredentialSelector {
 					(rejectedAccess === undefined || candidate.selection.credential.access !== rejectedAccess);
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
 				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
+				// On-use-only: a stale credential this request will not use stays as it
+				// is. Refreshing it here would mint the whole pool's tokens with no
+				// request behind them, which is the linking pattern the rule prevents.
+				if (onUseOnlyPreflight && candidate.selection.index !== servingIndex) return;
 				const latestCredential = this.#deps.pool.credentials(provider)[candidate.selection.index];
 				if (
 					!force &&
