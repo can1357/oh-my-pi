@@ -17,6 +17,8 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Added an opt-in decision layer (`decision.*`, off by default) that asks the judge which skills each task needs and hints or loads them with the request; see [docs/decision-layer.md](https://github.com/can1357/oh-my-pi/blob/main/docs/decision-layer.md) ([#19056](https://github.com/can1357/oh-my-pi/pull/19056) by [@Xytronix](https://github.com/Xytronix))
+- Added decision-layer tool preflight (`decision.tools.mode`, off by default): before the first request of a task, the judge picks which mounted `xd://` tools, including connected MCP server tools, the task needs and names them or delivers their docs with the request; see [docs/decision-layer.md](https://github.com/can1357/oh-my-pi/blob/main/docs/decision-layer.md#tools) ([#19057](https://github.com/can1357/oh-my-pi/pull/19057) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

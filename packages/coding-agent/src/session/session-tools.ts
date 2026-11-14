@@ -9,6 +9,7 @@ import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-m
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import type { ToolPreflightSource } from "../decision/tool-preflight";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
@@ -879,6 +880,11 @@ export class SessionTools {
 	/** Names currently presented as `xd://` devices. */
 	getMountedXdevToolNames(): string[] {
 		return [...(this.#xdev?.mountedNames ?? [])];
+	}
+
+	/** Mounted devices and enabled tool names for decision-layer tool preflight. */
+	toolPreflightSource(): ToolPreflightSource {
+		return { xdev: this.#xdev, enabledNames: this.getEnabledToolNames() };
 	}
 
 	/** Whether the edit tool is registered. */

@@ -185,6 +185,10 @@ import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { type DecisionRecord, DecisionRecords, formatDecisionStatus } from "../decision/records";
+import { DECISION_CONTEXT_BYTES, prepareSkillTurn } from "../decision/skill-turn";
+import { buildTaskContext } from "../decision/task-context";
+import { prepareToolPreflight, toolPreflightMessages } from "../decision/tool-preflight";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -1265,6 +1269,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#skillDescriptions: SkillDescriptionCatalog;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
+	/** Recent decision-layer outcomes, for `/decision status`. */
+	readonly #decisionRecords = new DecisionRecords();
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -9394,6 +9400,73 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Skill hint and bodies (`decision.skills`) and tool contracts (`decision.tools`) the decision
+	 * layer delivers with a user task. Both run concurrently and share one context budget.
+	 */
+	async #prepareDecisionMessages(
+		message: AgentMessage,
+		prompt: string,
+		isCurrent: () => boolean,
+		signal: AbortSignal | undefined,
+	): Promise<{ skills: AgentMessage[]; tools: AgentMessage[] }> {
+		// A user-invoked skill is an explicit request for it; its body is already part of the turn.
+		const invoked =
+			message.role === "custom" && isRecord(message.details) && typeof message.details.name === "string"
+				? message.details.name
+				: undefined;
+		const history = this.messages.filter(item => item !== message);
+		const judge = {
+			settings: this.settings,
+			registry: this.#modelRegistry,
+			sessionId: this.sessionId,
+			signal,
+			onUsage: journalJudgmentUsage(this.sessionManager),
+			telemetry: this.agent.telemetry,
+		};
+		const onRecord = (record: DecisionRecord) => this.#decisionRecords.add(record);
+		const [skills, tools] = await Promise.all([
+			prepareSkillTurn({
+				settings: this.settings,
+				skills: this.skills,
+				request: invoked ? `${prompt}\n/skill:${invoked}` : prompt,
+				history: invoked ? [...history, message] : history,
+				isCurrent,
+				judge,
+				source: this,
+				onRecord,
+			}),
+			prepareToolPreflight({
+				settings: this.settings,
+				source: this.#tools.toolPreflightSource(),
+				request: prompt,
+				taskContext: buildTaskContext(prompt, history),
+				isCurrent,
+				judge,
+				onRecord,
+			}),
+		]);
+		const skillBytes = skills.reduce(
+			(total, item) =>
+				total +
+				(item.role === "custom" && item.customType === SKILL_PROMPT_MESSAGE_TYPE && typeof item.content === "string"
+					? Buffer.byteLength(item.content)
+					: 0),
+			0,
+		);
+		return { skills, tools: toolPreflightMessages(tools, history, DECISION_CONTEXT_BYTES - skillBytes) };
+	}
+
+	/** `/decision status` report for this session. */
+	decisionStatus(): string {
+		return formatDecisionStatus({
+			settings: this.settings,
+			nativeJudge: hasNativeJudge(this.settings, this.#modelRegistry),
+			skills: this.skills,
+			records: this.#decisionRecords.list(),
+		});
+	}
+
+	/**
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
 	 *
 	 * `signal` cancels awaited setup (memory auto-recall) for both direct and queued turns.
@@ -9429,6 +9502,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.debug("Turn started before MCP discovery finished", { error: String(error) });
 			});
 		}
+		// Once per user task, outside the extension-policy retries below, and after MCP discovery so
+		// tool preflight sees connected servers: delivered with the request, never written into the
+		// cacheable system prefix.
+		const skills = this.skills;
+		const decision = this.#isUserTask(message)
+			? await this.#prepareDecisionMessages(message, prompt, isCurrent, signal)
+			: { skills: [], tools: [] };
+		if (!isCurrent()) return cancelled;
 		for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
 			await this.#memory.transition;
 			if (!isCurrent()) return cancelled;
@@ -9450,7 +9531,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			};
 			if (!overrideIsCurrent()) continue;
-			const messages: AgentMessage[] = [];
+			const messages: AgentMessage[] = [...decision.skills, ...decision.tools];
 			if (basePreparation.memoryNotice) {
 				messages.push({
 					role: "custom",
@@ -9498,7 +9579,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						this.#tools.clearTurnSystemPromptOverride();
 						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
 					}
-					return messages;
+					// A skill reload since preparation invalidates the selection, not the turn.
+					return this.skills === skills ? messages : messages.filter(item => !decision.skills.includes(item));
 				},
 			};
 		}

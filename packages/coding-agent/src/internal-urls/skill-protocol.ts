@@ -4,6 +4,8 @@
  * Resolves skill names to their SKILL.md files or relative paths within skill directories.
  *
  * URL forms:
+ * - skill:// or skill://?q=<query> - Pages the non-hidden catalogue, or searches it locally
+ *   (only while the progressive skill catalogue is active for the calling session)
  * - skill://<name> - Reads SKILL.md
  * - skill://<name>/<path> - Reads relative path within skill's baseDir
  * - skill://<namespace>/<name>[/<path>] - Same, for a collision-namespaced skill
@@ -13,6 +15,8 @@ import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { progressiveSkillsRequested } from "../decision/skill-projection";
+import { searchSkills, skillCatalogueDigest } from "../decision/skills";
 import { resolveContainedPath } from "../discovery/contained-path";
 import {
 	findStaleSkillStandIn,
@@ -293,6 +297,58 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 }
 
 /**
+ * `skill://` (every non-hidden skill by name) or `skill://?q=<query>` (local lexical search), paged
+ * by `limit` (1–100, default 50) and an opaque `cursor` that a changed catalogue or query rejects.
+ */
+function skillCatalogue(url: InternalUrl, skills: readonly Skill[]): InternalResource {
+	if (url.pathname && url.pathname !== "/") throw new Error("skill:// catalogue URLs cannot include a path");
+	const digest = skillCatalogueDigest(skills);
+	const query = (url.searchParams.get("q") ?? "").trim();
+	const rawLimit = url.searchParams.get("limit") ?? "50";
+	const limit = Number(rawLimit);
+	if (!/^\d+$/.test(rawLimit) || limit < 1 || limit > 100) {
+		throw new Error("skill:// catalogue limit must be an integer from 1 to 100");
+	}
+	let offset = 0;
+	const cursor = url.searchParams.get("cursor");
+	if (cursor) {
+		let decoded: unknown;
+		try {
+			decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+		} catch {
+			decoded = undefined;
+		}
+		if (
+			!Array.isArray(decoded) ||
+			decoded[0] !== digest ||
+			decoded[1] !== query ||
+			!Number.isSafeInteger(decoded[2]) ||
+			decoded[2] < 0
+		) {
+			throw new Error("Invalid or stale skill catalogue cursor; restart from skill:// or the original query");
+		}
+		offset = decoded[2];
+	}
+	const matches = searchSkills(skills, query);
+	if (offset > matches.length) throw new Error("Skill catalogue cursor is outside the result set");
+	const end = Math.min(offset + limit, matches.length);
+	const nextCursor =
+		end < matches.length ? Buffer.from(JSON.stringify([digest, query, end])).toString("base64url") : null;
+	const content = JSON.stringify(
+		{
+			skills: matches.slice(offset, end).map(({ name, description }) => ({ name, description })),
+			query,
+			total: matches.length,
+			coverageComplete: nextCursor === null,
+			nextCursor,
+		},
+		null,
+		2,
+	);
+	return { url: url.href, content, contentType: "application/json", size: Buffer.byteLength(content) };
+}
+
+/**
  * Handler for skill:// URLs.
  */
 export class SkillProtocolHandler implements ProtocolHandler {
@@ -311,6 +367,11 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		// The catalogue backs the progressive variant's discovery guidance; otherwise every
+		// non-hidden skill is already listed in the system prompt.
+		if (!(url.rawHost || url.hostname) && context?.settings && progressiveSkillsRequested(context.settings)) {
+			return skillCatalogue(url, context.skills ?? getActiveSkills());
+		}
 		let target: LocatedSkillTarget;
 		try {
 			target = await locateSkillTarget(url, context, false);
