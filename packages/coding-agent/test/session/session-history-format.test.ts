@@ -512,4 +512,32 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).not.toContain("LONGSECRET");
 		expect(output.match(/\[redacted\]/g)).toHaveLength(3);
 	});
+
+	it("preserves a skill-prompt's user text past the 120-char body cap", () => {
+		const body = `# in-your-own-words\n${"Instruction line filling the skill body. ".repeat(20)}`;
+		const args = "Now explain closures in your own words, focusing on the counter example";
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "custom",
+					customType: "skill-prompt",
+					content: `[IMPORTANT: User invoked the "in-your-own-words" skill; follow its instructions. Full skill below.]\n\n${body}\n\n---\n\nUser: ${args}`,
+					display: true,
+					attribution: "user",
+					details: {
+						name: "in-your-own-words",
+						path: "/skills/in-your-own-words/SKILL.md",
+						args,
+						lineCount: 21,
+					},
+					timestamp: 1,
+				},
+			],
+			{ watchedRoles: true },
+		);
+
+		expect(output).toContain("[skill:in-your-own-words]");
+		expect(output).toContain("counter example");
+	});
+
 });

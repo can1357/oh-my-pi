@@ -91,6 +91,9 @@ const EXPANDED_TOOL_IO_MAX_LINES = 80;
 const EXPANDED_DIFF_MAX_LINES = 300;
 const EXPANDED_ASK_FIELD_MAX_BYTES = 2 * 1024;
 const EXPANDED_ASK_FIELD_MAX_LINES = 20;
+/** Preview budget for a skill-prompt's user text: long enough to carry the
+ *  actual request past a large skill body that precedes it (issue #19164). */
+const SKILL_PROMPT_ARGS_MAX = 500;
 
 /** Per-tool preference order for the most informative scalar argument. */
 const PRIMARY_ARG_KEYS = [
@@ -456,6 +459,17 @@ function customOneLiner(msg: CustomMessage | HookMessage, transform?: ToolIOTran
 			const index =
 				typeof details.index === "number" ? details.index : (LEGACY_IMAGE_ATTACHMENT_INDEX.exec(text)?.[1] ?? "?");
 			return `[image-attachment] Image #${index}: ${path}`;
+		}
+		case "skill-prompt": {
+			// The rendered content puts the full skill body before `User: <args>`, so the
+			// generic 120-char cap hides the user's request (issue #19164). Surface the
+			// structured user text from details with its own budget instead.
+			const userText =
+				str("prompt").trim() ||
+				(typeof details.args === "string" && details.args.trim() ? `User: ${details.args.trim()}` : "");
+			const label = typeof details.name === "string" && details.name ? `skill:${details.name}` : "skill-prompt";
+			if (!userText) return `[${label}] ${previewLine(contentToText(msg.content), transform)}`;
+			return `[${label}] ${previewLine(userText, transform, SKILL_PROMPT_ARGS_MAX)}`;
 		}
 		default:
 			return `[${msg.customType}] ${previewLine(contentToText(msg.content), transform)}`;
