@@ -13,10 +13,24 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
 import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
-import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
+import {
+	cfgTodoEager,
+	cfgTodoEnabled,
+	cfgTodoMidRunNudges,
+	cfgTodoReminders,
+	cfgTodoRemindersMax,
+} from "../tools/settings";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
+/** `todo.midRunNudges: capped` — unanswered nudges allowed before going silent until the next reset. */
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+/**
+ * `todo.midRunNudges: backoff` — how many times the threshold may double while
+ * nudges go unanswered. A model that keeps working without touching `todo`
+ * still gets reminded — at 12, 24, 48, 96, then every 192 mutating results —
+ * instead of falling silent after the second reminder for the rest of the turn.
+ */
+const MID_RUN_NUDGE_BACKOFF_DOUBLINGS = 4;
 const MUTATING_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
@@ -328,8 +342,16 @@ export class TodoTracker {
 
 	/** Takes the next hidden mid-run reconciliation nudge, if its budget and guards allow. */
 	takeMidRunNudge(): AgentMessage | null {
-		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
-		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		const mode = cfgTodoMidRunNudges.get(this.#host.settings);
+		if (mode === "off") return null;
+		if (mode === "capped" && this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		// Backoff: an ignored nudge doubles the runway before the next one, capped
+		// so a long turn still gets a reminder without nudging on every threshold.
+		const threshold =
+			mode === "backoff"
+				? MID_RUN_NUDGE_MUTATION_THRESHOLD * 2 ** Math.min(this.#midRunNudgeCount, MID_RUN_NUDGE_BACKOFF_DOUBLINGS)
+				: MID_RUN_NUDGE_MUTATION_THRESHOLD;
+		if (this.#mutationsSinceLastTouch < threshold) return null;
 		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases

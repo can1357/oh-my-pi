@@ -17,7 +17,7 @@ describe("buildNonInteractiveEnv", () => {
 	// An inherited `LANG=en_US.UTF-8` made `sort` collate while byte-order
 	// tools (comm, git) disagreed, and localized messages vary by machine.
 	it("pins the agent locale over an inherited one on every platform", () => {
-		for (const platform of ["linux", "darwin", "win32"] as const) {
+		for (const platform of ["linux", "win32"] as const) {
 			const env = buildNonInteractiveEnv(undefined, {
 				baseEnv: { LANG: "de_DE.UTF-8", LC_ALL: "de_DE.UTF-8", PYTHONUTF8: "0" },
 				platform,
@@ -28,6 +28,22 @@ describe("buildNonInteractiveEnv", () => {
 			expect(env.PYTHONIOENCODING).toBeUndefined();
 			expect(env.PYTHONUTF8).toBeUndefined();
 		}
+	});
+
+	// macOS ships no `C.UTF-8`: `initdb` refused to start and `perl` warned on every run (#18540).
+	it("pins a locale macOS can load, C in every category but a UTF-8 LC_CTYPE", () => {
+		const baseEnv = { LANG: "de_DE.UTF-8", LC_ALL: "de_DE.UTF-8", LC_COLLATE: "de_DE.UTF-8", LC_NUMERIC: "de_DE" };
+		const env: Record<string, string> = {
+			...baseEnv,
+			...buildNonInteractiveEnv(undefined, { baseEnv, platform: "darwin" }),
+		};
+		// POSIX lookup: the first non-empty of LC_ALL, the category, then LANG.
+		const effective = (category: string) => [env.LC_ALL, env[category], env.LANG].find(value => value);
+
+		for (const category of ["LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME"]) {
+			expect(effective(category)).toBe("C");
+		}
+		expect(effective("LC_CTYPE")).toBe("en_US.UTF-8");
 	});
 
 	it("lets a per-command locale or encoding replace the defaults", () => {

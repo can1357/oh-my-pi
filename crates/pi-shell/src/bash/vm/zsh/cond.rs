@@ -24,9 +24,12 @@ use crate::bash::{
 	fs::{FileKind, Stat, StatKind},
 	ir::{CondIr, Op as IrOp, Opcode, Part, Unit, Word},
 	pattern::zsh::{Captures, PatFlags},
-	syntax::zsh::{
-		tok,
-		tok::{span, tail},
+	syntax::{
+		MAX_NESTING,
+		zsh::{
+			tok,
+			tok::{span, tail},
+		},
 	},
 	vm::{
 		Cx, Kernel,
@@ -888,8 +891,12 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Ve
 #[derive(Debug, PartialEq, Eq)]
 enum Node {
 	Not(Box<Self>),
-	And(Box<Self>, Box<Self>),
-	Or(Box<Self>, Box<Self>),
+	/// A `-a` chain. zsh parses one right-nested node per operator; the
+	/// whole run is held here instead, so neither building it, evaluating
+	/// it nor dropping it costs a stack frame per operator.
+	And(Vec<Self>),
+	/// A `-o` chain, folded like [`Node::And`].
+	Or(Vec<Self>),
 	Prim {
 		op: CondOp,
 		l:  BString,
@@ -935,6 +942,9 @@ struct TestParser<'a> {
 	tok:    Tok,
 	tokstr: Option<&'a [u8]>,
 	posix:  bool,
+	/// Parenthesis nesting, bounded by [`MAX_NESTING`]. A chain of one
+	/// operator does not count: it costs no stack.
+	depth:  u32,
 }
 
 impl TestParser<'_> {
@@ -970,66 +980,99 @@ impl TestParser<'_> {
 		self.tokstr.unwrap_or_default().into()
 	}
 
-	/// `par_cond`: `cond_1 [ -o cond ]`.
+	/// `par_cond`: `cond_1 [ -o cond ]`, folded into one node so a long
+	/// chain costs no stack.
 	fn cond(&mut self) -> Result<Node, Perr> {
-		let r = self.cond_1()?;
-		if self.tok == Tok::Dbar {
+		let mut chain = vec![self.cond_1()?];
+		while self.tok == Tok::Dbar {
 			self.lex();
-			let rhs = self.cond()?;
-			return Ok(Node::Or(Box::new(r), Box::new(rhs)));
+			chain.push(self.cond_1()?);
 		}
-		Ok(r)
+		Ok(fold(chain, Node::Or))
 	}
 
-	/// `par_cond_1`: `cond_2 [ -a cond_1 ]`.
+	/// `par_cond_1`: `cond_2 [ -a cond_1 ]`, folded like [`Self::cond`].
 	fn cond_1(&mut self) -> Result<Node, Perr> {
-		let r = self.cond_2()?;
-		if self.tok == Tok::Damper {
+		let mut chain = vec![self.cond_2()?];
+		while self.tok == Tok::Damper {
 			self.lex();
-			let rhs = self.cond_1()?;
-			return Ok(Node::And(Box::new(r), Box::new(rhs)));
+			chain.push(self.cond_2()?);
 		}
-		Ok(r)
+		Ok(fold(chain, Node::And))
+	}
+
+	/// Run `f` one parenthesis level deeper. Parentheses are real nesting,
+	/// not a chain, so they keep the parser's [`MAX_NESTING`] policy: past
+	/// the limit the expression is a parse error rather than a stack
+	/// overflow that takes the host process down.
+	fn nested<V>(&mut self, f: impl FnOnce(&mut Self) -> Result<V, Perr>) -> Result<V, Perr> {
+		if self.depth >= MAX_NESTING {
+			return Err(Perr::Cond("parse error: maximum nesting level exceeded".into()));
+		}
+		self.depth += 1;
+		let r = f(self);
+		self.depth -= 1;
+		r
 	}
 
 	/// `par_cond_2` in test mode (POSIX's rules by argument count first).
+	///
+	/// zsh recurses for each leading `!`, one stack frame per operator. The
+	/// run is counted here and applied once instead: `Not` inverts only a
+	/// 0 or 1 status and passes every other result through unchanged, so it
+	/// is its own inverse and an even run cancels.
 	fn cond_2(&mut self) -> Result<Node, Perr> {
-		let n_testargs = self.args.len() - self.pos + 1;
-		if self.tok == Tok::Null {
-			return double(b"-n", b"");
-		}
-		if n_testargs == 1 {
-			let s1 = self.s();
-			self.lex();
-			if !self.posix && s1.as_slice() == b"-t" {
-				return double(&s1, b"1");
+		let mut nots = 0usize;
+		let node = loop {
+			let n_testargs = self.args.len() - self.pos + 1;
+			if self.tok == Tok::Null {
+				break double(b"-n", b"")?;
 			}
-			return double(b"-n", &s1);
-		}
-		if n_testargs > 2 {
-			let next = self.args.get(self.pos).map_or(&[][..], |a| a.as_slice());
-			if matches!(next, b"=" | b"==" | b"!=")
-				|| matches!(next, [b'-', rest @ ..] if cond_num(rest).is_some())
-			{
+			if n_testargs == 1 {
 				let s1 = self.s();
 				self.lex();
-				let s2 = self.s();
-				self.lex();
-				let s3 = self.s();
-				self.lex();
-				return triple(&s1, &s2, &s3);
+				if !self.posix && s1.as_slice() == b"-t" {
+					break double(&s1, b"1")?;
+				}
+				break double(b"-n", &s1)?;
 			}
-		}
-		if self.tok == Tok::Bang
-			&& !(n_testargs > 2
-				&& matches!(self.args.get(self.pos).map(|a| a.as_slice()), Some(b"-a" | b"-o")))
-		{
-			self.lex();
-			return Ok(Node::Not(Box::new(self.cond_2()?)));
-		}
+			if n_testargs > 2 {
+				let next = self.args.get(self.pos).map_or(&[][..], |a| a.as_slice());
+				if matches!(next, b"=" | b"==" | b"!=")
+					|| matches!(next, [b'-', rest @ ..] if cond_num(rest).is_some())
+				{
+					let s1 = self.s();
+					self.lex();
+					let s2 = self.s();
+					self.lex();
+					let s3 = self.s();
+					self.lex();
+					break triple(&s1, &s2, &s3)?;
+				}
+			}
+			if self.tok == Tok::Bang
+				&& !(n_testargs > 2
+					&& matches!(self.args.get(self.pos).map(|a| a.as_slice()), Some(b"-a" | b"-o")))
+			{
+				self.lex();
+				nots += 1;
+				continue;
+			}
+			break self.cond_2_tail(n_testargs)?;
+		};
+		Ok(if nots % 2 == 1 {
+			Node::Not(Box::new(node))
+		} else {
+			node
+		})
+	}
+
+	/// The rest of `par_cond_2` once the leading `!` run is consumed: a
+	/// parenthesized expression or a primary of one to many words.
+	fn cond_2_tail(&mut self, n_testargs: usize) -> Result<Node, Perr> {
 		if self.tok == Tok::Inpar {
 			self.lex();
-			let r = self.cond()?;
+			let r = self.nested(Self::cond)?;
 			if self.tok != Tok::Outpar {
 				self.tok = Tok::LexErr;
 				return Err(Perr::Yy);
@@ -1084,6 +1127,18 @@ impl TestParser<'_> {
 	}
 }
 
+/// One node for a chain: a single member stands alone, a longer run
+/// becomes `make`'s folded node.
+fn fold(mut chain: Vec<Node>, make: fn(Vec<Node>) -> Node) -> Node {
+	if chain.len() == 1 {
+		chain
+			.pop()
+			.unwrap_or_else(|| unreachable!("a chain has at least one member"))
+	} else {
+		make(chain)
+	}
+}
+
 /// `par_cond_double`: `-c b`, or an unknown `-name b`.
 fn double(a: &[u8], b: &[u8]) -> Result<Node, Perr> {
 	if a.first() != Some(&b'-') || a.len() < 2 {
@@ -1124,13 +1179,28 @@ fn evalcond(ctx: &mut Ctx<'_, '_>, n: &Node) -> Result<Res, Need> {
 			Res::St(s @ (0 | 1)) => Res::St(1 - s),
 			r => r,
 		},
-		Node::And(a, b) => match evalcond(ctx, a)? {
-			Res::St(0) => evalcond(ctx, b)?,
-			r => r,
+		Node::And(cs) => {
+			// zsh's `evalcond` stops at the first member that is not true;
+			// the chain is one node, so the walk is a loop, not a frame per
+			// operator.
+			let mut last = Res::St(0);
+			for c in cs {
+				last = evalcond(ctx, c)?;
+				if !matches!(last, Res::St(0)) {
+					break;
+				}
+			}
+			last
 		},
-		Node::Or(a, b) => match evalcond(ctx, a)? {
-			Res::St(1 | 3) => evalcond(ctx, b)?,
-			r => r,
+		Node::Or(cs) => {
+			let mut last = Res::St(1);
+			for c in cs {
+				last = evalcond(ctx, c)?;
+				if !matches!(last, Res::St(1 | 3)) {
+					break;
+				}
+			}
+			last
 		},
 		Node::Prim { op, l, r } => primary(ctx, true, *op, l, r)?,
 		Node::Mod { name, infix, args } => {
@@ -1176,7 +1246,8 @@ pub fn test(ctx: &mut Ctx<'_, '_>, args: &[BString], bracket: bool) -> R {
 		}
 	}
 	let posix = ctx.zsh_option(ZshOpt::Posixbuiltins)?;
-	let mut p = TestParser { args: argv, pos: 0, cur: 0, tok: Tok::Null, tokstr: None, posix };
+	let mut p =
+		TestParser { args: argv, pos: 0, cur: 0, tok: Tok::Null, tokstr: None, posix, depth: 0 };
 	p.lex();
 	let node = match p.cond() {
 		Ok(n) if p.tok != Tok::LexErr => n,
@@ -1220,6 +1291,7 @@ mod tests {
 			tok:    Tok::Null,
 			tokstr: None,
 			posix:  false,
+			depth:  0,
 		};
 		p.lex();
 		match p.cond() {
@@ -1248,10 +1320,7 @@ mod tests {
 		assert_eq!(parse(&["-z", "("]).unwrap().0, prim(CondOp::Unary(b'z'), "(", ""));
 		assert_eq!(
 			parse(&["!", "-a", "!"]).unwrap().0,
-			Node::And(
-				Box::new(prim(CondOp::Unary(b'n'), "!", "")),
-				Box::new(prim(CondOp::Unary(b'n'), "!", ""))
-			)
+			Node::And(vec![prim(CondOp::Unary(b'n'), "!", ""), prim(CondOp::Unary(b'n'), "!", "")])
 		);
 	}
 

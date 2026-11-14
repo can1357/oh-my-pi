@@ -308,6 +308,8 @@ export function buildModelSelectorCompletions(
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
 			});
+			// Later keystrokes list whatever a retry of failed provider discovery recovers.
+			void rankModels.retryDiscovery?.();
 			for (const { selector, model } of rankModels(query)) {
 				matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });
 			}
