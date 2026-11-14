@@ -1,3 +1,4 @@
+import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { AbortError } from "./abort";
 import { networkFailureMessage } from "./network-cause";
@@ -201,10 +202,49 @@ export class AnthropicApiError extends ProviderHttpError {
 	}
 }
 
+/** How far a request got before its connection was lost. */
+export interface RequestUploadProgress {
+	/** Request body size on the wire. */
+	bodyBytes: number;
+	/** Whether the socket had taken the whole body; the OS may still hold some of it unsent. */
+	bodySent: boolean;
+	/** Time since the request started. */
+	elapsedMs: number;
+}
+
+/**
+ * An established connection that failed before any response headers arrived,
+ * naming how far the request body got. While part of the body is still queued
+ * in the process, it is "uploading"; once the socket has taken all of it, it was
+ * "written to the socket", which does not say the server received it.
+ */
+export class ConnectionLostBeforeResponseError extends Error {
+	constructor(cause: unknown, { bodyBytes, bodySent, elapsedMs }: RequestUploadProgress) {
+		const after = `connection lost after ${formatDuration(elapsedMs)}`;
+		const code =
+			typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
+				? ` (${cause.code})`
+				: "";
+		const progress =
+			bodyBytes === 0
+				? `${after}, before any response${code}`
+				: bodySent
+					? `${after}, after the ${formatBytes(bodyBytes)} request body was written to the socket, before any response${code}`
+					: `${after} while uploading the ${formatBytes(bodyBytes)} request body; no response received${code}`;
+		super(progress, { cause });
+		this.name = "ConnectionLostBeforeResponseError";
+	}
+}
+
 /** Network-level failure (DNS, TLS, socket reset) after retries were exhausted. */
 export class AnthropicConnectionError extends Error {
 	constructor(cause: unknown, requestUrl?: string) {
-		super(networkFailureMessage(cause, requestUrl) ?? "Connection error.", { cause });
+		super(
+			cause instanceof ConnectionLostBeforeResponseError
+				? `Connection error: ${cause.message}.`
+				: (networkFailureMessage(cause, requestUrl) ?? "Connection error."),
+			{ cause },
+		);
 		this.name = "AnthropicConnectionError";
 	}
 }
