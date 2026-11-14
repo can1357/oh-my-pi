@@ -9,7 +9,7 @@ import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 
-import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgComposerRestoreInterruptedPrompt, cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 type Spy = Mock<(...args: unknown[]) => unknown>;
 type StartPendingSubmissionSpy = Mock<InteractiveModeContext["startPendingSubmission"]>;
@@ -186,6 +186,7 @@ function createContext(): {
 			abortBash,
 			abortEval,
 			clearQueue,
+			getInterruptiblePrompt: vi.fn(() => undefined),
 			getQueuedMessages,
 			prompt,
 			subscribe: vi.fn((listener: (event: { type: string }) => void) => {
@@ -373,6 +374,29 @@ describe("InputController escape behavior", () => {
 		expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
 	});
 
+	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
+		const { ctx, editor, spies } = createContext();
+		// Stubbed session: only the streaming/interrupt gate fields matter here.
+		const session = ctx.session as { isStreaming: boolean; hasInterruptibleInput: boolean };
+		session.isStreaming = true;
+		session.hasInterruptibleInput = true;
+		const order: string[] = [];
+		spies.abort.mockImplementation(async () => {
+			order.push("abort");
+		});
+		spies.updatePendingMessagesDisplay.mockImplementation(() => {
+			order.push("refresh");
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("");
+
+		expect(order).toEqual(["abort", "refresh"]);
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: false });
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledTimes(1);
+	});
 	it("runs /btw as a builtin side request instead of steering the active stream", async () => {
 		const { ctx, editor, spies } = createContext();
 		(ctx.session as { isStreaming: boolean }).isStreaming = true;
@@ -644,7 +668,7 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledTimes(1);
 		// The Esc interrupt threads a user-facing reason so the aborted turn and its
 		// synthetic tool results read as a deliberate interrupt, not "Request was aborted".
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
 	});
 
 	it("suspends a streaming loop iteration and pauses the loop", () => {
@@ -658,7 +682,7 @@ describe("InputController escape behavior", () => {
 		controller.setupKeyHandlers();
 		editor.onEscape?.();
 
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
 		expect(pauseLoop).toHaveBeenCalledTimes(1);
 		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
 	});
@@ -760,7 +784,7 @@ describe("InputController escape behavior", () => {
 		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(1);
 		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
 		expect(spies.abort).toHaveBeenCalledTimes(1);
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
 	});
 
 	it("dismisses an active /btw panel before aborting the main stream", () => {
@@ -843,7 +867,7 @@ describe("InputController escape behavior", () => {
 		editor.onEscape?.();
 
 		expect(spies.abort).toHaveBeenCalledTimes(1);
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
 		expect(spies.showStatus).not.toHaveBeenCalledWith("Press Esc again within 2s to cancel streaming.");
 	});
 
@@ -863,7 +887,7 @@ describe("InputController escape behavior", () => {
 
 		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
 		expect(spies.abort).toHaveBeenCalledTimes(1);
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
 		expect(spies.showStatus).not.toHaveBeenCalledWith("Press Esc again within 2s to cancel streaming.");
 	});
 
@@ -1042,6 +1066,97 @@ describe("InputController escape behavior", () => {
 		expect(spies.abortBash).toHaveBeenCalledTimes(1);
 		expect(spies.stopAwaitingAsyncWork).not.toHaveBeenCalled();
 		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("hands the interrupted prompt back to the composer when Esc stops a live turn", () => {
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		const getInterruptiblePrompt = vi.fn(() => ({ text: "fix the failing test" }));
+		(ctx.session as { getInterruptiblePrompt?: () => { text: string } }).getInterruptiblePrompt =
+			getInterruptiblePrompt;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(editor.getText()).toBe("fix the failing test");
+		expect(spies.requestRender).toHaveBeenCalled();
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
+	});
+
+	it("hands the interrupted prompt back when Esc stops the live turn under the working row", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+		(ctx.session as { getInterruptiblePrompt?: () => { text: string } }).getInterruptiblePrompt = () => ({
+			text: "fix the failing test",
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(editor.getText()).toBe("fix the failing test");
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
+	});
+
+	it("restores the interrupted prompt ahead of messages queued behind it", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+		spies.clearQueue.mockReturnValue({ steering: [{ text: "and add a test" }], followUp: [] });
+		(ctx.session as { getInterruptiblePrompt?: () => { text: string } }).getInterruptiblePrompt = () => ({
+			text: "fix the failing test",
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(editor.getText()).toBe("fix the failing test\n\nand add a test");
+	});
+
+	it("keeps a draft typed mid-turn behind the restored prompt", () => {
+		const { ctx, editor } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		(ctx.session as { getInterruptiblePrompt?: () => { text: string } }).getInterruptiblePrompt = () => ({
+			text: "fix the failing test",
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.setText("and rerun it");
+		editor.onEscape?.();
+
+		expect(editor.getText()).toBe("fix the failing test\n\nand rerun it");
+	});
+
+	it("aborts without touching the composer when the restore is turned off", () => {
+		cfgComposerRestoreInterruptedPrompt.override(Settings.instance, false);
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		(ctx.session as { getInterruptiblePrompt?: () => { text: string } }).getInterruptiblePrompt = () => ({
+			text: "fix the failing test",
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(editor.getText()).toBe("");
+		// The turn stays too: a restore the host refused must not become a silent cut.
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: false });
+	});
+
+	it("aborts a live turn with nothing to restore when the prompt was not the operator's", () => {
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		editor.setText("draft");
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(editor.getText()).toBe("draft");
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, retake: true });
 	});
 
 	it("ignores double-Esc when the action is disabled", () => {
