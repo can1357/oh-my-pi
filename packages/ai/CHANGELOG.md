@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added the Antigravity CLI ACP provider with managed installation, Google sign-in, refreshable distributed credentials, host tools, and retained conversations across tool steps and history changes.
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
