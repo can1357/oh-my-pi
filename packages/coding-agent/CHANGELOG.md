@@ -539,7 +539,6 @@
 
 - `workpool()` and `judgeBatch()` no longer close or cancel an existing pool or batch when their options object contains an `op`; they always create new work ([#18614](https://github.com/can1357/oh-my-pi/pull/18614) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
-
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
