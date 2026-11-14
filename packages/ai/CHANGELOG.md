@@ -268,6 +268,8 @@
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4
+- Fixed Vertex AI Gemini 3+ (`google-vertex`) returning `400 Function call is missing a thought_signature` when replaying an assistant turn whose first tool call has no signature by sending `skip_thought_signature_validator` on the unsigned first call only ([#10602](https://github.com/can1357/oh-my-pi/issues/10602), [#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@sinhduc01](https://github.com/sinhduc01))
+- Fixed `google-level` thinking models rejecting `MINIMAL` (including when disabling reasoning via `suppressWhenOff`) by clamping unsupported thinking levels to the model's minimum supported effort ([#17254](https://github.com/can1357/oh-my-pi/pull/17254) by [@sinhduc01](https://github.com/sinhduc01))
 
 ## [18.13.2] - 2026-10-27
 
