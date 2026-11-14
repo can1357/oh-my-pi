@@ -1,6 +1,11 @@
 //! Laws for append, recovery, and branch selection.
 
-use std::{env, fs, process::Command};
+use std::{
+	env, fs,
+	path::Path,
+	process::{Command, abort},
+	time::SystemTime,
+};
 
 use omp_core::Str;
 use omp_journal::{
@@ -369,7 +374,7 @@ fn append_refuses_a_frame_the_reader_would_reject() {
 
 /// Names, sizes and modification times of everything in `dir`: a probe that
 /// created, touched or removed a file changes this.
-fn listing(dir: &std::path::Path) -> Vec<(String, u64, std::time::SystemTime)> {
+fn listing(dir: &Path) -> Vec<(String, u64, SystemTime)> {
 	let mut rows = fs::read_dir(dir)
 		.expect("read directory")
 		.map(|entry| {
@@ -461,7 +466,7 @@ fn is_live_subprocess_helper() {
 fn crashing_writer_subprocess_helper() {
 	let path = env::var_os("OMP_JOURNAL_LIVE_TEST_PATH").expect("journal test path");
 	let (_journal, _) = Journal::open(path).expect("child takes the writer lock");
-	std::process::abort();
+	abort();
 }
 
 /// Liveness is observable across processes, and a writer that crashed while
