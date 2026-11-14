@@ -2720,8 +2720,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A subagent whose messages get turns of their own (its run holds them,
 			// or its wake observer answers them) never extends a finished turn with
 			// one: that turn's text is its result.
-			const keepPeerMessages =
-				boundary === "stop" && (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined);
+			const keepPeerMessages = boundary === "stop" && this.#peerMessagesGetOwnTurns;
 			const thunks: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
 			if (!this.#drivenTurn || this.#requiredDrivenFlushOwner()) thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
@@ -3898,7 +3897,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					epoch = this.#beginInFlight();
 					selected = this.#irc.drainQueuedMatching(record => this.#isRequiredDrivenIrcRecord(record, owner));
 					if (selected.length === 0) return;
-					if (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined) {
+					if (this.#peerMessagesGetOwnTurns) {
 						this.#irc.queueDeferredWake(this.#irc.drainQueuedMatching(record => this.#irc.isPeerMessage(record)));
 					}
 					parkedFollowUps =
@@ -4016,6 +4015,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		state.invalid = true;
 		state.controller.abort();
 		state.invalidated.resolve();
+	}
+
+	/** Whether non-parent IRC messages should be answered in their own wake turns instead of extending a finished report turn. */
+	get #peerMessagesGetOwnTurns(): boolean {
+		return this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined;
 	}
 
 	/** Acquires exclusive driven-turn ownership when the session has no active or pending turn work. */
@@ -10086,9 +10090,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#eval.flushPending();
 			// This turn carries the assignment: IRC asides parked for it fold in ahead of the message.
 			this.#ircAwaitingAssignment = false;
-			this.#irc.flushPending({
-				keepPeerMessages: this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined,
-			});
+			this.#irc.flushPending({ keepPeerMessages: this.#peerMessagesGetOwnTurns });
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();

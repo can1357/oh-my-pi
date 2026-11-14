@@ -311,7 +311,13 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(options?: { keepPeerMessages?: boolean }): void {
-		for (const record of this.drainPending(options)) {
+		if (options?.keepPeerMessages) {
+			const isPeer = (record: AgentMessage) => this.isPeerMessage(record);
+			this.#deferredWakes.push(...this.#interrupts.filter(isPeer), ...this.#asides.filter(isPeer));
+			this.#interrupts = this.#interrupts.filter(record => !isPeer(record));
+			this.#asides = this.#asides.filter(record => !isPeer(record));
+		}
+		for (const record of this.drainPending()) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}

@@ -532,17 +532,31 @@ it("answers a peer separately when it arrives before a structured yield reminder
 	let reminderActive = false;
 	let reminderAdmitted = false;
 	let assignmentSeen = false;
+	let reminderReadDone = false;
 	const child = await startRun({
 		structured: true,
 		respond: (request, context) => {
-			if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
 			const input = latestInput(context);
 			if (input.includes(PEER_BODY)) return { content: ["PEER_REPLY"] };
 			if (input.includes("report again")) {
 				assignmentSeen = true;
 				return { content: ["Working on it."] };
 			}
+			if (assignmentSeen && !reminderReadDone) {
+				reminderReadDone = true;
+				return {
+					content: [
+						{
+							type: "toolCall",
+							id: `reminder-read-${request}`,
+							name: "read",
+							arguments: { path: "notes.txt" },
+						},
+					],
+				};
+			}
 			if (assignmentSeen) reminderContext = JSON.stringify(context.messages);
+			if (context.messages.at(-1)?.role === "toolResult" && !assignmentSeen) return { content: ["ok"] };
 			return {
 				content: [
 					{
