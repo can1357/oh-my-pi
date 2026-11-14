@@ -87,6 +87,7 @@
 - Fixed the shell cp builtin so symlink-following options work correctly with archive and directory-copy modes without disabling recursion or attribute preservation.
 - Replaced built-in shell crashes on very long -a/-o chains in [ ] and test expressions with a clear error for excessively deep expressions.
 - Fixed `setValue` on macOS sliders, steppers and other number-valued controls failing with `AXError(-25201)`: the value is now written as a number and read back, and a value the control clamped or rounded is reported with what it now reads.
+- `setValue` on a macOS control whose value is not settable but that steps (a SwiftUI `Slider`) now refuses naming the `AXIncrement`/`AXDecrement` actions it offers and the number it reads, so the next call can step it.
 - Fixed patches from `diffText({ binary: true })` and `diffNoIndex(…, true)` failing to apply for text that is not UTF-8 (e.g. Latin-1): such content is now carried as a `GIT binary patch` instead of a text hunk that lost its bytes.
 - Fixed `<text>` elements disappearing from rendered SVGs when a generic font family refers to an unavailable font ([#15181](https://github.com/can1357/oh-my-pi/issues/15181), [#18538](https://github.com/can1357/oh-my-pi/pull/18538)).
 - Fixed `worktree add` with source checkouts containing read-only files or directories, including cleanup and safety issues involving tracked directories replaced by symlinks ([#14190](https://github.com/can1357/oh-my-pi/issues/14190), [#18537](https://github.com/can1357/oh-my-pi/pull/18537)).

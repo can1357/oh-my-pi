@@ -1203,8 +1203,9 @@ impl AxBackend for MacAx {
 			// surface.
 			ensure_native_text_target(element)?;
 			if !attribute_settable(element, "AXValue") {
-				return Err(DesktopError::ax_failed(
-					"AXValue is not settable; no typing fallback was attempted",
+				return Err(not_settable(
+					copy_number(element, "AXValue").as_deref(),
+					&copy_strings_from_action_names(element).unwrap_or_default(),
 				));
 			}
 			if let Some(current) = copy_date(element, "AXValue") {
@@ -2131,6 +2132,39 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 			))),
 		}
 	})
+}
+
+/// The actions that step a value control (a slider) by its own step size.
+const STEP_ACTIONS: [&str; 2] = ["AXIncrement", "AXDecrement"];
+
+/// The refusal of a value write to an element whose `AXValue` is not
+/// settable; nothing was sent. An element that offers step actions names
+/// them, spelled as `actions()` lists them and `perform` takes them, and its
+/// value when that is a number: a text value is never quoted here.
+fn not_settable(value: Option<&CFNumber>, actions: &[String]) -> DesktopError {
+	let offered: Vec<&str> = STEP_ACTIONS
+		.into_iter()
+		.filter(|step| {
+			actions
+				.iter()
+				.any(|action| action.eq_ignore_ascii_case(step))
+		})
+		.collect();
+	if offered.is_empty() {
+		return DesktopError::ax_failed("AXValue is not settable; no typing fallback was attempted");
+	}
+	let reads =
+		value.map_or_else(String::new, |value| format!(" it reads {} and", stringify_number(value)));
+	let calls = offered
+		.iter()
+		.map(|step| format!("el.perform(\"{step}\")"))
+		.collect::<Vec<_>>()
+		.join(" or ");
+	DesktopError::ax_failed(format!(
+		"AXValue is not settable;{reads} it offers {}, which step it by the control's own step: \
+		 {calls}; nothing was sent and no typing fallback was attempted",
+		offered.join(" and "),
+	))
 }
 
 /// How long a number write's read-back waits for the value to arrive, for an
@@ -3685,6 +3719,48 @@ mod tests {
 		);
 		let unread = number_readback_error(75.0, None, None, None);
 		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+	}
+
+	#[test]
+	fn a_value_that_is_not_settable_names_the_step_actions_the_element_offers() {
+		let actions = |names: &[&str]| {
+			names
+				.iter()
+				.map(|name| (*name).to_owned())
+				.collect::<Vec<_>>()
+		};
+		// SwiftUI's Slider lists each step action twice.
+		let slider = not_settable(
+			Some(&CFNumber::new_f64(0.0)),
+			&actions(&["AXIncrement", "AXDecrement", "AXIncrement", "AXDecrement"]),
+		);
+		assert_eq!(
+			slider.message,
+			"AXValue is not settable; it reads 0 and it offers AXIncrement and AXDecrement, which \
+			 step it by the control's own step: el.perform(\"AXIncrement\") or \
+			 el.perform(\"AXDecrement\"); nothing was sent and no typing fallback was attempted"
+		);
+		// A value that is not a number is never quoted.
+		let unread = not_settable(None, &actions(&["AXPress", "AXIncrement"]));
+		assert!(
+			unread
+				.message
+				.starts_with("AXValue is not settable; it offers AXIncrement, which step it"),
+			"{}",
+			unread.message
+		);
+		assert!(
+			unread
+				.message
+				.contains("el.perform(\"AXIncrement\"); nothing"),
+			"{}",
+			unread.message
+		);
+		// Without step actions the refusal is unchanged.
+		assert_eq!(
+			not_settable(Some(&CFNumber::new_i32(1)), &actions(&["AXPress"])).message,
+			"AXValue is not settable; no typing fallback was attempted"
+		);
 	}
 
 	#[test]
