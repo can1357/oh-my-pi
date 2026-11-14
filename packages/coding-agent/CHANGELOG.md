@@ -558,6 +558,9 @@
 - `omp zsh`'s `typeset -U path` / `typeset -U fpath` (and `local -U path`) drop repeated entries as zsh does ([#18533](https://github.com/can1357/oh-my-pi/pull/18533) by [@H4vC](https://github.com/H4vC)).
 - `omp zsh` and the bash tool: `$!` of a background pipeline is its last program's pid, as in bash and zsh, so `kill $!` signals that program; `omp zsh`'s `[n]` line for a background pipeline lists the pid of each of its processes, as zsh does ([#18547](https://github.com/can1357/oh-my-pi/pull/18547) by [@H4vC](https://github.com/H4vC)).
 - `omp zsh` is faster: function calls, loops and arithmetic run 2–3× faster, `compinit` almost 4× faster, and building a large array or association one element at a time (`a+=(x)`, `h[k]=v`) or reading `$a[i]` from a large array no longer slows down with its size ([#18565](https://github.com/can1357/oh-my-pi/pull/18565) by [@H4vC](https://github.com/H4vC)).
+### Fixed
+
+- Agent `bash` commands on macOS no longer get `LANG`/`LC_ALL=C.UTF-8`, a locale macOS does not ship, which made `initdb` refuse to start and `perl` warn on every run; they get `C` with a UTF-8 `LC_CTYPE` instead ([#18540](https://github.com/can1357/oh-my-pi/issues/18540))
 
 ## [18.18.2] - 2026-11-08
 
