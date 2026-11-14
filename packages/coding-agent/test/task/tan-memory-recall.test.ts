@@ -68,6 +68,7 @@ it("sends the parent's recalled system prompt unchanged from a /tan clone", asyn
 		"mnemopi.noEmbeddings": true,
 		"mnemopi.llmMode": "none",
 		"mnemopi.autoRetain": false,
+		"mnemopi.recallRelevance": "off",
 	});
 	try {
 		const { session: parent } = await sdk.createAgentSession({

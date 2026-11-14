@@ -104,6 +104,35 @@ export const cfgMnemopiAutoRecall = register({
 	},
 });
 
+export const cfgMnemopiRecallRelevance = register({
+	id: "mnemopi.recallRelevance",
+	type: "enum",
+	values: ["auto", "on", "off"] as const,
+	default: "off",
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Recall Relevance",
+		description:
+			"Ask the judge model role whether each automatically recalled memory is relevant to the task before injecting it",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Filter only with a native judge backend; otherwise inject every recalled memory",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"Filter with whichever model the judge role resolves to; an on-device judge may answer only some memories in time",
+			},
+			{ value: "off", label: "Off", description: "Never filter; inject every recalled memory" },
+		],
+		condition: "mnemopiActive",
+	},
+});
+
 export const cfgMnemopiAutoRetain = register({
 	id: "mnemopi.autoRetain",
 	type: "boolean",
