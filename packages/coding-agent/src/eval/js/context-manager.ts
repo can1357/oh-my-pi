@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
@@ -7,6 +8,7 @@ import {
 	createWorkerHandle,
 	createWorkerSubprocess,
 	resolveWorkerSpawnCmd,
+	type SpawnedSubprocess,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
 import { registerOnBoard } from "../../daemon/client";
@@ -35,14 +37,17 @@ import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
-import type {
-	EvalPreludeSource,
-	JsToolRequest,
-	RunErrorPayload,
-	SessionSnapshot,
-	WorkerInbound,
-	WorkerOutbound,
-	WorkerOutboxMessage,
+import {
+	JS_EVAL_OUTBOX_ENV,
+	type EvalPreludeSource,
+	type JsToolRequest,
+	type ProcessWorkerOutbound,
+	type ProcessWorkerOutput,
+	type RunErrorPayload,
+	type SessionSnapshot,
+	type WorkerInbound,
+	type WorkerOutbound,
+	type WorkerOutboxMessage,
 } from "./worker-protocol";
 
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
@@ -1063,14 +1068,32 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 }
 
 function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
-	const spawned = createWorkerSubprocess<WorkerOutbound>({
-		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
-		env: workerEnvFromParent(),
-		exitLabel: "JS eval worker",
-		detached: shouldDetachKernel(process.platform),
-		reportCleanExit: true,
-		unref: false,
-	});
+	// Shared subprocess workers ignore stdout; keep only eval output in an
+	// owned OS-temp outbox so SIGKILL cannot discard process.send's queue.
+	const outbox = fs.mkdtempSync(path.join(os.tmpdir(), "omp-js-eval-outbox-"));
+	const cleanup = (): void => {
+		process.off("exit", cleanup);
+		try {
+			fs.rmSync(outbox, { recursive: true, force: true });
+		} catch (error) {
+			logger.warn("Failed to remove JS eval output directory", { outbox, error });
+		}
+	};
+	let spawned: SpawnedSubprocess<ProcessWorkerOutbound>;
+	try {
+		spawned = createWorkerSubprocess<ProcessWorkerOutbound>({
+			spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
+			env: { ...workerEnvFromParent(), [JS_EVAL_OUTBOX_ENV]: outbox },
+			exitLabel: "JS eval worker",
+			detached: shouldDetachKernel(process.platform),
+			reportCleanExit: true,
+			unref: false,
+		});
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
+	process.once("exit", cleanup);
 	const pid = spawned.proc.pid;
 	const board = registerOnBoard({
 		kind: "external",
@@ -1081,46 +1104,78 @@ function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 	});
 	// Exit covers every teardown path: close, terminate, and crashes.
 	void spawned.proc.exited.finally(() => board.dispose());
-	const base = createWorkerHandle<WorkerInbound, WorkerOutbound>(spawned, message =>
+	const base = createWorkerHandle<WorkerInbound, ProcessWorkerOutbound>(spawned, message =>
 		safeSendIpc(spawned.proc, message, "js-eval"),
 	);
+	const listeners = new Set<(message: WorkerOutbound) => void>();
+	let delivered = 0;
+	const deliverOutput = (sequence: number): void => {
+		if (sequence <= delivered) return;
+		const filename = path.join(outbox, `${sequence}.json`);
+		const message = JSON.parse(fs.readFileSync(filename, "utf8")) as ProcessWorkerOutput;
+		fs.unlinkSync(filename);
+		delivered = sequence;
+		for (const listener of listeners) listener(message);
+	};
+	const unsubscribe = base.onMessage(message => {
+		if (message.type === "output-ready") deliverOutput(message.sequence);
+		else for (const listener of listeners) listener(message);
+	});
+	let terminating: Promise<void> | undefined;
+	const terminate = (): Promise<void> => {
+		terminating ??= (async () => {
+			try {
+				await base.terminate();
+				// Wait for the writer to stop before draining its atomically published
+				// records. Unlike IPC disconnect, this outbox survives a killed child.
+				await spawned.proc.exited;
+				const sequences = fs
+					.readdirSync(outbox)
+					.filter(name => /^\d+\.json$/.test(name))
+					.map(name => Number(name.slice(0, -5)))
+					.sort((a, b) => a - b);
+				for (const sequence of sequences) deliverOutput(sequence);
+			} catch (error) {
+				logger.error("Failed to drain JS eval process output", { outbox, error });
+				throw error;
+			} finally {
+				unsubscribe();
+				cleanup();
+			}
+		})();
+		return terminating;
+	};
 	return {
 		mode: "process",
 		send: message => base.send(message),
-		onMessage: handler => base.onMessage(handler),
+		onMessage(handler) {
+			listeners.add(handler);
+			return () => listeners.delete(handler);
+		},
 		onError: handler => base.onError(handler),
 		async close() {
 			const { promise, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let unsubscribe = (): void => {};
+			let unsubscribeClose = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
 				settled = true;
 				if (timeout) clearTimeout(timeout);
-				unsubscribe();
+				unsubscribeClose();
 				resolve(value);
 			};
-			unsubscribe = base.onMessage(message => {
+			unsubscribeClose = base.onMessage(message => {
 				if (message.type !== "closed") return;
-				void base.terminate().finally(() => finish(true));
+				void terminate().then(
+					() => finish(true),
+					() => finish(false),
+				);
 			});
 			const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
 			base.send({ type: "close" });
 			return await promise;
 		},
-		async terminate() {
-			await base.terminate();
-			// Bun hands the child's IPC messages to `ipc` until the channel closes, a SIGKILLed
-			// child's included; wait for that so its last output reaches the handlers. Bounded: a
-			// descendant that inherited the channel could keep it open.
-			const bound = Promise.withResolvers<void>();
-			const timer = setTimeout(bound.resolve, WORKER_CLOSE_TIMEOUT_MS);
-			try {
-				await Promise.race([spawned.disconnected, bound.promise]);
-			} finally {
-				clearTimeout(timer);
-			}
-		},
+		terminate,
 	};
 }
 
