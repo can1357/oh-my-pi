@@ -59,7 +59,7 @@ export class XdProtocolHandler implements ProtocolHandler {
 	readonly scheme = "xd";
 	readonly spec: SchemeSpec = {
 		backing: "device",
-		selectors: "none",
+		selectors: "lines",
 		immutable: true,
 		compactTranscript: true,
 		write: { via: "handler", payload: "text", scope: "device", tier: deviceWriteTier },

@@ -64,6 +64,32 @@ export function getShouldRetryFromHeaders(headers: HeadersLike): boolean | undef
 	return undefined;
 }
 
+const RATE_LIMIT_LIMIT_HEADER_PREFIX = "x-ratelimit-limit-";
+
+/**
+ * Name of the first `x-ratelimit-limit-*` header that reports a zero
+ * allowance (Mistral `x-ratelimit-limit-req-minute: 0`, OpenAI
+ * `x-ratelimit-limit-requests: 0`), or `undefined` when none does.
+ *
+ * A zero limit means the plan grants no quota for the model at all, so a 429
+ * carrying one never clears by waiting; `captureOpenAIHttpError` and the
+ * OpenAI-wire transport use it to fail fast instead of replaying.
+ */
+export function getZeroRateLimitHeader(headers: HeadersLike): string | undefined {
+	if (!headers) return undefined;
+	if (headers instanceof Headers) {
+		for (const [name, value] of headers) {
+			if (name.startsWith(RATE_LIMIT_LIMIT_HEADER_PREFIX) && value.trim() === "0") return name;
+		}
+		return undefined;
+	}
+	for (const key in headers) {
+		const name = key.toLowerCase();
+		if (name.startsWith(RATE_LIMIT_LIMIT_HEADER_PREFIX) && headers[key]?.trim() === "0") return name;
+	}
+	return undefined;
+}
+
 export function getHeadersFromError(error: unknown): HeadersLike {
 	if (!error || typeof error !== "object") return undefined;
 	const record = error as { headers?: unknown; response?: { headers?: unknown }; cause?: unknown };

@@ -13,8 +13,9 @@ import { readSessionHeaderIdSync, sessionIdFromContent } from "./session-header-
  * two cannot drift apart again.
  *
  * Best-effort: purge failures are swallowed so a session delete never fails
- * because a dashboard store was busy or missing. Callers invoke this BEFORE
- * removing the transcript so the session id is read from the live header.
+ * because a dashboard store was busy or missing. Callers that remove the
+ * transcript first must pass `sessionId` or `content`; the live header is
+ * read only when neither was supplied.
  */
 
 const SESSION_SUFFIX = ".jsonl";
@@ -156,8 +157,10 @@ export interface PurgeDeletedSessionRowsOptions {
 
 /**
  * Purge `history.db` / `stats.db` rows for the session at `sessionPath`.
- * Reads the session id from the transcript, so it MUST run before the
- * transcript is unlinked. Never throws: a missing file, an unreadable store,
+ * Resolves the session id from `options.sessionId`, else `options.content`,
+ * else a live transcript read. Callers that have already unlinked the
+ * transcript must pass `sessionId` or `content` — a read of a deleted file
+ * cannot recover the id. Never throws: a missing file, an unreadable store,
  * or a busy/locked db leaves the rows behind like before.
  *
  * Under the test runner the stores resolve to the real user files, so the
