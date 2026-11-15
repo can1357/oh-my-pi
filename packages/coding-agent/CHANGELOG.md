@@ -23,7 +23,7 @@
 - Editing a queued follow-up (`/queue`, `=>`, or the follow-up key) with Alt+Up now restores it as `=> <message>`, so Enter queues it again for when the agent yields instead of sending it into the running turn ([#19304](https://github.com/can1357/oh-my-pi/issues/19304))
 - `find` lists unranked literal keyword matches from the files it already read when every judge request fails, instead of returning an empty result ([#19231](https://github.com/can1357/oh-my-pi/pull/19231) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Skill-prompt advisor transcript no longer drops the user's request past a long skill body ([#19164](https://github.com/can1357/oh-my-pi/issues/19164)) ([#19267](https://github.com/can1357/oh-my-pi/pull/19267) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it
+- Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
 
 ## [18.20.2] - 2026-11-14
 
