@@ -13,6 +13,7 @@ import {
 	ATTEMPT_COOLDOWN_MS,
 	DEBOUNCE_BUCKET_MS,
 	IMMINENT_RESET_EXPIRY_MS,
+	LIVE_HINT_TOLERANCE_MS,
 	REPORT_FRESHNESS_MS,
 	resetWindowMode,
 	resetWindowsEnabled,
@@ -214,6 +215,36 @@ function maxPlausibleRemainingMs(limitId: string, limit: UsageLimit | undefined)
 	const duration = limit?.window?.durationMs;
 	if (duration !== undefined && Number.isFinite(duration) && duration > 0) return duration + 3_600_000;
 	return limitId === FIVE_HOUR_LIMIT_ID ? MAX_PLAUSIBLE_FIVE_HOUR_MS : MAX_PLAUSIBLE_WEEKLY_MS;
+}
+
+/**
+ * The limit a live 429 deadline proves binds beyond `blockers`: the reported
+ * limit whose reset it names, else the shared weekly window. Undefined when the
+ * deadline falls within rounding slack of the latest blocker reset, or when a
+ * blocker has no reset to compare (that path adopts the live deadline as-is).
+ */
+function liveHintBlocker(
+	limits: readonly UsageLimit[],
+	blockers: readonly string[],
+	liveUnblockAtMs: number | undefined,
+): string | undefined {
+	if (liveUnblockAtMs === undefined || blockers.length === 0) return undefined;
+	let latest = Number.NEGATIVE_INFINITY;
+	for (const blocker of blockers) {
+		const resetsAt = limits.find(limit => limit.id === blocker)?.window?.resetsAt;
+		if (resetsAt === undefined || !Number.isFinite(resetsAt)) return undefined;
+		latest = Math.max(latest, resetsAt);
+	}
+	if (liveUnblockAtMs - latest <= LIVE_HINT_TOLERANCE_MS) return undefined;
+	const named = limits.find(limit => {
+		const resetsAt = limit.window?.resetsAt;
+		return (
+			!blockers.includes(limit.id) &&
+			resetsAt !== undefined &&
+			Math.abs(resetsAt - liveUnblockAtMs) <= LIVE_HINT_TOLERANCE_MS
+		);
+	});
+	return named?.id ?? (blockers.includes(WEEKLY_LIMIT_ID) ? undefined : WEEKLY_LIMIT_ID);
 }
 
 /**
@@ -435,6 +466,13 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				.map(limit => limit.id);
 			const serverBlockers = snapshot.credit.blocking ?? [];
 			const blockers = [...new Set([...reportedBlockers, ...serverBlockers])];
+			// The active account's 429 names when it actually unblocks. A deadline past
+			// every reported blocker's reset proves a window the pre-block evidence
+			// missed binds too, so a reset that leaves it in place cannot serve the retry.
+			const liveBlocker = snapshot.active
+				? liveHintBlocker(snapshot.limits, blockers, input.activeBlockUnblockAtMs)
+				: undefined;
+			if (liveBlocker) blockers.push(liveBlocker);
 			if (blockers.length === 0) {
 				skip("no-blocked-window");
 				continue;

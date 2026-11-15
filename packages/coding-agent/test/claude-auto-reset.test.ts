@@ -253,6 +253,50 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		});
 	});
 
+	it("never restores with a 5h-only reset when the provider's retry-after is the weekly reset", () => {
+		// The usage report predates the 429 that pushed the weekly window to its cap
+		// (99% reported); the 429's retry-after names the weekly reset, so the weekly
+		// window binds and clearing the exhausted 5h window cannot serve the retry.
+		const juniper = status({
+			credit: {
+				id: "juniper_tide",
+				program: "juniper_tide",
+				clears: ["anthropic:5h"],
+				blocking: ["anthropic:5h"],
+				usedFractions: { "anthropic:5h": 1 },
+				requiresLimit: true,
+			},
+		});
+		const reports = [report({ fiveHourUsed: 1, weeklyUsed: 0.99 })];
+		const weeklyBinds = planClaudeResetRedemptions(
+			input({ reports, statuses: [juniper], activeBlockUnblockAtMs: NOW + 3 * 24 * HOUR }),
+		);
+		expect(weeklyBinds.actions).toEqual([]);
+		expect(weeklyBinds.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "blocked-account",
+			reason: "incomplete-coverage",
+		});
+
+		// A retry-after at the 5h reset (rounded to the second) confirms the 5h window binds.
+		const fiveHourBinds = planClaudeResetRedemptions(
+			input({ reports, statuses: [juniper], activeBlockUnblockAtMs: NOW + 2 * HOUR + 999 }),
+		);
+		expect(fiveHourBinds.actions).toMatchObject([{ program: "juniper_tide", blockedWindows: ["anthropic:5h"] }]);
+
+		// A full grant clears the weekly window too, so the same weekly hint still restores,
+		// governed by weekly consent.
+		const full = status({
+			credit: { blocking: ["anthropic:5h"], usedFractions: { "anthropic:5h": 1, "anthropic:7d": 0.99 } },
+		});
+		const fullGrant = planClaudeResetRedemptions(
+			input({ reports, statuses: [full], activeBlockUnblockAtMs: NOW + 3 * 24 * HOUR }),
+		);
+		expect(fullGrant.actions).toMatchObject([
+			{ program: "cedar_ember", blockedWindows: ["anthropic:5h", "anthropic:7d"], window: "weekly" },
+		]);
+	});
+
 	it("refuses a Cedar grant that does not clear an exhausted relevant model scope", () => {
 		const plan = planClaudeResetRedemptions(input({ reports: [report({ weeklyUsed: 0.5, sonnetUsed: 1 })] }));
 		expect(plan.actions).toEqual([]);
