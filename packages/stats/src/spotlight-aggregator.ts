@@ -10,8 +10,8 @@
  * - a rerun is a bash command equal to, extending (pipe, redirect, `&&`), or ≥ 60% token-similar to a recent one;
  *   for any other tool but `read`, a call of the same tool whose argument tokens (`argumentTokens`) are ≥ 60%
  *   similar;
- * - an extra turn costs what it added to the bill: cache writes beyond its context's growth since the previous request
- *   (a rewrite the next request would have paid anyway) are priced at its own cache-read rate, and one that read no
+ * - an extra turn costs what it added to the bill: its cache writes are priced at its own cache-read rate, since the
+ *   next request would have written those tokens had the turn not run and reads them instead, and one that read no
  *   cache keeps its whole cost (see {@link Request.turnUsd}).
  */
 
@@ -273,10 +273,10 @@ export interface Request {
 	durationMs: number;
 	context: number;
 	/**
-	 * What the request added to the bill: its cost, with cache writes beyond its context's growth since the previous
-	 * request (a rewrite of context already sent, after a partial cache miss or a compaction) priced at its own cache
-	 * read rate, since the next request would have paid that rewrite had this one not run. A request that read no cache
-	 * bills no read rate to price the rewrite at, so it keeps its whole cost.
+	 * What the request added to the bill, as an extra turn: its cost with every cache write priced at its own cache-read
+	 * rate. Had it not run, the next request would have written the same context (the previous request's output and
+	 * tool results, or a rewrite after a cache miss or a compaction); with it, the next request reads that context
+	 * instead. A request that read no cache bills no read rate to price its writes at, so it keeps its whole cost.
 	 */
 	turnUsd: number;
 	compacted: boolean;
@@ -290,7 +290,7 @@ export interface SessionAnalysis {
 	calls: Call[];
 	requests: Request[];
 	/** {@link Request.turnUsd} by assistant entry id (main-loop requests). */
-	costByEntry: Map<string, number>;
+	turnUsdByEntry: Map<string, number>;
 	agentType: AgentType;
 	edits: EditLog;
 }
@@ -460,20 +460,19 @@ function seenTokens(result: Result | null, resultChars: number | null): number {
 	return result?.plainTokens ?? 0;
 }
 
-function toRequest(row: RequestRow, previous: Request | undefined): Request {
+function toRequest(row: RequestRow): Request {
 	const inputRate = row.input_tokens > 0 ? row.cost_input / row.input_tokens : 0;
-	const context = row.input_tokens + row.cache_read_tokens + row.cache_write_tokens;
 	const readRate = row.cache_read_tokens > 0 ? row.cost_cache_read / row.cache_read_tokens : inputRate;
 	const writeRate = row.cache_write_tokens > 0 ? row.cost_cache_write / row.cache_write_tokens : inputRate;
-	const growth = previous ? Math.max(0, context - previous.context) : context;
-	const rewritten = Math.max(0, row.cache_write_tokens - growth);
 	return {
 		entryId: row.entry_id,
 		timestamp: row.timestamp,
 		durationMs: row.duration,
-		context,
+		context: row.input_tokens + row.cache_read_tokens + row.cache_write_tokens,
 		turnUsd:
-			row.cache_read_tokens > 0 ? row.cost_total - rewritten * Math.max(0, writeRate - readRate) : row.cost_total,
+			row.cache_read_tokens > 0
+				? row.cost_total - row.cache_write_tokens * Math.max(0, writeRate - readRate)
+				: row.cost_total,
 		compacted: false,
 		readRate,
 		writeRate,
@@ -574,21 +573,21 @@ class SessionLoader {
 
 		const requests: Request[] = [];
 		for (const row of this.#requests.all(session.session_file)) {
-			const previous = requests.at(-1);
-			const request = toRequest(row, previous);
+			const request = toRequest(row);
 			// Failed requests report no prompt; they neither carry context nor mark a compaction. Requests before
 			// the marker (a resumed pre-experiment session) are not the experiment's.
 			if (request.context <= 0 || request.timestamp < session.marked_at) continue;
+			const previous = requests.at(-1);
 			request.compacted = previous !== undefined && request.context < previous.context * COMPACTION_RATIO;
 			requests.push(request);
 		}
-		const costByEntry = new Map(requests.map(request => [request.entryId, request.turnUsd]));
+		const turnUsdByEntry = new Map(requests.map(request => [request.entryId, request.turnUsd]));
 		const analysis: SessionAnalysis = {
 			session,
 			cwd: session.cwd,
 			calls,
 			requests,
-			costByEntry,
+			turnUsdByEntry,
 			agentType: classifyAgentType(session.session_file),
 			edits: new EditLog(calls),
 		};
@@ -1162,7 +1161,7 @@ function summarize(analysis: SessionAnalysis): SpotlightSessionSummary {
 			if (call.recovery.turn) turnEntries.add(call.entryId);
 		}
 	}
-	for (const entry of turnEntries) recoveryUsd += analysis.costByEntry.get(entry) ?? 0;
+	for (const entry of turnEntries) recoveryUsd += analysis.turnUsdByEntry.get(entry) ?? 0;
 	return {
 		sessionFile: analysis.session.session_file,
 		title: analysis.session.title,
@@ -1390,7 +1389,7 @@ export function buildSpotlightDashboard(
 			point.netUsd -= call.recoveryCarryUsd;
 			if (recovery.turn && !turnsCounted.has(call.entryId)) {
 				turnsCounted.add(call.entryId);
-				const turnUsd = analysis.costByEntry.get(call.entryId) ?? 0;
+				const turnUsd = analysis.turnUsdByEntry.get(call.entryId) ?? 0;
 				for (const totals of [clawback, kind]) {
 					totals.turns++;
 					totals.turnsUsd += turnUsd;
@@ -1612,7 +1611,7 @@ function extraTurnShares(analysis: SessionAnalysis): Map<Call, { turns: number; 
 	const shares = new Map<Call, { turns: number; usd: number }>();
 	for (const [entryId, calls] of byEntry) {
 		if (calls.length !== calls[0].callsInTurn) continue;
-		const usd = analysis.costByEntry.get(entryId) ?? 0;
+		const usd = analysis.turnUsdByEntry.get(entryId) ?? 0;
 		for (const call of calls) {
 			const source = call.recovery?.source;
 			if (!source) continue;

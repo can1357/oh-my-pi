@@ -463,7 +463,7 @@ describe("Spotlight cut economics", () => {
 		expect(stats.clawback.turns).toBe(1);
 	});
 
-	it("charges a fetch-back turn that missed the prompt cache only what it added, not the context rewrite", async () => {
+	it("charges a fetch-back turn its cache writes at the read rate: the next request would have written them", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		shortenedRead(b); // context 500 + 10,000 + 500 = 11,000
@@ -477,9 +477,10 @@ describe("Spotlight cut economics", () => {
 		await write("cache-miss.jsonl", b);
 
 		const stats = await dashboard();
-		// Input 500 × 5e-6 + output 200 × 25e-6 + reads 1,000 × 0.5e-6, the 2,000 new tokens written at 6.25e-6 and
-		// the 9,500 rewritten ones at the read rate: the next request would have paid that rewrite anyway.
-		const added = 0.0025 + 0.005 + 0.0005 + 2000 * 6.25e-6 + 9500 * 0.5e-6;
+		// Input 500 × 5e-6 + output 200 × 25e-6 + reads 1,000 × 0.5e-6, and all 11,500 writes at the read rate: without
+		// the dive the next request would have written the 2,000 new tokens and the 9,500 rewritten ones, and with it
+		// reads them instead.
+		const added = 0.0025 + 0.005 + 0.0005 + 11_500 * 0.5e-6;
 		expect(stats.clawback.turns).toBe(1);
 		expect(stats.clawback.turnsUsd).toBeCloseTo(added, 12);
 		expect(stats.economics.find(e => e.tool === "read")?.turnUsd).toBeCloseTo(added, 12);
