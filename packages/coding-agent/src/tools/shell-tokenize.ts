@@ -1003,9 +1003,11 @@ export interface ShellCommand {
 	/** Directory the command runs in, after the `cd`s that precede it in the script. */
 	cwd: string;
 	/**
-	 * Commands whose output can reach this one's input through pipes: the earlier stages of its
-	 * pipeline, where a compound command (`( )`, `{ }`, a loop, `if`, `case`) is one stage made of
-	 * every command run in it, and whatever is piped into a compound command it runs in.
+	 * Commands whose output can reach this one's input: the earlier stages of its pipeline, where a
+	 * compound command (`( )`, `{ }`, a loop, `if`, `case`) is one stage made of every command run in
+	 * it; whatever is piped into a compound command it runs in, or that compound command's own input
+	 * redirections give it (`done < .env`); and in a substitution, the input of the command the
+	 * substitution is in, or for a `>( )` that command itself.
 	 */
 	upstream: ShellUpstream | undefined;
 	/**
@@ -1245,11 +1247,14 @@ interface CaseReading {
 
 /**
  * A substitution read but not parsed into commands yet: what it runs depends on the directory of
- * the command it is in, known only once the `cd`s before that command are applied.
+ * the command it is in, known only once the `cd`s before that command are applied, and on what
+ * that command reads, or for `>( )` writes.
  */
 interface Substitution {
-	/** Its pipelines, nested ones after the top level, run from `cwd`. */
-	read: (cwd: string) => ShellCommand[][];
+	/** Its pipelines, nested ones after the top level, run from `cwd` with `input` upstream of them. */
+	read: (cwd: string, input: ShellUpstream | undefined) => ShellCommand[][];
+	/** Set on a `>( )`: it reads what the command it is in writes there, not that command's input. */
+	output?: true;
 	/** Set by the first {@link ShellScriptParser#substitute}: a substitution runs in one place. */
 	pipelines?: ShellCommand[][];
 }
@@ -1445,12 +1450,61 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 	return out;
 }
 
+/** The compound commands the reserved words at the start of a segment open and close, in order. */
+function* compoundKeywords(words: readonly string[], quoted: readonly boolean[]): Generator<"open" | "close"> {
+	for (let k = 0; k < words.length && !quoted[k]; k++) {
+		const word = words[k];
+		if (Object.hasOwn(COMPOUND_OPENERS, word)) {
+			yield "open";
+			// The words after `for`, `select` and `case` are no command.
+			if (word === "for" || word === "select" || word === "case") return;
+		} else if (Object.hasOwn(COMPOUND_CLOSERS, word)) {
+			yield "close";
+		} else if (!COMMAND_PREFIXES.includes(word)) {
+			return;
+		}
+	}
+}
+
+/**
+ * Per compound command that redirects its own input with a `<` file, a heredoc or a here-string
+ * (`done < file`, `} <<EOF`, `) < file`), numbered in the order they open, the index of the
+ * segment with those redirections: the one its closing reserved word starts, or the one with no
+ * words right after its `)`.
+ */
+function compoundInputs(segments: readonly ShellScriptSegment[]): Map<number, number> {
+	const redirects = segments.map(
+		segment => segment.reads.length > 0 || segment.heredocs.length > 0 || segment.herestrings.length > 0,
+	);
+	const inputs = new Map<number, number>();
+	const open: number[] = [];
+	let opened = 0;
+	for (const [index, segment] of segments.entries()) {
+		let closed: number | undefined;
+		for (const keyword of compoundKeywords(segment.words, segment.quoted)) {
+			if (keyword === "open") open.push(opened++);
+			else closed = open.pop();
+		}
+		if (closed !== undefined && redirects[index]) inputs.set(closed, index);
+		if (segment.operator === "(") {
+			open.push(opened++);
+		} else if (segment.operator === ")") {
+			const group = open.pop();
+			if (group !== undefined && redirects[index + 1] && segments[index + 1].words.length === 0) {
+				inputs.set(group, index + 1);
+			}
+		}
+	}
+	return inputs;
+}
+
 /**
  * Which commands feed each command's input through pipes, as a script runs. A compound command
  * (`( )`, `{ }`, a loop, `if`, `case`) is one pipeline stage: every command run in it is upstream of
- * the stage after it, and what is piped into it is upstream of every command in it. The commands
- * are kept in one list, where a stage and a compound command are each a run of it, so an upstream
- * chain costs the same at every pipe however long the pipeline gets.
+ * the stage after it, and what is piped into it, or what its own redirections give it, is upstream
+ * of every command in it. The commands are kept in one list, where a stage and a compound command
+ * are each a run of it, so an upstream chain costs the same at every pipe however long the
+ * pipeline gets.
  */
 class PipelineStages {
 	/** Every command added, in order. */
@@ -1463,6 +1517,21 @@ class PipelineStages {
 	#upstream: ShellUpstream | undefined;
 	/** Where the commands of the current stage start. */
 	#stage = 0;
+	/** Compound commands opened so far. */
+	#opened = 0;
+
+	/**
+	 * @param input What the script reads: upstream of every pipeline in it that no compound command
+	 *   around it gives other input.
+	 * @param redirection The command made of the input redirections of the compound command opened
+	 *   `opened`-th (counted from 0), if it has any.
+	 */
+	constructor(
+		readonly input: ShellUpstream | undefined,
+		readonly redirection: (opened: number) => ShellCommand | undefined,
+	) {
+		this.#upstream = input;
+	}
 
 	/** Upstream of the current stage. */
 	get upstream(): ShellUpstream | undefined {
@@ -1471,17 +1540,9 @@ class PipelineStages {
 
 	/** Opens and closes the compound commands whose reserved words start a segment. */
 	keywords(words: readonly string[], quoted: readonly boolean[]): void {
-		for (let k = 0; k < words.length && !quoted[k]; k++) {
-			const word = words[k];
-			if (Object.hasOwn(COMPOUND_OPENERS, word)) {
-				this.#open();
-				// The words after `for`, `select` and `case` are no command.
-				if (word === "for" || word === "select" || word === "case") return;
-			} else if (Object.hasOwn(COMPOUND_CLOSERS, word)) {
-				this.#close();
-			} else if (!COMMAND_PREFIXES.includes(word)) {
-				return;
-			}
+		for (const keyword of compoundKeywords(words, quoted)) {
+			if (keyword === "open") this.#open();
+			else this.#close();
 		}
 	}
 
@@ -1503,13 +1564,19 @@ class PipelineStages {
 			}
 			this.#stage = end;
 		} else {
-			// The pipeline ended: the next one reads what is piped into the compound around it.
-			this.#upstream = this.#compounds.at(-1)?.input;
+			// The pipeline ended: the next one reads what the compound around it, or the script, reads.
+			this.#upstream = this.#compounds.length > 0 ? this.#compounds.at(-1)!.input : this.input;
 			this.#stage = end;
 		}
 	}
 
+	/** Opens a compound command: its input redirections, if any, feed every command in it. */
 	#open(): void {
+		const redirection = this.redirection(this.#opened++);
+		if (redirection) {
+			const at = this.#commands.push(redirection) - 1;
+			this.#upstream = { commands: this.#commands, from: at, to: at + 1, before: this.#upstream };
+		}
 		this.#compounds.push({ input: this.#upstream, from: this.#commands.length });
 		this.#stage = this.#commands.length;
 	}
@@ -1556,10 +1623,11 @@ class ShellScriptParser {
 	constructor(readonly home: string) {}
 
 	/**
-	 * The pipelines `source` runs, nested ones after the top level. When a `'` in a double-quoted
-	 * `${ }` makes bash and POSIX shells read `source` differently, the commands of both readings.
+	 * The pipelines `source` runs, nested ones after the top level, with `input` upstream of it.
+	 * When a `'` in a double-quoted `${ }` makes bash and POSIX shells read `source` differently,
+	 * the commands of both readings.
 	 */
-	parse(source: string, cwd: string, depth: number): ShellCommand[][] {
+	parse(source: string, cwd: string, depth: number, input?: ShellUpstream): ShellCommand[][] {
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
 			this.truncated = true;
 			return [];
@@ -1569,10 +1637,10 @@ class ShellScriptParser {
 		const outer = { bashQuotes: this.#bashQuotes, ambiguous: this.#ambiguous };
 		this.#bashQuotes = false;
 		this.#ambiguous = false;
-		const pipelines = this.#read(source, cwd, depth);
+		const pipelines = this.#read(source, cwd, depth, input);
 		if (this.#ambiguous && this.#budget(source, depth)) {
 			this.#bashQuotes = true;
-			append(pipelines, this.#read(source, cwd, depth));
+			append(pipelines, this.#read(source, cwd, depth, input));
 		}
 		this.#bashQuotes = outer.bashQuotes;
 		this.#ambiguous = outer.ambiguous;
@@ -1588,34 +1656,55 @@ class ShellScriptParser {
 		return false;
 	}
 
-	#read(source: string, cwd: string, depth: number): ShellCommand[][] {
+	#read(source: string, cwd: string, depth: number, input: ShellUpstream | undefined): ShellCommand[][] {
 		const scope: ReadScope = { depth, subs: new Map() };
-		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope, cwd);
+		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope, cwd, input);
 	}
 
-	/** The commands `substitution` runs from `cwd`, parsed the first time it is asked for. */
-	#substitute(substitution: Substitution, cwd: string): ShellCommand[][] {
-		substitution.pipelines ??= substitution.read(cwd);
+	/** The commands `substitution` runs from `cwd` with `input`, parsed the first time it is asked for. */
+	#substitute(substitution: Substitution, cwd: string, input: ShellUpstream | undefined): ShellCommand[][] {
+		substitution.pipelines ??= substitution.read(cwd, input);
 		return substitution.pipelines;
 	}
 
-	/** The pipelines `tokens`, read in `scope`, run from `start`, nested ones after the top level. */
-	#pipelines(tokens: readonly ShellScriptToken[], scope: ReadScope, start: string): ShellCommand[][] {
+	/**
+	 * The pipelines `tokens`, read in `scope`, run from `start` with `input` upstream of them,
+	 * nested ones after the top level.
+	 */
+	#pipelines(
+		tokens: readonly ShellScriptToken[],
+		scope: ReadScope,
+		start: string,
+		input: ShellUpstream | undefined,
+	): ShellCommand[][] {
 		const { depth, subs } = scope;
 		let cwd = start;
 		// A `( )` subshell's `cd` ends with the group: the directory is restored at its `)`.
 		const subshellCwds: string[] = [];
 		const pipelines: ShellCommand[][] = [];
 		const nested: ShellCommand[][] = [];
-		const stages = new PipelineStages();
+		const segments = this.#segments(tokens);
+		const inputs = compoundInputs(segments);
+		// Segments whose redirections were read when the compound command they belong to opened.
+		const opened = new Set<number>();
+		const stages = new PipelineStages(input, compound => {
+			const index = inputs.get(compound);
+			if (index === undefined) return undefined;
+			opened.add(index);
+			// The shell opens the files before it runs the compound command, from where it starts.
+			const command = this.#command(segments[index], cwd, subs, depth, nested, stages.upstream);
+			if (command) pipelines.push([command]);
+			return command;
+		});
 		let pipeline: ShellCommand[] = [];
-		for (const segment of this.#segments(tokens)) {
+		for (const [index, segment] of segments.entries()) {
 			stages.keywords(segment.words, segment.quoted);
-			const command = this.#command(segment, cwd, subs, depth, nested, stages.upstream);
+			const command = opened.has(index)
+				? undefined
+				: this.#command(segment, cwd, subs, depth, nested, stages.upstream);
 			if (command) {
 				pipeline.push(command);
 				stages.add(command);
-				this.#feedShell(command, segment, depth, nested);
 			}
 			stages.operator(segment.operator);
 			if (Object.hasOwn(SHELL_PIPES, segment.operator)) continue;
@@ -1632,25 +1721,17 @@ class ShellScriptParser {
 			else if (segment.operator === ")") cwd = subshellCwds.pop() ?? cwd;
 		}
 		// A substitution no command took (one in a heredoc delimiter) is read from where the script starts.
-		return [...pipelines, ...nested, ...[...subs.values()].flatMap(sub => this.#substitute(sub, start))];
+		return [...pipelines, ...nested, ...[...subs.values()].flatMap(sub => this.#substitute(sub, start, input))];
 	}
 
 	/**
-	 * Records what `command` (read from `segment`) passes on to a shell piped after it: the heredocs
-	 * and here-strings it reads (`cat <<EOF | sh`), and what `echo`/`printf` prints. When `command`
-	 * is a shell that reads its script from stdin, parses what its upstream commands and its own
-	 * heredocs and here-strings give it. The first such shell takes that input, so each text is
-	 * parsed once: a shell further down reads the output of the one before it instead.
+	 * Parses what the upstream commands of `command`, a shell that reads its script from stdin, and
+	 * its own heredocs and here-strings give it (see {@link #command}). The first such shell takes
+	 * that input, so each text is parsed once: a shell further down reads the output of the one
+	 * before it instead.
 	 */
-	#feedShell(command: ShellCommand, segment: ShellScriptSegment, depth: number, nested: ShellCommand[][]): void {
-		const { argv, cwd } = command;
-		const texts = new Set([...segment.heredocs.map(doc => doc.body), ...segment.herestrings]);
-		if (Object.hasOwn(SHELL_ECHOES, argv[0])) {
-			texts.add(argv.slice(1).join(" "));
-			for (const arg of argv.slice(1)) texts.add(arg);
-		}
-		this.#passed.set(command, [...texts]);
-		if (!Object.hasOwn(SCRIPT_SHELLS, argv[0]) || shellScriptSource(argv) !== "stdin") return;
+	#feedShell(command: ShellCommand, depth: number, nested: ShellCommand[][]): void {
+		const { cwd } = command;
 		// A stage a shell took from was taken with everything upstream of it.
 		const stages: ShellUpstream[] = [];
 		for (let stage = command.upstream; stage && !this.#fed.has(stage); stage = stage.before) {
@@ -2051,10 +2132,10 @@ class ShellScriptParser {
 	/**
 	 * Reads the substitution at `start` (`` ` ``, `$(`, `<(`, `>(`): the key that stands for it in a
 	 * word, and the index after it. What it runs is parsed when the command it is in is built, from
-	 * that command's directory. A `$( )` body is read as commands up to the `)` that closes it, so a
-	 * `)` in quotes, in a comment or in a heredoc body does not end it. A backtick body loses the
-	 * backslashes bash removes before parsing it (`quoted`: inside double quotes), so `` \` `` nests
-	 * a substitution and `\"` is a quote again.
+	 * that command's directory and with its input (for `>( )`, its output). A `$( )` body is read as
+	 * commands up to the `)` that closes it, so a `)` in quotes, in a comment or in a heredoc body
+	 * does not end it. A backtick body loses the backslashes bash removes before parsing it
+	 * (`quoted`: inside double quotes), so `` \` `` nests a substitution and `\"` is a quote again.
 	 */
 	#substitution(text: string, start: number, scope: ReadScope, quoted: boolean): { key: string; after: number } {
 		const key = `\0${this.#count++}\0`;
@@ -2063,7 +2144,7 @@ class ShellScriptParser {
 			let end = start + 1;
 			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
 			const body = text.slice(start + 1, end).replace(quoted ? QUOTED_BACKTICK_ESCAPE_RE : BACKTICK_ESCAPE_RE, "$1");
-			scope.subs.set(key, { read: cwd => this.parse(body, cwd, depth) });
+			scope.subs.set(key, { read: (cwd, input) => this.parse(body, cwd, depth, input) });
 			return { key, after: end + 1 };
 		}
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
@@ -2076,7 +2157,8 @@ class ShellScriptParser {
 		// commands either way, but a `<<` in it is never a heredoc.
 		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
 		this.scripts.push(text.slice(start + 2, end));
-		scope.subs.set(key, { read: cwd => this.#pipelines(tokens, inner, cwd) });
+		const read = (cwd: string, input: ShellUpstream | undefined) => this.#pipelines(tokens, inner, cwd, input);
+		scope.subs.set(key, text[start] === ">" ? { read, output: true } : { read });
 		return { key, after: end + 1 };
 	}
 
@@ -2152,8 +2234,11 @@ class ShellScriptParser {
 	}
 
 	/**
-	 * The simple command `segment` runs from `cwd`, or `undefined` when it runs none. The
-	 * substitutions in its words run from `cwd` too, even when it runs no command (`x=$(...)`).
+	 * The simple command `segment` runs from `cwd` with `upstream` feeding it, or `undefined` when
+	 * it runs none. Records what it passes on to a shell after it: the heredocs and here-strings it
+	 * reads (`cat <<EOF | sh`), and what `echo`/`printf` prints. The substitutions in its words run
+	 * from `cwd` too, even when it runs no command (`x=$(...)`), and read its input, or for `>( )`
+	 * what it writes there. A shell that reads its script from stdin is fed it ({@link #feedShell}).
 	 */
 	#command(
 		segment: ShellScriptSegment,
@@ -2163,22 +2248,7 @@ class ShellScriptParser {
 		nested: ShellCommand[][],
 		upstream: ShellUpstream | undefined,
 	): ShellCommand | undefined {
-		const { words, writes, reads } = segment;
-		const everything = [
-			...words,
-			...writes,
-			...reads,
-			...segment.herestrings,
-			...segment.heredocs.flatMap(doc => doc.subs),
-			...segment.other,
-		];
-		const used: ShellCommand[] = [];
-		for (const word of everything) {
-			for (const key of word.match(SUBSTITUTION_KEY_RE) ?? []) {
-				const sub = subs.get(key);
-				if (sub) for (const pipeline of this.#substitute(sub, cwd)) append(used, pipeline);
-			}
-		}
+		const { words, writes, reads, herestrings, heredocs } = segment;
 		const wrappers: string[] = [];
 		const start = unwrapShellCommand(words, wrappers);
 		const argv = words.slice(start);
@@ -2188,23 +2258,57 @@ class ShellScriptParser {
 			argv.push(wrappers.pop()!);
 			quoted.push(false);
 		}
-		// A command that is only redirections still opens its files (`$(< file)`, `done < file`).
-		if (argv.length === 0 && writes.length === 0 && reads.length === 0) return undefined;
 		const program = argv[0] ?? "";
 		if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
-		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
-		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1));
-		return {
+		const command: ShellCommand = {
 			argv,
 			quoted,
 			program,
 			wrappers,
 			reads,
-			subs: used,
+			subs: [],
 			cwd,
 			upstream,
 			literalTildes: segment.literalTildes,
 		};
+		// A command that is only redirections still opens its files (`$(< file)`, `done < file`) and
+		// passes its heredocs on.
+		const runs =
+			argv.length > 0 || writes.length > 0 || reads.length > 0 || herestrings.length > 0 || heredocs.length > 0;
+		if (runs) {
+			const texts = new Set([...heredocs.map(doc => doc.body), ...herestrings]);
+			if (Object.hasOwn(SHELL_ECHOES, argv[0])) {
+				texts.add(argv.slice(1).join(" "));
+				for (const arg of argv.slice(1)) texts.add(arg);
+			}
+			this.#passed.set(command, [...texts]);
+		}
+		let output: ShellUpstream | undefined;
+		const everything = [
+			...words,
+			...writes,
+			...reads,
+			...herestrings,
+			...heredocs.flatMap(doc => doc.subs),
+			...segment.other,
+		];
+		for (const word of everything) {
+			for (const key of word.match(SUBSTITUTION_KEY_RE) ?? []) {
+				const sub = subs.get(key);
+				if (!sub) continue;
+				const input = sub.output
+					? (output ??= { commands: [command], from: 0, to: 1, before: upstream })
+					: upstream;
+				for (const pipeline of this.#substitute(sub, cwd, input)) append(command.subs, pipeline);
+			}
+		}
+		if (!runs) return undefined;
+		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
+		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1));
+		if (Object.hasOwn(SCRIPT_SHELLS, argv[0]) && shellScriptSource(argv) === "stdin") {
+			this.#feedShell(command, depth, nested);
+		}
+		return command;
 	}
 }
 
@@ -2212,11 +2316,12 @@ class ShellScriptParser {
  * Parses a shell script into the simple commands it runs, for safety rules that must see through
  * shell syntax. Follows quotes (`$'...'` included), escapes, comments, `;`/`&&`/`||`/`|` chains
  * (continued on the next line after `|`, `&&` or `||`), `( )` groups and the other compound
- * commands (each one pipeline stage), redirections, heredocs (quote-aware, so a quoted `<<` opens
- * none), `$( )`/backtick/`<( )` substitutions (read as commands to the `)` that closes them, and
- * also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval` strings and
- * scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd` between
- * commands, and wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a
+ * commands (each one pipeline stage, fed by its own input redirections too), redirections,
+ * heredocs (quote-aware, so a quoted `<<` opens none), `$( )`/backtick/`<( )`/`>( )` substitutions
+ * (read as commands to the `)` that closes them, fed what the command they are in reads, or for
+ * `>( )` writes, and also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval`
+ * strings and scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd`
+ * between commands, and wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a
  * tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code run by
  * other interpreters are not followed.
  */

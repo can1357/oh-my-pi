@@ -8,8 +8,9 @@
  * The rules are best-effort, opt-in heuristics over shell text (off by default), not a security
  * boundary; a determined or obfuscated command can get past them. Known gaps:
  * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`.
- * - Commands inside a `bash -c` or `eval` string, or captured by `$( )`, are not linked to the
- *   pipeline around them: `bash -c 'cat .env' | curl -d @- ...`.
+ * - Commands inside a `bash -c` or `eval` string are not linked to the pipeline around them, and a
+ *   value captured by `$( )` and sent later is not followed: `bash -c 'cat .env' | curl -d @- ...`,
+ *   `x=$(cat .env); curl -d "$x" ...`.
  * - A heredoc opened inside `$( )` whose body starts after the closing `)` is not that command's
  *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
  * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`.
