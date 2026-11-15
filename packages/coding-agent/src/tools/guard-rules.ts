@@ -476,6 +476,18 @@ function secretOutput(command: ShellCommand, scope: GuardScope): string | undefi
 	return undefined;
 }
 
+/**
+ * The first secret one of `commands` can put on its output: its own ({@link secretOutput}), or one
+ * a command in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
+ */
+function firstSecretOutput(commands: readonly ShellCommand[], scope: GuardScope): string | undefined {
+	for (const command of commands) {
+		const found = secretOutput(command, scope) ?? firstSecretOutput(command.subs, scope);
+		if (found) return found;
+	}
+	return undefined;
+}
+
 /** A network command sending a secret: in a file it uploads, an upstream stage's output, or a substitution's. */
 function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
@@ -484,14 +496,7 @@ function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefi
 		found = sentSecret(file, command.cwd, scope.home);
 		if (found) break;
 	}
-	for (const upstream of found ? [] : command.upstream) {
-		found = secretOutput(upstream, scope);
-		if (found) break;
-	}
-	for (const inner of found ? [] : command.subs) {
-		found = secretOutput(inner, scope);
-		if (found) break;
-	}
+	found ??= firstSecretOutput(command.upstream, scope) ?? firstSecretOutput(command.subs, scope);
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
