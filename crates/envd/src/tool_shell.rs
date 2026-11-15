@@ -764,6 +764,12 @@ mod tests {
 			};
 			let visible = text.split_once('\n').expect("status line").1;
 			if command == "cargo build" {
+				let model_text = payload
+					.status
+					.model_text
+					.as_ref()
+					.expect("cargo build projection carries minimized model_text");
+				assert!(!model_text.contains("Compiling example"));
 				assert!(!visible.contains("Compiling example"));
 				assert!(
 					visible.len() * 4 < output.len(),
