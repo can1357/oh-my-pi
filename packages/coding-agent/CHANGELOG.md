@@ -20,6 +20,7 @@
 - Fixed quoted and Unicode filenames being omitted from task change tracking or failing selective commits ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
 - Pasting HTML into the composer keeps the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Hello world`) and code indentation inside `<pre>` ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla))
 - `browser.open` with `app: "/usr/bin/chromium"` on Arch now reuses the Chromium already running on that profile instead of failing with "Timed out waiting for CDP endpoint" ([#19235](https://github.com/can1357/oh-my-pi/pull/19235) by [@tuschla](https://github.com/tuschla))
+- Editing a queued follow-up (`/queue`, `=>`, or the follow-up key) with Alt+Up now restores it as `=> <message>`, so Enter queues it again for when the agent yields instead of sending it into the running turn ([#19304](https://github.com/can1357/oh-my-pi/issues/19304))
 
 ## [18.20.2] - 2026-11-14
 
