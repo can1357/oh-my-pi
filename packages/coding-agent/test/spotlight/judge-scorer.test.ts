@@ -89,7 +89,15 @@ describe("judge scorer", () => {
 		await new JudgeScorer(judge, 5_000).score(["alpha", "beta"], context());
 		const [request] = requests;
 		expect(request!.questions).toEqual([lineKey(0), lineKey(1)]);
-		expect(Object.keys(request!.state)).toEqual(["commands", "criteria", "intent", "lines", "said", "source", "task"]);
+		expect(Object.keys(request!.state)).toEqual([
+			"commands",
+			"criteria",
+			"intent",
+			"lines",
+			"said",
+			"source",
+			"task",
+		]);
 		expect((request!.state.lines as Record<string, string>)[lineKey(1)]).toBe("beta");
 	});
 
@@ -110,7 +118,11 @@ describe("judge scorer", () => {
 		const scorer = new JudgeScorer(judge, 5_000);
 		const items = Array.from({ length: JUDGE_CHUNK_ITEMS * 4 }, (_, i) => `line ${i}`);
 		// `scoreLines` fans one score() call out per 32 KB chunk: the cap holds across the stages, not within one.
-		await Promise.all([scorer.score(items, context()), scorer.score(items, context()), scorer.score(items, context())]);
+		await Promise.all([
+			scorer.score(items, context()),
+			scorer.score(items, context()),
+			scorer.score(items, context()),
+		]);
 		expect(peak()).toBe(8);
 	});
 

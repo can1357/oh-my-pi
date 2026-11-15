@@ -10,7 +10,14 @@
  * flattens every score to the same prior on a 900-line read.
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { type JsonValue, type Judge, type Model, type NoulQuestion, judgeQuestions, renderQuestion } from "@oh-my-pi/pi-ai";
+import {
+	type JsonValue,
+	type Judge,
+	type Model,
+	type NoulQuestion,
+	judgeQuestions,
+	renderQuestion,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Settings } from "../config/settings";
 import type { ModelRegistry } from "../config/model-registry";
