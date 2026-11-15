@@ -59,7 +59,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - normalizes `skip` to a non-negative integer;
    - expands delimiter-flattened `path` entries with `expandDelimitedPathEntries()`, keeping existing delimiter-containing paths intact, splitting semicolon-delimited lists unconditionally, accepting comma splits when at least one part resolves, and accepting whitespace splits only when every part resolves;
    - peels any line-range selector from each resulting entry;
-   - reads `grep.contextBefore` and `grep.contextAfter` from session settings (`1` and `3` by default);
+   - reads `grep.contextBefore` and `grep.contextAfter` from session settings (`0` and `0` by default: match lines only);
    - enables multiline only when `pattern` contains `\n` or an actual newline.
 2. Each `path` root is normalized with `normalizePathLikeInput()` again during shared scope resolution; this is a no-op for entries already normalized by delimiter expansion.
 3. Archive member paths such as `bundle.zip:src/foo.ts` are materialized to temporary UTF-8 scratch files before native grep. Binary or non-UTF-8 archive members are reported as skipped/unreadable.
@@ -98,7 +98,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 13. JS output shaping then:
 
 - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
-- caps matches per file to 20 for multi-file scopes and 200 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 20 matches in a.ts; grep keeps the first 20 per file when searching several. Search one file alone for up to 200.`; a single file gets `More than 200 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
+- caps matches per file to 10 for multi-file scopes and 50 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 10 matches in a.ts; grep keeps the first 10 per file when searching several. Search one file alone for up to 50.`; a single file gets `More than 50 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
 - round-robins selected per-file matches so one file does not monopolize the page;
 - sanitizes emitted match and context lines with `sanitizeText()` (`packages/utils/src/sanitize-text.ts`, stripping ANSI escapes, NUL, and other control characters), then formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` (`packages/tui/src/render/render-utils.ts`) for TUI;
 - in hashline mode, calls `getEditStore(session).recordSnapshotFile()` for each eligible rendered file to mint the `#TAG` anchor, then records emitted lines with `recordSeenLinesFromBody()`. Archive entries, immutable external materializations, and immutable URL schemes are skipped; a mutable file-backed URL (`local://`) is snapshotted against its backing host file (`resultSnapshotPath()`). Files too large or unreadable for snapshots fall back to plain line output.
@@ -109,9 +109,9 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 ## Modes / Variants
 
 1. **Single file path**
-   - Native `grep()` searches one file as text, including files containing NUL bytes across buffered files, streamed oversized files, and multiline searches within the leading 4 MiB window (unless answered by an `ovnfs` daemon; see Notes).
+   - Native `grep()` searches one file as text, including files containing NUL bytes across buffered files, streamed oversized files, and multiline searches within the leading 4 MiB window; named files are never answered by an ovnfs daemon (see Notes).
    - Output is a flat list of match/context lines.
-   - Visible limit is the first `200` matches after native matching and JS per-file capping.
+   - Visible limit is the first `50` matches after native matching and JS per-file capping.
 2. **Single directory path or single glob-like path**
    - `parseSearchPath()` may split the input into `path` + `glob`.
    - One native `grep()` scans the directory tree with `gitignore` and `hidden:true`.
@@ -148,11 +148,11 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 ## Limits & Caps
 
 - File page limit: `20` files (`DEFAULT_FILE_LIMIT` in `packages/coding-agent/src/tools/grep.ts`).
-- Per-file match caps: `20` for multi-file scopes (`MULTI_FILE_PER_FILE_MATCHES`), `200` for single-file scopes (`SINGLE_FILE_MATCHES`).
+- Per-file match caps: `10` for multi-file scopes (`MULTI_FILE_PER_FILE_MATCHES`), `50` for single-file scopes (`SINGLE_FILE_MATCHES`).
 - Ordinary native preselection cap: `2000` matches per invocation (`INTERNAL_TOTAL_CAP`). Line-range filters increase the fetch caps before JS filtering.
 - Line truncation: `512` UTF-8 bytes per emitted line content, including the native `...` markers but not the line prefix or `[col N]` suffix (`DEFAULT_MAX_COLUMN` in `packages/tui/src/tools/streaming-output.ts`). Native grep windows a cut match line around the first match the searcher found (re-run over the search buffer from the line's start, as ripgrep's printer does) and reports its `column`; JS reports `linesTruncated`.
 - Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
-- Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/tools/settings.ts`.
+- Context defaults: `grep.contextBefore = 0`, `grep.contextAfter = 0` in `packages/coding-agent/src/tools/settings.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
 - Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/pi-natives/src/grep.rs`.
 - Native grep wall-clock budget: `30_000ms` per invocation (`SEARCH_GREP_TIMEOUT_MS` in `packages/coding-agent/src/tools/grep.ts`); hitting it raises `Grep timed out after 30s; ...`.
@@ -185,4 +185,4 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `gitignore:false` only affects native directory traversal. It does not disable the tool's own path normalization or explicit-file handling.
 - When `path` resolves to multiple exact files, each target gets its own native fetch cap before JS grouping (`2000` ordinarily; enlarged for line-range filters).
 - The section tag in hashline mode is a four-hex opaque snapshot tag from the session snapshot store; `grep` records whole-file snapshots when possible and prints bare line numbers beneath the header.
-- When the `ovnfs` binary is found (`ovnfs.path`, default `ovnfs` on `PATH`) and a host directory or glob root lies inside a checkout mount served by its daemon (`packages/coding-agent/src/ovnfs/search.ts`), the daemon answers `grep` instead of `@oh-my-pi/pi-natives` (falling back to native search on daemon failure). Explicitly named files always use the native scanner, so they are searched as text. `DaemonGrepReply` has no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.
+- Below an ovnfs checkout, native `grep()` asks the ovnfs daemon serving it instead of walking the NFS mount (`crates/pi-walker/src/ovnfs.rs`): pi-walker finds ovnfs mounts in the host mount table and the daemon's admin socket from the mount source or ovnfs's state directory, and the daemon searches the checkout's overlay in-process. No ovnfs setting or binary is involved. Named files, `onMatches` streaming, and `type` filters always use the native walker; any daemon failure (no daemon, another protocol version, a daemon serving another mount, an error reply) falls back to the native walk, and cancelling the search closes the daemon connection, which cancels its search. Daemon replies carry no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.

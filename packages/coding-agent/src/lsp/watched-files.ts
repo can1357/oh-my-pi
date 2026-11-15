@@ -260,7 +260,10 @@ export class WatchedFilesForwarder {
 	#delivery: Promise<void> = Promise.resolve();
 	/** Paths the client reported itself, with their size and mtime then (undefined: absent). */
 	readonly #announced = new Map<string, { at: number; snapshot: Promise<string | undefined> }>();
-	/** Creations and deletions delivered lately, by case-folded path: a repeat of one is redundant. */
+	/**
+	 * Creations and deletions delivered lately, by case-folded path, with when the server last heard
+	 * of the path: a repeat of one is redundant, and a created file touched since has changed.
+	 */
 	readonly #reported = new Map<string, { type: FileChangeType; at: number }>();
 	#reportedPrunedAt = 0;
 	/** How far the file system's clock was last seen behind ours (network drives); rescans look back that much further. */
@@ -661,7 +664,7 @@ export class WatchedFilesForwarder {
 		if (since === 0) {
 			for (const target of files) {
 				if (renamedFrom) this.#record(path.join(renamedFrom, path.relative(dir, target)), true, false);
-				if (this.#wantedKinds(target) !== 0) this.#record(target, false, true);
+				if (this.#wantedKinds(target) !== 0) this.#record(target, false, true, undefined, true);
 			}
 			return;
 		}
@@ -818,11 +821,15 @@ export class WatchedFilesForwarder {
 
 	async #deliver(batch: Array<[target: string, change: PendingChange, kinds: number]>): Promise<void> {
 		// The disk answers what the events leave open: whether an `fs.watch`
-		// "rename" left the path present, and whether a changed path is a
-		// directory, which "changes" whenever its entries do (they report themselves).
+		// "rename" left the path present, whether a changed path is a
+		// directory, which "changes" whenever its entries do (they report
+		// themselves), and whether a file reported created was touched since.
 		const stats = await Promise.all(
 			batch.map(([target, { before, after }]) =>
-				after === undefined || (before && after) || this.#announcement(target)
+				after === undefined ||
+				(before && after) ||
+				(after && this.#reported.get(foldCase(path.resolve(target)))?.type === FileChangeType.Created) ||
+				this.#announcement(target)
 					? fs.promises.lstat(target).catch(() => null)
 					: undefined,
 			),
@@ -835,9 +842,18 @@ export class WatchedFilesForwarder {
 		const changes: FileEvent[] = [];
 		for (const [index, [target, change, kinds]] of batch.entries()) {
 			const stat = stats[index];
+			const key = foldCase(path.resolve(target));
+			const reported = this.#reported.get(key);
+			const last = reported && now - reported.at <= REPORTED_TTL_MS ? reported : undefined;
 			const after = change.after ?? !!stat;
+			// The server was told lately that this file was created: touched since, it changed, whatever
+			// the events guess (FSEvents keeps a new file's creation flag on its later events, so macOS
+			// reports writes to it as "rename"; a rescan takes every file it finds for new). Untouched,
+			// the event repeats the creation.
+			const touchedSinceCreated =
+				last?.type === FileChangeType.Created && !!stat && !stat.isDirectory() && stat.ctimeMs > last.at;
 			// A "rename" seen first: present now means it appeared, gone means it went.
-			const before = change.before ?? !after;
+			const before = touchedSinceCreated || (change.before ?? !after);
 			if (after && !before && change.directory === undefined && stat?.isDirectory()) this.#directoryAppeared(target);
 			if (!after && change.directory) this.#directoryVanished(target);
 			if (kinds === 0) continue;
@@ -854,11 +870,11 @@ export class WatchedFilesForwarder {
 			else if (before) type = FileChangeType.Deleted;
 			else continue;
 			// A creation after a creation (a rescan repeating an event, or the reverse) says nothing new.
-			const key = foldCase(path.resolve(target));
 			if (type !== FileChangeType.Changed) {
-				const last = this.#reported.get(key);
+				if (last?.type === type) continue;
 				this.#reported.set(key, { type, at: now });
-				if (last?.type === type && now - last.at <= REPORTED_TTL_MS) continue;
+			} else if (last?.type === FileChangeType.Created) {
+				last.at = now;
 			}
 			if (!(kinds & (1 << (type - 1)))) continue;
 			if (await this.#alreadyAnnounced(target, stat)) continue;

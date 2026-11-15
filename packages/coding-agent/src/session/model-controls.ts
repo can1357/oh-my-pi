@@ -57,10 +57,19 @@ import {
 } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
-/** Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix. */
+/**
+ * Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix:
+ * Anthropic per-message `output_config`, or OpenAI `configuration_update` items (standard reasoning mode only).
+ */
 function takesPerMessageEffort(model: Model): boolean {
 	const { compat } = model;
-	return compat !== undefined && "supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true;
+	if (compat === undefined) return false;
+	if ("supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true) return true;
+	return (
+		"supportsConfigurationUpdate" in compat &&
+		compat.supportsConfigurationUpdate === true &&
+		model.reasoningMode !== "pro"
+	);
 }
 
 /**

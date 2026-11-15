@@ -53,15 +53,13 @@ pub fn usable(
 	name: &[u8],
 	resolved: Option<IntrinsicId>,
 ) -> Result<Option<IntrinsicId>, StoreError> {
-	// Runs for every builtin command: nothing disabled (the root's flag,
-	// unless a subshell changed the list) skips the list.
-	let disabled = match vp
-		.overlay
-		.as_ref()
-		.and_then(|ov| ov.records.get(&KeyBuf::Misc(MiscKey::DisabledBuiltins)))
-	{
-		Some(Some(Record::Words(w))) => w.iter().any(|w| w == name),
-		Some(_) => false,
+	// Runs for every builtin command: nothing disabled (the root's flag; a
+	// forked vproc's own list) skips the list.
+	let disabled = match &vp.image {
+		Some(image) => matches!(
+			image.get(Key::Misc(MiscKey::DisabledBuiltins)),
+			Some(Record::Words(w)) if w.iter().any(|w| w == name)
+		),
 		None => {
 			k.root.builtins_disabled(store)?
 				&& matches!(

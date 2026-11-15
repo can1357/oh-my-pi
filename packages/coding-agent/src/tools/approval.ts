@@ -747,13 +747,43 @@ export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reaso
 	return [...approvalHeader(tool, reason), ...approvalDetails(tool, args)].join("\n");
 }
 
+const COMPOUND_COMMAND_COMPACT_MAX_SEGMENTS = 6;
+
+function summarizeCompoundCommandDetails(details: readonly string[]): string {
+	const segments = details.slice(1);
+	if (segments.length <= COMPOUND_COMMAND_COMPACT_MAX_SEGMENTS) {
+		return details.join("\n");
+	}
+	const firstPromptIndex = segments.findIndex(line => line.trimStart().startsWith("? "));
+	const elidedLeading = firstPromptIndex >= 5 ? firstPromptIndex - 3 : 0;
+	const rows: string[] = ["Command:"];
+	if (elidedLeading > 0) {
+		rows.push(`  ✓ … (${elidedLeading} allowed ${elidedLeading === 1 ? "segment" : "segments"})`);
+	}
+	const remaining = segments.slice(elidedLeading);
+	const slots = COMPOUND_COMMAND_COMPACT_MAX_SEGMENTS - (elidedLeading > 0 ? 1 : 0);
+	if (remaining.length <= slots) {
+		rows.push(...remaining);
+	} else {
+		const kept = Math.max(1, slots - 1);
+		const hidden = remaining.length - kept;
+		rows.push(...remaining.slice(0, kept), `  … (${hidden} more ${hidden === 1 ? "segment" : "segments"})`);
+	}
+	return rows.join("\n");
+}
+
 /**
  * The details as one row for a prompt that must stay small: each detail's first line, joined
  * by ` · `, ending in `…` when any detail has more lines. A label alone (`Code:`, its body on
- * the following lines) takes the body's first line after it.
+ * the following lines) takes the body's first line after it. Compound bash `Command:` segment
+ * rows stay on their own lines (with excess leading allowed rows elided so the first prompted
+ * segment is visible on mount).
  */
 function approvalSummary(details: readonly string[]): string | undefined {
 	if (details.length === 0) return undefined;
+	if (details[0] === "Command:" && details.length > 1) {
+		return summarizeCompoundCommandDetails(details);
+	}
 	let omitted = false;
 	const heads = details.map(detail => {
 		const lines = detail.split("\n", 3);

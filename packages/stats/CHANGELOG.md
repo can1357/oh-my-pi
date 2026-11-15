@@ -19,6 +19,21 @@
 
 - Session traces no longer follow symlinks out of the sessions directory ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
 - Unexpected dashboard errors return a generic `500` without internal details ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
+## [18.20.1] - 2026-11-14
+
+### Fixed
+
+- Fixed Traces tab timing so background jobs show their actual completion times, including accurate idle periods and turn durations.
+- Fixed per-model message counts on the Frustration page to include all answered messages.
+- Improved dashboard responsiveness by keeping other pages and Live status available while Spotlight rebuilds.
+- Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Spotlight stats count a `;`/`,` path `read` once with all its parts, and count a later read of any of its files as a re-read or a needed line ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

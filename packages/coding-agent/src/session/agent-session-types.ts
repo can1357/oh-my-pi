@@ -51,6 +51,7 @@ import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SettingsGatedToolDelta, SystemPromptRebuilder } from "./session-tools";
+import type { AdvisorToolFactory } from "./session-advisors";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
@@ -386,20 +387,8 @@ export interface AgentSessionConfig {
 	accountPoolScope?: SessionAccountPoolScope;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
-	/** Full advisor toolset built against an advisor-scoped tool session. */
-	advisorTools?: AgentTool[];
-	/**
-	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
-	 * match cap, against the advisor-scoped tool session. Without it an advisor
-	 * running on Cursor silently drops both fields.
-	 */
-	advisorCreateGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
-	/**
-	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs, against the
-	 * advisor-scoped tool session. The advisor's ordinary instance follows the
-	 * configured `edit.mode` and rejects the frame's `old_string`/`new_string` args.
-	 */
-	advisorCreateEditTool?(): AgentTool | undefined;
+	/** Builds each advisor's own tool slate against a tool session no other advisor shares. */
+	advisorTools?: AdvisorToolFactory;
 	/**
 	 * The execute-time context for the advisor's loop and bridge tools.
 	 *

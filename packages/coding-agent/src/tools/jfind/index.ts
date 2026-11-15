@@ -61,7 +61,10 @@ export const FIND_TIMEOUT_MS = 20_000;
 export function isFindEnabled(session: ToolSession): boolean {
 	const mode = cfgFindEnabled.get(session.settings);
 	if (mode !== "auto") return mode === "on";
-	return session.modelRegistry !== undefined && hasNativeJudge(session.settings, session.modelRegistry);
+	return (
+		session.modelRegistry !== undefined &&
+		hasNativeJudge(session.settings, session.modelRegistry, session.getActiveModel?.())
+	);
 }
 
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
@@ -108,6 +111,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		const judgeDeps: JudgeDeps = {
 			settings: this.session.settings,
 			registry,
+			sessionModel: this.session.getActiveModel?.(),
 			sessionId: this.session.getSessionId?.() ?? undefined,
 			purpose: "find",
 			onUsage: journalJudgmentUsage(this.session.sessionManager),

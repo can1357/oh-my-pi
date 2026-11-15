@@ -73,6 +73,7 @@ import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isRecord, logger, prompt, Snowflake, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -3719,9 +3720,14 @@ export class SessionMaintenance {
 		availableModels = availableModels.map(model => registry.fitContextWindow(model, settings));
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
+		const activeProvider = this.#model?.provider;
+		const offline = cfgOffline.get(settings);
+		// Offline mode keeps auxiliary requests on the active provider.
+		const offlineBlocked = (model: Model): boolean =>
+			offline && (!activeProvider || model.provider !== activeProvider);
 
 		const addCandidate = (model: Model | undefined): void => {
-			if (!model) return;
+			if (!model || offlineBlocked(model)) return;
 			const key = `${model.provider}/${model.id}`;
 			if (seen.has(key)) return;
 			seen.add(key);
@@ -3744,6 +3750,9 @@ export class SessionMaintenance {
 
 		const sortedByContext = [...availableModels].sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0));
 		for (const model of sortedByContext) {
+			// Offline skips other providers' models without consuming the single
+			// largest-context slot; a caller-filter rejection still consumes it.
+			if (offlineBlocked(model)) continue;
 			if (!seen.has(`${model.provider}/${model.id}`)) {
 				addCandidate(model);
 				break;

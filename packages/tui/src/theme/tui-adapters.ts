@@ -321,6 +321,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 		code: (text: string) => theme.fg("mdCode", text),
 		...(markdownColorful ? colorfulMarkdownRoles : {}),
 		link: (text: string) => theme.fg("mdLink", text),
+		extensionLink: (text: string) => theme.fg("mdExtensionLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
 		codeBlock: (text: string) => theme.fg("mdCodeBlock", text),
 		codeBlockBorder: (text: string) => theme.fg("mdCodeBlockBorder", text),

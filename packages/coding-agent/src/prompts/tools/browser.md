@@ -48,7 +48,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once. `<select>` elements: `select`, not `fill`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
 - Navigation and re-renders invalidate observed ids and refs: re-observe, then act in the same cell. `pushState(url)`: SPA navigation without a document load.
-- No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`.
+- No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`, and page calls fail naming them until answered.
 - `emulate` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides.
 - `devices()` lists valid device names.
 - Cookie imports accept objects, raw `Cookie:` headers, DevTools cURL dumps, or JSON arrays.

@@ -15,6 +15,12 @@ const fn menu_role(role: Role) -> bool {
 	matches!(role, Role::Menu | Role::MenuItem | Role::CheckMenuItem | Role::RadioMenuItem)
 }
 
+/// A submenu's container: GTK's `Menu`, and the `PopupMenu` a Qt menu bar item
+/// or `QMenu` action holds its items in.
+const fn submenu_role(role: Role) -> bool {
+	matches!(role, Role::Menu | Role::PopupMenu)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -141,7 +147,7 @@ impl AtSpiAx {
 						.await
 						.map_err(failure)?;
 					let name = self.reply(child.name()).await?.map_err(failure)?;
-					self.reply(child.get_role()).await?.map_err(failure)? == Role::Menu
+					submenu_role(self.reply(child.get_role()).await?.map_err(failure)?)
 						&& (name.is_empty() || name == owner_name)
 				};
 				if wrapped {
@@ -174,8 +180,8 @@ impl AtSpiAx {
 						.as_accessible_proxy(&self.connection)
 						.await
 						.map_err(failure)?;
-					has_submenu |=
-						menu_role(self.reply(child_proxy.get_role()).await?.map_err(failure)?);
+					let child_role = self.reply(child_proxy.get_role()).await?.map_err(failure)?;
+					has_submenu |= menu_role(child_role) || submenu_role(child_role);
 				}
 				let shortcut = match Self::action(&self.connection, &object).await {
 					Ok(action) => self

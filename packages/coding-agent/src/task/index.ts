@@ -1075,12 +1075,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 	}
 
+	/** Agents a TaskTool for `session` offers at construction; memoized per cwd and extension roots. */
+	static async discoverAgents(session: ToolSession): Promise<AgentDefinition[]> {
+		return (await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.())).agents;
+	}
+
+	/** Create a TaskTool synchronously from agents found by {@link TaskTool.discoverAgents}. */
+	static withAgents(session: ToolSession, agents: AgentDefinition[]): TaskTool {
+		return new TaskTool(session, agents);
+	}
+
 	/**
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
-		return new TaskTool(session, agents);
+		return new TaskTool(session, await TaskTool.discoverAgents(session));
 	}
 
 	async execute(

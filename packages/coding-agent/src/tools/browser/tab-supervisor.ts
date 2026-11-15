@@ -38,6 +38,7 @@ import {
 	holdBrowser,
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
+	sharedTargetScopeOf,
 	type TernBrowserHandle,
 	type WebKitBrowserHandle,
 } from "./registry";
@@ -690,7 +691,7 @@ async function acquireTabImpl(
 	sweepClosedTabUploads();
 	// Durably record ownership so another live omp process can reap this page if
 	// this process dies abnormally before its own teardown closes the tab.
-	const scope = sharedScopeOf(browser);
+	const scope = sharedTargetScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
 	const note = opts.url ? await navigateOpenedTab(name, opts.url, opts, startedAt, tab) : undefined;
 	return { tab, created: true, note };
@@ -1674,7 +1675,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		cleanupError ??= error;
 	} finally {
 		tabs.delete(name);
-		const scope = sharedScopeOf(tab.browser);
+		const scope = sharedTargetScopeOf(tab.browser);
 		if (scope) {
 			if (targetCloseFailed) {
 				// The target outlived its close, so it is still open in the
@@ -2479,7 +2480,7 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 	}
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(tab.name);
-	const scope = sharedScopeOf(tab.browser);
+	const scope = sharedTargetScopeOf(tab.browser);
 	if (scope) {
 		if (targetClosed) void forgetSharedTarget(scope, tab.targetId);
 		else recheckSharedBrowser(scope);
@@ -2488,7 +2489,7 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 
 /**
  * Best-effort close of a specific page target in the browser. Close through
- * the browser CDP session rather than `page.close()`: a page whose navigation
+ * the root CDP connection rather than `page.close()`: a page whose navigation
  * wedged during initialization can make Puppeteer's page close wait for the
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
@@ -2499,17 +2500,6 @@ async function closeTargetById(
 ): Promise<boolean> {
 	if (browser.kind.kind === "relay") return await closeRelayTarget(browserConnection(browser.browser), targetId);
 	return await closeCdpTarget(browser.browser, targetId, confirmTimeoutMs);
-}
-
-/**
- * Durable-ownership scope for a browser handle, or undefined when the handle is
- * not the project-shared broker-owned Chromium (the only browser whose targets
- * outlive their creating process and thus need cross-process orphan reaping).
- */
-function sharedScopeOf(browser: BrowserHandle): SharedTargetScope | undefined {
-	if (!("browser" in browser)) return undefined;
-	if (browser.kind.kind !== "headless" || !browser.sharedDaemon) return undefined;
-	return { projectDir: browser.sharedDaemon.projectDir, daemonName: browser.sharedDaemon.name };
 }
 
 /**

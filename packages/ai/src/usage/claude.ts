@@ -992,28 +992,40 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 * weekly row plus the shared umbrella windows — so a healthy report lifts
 	 * the block while a spent shared 5-hour wall keeps it.
 	 *
-	 * Legacy and shared quota errors also leave account-wide blocks. Only a
-	 * complete report with every reported quota healthy can heal that scope.
+	 * Legacy and shared quota errors also leave account-wide blocks. A
+	 * complete report with every reported quota healthy can heal that scope; a
+	 * report with a single shared window can heal it only when that window's
+	 * reset matches the stored block deadline.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
+		// Model-family rows still gate the account-wide scope alongside shared windows.
+		const globalScope = {
+			blockScope: "",
+			limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
+			healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
+		};
 		// The endpoint returns a report as soon as one window parses, and a tier
 		// 429 can be caused by a shared wall. A payload missing a shared gate
-		// leaves the block's cause unknown, so vouch for nothing rather than
-		// clear a block that still holds. A gate the payload declared inactive
-		// is accounted for: no running window can be what blocks the account.
-		if (!claudeReportCoversSharedGates(report)) return [];
+		// leaves the block's cause unknown. One exception: a report exposing a
+		// single shared window may heal the account-wide block only when that
+		// window's reset is the exact deadline that created the block; without
+		// that match, the missing window could still be the cap behind the 429.
+		// If both windows were spent, the stored deadline is the later reset, so
+		// an early recovery of that window can still lift a block the other
+		// window holds; the next 429 restores it.
+		if (!claudeReportCoversSharedGates(report)) {
+			if (sharedLimits.length !== 1) return [];
+			// Only shared windows are matched against the block deadline.
+			return [{ ...globalScope, resetMatchRequired: true }];
+		}
 		const tiers = new Set<string>();
 		for (const limit of report.limits) {
 			const tier = limit.scope.tier;
 			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 		}
 		return [
-			{
-				blockScope: "",
-				limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
-				healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
-			},
+			globalScope,
 			...[...tiers].map(tier => ({
 				blockScope: `tier:${tier}`,
 				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],

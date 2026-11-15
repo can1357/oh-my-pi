@@ -442,6 +442,12 @@ export interface SessionOwners {
 	hasFallbackOwner: boolean;
 }
 
+/** Narrows owner-scoped retained-kernel disposal. */
+export interface DisposeByOwnerOptions {
+	/** Sessions with this (language-namespaced) session id keep their kernel and owner registration. */
+	keepSessionId?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Base executor implementation
 // ---------------------------------------------------------------------------
