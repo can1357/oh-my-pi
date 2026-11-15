@@ -555,6 +555,7 @@ export class Draft {
 		if (target.units?.length && target.path === undefined) throw new Error("Units need a path.");
 		const files = target.path === undefined ? this.#files : this.#match(target.path);
 		const pattern = target.grep === undefined ? undefined : new RegExp(target.grep);
+		for (const file of files) this.#targetOps(file, target.units, pattern);
 		let touched = 0;
 		for (const file of files) {
 			const ops = this.#targetOps(file, target.units, pattern);
@@ -591,10 +592,13 @@ export class Draft {
 		const { hunks } = file.attribution;
 		const ops: ChangeOp[] = [];
 		const wanted = units?.length ? units : undefined;
+		const known = new Set<string>();
 		hunks.forEach((hunk, hunkIndex) => {
+			known.add(String(hunkIndex + 1));
 			const units = [...hunkUnits(hunk).values()];
 			units.forEach((unitOps, unitIndex) => {
 				const id = `${hunkIndex + 1}${unitLetter(unitIndex)}`;
+				known.add(id);
 				if (wanted && !wanted.includes(String(hunkIndex + 1)) && !wanted.includes(id)) return;
 				if (pattern && !unitOps.some(op => pattern.test(op.text))) return;
 				ops.push(...unitOps);
@@ -602,9 +606,7 @@ export class Draft {
 		});
 		if (wanted) {
 			for (const unit of wanted) {
-				const match = /^(\d+)([a-z]*)$/.exec(unit);
-				const hunk = match ? hunks[Number(match[1]) - 1] : undefined;
-				if (!hunk || (match?.[2] && !hunkUnits(hunk).size)) {
+				if (!known.has(unit)) {
 					throw new Error(`${file.path} has no unit "${unit}" (hunks 1-${hunks.length}).`);
 				}
 			}

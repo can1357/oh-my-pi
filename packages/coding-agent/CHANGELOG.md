@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `take()` and `drop()` now reject a hunk unit that does not exist, such as `1z`, instead of reporting that no lines were selected ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
