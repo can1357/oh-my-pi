@@ -17,7 +17,6 @@ import { BUILTIN_DEFAULTS_PROVIDER_ID, compileRuleCondition, type Rule } from ".
 import { ensureGrammar } from "../utils/grammars";
 import {
 	evaluateRegexConditionsSandbox,
-	isBacktrackProne,
 	type SandboxVerdict,
 	TTSR_REGEX_SANDBOX_TIMEOUT_MS,
 	TTSR_REGEX_SLOW_CONDITION_MS,
@@ -376,6 +375,137 @@ function analyzeCondition(condition: RegExp): ConditionTraits {
 	return { sliceSafe, lineLocal: sliceSafe && !crossesLines, monotonic };
 }
 
+/** One open group while scanning a pattern for backtracking. */
+interface BacktrackFrame {
+	/** The group can match one text in more than one way: a variable-length quantifier or an alternation. */
+	ambiguous: boolean;
+	/** Lookahead: its body runs atomically and never makes the enclosing group ambiguous. */
+	look: boolean;
+}
+
+/**
+ * True when `condition` can backtrack exponentially: it has a backreference, a
+ * lookbehind, or a group that can match one text in more than one way repeated
+ * by a quantifier (`(?:\1[ \t]+[^\n]*\n)*`, `(?:a{1,2})+`). Syntax the scan
+ * does not model fails closed.
+ */
+export function isBacktrackProne(condition: RegExp): boolean {
+	return condition.unicodeSets || new BacktrackScan(condition.source).isProne();
+}
+
+class BacktrackScan {
+	readonly #source: string;
+	readonly #open: BacktrackFrame[] = [{ ambiguous: false, look: false }];
+	#index = 0;
+
+	constructor(source: string) {
+		this.#source = source;
+	}
+
+	isProne(): boolean {
+		while (this.#index < this.#source.length) {
+			if (this.#step()) return true;
+		}
+		return this.#open.length !== 1;
+	}
+
+	get #enclosing(): BacktrackFrame {
+		return this.#open[this.#open.length - 1];
+	}
+
+	/** Consume one pattern element; true once the pattern is known prone. */
+	#step(): boolean {
+		switch (this.#source[this.#index]) {
+			case "\\":
+				return this.#escape();
+			case "(":
+				return this.#openGroup();
+			case ")":
+				return this.#closeGroup();
+			case "|":
+				this.#enclosing.ambiguous = true;
+				this.#index++;
+				return false;
+			case "[":
+				this.#index = readClass(this.#source, this.#index + 1).next;
+				return this.#quantify(undefined);
+			default:
+				this.#index++;
+				return this.#quantify(undefined);
+		}
+	}
+
+	#escape(): boolean {
+		const next = this.#source[this.#index + 1];
+		if (
+			next !== undefined &&
+			((next >= "1" && next <= "9") || (next === "k" && this.#source[this.#index + 2] === "<"))
+		) {
+			return true;
+		}
+		this.#index += 2;
+		return this.#quantify(undefined);
+	}
+
+	#openGroup(): boolean {
+		const group = backtrackGroupOpener(this.#source, this.#index);
+		if (group === undefined) return true;
+		this.#open.push({ ambiguous: false, look: group.look });
+		this.#index = group.next;
+		return false;
+	}
+
+	#closeGroup(): boolean {
+		const closed = this.#open.length > 1 ? this.#open.pop() : undefined;
+		this.#index++;
+		return closed === undefined ? true : this.#quantify(closed);
+	}
+
+	/** Apply a quantifier that may follow the atom just read (`closed` when the atom was a group). */
+	#quantify(closed: BacktrackFrame | undefined): boolean {
+		const quantifier = readQuantifier(this.#source, this.#index);
+		if (quantifier !== undefined) this.#index += quantifier.length;
+		const ambiguous = closed?.ambiguous === true && !closed.look;
+		if (ambiguous && quantifier !== undefined && quantifier.max >= 2) return true;
+		if (ambiguous || (quantifier !== undefined && quantifier.min !== quantifier.max)) {
+			this.#enclosing.ambiguous = true;
+		}
+		return false;
+	}
+}
+
+/** Index past a group opener and whether it is a lookahead; undefined for a lookbehind or syntax the scan does not model. */
+function backtrackGroupOpener(source: string, start: number): { next: number; look: boolean } | undefined {
+	if (source[start + 1] !== "?") return { next: start + 1, look: false };
+	const kind = source[start + 2];
+	if (kind === ":") return { next: start + 3, look: false };
+	if (kind === "=" || kind === "!") return { next: start + 3, look: true };
+	if (kind !== "<" || source[start + 3] === "=" || source[start + 3] === "!") return undefined;
+	const close = source.indexOf(">", start + 3);
+	return close === -1 ? undefined : { next: close + 1, look: false };
+}
+
+/** The quantifier at `index`: its source length and repeat bounds (`max` is Infinity when unbounded). */
+function readQuantifier(source: string, index: number): { length: number; min: number; max: number } | undefined {
+	const lazy = (end: number) => (source[end] === "?" ? 1 : 0);
+	switch (source[index]) {
+		case "*":
+			return { length: 1 + lazy(index + 1), min: 0, max: Infinity };
+		case "+":
+			return { length: 1 + lazy(index + 1), min: 1, max: Infinity };
+		case "?":
+			return { length: 1 + lazy(index + 1), min: 0, max: 1 };
+		case "{": {
+			const match = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(index, index + 24));
+			if (!match) return undefined;
+			const min = Number(match[1]);
+			const max = match[2] === undefined ? min : match[3] === "" ? Infinity : Number(match[3]);
+			return { length: match[0].length + lazy(index + match[0].length), min, max };
+		}
+	}
+	return undefined;
+}
+
 /** A condition's progress through one stream buffer. */
 interface ConditionScan {
 	/** Buffer length at the last line-region scan, or -1 before the first. */
@@ -423,6 +553,21 @@ function firstMatch(condition: RegExp, text: string): { index: number; length: n
 	condition.lastIndex = 0;
 	const match = condition.exec(text);
 	return match ? { index: match.index, length: match[0].length } : undefined;
+}
+
+/** `condition.test(text)`, reporting a call slow enough to warrant the sandbox. */
+function testTimed(condition: RegExp, text: string, onSlow: SlowConditionListener | undefined): boolean {
+	condition.lastIndex = 0;
+	const started = performance.now();
+	const hit = condition.test(text);
+	const elapsed = performance.now() - started;
+	if (elapsed >= TTSR_REGEX_SLOW_CONDITION_MS) onSlow?.(condition, elapsed, text.length);
+	return hit;
+}
+
+/** A condition's identity across recompiles: isolation decisions follow it through rule rebuilds. */
+function conditionKey(condition: RegExp): string {
+	return `${condition.flags}/${condition.source}`;
 }
 
 /** Verdict for a sandboxed condition whose child could not report one. */
@@ -511,7 +656,7 @@ class StreamBuffer {
 			length <= FULL_RESCAN_ALWAYS_BELOW ||
 			length - scan.paceFrom >= scan.paceFrom * FULL_RESCAN_GROWTH;
 		if (!rescanDue) return false;
-		scan.matched = this.#test(condition, this.#text());
+		scan.matched = testTimed(condition, this.#text(), this.#onSlow);
 		scan.settled = scan.matched && traits.monotonic;
 		scan.fullScannedTo = length;
 		scan.paceFrom = length;
@@ -561,16 +706,6 @@ class StreamBuffer {
 		return verdict?.matched ? { index: verdict.index, length: verdict.length } : undefined;
 	}
 
-	/** `condition.test(text)`, reporting a call slow enough to warrant the sandbox. */
-	#test(condition: RegExp, text: string): boolean {
-		condition.lastIndex = 0;
-		const started = performance.now();
-		const hit = condition.test(text);
-		const elapsed = performance.now() - started;
-		if (elapsed >= TTSR_REGEX_SLOW_CONDITION_MS) this.#onSlow?.(condition, elapsed, text.length);
-		return hit;
-	}
-
 	/** Whether a non-final check should rescan the region from the condition's last line start. */
 	#regionRescanDue(scan: ConditionScan): boolean {
 		if (scan.scannedTo < 0) return true;
@@ -586,7 +721,7 @@ class StreamBuffer {
 			const inSync = scan.scannedTo === this.#previousLength;
 			const start = inSync ? this.#regionStart : scan.lineStart;
 			const region = inSync ? this.#region : this.#text().slice(start);
-			if (this.#test(condition, region)) {
+			if (testTimed(condition, region, this.#onSlow)) {
 				scan.matched = true;
 				// A line-local match starting on a line already followed by `\n` can never change.
 				scan.settled = traits.monotonic || (traits.lineLocal && region.search(condition) < this.#lineStart - start);
@@ -638,6 +773,8 @@ export class TtsrManager {
 	/** Conditions that outlived the sandbox deadline; never evaluated again this session. */
 	readonly #quarantined = new Set<RegExp>();
 	readonly #sandboxTimeoutMs: number;
+	readonly #onSlow: SlowConditionListener = (condition, elapsedMs, bufferChars) =>
+		this.#demote(condition, elapsedMs, bufferChars);
 	#messageCount = 0;
 	#canMatchText = false;
 	#canMatchThinking = false;
@@ -880,7 +1017,7 @@ export class TtsrManager {
 				if (verdicts?.get(condition)?.matched) return true;
 				continue;
 			}
-			if (firstMatch(condition, content) !== undefined) return true;
+			if (testTimed(condition, content, this.#onSlow)) return true;
 		}
 		return false;
 	}
@@ -1069,9 +1206,7 @@ export class TtsrManager {
 		const bufferKey = this.#bufferKey(context);
 		let buffer = this.#buffers.get(bufferKey);
 		if (!buffer) {
-			buffer = new StreamBuffer((condition, elapsedMs, bufferChars) =>
-				this.#demote(condition, elapsedMs, bufferChars),
-			);
+			buffer = new StreamBuffer(this.#onSlow);
 			this.#buffers.set(bufferKey, buffer);
 		}
 		return buffer;
@@ -1376,11 +1511,17 @@ export class TtsrManager {
 		this.#canMatchText = replacement.#canMatchText;
 		this.#canMatchThinking = replacement.#canMatchThinking;
 		this.#hasJudgedRules = replacement.#hasJudgedRules;
+		const sandboxedKeys = new Set(Array.from(this.#sandboxed, conditionKey));
+		const quarantinedKeys = new Set(Array.from(this.#quarantined, conditionKey));
 		this.#userConditions.clear();
-		for (const [condition, ruleName] of replacement.#userConditions) this.#userConditions.set(condition, ruleName);
 		this.#sandboxed.clear();
-		for (const condition of replacement.#sandboxed) this.#sandboxed.add(condition);
 		this.#quarantined.clear();
+		for (const [condition, ruleName] of replacement.#userConditions) {
+			this.#userConditions.set(condition, ruleName);
+			const key = conditionKey(condition);
+			if (replacement.#sandboxed.has(condition) || sandboxedKeys.has(key)) this.#sandboxed.add(condition);
+			if (quarantinedKeys.has(key)) this.#quarantined.add(condition);
+		}
 		this.resetBuffer();
 
 		if (!this.#settings.enabled) return registered;

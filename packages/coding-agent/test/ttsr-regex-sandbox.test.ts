@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { logger } from "@oh-my-pi/pi-utils";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import { TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/export/ttsr";
-import { isBacktrackProne } from "@oh-my-pi/pi-coding-agent/export/ttsr-regex-sandbox";
+import { isBacktrackProne, TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { evaluateRegexConditionsSandbox } from "@oh-my-pi/pi-coding-agent/export/ttsr-regex-sandbox";
 
 function rule(name: string, condition: string, provider = "test"): Rule {
 	return {
@@ -33,6 +33,10 @@ function names(rules: Rule[]): string[] {
 	return rules.map(match => match.name);
 }
 
+function warnings(warn: { mock: { calls: unknown[][] } }, text: string): number {
+	return warn.mock.calls.filter(([message]) => String(message).includes(text)).length;
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -45,6 +49,11 @@ describe("backtrack-prone condition classifier", () => {
 		["a repeated group around a quantifier", "(a+)+b"],
 		["a repeated group around an alternation", '(?:[^"\\\\]|\\\\.)*"'],
 		["the indented-loop shape", INDENTED_LOOP],
+		["a repeated group around a bounded variable quantifier", "^(?:a{1,2})+b$"],
+		["a fixed repeat of an alternation", "(?:a|a){30}b"],
+		["a repeated group around an optional atom", "(?:a?)+b"],
+		["a nested quantifier after an any-character class", "[^](a+)+b"],
+		["a nested quantifier after an empty class", "x[]|(a+)+b"],
 	])("flags %s", (_label, source) => {
 		expect(isBacktrackProne(new RegExp(source))).toBe(true);
 	});
@@ -136,4 +145,69 @@ describe("TTSR regex sandbox", () => {
 		expect(manager.checkDelta("a".repeat(150), TEXT)).toEqual([]);
 		expect(warn.mock.calls.some(([message]) => String(message).includes("moved to the regex sandbox"))).toBe(true);
 	});
+
+	it("moves a judged rule's slow prefilter condition to the sandbox", async () => {
+		const warn = vi.spyOn(logger, "warn");
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		manager.addRule({ ...rule("judged-quartic", "a+a+a+a+b"), question: "Does it loop?" });
+
+		expect(await manager.judgedCandidates("a".repeat(150), TEXT)).toEqual([]);
+		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
+	});
+
+	it("keeps a quarantine when an unchanged rule is registered again", () => {
+		const warn = vi.spyOn(logger, "warn");
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		manager.addRule(rule("nested", "(a+)+b"));
+		const stuck = `${"a".repeat(26)}!`;
+		manager.checkDelta(stuck, TEXT, { final: true });
+		expect(warnings(warn, "quarantined")).toBe(1);
+
+		manager.replaceRules([rule("nested", "(a+)+b")]);
+		const started = performance.now();
+		expect(manager.checkDelta(stuck, TEXT, { final: true })).toEqual([]);
+		expect(performance.now() - started).toBeLessThan(250);
+		expect(warnings(warn, "quarantined")).toBe(1);
+	});
+
+	it("keeps a slow-scan demotion when an unchanged rule is registered again", () => {
+		const warn = vi.spyOn(logger, "warn");
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		manager.addRule(rule("quartic", "a+a+a+a+b"));
+		manager.checkDelta("a".repeat(150), TEXT);
+		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
+
+		manager.replaceRules([rule("quartic", "a+a+a+a+b")]);
+		manager.resetBuffer();
+		const started = performance.now();
+		expect(manager.checkDelta("a".repeat(150), TEXT)).toEqual([]);
+		expect(performance.now() - started).toBeLessThan(100);
+		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
+	});
+});
+
+describe("regex sandbox deadline", () => {
+	/**
+	 * Length of `a`s that makes `(a+)+X` fail in 150 ms or more, so each such
+	 * condition costs 150-350 ms: 14 of them overrun a 2 s deadline, and one
+	 * alone stays under it even when the host runs it 5x slower.
+	 */
+	function calibratedRun(): number {
+		for (let length = 16; ; length++) {
+			const started = performance.now();
+			/(a+)+b/.test(`${"a".repeat(length)}!`);
+			if (performance.now() - started >= 150) return length;
+		}
+	}
+
+	it("quarantines only a condition that alone outlives the deadline", () => {
+		const text = `${"a".repeat(calibratedRun())}!`;
+		const conditions = Array.from("bcdefghijklmno", end => ({ source: `(a+)+${end}`, flags: "" }));
+
+		const result = evaluateRegexConditionsSandbox(text, conditions, 2_000);
+
+		expect(result.error).toBeUndefined();
+		expect(result.culprits).toEqual([]);
+		expect(result.verdicts.size).toBeGreaterThanOrEqual(3);
+	}, 30_000);
 });

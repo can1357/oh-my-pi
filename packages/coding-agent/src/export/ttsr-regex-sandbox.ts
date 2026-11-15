@@ -13,9 +13,10 @@ import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker
 /** Default wall-clock budget for one child invocation; tests pass a shorter one. */
 export const TTSR_REGEX_SANDBOX_TIMEOUT_MS = 500;
 /**
- * Child invocations per sandbox call: each deadline kill names one culprit,
- * which the caller quarantines for good, and the rest run again. One call
- * therefore blocks at most `MAX_ROUNDS * timeout`, once per culprit per session.
+ * Child invocations per sandbox call. A deadline kill quarantines the running
+ * condition only when it ran first in its round, so it alone used the whole
+ * budget; otherwise it runs first in the next round. Finished conditions never
+ * run again. One call therefore blocks at most `MAX_ROUNDS * timeout`.
  */
 const SANDBOX_MAX_ROUNDS = 3;
 /**
@@ -24,142 +25,6 @@ const SANDBOX_MAX_ROUNDS = 3;
  * itself is not bounded; demotion only stops the repeats.
  */
 export const TTSR_REGEX_SLOW_CONDITION_MS = 250;
-
-/** One open group while scanning a pattern. */
-interface ScanFrame {
-	/**
-	 * The group holds an unbounded quantifier or an alternation, so an unbounded
-	 * quantifier applied to the group can match the same text many ways.
-	 */
-	ambiguous: boolean;
-	/** Lookahead: its body runs atomically and never makes the enclosing group ambiguous. */
-	look: boolean;
-}
-
-/**
- * True when `condition` can backtrack exponentially: it has a backreference, a
- * lookbehind, or an unbounded quantifier applied to a group that holds an
- * unbounded quantifier or an alternation (`(?:\1[ \t]+[^\n]*\n)*`). Syntax the
- * scan does not model fails closed.
- */
-export function isBacktrackProne(condition: RegExp): boolean {
-	return new PatternScan(condition.source).isProne();
-}
-
-class PatternScan {
-	readonly #source: string;
-	readonly #open: ScanFrame[] = [{ ambiguous: false, look: false }];
-	#index = 0;
-
-	constructor(source: string) {
-		this.#source = source;
-	}
-
-	isProne(): boolean {
-		while (this.#index < this.#source.length) {
-			if (this.#step()) return true;
-		}
-		return this.#open.length !== 1;
-	}
-
-	get #enclosing(): ScanFrame {
-		return this.#open[this.#open.length - 1];
-	}
-
-	/** Consume one pattern element; true once the pattern is known prone. */
-	#step(): boolean {
-		switch (this.#source[this.#index]) {
-			case "\\":
-				return this.#escape();
-			case "(":
-				return this.#openGroup();
-			case ")":
-				return this.#closeGroup();
-			case "|":
-				this.#enclosing.ambiguous = true;
-				this.#index++;
-				return false;
-			case "[":
-				this.#index = classEnd(this.#source, this.#index);
-				return this.#quantify(undefined);
-			default:
-				this.#index++;
-				return this.#quantify(undefined);
-		}
-	}
-
-	#escape(): boolean {
-		const next = this.#source[this.#index + 1];
-		if (
-			next !== undefined &&
-			((next >= "1" && next <= "9") || (next === "k" && this.#source[this.#index + 2] === "<"))
-		) {
-			return true;
-		}
-		this.#index += 2;
-		return this.#quantify(undefined);
-	}
-
-	#openGroup(): boolean {
-		const group = groupOpener(this.#source, this.#index);
-		if (group === undefined) return true;
-		this.#open.push({ ambiguous: false, look: group.look });
-		this.#index = group.next;
-		return false;
-	}
-
-	#closeGroup(): boolean {
-		const closed = this.#open.length > 1 ? this.#open.pop() : undefined;
-		this.#index++;
-		return closed === undefined ? true : this.#quantify(closed);
-	}
-
-	/** Apply a quantifier that may follow the atom just read (`closed` when the atom was a group). */
-	#quantify(closed: ScanFrame | undefined): boolean {
-		const quantifier = readQuantifier(this.#source, this.#index);
-		if (quantifier !== undefined) this.#index += quantifier.length;
-		if (quantifier?.unbounded) {
-			if (closed?.ambiguous) return true;
-			this.#enclosing.ambiguous = true;
-		} else if (closed?.ambiguous && !closed.look) {
-			this.#enclosing.ambiguous = true;
-		}
-		return false;
-	}
-}
-
-/** Index just past the character class opened at `start`. */
-function classEnd(source: string, start: number): number {
-	let index = start + 1;
-	if (source[index] === "^") index++;
-	if (source[index] === "]") index++;
-	while (index < source.length && source[index] !== "]") {
-		index += source[index] === "\\" ? 2 : 1;
-	}
-	return index + 1;
-}
-
-/** Index past a group opener and whether it is a lookahead; undefined for a lookbehind or syntax the scan does not model. */
-function groupOpener(source: string, start: number): { next: number; look: boolean } | undefined {
-	if (source[start + 1] !== "?") return { next: start + 1, look: false };
-	const kind = source[start + 2];
-	if (kind === ":") return { next: start + 3, look: false };
-	if (kind === "=" || kind === "!") return { next: start + 3, look: true };
-	if (kind !== "<" || source[start + 3] === "=" || source[start + 3] === "!") return undefined;
-	const close = source.indexOf(">", start + 3);
-	return close === -1 ? undefined : { next: close + 1, look: false };
-}
-
-function readQuantifier(source: string, index: number): { length: number; unbounded: boolean } | undefined {
-	const char = source[index];
-	if (char === "*" || char === "+") return { length: source[index + 1] === "?" ? 2 : 1, unbounded: true };
-	if (char === "?") return { length: source[index + 1] === "?" ? 2 : 1, unbounded: false };
-	if (char !== "{") return undefined;
-	const match = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(index, index + 24));
-	if (!match) return undefined;
-	const unbounded = match[2] !== undefined && match[3] === "";
-	return { length: match[0].length + (source[index + match[0].length] === "?" ? 1 : 0), unbounded };
-}
 
 /** One condition's sandbox verdict: whether it matched and where. */
 export interface SandboxVerdict {
@@ -178,7 +43,7 @@ export interface SandboxCondition {
 export interface SandboxResult {
 	/** Verdicts keyed by the caller's condition index; a culprit or an unreached condition has none. */
 	verdicts: Map<number, SandboxVerdict>;
-	/** Indexes of conditions the child was still running when the deadline killed it. */
+	/** Indexes of conditions that alone outlived a whole deadline. */
 	culprits: number[];
 	/** Set when the child could not run or died without naming a culprit. */
 	error?: string;
@@ -196,20 +61,31 @@ export function evaluateRegexConditionsSandbox(
 ): SandboxResult {
 	const verdicts = new Map<number, SandboxVerdict>();
 	const culprits: number[] = [];
-	let pending = conditions.map((condition, index) => ({ condition, index }));
+	let pending = conditions.map((_, index) => index);
 	for (let attempt = 0; attempt < SANDBOX_MAX_ROUNDS && pending.length > 0; attempt++) {
 		const round = runChild(
 			text,
-			pending.map(entry => entry.condition),
+			pending.map(index => conditions[index]),
 			timeoutMs,
 		);
-		for (const [local, verdict] of round.verdicts) verdicts.set(pending[local].index, verdict);
+		for (const [local, verdict] of round.verdicts) verdicts.set(pending[local], verdict);
 		if (round.error !== undefined) return { verdicts, culprits, error: round.error };
 		if (round.culprit === -1) break;
-		culprits.push(pending[round.culprit].index);
-		pending = pending.filter((_, local) => local !== round.culprit);
+		const interrupted = pending[round.culprit];
+		if (round.culprit === 0) culprits.push(interrupted);
+		const rest = pending.filter(index => index !== interrupted && !verdicts.has(index));
+		pending = round.culprit === 0 ? rest : [interrupted, ...rest];
 	}
 	return { verdicts, culprits };
+}
+
+/** Round-trip one condition through the sandbox child; installs exercise the worker selector with this. */
+export function smokeTestTtsrRegexWorker(): void {
+	const result = evaluateRegexConditionsSandbox("smoke", [{ source: "mo", flags: "" }], 10_000);
+	const verdict = result.verdicts.get(0);
+	if (result.error !== undefined || verdict?.matched !== true || verdict.index !== 1) {
+		throw new Error(`ttsr regex worker smoke failed: ${result.error ?? JSON.stringify(verdict)}`);
+	}
 }
 
 interface ChildRound {

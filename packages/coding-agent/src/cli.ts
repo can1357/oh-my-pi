@@ -48,6 +48,8 @@ import {
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
+import { smokeTestTtsrRegexWorker } from "./export/ttsr-regex-sandbox";
+import { runTtsrRegexWorker } from "./export/ttsr-regex-worker";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
@@ -194,6 +196,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
 	await smokeTestSubagentWorker();
+	smokeTestTtsrRegexWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -346,7 +349,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === TTSR_REGEX_WORKER_ARG) {
-		const { runTtsrRegexWorker } = await import("./export/ttsr-regex-worker");
 		runTtsrRegexWorker();
 		return true;
 	}
