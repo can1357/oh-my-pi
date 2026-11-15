@@ -204,7 +204,7 @@ interface FormTab {
 /** A note saved on an option: its text, and the images its `[Image #N]` markers index. */
 interface SavedNote {
 	text: string;
-	images?: ImageContent[];
+	images: ImageContent[];
 }
 
 /** The note being edited; dropped when it closes, so nothing of it outlives the note. */
@@ -1024,13 +1024,14 @@ export class HtmlFormDialog implements Component, Focusable {
 		editor.disableSubmit = true;
 		editor.setUseTerminalCursor(this.#useTerminalCursor);
 		editor.onChange = () => this.#resetCountdown();
-		editor.setText(this.#notes.get(stop.field)?.get(option)?.text ?? "", { cursor: "start" });
+		const saved = this.#notes.get(stop.field)?.get(option);
+		editor.setText(saved?.text ?? "", { cursor: "start" });
 		if (this.#options.acceptImages) editor.atomicTokenPattern = PLACEHOLDER_REGEX;
 		const note: OpenNote = {
 			field: stop.field,
 			option,
 			editor,
-			images: [...(this.#notes.get(stop.field)?.get(option)?.images ?? [])],
+			images: [...(saved?.images ?? [])],
 			pasteHandler: new BracketedPasteHandler(),
 			pastes: new OrderedPastes({
 				deliver: text => editor.pasteText(text),
@@ -1106,7 +1107,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const note = this.#noteEditor!;
 		const { text, images } = compactImageAttachments(note.editor.getExpandedText().trim(), note.images);
 		const notes = this.#notes.get(note.field)!;
-		if (text) notes.set(note.option, images.length > 0 ? { text, images } : { text });
+		if (text) notes.set(note.option, { text, images });
 		else notes.delete(note.option);
 		this.#closeNote();
 	}

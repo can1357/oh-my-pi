@@ -1744,11 +1744,11 @@ describe("InputController image paste into an ask form note", () => {
 
 		form.handleInput("n");
 		form.handleInput("why sqlite");
+		const delivered = Promise.withResolvers<void>();
+		context.spies.requestRender.mockImplementation(() => delivered.resolve());
 		paste(form, pngPath, listeners);
-		for (let attempt = 0; attempt < 200 && !form.optionNotes()[0]?.images?.length; attempt++) {
-			await Bun.sleep(10);
-		}
 		form.handleInput("\r");
+		await delivered.promise;
 
 		const [note] = form.optionNotes();
 		expect(note?.images).toHaveLength(1);
