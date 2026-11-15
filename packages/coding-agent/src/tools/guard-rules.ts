@@ -33,6 +33,7 @@ import {
 	parseShellScript,
 	resolveShellWordPath,
 	SHELL_SCRIPT_MAX_DEPTH,
+	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
 	shellPositionalArgs,
 } from "./shell-tokenize";
@@ -579,8 +580,8 @@ function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefi
 /**
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
- * command it runs. A command nested deeper than the parser follows fails closed
- * (`nesting_limit`).
+ * command it runs. A command nested deeper than the parser follows, or with more nested script
+ * text than it reads, fails closed (`nesting_limit`).
  */
 export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
@@ -608,7 +609,7 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 	if (truncated) {
 		return hit(
 			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep, past what the guard can check`,
+			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, past what the guard can check`,
 		);
 	}
 	for (const pipeline of pipelines) {

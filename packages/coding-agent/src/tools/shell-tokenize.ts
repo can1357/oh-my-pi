@@ -967,6 +967,12 @@ export function readShellWord(text: string): { value: string; rest: string } | "
  */
 export const SHELL_SCRIPT_MAX_DEPTH = 8;
 
+/**
+ * The most nested script text {@link parseShellScript} reads, all levels together: `bash -c` and
+ * `eval` strings, scripts fed to a shell's stdin, and backtick bodies, each counted every time it is read.
+ */
+export const SHELL_SCRIPT_MAX_NESTED_TEXT = 256 * 1024;
+
 /** One simple command found by {@link parseShellScript}, with its wrappers peeled off. */
 export interface ShellCommand {
 	/**
@@ -1006,8 +1012,9 @@ export interface ParsedShellScript {
 	/** Source text of every nested script (`bash -c` and `eval` strings, shell heredocs, substitution bodies). */
 	scripts: string[];
 	/**
-	 * True when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels was left unparsed,
-	 * possibly with the rest of the text after it.
+	 * True when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels, or past
+	 * {@link SHELL_SCRIPT_MAX_NESTED_TEXT} characters of nested script, was left unparsed, possibly
+	 * with the rest of the text after it.
 	 */
 	truncated: boolean;
 }
@@ -1200,6 +1207,11 @@ interface ReadScope {
 
 /** A substitution's key in a word; it stands for the commands the substitution runs. */
 const SUBSTITUTION_KEY_RE = /\0\d+\0/g;
+
+/** Appends `items` to `target`; unlike `push(...items)`, any number of them. */
+function append<T>(target: T[], items: Iterable<T>): void {
+	for (const item of items) target.push(item);
+}
 
 /** A line ending in an odd number of backslashes: in an unquoted heredoc, it continues on the next line. */
 const ODD_TRAILING_BACKSLASHES_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
@@ -1426,7 +1438,8 @@ class PipelineStages {
 	#close(): void {
 		const compound = this.#compounds.pop();
 		if (!compound) return;
-		this.#compounds.at(-1)?.inside.push(...compound.inside);
+		const outer = this.#compounds.at(-1);
+		if (outer) append(outer.inside, compound.inside);
 		this.#upstream = compound.input;
 		this.#stage = compound.inside;
 	}
@@ -1437,7 +1450,9 @@ class ShellScriptParser {
 	/** `${ }`/`$[ ]` expansions being read inside one another. */
 	#braces = 0;
 	readonly scripts: string[] = [];
-	/** Set when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} was left unparsed. */
+	/** Characters of nested script read so far, against {@link SHELL_SCRIPT_MAX_NESTED_TEXT}. */
+	#nestedText = 0;
+	/** Set when something was left unparsed: nested too deep, or past the nested text budget. */
 	truncated = false;
 	constructor(readonly home: string) {}
 
@@ -1447,7 +1462,14 @@ class ShellScriptParser {
 			this.truncated = true;
 			return [];
 		}
-		if (depth > 0) this.scripts.push(source);
+		if (depth > 0) {
+			this.#nestedText += source.length;
+			if (this.#nestedText > SHELL_SCRIPT_MAX_NESTED_TEXT) {
+				this.truncated = true;
+				return [];
+			}
+			this.scripts.push(source);
+		}
 		const scope: ReadScope = { cwd, depth, subs: new Map() };
 		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope);
 	}
@@ -1493,7 +1515,8 @@ class ShellScriptParser {
 	 * Records in `passed` what `command` (read from `segment`) passes on to a shell piped after it:
 	 * the heredocs and here-strings it reads (`cat <<EOF | sh`), and what `echo`/`printf` prints.
 	 * When `command` is a shell that reads its script from stdin, parses what its upstream commands
-	 * and its own heredocs and here-strings give it.
+	 * and its own heredocs and here-strings give it. The first such shell takes that input, so each
+	 * text is parsed once: a shell further down reads the output of the one before it instead.
 	 */
 	#feedShell(
 		command: ShellCommand,
@@ -1503,12 +1526,16 @@ class ShellScriptParser {
 		nested: ShellCommand[][],
 	): void {
 		const { argv, cwd } = command;
-		const texts = [...segment.heredocs.map(doc => doc.body), ...segment.herestrings];
-		if (Object.hasOwn(SHELL_ECHOES, argv[0])) texts.push(argv.slice(1).join(" "), ...argv.slice(1));
-		passed.set(command, texts);
+		const texts = new Set([...segment.heredocs.map(doc => doc.body), ...segment.herestrings]);
+		if (Object.hasOwn(SHELL_ECHOES, argv[0])) {
+			texts.add(argv.slice(1).join(" "));
+			for (const arg of argv.slice(1)) texts.add(arg);
+		}
+		passed.set(command, [...texts]);
 		if (!Object.hasOwn(SCRIPT_SHELLS, argv[0]) || shellScriptSource(argv) !== "stdin") return;
 		for (const source of [...command.upstream, command]) {
-			for (const text of passed.get(source) ?? []) nested.push(...this.parse(text, cwd, depth + 1));
+			for (const text of passed.get(source) ?? []) append(nested, this.parse(text, cwd, depth + 1));
+			passed.delete(source);
 		}
 	}
 
@@ -1802,7 +1829,7 @@ class ShellScriptParser {
 				i = quote < 0 ? text.length : quote + 1;
 			} else if (ch === '"') {
 				const double = this.#double(text, i + 1, scope);
-				keys.push(...(double.value.match(SUBSTITUTION_KEY_RE) ?? []));
+				append(keys, double.value.match(SUBSTITUTION_KEY_RE) ?? []);
 				i = double.after;
 			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
 				const sub = this.#substitution(text, i, scope, quoted);
@@ -1810,7 +1837,7 @@ class ShellScriptParser {
 				i = sub.after;
 			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
 				const inner = this.#parameter(text, i + 2, scope, quoted);
-				keys.push(...inner.keys);
+				append(keys, inner.keys);
 				i = inner.end + 1;
 			} else if (ch === close && brackets === 0) {
 				end = i;
@@ -1960,11 +1987,13 @@ class ShellScriptParser {
 			...segment.heredocs.flatMap(doc => doc.subs),
 		];
 		const used: ShellCommand[] = [];
-		for (const [key, pipelines] of subs) {
-			if (everything.some(word => word.includes(key))) used.push(...pipelines.flat());
+		for (const word of everything) {
+			for (const key of word.match(SUBSTITUTION_KEY_RE) ?? []) {
+				for (const pipeline of subs.get(key) ?? []) append(used, pipeline);
+			}
 		}
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
-		if (script !== undefined) nested.push(...this.parse(script, cwd, depth + 1));
+		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1));
 		return { argv, quoted, program, wrappers, reads, writes, subs: used, cwd, upstream };
 	}
 }
