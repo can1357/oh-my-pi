@@ -47,7 +47,6 @@ describe("advisor runtime vs swapped model records", () => {
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			advisorTools: [],
 		});
 	});
 
