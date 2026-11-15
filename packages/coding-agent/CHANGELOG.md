@@ -5,6 +5,7 @@
 ### Fixed
 
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- The `todo` tool accepts wrapped task shapes end to end (`{task: …}`, `{description: …}`, `{text: …}` and their JSON-stringified forms): stored verbatim, displayed as their task text, and addressable by both the literal and the unwrapped form, with ambiguous matches refused instead of merged and unsupported item values rejected instead of stringified — legacy snapshots stay matchable by plain text without being rewritten ([#16279](https://github.com/can1357/oh-my-pi/issues/16279), [#17235](https://github.com/can1357/oh-my-pi/pull/17235) by [@pperezrubio](https://github.com/pperezrubio))
 
 ## [18.20.2] - 2026-11-14
 
