@@ -1167,6 +1167,8 @@ interface ShellScriptToken {
 	heredoc?: ShellHeredoc;
 	/** Set on a word whose leading `~` was quoted or escaped (`"~/x"`, `\~/x`), so the shell does not expand it. */
 	literalTilde?: true;
+	/** Set on a `case` pattern: no command word, though its substitutions run. */
+	pattern?: true;
 }
 
 interface ShellScriptSegment {
@@ -1178,6 +1180,8 @@ interface ShellScriptSegment {
 	/** `<<<` words. */
 	herestrings: string[];
 	heredocs: ShellHeredoc[];
+	/** Words whose substitutions run although they are no argument or file: `case` patterns and `<&` targets. */
+	other: string[];
 	/** Words and redirection targets whose leading `~` the shell keeps, as in {@link ShellCommand.literalTildes}. */
 	literalTildes: Set<string>;
 	operator: string;
@@ -1218,11 +1222,21 @@ interface CaseReading {
 	next: "subject" | "in" | "clause" | "pattern" | "body";
 }
 
-/** What text being read is nested in: where its substitutions run, and the map their keys go in. */
+/**
+ * A substitution read but not parsed into commands yet: what it runs depends on the directory of
+ * the command it is in, known only once the `cd`s before that command are applied.
+ */
+interface Substitution {
+	/** Its pipelines, nested ones after the top level, run from `cwd`. */
+	read: (cwd: string) => ShellCommand[][];
+	/** Set by the first {@link ShellScriptParser#substitute}: a substitution runs in one place. */
+	pipelines?: ShellCommand[][];
+}
+
+/** What text being read is nested in, and the map the keys of its substitutions go in. */
 interface ReadScope {
-	cwd: string;
 	depth: number;
-	subs: Map<string, ShellCommand[][]>;
+	subs: Map<string, Substitution>;
 }
 
 /** A substitution's key in a word; it stands for the commands the substitution runs. */
@@ -1520,14 +1534,20 @@ class ShellScriptParser {
 	}
 
 	#read(source: string, cwd: string, depth: number): ShellCommand[][] {
-		const scope: ReadScope = { cwd, depth, subs: new Map() };
-		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope);
+		const scope: ReadScope = { depth, subs: new Map() };
+		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope, cwd);
 	}
 
-	/** The pipelines `tokens`, read in `scope`, run, nested ones after the top level. */
-	#pipelines(tokens: readonly ShellScriptToken[], scope: ReadScope): ShellCommand[][] {
+	/** The commands `substitution` runs from `cwd`, parsed the first time it is asked for. */
+	#substitute(substitution: Substitution, cwd: string): ShellCommand[][] {
+		substitution.pipelines ??= substitution.read(cwd);
+		return substitution.pipelines;
+	}
+
+	/** The pipelines `tokens`, read in `scope`, run from `start`, nested ones after the top level. */
+	#pipelines(tokens: readonly ShellScriptToken[], scope: ReadScope, start: string): ShellCommand[][] {
 		const { depth, subs } = scope;
-		let cwd = scope.cwd;
+		let cwd = start;
 		// A `( )` subshell's `cd` ends with the group: the directory is restored at its `)`.
 		const subshellCwds: string[] = [];
 		const pipelines: ShellCommand[][] = [];
@@ -1558,7 +1578,8 @@ class ShellScriptParser {
 			if (segment.operator === "(") subshellCwds.push(cwd);
 			else if (segment.operator === ")") cwd = subshellCwds.pop() ?? cwd;
 		}
-		return [...pipelines, ...nested, ...[...subs.values()].flat()];
+		// A substitution no command took (one in a heredoc delimiter) is read from where the script starts.
+		return [...pipelines, ...nested, ...[...subs.values()].flatMap(sub => this.#substitute(sub, start))];
 	}
 
 	/**
@@ -1654,8 +1675,9 @@ class ShellScriptParser {
 					out.push(token);
 				} else {
 					caseWord();
-					// A `case` pattern is no command; substitutions in it are still read.
-					if (cases.at(-1)?.next !== "pattern") out.push(token);
+					// A `case` pattern is no command; substitutions in it still run.
+					if (cases.at(-1)?.next === "pattern") token.pattern = true;
+					out.push(token);
 				}
 			}
 			word = "";
@@ -1943,11 +1965,12 @@ class ShellScriptParser {
 	}
 
 	/**
-	 * Reads the substitution at `start` (`` ` ``, `$(`, `<(`, `>(`) and parses what it runs: the key
-	 * that stands for it in a word, and the index after it. A `$( )` body is read as commands up to
-	 * the `)` that closes it, so a `)` in quotes, in a comment or in a heredoc body does not end it.
-	 * A backtick body loses the backslashes bash removes before parsing it (`quoted`: inside double
-	 * quotes), so `` \` `` nests a substitution and `\"` is a quote again.
+	 * Reads the substitution at `start` (`` ` ``, `$(`, `<(`, `>(`): the key that stands for it in a
+	 * word, and the index after it. What it runs is parsed when the command it is in is built, from
+	 * that command's directory. A `$( )` body is read as commands up to the `)` that closes it, so a
+	 * `)` in quotes, in a comment or in a heredoc body does not end it. A backtick body loses the
+	 * backslashes bash removes before parsing it (`quoted`: inside double quotes), so `` \` `` nests
+	 * a substitution and `\"` is a quote again.
 	 */
 	#substitution(text: string, start: number, scope: ReadScope, quoted: boolean): { key: string; after: number } {
 		const key = `\0${this.#count++}\0`;
@@ -1956,7 +1979,7 @@ class ShellScriptParser {
 			let end = start + 1;
 			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
 			const body = text.slice(start + 1, end).replace(quoted ? QUOTED_BACKTICK_ESCAPE_RE : BACKTICK_ESCAPE_RE, "$1");
-			scope.subs.set(key, this.parse(body, scope.cwd, depth));
+			scope.subs.set(key, { read: cwd => this.parse(body, cwd, depth) });
 			return { key, after: end + 1 };
 		}
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
@@ -1964,12 +1987,12 @@ class ShellScriptParser {
 			this.truncated = true;
 			return { key, after: text.length };
 		}
-		const inner: ReadScope = { cwd: scope.cwd, depth, subs: new Map() };
+		const inner: ReadScope = { depth, subs: new Map() };
 		// `$(( ))` is arithmetic, or a command substitution that starts with a subshell: it is read as
 		// commands either way, but a `<<` in it is never a heredoc.
 		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
 		this.scripts.push(text.slice(start + 2, end));
-		scope.subs.set(key, this.#pipelines(tokens, inner));
+		scope.subs.set(key, { read: cwd => this.#pipelines(tokens, inner, cwd) });
 		return { key, after: end + 1 };
 	}
 
@@ -1987,6 +2010,7 @@ class ShellScriptParser {
 			reads: [],
 			herestrings: [],
 			heredocs: [],
+			other: [],
 			literalTildes: new Set(),
 			operator: ";",
 		});
@@ -1996,6 +2020,10 @@ class ShellScriptParser {
 		let redirect: string | undefined;
 		let continued = false;
 		for (const token of tokens) {
+			if (token.pattern) {
+				current.other.push(token.text);
+				continue;
+			}
 			if (continued && token.operator && token.text === "\n") continue;
 			if (!token.operator && token.text.startsWith("~")) {
 				if (token.literalTilde && !bareTildes.has(token.text)) {
@@ -2018,6 +2046,8 @@ class ShellScriptParser {
 					current.herestrings.push(token.text);
 				} else if (token.heredoc) {
 					current.heredocs.push(token.heredoc);
+				} else {
+					current.other.push(token.text);
 				}
 				redirect = undefined;
 			} else if (!token.operator) {
@@ -2037,15 +2067,34 @@ class ShellScriptParser {
 		return segments;
 	}
 
+	/**
+	 * The simple command `segment` runs from `cwd`, or `undefined` when it runs none. The
+	 * substitutions in its words run from `cwd` too, even when it runs no command (`x=$(...)`).
+	 */
 	#command(
 		segment: ShellScriptSegment,
 		cwd: string,
-		subs: Map<string, ShellCommand[][]>,
+		subs: Map<string, Substitution>,
 		depth: number,
 		nested: ShellCommand[][],
 		upstream: readonly ShellCommand[],
 	): ShellCommand | undefined {
 		const { words, writes, reads } = segment;
+		const everything = [
+			...words,
+			...writes,
+			...reads,
+			...segment.herestrings,
+			...segment.heredocs.flatMap(doc => doc.subs),
+			...segment.other,
+		];
+		const used: ShellCommand[] = [];
+		for (const word of everything) {
+			for (const key of word.match(SUBSTITUTION_KEY_RE) ?? []) {
+				const sub = subs.get(key);
+				if (sub) for (const pipeline of this.#substitute(sub, cwd)) append(used, pipeline);
+			}
+		}
 		const wrappers: string[] = [];
 		const start = unwrapShellCommand(words, wrappers);
 		const argv = words.slice(start);
@@ -2059,19 +2108,6 @@ class ShellScriptParser {
 		if (argv.length === 0 && writes.length === 0 && reads.length === 0) return undefined;
 		const program = argv[0] ?? "";
 		if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
-		const everything = [
-			...words,
-			...writes,
-			...reads,
-			...segment.herestrings,
-			...segment.heredocs.flatMap(doc => doc.subs),
-		];
-		const used: ShellCommand[] = [];
-		for (const word of everything) {
-			for (const key of word.match(SUBSTITUTION_KEY_RE) ?? []) {
-				for (const pipeline of subs.get(key) ?? []) append(used, pipeline);
-			}
-		}
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
 		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1));
 		return {
