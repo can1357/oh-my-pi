@@ -52,9 +52,19 @@
 			const fixes = options.fixes === undefined ? undefined : [options.fixes].flat();
 			const response = await this.#run(
 				"commit",
-				{ subject, body: options.body, fixes, amend: options.amend || undefined },
+				{
+					subject,
+					body: options.body,
+					fixes,
+					amend: options.amend || undefined,
+					noVerify: options.noVerify || undefined,
+				},
 				options.silent,
 			);
+			// The committed draft is gone; continue with what remains.
+			this.id = response.details.remaining.id;
+			this.details = response.details.remaining;
+			this.#text = response.text;
 			return response.details;
 		}
 	}

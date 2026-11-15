@@ -27,11 +27,8 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
 
-/**
- * Shared workspace: the user staged a fix in `b.ts` and added a changelog bullet; agent Main
- * edited `a.ts` and added its own bullet; its subagent ParserFix created `parser.ts`.
- */
-async function sharedWorkspace() {
+/** Repository without commits, and a writer that edits files the way agent edit tools do: journaled. */
+async function emptyRepo() {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-"));
 	const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-artifacts-"));
 	tempDirs.push(root, artifacts);
@@ -39,13 +36,6 @@ async function sharedWorkspace() {
 	await git(root, ["config", "user.email", "test@example.com"]);
 	await git(root, ["config", "user.name", "Test"]);
 	await git(root, ["config", "commit.gpgSign", "false"]);
-	await Bun.write(path.join(root, "CHANGELOG.md"), CHANGELOG);
-	await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
-	await Bun.write(path.join(root, "b.ts"), "export const b = 1;\n");
-	await git(root, ["add", "."]);
-	await git(root, ["commit", "-q", "-m", "seed"]);
-	const head = (await git(root, ["rev-parse", "HEAD"])).trim();
-
 	const journal = ChangeJournal.at(artifacts);
 	const write = async (agent: string, parent: string | undefined, file: string, after: string) => {
 		const absolute = path.join(root, file);
@@ -55,6 +45,21 @@ async function sharedWorkspace() {
 		await Bun.write(absolute, after);
 		journal.recordChange({ agent, parent, tool: "edit", path: absolute, before, after });
 	};
+	return { root, journal, write };
+}
+
+/**
+ * Shared workspace: the user staged a fix in `b.ts` and added a changelog bullet; agent Main
+ * edited `a.ts` and added its own bullet; its subagent ParserFix created `parser.ts`.
+ */
+async function sharedWorkspace() {
+	const { root, journal, write } = await emptyRepo();
+	await Bun.write(path.join(root, "CHANGELOG.md"), CHANGELOG);
+	await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
+	await Bun.write(path.join(root, "b.ts"), "export const b = 1;\n");
+	await git(root, ["add", "."]);
+	await git(root, ["commit", "-q", "-m", "seed"]);
+	const head = (await git(root, ["rev-parse", "HEAD"])).trim();
 
 	// The user's work, unrecorded: a staged fix and a changelog bullet.
 	await Bun.write(path.join(root, "b.ts"), "export const b = 2;\n");
@@ -115,6 +120,75 @@ describe("selective commit flow", () => {
 
 		expect(outcome.paths).toEqual(["parser.ts"]);
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
+	});
+
+	it("commits modes, executable deletions, symlinks, and non-UTF-8 files exactly as in the worktree", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const latin1 = (text: string) => Buffer.from(text, "latin1");
+		await Bun.write(path.join(root, "run.sh"), "#!/bin/sh\necho run\n");
+		await Bun.write(path.join(root, "tool.sh"), "#!/bin/sh\necho tool\n");
+		await Bun.write(path.join(root, "plain.txt"), "plain\n");
+		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\n"));
+		await fs.chmod(path.join(root, "run.sh"), 0o755);
+		await fs.chmod(path.join(root, "tool.sh"), 0o755);
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+
+		await fs.chmod(path.join(root, "run.sh"), 0o644);
+		await fs.rm(path.join(root, "tool.sh"));
+		await write("Main", undefined, "plain.txt", "plain\nmore\n");
+		await fs.chmod(path.join(root, "plain.txt"), 0o755);
+		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\nna\xefve\n"));
+		await fs.symlink("plain.txt", path.join(root, "link"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "**" });
+		await commitSelection(draft, { subject: "chore: committed everything" }, { journal, agent: { agent: "Main" } });
+
+		// Index and worktree both match the commit, byte for byte and mode for mode.
+		expect(await git(root, ["status", "--porcelain"])).toBe("");
+		const modes = Object.fromEntries(
+			(await git(root, ["ls-tree", "HEAD"]))
+				.trim()
+				.split("\n")
+				.map(line => {
+					const [meta, file] = line.split("\t");
+					return [file, meta.split(" ")[0]];
+				}),
+		);
+		expect(modes).toEqual({ "latin1.txt": "100644", link: "120000", "plain.txt": "100755", "run.sh": "100644" });
+	});
+
+	it("makes the first commit of a repository without commits", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await write("Main", undefined, "first.txt", "first\n");
+		await write("Main", undefined, "second.txt", "second\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.summary()).toContain("✓ first.txt  +1  [Main]");
+		draft.only(["first.txt"]);
+		const outcome = await commitSelection(draft, { subject: "feat: first" }, { journal, agent: { agent: "Main" } });
+
+		expect(outcome.parent).toBeNull();
+		expect(await git(root, ["rev-list", "--count", "HEAD"])).toBe("1\n");
+		expect(await git(root, ["ls-tree", "--name-only", "HEAD"])).toBe("first.txt\n");
+		expect(await git(root, ["status", "--porcelain"])).toBe("?? second.txt\n");
+	});
+
+	it("attributes edits journaled through a symlinked directory", async () => {
+		const { root, journal } = await emptyRepo();
+		const alias = `${root}-alias`;
+		tempDirs.push(alias);
+		await fs.symlink(root, alias);
+		const file = path.join(alias, "notes.md");
+		await Bun.write(file, "hello\n");
+		journal.recordChange({ agent: "Main", tool: "write", path: file, before: null, after: "hello\n" });
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.summary()).toContain("✓ notes.md  +1  [Main]");
 	});
 
 	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
