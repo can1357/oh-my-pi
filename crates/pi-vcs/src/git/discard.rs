@@ -302,7 +302,17 @@ fn deletes_untracked_files(
 		.lines()
 		.filter_map(|line| line.strip_prefix("Would remove "))
 		.collect();
-	Ok(listed.iter().any(|path| !saved.contains(path)))
+	// Both previews name an untracked directory with nothing kept in it as one
+	// `dir/` line, so an `-e` that keeps a file in it makes this preview list
+	// the directory's other files where the plain one lists the directory: a
+	// path is saved when the plain preview lists it or a directory above it.
+	let is_saved = |path: &str| {
+		saved.contains(path)
+			|| path
+				.match_indices('/')
+				.any(|(at, _)| at + 1 < path.len() && saved.contains(&path[..=at]))
+	};
+	Ok(listed.iter().any(|path| !is_saved(path)))
 }
 
 #[cfg(test)]
@@ -691,6 +701,41 @@ mod tests {
 		fs::create_dir(root.join("cache"))?;
 		fs::write(root.join("cache").join("c.bin"), "x\n")?;
 		assert!(discards_work(root, &DISCOVERED, &stashed(&["*.log"]))?);
+		Ok(())
+	}
+
+	/// The plain preview names an untracked directory as one `dir/` line, while
+	/// an `-e` that keeps a file in it makes the `-x` preview list its other
+	/// files one by one: the stash holds those too. An ignored file in it is
+	/// not stashed.
+	#[test]
+	fn a_stashed_untracked_directory_keeps_the_files_in_it() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		fs::write(root.join(".gitignore"), "*.log\n")?;
+		git(root, &["add", ".gitignore"])?;
+		git(root, &[
+			"-c",
+			"user.name=t",
+			"-c",
+			"user.email=t@example.com",
+			"commit",
+			"-qm",
+			"ignore",
+		])?;
+		fs::create_dir(root.join("d"))?;
+		fs::write(root.join("d").join("a.txt"), "x\n")?;
+		fs::write(root.join("d").join("b.keep"), "x\n")?;
+		let stashed = clean(CleanCheck {
+			directories: true,
+			include_ignored: true,
+			excludes: vec!["*.keep".to_owned()],
+			untracked_stashed: true,
+			..CleanCheck::default()
+		});
+		assert!(!discards_work(root, &DISCOVERED, &stashed)?);
+		fs::write(root.join("d").join("c.log"), "x\n")?;
+		assert!(discards_work(root, &DISCOVERED, &stashed)?);
 		Ok(())
 	}
 }
