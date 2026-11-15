@@ -1,7 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { JudgmentRequest, JudgmentResult, NoulQuestion, Questions } from "@oh-my-pi/pi-ai";
-import { JUDGE_CHUNK_ITEMS, JudgeScorer, lineBatch, lineKey } from "@oh-my-pi/pi-coding-agent/spotlight/judge-scorer";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	JUDGE_CHUNK_ITEMS,
+	JudgeScorer,
+	judgeScorerFor,
+	lineBatch,
+	lineKey,
+} from "@oh-my-pi/pi-coding-agent/spotlight/judge-scorer";
 import type { CallContext } from "@oh-my-pi/pi-coding-agent/spotlight/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 function context(): CallContext {
 	return { task: "Fix the service.", said: "", intent: "", commands: [], source: "read src/a.ts" };
@@ -165,12 +174,11 @@ describe("judge scorer", () => {
 	});
 
 	it("reports no_judge when the role resolves no candidate, not a provider failure", async () => {
-		// A registry is present but its `judge` role names nothing usable: the chain throws, and that is a missing
-		// judge, not a broken provider.
-		const { judge } = fakeJudge(() => {
-			throw new Error("judgment: no judge model available");
-		});
-		const scorer = new JudgeScorer(judge, 5_000);
+		// A real registry whose `judge` role resolves nothing: the chain throws, and that is a missing judge, not a
+		// broken provider.
+		const registry = new ModelRegistry(createInMemoryAuthStorage(), "/nonexistent/spotlight-judge-models.yml");
+		vi.spyOn(registry, "getAvailable").mockReturnValue([]);
+		const scorer = judgeScorerFor({ settings: Settings.isolated({}), modelRegistry: registry }, 5_000);
 		expect(await scorer.score(["a"], context())).toBeNull();
 		expect(scorer.usage.failureCauses).toEqual({ no_judge: 1 });
 	});
