@@ -63,3 +63,5 @@ insta.workspace = true
 omp-vcs = { workspace = true, features = ["test-support"] }
 # The vocalizer tests play on the virtual speaker, never the host's device.
 omp-audio = { workspace = true, features = ["virtual-output"] }
+# The TSP frame log test captures `tracing` events.
+tracing-subscriber.workspace = true

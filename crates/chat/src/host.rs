@@ -2397,6 +2397,28 @@ impl Presenter {
 		Ok(routed)
 	}
 
+	/// Whether Enter would reach the composer: no approval swallows the keys
+	/// and no modal overlay owns them. A native composer is `sendable` exactly
+	/// then.
+	fn composer_ready(&self) -> bool {
+		self.overlays.approval().is_none() && !self.overlays.modal()
+	}
+
+	/// A TSP `send`: submits `text` as one prompt through the classification
+	/// Enter uses (command, local `!` / `$` input, queue shorthand, prompt),
+	/// including every refusal Enter has. It is ignored when the composer would
+	/// not take Enter, or `text` is blank. The draft it displaces joins local
+	/// recall ([`Composer::stage_send`]).
+	fn send_prompt(&mut self, text: &str) -> Result<Routed, HostError> {
+		if !self.composer_ready() || !self.composer.stage_send(text) {
+			return Ok(Routed::Ignored);
+		}
+		let action = self.composer.preview_submission();
+		let routed = self.preview_composer_action(action)?;
+		self.sync_pending_input();
+		Ok(routed)
+	}
+
 	fn sync_pending_input(&self) {
 		let pending = self.composer.has_pending_submission();
 		if let Some(gate) = self.con.user::<PendingInputGate>() {
@@ -4598,8 +4620,13 @@ impl Host {
 		arrived: Option<Instant>,
 	) -> Result<Option<Pause>, HostError> {
 		if terminal.handle_input_event(&event, renderer)? {
-			if self.drain_tsp(terminal) {
-				self.present(renderer, size)?;
+			let routed = self.drain_tsp(terminal)?;
+			// A sent `/copy` reaches the clipboard like a typed one.
+			if let Some(text) = self.presenter.clipboard.take() {
+				self.clipboard_write = Some(terminal.copy_to_clipboard(&text)?);
+			}
+			if let Some(pause) = self.apply_routed(routed, renderer, size)? {
+				return Ok(Some(pause));
 			}
 			// A completed OSC 5522 offer carries an image or text paste out
 			// of band ( enhanced paste).
@@ -4748,12 +4775,29 @@ impl Host {
 		}
 	}
 
+	/// Submits a `send` event's prompt when `sf` and `id` name the live
+	/// composer and the composer would take Enter; any other `send` is stale
+	/// and ignored.
+	fn route_tsp_send(&mut self, sf: &str, id: &str, text: &str) -> Result<Routed, HostError> {
+		let live = self
+			.tsp_surface
+			.as_ref()
+			.is_some_and(|surface| surface.addresses_composer(sf, id));
+		if live {
+			self.presenter.send_prompt(text)
+		} else {
+			Ok(Routed::Ignored)
+		}
+	}
+
 	/// Consumes decoded TSP replies and events queued by the terminal.
 	///
-	/// Returns `true` when the surface still owes a frame, so the caller
-	/// repaints: an `ack` can release a credit-blocked frame, and `gone`
-	/// forces a full remount.
-	fn drain_tsp(&mut self, terminal: &mut Terminal) -> bool {
+	/// Returns what the events asked the host to do: at least a repaint when
+	/// the surface still owes a frame (an `ack` can release a credit-blocked
+	/// frame, and `gone` forces a full remount), and the strongest outcome of
+	/// any `send` (a sent `/exit` quits like a typed one).
+	fn drain_tsp(&mut self, terminal: &mut Terminal) -> Result<Routed, HostError> {
+		let mut routed = Routed::Ignored;
 		let mut repaint = false;
 		while let Some(incoming) = terminal.take_tsp() {
 			let mut events = Vec::new();
@@ -4768,11 +4812,20 @@ impl Host {
 				repaint |= surface.dirty();
 			}
 			for event in events {
-				self.route_tsp_event(event);
+				match event {
+					TspEvent::Send { sf, id, text } => {
+						routed = routed.max(self.route_tsp_send(&sf, &id, &text)?);
+					},
+					event => self.route_tsp_event(event),
+				}
 				repaint = true;
 			}
 		}
-		repaint
+		Ok(if repaint {
+			routed.max(Routed::Repaint)
+		} else {
+			routed
+		})
 	}
 
 	/// Abandons the optimistic surface and returns the epoch to cell drawing.
@@ -5104,6 +5157,7 @@ impl Host {
 		))
 		.unwrap_or(u32::MAX);
 		let status = StatusLine::from_dom(&self.presenter.replica).text();
+		let sendable = self.presenter.composer_ready();
 		let blocks = self.presenter.blocks();
 		let now = self.presenter.clock.elapsed();
 		let pacing = CL_TSP_STREAM_PACING.get(&self.presenter.con);
@@ -5141,6 +5195,7 @@ impl Host {
 			return Ok(false);
 		}
 		surface.resume(renderer.writer_mut())?;
+		surface.set_sendable(sendable);
 		surface.present(renderer.writer_mut(), &blocks, &composer, cursor, &status, now, pacing)?;
 		surface.present_approval(
 			renderer.writer_mut(),
