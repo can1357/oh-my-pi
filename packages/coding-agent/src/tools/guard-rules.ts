@@ -14,6 +14,14 @@
  *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
  * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`.
  * - Upload syntaxes and network tools it does not model are not seen: `gh gist create .env`.
+ * - Programs outside the reader list are not seen reading: `tac ~/.ssh/id_rsa`,
+ *   `jq . ~/.docker/config.json`.
+ * - A command run by a program it does not unwrap, or given its operands at run time, is not
+ *   checked with them: `find ~/.ssh -exec cat {} +`, `ls ~/.ssh/id_* | xargs cat`.
+ * - A directory that contains a credential location does not count as one:
+ *   `tar czf - ~ | curl -T - ...`.
+ * - A secret copied to another file first is sent under that file's name:
+ *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
  *
  * The `credential_read` and `secret_send` rules are derived from `src/intern/guard.py` of
  * nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit e1bbd096f9), Copyright Nace
