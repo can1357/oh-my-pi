@@ -1874,10 +1874,10 @@ impl ChildEnv {
 /// Standard input for a utility builtin: the command's fd 0 plus the
 /// cancellation flag.
 ///
-/// On unix, when fd 0 is a descriptor whose reads can block (a pipe, FIFO,
-/// terminal, socket or device), reads wait for readiness in short
-/// slices so an abort or `timeout` is observed even when input never arrives on
-/// a blocked pipe. A cancelled read fails with [`omp_vfs::cancelled`], not EOF,
+/// When fd 0 is a descriptor whose reads can block (on unix, a pipe, FIFO,
+/// terminal, socket or device; on Windows, a pipe), reads wait for readiness
+/// in short slices so an abort or `timeout` is observed even when input never
+/// arrives. A cancelled read fails with [`omp_vfs::cancelled`], not EOF,
 /// so a utility never reports a result for input it did not finish reading
 /// (`timeout 1 md5sum - < big` printed a checksum of a prefix); it unwinds
 /// rather than leaving a detached thread writing to descriptors the host has
@@ -1920,6 +1920,54 @@ impl Stdin {
 	pub fn is_cancelled(&self) -> bool {
 		self.cancel.fired()
 	}
+
+	/// Anonymous and named Windows pipes have no pollable descriptor.
+	/// Peek before reading so an empty, still-open pipe remains cancellable.
+	#[cfg(windows)]
+	fn wait_pipe_readable(&self, file: &std::fs::File) -> io::Result<()> {
+		use std::os::windows::io::AsRawHandle as _;
+		use windows_sys::Win32::{
+			Foundation::ERROR_BROKEN_PIPE,
+			Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
+			System::Pipes::PeekNamedPipe,
+		};
+
+		let handle = file.as_raw_handle();
+		// SAFETY: the file owns the handle for the whole call.
+		if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+			return Ok(());
+		}
+		loop {
+			if self.cancel.fired() {
+				return Err(omp_vfs::cancelled());
+			}
+			let mut available = 0;
+			// SAFETY: the handle is live; only `available` is written.
+			let ready = unsafe {
+				PeekNamedPipe(
+					handle,
+					std::ptr::null_mut(),
+					0,
+					std::ptr::null_mut(),
+					&mut available,
+					std::ptr::null_mut(),
+				)
+			};
+			if ready == 0 {
+				let error = io::Error::last_os_error();
+				// Let the read below report EOF once every writer has closed.
+				return if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+					Ok(())
+				} else {
+					Err(error)
+				};
+			}
+			if available > 0 {
+				return Ok(());
+			}
+			std::thread::sleep(Duration::from_millis(10));
+		}
+	}
 }
 
 /// The raw descriptor [`Stdin`] polls for readiness, so a blocked read
@@ -1951,6 +1999,12 @@ impl Read for Stdin {
 			// SAFETY: `fd` is owned by the live `OpenFile` held in this struct.
 			let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 			omp_vfs::wait_readable(fd, || self.cancel.fired())?;
+		}
+		#[cfg(windows)]
+		if !buf.is_empty()
+			&& let OpenFile::File(file) = &self.file
+		{
+			self.wait_pipe_readable(file)?;
 		}
 		match (&self.file, &self.cancel.token) {
 			(OpenFile::Vfs(file), Some(token)) => file.read_until_cancelled(buf, token),
