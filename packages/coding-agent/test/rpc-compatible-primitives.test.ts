@@ -308,6 +308,22 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 		});
 	}, 60000);
 
+	test("set_todos without a phases array fails and keeps the list", async () => {
+		const { send, next } = server;
+		send({ type: "set_todos", id: "todos-set", phases: [{ name: "Kept", tasks: [] }] });
+		expect((await next()).success).toBe(true);
+		send({ type: "set_todos", id: "todos-missing" });
+		expect(await next()).toEqual({
+			id: "todos-missing",
+			type: "response",
+			command: "set_todos",
+			success: false,
+			error: "set_todos requires a phases array",
+		});
+		send({ type: "get_state", id: "todos-state" });
+		expect((await next()).data).toMatchObject({ todoPhases: [{ name: "Kept", tasks: [] }] });
+	}, 60000);
+
 	test("get_entries, get_tree, thinking levels, and command-discovery dialect", async () => {
 		const { send, next } = server;
 		send({ type: "get_entries", id: "entries-base" });
