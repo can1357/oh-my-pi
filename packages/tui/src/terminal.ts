@@ -1963,8 +1963,12 @@ export class ProcessTerminal implements Terminal {
 			}
 		});
 
-		// Handler that pipes stdin data through the buffer
+		// Handler that pipes stdin data through the buffer. Bound to the parser it
+		// was installed with: an emission that snapshotted the listener before
+		// stop() still calls it after the parser is retired or replaced (#19372).
+		const stdinBuffer = this.#stdinBuffer;
 		this.#stdinDataHandler = (data: string) => {
+			if (this.#stdinBuffer !== stdinBuffer) return;
 			if (this.#cookedTypeahead && data) {
 				this.#cookedTypeahead = false;
 				data = restoreCookedEnter(data);
@@ -1972,10 +1976,9 @@ export class ProcessTerminal implements Terminal {
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
 			// turn one paste into thousands of writes (#15757).
-			if (data && this.#active && this.#rearmBracketedPaste && !this.#stdinBuffer!.pasting)
-				this.#safeWrite("\x1b[?2004h");
+			if (data && this.#active && this.#rearmBracketedPaste && !stdinBuffer.pasting) this.#safeWrite("\x1b[?2004h");
 			if (this.#win32PasteNormalizer) this.#win32PasteNormalizer.process(data);
-			else this.#stdinBuffer!.process(data);
+			else stdinBuffer.process(data);
 		};
 	}
 
@@ -2735,18 +2738,18 @@ export class ProcessTerminal implements Terminal {
 		this.#disableWin32InputMode();
 
 		this.#restoreWindowsVTInput();
-		// Clean up StdinBuffer
+		// Detach stdin before retiring the parser it feeds.
+		if (this.#stdinDataHandler) {
+			process.stdin.removeListener("data", this.#stdinDataHandler);
+			this.#stdinDataHandler = undefined;
+		}
 		if (this.#stdinBuffer) {
 			this.#stdinBuffer.destroy();
 			this.#stdinBuffer = undefined;
 		}
 		this.#stdinSequenceHandler = undefined;
 
-		// Remove event handlers
-		if (this.#stdinDataHandler) {
-			process.stdin.removeListener("data", this.#stdinDataHandler);
-			this.#stdinDataHandler = undefined;
-		}
+		// Remove remaining event handlers
 		process.stdin.removeListener("end", this.#stdinEndHandler);
 		process.stdin.removeListener("close", this.#stdinCloseHandler);
 		process.stdin.removeListener("error", this.#stdinErrorHandler);
