@@ -15,12 +15,12 @@ The runner does not add spawn capability. A `task` batch, an `eval` script, and 
 
 ## Implementation files
 
-- [`src/workload/spec.ts`](../packages/coding-agent/src/workload/spec.ts) — schema, YAML load, discovery, DAG validation
-- [`src/workload/template.ts`](../packages/coding-agent/src/workload/template.ts) — `${...}` expansion
-- [`src/workload/runner.ts`](../packages/coding-agent/src/workload/runner.ts) — wave execution, `for_each` fan-out, retries, failure policy
-- [`src/workload/index.ts`](../packages/coding-agent/src/workload/index.ts) — `runWorkloadCommand` (list / dry-run / run)
-- [`src/commands/workload.ts`](../packages/coding-agent/src/commands/workload.ts) — `omp workload` CLI
-- [`src/task/structured-subagent.ts`](../packages/coding-agent/src/task/structured-subagent.ts) — spawn primitive used by every `prompt` step
+- [`src/workload/spec.ts`](../packages/coding-agent/src/workload/spec.ts): schema, YAML load, discovery, DAG validation
+- [`src/workload/template.ts`](../packages/coding-agent/src/workload/template.ts): `${...}` expansion
+- [`src/workload/runner.ts`](../packages/coding-agent/src/workload/runner.ts): wave execution, `for_each` fan-out, retries, failure policy
+- [`src/workload/index.ts`](../packages/coding-agent/src/workload/index.ts): `runWorkloadCommand` (list / dry-run / run)
+- [`src/commands/workload.ts`](../packages/coding-agent/src/commands/workload.ts): `omp workload` CLI
+- [`src/task/structured-subagent.ts`](../packages/coding-agent/src/task/structured-subagent.ts): spawn primitive used by every `prompt` step
 
 ---
 
@@ -33,19 +33,19 @@ Version 1 only (`version` omitted → `1`; any other value is rejected). Extra k
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `version` | `number` | No | `1` | Schema version. This omp understands `1` only. |
-| `name` | `string` | Yes | — | Workload id. When the file is found by discovery, this must equal the filename stem (`audit-routes.yml` → `name: audit-routes`). |
-| `description` | `string` | No | — | Shown in listing and plan output. |
+| `name` | `string` | Yes | none | Workload id. When the file is found by discovery, this must equal the filename stem (`audit-routes.yml` → `name: audit-routes`). |
+| `description` | `string` | No | none | Shown in listing and plan output. |
 | `defaults` | `object` | No | see below | Per-step defaults folded into every step before execution. |
 | `defaults.agent` | `string` | No | `"task"` | Agent definition name for `prompt` steps (bundled `task`, `scout`, `reviewer`, …). |
-| `defaults.model` | `string` | No | — | Per-call model selector. Highest precedence; see [Model and effort](#model-and-effort). |
-| `defaults.effort` | `"lo" \| "med" \| "hi"` | No | — | Coarse thinking tier, same vocabulary as a `task` item. Omitted → agent-configured selector remains. |
+| `defaults.model` | `string` | No | none | Per-call model selector. Highest precedence; see [Model and effort](#model-and-effort). |
+| `defaults.effort` | `"lo" \| "med" \| "hi"` | No | none | Coarse thinking tier, same vocabulary as a `task` item. Omitted → agent-configured selector remains. |
 | `defaults.concurrency` | `number` | No | `8` | Positive integer. Caps `for_each` fan-out for a step. |
 | `defaults.on_failure` | `"abort" \| "continue"` | No | `"abort"` | What happens after a step exhausts retries. |
 | `args` | `object` | No | `{}` | Declared inputs, filled by `--set name=value`. Each value is an object with the keys below. |
 | `args.<name>.required` | `boolean` | No | `false` | Missing with no `default` → hard error before the DAG runs. |
-| `args.<name>.default` | `string` | No | — | Used when `--set` omits this name. Values are strings (`default: "2"`). |
-| `args.<name>.description` | `string` | No | — | Documentation only. |
-| `steps` | `array` | Yes | — | Nodes of the DAG. Ids must be unique. |
+| `args.<name>.default` | `string` | No | none | Used when `--set` omits this name. Values are strings (`default: "2"`). |
+| `args.<name>.description` | `string` | No | none | Documentation only. |
+| `steps` | `array` | Yes | none | Nodes of the DAG. Ids must be unique. |
 
 `--set` is rejected for undeclared names (a typo must not vanish at template time). An optional arg with no default is omitted from the arg map; referencing it is a missing-path error.
 
@@ -53,17 +53,17 @@ Version 1 only (`version` omitted → `1`; any other value is rejected). Extra k
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `id` | `string` | Yes | — | Node id. Unique. Same identifier pattern as `name`. |
-| `description` | `string` | No | — | Shown in progress output. |
-| `prompt` | `string` | Exactly one of `prompt` / `run` | — | Subagent assignment. Templates expand before spawn. Mutually exclusive with `run`. |
-| `run` | `string[]` | Exactly one of `prompt` / `run` | — | Exec-form argv (no shell). Each element is template-expanded, then `Bun.spawn`ed. Empty elements are rejected. Mutually exclusive with `prompt`. |
+| `id` | `string` | Yes | none | Node id. Unique. Same identifier pattern as `name`. |
+| `description` | `string` | No | none | Shown in progress output. |
+| `prompt` | `string` | Exactly one of `prompt` / `run` | none | Subagent assignment. Templates expand before spawn. Mutually exclusive with `run`. |
+| `run` | `string[]` | Exactly one of `prompt` / `run` | none | Exec-form argv (no shell). Each element is template-expanded, then `Bun.spawn`ed. Empty elements are rejected. Mutually exclusive with `prompt`. |
 | `agent` | `string` | No | `defaults.agent` or `"task"` | Agent definition for a `prompt` step. |
-| `model` | `string` | No | `defaults.model` | Per-call selector (`provider/model[:level]` or `@role`). **Prompt steps only** — a `run` step that sets `model` is a spec error. |
+| `model` | `string` | No | `defaults.model` | Per-call selector (`provider/model[:level]` or `@role`). **Prompt steps only**: a `run` step that sets `model` is a spec error. |
 | `effort` | `"lo" \| "med" \| "hi"` | No | `defaults.effort` | Coarse thinking tier for a `prompt` step. |
 | `isolated` | `boolean` | No | `false` | When `true`, the subagent runs in an isolated workspace (same isolation path as `task`). |
-| `output_schema` | `object` | No | — | JSON Schema for structured output. The parsed object becomes `${steps.<id>.output}`. **Prompt steps only** — a `run` step that sets `output_schema` is a spec error. |
+| `output_schema` | `object` | No | none | JSON Schema for structured output. The parsed object becomes `${steps.<id>.output}`. **Prompt steps only**: a `run` step that sets `output_schema` is a spec error. |
 | `needs` | `string[]` | No | `[]` | Step ids that must succeed before this step runs. Unknown ids and self-dependencies are rejected at load. |
-| `for_each` | `string` | No | — | Template expression that must resolve to a list. One invocation per element, bounded by `concurrency`. `${item}` / `${item_index}` are in scope. Allowed on both `prompt` and `run` steps (fanning a checker over a file list is a legitimate shell step). |
+| `for_each` | `string` | No | none | Template expression that must resolve to a list. One invocation per element, bounded by `concurrency`. `${item}` / `${item_index}` are in scope. Allowed on both `prompt` and `run` steps (fanning a checker over a file list is a legitimate shell step). |
 | `concurrency` | `number` | No | `defaults.concurrency` or `8` | Positive integer. Caps this step's `for_each` fan-out. `--concurrency` / `-n` overrides it. |
 | `retries` | `number` | No | `0` | Extra attempts after a failure (`retries: 1` → two tries). Each `for_each` item retries independently. |
 | `on_failure` | `"abort" \| "continue"` | No | `defaults.on_failure` or `"abort"` | After retries are exhausted. See [Execution semantics](#execution-semantics). |
@@ -108,7 +108,7 @@ ${steps.audit.output[0].findings[0].message}
 
 `for_each` uses the raw value (the list stays a list). It accepts `${steps.discover.output.files}` or the bare path `steps.discover.output.files`. In `prompt` / `run`, strings copy through; numbers, booleans, and `null` stringify (`null` is a real value, not missing); objects and arrays render as compact JSON.
 
-Unknown root, unknown or unfinished step, missing path, unterminated `${`, empty `${}`, or `${item}` / `${item_index}` outside `for_each` is a **hard error at expansion time**. Referencing a step that is not in `needs` (or has not finished) is the unfinished-step error — list it in `needs`.
+Unknown root, unknown or unfinished step, missing path, unterminated `${`, empty `${}`, or `${item}` / `${item_index}` outside `for_each` is a **hard error at expansion time**. Referencing a step that is not in `needs` (or has not finished) is the unfinished-step error, so list it in `needs`.
 
 A `for_each` expression that does not resolve to a list fails that step: fan-out needs a list, so the producing step should declare an `output_schema` with an array property (or, for a `run` producer, print a JSON array to stdout).
 
@@ -159,7 +159,7 @@ Exit code `0` on a successful list, dry-run, or run; `1` on validation errors or
 
 ### Fan-out audit
 
-`.omp/workloads/audit-routes.yml` — discover files, audit each, then rank the array.
+`.omp/workloads/audit-routes.yml`: discover files, audit each, then rank the array.
 
 ```yaml
 version: 1
@@ -266,7 +266,7 @@ If `scripts/list-changed.mjs` writes `["src/a.ts","src/b.ts"]` to stdout, `list.
 
 ### Fix until green
 
-`.omp/workloads/fix-until-green.yml` — a repair `prompt` with `retries`, then a shell `run` gate. `retries` re-spawns the repair agent if *it* fails; the agent is told to iterate on `tsc` internally. The trailing `run` is what CI fails on. This is not a YAML `while`.
+`.omp/workloads/fix-until-green.yml`: a repair `prompt` with `retries`, then a shell `run` gate. `retries` re-spawns the repair agent if *it* fails; the agent is told to iterate on `tsc` internally. The trailing `run` is what CI fails on. This is not a YAML `while`.
 
 ```yaml
 version: 1
@@ -292,7 +292,7 @@ steps:
       progress. Do not change public APIs unless the types require it.
 
   - id: typecheck
-    description: Gate — tsc must be clean
+    description: Gate that requires a clean tsc
     needs: [repair]
     run: ["npx", "tsc", "--noEmit", "-p", "${args.pkg}"]
 ```
@@ -301,11 +301,11 @@ steps:
 omp workload fix-until-green --set pkg=packages/coding-agent
 ```
 
-A failing `run` with `on_failure: continue` still **skips** dependents (`needs "typecheck", which did not succeed`). Do not write "tsc fails, then a repair step `needs` it" — the repair will be skipped. Put the checker after the repair, or fold the checker into the repair prompt.
+A failing `run` with `on_failure: continue` still **skips** dependents (`needs "typecheck", which did not succeed`). Do not write "tsc fails, then a repair step `needs` it", because the repair will be skipped. Put the checker after the repair, or fold the checker into the repair prompt.
 
 ### Cross-model review
 
-`.omp/workloads/cross-model-review.yml` — the same assignment on two model families in one wave, then a third step that weighs both.
+`.omp/workloads/cross-model-review.yml`: the same assignment on two model families in one wave, then a third step that weighs both.
 
 ```yaml
 version: 1
