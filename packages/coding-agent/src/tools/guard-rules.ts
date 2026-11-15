@@ -13,7 +13,9 @@
  *   `x=$(cat .env); curl -d "$x" ...`.
  * - A heredoc opened inside `$( )` whose body starts after the closing `)` is not that command's
  *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
- * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`.
+ * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`. Nor is
+ *   a relative path after a `cd`, `pushd` or `popd` to such a directory, though a `.env` there
+ *   still counts by its name: `cd "$dir" && cat .npmrc`.
  * - Upload syntaxes and network tools it does not model are not seen: `gh gist create .env`.
  * - Programs outside the reader list are not seen reading: `tac ~/.ssh/id_rsa`,
  *   `jq . ~/.docker/config.json`.
@@ -435,9 +437,9 @@ function braceWords(parts: readonly BracePart[]): string[] {
 /**
  * The absolute paths a word of `command` names, one per word its braces expand to
  * ({@link expandBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
- * those that cannot be resolved are left out.
+ * those that cannot be resolved, relative ones from an unknown `cwd` included, are left out.
  */
-function wordPaths(command: ShellCommand, word: string, cwd: string, home: string): string[] {
+function wordPaths(command: ShellCommand, word: string, cwd: string | undefined, home: string): string[] {
 	const literalTilde = command.literalTildes.has(word);
 	const paths: string[] = [];
 	for (const expanded of expandBraces(word)) {
@@ -481,11 +483,12 @@ export function credentialLocation(absPath: string, home: string): string | unde
 }
 
 /**
- * The secret a word of `command` names when it is sent somewhere: a credential file, a `.env`, or
- * a process environment, also through braces and pathname patterns (`.env*`, `~/.{netrc,x}`).
+ * The secret a word of `command`, resolved from `cwd`, names when it is sent somewhere: a
+ * credential file, a `.env`, or a process environment, also through braces and pathname patterns
+ * (`.env*`, `~/.{netrc,x}`). From an unknown `cwd`, a relative `.env` still counts by its name.
  */
-function sentSecret(command: ShellCommand, word: string, home: string): string | undefined {
-	for (const target of wordPaths(command, word, command.cwd, home)) {
+function sentSecret(command: ShellCommand, word: string, cwd: string | undefined, home: string): string | undefined {
+	for (const target of wordPaths(command, word, cwd, home)) {
 		const names = pathNames(target);
 		if (namesDotenv(names.at(-1) ?? "")) return path.basename(target);
 		if (names.length === 3 && namesFile(names[0], "proc") && namesFile(names[2], "environ")) {
@@ -493,6 +496,11 @@ function sentSecret(command: ShellCommand, word: string, home: string): string |
 		}
 		const found = credentialLocation(target, home);
 		if (found) return found;
+	}
+	if (cwd === undefined) {
+		for (const target of wordPaths(command, word, path.sep, home)) {
+			if (namesDotenv(path.basename(target))) return path.basename(target);
+		}
 	}
 	return undefined;
 }
@@ -988,11 +996,17 @@ function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | un
 	if (name === "gpg" && args(command).some(arg => arg.startsWith("--export-secret"))) {
 		return hit("credential_read", "it exports private keys");
 	}
-	const words = [...readWords(command, scope.home), ...command.reads];
-	for (const word of words) {
-		for (const target of wordPaths(command, word, command.cwd, scope.home)) {
-			const found = credentialLocation(target, scope.home);
-			if (found) return hit("credential_read", `it reads your credentials in ${found}`);
+	// Its arguments are read from where it runs, its `<` redirections from where the shell opens them.
+	const sources = [
+		{ words: readWords(command, scope.home), cwd: command.cwd },
+		{ words: command.reads, cwd: command.shellCwd },
+	];
+	for (const { words, cwd } of sources) {
+		for (const word of words) {
+			for (const target of wordPaths(command, word, cwd, scope.home)) {
+				const found = credentialLocation(target, scope.home);
+				if (found) return hit("credential_read", `it reads your credentials in ${found}`);
+			}
 		}
 	}
 	return undefined;
@@ -1060,11 +1074,11 @@ function formFiles(value: string): string[] {
 	}
 }
 
-/** The local files a network command sends. */
+/** The local files a network command sends through its arguments. */
 function sentFiles(command: ShellCommand): string[] {
 	const name = command.argv[0];
 	const argv = args(command);
-	const files = [...command.reads];
+	const files: string[] = [];
 	if (name === "curl") {
 		for (let i = 0; i < argv.length; i++) {
 			const arg = argv[i];
@@ -1139,16 +1153,31 @@ function dumpsEnvironment(command: ShellCommand): boolean {
 	return name === "set" && rest.length === 0;
 }
 
-/** The secret a command puts on its output: the environment, or a credential or `.env` file it reads. */
-function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
-	if (dumpsEnvironment(command)) return "the environment";
-	const name = command.argv[0];
-	const words = [...(name === "source" ? args(command) : readWords(command, scope.home)), ...command.reads];
+/** The first secret one of `words` of `command` names, each resolved from `cwd` ({@link sentSecret}). */
+function firstSecret(
+	command: ShellCommand,
+	words: readonly string[],
+	cwd: string | undefined,
+	home: string,
+): string | undefined {
 	for (const word of words) {
-		const found = sentSecret(command, word, scope.home);
+		const found = sentSecret(command, word, cwd, home);
 		if (found) return found;
 	}
 	return undefined;
+}
+
+/**
+ * The secret a command puts on its output: the environment, or a credential or `.env` file it
+ * reads, through its arguments from where it runs or its `<` redirections from where the shell opens them.
+ */
+function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
+	if (dumpsEnvironment(command)) return "the environment";
+	const words = command.argv[0] === "source" ? args(command) : readWords(command, scope.home);
+	return (
+		firstSecret(command, command.reads, command.shellCwd, scope.home) ??
+		firstSecret(command, words, command.cwd, scope.home)
+	);
 }
 
 /**
@@ -1209,15 +1238,18 @@ class SecretOutputs {
 	}
 }
 
-/** A network command sending a secret: in a file it uploads, an upstream stage's output, or a substitution's. */
+/**
+ * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, from
+ * an upstream stage's output, or from a substitution's.
+ */
 function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | undefined {
 	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
-	let found: string | undefined;
-	for (const file of sentFiles(command)) {
-		found = sentSecret(command, file, outputs.scope.home);
-		if (found) break;
-	}
-	found ??= outputs.upstream(command.upstream) ?? outputs.first(command.subs);
+	const { home } = outputs.scope;
+	const found =
+		firstSecret(command, command.reads, command.shellCwd, home) ??
+		firstSecret(command, sentFiles(command), command.cwd, home) ??
+		outputs.upstream(command.upstream) ??
+		outputs.first(command.subs);
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 

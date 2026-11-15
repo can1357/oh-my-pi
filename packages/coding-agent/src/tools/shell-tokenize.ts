@@ -1000,8 +1000,17 @@ export interface ShellCommand {
 	 * redirections, and its unquoted heredoc bodies, which the shell expands even when the body is data.
 	 */
 	subs: ShellCommand[];
-	/** Directory the command runs in, after the `cd`s that precede it in the script. */
-	cwd: string;
+	/**
+	 * Directory the program runs in: where the shell is after the `cd`, `pushd` and `popd` before the
+	 * command, moved by a wrapper's directory option (`env -C`, `sudo -D`). `undefined` when the
+	 * guard cannot tell (`cd "$dir"`), so relative paths are not resolved.
+	 */
+	cwd: string | undefined;
+	/**
+	 * Directory the shell is in when it runs the command, where it opens its redirections: `cwd`
+	 * without the wrapper's directory option.
+	 */
+	shellCwd: string | undefined;
 	/**
 	 * Commands whose output can reach this one's input: the earlier stages of its pipeline, where a
 	 * compound command (`( )`, `{ }`, a loop, `if`, `case`) is one stage made of every command run in
@@ -1053,13 +1062,15 @@ export interface ShellScriptScope {
 
 /**
  * The absolute path a shell word names, resolved lexically against `cwd`. `~`, `$HOME`, and `$PWD`
- * expand; any other expansion makes the path unknown (`undefined`).
+ * expand; any other expansion makes the path unknown (`undefined`), and so does a relative path,
+ * or `$PWD`, when `cwd` is unknown.
  */
-export function resolveShellWordPath(word: string, cwd: string, home: string): string | undefined {
+export function resolveShellWordPath(word: string, cwd: string | undefined, home: string): string | undefined {
 	let expanded = word.replace(/\$(?:\{HOME\}|HOME\b)/g, () => home);
-	expanded = expanded.replace(/\$(?:\{PWD\}|PWD\b)/g, () => cwd);
+	if (cwd !== undefined) expanded = expanded.replace(/\$(?:\{PWD\}|PWD\b)/g, () => cwd);
 	if (expanded === "~" || expanded.startsWith("~/")) expanded = home + expanded.slice(1);
 	if (!expanded || expanded.includes("$") || expanded.includes("\0") || expanded.startsWith("~")) return undefined;
+	if (cwd === undefined) return path.isAbsolute(expanded) ? path.resolve(expanded) : undefined;
 	return path.resolve(cwd, expanded);
 }
 
@@ -1070,7 +1081,7 @@ export function resolveShellWordPath(word: string, cwd: string, home: string): s
 export function resolveCommandWordPath(
 	command: ShellCommand,
 	word: string,
-	cwd: string,
+	cwd: string | undefined,
 	home: string,
 ): string | undefined {
 	return resolveShellWordPath(command.literalTildes.has(word) ? `./${word}` : word, cwd, home);
@@ -1200,6 +1211,14 @@ const SHELL_WRAPPERS: Record<string, readonly string[]> = {
 	caffeinate: ["-t", "-w"],
 	unbuffer: [],
 };
+/**
+ * Wrappers that run their command in another directory, with the option that names it: its letter
+ * and its long form, which may be abbreviated down to `shortest` (`sudo --ch` is also `--chroot`).
+ */
+const SHELL_WRAPPER_CHDIRS: Record<string, { letter: string; long: string; shortest: string }> = {
+	env: { letter: "C", long: "--chdir", shortest: "--c" },
+	sudo: { letter: "D", long: "--chdir", shortest: "--chd" },
+};
 const SCRIPT_SHELLS: Record<string, true> = {
 	sh: true,
 	bash: true,
@@ -1293,7 +1312,7 @@ interface CaseReading {
  */
 interface Substitution {
 	/** Its pipelines, nested ones after the top level, run from `cwd` with `input` upstream of them. */
-	read: (cwd: string, input: ShellUpstream | undefined) => ShellCommand[][];
+	read: (cwd: string | undefined, input: ShellUpstream | undefined) => ShellCommand[][];
 	/** Set on a `>( )`: it reads what the command it is in writes there, not that command's input. */
 	output?: true;
 	/** Set by the first {@link ShellScriptParser#substitute}: a substitution runs in one place. */
@@ -1304,6 +1323,57 @@ interface Substitution {
 interface ReadScope {
 	depth: number;
 	subs: Map<string, Substitution>;
+}
+
+/** Directories `pushd` saved, the one `popd` returns to first; what is below them is unknown. */
+interface DirectoryStack {
+	readonly dir: string | undefined;
+	readonly below: DirectoryStack | undefined;
+}
+
+/** Where the shell is as a script runs, each `undefined` where the guard cannot tell. */
+interface ShellDirectories {
+	readonly cwd: string | undefined;
+	/** `OLDPWD`, where `cd -` goes. */
+	readonly previous: string | undefined;
+	readonly stack: DirectoryStack | undefined;
+}
+
+/** Builtins that change the shell's directory, run on their own ({@link changeDirectory}). */
+const DIRECTORY_CHANGERS: Record<string, true> = { cd: true, pushd: true, popd: true };
+
+/**
+ * Where the shell is after `command`, a {@link DIRECTORY_CHANGERS} builtin, runs from `dirs`,
+ * taking it to succeed. `cd -` goes back to `OLDPWD`, `pushd dir` saves the directory it leaves,
+ * `pushd` alone swaps it with the saved one, and `popd` returns to that one. A target the guard
+ * cannot resolve (`cd "$dir"`), a `popd` past what the script pushed, and the stack's other
+ * operations (`+N`, `-N`) leave the directory unknown, so relative paths after them are not
+ * resolved; `-n` changes only the stack, which it leaves unknown.
+ */
+function changeDirectory(command: ShellCommand, dirs: ShellDirectories, home: string): ShellDirectories {
+	const [name, ...rest] = command.argv;
+	const operands = shellPositionalArgs(command.argv);
+	const moveTo = (cwd: string | undefined, stack: DirectoryStack | undefined): ShellDirectories => ({
+		cwd,
+		previous: dirs.cwd,
+		stack,
+	});
+	if (name === "cd") {
+		const target = operands[0];
+		if (target === undefined) return moveTo(home, dirs.stack);
+		if (target === "-") return moveTo(dirs.previous, dirs.stack);
+		return moveTo(resolveCommandWordPath(command, target, dirs.cwd, home), dirs.stack);
+	}
+	if (rest.length === 0) {
+		const saved = dirs.stack;
+		if (name === "popd") return moveTo(saved?.dir, saved?.below);
+		return moveTo(saved?.dir, saved && { dir: dirs.cwd, below: saved.below });
+	}
+	if (name === "pushd" && rest.length === 1 && operands.length === 1 && !/^\+\d+$/.test(operands[0])) {
+		const target = resolveCommandWordPath(command, operands[0], dirs.cwd, home);
+		return moveTo(target, { dir: dirs.cwd, below: dirs.stack });
+	}
+	return rest.includes("-n") ? { ...dirs, stack: undefined } : moveTo(undefined, undefined);
 }
 
 /** A substitution's key in a word; it stands for the commands the substitution runs. */
@@ -1402,9 +1472,12 @@ function readAnsiCString(text: string, start: number): { value: string; end: num
  * Where the command a wrapper chain runs starts in `words` (`sudo env X=1 timeout 5 rm ...` runs
  * `rm ...`). A long option may be abbreviated, as getopt allows (`--us root`); in a bundle of short
  * options (`-nu root`), the first that takes a value takes the rest of the word, or the next word
- * when it ends the bundle.
+ * when it ends the bundle. The directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
+ * moves the command to go in `chdirs`, in order; one in the same word as its option (`-C~/x`,
+ * `--chdir=~/x`) gets no tilde expansion, so a leading `~` in it is kept as a name (`./~/x`).
  */
-function unwrapShellCommand(words: readonly string[], wrappers: string[]): number {
+function unwrapShellCommand(words: readonly string[], wrappers: string[], chdirs: string[]): number {
+	const inWord = (value: string) => (value.startsWith("~") ? `./${value}` : value);
 	let i = 0;
 	while (i < words.length) {
 		const word = words[i];
@@ -1415,6 +1488,7 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[]): numbe
 		const name = path.posix.basename(word);
 		const valued = Object.hasOwn(SHELL_WRAPPERS, name) ? SHELL_WRAPPERS[name] : undefined;
 		if (!valued || (name === "command" && (words[i + 1] === "-v" || words[i + 1] === "-V"))) break;
+		const chdir = Object.hasOwn(SHELL_WRAPPER_CHDIRS, name) ? SHELL_WRAPPER_CHDIRS[name] : undefined;
 		wrappers.push(name);
 		i++;
 		let positional = name === "timeout" ? 1 : 0; // timeout's duration
@@ -1424,13 +1498,20 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[]): numbe
 				i++;
 				break;
 			}
+			let dir: string | undefined;
 			if (name === "env" && SHELL_ASSIGNMENT.test(arg)) {
 				i++;
 			} else if (arg.startsWith("--")) {
-				i += !arg.includes("=") && valued.some(option => option.startsWith(arg)) ? 2 : 1;
+				const eq = arg.indexOf("=");
+				const flag = eq < 0 ? arg : arg.slice(0, eq);
+				if (chdir && flag.length >= chdir.shortest.length && chdir.long.startsWith(flag)) {
+					dir = eq < 0 ? words[i + 1] : inWord(arg.slice(eq + 1));
+				}
+				i += eq < 0 && valued.some(option => option.startsWith(arg)) ? 2 : 1;
 			} else if (arg.startsWith("-") && arg.length > 1) {
 				let k = 1;
 				while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
+				if (chdir && arg[k] === chdir.letter) dir = k === arg.length - 1 ? words[i + 1] : inWord(arg.slice(k + 1));
 				i += k === arg.length - 1 ? 2 : 1;
 			} else if (positional > 0) {
 				positional--;
@@ -1438,6 +1519,7 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[]): numbe
 			} else {
 				break;
 			}
+			if (dir !== undefined) chdirs.push(dir);
 		}
 	}
 	return i;
@@ -1677,7 +1759,7 @@ class ShellScriptParser {
 	 * When a `'` in a double-quoted `${ }` makes bash and POSIX shells read `source` differently,
 	 * the commands of both readings.
 	 */
-	parse(source: string, cwd: string, depth: number, input?: ShellUpstream): ShellCommand[][] {
+	parse(source: string, cwd: string | undefined, depth: number, input?: ShellUpstream): ShellCommand[][] {
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
 			this.truncated = true;
 			return [];
@@ -1706,31 +1788,35 @@ class ShellScriptParser {
 		return false;
 	}
 
-	#read(source: string, cwd: string, depth: number, input: ShellUpstream | undefined): ShellCommand[][] {
+	#read(source: string, cwd: string | undefined, depth: number, input: ShellUpstream | undefined): ShellCommand[][] {
 		const scope: ReadScope = { depth, subs: new Map() };
 		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope, cwd, input);
 	}
 
 	/** The commands `substitution` runs from `cwd` with `input`, parsed the first time it is asked for. */
-	#substitute(substitution: Substitution, cwd: string, input: ShellUpstream | undefined): ShellCommand[][] {
+	#substitute(
+		substitution: Substitution,
+		cwd: string | undefined,
+		input: ShellUpstream | undefined,
+	): ShellCommand[][] {
 		substitution.pipelines ??= substitution.read(cwd, input);
 		return substitution.pipelines;
 	}
 
 	/**
 	 * The pipelines `tokens`, read in `scope`, run from `start` with `input` upstream of them,
-	 * nested ones after the top level.
+	 * nested ones after the top level. Neither `OLDPWD` nor the `pushd` stack is known at the start.
 	 */
 	#pipelines(
 		tokens: readonly ShellScriptToken[],
 		scope: ReadScope,
-		start: string,
+		start: string | undefined,
 		input: ShellUpstream | undefined,
 	): ShellCommand[][] {
 		const { depth, subs } = scope;
-		let cwd = start;
-		// A `( )` subshell's `cd` ends with the group: the directory is restored at its `)`.
-		const subshellCwds: string[] = [];
+		let dirs: ShellDirectories = { cwd: start, previous: undefined, stack: undefined };
+		// A `( )` subshell's `cd` ends with the group: the directories are restored at its `)`.
+		const subshellDirs: ShellDirectories[] = [];
 		const pipelines: ShellCommand[][] = [];
 		const nested: ShellCommand[][] = [];
 		const segments = this.#segments(tokens);
@@ -1742,7 +1828,7 @@ class ShellScriptParser {
 			if (index === undefined) return undefined;
 			opened.add(index);
 			// The shell opens the files before it runs the compound command, from where it starts.
-			const command = this.#command(segments[index], cwd, subs, depth, nested, stages.upstream);
+			const command = this.#command(segments[index], dirs.cwd, subs, depth, nested, stages.upstream);
 			if (command) pipelines.push([command]);
 			return command;
 		});
@@ -1751,7 +1837,7 @@ class ShellScriptParser {
 			stages.keywords(segment.words, segment.quoted);
 			const command = opened.has(index)
 				? undefined
-				: this.#command(segment, cwd, subs, depth, nested, stages.upstream);
+				: this.#command(segment, dirs.cwd, subs, depth, nested, stages.upstream);
 			if (command) {
 				pipeline.push(command);
 				stages.add(command);
@@ -1761,14 +1847,11 @@ class ShellScriptParser {
 			if (pipeline.length > 0) {
 				pipelines.push(pipeline);
 				const only = pipeline.length === 1 ? pipeline[0] : undefined;
-				if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
-					const target = shellPositionalArgs(only.argv)[0];
-					cwd = target === undefined ? this.home : (resolveCommandWordPath(only, target, cwd, this.home) ?? cwd);
-				}
+				if (only && Object.hasOwn(DIRECTORY_CHANGERS, only.argv[0])) dirs = changeDirectory(only, dirs, this.home);
 				pipeline = [];
 			}
-			if (segment.operator === "(") subshellCwds.push(cwd);
-			else if (segment.operator === ")") cwd = subshellCwds.pop() ?? cwd;
+			if (segment.operator === "(") subshellDirs.push(dirs);
+			else if (segment.operator === ")") dirs = subshellDirs.pop() ?? dirs;
 		}
 		// A substitution no command took (one in a heredoc delimiter) is read from where the script starts.
 		return [...pipelines, ...nested, ...[...subs.values()].flatMap(sub => this.#substitute(sub, start, input))];
@@ -2207,7 +2290,7 @@ class ShellScriptParser {
 		// commands either way, but a `<<` in it is never a heredoc.
 		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
 		this.scripts.push(text.slice(start + 2, end));
-		const read = (cwd: string, input: ShellUpstream | undefined) => this.#pipelines(tokens, inner, cwd, input);
+		const read: Substitution["read"] = (cwd, input) => this.#pipelines(tokens, inner, cwd, input);
 		scope.subs.set(key, text[start] === ">" ? { read, output: true } : { read });
 		return { key, after: end + 1 };
 	}
@@ -2289,10 +2372,11 @@ class ShellScriptParser {
 	 * reads (`cat <<EOF | sh`), and what `echo`/`printf` prints. The substitutions in its words run
 	 * from `cwd` too, even when it runs no command (`x=$(...)`), and read its input, or for `>( )`
 	 * what it writes there. A shell that reads its script from stdin is fed it ({@link #feedShell}).
+	 * The program, and a script it runs, run where a wrapper's directory option moves it (`env -C`).
 	 */
 	#command(
 		segment: ShellScriptSegment,
-		cwd: string,
+		cwd: string | undefined,
 		subs: Map<string, Substitution>,
 		depth: number,
 		nested: ShellCommand[][],
@@ -2300,7 +2384,8 @@ class ShellScriptParser {
 	): ShellCommand | undefined {
 		const { words, writes, reads, herestrings, heredocs } = segment;
 		const wrappers: string[] = [];
-		const start = unwrapShellCommand(words, wrappers);
+		const chdirs: string[] = [];
+		const start = unwrapShellCommand(words, wrappers, chdirs);
 		const argv = words.slice(start);
 		const quoted = segment.quoted.slice(start);
 		// `env` alone prints the environment.
@@ -2310,6 +2395,10 @@ class ShellScriptParser {
 		}
 		const program = argv[0] ?? "";
 		if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
+		let programCwd = cwd;
+		for (const dir of chdirs) {
+			programCwd = resolveShellWordPath(segment.literalTildes.has(dir) ? `./${dir}` : dir, programCwd, this.home);
+		}
 		const command: ShellCommand = {
 			argv,
 			quoted,
@@ -2317,7 +2406,8 @@ class ShellScriptParser {
 			wrappers,
 			reads,
 			subs: [],
-			cwd,
+			cwd: programCwd,
+			shellCwd: cwd,
 			upstream,
 			literalTildes: segment.literalTildes,
 		};
@@ -2355,7 +2445,7 @@ class ShellScriptParser {
 		}
 		if (!runs) return undefined;
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
-		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1));
+		if (script !== undefined) append(nested, this.parse(script, command.cwd, depth + 1));
 		if (Object.hasOwn(SCRIPT_SHELLS, argv[0]) && shellScriptSource(argv) === "stdin") {
 			this.#feedShell(command, depth, nested);
 		}
@@ -2372,9 +2462,11 @@ class ShellScriptParser {
  * (read as commands to the `)` that closes them, fed what the command they are in reads, or for
  * `>( )` writes, and also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval`
  * strings and scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd`
- * between commands, and wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a
- * tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code run by
- * other interpreters are not followed.
+ * (`cd -` included), `pushd` and `popd` between commands, and wrappers (`sudo`, `env`, `timeout`,
+ * `xargs`, `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in). It
+ * is a tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code
+ * run by other interpreters are not followed, and after a `cd` to a directory it cannot resolve,
+ * relative paths are not resolved.
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
