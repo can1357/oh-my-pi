@@ -326,9 +326,83 @@ function copyOperands(command: ShellCommand): string[] {
 	return operands;
 }
 
+/** An expansion up front that makes a word an absolute path: `~`, `$HOME`, `$PWD`. */
+const ABSOLUTE_EXPANSION_RE = /^(?:~(?:\/|$)|\$\{?(?:HOME|PWD)\b)/;
+/** tar's one-letter options that take a value; in a bundle, the first of them takes the rest of the word. */
+const TAR_VALUE_LETTERS = "bCfFgHIKLNTVX";
+/** tar's long options that take a separate value word (`--file x.tar`), besides `--directory`. */
+const TAR_VALUE_OPTIONS: Record<string, true> = {
+	"--file": true,
+	"--files-from": true,
+	"--exclude": true,
+	"--exclude-from": true,
+};
+
+/**
+ * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
+ * that directory, as tar does; each `-C` is relative to the one before it. Option values stay as
+ * written. A member after a directory the guard cannot resolve is left out unless it is absolute.
+ */
+function tarReadWords(command: ShellCommand, home: string): string[] {
+	const argv = args(command);
+	const words: string[] = [];
+	let dir: string | undefined = command.cwd;
+	const changeDir = (word: string) => {
+		dir = dir === undefined ? undefined : resolveShellWordPath(word, dir, home);
+	};
+	let i = 0;
+	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
+	if (argv.length > 0 && !argv[0].startsWith("-")) {
+		const letters = argv[i++];
+		for (const letter of letters) {
+			if (!TAR_VALUE_LETTERS.includes(letter) || i >= argv.length) continue;
+			const value = argv[i++];
+			if (letter === "C") changeDir(value);
+			else words.push(value);
+		}
+	}
+	let options = true;
+	for (; i < argv.length; i++) {
+		const arg = argv[i];
+		if (options && arg === "--") {
+			options = false;
+		} else if (options && arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const flag = eq > 0 ? arg.slice(0, eq) : arg;
+			const value = eq > 0 ? arg.slice(eq + 1) : undefined;
+			// GNU tar takes any unambiguous abbreviation: `--dir`, `--direc`.
+			if (flag.length >= 5 && "--directory".startsWith(flag)) {
+				const target = value ?? argv[++i];
+				if (target !== undefined) changeDir(target);
+			} else if (Object.hasOwn(TAR_VALUE_OPTIONS, flag)) {
+				const target = value ?? argv[++i];
+				if (target !== undefined) words.push(target);
+			}
+		} else if (options && arg.startsWith("-") && arg.length > 1) {
+			let k = 1;
+			while (k < arg.length && !TAR_VALUE_LETTERS.includes(arg[k])) k++;
+			if (k === arg.length) continue;
+			const value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
+			if (value === undefined) continue;
+			if (arg[k] === "C") changeDir(value);
+			else words.push(value);
+		} else {
+			const member: string | undefined =
+				dir !== undefined
+					? resolveShellWordPath(arg, dir, home)
+					: path.isAbsolute(arg) || ABSOLUTE_EXPANSION_RE.test(arg)
+						? arg
+						: undefined;
+			if (member !== undefined) words.push(member);
+		}
+	}
+	return words;
+}
+
 /** The words a reading command reads files from: a copy's local sources, any other reader's arguments. */
-function readWords(command: ShellCommand): string[] {
+function readWords(command: ShellCommand, home: string): string[] {
 	const name = command.argv[0];
+	if (name === "tar") return tarReadWords(command, home);
 	if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
 		return copyOperands(command)
 			.slice(0, -1)
@@ -355,7 +429,7 @@ function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | un
 	if (name === "gpg" && args(command).some(arg => arg.startsWith("--export-secret"))) {
 		return hit("credential_read", "it exports private keys");
 	}
-	const words = [...readWords(command), ...command.reads];
+	const words = [...readWords(command, scope.home), ...command.reads];
 	for (const word of words) {
 		const target = resolveShellWordPath(word, command.cwd, scope.home);
 		const found = target === undefined ? undefined : credentialLocation(target, scope.home);
@@ -468,7 +542,7 @@ function dumpsEnvironment(command: ShellCommand): boolean {
 function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
 	const name = command.argv[0];
-	const words = [...(name === "source" ? args(command) : readWords(command)), ...command.reads];
+	const words = [...(name === "source" ? args(command) : readWords(command, scope.home)), ...command.reads];
 	for (const word of words) {
 		const found = sentSecret(word, command.cwd, scope.home);
 		if (found) return found;
@@ -619,8 +693,6 @@ const SHELL_EXPANDED_RE = /[$\0]|^~/;
  * only that some part of it was quoted, not which, so a quoted one counts too.
  */
 const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
-/** An expansion up front that makes a word an absolute path: `~`, `$HOME`, `$PWD`. */
-const ABSOLUTE_EXPANSION_RE = /^(?:~(?:\/|$)|\$\{?(?:HOME|PWD)\b)/;
 
 /**
  * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run. Without
