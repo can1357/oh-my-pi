@@ -8086,14 +8086,17 @@ fn substitute(
 						Ok(caps) => caps,
 						Err(e) => break 'captures Err(e),
 					};
-					count += 1;
-
 					let m = caps.get(0)?.unwrap();
 
 					// Always write the unmatched text before this match.
 					if text.is_none() {
 						text = Some(pattern.as_str()?);
 					}
+					// Byte regexes also match empty text inside a character; skip it.
+					if !text.unwrap().is_char_boundary(m.start()) {
+						continue;
+					}
+					count += 1;
 					result.push_str(&text.unwrap()[last_end..m.start()]);
 
 					if sub.occurrence == 0 || count == sub.occurrence {
@@ -9702,5 +9705,15 @@ mod tests {
 			crate::host::run_util::<Sed>(&["-n", "-f", "script.sed"], "saved\n", dir.path());
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(std::fs::read(dir.path().join("output.txt")).unwrap(), b"saved\n");
+	}
+
+	#[test]
+	fn builtin_substitutes_empty_matches_around_multibyte_characters() {
+		let (code, capture) = crate::host::run_util::<Sed>(&["s/ */_/g"], "café au lait\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "_c_a_f_é_a_u_l_a_i_t_\n");
+		let (code, capture) = crate::host::run_util::<Sed>(&["s/x*/-/2"], "éa\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "é-a\n");
 	}
 }

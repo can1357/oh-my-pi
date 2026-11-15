@@ -7,6 +7,11 @@
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added the Google/GitHub sign-in variant to the Kiro credential codec, carrying the login provider and profile ARN
 
+### Fixed
+
+- Fixed `deepseek/deepseek-v4-flash` dropping attached images: DeepSeek serves the retired id with the multimodal V4.1 Flash, so it now keeps image input like `deepseek-flash` ([#19288](https://github.com/can1357/oh-my-pi/issues/19288))
+- Mistral GLM 5.3, GLM 5.3 Flash and Mistral Large 4 now offer only the reasoning efforts Mistral documents ([#19265](https://github.com/can1357/oh-my-pi/issues/19265)) ([#19287](https://github.com/can1357/oh-my-pi/pull/19287) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

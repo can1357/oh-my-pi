@@ -798,6 +798,7 @@ export function createStrictCompletionProbe(): CompletionProbe {
 		const oauthIdentity =
 			input.credential.type === "oauth"
 				? {
+						accountId: input.credential.accountId,
 						orgId: input.credential.orgId,
 						region: input.credential.region,
 						inferenceRegion: input.credential.inferenceRegion,
