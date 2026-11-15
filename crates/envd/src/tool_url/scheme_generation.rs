@@ -1,4 +1,4 @@
-//! Envd-owned URL-scheme generation for ADR 0050 S2/S3.
+//! Envd-owned URL-scheme generation for ADR 0050 S2–S5.
 //!
 //! One [`SchemeGeneration`] is the unknown-scheme broker (`HostResources`) that
 //! `HostUriResolver` already calls. Publish replaces the envd-owned map (same
@@ -7,7 +7,10 @@
 //! `omp.schemes.read` on the owning extension host.
 //!
 //! S3 adds declaration-based [`HostUriJudgment`] and live-only line-selector
-//! peel gating via [`SchemeGeneration::is_live`].
+//! peel gating via [`SchemeGeneration::is_live`]. S4 adds [`Self::clear_owner`]
+//! for reload / quarantine (D6: not live while the host is down). S5 exposes
+//! [`Self::listing_payload`] for CONTROL `omp.schemes.live` (model-facing
+//! listing; `omp.urls.schemes` stays built-in-only).
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -168,6 +171,29 @@ impl SchemeGeneration {
 		self.schemes.read().values().cloned().collect()
 	}
 
+	/// Model-facing CONTROL payload for ADR 0050 S5 (`omp.schemes.live`).
+	///
+	/// Built-in wire names never appear here; they stay on `omp.urls.schemes`.
+	#[must_use]
+	pub fn listing_payload(&self) -> serde_json::Value {
+		let schemes = self
+			.snapshot()
+			.into_iter()
+			.map(|live| {
+				serde_json::json!({
+					"name": live.scheme.as_str(),
+					"description": live.description.as_ref().map(Str::as_str),
+					"immutable": live.immutable,
+					"writable": live.writable,
+					"owner": live.owner.as_str(),
+					"fetch": live.fetch,
+					"credentials": live.credentials,
+				})
+			})
+			.collect::<Vec<_>>();
+		serde_json::json!({ "schemes": schemes })
+	}
+
 	/// Whether a spelling is a built-in wire name of the closed vocabulary.
 	#[must_use]
 	pub fn is_builtin_wire_name(spelling: &str) -> bool {
@@ -196,11 +222,20 @@ impl SchemeGeneration {
 			.map_or(HostUriJudgment::Undeclared, LiveScheme::judgment)
 	}
 
+	/// Removes every scheme owned by `owner` (ADR 0050 S4 / D6).
+	///
+	/// Idempotent. Other owners' rows are preserved. A refused co-claimant does
+	/// not auto-inherit the freed spelling.
+	pub fn clear_owner(&self, owner: impl Into<Str>) {
+		let _ = self.replace_owner(owner, None, Vec::new());
+	}
+
 	/// Replaces every scheme owned by `owner` with `claims` (union publish).
 	///
 	/// Schemes owned by other owners are preserved. Built-in wire names,
 	/// collisions with another owner, and a union above 32 are refused. On
-	/// refusal the generation is unchanged.
+	/// refusal the generation is unchanged. An empty `claims` list clears the
+	/// owner (see [`Self::clear_owner`]).
 	pub fn replace_owner(
 		&self,
 		owner: impl Into<Str>,
@@ -531,5 +566,50 @@ mod tests {
 			generation.judge("widget://id"),
 			HostUriJudgment::Fetch(FetchEffects { credentials: true })
 		);
+	}
+
+	#[test]
+	fn clear_owner_is_idempotent_and_preserves_other_owners() {
+		let generation = SchemeGeneration::new();
+		generation
+			.replace_owner("acme.widgets", None, vec![claim("widget")])
+			.expect("fold widget");
+		generation
+			.replace_owner("acme.gadgets", None, vec![claim("gadget")])
+			.expect("fold gadget");
+		generation.clear_owner("acme.widgets");
+		assert!(!generation.is_live("widget"));
+		assert!(generation.is_live("gadget"));
+		generation.clear_owner("acme.widgets");
+		assert!(!generation.is_live("widget"));
+		assert!(generation.is_live("gadget"));
+		assert_eq!(generation.snapshot().len(), 1);
+	}
+
+	#[test]
+	fn listing_payload_is_builtin_free() {
+		let generation = SchemeGeneration::new();
+		assert_eq!(
+			generation.listing_payload()["schemes"]
+				.as_array()
+				.unwrap()
+				.len(),
+			0
+		);
+		generation
+			.replace_owner("acme.widgets", None, vec![SchemeClaim {
+				scheme:      Str::new_static("widget"),
+				description: Some(Str::new_static("desc")),
+				writable:    false,
+				immutable:   true,
+				fetch:       false,
+				credentials: false,
+			}])
+			.expect("fold");
+		let row = &generation.listing_payload()["schemes"][0];
+		assert_eq!(row["name"], "widget");
+		assert_eq!(row["owner"], "acme.widgets");
+		assert_eq!(row["description"], "desc");
+		assert_eq!(row["immutable"], true);
 	}
 }

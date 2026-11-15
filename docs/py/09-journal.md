@@ -934,15 +934,15 @@ shared by artifact and URL readers. `UrlError` itself derives from both `omp.Omp
 
 ### `omp.schemes`
 
-Extension-declared URL schemes ([ADR 0050](../adr/0050-extension-declared-url-schemes.md)).
-An extension claims its schemes in the manifest `schemes` table
-([00-overview.md](00-overview.md)) and registers them at activation. **Inert until
-ADR 0050 S2:** registrations are validated and stored; nothing binds a resolver yet,
-`omp.urls.schemes()` keeps returning the built-in table, and a declared scheme still
-parses as the `UNKNOWN` member of `omp.Scheme`. The host checks each registration against the
-manifest's claims when S2 binds it. The package-root name `omp.schemes` used to be an
-unexported alias of the callable `omp.urls.schemes` with no users; that alias is dropped,
-so `omp.schemes` is now this module, and `omp.urls.schemes()` is unchanged.
+Extension-declared URL schemes ([ADR 0050](../adr/0050-extension-declared-url-schemes.md)
+S1–S5). An extension claims its schemes in the manifest `schemes` table
+([00-overview.md](00-overview.md)) and registers them at activation. Registration gates
+on the loaded manifest's claims; envd folds live claims into one `SchemeGeneration`
+served by the unknown-scheme fallback. `omp.urls.schemes()` keeps returning the built-in
+table only, and a declared scheme still parses as the `UNKNOWN` member of `omp.Scheme`.
+The package-root name `omp.schemes` used to be an unexported alias of the callable
+`omp.urls.schemes` with no users; that alias is dropped, so `omp.schemes` is now this
+module, and `omp.urls.schemes()` is unchanged.
 
 #### `omp.schemes.Declaration(name, description=None, immutable=False, writable=False)`
 
@@ -954,17 +954,23 @@ a built-in wire name of the URL vocabulary that `omp.urls` loads, `https` and `p
 included. `description` is at most `omp.schemes.MAX_DESCRIPTION_BYTES` (4096) UTF-8
 bytes. **Raises** `TypeError` for a wrongly typed field.
 
-#### `omp.schemes.register(*declarations) -> tuple[omp.schemes.Declaration, ...]`
+#### `omp.schemes.register(*declarations, read=None) -> tuple[omp.schemes.Declaration, ...]`
 
 Registers `omp.schemes.Declaration` values or bare spellings, additively across calls.
 A spelling repeated after normalization raises `omp.schemes.DuplicateSchemeError`; more
 than `omp.schemes.MAX_SCHEMES` (32) in total raises `omp.schemes.SchemeLimitError`. A
-refused call registers nothing.
+refused call registers nothing. Optional `read` is invoked by CONTROL `omp.schemes.read`.
 
 #### `omp.schemes.declared() -> tuple[omp.schemes.Declaration, ...]`
 
-This extension's registrations, in registration order: the declared-scheme listing,
-separate from the built-in `omp.urls.schemes()` table.
+This extension's process-local registrations, in registration order. Separate from the
+built-in `omp.urls.schemes()` table and from the Environment-wide live listing.
+
+#### `async omp.schemes.live() -> tuple[omp.schemes.LiveDeclaration, ...]`
+
+Every scheme currently live in the Environment generation (CONTROL `omp.schemes.live`),
+including `owner` and fold-time `fetch` / `credentials` flags. Requires the CONTROL
+bridge (`omp.NotWiredError` when absent). Built-in schemes never appear here.
 
 #### Exceptions
 

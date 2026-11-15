@@ -319,6 +319,7 @@ impl EnvServer {
 			Arc::clone(&convars),
 			ext_host_config.quota_runtime(),
 			crate::extension_tool_call_timeout(con),
+			Arc::clone(&scheme_generation),
 		);
 		mcp_manager.bind_notification_sink(control_bindings.hooks.clone());
 		ext_host_config.bind_control_authorities(Arc::clone(&control_bindings.factory));
@@ -627,6 +628,7 @@ impl EnvServer {
 			Arc::clone(&convars),
 			ext_host_config.quota_runtime(),
 			crate::extension_tool_call_timeout(con),
+			Arc::clone(&scheme_generation),
 		);
 		mcp_manager.bind_notification_sink(control_bindings.hooks.clone());
 		ext_host_config.bind_control_authorities(Arc::clone(&control_bindings.factory));
@@ -872,6 +874,7 @@ impl EnvServer {
 			Arc::clone(&convars),
 			ext_host_config.quota_runtime(),
 			crate::extension_tool_call_timeout(con),
+			Arc::clone(&scheme_generation),
 		);
 		mcp_manager.bind_notification_sink(control_bindings.hooks.clone());
 		ext_host_config.bind_control_authorities(Arc::clone(&control_bindings.factory));
