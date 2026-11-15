@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `openai-models-list` discovery no longer offers a gateway's speech, transcription and decision models as chat models: rows that declare only `speech` or audio output, only `transcription` or text output from audio input, or `decisions` output (including OpenRouter's `text->speech`, `audio->transcription` and `text->decisions` summaries) become `tts`, `stt` and judge models
+- `openai-models-list` discovery no longer offers a gateway's speech, transcription and decision models as chat models: rows whose only output is `speech`, `transcription` or `decisions` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts`, `stt` and judge models
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
 - The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
 - Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))

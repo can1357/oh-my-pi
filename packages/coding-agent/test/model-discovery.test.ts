@@ -3476,14 +3476,13 @@ describe("ModelRegistry runtime discovery", () => {
 			kind: "image",
 			api: "openai-images",
 		});
-		// Text output, including multimodal rows, stays on the provider's chat API.
-		for (const id of ["vision-chat", "multimodal-chat"]) {
+		// Text output — including multimodal rows — stays on the provider's chat API,
+		// and an audio-only row carries too little metadata to pick a runner.
+		for (const id of ["vision-chat", "multimodal-chat", "speech-or-music"]) {
 			const model = registry.find("openai-test", id);
 			expect(model?.kind).toBeUndefined();
 			expect(model?.api).toBe("openai-completions");
 		}
-		// Audio as the only output answers on the speech endpoint.
-		expect(registry.find("openai-test", "speech-or-music")).toMatchObject({ kind: "tts", api: "openai-speech" });
 		// The chat roster no longer offers models the chat endpoint cannot serve.
 		const rosterFor = (kind: ModelKind) =>
 			registry
@@ -3491,7 +3490,7 @@ describe("ModelRegistry runtime discovery", () => {
 				.filter(model => model.provider === "openai-test")
 				.map(model => model.id)
 				.sort();
-		expect(rosterFor("chat")).toEqual(["multimodal-chat", "vision-chat"]);
+		expect(rosterFor("chat")).toEqual(["multimodal-chat", "speech-or-music", "vision-chat"]);
 		expect(rosterFor("embedding")).toEqual(["bare-embedder", "openrouter/openai/text-embedding-3-small"]);
 		expect(rosterFor("image")).toEqual(["image-generator"]);
 	});
@@ -3511,12 +3510,26 @@ describe("ModelRegistry runtime discovery", () => {
 				return new Response(
 					JSON.stringify({
 						data: [
+							// Poe's rows, verbatim: a TTS voice and a music generator declare
+							// the same `text->audio`, and Poe serves both on chat completions.
 							{
-								id: "vendor/some-tts",
-								architecture: { input_modalities: ["text"], output_modalities: ["audio"] },
+								id: "orpheus-tts",
+								architecture: {
+									input_modalities: ["text"],
+									output_modalities: ["audio"],
+									modality: "text->audio",
+								},
 							},
 							{
-								id: "vendor/transcriber",
+								id: "lyria",
+								architecture: {
+									input_modalities: ["text"],
+									output_modalities: ["audio"],
+									modality: "text->audio",
+								},
+							},
+							{
+								id: "vendor/audio-reader",
 								architecture: { input_modalities: ["audio"], output_modalities: ["text"] },
 							},
 							// OpenRouter's TTS and STT rows, verbatim from its roster.
@@ -3568,16 +3581,12 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
-		expect(registry.find("gateway-test", "vendor/some-tts")).toMatchObject({
-			kind: "tts",
-			api: "openai-speech",
-			baseUrl: "http://127.0.0.1:9993/v1",
-			supportsTools: false,
-		});
-		expect(registry.find("gateway-test", "vendor/transcriber")).toMatchObject({
-			kind: "stt",
-			api: "openai-transcriptions",
-		});
+		// Audio output, or text from audio input, names no endpoint: chat API.
+		for (const id of ["orpheus-tts", "lyria", "vendor/audio-reader"]) {
+			const model = registry.find("gateway-test", id);
+			expect(model?.kind).toBeUndefined();
+			expect(model?.api).toBe("openai-completions");
+		}
 		expect(registry.find("gateway-test", "speechify/simba-3.5")).toMatchObject({
 			kind: "tts",
 			api: "openai-speech",
@@ -3605,9 +3614,17 @@ describe("ModelRegistry runtime discovery", () => {
 				.filter(model => model.provider === "gateway-test")
 				.map(model => model.id)
 				.sort();
-		expect(rosterFor("chat")).toEqual(["vendor/chat", "vendor/flash-tts", "vendor/plain-chat", "vendor/voice-chat"]);
-		expect(rosterFor("tts")).toEqual(["openrouter/vendor/tts-lite", "speechify/simba-3.5", "vendor/some-tts"]);
-		expect(rosterFor("stt")).toEqual(["vendor/transcriber", "x-ai/grok-stt-2.0"]);
+		expect(rosterFor("chat")).toEqual([
+			"lyria",
+			"orpheus-tts",
+			"vendor/audio-reader",
+			"vendor/chat",
+			"vendor/flash-tts",
+			"vendor/plain-chat",
+			"vendor/voice-chat",
+		]);
+		expect(rosterFor("tts")).toEqual(["openrouter/vendor/tts-lite", "speechify/simba-3.5"]);
+		expect(rosterFor("stt")).toEqual(["x-ai/grok-stt-2.0"]);
 		expect(rosterFor("judge")).toEqual(["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]);
 	});
 

@@ -880,37 +880,32 @@ function extractOpenAIModelsListInputCapabilities(item: {
 /**
  * Map an explicit non-chat output modality onto the runner kind and API that
  * serves it, on the same OpenAI-compatible root the provider already serves
- * its model list from. Only rows whose declared modalities name one task are
- * routed:
- * - sole `embeddings` or `image` output: `/embeddings`, `/images/generations`;
- * - sole `decisions` output (OpenRouter's decision models): `/decisions`;
- * - sole `speech` or `transcription` output (OpenRouter's TTS and STT rows):
- *   `/audio/speech`, `/audio/transcriptions`;
- * - sole `audio` output from text (or undeclared) input: `/audio/speech`;
- * - sole `text` output from audio input without text: `/audio/transcriptions`.
+ * its model list from. Only a sole output that names its task is routed:
+ * `embeddings` (`/embeddings`), `image` (`/images/generations`), and
+ * OpenRouter's `decisions` (`/decisions`), `speech` (`/audio/speech`) and
+ * `transcription` (`/audio/transcriptions`). Outputs come from the row's arrays
+ * or OpenRouter's `architecture.modality` summary (`text->speech`).
  *
- * Modalities come from the row's arrays or OpenRouter's `architecture.modality`
- * summary (`text+image->text`). Anything else stays chat: rows that also emit
- * `text` are ordinary (multimodal) chat models, a `video` output alone cannot
- * tell a chat response from a video-job API, and a row that declares nothing
- * keeps the provider's chat API.
+ * Anything else stays chat. Rows that also emit `text` are ordinary
+ * (multimodal) chat models, and an `audio` or `video` output alone cannot
+ * distinguish a TTS SKU from a music generator, or a chat response from a
+ * video-job API: Poe lists TTS voices, music generators and `gpt-audio` alike
+ * as `text->audio` and serves them all on `/chat/completions`. Text from audio
+ * input reads the same for a transcriber and an audio-understanding chat model.
+ * A row that declares nothing keeps the provider's chat API.
  */
 function extractOpenAIModelsListOutputTask(item: {
-	input?: unknown;
-	input_modalities?: unknown;
 	output?: unknown;
 	output_modalities?: unknown;
 	architecture?: unknown;
 }): { kind: ModelKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
-	const [summaryInput, summaryOutput] = summary.length === 2 ? summary.map(side => side.split("+")) : [];
-	const input = collectModalities([item.input, item.input_modalities, architecture?.input_modalities, summaryInput]);
 	const output = collectModalities([
 		item.output,
 		item.output_modalities,
 		architecture?.output_modalities,
-		summaryOutput,
+		summary.length === 2 ? summary[1].split("+") : undefined,
 	]);
 	if (output.size !== 1) return undefined;
 	const [modality] = output;
@@ -926,10 +921,6 @@ function extractOpenAIModelsListOutputTask(item: {
 			return { kind: "tts", api: "openai-speech" };
 		case "transcription":
 			return { kind: "stt", api: "openai-transcriptions" };
-		case "audio":
-			return input.size === 0 || input.has("text") ? { kind: "tts", api: "openai-speech" } : undefined;
-		case "text":
-			return input.has("audio") && !input.has("text") ? { kind: "stt", api: "openai-transcriptions" } : undefined;
 		default:
 			return undefined;
 	}
