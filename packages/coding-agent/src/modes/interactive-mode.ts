@@ -6385,13 +6385,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = this.#goalModePreviousTools;
 		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
 		// before this runs, which used to leave the goal tool active.
-		if (previousTools) {
+		if (this.vibeModeEnabled) {
+			// Goal exits inside vibe must keep the director toolset: the goal
+			// entry's snapshot is either the vibe set (goal entered mid-vibe) or
+			// the pre-goal full set (goal entered first) — neither is right to
+			// restore while vibe is still on. Drop only the goal tool.
+			await this.session.setActiveToolsByName(
+				this.session.getEnabledToolNames().filter(name => name !== "goal"),
+			);
+		} else if (previousTools) {
 			await this.session.setActiveToolsByName(previousTools);
 		}
 		const currentState = this.session.getGoalModeState();
 		if (options?.reason === "completed") {
 			this.session.setGoalModeState(undefined);
-			this.sessionManager.appendModeChange("none");
+			this.session.appendGoalModeExit();
 			this.sessionManager.appendCustomEntry("goal-completed", {
 				objective: currentState?.goal?.objective,
 				tokensUsed: currentState?.goal?.tokensUsed,
@@ -7379,12 +7387,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#vibeModeOwnerScope = undefined;
 		this.lastAssistantUsage = undefined;
 		this.#updateVibeModeStatus();
-		// The in-teardown pause journaled a combined vibe entry while the vibe
-		// state was still enabled; the authoritative tail must be a bare paused
-		// goal, now that vibe is off.
-		if (goalPausedByExit) {
-			const goal = this.session.getGoalModeState()?.goal;
-			if (goal) this.sessionManager.appendModeChange("goal_paused", { goal });
+		// killAll's mode-exit persistence appended "none" as the journal tail;
+		// a goal that survives vibe exit (paused by this exit, or already
+		// paused/budget-limited) must own the tail instead, or resume drops it.
+		const survivingGoal = this.session.getGoalModeState()?.goal;
+		if (survivingGoal && (survivingGoal.status === "paused" || survivingGoal.status === "budget-limited")) {
+			this.sessionManager.appendModeChange("goal_paused", { goal: survivingGoal });
 		}
 		this.showStatus(
 			(killed > 0

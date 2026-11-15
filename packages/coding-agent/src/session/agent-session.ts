@@ -2848,7 +2848,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 				if (mode === "none") {
-					this.sessionManager.appendModeChange("none");
+					this.appendGoalModeExit();
 				} else if (state) {
 					this.sessionManager.appendModeChange(mode, { goal: state.goal });
 				}
@@ -8205,6 +8205,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async onVibeWorkerTurnSettled(): Promise<void> {
 		await this.#goalRuntime.flushUsage("allowed");
+	}
+
+	/**
+	 * Journal a goal-mode exit through the vibe carrier: while vibe is active a
+	 * bare `none` would become the latest mode_change and drop the director
+	 * scope on resume, so the tail must stay a vibe entry (without goal state).
+	 */
+	appendGoalModeExit(): void {
+		if (this.#vibeModeState?.enabled) {
+			this.sessionManager.appendModeChange("vibe", { previousTools: this.#vibeModeState.previousTools });
+		} else {
+			this.sessionManager.appendModeChange("none");
+		}
 	}
 
 	setVibeModeState(state: VibeModeState | undefined): void {

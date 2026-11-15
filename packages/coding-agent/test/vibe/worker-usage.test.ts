@@ -4,29 +4,25 @@
  *
  * 1. `hasInFlightTurns` reports workers with a running/unknown turn job and
  *    stays false when every worker is idle.
- * 2. `aggregateVibeWorkerUsage` sums live worker sessions' assistant usage and
- *    is monotonic across park/revive: a worker whose live session disappears
- *    keeps its recorded spend, and a revived transcript does not double-count.
+ * 2. `aggregateVibeWorkerUsage` sums record-level cumulative usage and keeps a
+ *    killed (dead) worker's spend in the total, so a worker's disappearance
+ *    cannot mask a live worker's new delta under per-field clamped deltas.
+ * 3. `seedPersistedWorkerUsage` re-arms the baseline from persisted
+ *    turn-settled events after a process restart, so a revived worker's first
+ *    turn charges only new spend instead of replaying its whole transcript.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { MAIN_AGENT_ID, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { aggregateVibeWorkerUsage, VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import {
+	aggregateVibeWorkerUsage,
+	seedPersistedWorkerUsage,
+	VibeSessionRegistry,
+	type VibeWorkerUsageTotals,
+} from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
-const TEST_PARENT_ID = "test-parent-session";
-
-function fakeParentSession() {
-	return {
-		getSessionId: () => TEST_PARENT_ID,
-		getSessionFile: () => null,
-		settings: Settings.isolated({}),
-	};
-}
-
-/** Test fixture: aggregateVibeWorkerUsage reads only `role` and `usage`. */
-function usageMessage(input: number, output = 0): AgentMessage {
-	return { role: "assistant", usage: { input, output, cacheRead: 0, cacheWrite: 0 } } as unknown as AgentMessage;
+function usage(input: number, output = 0): VibeWorkerUsageTotals {
+	return { input, output, cacheRead: 0, cacheWrite: 0 };
 }
 
 describe("vibe worker usage aggregation", () => {
@@ -35,56 +31,49 @@ describe("vibe worker usage aggregation", () => {
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
 		VibeSessionRegistry.resetGlobalForTests();
 	});
 
 	it("hasInFlightTurns is true only while a worker turn runs", () => {
 		const registry = VibeSessionRegistry.global();
-		expect(registry.hasInFlightTurns(fakeParentSession())).toBe(false);
+		const parent = {
+			getSessionId: () => "test-parent-session",
+			getSessionFile: () => null,
+			settings: Settings.isolated({}),
+		};
+		expect(registry.hasInFlightTurns(parent)).toBe(false);
 
 		registry.registerRecordForTests({ id: "w-idle", ownerId: MAIN_AGENT_ID });
-		expect(registry.hasInFlightTurns(fakeParentSession())).toBe(false);
+		expect(registry.hasInFlightTurns(parent)).toBe(false);
 
 		registry.registerRecordForTests({ id: "w-busy", ownerId: MAIN_AGENT_ID, jobId: "job-1" });
-		expect(registry.hasInFlightTurns(fakeParentSession())).toBe(true);
+		expect(registry.hasInFlightTurns(parent)).toBe(true);
 	});
 
-	it("sums live worker usage and stays monotonic across park and revive", () => {
+	it("keeps a killed worker's spend in the aggregate", () => {
 		const registry = VibeSessionRegistry.global();
-		registry.registerRecordForTests({ id: "w-1", ownerId: MAIN_AGENT_ID });
+		registry.registerRecordForTests({ id: "w-done", ownerId: MAIN_AGENT_ID, usage: usage(50, 5) });
+		expect(aggregateVibeWorkerUsage(MAIN_AGENT_ID)).toEqual(usage(50, 5));
 
-		let messages: AgentMessage[] = [usageMessage(10, 4)];
-		const agentRef = { kind: "sub", parentId: MAIN_AGENT_ID, session: { messages } } as never;
-		const get = vi.spyOn(AgentRegistry.global(), "get").mockReturnValue(agentRef);
+		// The director kills the finished worker; its record turns dead.
+		const records = registry.listWorkerRecordsByOwner(MAIN_AGENT_ID);
+		for (const record of records) {
+			if (record.id === "w-done") record.state = "dead";
+		}
+		registry.registerRecordForTests({ id: "w-next", ownerId: MAIN_AGENT_ID, usage: usage(3) });
+		// The dead worker's 50 input tokens must still be part of the total;
+		// dropping them would clamp away w-next's 3 new tokens in a goal delta.
+		expect(aggregateVibeWorkerUsage(MAIN_AGENT_ID)).toEqual(usage(53, 5));
+	});
 
-		let totals = aggregateVibeWorkerUsage(MAIN_AGENT_ID);
-		expect(totals).toEqual({ input: 10, output: 4, cacheRead: 0, cacheWrite: 0 });
-
-		// New spend visible through the live session.
-		messages.push(usageMessage(5, 1));
-		totals = aggregateVibeWorkerUsage(MAIN_AGENT_ID);
-		expect(totals).toEqual({ input: 15, output: 5, cacheRead: 0, cacheWrite: 0 });
-
-		// Parked worker: live session gone from the registry — spend must persist.
-		get.mockReturnValue(undefined);
-		expect(aggregateVibeWorkerUsage(MAIN_AGENT_ID)).toEqual({
-			input: 15,
-			output: 5,
-			cacheRead: 0,
-			cacheWrite: 0,
+	it("seeds restart baselines from persisted turn-settled usage", () => {
+		seedPersistedWorkerUsage(MAIN_AGENT_ID, "w-1", usage(120, 30));
+		// Simulate a revived worker whose first post-restart turn adds 10 more.
+		VibeSessionRegistry.global().registerRecordForTests({
+			id: "w-1",
+			ownerId: MAIN_AGENT_ID,
+			usage: usage(130, 30),
 		});
-
-		// Revived with a fresh session object replaying the same transcript: no
-		// double count, and new spend keeps accumulating from the high-water mark.
-		messages = [usageMessage(15, 5), usageMessage(2)];
-		const revivedRef = { kind: "sub", parentId: MAIN_AGENT_ID, session: { messages } } as never;
-		get.mockReturnValue(revivedRef);
-		expect(aggregateVibeWorkerUsage(MAIN_AGENT_ID)).toEqual({
-			input: 17,
-			output: 5,
-			cacheRead: 0,
-			cacheWrite: 0,
-		});
+		expect(aggregateVibeWorkerUsage(MAIN_AGENT_ID)).toEqual(usage(130, 30));
 	});
 });

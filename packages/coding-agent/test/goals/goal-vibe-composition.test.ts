@@ -20,6 +20,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -51,6 +52,31 @@ function flushMacroTaskQueue(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	setImmediate(resolve);
 	return promise;
+}
+
+async function flushMicrotasks(): Promise<void> {
+	// Deterministic under fake timers: let queued promise callbacks settle so a
+	// fired continuation tick is observed before asserting it was dropped.
+	for (let i = 0; i < 5; i++) {
+		await Promise.resolve();
+	}
+}
+
+async function armInputWaiter(mode: InteractiveMode): Promise<{
+	inputPromise: Promise<void>;
+	getResolvedInput: () => SubmittedUserInput | undefined;
+}> {
+	let resolvedInput: SubmittedUserInput | undefined;
+	const inputPromise = mode.getUserInput().then(input => {
+		resolvedInput = input;
+	});
+	// getUserInput resolves its promise only after onInputCallback fires; the
+	// scheduler needs the waiter armed synchronously, so flush once it is.
+	await Promise.resolve();
+	return {
+		inputPromise,
+		getResolvedInput: () => resolvedInput,
+	};
 }
 
 describe("goal + vibe composition", () => {
@@ -195,24 +221,71 @@ describe("goal + vibe composition", () => {
 		expect(goal?.status).toBe("paused");
 	});
 
-	it("goal continuation does not fire while a vibe worker turn is in flight", async () => {
+	it("goal continuation stays silent while a worker turn is in flight, then fires with the vibe prompt", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		await mode.handleVibeModeCommand();
 		await mode.handleGoalModeCommand("Ship the refactor");
 		expect(mode.goalModeEnabled).toBe(true);
 
-		const buildPrompt = vi.spyOn(session.goalRuntime, "buildContinuationPrompt");
 		const inFlight = vi.spyOn(VibeSessionRegistry.global(), "hasInFlightTurns").mockReturnValue(true);
 
-		// A settled director turn asks for continuation scheduling; with a worker
-		// turn in flight the scheduler must not even build a continuation prompt.
-		await session.prompt("direct the workers");
-		await flushMacroTaskQueue();
-		expect(buildPrompt).not.toHaveBeenCalled();
+		// Worker in flight: the armed 800ms continuation timer must produce no
+		// submission at all — delivery owns waking the director.
+		vi.useFakeTimers();
+		let waiter = await armInputWaiter(mode);
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+		expect(waiter.getResolvedInput()).toBeUndefined();
+		const cleanup = waiter.getResolvedInput() ?? mode.startPendingSubmission({ text: "cleanup" });
+		mode.onInputCallback?.(cleanup);
+		await waiter.inputPromise;
+		// Release the reservation so the next scheduler pass is not blocked.
+		mode.finishPendingSubmission(cleanup);
+		vi.useRealTimers();
 
+		// All workers idle: the continuation fires and carries the vibe variant.
 		inFlight.mockReturnValue(false);
-		await session.prompt("check on the workers");
+		vi.useFakeTimers();
+		waiter = await armInputWaiter(mode);
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+		vi.useRealTimers();
+		const input = waiter.getResolvedInput();
+		expect(input?.customType).toBe("goal-continuation");
+		const drain = input ?? mode.startPendingSubmission({ text: "cleanup" });
+		mode.onInputCallback?.(drain);
+		await waiter.inputPromise;
+		mode.finishPendingSubmission(drain);
+	});
+
+	it("preserves an already-paused goal when exiting vibe", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await mode.handleGoalModeCommand("Ship the refactor");
+		await session.goalRuntime.pauseGoal();
+		await mode.handleVibeModeCommand();
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		const tail = lastModeChange(session.sessionManager);
+		expect(tail?.mode).toBe("goal_paused");
+		const goal = tail?.data?.goal as { status?: string } | undefined;
+		expect(goal?.status).toBe("paused");
+	});
+
+	it("journals the vibe carrier when the goal completes inside vibe", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await mode.handleGoalModeCommand("Ship the refactor");
+
+		await session.goalRuntime.completeGoalFromTool();
+		// The goal's mode is "exiting"; the next agent_end tears it down the way
+		// #handleGoalSessionEvent does in the live TUI.
+		await session.prompt("wrap up");
 		await flushMacroTaskQueue();
-		expect(buildPrompt.mock.calls.every(([options]) => options?.vibe === true)).toBe(true);
+
+		const tail = lastModeChange(session.sessionManager);
+		expect(tail?.mode).toBe("vibe");
+		expect(tail?.data?.goal).toBeUndefined();
+		expect(mode.vibeModeEnabled).toBe(true);
 	});
 });
