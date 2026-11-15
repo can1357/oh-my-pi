@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `mnemopi.embeddingQueryPrefix` and `mnemopi.embeddingInputType` so Mnemopi recall works with asymmetric embedders: instruction-tuned models such as Qwen3-Embedding, and NVIDIA NIM retrievers that reject requests without `input_type` ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
+
+### Fixed
+
+- Fixed Mnemopi embedding API failures (rejected key, unknown model, missing `input_type`) silently degrading recall to keyword search; they now show a warning with the provider's response, and print mode writes it to stderr ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
