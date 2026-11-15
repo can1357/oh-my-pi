@@ -993,7 +993,7 @@ export interface ShellCommand {
 	program: string;
 	/** Wrappers that ran the command, outermost first (`sudo`, `env`, `timeout`, `xargs`, ...). */
 	wrappers: string[];
-	/** Targets of `<` input redirections. */
+	/** Targets of `<` and `<>` input redirections. */
 	reads: string[];
 	/**
 	 * Commands inside the substitutions (`$( )`, backticks, `<( )`) in this command's words, its
@@ -2251,18 +2251,18 @@ class ShellScriptParser {
 			}
 			continued = token.operator && Object.hasOwn(SHELL_CONTINUATIONS, token.text);
 			if (redirect !== undefined && !token.operator) {
+				// `<>` opens its file for reading and writing, as the command's input.
+				if (redirect === "<" || redirect === "<>") current.reads.push(token.text);
 				if (
 					Object.hasOwn(SHELL_WRITE_REDIRECTS, redirect) ||
 					(redirect === ">&" && !(/^\d+$/.test(token.text) || token.text === "-"))
 				) {
 					current.writes.push(token.text);
-				} else if (redirect === "<") {
-					current.reads.push(token.text);
 				} else if (redirect === "<<<") {
 					current.herestrings.push(token.text);
 				} else if (token.heredoc) {
 					current.heredocs.push(token.heredoc);
-				} else {
+				} else if (redirect !== "<") {
 					current.other.push(token.text);
 				}
 				redirect = undefined;
@@ -2334,14 +2334,15 @@ class ShellScriptParser {
 			this.#passed.set(command, [...texts]);
 		}
 		let output: ShellUpstream | undefined;
-		const everything = [
+		// A `<>` target is both written and read, and its substitutions run once.
+		const everything = new Set([
 			...words,
 			...writes,
 			...reads,
 			...herestrings,
 			...heredocs.flatMap(doc => doc.subs),
 			...segment.other,
-		];
+		]);
 		for (const word of everything) {
 			for (const key of word.match(SUBSTITUTION_KEY_RE) ?? []) {
 				const sub = subs.get(key);
