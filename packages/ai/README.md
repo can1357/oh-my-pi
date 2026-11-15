@@ -1206,12 +1206,12 @@ the separate official `antigravity-cli` ACP provider.
 
 When explicitly enabled, `/login google-antigravity` starts browser OAuth with
 PKCE and a local HTTP callback (preferred address
-`http://127.0.0.1:51121/oauth-callback`). Complete consent in a browser on the
-machine running OMP; token exchange and project discovery use the provider
-transport and save the resulting credential to OMP's store.
-The normal flow does not ask for a pasted authorization code or import the
-official CLI's credential store. SDK callers can still explicitly supply a
-manual-code callback when they need one.
+`http://127.0.0.1:51121/oauth-callback`). Browser completion is automatic when the
+callback reaches OMP. The dialog also keeps a focused input available: if the
+localhost page cannot connect, paste its **entire address** from the browser and
+press Enter. A separate displayed code is not required; the address contains it.
+A raw authorization code is also accepted. PKCE and validation of supplied
+OAuth state remain enabled.
 
 Default Antigravity chat, image, OAuth, and usage requests use a lazily started
 Go helper. Source checkouts build it with

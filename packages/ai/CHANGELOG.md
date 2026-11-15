@@ -13,7 +13,7 @@
 ### Fixed
 
 - Antigravity continuations retain cumulative usage, avoid unsafe checkpoint replay, and surface next-leg HTTP failures. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
-- Antigravity login uses its browser callback without an unnecessary paste-code prompt, and project discovery honors explicit fetch overrides. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity login supports automatic browser callbacks and focused redirect-URL/code entry when the callback cannot reach OMP; project discovery honors explicit fetch overrides. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 - Antigravity image streams surface provider errors, tool results use the serving model's role, and logical execution identity stays stable through tool turns. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 - Transport helpers support bodyless responses and stop without keeping idle hosts alive. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 

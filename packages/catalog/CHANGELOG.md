@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Antigravity discovery accepts an explicit client User-Agent, and browser-callback login no longer opens an unnecessary paste-code prompt; the provider remains paused by default. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity discovery accepts an explicit client User-Agent, and browser-callback login keeps manual redirect-URL/code entry available; the provider remains paused by default. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 
 ### Removed
 
