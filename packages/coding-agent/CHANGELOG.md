@@ -6,6 +6,10 @@
 
 - Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
 
+### Added
+
+- Host tool adapters can identify role-backed agents without inferring roles from resolved model IDs ([#19379](https://github.com/can1357/oh-my-pi/pull/19379) by [@andrebrait](https://github.com/andrebrait))
+
 ### Changed
 
 - Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
