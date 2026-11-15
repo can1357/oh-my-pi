@@ -221,6 +221,29 @@ impl Journal {
 			.map(|decoded| decoded.entries)
 	}
 
+	/// Reports whether a writer currently holds the journal at `path`.
+	///
+	/// Read-only: it opens an **existing** `<journal>.lock` sidecar without
+	/// `create` and tries a shared non-blocking lock, so it never creates a
+	/// file, never truncates, and never takes the writer lock. A missing
+	/// sidecar means no writer has ever opened the journal, so it is not live.
+	/// The advisory lock dies with its holder, so a sidecar left behind by a
+	/// finished or crashed writer is not live either.
+	///
+	/// The answer is a point-in-time observation: the shared lock is held only
+	/// for the probe, and a writer that opens the journal an instant later is
+	/// not seen. A writer racing the probe itself can see
+	/// [`JournalError::Locked`] once; it is the caller's refusal to act on, not
+	/// a stuck lock.
+	///
+	/// # Errors
+	///
+	/// Returns [`JournalError::Io`] when the sidecar exists but cannot be
+	/// opened or locked for a reason other than the lock being held.
+	pub fn is_live(path: impl AsRef<Path>) -> Result<bool, JournalError> {
+		WriterLock::is_held(path.as_ref())
+	}
+
 	/// Appends and durably commits one entry.
 	///
 	/// # Errors
@@ -519,15 +542,36 @@ pub(crate) struct ReplaceLock {
 }
 
 impl WriterLock {
-	/// Takes the journal's exclusive advisory lock without blocking.
-	fn acquire(path: &Path) -> Result<Self, JournalError> {
+	/// Path of the sidecar lock for the journal at `path`.
+	fn sidecar(path: &Path) -> PathBuf {
 		let mut name = path.file_name().unwrap_or_default().to_os_string();
 		name.push(".lock");
+		path.with_file_name(name)
+	}
+
+	/// Probes the sidecar without creating it: `false` when it is absent or
+	/// no one holds it, `true` when a writer holds the exclusive lock.
+	fn is_held(path: &Path) -> Result<bool, JournalError> {
+		let file = match File::open(Self::sidecar(path)) {
+			Ok(file) => file,
+			Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+			Err(source) => return Err(JournalError::Io(source)),
+		};
+		match File::try_lock_shared(&file) {
+			// The probe lock releases when `file` drops.
+			Ok(()) => Ok(false),
+			Err(fs::TryLockError::WouldBlock) => Ok(true),
+			Err(fs::TryLockError::Error(source)) => Err(JournalError::Io(source)),
+		}
+	}
+
+	/// Takes the journal's exclusive advisory lock without blocking.
+	fn acquire(path: &Path) -> Result<Self, JournalError> {
 		let file = OpenOptions::new()
 			.create(true)
 			.read(true)
 			.write(true)
-			.open(path.with_file_name(name))?;
+			.open(Self::sidecar(path))?;
 		match file.try_lock() {
 			Ok(()) => Ok(Self { _file: file }),
 			Err(fs::TryLockError::WouldBlock) => {

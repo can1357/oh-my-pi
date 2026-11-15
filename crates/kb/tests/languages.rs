@@ -227,6 +227,34 @@ fn python_scip_fixture_is_ingested() {
 	assert_eq!(result["results"][0]["definitions"][0]["path"], "lib.py");
 }
 
+/// A producer that writes build output into the work tree (rust-analyzer's
+/// in-tree `target/` on a host with no `CARGO_TARGET_DIR`) changes the
+/// snapshot it indexed: kb refuses to publish and names the offending path.
+#[test]
+fn producer_written_file_is_rejected_and_named() {
+	let repo =
+		repository("lib.py", "def helper():\n    return 1\n\ndef entry():\n    return helper()\n");
+	let (keep, program) = install_producer(include_bytes!("fixtures/python.scip"));
+	let polluting = keep.path().join("polluting-producer");
+	fs::write(
+		&polluting,
+		format!("#!/bin/sh\ntouch build-output.txt\nexec '{}' \"$@\"\n", program.display()),
+	)
+	.unwrap();
+	let mut permissions = fs::metadata(&polluting).unwrap().permissions();
+	use std::os::unix::fs::PermissionsExt;
+	permissions.set_mode(0o755);
+	fs::set_permissions(&polluting, permissions).unwrap();
+	let output = produced(repo.path(), "OMP_KB_SCIP_PYTHON", &polluting, &["update"]);
+	assert!(!output.status.success(), "a producer that changed the repository must not publish");
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	assert!(
+		stderr.contains("repository changed while SCIP producers were running: build-output.txt"),
+		"{stderr}"
+	);
+	assert!(!repo.path().join(".git/omp-kb/index.json").exists());
+}
+
 #[test]
 fn untagged_wasm_is_not_indexed_as_rust() {
 	let repo = repository("lib.rs", "fn helper() {}\n");
