@@ -192,9 +192,14 @@ export class SpotlightExperiment implements SpotlightSession {
 		const budgetMs = cfgSpotlightTimeoutMs.get(session.settings);
 		if (this.ranker === "judge") return judgeScorerFor(session, budgetMs, "spotlight");
 		if (!this.client) throw new Error("spotlight: no client to rank with");
-		// `auto` ranks with Spotlight and hands the whole call to the judge when Spotlight cannot answer a chunk.
+		// `auto` ranks with Spotlight and hands the whole call to the judge when Spotlight cannot answer a chunk. Each
+		// handover gets a budget of its own: Spotlight's timeout already ran before it.
 		if (this.ranker === "auto")
-			return new RecordingScorer(this.client, this.thinking, judgeScorerFor(session, budgetMs));
+			return new RecordingScorer(
+				this.client,
+				this.thinking,
+				judgeScorerFor(session, budgetMs, "spotlight", { rerank: true }),
+			);
 		return new RecordingScorer(this.client, this.thinking);
 	}
 

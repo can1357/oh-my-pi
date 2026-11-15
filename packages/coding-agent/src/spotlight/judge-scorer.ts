@@ -96,10 +96,21 @@ export interface SpotlightScorerSession {
 	sessionManager?: Partial<JudgmentUsageLedger>;
 }
 
+/** How a {@link JudgeScorer} spends its budget. */
+export interface JudgeScorerOptions {
+	readonly fallback?: Scorer;
+	/**
+	 * Reranks the calls another ranker could not answer: every handover gets a budget of its own, since the other
+	 * ranker's timeout already ran before it. Unset, one budget holds for the whole result.
+	 */
+	readonly rerank?: boolean;
+}
+
 /**
  * A {@link Scorer} over one judge for one tool result: ranks every item's relevance, splits items that would
  * overflow one request into chunks of {@link JUDGE_CHUNK_ITEMS}, and records what it spent and what failed. One
- * scorer serves one result, so its budget and its in-flight cap hold across the stages shaping ranks in.
+ * scorer serves one result, so its in-flight cap holds across the stages shaping ranks in, and so does its budget
+ * unless it reranks for another ranker.
  */
 export class JudgeScorer implements Scorer {
 	readonly usage: ScorerUsage = { calls: 0, failures: 0, ms: 0, tokens: 0, costUsd: 0 };
@@ -108,15 +119,19 @@ export class JudgeScorer implements Scorer {
 	readonly fallback: Scorer | undefined;
 	readonly #judge: Pick<Judge, "judge"> | undefined;
 	readonly #budgetMs: number;
+	readonly #rerank: boolean;
 	#inFlight = 0;
 	readonly #waiting: (() => void)[] = [];
-	/** The result's single budget: a later stage of the same result does not reset it. */
+	/** `score` calls running now: the chunks of one handover enter together, so a rerank renews its budget at 0. */
+	#active = 0;
+	/** The result's budget, or under {@link JudgeScorerOptions.rerank} the current handover's. */
 	#deadline: AbortSignal | undefined;
 
-	constructor(judge: Pick<Judge, "judge"> | undefined, budgetMs: number, fallback?: Scorer) {
+	constructor(judge: Pick<Judge, "judge"> | undefined, budgetMs: number, options: JudgeScorerOptions = {}) {
 		this.#judge = judge;
 		this.#budgetMs = budgetMs;
-		this.fallback = fallback;
+		this.fallback = options.fallback;
+		this.#rerank = options.rerank ?? false;
 	}
 
 	async score(items: readonly string[], ctx: CallContext, signal?: AbortSignal): Promise<number[] | null> {
@@ -126,6 +141,21 @@ export class JudgeScorer implements Scorer {
 			this.#fail("no_judge", undefined);
 			return null;
 		}
+		if (this.#rerank && this.#active === 0) this.#deadline = undefined;
+		this.#active++;
+		try {
+			return await this.#score(judge, items, ctx, signal);
+		} finally {
+			this.#active--;
+		}
+	}
+
+	async #score(
+		judge: Pick<Judge, "judge">,
+		items: readonly string[],
+		ctx: CallContext,
+		signal?: AbortSignal,
+	): Promise<number[] | null> {
 		const started = performance.now();
 		const budget = this.#budget(signal);
 		const chunks: (readonly string[])[] = [];
@@ -167,7 +197,7 @@ export class JudgeScorer implements Scorer {
 		return scores.flat();
 	}
 
-	/** The result's budget, started on first use and reused by every later stage and block it ranks. */
+	/** The result's budget (or the handover's), started on first use and reused by every stage and block it ranks. */
 	#budget(signal?: AbortSignal): AbortSignal {
 		this.#deadline ??= AbortSignal.timeout(this.#budgetMs);
 		const deadline = this.#deadline;
@@ -224,9 +254,14 @@ function causeOf(error: unknown, deadline: AbortSignal, signal?: AbortSignal): s
  * The judge this session ranks with, or undefined when the `judge` role has no native candidate (or the session has
  * no model registry): shaping then falls back to its unranked rules rather than reporting a score-free result.
  */
-export function judgeScorerFor(session: SpotlightScorerSession, budgetMs: number, purpose = "spotlight"): JudgeScorer {
+export function judgeScorerFor(
+	session: SpotlightScorerSession,
+	budgetMs: number,
+	purpose = "spotlight",
+	options: JudgeScorerOptions = {},
+): JudgeScorer {
 	const registry = session.modelRegistry;
-	if (!registry) return new JudgeScorer(undefined, budgetMs);
+	if (!registry) return new JudgeScorer(undefined, budgetMs, options);
 	// No up-front candidate check: a `judge` role may name a prompted chat model as well as a native judgment API, and
 	// a role emptied by policy is not distinguishable here from one that answers. The chain throws without candidates,
 	// and that failure is classified `no_judge`.
@@ -244,5 +279,6 @@ export function judgeScorerFor(session: SpotlightScorerSession, budgetMs: number
 			cache: sharedJudgmentCache(),
 		}),
 		budgetMs,
+		options,
 	);
 }

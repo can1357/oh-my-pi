@@ -138,6 +138,17 @@ describe("judge scorer", () => {
 		expect(scorer.usage.failureCauses).toEqual({ timeout: 1 });
 	});
 
+	it("renews the budget on every handover when it reranks for another ranker", async () => {
+		const { judge } = fakeJudge(() => 0.5);
+		const scorer = new JudgeScorer(judge, 60, { rerank: true });
+		expect(await scorer.score(["a"], context())).toEqual([0.5]);
+		// The other ranker's timeout ran before this handover; the judge still gets a budget of its own. A real wait,
+		// as above: fake timers do not drive `AbortSignal.timeout`.
+		await Bun.sleep(80);
+		expect(await scorer.score(["a"], context())).toEqual([0.5]);
+		expect(scorer.usage.failures).toBe(0);
+	});
+
 	it("answers null with a cause when the judge has no candidate, fails, or does not answer every line", async () => {
 		const none = new JudgeScorer(undefined, 5_000);
 		expect(await none.score(["a"], context())).toBeNull();
