@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Spotlight page treating a cut the `auto` ranker's judge reranked as unranked: it now counts as a ranked cut, and the judge's spend counts in the ranking cost ([#19282](https://github.com/can1357/oh-my-pi/pull/19282) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

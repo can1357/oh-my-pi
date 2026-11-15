@@ -113,8 +113,10 @@ export interface SpotlightShapeRow {
 	/** Artifact ids the result names (its text's `artifact://N` plus `original.url`); null before the result lands. */
 	artifacts: number[] | null;
 	/**
-	 * Spotlight's own usage, from the shape entry; null before it lands. `failureCauses` counts failed calls by cause
-	 * (`no_credential`, `timeout`, …); null when none failed or the entry predates it.
+	 * The ranker's usage, from the shape entry; null before it lands. `failureCauses` counts failed calls by cause
+	 * (`no_credential`, `timeout`, …); null when none failed or the entry predates it. `reranked`: the `auto` ranker's
+	 * fallback (the judge) answered every chunk after Spotlight failed, so the cut is ranked; `costUsd` includes the
+	 * fallback's spend.
 	 */
 	spotlight: {
 		calls: number;
@@ -122,6 +124,7 @@ export interface SpotlightShapeRow {
 		failureCauses: Record<string, number> | null;
 		ms: number;
 		costUsd: number;
+		reranked: boolean;
 	} | null;
 	/** Wall time shaping took, from the shape entry. */
 	shapeMs: number | null;
@@ -632,6 +635,7 @@ export function shapeFromEntry(
 ): SpotlightShapeRow | null {
 	if (typeof data.toolCallId !== "string" || typeof data.tool !== "string") return null;
 	const usage: Record<string, unknown> = isRecord(data.spotlight) ? data.spotlight : {};
+	const fallback: Record<string, unknown> = isRecord(data.fallback) ? data.fallback : {};
 	return {
 		sessionFile,
 		toolCallId: data.toolCallId,
@@ -656,7 +660,9 @@ export function shapeFromEntry(
 			failures: finite(usage.failures),
 			failureCauses: parseFailureCauses(usage.failureCauses),
 			ms: finite(usage.ms),
-			costUsd: finite(usage.costUsd),
+			costUsd: finite(usage.costUsd) + finite(fallback.costUsd),
+			// The fallback reranks the whole call; one failed chunk leaves it to the no-score rules.
+			reranked: finite(fallback.calls) > 0 && finite(fallback.failures) === 0,
 		},
 		shapeMs: finite(data.ms),
 	};

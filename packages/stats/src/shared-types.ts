@@ -589,12 +589,16 @@ export interface SpotlightOverhead {
 	/** Spotlight's own request time, over results whose calls all answered. */
 	spotlightMsP50: number | null;
 	spotlightMsP90: number | null;
-	/** Results whose Spotlight calls failed or timed out (shaped by the no-score fallback). */
+	/**
+	 * Results whose Spotlight calls failed or timed out (shaped by the no-score fallback, or reranked by the `auto`
+	 * ranker's judge).
+	 */
 	failureRate: number | null;
 	/** The failed results by cause, most first. */
 	failureCauses: SpotlightFailureCause[];
 	/** Wall time tool calls spent shaping results whose Spotlight calls failed (mostly the 5 s timeout per call). */
 	failedWaitMs: number;
+	/** What ranking cost: Spotlight's bill, or the judge's when it ranked or reranked. */
 	spotlightUsd: number;
 }
 
