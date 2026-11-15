@@ -39,7 +39,7 @@ const QUESTIONS = judgeQuestions(questionFile);
  */
 const LINE_CRITERIA = {
 	no: "Routine or incidental for this call: imports, braces and boilerplate, unrelated code, header prose, lines a passing run repeats.",
-	yes: "The agent needs this line for its current call: it names, defines, reports or decides something the intent, the agent's text or the task is about — an error, the asked-for symbol, a failing assertion, a changed value, the line that explains the ones around it.",
+	yes: "The agent needs this line for its current call: it names, defines, reports or decides something the intent, the agent's text or the task is about, such as an error, the asked-for symbol, a failing assertion, a changed value, the line that explains the ones around it.",
 } as const;
 
 /** Items one judge request ranks: 48 keeps a cut sharp, 96 scores every line the same. */
