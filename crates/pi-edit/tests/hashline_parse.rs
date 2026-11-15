@@ -795,6 +795,34 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 }
 
 #[test]
+fn mismatch_message_says_tags_are_copied_never_invented() {
+	let placeholder = MismatchDetails {
+		path:               Some("a.ts".into()),
+		expected_file_hash: "0000".into(),
+		actual_file_hash:   "3C4D".into(),
+		file_lines:         vec!["one".into(), "two".into()],
+		anchor_lines:       vec![1],
+		hash_recognized:    false,
+		tag_origin_paths:   Vec::new(),
+	};
+	let message = format_mismatch_message(&placeholder);
+	assert!(
+		message.contains("hash #0000 is not from this session: it is a placeholder, not a tag"),
+		"{message}"
+	);
+	assert!(
+		message.contains("copy the [path#tag] header verbatim from the latest read or search output")
+	);
+	let invented = MismatchDetails { expected_file_hash: "7E21".into(), ..placeholder };
+	let message = format_mismatch_message(&invented);
+	assert!(message.contains("hash #7E21 is not from this session"));
+	assert!(message.contains("Tags are never invented or guessed"));
+	// A tag issued for another file is a mix-up, not an invention.
+	let elsewhere = MismatchDetails { tag_origin_paths: vec!["/w/b.ts".into()], ..invented };
+	assert!(!format_mismatch_message(&elsewhere).contains("Tags are never invented"));
+}
+
+#[test]
 fn recognizes_operations_and_emits_canonical_labels() {
 	assert!(contains_recognizable_hashline_operations("partial\nPUT 2:\n"));
 	assert!(!contains_recognizable_hashline_operations("plain text"));

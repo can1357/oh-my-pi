@@ -93,6 +93,12 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				"Edit rejected{path}: the header needs this file's current tag, #{}.",
 				details.actual_file_hash
 			)
+		} else if is_placeholder_tag(&details.expected_file_hash) {
+			format!(
+				"Edit rejected{path}: hash #{} is not from this session: it is a placeholder, not a \
+				 tag, and no read or search output issues it.",
+				details.expected_file_hash
+			)
 		} else {
 			format!(
 				"Edit rejected{path}: hash #{} is not from this session.",
@@ -110,6 +116,15 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
+		// A tag no file in this session was ever issued is invented: say where
+		// tags come from instead of only that this one is wrong.
+		if !details.expected_file_hash.is_empty() && details.tag_origin_paths.is_empty() {
+			lines.push(
+				"Tags are never invented or guessed: copy the [path#tag] header verbatim from the \
+				 latest read or search output for this file (or the latest edit response for it)."
+					.to_owned(),
+			);
+		}
 		lines.push(current_tag_advice(&details.actual_file_hash));
 		lines
 	};
@@ -126,6 +141,12 @@ fn current_tag_advice(actual_file_hash: &str) -> String {
 		"The current file hashes to #{actual_file_hash}. Re-read the file with `read` to copy a \
 		 current [path#tag] header — never invent the tag and never reuse one from a prior session."
 	)
+}
+
+/// An all-zero tag (`#0000`): the stand-in a model writes when it has no tag
+/// to copy. Only reached for tags this session never issued.
+fn is_placeholder_tag(tag: &str) -> bool {
+	!tag.is_empty() && tag.bytes().all(|byte| byte == b'0')
 }
 
 /// Diagnostic for input whose only content is a section header: no ops to
