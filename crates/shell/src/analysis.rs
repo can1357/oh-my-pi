@@ -18,8 +18,22 @@ use crate::parser::{
 };
 
 /// Static analysis of a parsed script, independent of expansion or execution.
+///
+/// Equivalent to [`analyze_with`] with no opt-in builtins enabled, so every
+/// command name is analysed as the external program it resolves to by default.
 pub fn analyze(program: &ast::Program, cwd: &str, root: &str) -> ScriptIr {
-	let mut analyzer = Analyzer::new(cwd, root);
+	analyze_with(program, cwd, root, &[])
+}
+
+/// Static analysis of a parsed script when the session has opted into the
+/// builtins named by `enabled`.
+///
+/// An enabled builtin shadows the system command of the same name, so its
+/// option set and write facts may differ from the external program's; a command
+/// name's arm applies only when that name is listed (ADR 0054 D6). No name has
+/// an arm yet, so the result equals [`analyze`] for every `enabled`.
+pub fn analyze_with(program: &ast::Program, cwd: &str, root: &str, enabled: &[Str]) -> ScriptIr {
+	let mut analyzer = Analyzer::new(cwd, root, enabled);
 	for list in &program.complete_commands {
 		analyzer.list(list, false);
 	}
@@ -223,10 +237,14 @@ const DELETE: u32 = 16;
 const CREATE: u32 = 64;
 
 struct Analyzer<'a> {
-	cwd:   EffectiveCwd,
-	root:  &'a str,
-	ir:    ScriptIr,
-	depth: u32,
+	cwd:     EffectiveCwd,
+	root:    &'a str,
+	/// Opt-in builtin names whose arms apply; consulted by the first arm that
+	/// needs it.
+	#[expect(dead_code, reason = "ADR 0054 slice 1 adds no arm; the chmod/sd/tar arms read it")]
+	enabled: &'a [Str],
+	ir:      ScriptIr,
+	depth:   u32,
 }
 
 #[derive(Clone)]
@@ -236,10 +254,11 @@ enum EffectiveCwd {
 }
 
 impl<'a> Analyzer<'a> {
-	fn new(cwd: &str, root: &'a str) -> Self {
+	fn new(cwd: &str, root: &'a str, enabled: &'a [Str]) -> Self {
 		Self {
 			cwd: EffectiveCwd::Known(Str::new(cwd)),
 			root,
+			enabled,
 			ir: ScriptIr { rev: sf!("omp.policy.v1"), ..ScriptIr::default() },
 			depth: 0,
 		}
@@ -1167,6 +1186,38 @@ mod tests {
 		let dynamic = analyze(&parsed("python -c \"$CODE\""), "/work", "/work");
 		assert!(dynamic.has_dynamic_eval);
 		assert!(!dynamic.is_read_only());
+	}
+
+	/// ADR 0054 D6: `analyze` is `analyze_with` and an empty enabled set; with
+	/// no arm keyed by an opt-in name, any enabled set yields the same facts,
+	/// including for the names the later slices will give arms.
+	#[test]
+	fn enabled_builtin_names_do_not_change_analysis_yet() {
+		let corpus = [
+			"echo literal \"$HOME\" $(hostname)",
+			"cd src && cat a; (cd tmp; cat b); cd pipe | cat c; cat d",
+			"echo x > output; cat < input",
+			"python -c 'print(1)'",
+			"python -c \"$CODE\"",
+			"cat src/a",
+			"touch ../outside",
+			"curl https://example.test/a",
+			"cp a b; cp -t /etc src; chmod 777 f; chmod -R a+w dir; rmdir -p a/b",
+			"tar -xf a.tar -C out; sd old new file; sd -i old new file; dd if=a of=b",
+			"cd /etc && chmod 600 passwd; sd x y z > out",
+		];
+		let all = ["all", "cp", "chmod", "tar", "sd", "rmdir", "dd"].map(Str::new_static);
+		for source in corpus {
+			let program = parsed(source);
+			let baseline = format!("{:?}", analyze(&program, "/work", "/work"));
+			for enabled in [&all[..], &all[..1], &all[1..2], &all[2..4], &[]] {
+				assert_eq!(
+					baseline,
+					format!("{:?}", analyze_with(&program, "/work", "/work", enabled)),
+					"{source:?} under {enabled:?}"
+				);
+			}
+		}
 	}
 
 	#[test]

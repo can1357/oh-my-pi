@@ -88,7 +88,10 @@ mod sleep;
 mod timeout;
 mod top;
 
-pub use factory::{dyn_builtin, process_builtins, utility_builtins};
+pub use factory::{
+	ALL_EXTRAS, ExtraBuiltinError, OFFERED_EXTRAS, dyn_builtin, extra_builtins, process_builtins,
+	utility_builtins, validate_extra_names,
+};
 pub use graphics::{
 	ImagePassthrough, encode_image_passthrough, extract_image_passthrough, image_passthrough_ranges,
 };
