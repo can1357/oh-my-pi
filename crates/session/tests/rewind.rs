@@ -58,6 +58,33 @@ fn subscription_survives_rewind_and_marks_branch_prior() {
 }
 
 #[test]
+fn live_entries_follow_rewind_before_append_and_after_reopen() {
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("live-entries.oms");
+	let mut session = Session::create(&path, ComponentRegistry::default()).unwrap();
+	let target = session.begin_turn().unwrap();
+	let abandoned = session.user("abandoned", Vec::new()).unwrap();
+	assert!(session.live_entries().any(|entry| entry.id == abandoned));
+	session.rewind(target).unwrap();
+	assert_eq!(session.live_entries().last().map(|entry| entry.id), Some(target));
+	assert!(!session.live_entries().any(|entry| entry.id == abandoned));
+	assert!(session.entries().any(|entry| entry.id == abandoned));
+	let selected = session.begin_turn().unwrap();
+	let live: Vec<_> = session.live_entries().map(|entry| entry.id).collect();
+	assert_eq!(live.last(), Some(&selected));
+	assert!(!live.contains(&abandoned));
+	drop(session);
+	let reopened = Session::open(&path, ComponentRegistry::default()).unwrap();
+	assert_eq!(
+		reopened
+			.live_entries()
+			.map(|entry| entry.id)
+			.collect::<Vec<_>>(),
+		live
+	);
+}
+
+#[test]
 fn rewind_is_a_dom_diff_that_lists_lifecycle_work() {
 	let directory = tempfile::tempdir().expect("temporary session directory");
 	let path = directory.path().join("rewind.oms");
