@@ -973,6 +973,13 @@ export const SHELL_SCRIPT_MAX_DEPTH = 8;
  */
 export const SHELL_SCRIPT_MAX_NESTED_TEXT = 256 * 1024;
 
+/**
+ * The most text {@link parseShellScript} reads looking for heredoc delimiter lines that never come,
+ * all searches together. A `<<` whose delimiter line is missing makes the search run to the end of
+ * the text, so many of them would read it again and again.
+ */
+export const SHELL_SCRIPT_MAX_HEREDOC_SEARCH = 256 * 1024;
+
 /** One simple command found by {@link parseShellScript}, with its wrappers peeled off. */
 export interface ShellCommand {
 	/**
@@ -1000,12 +1007,24 @@ export interface ShellCommand {
 	 * pipeline, where a compound command (`( )`, `{ }`, a loop, `if`, `case`) is one stage made of
 	 * every command run in it, and whatever is piped into a compound command it runs in.
 	 */
-	upstream: readonly ShellCommand[];
+	upstream: ShellUpstream | undefined;
 	/**
 	 * Arguments and redirection targets whose leading `~` was quoted or escaped (`"~/.ssh/id_rsa"`,
 	 * `\~/x`), so the shell does not expand it; a word the command also has with a bare `~` is not here.
 	 */
 	literalTildes: ReadonlySet<string>;
+}
+
+/**
+ * Commands upstream of a pipeline stage ({@link ShellCommand.upstream}), as a chain every command
+ * downstream shares: `commands[from]` to `commands[to - 1]` ran in the stage just before, and
+ * `before` is what is upstream of that stage.
+ */
+export interface ShellUpstream {
+	readonly commands: readonly ShellCommand[];
+	readonly from: number;
+	readonly to: number;
+	readonly before: ShellUpstream | undefined;
 }
 
 /** A shell script broken into pipelines, nested scripts included. */
@@ -1017,7 +1036,9 @@ export interface ParsedShellScript {
 	/**
 	 * True when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels, or past
 	 * {@link SHELL_SCRIPT_MAX_NESTED_TEXT} characters of nested script, was left unparsed, possibly
-	 * with the rest of the text after it.
+	 * with the rest of the text after it, or when heredocs whose delimiter line never comes took
+	 * more than {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH} characters of searching, so later ones were
+	 * not read as heredocs.
 	 */
 	truncated: boolean;
 }
@@ -1250,8 +1271,20 @@ function append<T>(target: T[], items: Iterable<T>): void {
 	for (const item of items) target.push(item);
 }
 
-/** A line ending in an odd number of backslashes: in an unquoted heredoc, it continues on the next line. */
-const ODD_TRAILING_BACKSLASHES_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
+/**
+ * The first index from `i` that `taken` does not link past (`taken[i]` is the next index to look
+ * at once `i` is taken), shortening every link it follows to point there.
+ */
+function untaken(taken: number[], i: number): number {
+	let end = i;
+	while (taken[end] !== undefined) end = taken[end];
+	while (i !== end) {
+		const next = taken[i];
+		taken[i] = end;
+		i = next;
+	}
+	return end;
+}
 
 /**
  * The escapes bash removes from a backtick body before parsing it: before `$`, a backtick and `\`,
@@ -1415,17 +1448,24 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 /**
  * Which commands feed each command's input through pipes, as a script runs. A compound command
  * (`( )`, `{ }`, a loop, `if`, `case`) is one pipeline stage: every command run in it is upstream of
- * the stage after it, and what is piped into it is upstream of every command in it.
+ * the stage after it, and what is piped into it is upstream of every command in it. The commands
+ * are kept in one list, where a stage and a compound command are each a run of it, so an upstream
+ * chain costs the same at every pipe however long the pipeline gets.
  */
 class PipelineStages {
-	/** The compound commands open around the current command, innermost last. */
-	readonly #compounds: { input: readonly ShellCommand[]; inside: ShellCommand[] }[] = [];
-	#upstream: readonly ShellCommand[] = [];
-	/** The commands of the current stage. */
-	#stage: ShellCommand[] = [];
+	/** Every command added, in order. */
+	readonly #commands: ShellCommand[] = [];
+	/**
+	 * The compound commands open around the current command, innermost last: what is piped into
+	 * each, and where its commands start in {@link #commands}.
+	 */
+	readonly #compounds: { input: ShellUpstream | undefined; from: number }[] = [];
+	#upstream: ShellUpstream | undefined;
+	/** Where the commands of the current stage start. */
+	#stage = 0;
 
 	/** Upstream of the current stage. */
-	get upstream(): readonly ShellCommand[] {
+	get upstream(): ShellUpstream | undefined {
 		return this.#upstream;
 	}
 
@@ -1447,38 +1487,39 @@ class PipelineStages {
 
 	/** A command run in the current stage. */
 	add(command: ShellCommand): void {
-		this.#stage.push(command);
-		this.#compounds.at(-1)?.inside.push(command);
+		this.#commands.push(command);
 	}
 
 	/** The operator after a segment. */
 	operator(operator: string): void {
+		const end = this.#commands.length;
 		if (operator === "(") {
 			this.#open();
 		} else if (operator === ")") {
 			this.#close();
 		} else if (Object.hasOwn(SHELL_PIPES, operator)) {
-			this.#upstream = [...this.#upstream, ...this.#stage];
-			this.#stage = [];
+			if (end > this.#stage) {
+				this.#upstream = { commands: this.#commands, from: this.#stage, to: end, before: this.#upstream };
+			}
+			this.#stage = end;
 		} else {
 			// The pipeline ended: the next one reads what is piped into the compound around it.
-			this.#upstream = this.#compounds.at(-1)?.input ?? [];
-			this.#stage = [];
+			this.#upstream = this.#compounds.at(-1)?.input;
+			this.#stage = end;
 		}
 	}
 
 	#open(): void {
-		this.#compounds.push({ input: this.#upstream, inside: [] });
-		this.#stage = [];
+		this.#compounds.push({ input: this.#upstream, from: this.#commands.length });
+		this.#stage = this.#commands.length;
 	}
 
+	/** Closes the innermost compound command: everything run in it, nested ones included, is the current stage. */
 	#close(): void {
 		const compound = this.#compounds.pop();
 		if (!compound) return;
-		const outer = this.#compounds.at(-1);
-		if (outer) append(outer.inside, compound.inside);
 		this.#upstream = compound.input;
-		this.#stage = compound.inside;
+		this.#stage = compound.from;
 	}
 }
 
@@ -1496,8 +1537,22 @@ class ShellScriptParser {
 	#bashQuotes = false;
 	/** Set when the text being read has such a `'` that the two readings take differently. */
 	#ambiguous = false;
-	/** Set when something was left unparsed: nested too deep, or past the nested text budget. */
+	/**
+	 * Set when something was left unparsed: nested too deep, past the nested text budget, or past
+	 * the budget for searching delimiters of heredocs that never close.
+	 */
 	truncated = false;
+	/** Characters read looking for heredoc delimiter lines that never came, against {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH}. */
+	#heredocSearch = 0;
+	/** Per command, the texts it passes on to a shell after it in its pipeline, until a shell takes them. */
+	readonly #passed = new Map<ShellCommand, string[]>();
+	/** Upstream stages a shell took the texts of, with everything upstream of them. */
+	readonly #fed = new Set<ShellUpstream>();
+	/**
+	 * Per command list of a {@link ShellUpstream}, links past the commands a shell took the texts of
+	 * (see {@link untaken}), so a stage nested in many taken ones is not walked again for each.
+	 */
+	readonly #taken = new Map<readonly ShellCommand[], number[]>();
 	constructor(readonly home: string) {}
 
 	/**
@@ -1553,8 +1608,6 @@ class ShellScriptParser {
 		const pipelines: ShellCommand[][] = [];
 		const nested: ShellCommand[][] = [];
 		const stages = new PipelineStages();
-		// Per command, the texts it passes on to the next stage when that is a shell.
-		const passed = new Map<ShellCommand, string[]>();
 		let pipeline: ShellCommand[] = [];
 		for (const segment of this.#segments(tokens)) {
 			stages.keywords(segment.words, segment.quoted);
@@ -1562,7 +1615,7 @@ class ShellScriptParser {
 			if (command) {
 				pipeline.push(command);
 				stages.add(command);
-				this.#feedShell(command, segment, passed, depth, nested);
+				this.#feedShell(command, segment, depth, nested);
 			}
 			stages.operator(segment.operator);
 			if (Object.hasOwn(SHELL_PIPES, segment.operator)) continue;
@@ -1583,30 +1636,43 @@ class ShellScriptParser {
 	}
 
 	/**
-	 * Records in `passed` what `command` (read from `segment`) passes on to a shell piped after it:
-	 * the heredocs and here-strings it reads (`cat <<EOF | sh`), and what `echo`/`printf` prints.
-	 * When `command` is a shell that reads its script from stdin, parses what its upstream commands
-	 * and its own heredocs and here-strings give it. The first such shell takes that input, so each
-	 * text is parsed once: a shell further down reads the output of the one before it instead.
+	 * Records what `command` (read from `segment`) passes on to a shell piped after it: the heredocs
+	 * and here-strings it reads (`cat <<EOF | sh`), and what `echo`/`printf` prints. When `command`
+	 * is a shell that reads its script from stdin, parses what its upstream commands and its own
+	 * heredocs and here-strings give it. The first such shell takes that input, so each text is
+	 * parsed once: a shell further down reads the output of the one before it instead.
 	 */
-	#feedShell(
-		command: ShellCommand,
-		segment: ShellScriptSegment,
-		passed: Map<ShellCommand, string[]>,
-		depth: number,
-		nested: ShellCommand[][],
-	): void {
+	#feedShell(command: ShellCommand, segment: ShellScriptSegment, depth: number, nested: ShellCommand[][]): void {
 		const { argv, cwd } = command;
 		const texts = new Set([...segment.heredocs.map(doc => doc.body), ...segment.herestrings]);
 		if (Object.hasOwn(SHELL_ECHOES, argv[0])) {
 			texts.add(argv.slice(1).join(" "));
 			for (const arg of argv.slice(1)) texts.add(arg);
 		}
-		passed.set(command, [...texts]);
+		this.#passed.set(command, [...texts]);
 		if (!Object.hasOwn(SCRIPT_SHELLS, argv[0]) || shellScriptSource(argv) !== "stdin") return;
-		for (const source of [...command.upstream, command]) {
-			for (const text of passed.get(source) ?? []) append(nested, this.parse(text, cwd, depth + 1));
-			passed.delete(source);
+		// A stage a shell took from was taken with everything upstream of it.
+		const stages: ShellUpstream[] = [];
+		for (let stage = command.upstream; stage && !this.#fed.has(stage); stage = stage.before) {
+			this.#fed.add(stage);
+			stages.push(stage);
+		}
+		const sources: ShellCommand[] = [];
+		for (const { commands, from, to } of stages.reverse()) {
+			let taken = this.#taken.get(commands);
+			if (!taken) {
+				taken = [];
+				this.#taken.set(commands, taken);
+			}
+			for (let i = untaken(taken, from); i < to; i = untaken(taken, i + 1)) {
+				sources.push(commands[i]);
+				taken[i] = i + 1;
+			}
+		}
+		sources.push(command);
+		for (const source of sources) {
+			for (const text of this.#passed.get(source) ?? []) append(nested, this.parse(text, cwd, depth + 1));
+			this.#passed.delete(source);
 		}
 	}
 
@@ -1615,8 +1681,8 @@ class ShellScriptParser {
 	 * when its line ends and attached to the delimiter word. With `heredocs` off (`$(( ))`), and
 	 * inside a `(( ))` command, `<<` is a shift. With `close`, reading stops at the `)` that closes a
 	 * `$( )` opened just before `start`: `end` is its index, or the text's length when none comes.
-	 * The `)` that ends a `case` pattern list is no parenthesis: it becomes a `;`, and the patterns,
-	 * the `|` between them and the optional `(` before them are dropped.
+	 * The `)` that ends a `case` pattern list is no parenthesis: it becomes a `;`, the patterns are
+	 * marked as such, and the `|` between them and the optional `(` before them are dropped.
 	 */
 	#tokens(
 		text: string,
@@ -1806,27 +1872,43 @@ class ShellScriptParser {
 	 * delimiter is looked for. Inside a `$( )` (`close`), a line that starts with the delimiter and
 	 * has a `)` after it ends the heredoc too, as in bash, and the script goes on right after the
 	 * delimiter (`EOF)`). When a delimiter line never comes, every line stays in place and is parsed
-	 * as commands: a `<<` misread as a heredoc must not hide what follows it.
+	 * as commands: a `<<` misread as a heredoc must not hide what follows it. Such searches read to
+	 * the end of the text, so past {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH} characters of them no more
+	 * are made and the script is truncated.
 	 */
 	#heredocBodies(text: string, start: number, pending: PendingHeredoc[], scope: ReadScope, close: boolean): number {
+		if (this.#heredocSearch > SHELL_SCRIPT_MAX_HEREDOC_SEARCH) {
+			pending.length = 0;
+			return start;
+		}
 		const bodies: string[] = [];
 		let pos = start;
 		for (const { delimiter, stripTabs, doc } of pending) {
 			const lines: string[] = [];
 			let closed = false;
 			while (pos < text.length && !closed) {
-				let line = "";
-				// Where each physical line joined into `line` starts, in `line` and in `text`.
+				// The physical lines joined into this line, and where each starts in it and in `text`.
+				const pieces: string[] = [];
 				const parts: { from: number; at: number }[] = [];
+				let length = 0;
+				// The backslashes the line ends in so far.
+				let trailing = 0;
 				let joined = true;
 				while (joined) {
 					const newline = text.indexOf("\n", pos);
-					parts.push({ from: line.length, at: pos });
-					line += text.slice(pos, newline < 0 ? text.length : newline);
+					const end = newline < 0 ? text.length : newline;
+					let run = 0;
+					while (run < end - pos && text[end - 1 - run] === "\\") run++;
+					trailing = run === end - pos ? trailing + run : run;
+					joined = doc.expands && newline >= 0 && trailing % 2 === 1;
+					if (joined) trailing--;
+					const piece = text.slice(pos, joined ? end - 1 : end);
+					parts.push({ from: length, at: pos });
+					pieces.push(piece);
+					length += piece.length;
 					pos = newline < 0 ? text.length : newline + 1;
-					joined = doc.expands && newline >= 0 && ODD_TRAILING_BACKSLASHES_RE.test(line);
-					if (joined) line = line.slice(0, -1);
 				}
+				const line = pieces.join("");
 				const stripped = stripTabs ? line.replace(/^\t+/, "") : line;
 				const after = line.length - stripped.length + delimiter.length;
 				if (stripped === delimiter) {
@@ -1840,6 +1922,8 @@ class ShellScriptParser {
 				}
 			}
 			if (!closed) {
+				this.#heredocSearch += text.length - start;
+				if (this.#heredocSearch > SHELL_SCRIPT_MAX_HEREDOC_SEARCH) this.truncated = true;
 				pending.length = 0;
 				return start;
 			}
@@ -2077,7 +2161,7 @@ class ShellScriptParser {
 		subs: Map<string, Substitution>,
 		depth: number,
 		nested: ShellCommand[][],
-		upstream: readonly ShellCommand[],
+		upstream: ShellUpstream | undefined,
 	): ShellCommand | undefined {
 		const { words, writes, reads } = segment;
 		const everything = [

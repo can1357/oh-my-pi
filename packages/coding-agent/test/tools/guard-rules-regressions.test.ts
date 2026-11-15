@@ -402,4 +402,24 @@ describe("guard rule regressions", () => {
 		// A project `.npmrc` under the home directory is no credential.
 		expect(bashApproval(os.homedir(), `cd work/app && echo "$(cat .npmrc)"`)).toBe("exec");
 	});
+
+	it("reads long pipelines, nested groups and heredoc lines in time linear in their length", () => {
+		const started = performance.now();
+		for (const command of [
+			`${"true|".repeat(10_000)}true`,
+			`${"nc|".repeat(6_000)}nc`,
+			`${"bash|".repeat(8_000)}bash`,
+			`${"(a;".repeat(10_000)}${")".repeat(10_000)}`,
+			`${"(".repeat(5_000)}echo a${") | bash".repeat(5_000)}`,
+			`cat <<EOF\n${"a\\\n".repeat(40_000)}EOF`,
+		]) {
+			expect({ command: command.slice(0, 16), decision: bashApproval(cwd, command) }).toEqual({
+				command: command.slice(0, 16),
+				decision: "exec",
+			});
+		}
+		// Heredocs whose delimiter line never comes are searched for up to a budget; past it, the guard fails closed.
+		expect(ruleOf(bashApproval(cwd, "x <<E\n".repeat(6_000)))).toBe("nesting_limit");
+		expect(performance.now() - started).toBeLessThan(2_000);
+	});
 });

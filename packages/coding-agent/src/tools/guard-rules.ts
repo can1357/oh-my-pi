@@ -41,8 +41,10 @@ import {
 	parseShellScript,
 	resolveCommandWordPath,
 	SHELL_SCRIPT_MAX_DEPTH,
+	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
+	type ShellUpstream,
 	shellPositionalArgs,
 } from "./shell-tokenize";
 
@@ -786,26 +788,72 @@ function secretOutput(command: ShellCommand, scope: GuardScope): string | undefi
 }
 
 /**
- * The first secret one of `commands` can put on its output: its own ({@link secretOutput}), or one
- * a command in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
+ * The secrets commands put on their output, each command and upstream stage worked out once per
+ * {@link findShellGuardHit}, so a long pipeline of senders costs no more than its length.
  */
-function firstSecretOutput(commands: readonly ShellCommand[], scope: GuardScope): string | undefined {
-	for (const command of commands) {
-		const found = secretOutput(command, scope) ?? firstSecretOutput(command.subs, scope);
-		if (found) return found;
+class SecretOutputs {
+	readonly #commands = new Map<ShellCommand, string | undefined>();
+	/** Per command list of an upstream stage, the index of the first command from each index on that puts a secret out. */
+	readonly #next = new Map<readonly ShellCommand[], Int32Array>();
+	readonly #upstream = new Map<ShellUpstream, string | undefined>();
+
+	constructor(readonly scope: GuardScope) {}
+
+	/**
+	 * The secret `command` can put on its output: its own ({@link secretOutput}), or one a command
+	 * in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
+	 */
+	of(command: ShellCommand): string | undefined {
+		if (this.#commands.has(command)) return this.#commands.get(command);
+		const found = secretOutput(command, this.scope) ?? this.first(command.subs);
+		this.#commands.set(command, found);
+		return found;
 	}
-	return undefined;
+
+	/** The first secret one of `commands` can put on its output. */
+	first(commands: readonly ShellCommand[]): string | undefined {
+		for (const command of commands) {
+			const found = this.of(command);
+			if (found) return found;
+		}
+		return undefined;
+	}
+
+	/** The first secret a command upstream can put on its output, the earliest stage first. */
+	upstream(upstream: ShellUpstream | undefined): string | undefined {
+		const stages: ShellUpstream[] = [];
+		let known = upstream;
+		for (; known && !this.#upstream.has(known); known = known.before) stages.push(known);
+		let found = known === undefined ? undefined : this.#upstream.get(known);
+		for (const stage of stages.reverse()) {
+			found ??= this.#stage(stage);
+			this.#upstream.set(stage, found);
+		}
+		return found;
+	}
+
+	/** The first secret a command of the stage itself can put on its output. */
+	#stage({ commands, from, to }: ShellUpstream): string | undefined {
+		let next = this.#next.get(commands);
+		if (!next) {
+			next = new Int32Array(commands.length + 1);
+			next[commands.length] = commands.length;
+			for (let i = commands.length - 1; i >= 0; i--) next[i] = this.of(commands[i]) ? i : next[i + 1];
+			this.#next.set(commands, next);
+		}
+		return next[from] < to ? this.of(commands[next[from]]) : undefined;
+	}
 }
 
 /** A network command sending a secret: in a file it uploads, an upstream stage's output, or a substitution's. */
-function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
+function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | undefined {
 	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
 	let found: string | undefined;
 	for (const file of sentFiles(command)) {
-		found = sentSecret(command, file, scope.home);
+		found = sentSecret(command, file, outputs.scope.home);
 		if (found) break;
 	}
-	found ??= firstSecretOutput(command.upstream, scope) ?? firstSecretOutput(command.subs, scope);
+	found ??= outputs.upstream(command.upstream) ?? outputs.first(command.subs);
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
@@ -814,8 +862,9 @@ function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefi
 /**
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
- * command it runs. A command nested deeper than the parser follows, or with more nested script
- * text than it reads, fails closed (`nesting_limit`).
+ * command it runs. A command nested deeper than the parser follows, with more nested script text
+ * than it reads, or with more text to search for heredoc delimiters that never come, fails closed
+ * (`nesting_limit`).
  */
 export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
@@ -843,12 +892,13 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 	if (truncated) {
 		return hit(
 			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, past what the guard can check`,
+			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, or has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, past what the guard can check`,
 		);
 	}
+	const outputs = new SecretOutputs(scope);
 	for (const pipeline of pipelines) {
 		const found =
-			pipeline.map(c => secretSend(c, scope)).find(Boolean) ??
+			pipeline.map(c => secretSend(c, outputs)).find(Boolean) ??
 			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
 		if (found) return found;
 	}
