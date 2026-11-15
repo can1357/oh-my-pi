@@ -320,10 +320,13 @@ const PNG_CLIPBOARD = {
 	readMacFileUrls: async (): Promise<string[]> => [],
 };
 
+/** One kitty OSC 5522 clipboard packet. */
+const packet = (metadata: string, payload?: string) =>
+	`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+const base64 = (value: string) => Buffer.from(value).toString("base64");
+
 /** Replay a kitty OSC 5522 enhanced paste that offers text and PNG and delivers `png` bytes. */
 function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array): void {
-	const packet = (metadata: string, payload?: string) =>
-		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const imageMime = Buffer.from("image/png").toString("base64");
 	const textMime = Buffer.from("text/plain").toString("base64");
 	for (const input of [
@@ -341,8 +344,6 @@ function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array)
 
 /** Replay a kitty OSC 5522 enhanced paste that offers and delivers plain `text`. */
 function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): void {
-	const packet = (metadata: string, payload?: string) =>
-		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const textMime = Buffer.from("text/plain").toString("base64");
 	for (const input of [
 		packet("type=read:status=OK:pw=secret"),
@@ -356,25 +357,18 @@ function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): vo
 	}
 }
 
-const enhancedPastePacket = (metadata: string, payload?: string) =>
-	`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
-const base64 = (value: string) => Buffer.from(value).toString("base64");
-
 /** Replay a kitty OSC 5522 listing that offers plain text and HTML; the controller then requests one of them. */
 function offerTextAndHtml(listeners: InputListener[]): void {
-	dispatchInput(listeners, enhancedPastePacket("type=read:status=OK"));
-	dispatchInput(
-		listeners,
-		enhancedPastePacket(`type=read:status=DATA:mime=${base64(".")}`, base64("text/plain text/html")),
-	);
-	dispatchInput(listeners, enhancedPastePacket("type=read:status=DONE"));
+	dispatchInput(listeners, packet("type=read:status=OK"));
+	dispatchInput(listeners, packet(`type=read:status=DATA:mime=${base64(".")}`, base64("text/plain text/html")));
+	dispatchInput(listeners, packet("type=read:status=DONE"));
 }
 
 /** Deliver `body` as the `mime` the controller requested. */
 function deliverEnhancedPaste(listeners: InputListener[], mime: string, body: string): void {
-	dispatchInput(listeners, enhancedPastePacket("type=read:status=OK"));
-	dispatchInput(listeners, enhancedPastePacket(`type=read:status=DATA:mime=${base64(mime)}`, base64(body)));
-	dispatchInput(listeners, enhancedPastePacket("type=read:status=DONE"));
+	dispatchInput(listeners, packet("type=read:status=OK"));
+	dispatchInput(listeners, packet(`type=read:status=DATA:mime=${base64(mime)}`, base64(body)));
+	dispatchInput(listeners, packet("type=read:status=DONE"));
 }
 
 describe("InputController keybinding setup", () => {
