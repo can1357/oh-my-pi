@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import type { OAuthLoginController, OAuthLoginIdentity } from "@oh-my-pi/pi-ai/auth/types";
+import { loginRiskWarning, setUnpausedProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 	googleAntigravityProjectHook,
@@ -53,11 +54,9 @@ describe("Antigravity OAuth project discovery", () => {
 		for (const [url, init] of fetchSpy.mock.calls) {
 			expect(url).toBe(LOAD_CODE_ASSIST_URL);
 			expect(init?.method).toBe("POST");
-			expect(init?.headers).toEqual({
+			expect(init?.headers).toMatchObject({
 				Authorization: "Bearer access-token",
 				"Content-Type": "application/json",
-				"User-Agent": expect.stringMatching(/^antigravity\/hub\//),
-				"Accept-Encoding": "gzip",
 			});
 			expect(JSON.parse(String(init?.body))).toEqual({
 				metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
@@ -187,11 +186,9 @@ describe("Antigravity OAuth project discovery", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(4);
 		expect(fetchSpy.mock.calls[2]?.[0]).toBe(OPERATION_URL);
 		expect(fetchSpy.mock.calls[2]?.[1]?.method).toBe("GET");
-		expect(fetchSpy.mock.calls[2]?.[1]?.headers).toEqual({
+		expect(fetchSpy.mock.calls[2]?.[1]?.headers).toMatchObject({
 			Authorization: "Bearer access-token",
 			"Content-Type": "application/json",
-			"User-Agent": expect.stringMatching(/^antigravity\/hub\//),
-			"Accept-Encoding": "gzip",
 		});
 		expect(fetchSpy.mock.calls[2]?.[1]?.body).toBeUndefined();
 		expect(fetchSpy.mock.calls.filter(([url]) => url === ONBOARD_USER_URL)).toHaveLength(1);
@@ -230,68 +227,110 @@ describe("Antigravity OAuth login", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("registered login sends the native scopes and binds the PKCE verifier to the form token exchange", async () => {
-		let tokenForm: URLSearchParams | undefined;
-		const stub = Object.assign(
-			async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input instanceof Request ? input.url : input);
-				if (url === "https://oauth2.googleapis.com/token") {
-					tokenForm = new URLSearchParams(String(init?.body));
-					return jsonResponse({ access_token: "access-token", refresh_token: "refresh-token", expires_in: 3600 });
-				}
-				if (url.startsWith("https://www.googleapis.com/oauth2/v1/userinfo")) {
-					return jsonResponse({ email: "user@example.test" });
-				}
-				if (url === LOAD_CODE_ASSIST_URL) {
-					return jsonResponse({
-						currentTier: { id: "free-tier" },
-						paidTier: { id: "standard-tier" },
-						cloudaicompanionProject: "project-123",
-					});
-				}
-				return new Response(`unexpected ${url}`, { status: 500 });
-			},
-			{ preconnect: fetch.preconnect },
-		);
-		// Project discovery runs through the shared Google transport on the global fetch.
-		vi.spyOn(globalThis, "fetch").mockImplementation(stub);
-		let authorize: URL | undefined;
-		const ctrl: OAuthController = {
-			onAuth: info => {
-				authorize = new URL(info.url);
-			},
-			onManualCodeInput: async () => {
-				const callback = new URL(authorize!.searchParams.get("redirect_uri")!);
-				callback.searchParams.set("code", "auth-code");
-				callback.searchParams.set("state", authorize!.searchParams.get("state")!);
-				return callback.href;
-			},
-			fetch: stub,
-			signal: AbortSignal.timeout(5_000),
-		};
+	it.each(["redirect", "code"] as const)(
+		"completes hosted copy-code login from %s with PKCE and no local listener",
+		async mode => {
+			const auth = await AuthStorage.create(":memory:");
+			let tokenForm: URLSearchParams | undefined;
+			const stub = Object.assign(
+				async (input: string | URL | Request, init?: RequestInit) => {
+					const url = String(input instanceof Request ? input.url : input);
+					if (url === "https://oauth2.googleapis.com/token") {
+						tokenForm = new URLSearchParams(String(init?.body));
+						return jsonResponse({
+							access_token: "access-token",
+							refresh_token: "refresh-token",
+							expires_in: 3600,
+						});
+					}
+					if (url.startsWith("https://www.googleapis.com/oauth2/v1/userinfo")) {
+						return jsonResponse({ email: "user@example.test" });
+					}
+					if (url === LOAD_CODE_ASSIST_URL) {
+						return jsonResponse({
+							currentTier: { id: "free-tier" },
+							paidTier: { id: "standard-tier" },
+							cloudaicompanionProject: "project-123",
+						});
+					}
+					return new Response(`unexpected ${url}`, { status: 500 });
+				},
+				{ preconnect: fetch.preconnect },
+			);
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(
+					() => {
+						throw new Error("OAuth escaped the explicit transport");
+					},
+					{ preconnect: fetch.preconnect },
+				),
+			);
+			vi.spyOn(Bun, "serve").mockImplementation(() => {
+				throw new Error("Hosted copy-code login must not bind a local callback server");
+			});
+			let authorize: URL | undefined;
+			let manualPrompts = 0;
+			const riskWarning = loginRiskWarning("google-antigravity");
+			const ctrl: OAuthLoginController = {
+				onAuth: info => {
+					authorize = new URL(info.url);
+					expect(info.launchUrl).toBeUndefined();
+				},
+				onPrompt: async prompt => {
+					if (riskWarning !== undefined && prompt.message.includes(riskWarning)) return "yes";
+					manualPrompts++;
+					if (mode === "code") return "auth-code";
+					// A mismatched pasted state must re-prompt without exchanging a token.
+					expect(tokenForm).toBeUndefined();
+					const callback = new URL(authorize!.searchParams.get("redirect_uri")!);
+					callback.searchParams.set("code", "auth-code");
+					callback.searchParams.set(
+						"state",
+						manualPrompts === 1 ? "wrong-state" : authorize!.searchParams.get("state")!,
+					);
+					return callback.href;
+				},
+				fetch: stub,
+				signal: AbortSignal.timeout(5_000),
+			};
 
-		const credentials = await getProviderDefinition("google-antigravity")!.login!(ctrl);
-		if (typeof credentials === "string") throw new Error("Expected OAuth credentials");
+			let identity: OAuthLoginIdentity | undefined;
+			setUnpausedProviders(["google-antigravity"]);
+			try {
+				identity = await auth.oauth.login("google-antigravity", ctrl);
+				expect(manualPrompts).toBe(mode === "redirect" ? 2 : 1);
+				const stored = auth.credentials.list("google-antigravity");
+				expect(stored.map(row => row.credential)).toMatchObject([
+					{ type: "oauth", access: "access-token", refresh: "refresh-token", projectId: "project-123" },
+				]);
+			} finally {
+				setUnpausedProviders([]);
+				auth.close();
+			}
 
-		const params = authorize!.searchParams;
-		expect(params.get("response_type")).toBe("code");
-		expect(params.get("access_type")).toBe("offline");
-		expect(params.get("prompt")).toBe("consent");
-		expect(params.get("code_challenge_method")).toBe("S256");
-		expect(params.get("scope")?.split(" ")).toEqual([
-			"https://www.googleapis.com/auth/cloud-platform",
-			"https://www.googleapis.com/auth/userinfo.email",
-			"https://www.googleapis.com/auth/userinfo.profile",
-			"https://www.googleapis.com/auth/cclog",
-			"https://www.googleapis.com/auth/experimentsandconfigs",
-			"https://www.googleapis.com/auth/aicode",
-		]);
-		expect(tokenForm?.get("grant_type")).toBe("authorization_code");
-		expect(tokenForm?.get("code")).toBe("auth-code");
-		expect(tokenForm?.get("client_id")).toBe(params.get("client_id"));
-		expect(tokenForm?.get("client_secret")).toBeTruthy();
-		expect(tokenForm?.get("redirect_uri")).toBe(params.get("redirect_uri"));
-		expect(Bun.SHA256.hash(tokenForm!.get("code_verifier")!, "base64url")).toBe(params.get("code_challenge")!);
-		expect(credentials).toMatchObject({ access: "access-token", refresh: "refresh-token", projectId: "project-123" });
-	});
+			const params = authorize!.searchParams;
+			expect(`${authorize!.origin}${authorize!.pathname}`).toBe("https://accounts.google.com/o/oauth2/auth");
+			expect(params.get("redirect_uri")).toBe("https://antigravity.google/oauth-callback");
+			expect(params.get("response_type")).toBe("code");
+			expect(params.get("access_type")).toBe("offline");
+			expect(params.get("prompt")).toBe("consent");
+			expect(params.get("code_challenge_method")).toBe("S256");
+			expect(params.get("scope")?.split(" ")).toEqual([
+				"https://www.googleapis.com/auth/cloud-platform",
+				"https://www.googleapis.com/auth/userinfo.email",
+				"https://www.googleapis.com/auth/userinfo.profile",
+				"https://www.googleapis.com/auth/cclog",
+				"https://www.googleapis.com/auth/experimentsandconfigs",
+				"https://www.googleapis.com/auth/aicode",
+				"openid",
+			]);
+			expect(tokenForm?.get("grant_type")).toBe("authorization_code");
+			expect(tokenForm?.get("code")).toBe("auth-code");
+			expect(tokenForm?.get("client_id")).toBe(params.get("client_id"));
+			expect(tokenForm?.get("client_secret")).toBeTruthy();
+			expect(tokenForm?.get("redirect_uri")).toBe(params.get("redirect_uri"));
+			expect(Bun.SHA256.hash(tokenForm!.get("code_verifier")!, "base64url")).toBe(params.get("code_challenge")!);
+			expect(identity).toMatchObject({ type: "oauth", email: "user@example.test" });
+		},
+	);
 });

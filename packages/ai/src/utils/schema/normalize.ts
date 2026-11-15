@@ -200,6 +200,8 @@ const CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA = {
 	properties: {},
 } as const;
 
+const CLOUD_CODE_ASSIST_PROTOBUF_FALLBACK_SCHEMA = { type: "OBJECT", properties: {} } as const;
+
 function isGoogleUnsupportedSchemaField(key: string): boolean {
 	return Object.hasOwn(UNSUPPORTED_SCHEMA_FIELDS, key);
 }
@@ -1340,6 +1342,31 @@ export function normalizeSchemaForCCA(value: unknown): unknown {
 		rejectResidualIncompatibilities: ["type-array", "type-null", "nullable", "combiners", "not"],
 		validateAndFallback: { fallback: CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA },
 	});
+}
+
+/**
+ * Encode the owned, validated CCA projection for Google's Schema protobuf.
+ * JSON Schema validation must run before enum names become uppercase.
+ */
+export function normalizeSchemaForCCAProtobuf(value: unknown): unknown {
+	const normalized = normalizeSchemaForCCA(value);
+	if (normalized === CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA) return CLOUD_CODE_ASSIST_PROTOBUF_FALLBACK_SCHEMA;
+	encodeCcaSchemaTypes(normalized, false);
+	return normalized;
+}
+
+function encodeCcaSchemaTypes(value: unknown, insideSchemaMap: boolean): void {
+	if (Array.isArray(value)) {
+		for (const entry of value) encodeCcaSchemaTypes(entry, insideSchemaMap);
+		return;
+	}
+	if (!isJsonObject(value)) return;
+	if (!insideSchemaMap && typeof value.type === "string") value.type = value.type.toUpperCase();
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const childKind = classifySchemaChild(key, value[key], insideSchemaMap);
+		if (childKind) encodeCcaSchemaTypes(value[key], childKind === "map");
+	}
 }
 
 export function normalizeSchemaForMCP(value: unknown): unknown {

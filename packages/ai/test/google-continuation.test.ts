@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import type { AgyFetch } from "@oh-my-pi/pi-ai/providers/agy-fetch";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { CONTINUATION_MAX_ATTEMPTS } from "@oh-my-pi/pi-ai/providers/google-shared";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -188,6 +190,51 @@ describe("Google output continuation (Cloud Code Assist path)", () => {
 		const first = bodies[0] as { request: Record<string, unknown> };
 		expect(first.request.continuationToken).toBeUndefined();
 		expect(bodies[1]).toEqual({ ...first, request: { ...first.request, continuationToken: "tok-1" } });
+	});
+
+	it("keeps TypeScript continuation handling for an explicit Antigravity fetch override", async () => {
+		const model = buildModel({ ...cliModel, provider: "google-antigravity" });
+		const { fetch, bodies } = recordingFetch([
+			sse(...firstSegment.map(response => ({ response }))),
+			sse(...secondSegment.map(response => ({ response }))),
+		]);
+		const result = await streamGoogleGeminiCli(model, context, { apiKey: cliAuth, fetch }).result();
+
+		expectOneGeneration(result);
+		expect(bodies).toHaveLength(2);
+		const first = bodies[0] as { request: Record<string, unknown> };
+		expect(bodies[1]).toEqual({ ...first, request: { ...first.request, continuationToken: "tok-1" } });
+	});
+
+	it("does not resume a transport-owned continuation after streamSimple wraps the fetch", async () => {
+		// A terminal checkpoint from a transport that owns resumes is not permission
+		// for the TypeScript layer to issue another request or accumulate usage again.
+		const { fetch, bodies } = recordingFetch([
+			sse({
+				response: {
+					candidates: [
+						{
+							content: { role: "model", parts: [{ text: "Partial" }] },
+							finishReason: "CONTINUATION",
+							continuationToken: "transport-owned-checkpoint",
+						},
+					],
+					usageMetadata: {
+						promptTokenCount: 10,
+						candidatesTokenCount: 5,
+						thoughtsTokenCount: 20,
+						totalTokenCount: 35,
+					},
+				},
+			}),
+		]);
+		const transport: AgyFetch = Object.assign(fetch, { handlesGoogleContinuations: true as const });
+		const result = await streamSimple(cliModel, context, { apiKey: cliAuth, fetch: transport }).result();
+
+		expect(bodies).toHaveLength(1);
+		expect(result.stopReason).toBe("length");
+		expect(result.content).toEqual([{ type: "text", text: "Partial" }]);
+		expect(result.usage).toMatchObject({ input: 10, output: 25, reasoningTokens: 20, totalTokens: 35 });
 	});
 
 	it("ends a CONTINUATION without a token as cut short, not as a failure", async () => {

@@ -74,6 +74,7 @@ const OPTION_TIERS = {
 	cwd: "server",
 	providerOptions: "server",
 	providerSessionState: "server",
+	trajectoryStepCount: "server",
 	providerRetryWait: "server",
 	parentSessionId: "server",
 	minimizeEffort: "server",

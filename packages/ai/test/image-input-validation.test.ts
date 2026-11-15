@@ -282,15 +282,22 @@ it("delivers legal MIME punctuation and image bytes intact through hosted provid
 	expect(Buffer.from(await consumed.arrayBuffer())).toEqual(IMAGE_BYTES);
 });
 
-it("does not tag Antigravity image requests with the requestType that draws false 429 quota errors", async () => {
-	const calls: FetchCall[] = [];
-	await generateAntigravityImage(
-		antigravityModel,
-		{ prompt: "draw a cat" },
-		{ apiKey: ANTIGRAVITY_KEY, fetch: createFetch(calls) },
-	);
-	const call = calls.find(item => item.url.includes(":streamGenerateContent"));
-	if (!call) throw new Error("Expected the Antigravity image request");
-	const body = jsonBody(call);
-	expect(body !== null && typeof body === "object" && "requestType" in body).toBe(false);
+it("surfaces an in-band Antigravity image denial instead of returning empty success", async () => {
+	const fetchImpl: FetchImpl = async input => {
+		const url = String(input);
+		if (url.includes(":fetchAvailableModels")) return Response.json({ models: {} });
+		if (url.includes(":streamGenerateContent")) {
+			return new Response('data: {"error":{"code":403,"message":"image permission denied"}}\n\n', {
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		}
+		throw new Error(`Unexpected fixture route: ${url}`);
+	};
+	await expect(
+		generateAntigravityImage(
+			antigravityModel,
+			{ prompt: "draw a cat" },
+			{ apiKey: ANTIGRAVITY_KEY, fetch: fetchImpl },
+		),
+	).rejects.toMatchObject({ status: 403, message: expect.stringContaining("image permission denied") });
 });

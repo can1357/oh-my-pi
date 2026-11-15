@@ -415,6 +415,8 @@ export interface ProviderSessionState {
 	close(): void;
 	/** Release one routing session after its final request, preserving shared provider fallbacks. */
 	releaseSession?(sessionId: string): void;
+	/** Commit a completed host execution (which can contain several model/tool turns). */
+	finishExecution?(): void;
 }
 
 export interface ProviderResponseMetadata {
@@ -582,6 +584,8 @@ export interface StreamOptions {
 	 * as the prompt-cache key when `promptCacheKey` is not set.
 	 */
 	sessionId?: string;
+	/** Logical host trajectory steps before LLM-history projection or compaction. */
+	trajectoryStepCount?: number;
 	/**
 	 * Optional prompt-cache identity. OpenAI-family providers use this for
 	 * `prompt_cache_key` payloads and cache-affinity headers such as

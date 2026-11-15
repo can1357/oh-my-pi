@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai/registry";
 import {
 	getOAuthProviders,
 	refreshOAuthToken,
@@ -69,25 +68,6 @@ describe("provider registry auth surface", () => {
 		expect(ids).toContain("llama.cpp");
 		// openai has no interactive login flow.
 		expect(ids).not.toContain("openai");
-	});
-
-	test("paste-code login set is derived from pasteCodeFlow", () => {
-		expect([...PASTE_CODE_LOGIN_PROVIDERS].sort()).toEqual(
-			[
-				"anthropic",
-				"devin",
-				"gitlab-duo",
-				"gitlab-duo-agent",
-				"google-antigravity",
-				"google-gemini-cli",
-				"openai-codex",
-				"openrouter",
-				"snowflake",
-				"stencil",
-				"zai-coding-plan",
-			].sort(),
-		);
-		expect(PASTE_CODE_LOGIN_PROVIDERS.has("zenmux")).toBe(false);
 	});
 
 	test("refresh dispatch returns api-key providers unchanged and routes real refreshers", async () => {

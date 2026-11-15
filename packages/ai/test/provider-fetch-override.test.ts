@@ -1,7 +1,10 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import * as providerRegistry from "@oh-my-pi/pi-ai/registry/registry";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ResponsesWebSocketConnection } from "../src/providers/responses-websocket-connection";
 
@@ -26,6 +29,78 @@ function createSseResponse(events: unknown[]): Response {
 }
 
 describe("StreamOptions.fetch override", () => {
+	it("authenticates through the provider transport while explicit overrides take precedence", async () => {
+		let requiredTransport = "provider";
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				if (request.headers.get("x-required-transport") !== requiredTransport) {
+					return Response.json({ error: { message: "Required transport was bypassed" } }, { status: 403 });
+				}
+				const body = (await request.json()) as { request: { contents: { parts: { text?: string }[] }[] } };
+				const input = body.request.contents
+					.flatMap(content => content.parts)
+					.map(part => part.text ?? "")
+					.join("");
+				return createSseResponse([
+					{
+						response: {
+							candidates: [
+								{ content: { role: "model", parts: [{ text: input.toUpperCase() }] }, finishReason: "STOP" },
+							],
+						},
+					},
+				]);
+			},
+		});
+		const model = buildModel({
+			id: "gemini-2.5-flash",
+			name: "Local transport fixture",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: server.url.origin,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 100,
+		});
+		const authenticatedFetch =
+			(transport: string): FetchImpl =>
+			async (input, init) => {
+				const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+				request.headers.set("x-required-transport", transport);
+				return fetch(request);
+			};
+		const lookup = providerRegistry.getProviderDefinition;
+		const original = lookup(model.provider);
+		if (!original) throw new Error("Gemini CLI provider is not registered");
+		const definition = { ...original, fetch: authenticatedFetch("provider") };
+		const lookupSpy = spyOn(providerRegistry, "getProviderDefinition").mockImplementation(id =>
+			id === model.provider ? definition : lookup(id),
+		);
+		try {
+			const apiKey = JSON.stringify({ token: "fixture-only", projectId: "fixture-project" });
+			for (const send of [stream<"google-gemini-cli">, streamSimple<"google-gemini-cli">]) {
+				requiredTransport = "provider";
+				const normal = await send(model, baseContext(), { apiKey }).result();
+				expect(normal.stopReason).toBe("stop");
+				expect(normal.content).toEqual([{ type: "text", text: "SAY HELLO" }]);
+				requiredTransport = "explicit";
+				const overridden = await send(model, baseContext(), {
+					apiKey,
+					fetch: authenticatedFetch("explicit"),
+				}).result();
+				expect(overridden.stopReason).toBe("stop");
+				expect(overridden.content).toEqual([{ type: "text", text: "SAY HELLO" }]);
+			}
+		} finally {
+			lookupSpy.mockRestore();
+			server.stop(true);
+		}
+	});
+
 	it("routes openai-completions requests through the override", async () => {
 		const calls: Array<{ url: string }> = [];
 

@@ -57,3 +57,13 @@ export function resetAccountScopedProviderSessionState(states: Map<string, Provi
 	resetAnthropicThreads(states);
 	resetOpenAIResponsesAccountScopedState(states);
 }
+
+/**
+ * Commit provider-owned execution identities before publishing agent_end.
+ * SDK hosts with their own tool loop call this once when that loop finishes,
+ * not after each model response or tool result.
+ */
+export function finishProviderExecution(states: Map<string, ProviderSessionState> | undefined): void {
+	if (!states) return;
+	for (const state of states.values()) state.finishExecution?.();
+}

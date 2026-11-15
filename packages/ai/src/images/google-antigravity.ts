@@ -4,7 +4,7 @@ import {
 	fetchAntigravityImageModel,
 } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { agyFetch, getAgyHeaders, getAgyUserAgent } from "../providers/agy-fetch";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -25,6 +25,7 @@ interface AntigravityTarget {
 }
 
 interface AntigravityChunk {
+	error?: { code?: number; message?: string } | null;
 	response?: {
 		candidates?: Array<{
 			content?: { parts?: Array<{ text?: string; inlineData?: { data?: string; mimeType?: string } }> };
@@ -63,6 +64,7 @@ async function resolveTarget(
 		endpoint: endpoints.length === 1 ? endpoints[0] : undefined,
 		signal,
 		fetcher: fetchImpl,
+		userAgent: getAgyUserAgent(),
 	});
 	return advertised
 		? {
@@ -100,7 +102,7 @@ function buildRequest(request: ImageGenerationRequest, model: string, projectId:
 				{ category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_ONLY_HIGH" },
 			],
 		},
-		requestId: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+		requestId: `agent/${crypto.randomUUID()}`,
 		userAgent: "antigravity",
 	};
 }
@@ -113,6 +115,9 @@ async function parseSse(response: Response, signal?: AbortSignal): Promise<Image
 	const texts: string[] = [];
 	let usage = usageFromWire(undefined);
 	for await (const chunk of readSseJson<AntigravityChunk>(response.body, signal)) {
+		if (chunk.error) {
+			throw new ImageApiError(errorMessage(JSON.stringify(chunk)), chunk.error.code ?? 500);
+		}
 		for (const candidate of chunk.response?.candidates ?? []) {
 			for (const part of candidate.content?.parts ?? []) {
 				if (part.text) texts.push(part.text);
@@ -139,7 +144,7 @@ export async function generateAntigravityImage(
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
 	for (const image of request.inputImages ?? []) validateImageInput(image);
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = options.fetch ?? agyFetch;
 	const response = await withAuth(
 		options.apiKey,
 		async rawKey => {
@@ -156,7 +161,7 @@ export async function generateAntigravityImage(
 					headers: {
 						Authorization: `Bearer ${credentials.accessToken}`,
 						"Content-Type": "application/json",
-						...getAntigravityHeaders(),
+						...getAgyHeaders(),
 					},
 					body: JSON.stringify(body),
 					signal: options.signal,

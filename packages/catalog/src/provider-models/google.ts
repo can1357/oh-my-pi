@@ -52,6 +52,7 @@ export interface GoogleAntigravityModelManagerConfig {
 	resolveAccounts?: () => Promise<readonly GoogleAntigravityAccount[] | null>;
 	endpoint?: string;
 	fetch?: FetchImpl;
+	userAgent?: string;
 }
 
 export interface GoogleGeminiCliModelManagerConfig {
@@ -117,6 +118,7 @@ export function googleAntigravityModelManagerOptions(
 									endpoint: config?.endpoint,
 									projectId: account.projectId,
 									fetcher,
+									userAgent: config?.userAgent,
 								}),
 							})),
 						);

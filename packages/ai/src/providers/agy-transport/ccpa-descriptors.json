@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "binarySha256": "39816d49d5ab92229952987225c23ea3fed7580699dcb4a444e0388e0ac1ce43",
+  "descriptorSetSha256": "a7837a7c5dd79adce6c2a8b797c327cd691369edbe9bc1fa82bcabd1aec27668",
+  "root": "google/internal/cloud/code/v1internal/prediction_service.proto",
+  "message": "google.internal.cloud.code.v1internal.GenerateContentRequest",
+  "projection": "GenerateContentRequest reachable message/enum closure; API services, annotations and unused extension declarations omitted",
+  "files": [
+    {
+      "name": "google/cloud/aiplatform/master/api_auth.proto",
+      "rva": "0x651b5dc",
+      "length": 971,
+      "accessorRva": "0x7597c60",
+      "sha256": "fb61b06fb175a8457a6028deccd83db454233fe38e51c797bfcfe0908211e3fe"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/auth.proto",
+      "rva": "0x661d105",
+      "length": 4166,
+      "accessorRva": "0x7599a60",
+      "sha256": "1dc7eb4a36ae88973c3168929f529191517fa87c9b2b51a1dd3c04c385103eee"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/cached_content.proto",
+      "rva": "0x65a2b1c",
+      "length": 2740,
+      "accessorRva": "0x79e1000",
+      "sha256": "ea347827de37f3169328b5b01d60522f39c5654218d9adff41626a982a7428c4"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/content.proto",
+      "rva": "0x69739eb",
+      "length": 36611,
+      "accessorRva": "0x79d8140",
+      "sha256": "1041a7b4dfb337fbc2635dfd9d2635a379db021101b983871f0571836c7890ff"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/media_metadata.proto",
+      "rva": "0x656bc1f",
+      "length": 2052,
+      "accessorRva": "0x759c220",
+      "sha256": "da15071540c19cda2843f5915346be8e893115d4bdcb0dccbe1b9790e55b821e"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/openapi.proto",
+      "rva": "0x659acb6",
+      "length": 2660,
+      "accessorRva": "0x759d1c0",
+      "sha256": "f27644585012d65181eb53d9bf7951edaebb3db46f6880cbe447672e3c9b2e5e"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/prediction_service.proto",
+      "rva": "0x6a06088",
+      "length": 47567,
+      "accessorRva": "0x7a06d00",
+      "sha256": "968be2762dd998dda704d86b4030b2e9ff310ab7ef283800b28d506bddf9a296"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/service_tier.proto",
+      "rva": "0x64efca4",
+      "length": 437,
+      "accessorRva": "0x79ea7a0",
+      "sha256": "46c480c703a13c7e00ebacd21921a9346d1000eeeaec781c6def104963d06e58"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/tool.proto",
+      "rva": "0x68d2ca7",
+      "length": 24878,
+      "accessorRva": "0x75c5a00",
+      "sha256": "226485c472479a9c070edea260a22820591760e3c95b2f60013a7789e134dcd8"
+    },
+    {
+      "name": "google/cloud/aiplatform/master/vertex_rag_data.proto",
+      "rva": "0x685b357",
+      "length": 19487,
+      "accessorRva": "0x79c2a00",
+      "sha256": "09075dc3a3fea8a6a160aaa4d0adcbe2eab8a60d35ed6f9780d92a8e0a9c1121"
+    },
+    {
+      "name": "google/internal/cloud/code/v1internal/credits.proto",
+      "rva": "0x64f8242",
+      "length": 523,
+      "accessorRva": "0x7589120",
+      "sha256": "bf362b0c3d49ff7c15bc4c77e1f70a5ad02b39e52ea10813c170fa95831bfa7b"
+    },
+    {
+      "name": "google/internal/cloud/code/v1internal/prediction_service.proto",
+      "rva": "0x66b34af",
+      "length": 6541,
+      "accessorRva": "0x7a23d40",
+      "sha256": "7ef1b2bfd5ca367a8f53b3e86c18f114f82beaf87a50ace219023e8dfc4e6b20"
+    },
+    {
+      "name": "google/protobuf/duration.proto",
+      "rva": "0x64da40f",
+      "length": 254,
+      "accessorRva": "0x759af00",
+      "sha256": "d74f874b3dcc707fa971ad4ce7543ac7de5eec47836b70565eafc85296d2f00b"
+    },
+    {
+      "name": "google/protobuf/struct.proto",
+      "rva": "0x6508886",
+      "length": 742,
+      "accessorRva": "0x7591f00",
+      "sha256": "a3e68342f4efc03c12bd8132d2fc4c824816a6624f5d2df667cd7b8c775a2b44"
+    },
+    {
+      "name": "google/protobuf/timestamp.proto",
+      "rva": "0x64db40d",
+      "length": 258,
+      "accessorRva": "0x759dde0",
+      "sha256": "677ffd2bf8f2b78cd407039ddf76d8033df80f0a885e23a793c99298b926895f"
+    },
+    {
+      "name": "google/type/interval.proto",
+      "rva": "0x64ec3a5",
+      "length": 399,
+      "accessorRva": "0x759e3c0",
+      "sha256": "f95b855b29d92a18254aed9aac730bb6e4780772dfcd4b16f9349bb522769796"
+    },
+    {
+      "name": "google/type/latlng.proto",
+      "rva": "0x64d89e2",
+      "length": 243,
+      "accessorRva": "0x759e9a0",
+      "sha256": "8451a36b9c80d82f065c3a234d84b6cb01a8a94f22530ae312e0e8abe2e7b914"
+    },
+    {
+      "name": "net/proto2/bridge/proto/message_set.proto",
+      "rva": "0x64c218d",
+      "length": 147,
+      "accessorRva": "0x759ec60",
+      "sha256": "39defb26e1385ce0fc4f6e4cb215fdad79d221d545cd2afd014c6fb1f2359544"
+    },
+    {
+      "name": "security/credentials/proto/authenticator.proto",
+      "rva": "0x691b3e4",
+      "length": 30155,
+      "accessorRva": "0x75b4260",
+      "sha256": "ec6b7a6f518b2a7e2148eb56282043a5db7da81d1816adde2e26132ff564e94d"
+    },
+    {
+      "name": "security/credentials/proto/end_user_credentials.proto",
+      "rva": "0x66603ed",
+      "length": 5121,
+      "accessorRva": "0x75b8ee0",
+      "sha256": "8e4d21c266191d707373b201237b81d6b2e8439c54ecefa8a3336457cedef1f9"
+    },
+    {
+      "name": "security/credentials/proto/iam_request_attributes.proto",
+      "rva": "0x65ac44e",
+      "length": 2865,
+      "accessorRva": "0x75b79a0",
+      "sha256": "8e092d5d9fc72e90d32edd1f167bec40f06f4090fe8ea4ad2af843f3b3fea55c"
+    },
+    {
+      "name": "security/credentials/proto/principal.proto",
+      "rva": "0x67a9f04",
+      "length": 13614,
+      "accessorRva": "0x75a8b40",
+      "sha256": "d17b5a750c258fa3d618eba0cef2263fbf4a0cb23f75a454a771c1e2b0d6d65e"
+    },
+    {
+      "name": "security/thinmint/proto/core/thinmint_core.proto",
+      "rva": "0x65d7d5b",
+      "length": 3482,
+      "accessorRva": "0x75aaea0",
+      "sha256": "9a1c1fb26e6f1574b67f27e452e86287cbf94dfec27b05f1e53e2c7a6d74ebfe"
+    }
+  ]
+}

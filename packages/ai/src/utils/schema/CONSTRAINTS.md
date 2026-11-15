@@ -120,6 +120,14 @@ For Cloud Code Assist Claude tool declarations, schema MUST satisfy stricter con
 1. **Use legacy `parameters` field** (not `parametersJsonSchema`) for CCA Claude.
 2. CCA path uses the full `normalizeSchemaForCCA` pipeline.
 
+The AGY protobuf transport uses `normalizeSchemaForCCAProtobuf`: run this same
+normalization and JSON Schema validation first, then encode schema `type` values
+as protobuf enum names (`OBJECT`, `STRING`, etc.). Only schema-valued nodes are
+visited; property names and literal enum values must not be case-converted.
+The caller's canonical schema and the shared JSON-schema fallback remain
+unchanged. `convertTools(..., "protobuf")` selects this legacy `parameters`
+projection directly, without normalizing through the generic Google path first.
+
 ### 3.2 Sanitization contract
 
 1. Start with Google unsupported-key stripping behavior.

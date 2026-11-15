@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity tool loops retain execution identity until the host run finishes and count logical messages before wire grouping. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

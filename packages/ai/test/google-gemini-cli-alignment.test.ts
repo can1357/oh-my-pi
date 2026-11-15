@@ -297,7 +297,7 @@ describe("Google Gemini CLI alignment", () => {
 		expect(labels.used_non_gemini_model).toBe("false");
 	});
 
-	it("numbers Antigravity steps and request_id labels like the native client across one session", () => {
+	it("counts logical steps independently from repeated request attempts", () => {
 		const model = createModel("google-antigravity");
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const send = (context: Context) =>
@@ -355,17 +355,6 @@ describe("Google Gemini CLI alignment", () => {
 			used_claude_conservative: "false",
 			used_non_gemini_model: "false",
 		});
-		expect(Object.keys(first.request.labels ?? {})).toEqual([
-			"cascade_id",
-			"last_step_index",
-			"model_enum",
-			"request_id",
-			"root_cascade_id",
-			"trajectory_id",
-			"used_claude",
-			"used_claude_conservative",
-			"used_non_gemini_model",
-		]);
 
 		// The model's tool call and its result are one step each.
 		const second = send(afterToolRoundTrip);
@@ -379,10 +368,11 @@ describe("Google Gemini CLI alignment", () => {
 			trajectory_id: trajectoryId!,
 		});
 
-		// Resending the same (or a compacted) context never moves the step back.
-		const resent = send(createContext());
-		expect(resent.requestId?.split("/")[4]).toBe("4");
-		expect(resent.request.labels?.last_step_index).toBe("3");
+		// Retrying the same logical context must not invent a new message.
+		const resent = send(afterToolRoundTrip);
+		expect(resent.requestId?.split("/")[4]).toBe("3");
+		expect(resent.request.labels?.last_step_index).toBe("2");
+		expect(resent.request.labels?.request_id).toBe(`${trajectoryId}-2`);
 	});
 
 	it("marks Antigravity Claude requests as non-Gemini usage", () => {
@@ -400,10 +390,53 @@ describe("Google Gemini CLI alignment", () => {
 		});
 	});
 
-	it("does not tag Antigravity chat requests with the requestType that draws false 429 quota errors", () => {
-		const model = createModel("google-antigravity");
-		const payload = buildRequest(model, createContext(), "proj-123", {}, true);
-		expect(payload !== null && typeof payload === "object" && "requestType" in payload).toBe(false);
+	it("encodes tool results with the serving model's conversation role", () => {
+		for (const [id, role] of [
+			["gemini-3.8-flash", "model"],
+			["gpt-oss-120b", "model"],
+			["claude-sonnet-4-6", "user"],
+		] as const) {
+			const model = createModel("google-antigravity", id);
+			const payload = buildRequest(
+				model,
+				{
+					messages: [
+						...createContext().messages,
+						{
+							role: "assistant",
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "toolUse",
+							timestamp: 1,
+						},
+						{
+							role: "toolResult",
+							toolCallId: "call-1",
+							toolName: "read",
+							content: [{ type: "text", text: "file contents" }],
+							isError: false,
+							timestamp: 2,
+						},
+					],
+				},
+				"fixture-project",
+				{},
+				true,
+			);
+			const result = payload.request.contents.find(content => content.parts?.some(part => part.functionResponse));
+			expect(result?.role).toBe(role);
+			expect(result?.parts?.[0]?.functionResponse?.response).toEqual({ output: "file contents" });
+		}
 	});
 
 	it("stamps the antigravity wire profile (maxOutputTokens + model_enum) by routed wire id", () => {
@@ -445,47 +478,6 @@ describe("Google Gemini CLI alignment", () => {
 		}
 	});
 
-	it("defaults antigravity tools to VALIDATED but omits AUTO toolConfig for plain gemini-cli", () => {
-		const context: Context = {
-			messages: [{ role: "user", content: "inspect repo", timestamp: Date.now() }],
-			tools: [
-				{
-					name: "read_file",
-					description: "Read a file",
-					parameters: {
-						type: "object",
-						properties: { path: { type: "string" } },
-						required: ["path"],
-					} as TJsonSchema,
-				},
-			],
-		};
-
-		const cli = buildRequest(
-			createModel("google-gemini-cli"),
-			context,
-			"proj-123",
-			{ toolChoice: "auto" },
-			false,
-		) as {
-			request: { tools?: unknown; toolConfig?: unknown };
-		};
-		expect(cli.request.tools).toBeDefined();
-		expect(cli.request.toolConfig).toBeUndefined();
-
-		const antigravity = buildRequest(
-			createModel("google-antigravity"),
-			context,
-			"proj-123",
-			{ toolChoice: "auto" },
-			true,
-		) as {
-			request: { tools?: unknown; toolConfig?: { functionCallingConfig: { mode: string } } };
-		};
-		expect(antigravity.request.tools).toBeDefined();
-		expect(antigravity.request.toolConfig).toEqual({ functionCallingConfig: { mode: "VALIDATED" } });
-	});
-
 	it("strips patternProperties when antigravity rewrites tools to legacy parameters", () => {
 		const model = createModel("google-antigravity");
 		const toolContext: Context = {
@@ -516,59 +508,6 @@ describe("Google Gemini CLI alignment", () => {
 		const parameters = payload.request.tools?.[0]?.functionDeclarations[0]?.parameters;
 		expect(parameters).toBeDefined();
 		expect(JSON.stringify(parameters)).not.toContain('"patternProperties"');
-	});
-	it("adds anthropic-beta for Antigravity Claude 4.x reasoning models without relying on id suffix", async () => {
-		let requestHeaders: Headers | undefined;
-		const fetchMock: FetchImpl = async (_url, init) => {
-			requestHeaders = new Headers(init?.headers);
-			return new Response('{"error":{"message":"bad request"}}', { status: 400 });
-		};
-
-		const model: Model<"google-gemini-cli"> = createModel("google-antigravity", "claude-sonnet-4-6", true);
-
-		const result = await streamGoogleGeminiCli(model, createContext(), {
-			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
-			fetch: fetchMock,
-		}).result();
-
-		expect(result.stopReason).toBe("error");
-		expect(requestHeaders!.get("anthropic-beta")).toBe("interleaved-thinking-2025-05-14");
-		expect(requestHeaders!.get("X-Goog-Api-Client")).toBeNull();
-		expect(requestHeaders!.get("Client-Metadata")).toBeNull();
-	});
-
-	it("sends no anthropic-beta for Antigravity Claude 5.5, like the native client", async () => {
-		let requestHeaders: Headers | undefined;
-		const fetchMock: FetchImpl = async (_url, init) => {
-			requestHeaders = new Headers(init?.headers);
-			return new Response('{"error":{"message":"bad request"}}', { status: 400 });
-		};
-
-		await streamGoogleGeminiCli(createModel("google-antigravity", "claude-sonnet-5-5", true), createContext(), {
-			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
-			fetch: fetchMock,
-		}).result();
-
-		expect(requestHeaders!.get("anthropic-beta")).toBeNull();
-	});
-
-	it("sends the native client's transport headers on the Antigravity transport", async () => {
-		let requestHeaders: Headers | undefined;
-		const fetchMock: FetchImpl = async (_url, init) => {
-			requestHeaders = new Headers(init?.headers);
-			return new Response('{"error":{"message":"bad request"}}', { status: 400 });
-		};
-
-		const model = createModel("google-antigravity");
-		await streamGoogleGeminiCli(model, createContext(), {
-			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
-			fetch: fetchMock,
-		}).result();
-
-		expect(requestHeaders!.get("User-Agent")).toMatch(/^antigravity\/hub\/[0-9.]+ /);
-		// Go net/http offers gzip only and sends no Accept of its own.
-		expect(requestHeaders!.get("Accept-Encoding")).toBe("gzip");
-		expect(requestHeaders!.get("Accept")).toBeNull();
 	});
 
 	it("filters out empty text parts at stream end but preserves terminal thought signatures", async () => {

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added offline `gen:models --snapshot-compat` regeneration without changing the bundled inventory. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
+### Fixed
+
+- Antigravity discovery accepts an explicit client User-Agent, and login uses the observed CLI authorization endpoint, hosted callback, and scopes including `openid`; the provider remains paused by default. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
+### Removed
+
+- Removed obsolete Antigravity Claude tool-mode and thinking-beta compatibility flags. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

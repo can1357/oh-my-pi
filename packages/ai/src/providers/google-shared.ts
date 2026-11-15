@@ -30,7 +30,12 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import {
+	normalizeSchemaForCCA,
+	normalizeSchemaForCCAProtobuf,
+	normalizeSchemaForGoogle,
+	toolWireSchema,
+} from "../utils/schema";
 import type {
 	Content,
 	FinishReason,
@@ -412,6 +417,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 export function convertTools(
 	tools: Tool[],
 	model: Model<"google-generative-ai" | "google-gemini-cli" | "google-vertex">,
+	schemaEncoding: "json" | "protobuf" = "json",
 ): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
 	if (tools.length === 0) return undefined;
 
@@ -419,7 +425,8 @@ export function convertTools(
 	 * Claude models on Cloud Code Assist need the legacy `parameters` field;
 	 * the API translates it into Anthropic's `input_schema`.
 	 */
-	const useParameters = model.compat.ccaLegacyParametersSchema;
+	const useParameters = schemaEncoding === "protobuf" || model.compat.ccaLegacyParametersSchema;
+	const normalizeParameters = schemaEncoding === "protobuf" ? normalizeSchemaForCCAProtobuf : normalizeSchemaForCCA;
 
 	return [
 		{
@@ -427,7 +434,7 @@ export function convertTools(
 				name: tool.name,
 				description: tool.description || "",
 				...(useParameters
-					? { parameters: normalizeSchemaForCCA(toolWireSchema(tool)) }
+					? { parameters: normalizeParameters(toolWireSchema(tool)) }
 					: { parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)) }),
 			})),
 		},

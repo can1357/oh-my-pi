@@ -343,7 +343,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			affinity,
 			strategies,
 			usageProviders,
-			fetch: options.usageFetch ?? fetch,
+			fetch: options.usageFetch,
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
 			requestKey: provider => keys.peek(provider),
 			logger:

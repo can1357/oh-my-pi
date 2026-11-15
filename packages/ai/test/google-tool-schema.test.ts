@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/google-shared";
 import type { Model, TJsonSchema, Tool } from "@oh-my-pi/pi-ai/types";
-import { normalizeSchemaForCCA, normalizeSchemaForGoogle } from "@oh-my-pi/pi-ai/utils/schema";
+import {
+	normalizeSchemaForCCA,
+	normalizeSchemaForCCAProtobuf,
+	normalizeSchemaForGoogle,
+} from "@oh-my-pi/pi-ai/utils/schema";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 function createModel(id: string): Model<"google-gemini-cli"> {
@@ -23,6 +27,33 @@ function createModel(id: string): Model<"google-gemini-cli"> {
 		maxTokens: 8192,
 	});
 }
+
+describe("CCA protobuf tool schemas", () => {
+	it("encodes nested schema types without changing property names, enum literals, or caller schemas", () => {
+		const input = {
+			type: "object",
+			properties: {
+				type: { type: "string", enum: ["object", "array"] },
+				properties: { type: "array", items: { type: "object", properties: { count: { type: "integer" } } } },
+			},
+		};
+		const original = structuredClone(input);
+		expect(normalizeSchemaForCCAProtobuf(input)).toEqual({
+			type: "OBJECT",
+			properties: {
+				type: { type: "STRING", enum: ["object", "array"] },
+				properties: { type: "ARRAY", items: { type: "OBJECT", properties: { count: { type: "INTEGER" } } } },
+			},
+		});
+		expect(input).toEqual(original);
+	});
+
+	it("keeps the shared JSON-schema fallback usable after protobuf conversion", () => {
+		const invalid = { type: "invalid-schema-type" };
+		expect(normalizeSchemaForCCAProtobuf(invalid)).toEqual({ type: "OBJECT", properties: {} });
+		expect(normalizeSchemaForCCA(invalid)).toEqual({ type: "object", properties: {} });
+	});
+});
 
 describe("Cloud Code Assist Claude tool schema conversion", () => {
 	it("strips nullable keyword and collapses type arrays for CCA Claude", () => {

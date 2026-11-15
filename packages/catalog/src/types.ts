@@ -1346,10 +1346,6 @@ export interface GoogleCompat {
 	streamIdleTimeoutMs?: number;
 	/** Work around the Flash streaming leak (duplicate first chunk) on gemini-cli. */
 	flashStreamLeakWorkaround?: boolean;
-	/** Send the Claude thinking beta header on Antigravity Claude requests. */
-	claudeThinkingBetaHeader?: boolean;
-	/** Antigravity Claude tool-mode request framing. */
-	antigravityClaudeToolMode?: boolean;
 	/** Usage-label bucket Antigravity reports this model under. */
 	antigravityUsageLabel?: string;
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */

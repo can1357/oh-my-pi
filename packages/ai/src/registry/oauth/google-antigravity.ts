@@ -3,7 +3,8 @@
  * Uses different OAuth credentials than google-gemini-cli for access to additional models.
  */
 import { type } from "@oh-my-pi/omptype";
-import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAgyHeaders } from "../../providers/agy-fetch";
+import type { FetchImpl } from "../../types";
 import * as AIError from "../../error";
 import { raceWithSignal } from "../../utils/abort";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
@@ -27,6 +28,7 @@ export const ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA = Object.freeze({
 interface CloudCodeContext {
 	headers: Record<string, string>;
 	signal?: AbortSignal;
+	fetch: FetchImpl;
 }
 
 interface CloudCodeRequest extends CloudCodeContext {
@@ -140,10 +142,11 @@ async function requestCloudCodeAssist({
 	body,
 	signal,
 	timeoutMs,
+	fetch,
 }: CloudCodeRequest): Promise<unknown> {
 	throwIfLoginCancelled(signal);
 	const init: RequestInit = body === undefined ? { method, headers } : { method, headers, body };
-	const response = await oauthFetch(url, init, { provider: PROVIDER, signal, timeoutMs });
+	const response = await oauthFetch(url, init, { provider: PROVIDER, signal, timeoutMs, fetch });
 	if (response.status !== 200) {
 		const errorText = await response.text();
 		throw new AIError.OAuthError(`${label} failed: ${response.status} ${response.statusText}: ${errorText}`, {
@@ -260,14 +263,16 @@ async function discoverProject(
 	accessToken: string,
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
+	fetchImpl: FetchImpl = fetch,
 ): Promise<string> {
 	const context: CloudCodeContext = {
 		headers: {
 			Authorization: `Bearer ${accessToken}`,
 			"Content-Type": "application/json",
-			...getAntigravityHeaders(),
+			...getAgyHeaders(),
 		},
 		signal,
+		fetch: fetchImpl,
 	};
 
 	onProgress?.("Checking Cloud Code Assist account status...");
@@ -318,7 +323,7 @@ export const googleAntigravityProjectHook: AfterExchangeHook = async (credential
 	}
 	let projectId: string;
 	try {
-		projectId = await discoverProject(credentials.access, context.onProgress, context.signal);
+		projectId = await discoverProject(credentials.access, context.onProgress, context.signal, context.fetch);
 	} catch (error) {
 		const validationUrl = extractGoogleValidationUrl(error instanceof Error ? error.message : String(error));
 		if (!validationUrl) throw error;

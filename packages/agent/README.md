@@ -100,6 +100,16 @@ prompt("Read config.json")
 └─ agent_end
 ```
 
+Provider session state spans the whole host execution, including every tool
+round trip. The loop calls optional `ProviderSessionState.finishExecution()`
+hooks once before `agent_end` (also on exceptional exit), never after each model
+response. Antigravity uses this boundary for its completed-execution identifier;
+backend response IDs are not execution IDs.
+
+`trajectoryStepCount` is forwarded before message projection/grouping. Hosts
+implementing a separate tool loop should preserve their session-state map and
+call `finishProviderExecution(states)` when the logical execution finishes.
+
 ### continue() Event Sequence
 
 `continue()` resumes from existing context without adding a new message. Use it for retries after errors.

@@ -824,9 +824,31 @@ export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	return buildModel(spec);
 }
 
+/** Recompile wire policy from the retained inventory without probing accounts. */
+async function regenerateSnapshotCompat(selectedProvider?: string): Promise<void> {
+	const models = prevModelsJson;
+	if (selectedProvider !== undefined && models[selectedProvider] === undefined) {
+		throw new Error(`Unknown snapshot provider: ${selectedProvider}`);
+	}
+	let updated = 0;
+	for (const [provider, rows] of Object.entries(models)) {
+		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
+		for (const model of Object.values(rows)) {
+			model.compat = buildGeneratedModel(toModelSpec(model)).compat;
+			updated++;
+		}
+	}
+	await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(models));
+	console.log(`Recompiled wire policy for ${updated} retained model rows`);
+}
+
 if (import.meta.main) {
-	const { values } = parseArgs({ args: Bun.argv.slice(2), options: { provider: { type: "string" } } });
-	generateModels(values.provider).catch(error => {
+	const { values } = parseArgs({
+		args: Bun.argv.slice(2),
+		options: { provider: { type: "string" }, "snapshot-compat": { type: "boolean" } },
+	});
+	const generate = values["snapshot-compat"] ? regenerateSnapshotCompat : generateModels;
+	generate(values.provider).catch(error => {
 		console.error(error);
 		process.exitCode = 1;
 	});

@@ -1198,6 +1198,75 @@ usage polling do not imply that reason.
 
 **Google Gemini CLI / Antigravity**: These use Google Cloud OAuth. The `apiKey` returned by `getOAuthApiKey()` is a JSON string containing both the token and project ID, which the library handles automatically.
 
+#### Antigravity transport and verification
+
+The existing `google-antigravity` provider remains paused by default, including
+its login/account-risk warning. This transport does not change that policy or
+the separate official `antigravity-cli` ACP provider.
+
+When explicitly enabled, `/login google-antigravity` uses the official CLI's
+hosted code page at `https://antigravity.google/oauth-callback`. After signing
+in, copy the displayed authorization code, paste it into OMP's focused login
+input, and press Enter. No localhost callback listener is started. PKCE remains
+S256; supplied OAuth state is still validated.
+
+The authorization endpoint, hosted redirect, and seven scopes (including
+`openid`) were observed from an isolated official Windows AGY 1.5.9 `acp --login`
+run. Google's [CLI walkthrough](https://codelabs.developers.google.com/antigravity-cli-hands-on)
+describes this interaction. Matching these parameters is not evidence about
+Google's client-detection rules.
+
+Default Antigravity chat, image, OAuth, and usage requests use a lazily started
+Go helper. Source checkouts build it with
+`bun run --cwd packages/ai build:agy-transport`; installed SDK packages use
+`bun run --cwd node_modules/@oh-my-pi/pi-ai build:agy-transport`.
+Go must be installed; the module selects its required toolchain. `bun run setup`
+also builds the helper. Compiled CLI builds embed their target's helper.
+
+`PI_AI_AGY_TRANSPORT` selects an explicit executable. Advanced callers can use
+`createAgyFetch()` from `@oh-my-pi/pi-ai/providers/agy-fetch`, pass the returned
+`fetch` to supported request options, and call `close()` after consuming response
+bodies. Explicit fetch overrides take precedence over provider defaults.
+`closeDefaultAgyFetch()` releases the shared helper for hosts requiring explicit
+shutdown. The helper owns no stored OAuth credentials.
+The returned fetch function declares `handlesGoogleContinuations: true` so the
+provider does not resume or accumulate the helper's responses a second time.
+Custom wrappers around that fetch must preserve this capability property.
+
+HTTPS certificate verification remains enabled. `NODE_EXTRA_CA_CERTS` or the
+handle's `ca` option adds a trusted PEM bundle. Environment HTTP/HTTPS CONNECT
+proxies are supported; per-request/per-provider proxy settings are rejected
+rather than silently bypassed. Use an explicit fetch override for those settings.
+SOCKS and arbitrary `fetch` transport options are not supported. Redirects are
+returned rather than followed. The optional `quotaProject` is a billing-project
+override: it is **not** inferred from the OAuth credential's shared CCPA project.
+
+Streaming continuation is bounded to 32 additional legs. Recovery from a
+transport interruption requires a checkpoint covering all emitted output and
+is bounded separately; output after the last checkpoint prevents unsafe replay.
+HTTP denials during continuation surface as errors, not retries. Usage snapshots
+are accumulated across legs without counting the initial prompt again.
+Image streams also surface in-band provider errors.
+
+The observational harness lives in `scripts/agy-wire/`. From this package:
+
+```sh
+bun scripts/agy-wire/compare.ts --reference reference.json --candidate candidate.json \
+  --reference-pcap reference.pcap --candidate-pcap candidate.pcap --out report.json
+```
+
+Exit codes are `0` for the explicitly evaluated normalized scopes matching, `1`
+for a mismatch, and `2` for missing or malformed evidence. Omitting PCAP is not an
+L4 pass; `--scope application-tls` explicitly requests a narrower comparison.
+Raw differences and declared exclusions remain in every report. Captures may
+contain credentials and must be protected and kept out of version control.
+
+`scripts/agy-wire/analysis-1.5.9.json` records the pinned binary's provenance,
+static findings, and historical fixture results. Earlier authenticated CLI and
+transport generation runs succeeded, but neither that acceptance nor JA3/JA4
+agreement proves attestation or complete protocol identity. All-layer equivalence
+has **not** been established; the recorded TCP comparison differed.
+
 ## License
 
 MIT

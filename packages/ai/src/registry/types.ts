@@ -71,6 +71,8 @@ export interface ProviderDefinition {
 	readonly allowsMissingApiKey?: boolean;
 	/** APIs whose provider transport resolves credentials without a stored account. */
 	readonly nativeAuthApis?: readonly string[];
+	/** Default provider transport for requests, auth and discovery; explicit fetch overrides win. */
+	readonly fetch?: FetchImpl;
 	/** Provider-owned model normalization that must run before API-specific option mapping. */
 	readonly prepareModel?: ProviderModelPreparer;
 	/** Provider-owned request shaping applied before generic API dispatch. */

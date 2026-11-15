@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- When explicitly enabled, Google Antigravity uses a Go transport helper by default; source SDK installs must build it, while compiled CLI builds embed it. Explicit fetch overrides remain supported and are required for per-request proxy settings. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
+### Added
+
+- Added observational AGY wire comparison tooling with explicit exclusions and missing-evidence reporting; matching fingerprints do not establish attestation. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
+### Fixed
+
+- Antigravity continuations retain cumulative usage, avoid unsafe checkpoint replay, and surface next-leg HTTP failures. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity login uses the official CLI's hosted copy-code page with S256 PKCE and a focused input instead of redirecting to localhost; project discovery honors explicit fetch overrides. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity image streams surface provider errors, tool results use the serving model's role, and logical execution identity stays stable through tool turns. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Transport helpers support bodyless responses and stop without keeping idle hosts alive. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity tool schemas encode protobuf type enums correctly without mutating caller schemas or property names. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
