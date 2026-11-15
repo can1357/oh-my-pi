@@ -35,7 +35,7 @@ Run one agent synchronously.
 - `context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.
 {{/if}}
 {{#if steps}}
-- `steps`: ordered stages for one agent; each is sent only after it finishes the previous one, and the last stage's result is returned.
+- `steps`: ordered stages for one agent; each is sent only after it finishes the previous one. Earlier stages' reports arrive as progress messages; the last stage's result is returned.
   - First step carries `# Target` files/non-goals{{#if batchEnabled}} beyond `context`{{/if}}.
   - Each step: one `# Change` stage.
   - Last step adds `# Acceptance` observable result.

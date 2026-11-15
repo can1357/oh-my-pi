@@ -14,6 +14,7 @@ use gix::{
 use super::{
 	GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
+	patch::{path_needs_quoting, split_unquoted_paths, write_quoted_path},
 };
 use crate::{
 	error::{Error, Result},
@@ -740,11 +741,7 @@ fn render_change(
 		.map_err(|err| Error::backend("git diff", err))?;
 
 	let mut text = String::new();
-	text.push_str("diff --git a/");
-	text.push_str(&change.old_path);
-	text.push_str(" b/");
-	text.push_str(&change.new_path);
-	text.push('\n');
+	push_diff_header(&mut text, &change.old_path, &change.new_path);
 	// Callers receive the patch as a `String`, which cannot hold a text hunk of
 	// bytes that are not UTF-8. An appliable (`binary_patch`) render carries
 	// such content as a binary block instead; `git apply` takes either form.
@@ -823,7 +820,8 @@ fn render_change(
 }
 
 fn render_gitlink(change: &FileChange) -> Rendered {
-	let mut text = format!("diff --git a/{} b/{}\n", change.old_path, change.new_path);
+	let mut text = String::new();
+	push_diff_header(&mut text, &change.old_path, &change.new_path);
 	// Gitlinks have no content to score, so only an exact-id rename carries a
 	// meaningful similarity; the "compute later" sentinel has nothing to
 	// compute.
@@ -859,10 +857,10 @@ fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>
 	if let Some(similarity) = similarity {
 		let _ = writeln!(out, "similarity index {similarity}%");
 		out.push_str("rename from ");
-		out.push_str(&change.old_path);
+		push_record_path(out, "", &change.old_path);
 		out.push('\n');
 		out.push_str("rename to ");
-		out.push_str(&change.new_path);
+		push_record_path(out, "", &change.new_path);
 		out.push('\n');
 	}
 	match (change.old_mode, change.new_mode) {
@@ -1570,10 +1568,47 @@ fn push_range(out: &mut String, start: u32, len: u32) {
 	}
 }
 
+fn push_diff_header(out: &mut String, old_path: &str, new_path: &str) {
+	// Paths with spaces stay verbatim whenever that header parses back to
+	// the same paths; anything ambiguous or corrupting is C-quoted instead.
+	// No spaces means the single separator parses back to these paths, so
+	// skip the verbatim allocation on the common path.
+	let resolvable = if old_path.contains(' ') || new_path.contains(' ') {
+		let verbatim = format!("a/{old_path} b/{new_path}");
+		split_unquoted_paths(&verbatim).is_some_and(|(old, new)| old == old_path && new == new_path)
+	} else {
+		true
+	};
+	out.push_str("diff --git ");
+	push_header_side(out, "a/", old_path, resolvable);
+	out.push(' ');
+	push_header_side(out, "b/", new_path, resolvable);
+	out.push('\n');
+}
+
+fn push_header_side(out: &mut String, prefix: &str, path: &str, resolvable: bool) {
+	if resolvable && !path_needs_quoting(path) {
+		out.push_str(prefix);
+		out.push_str(path);
+	} else {
+		write_quoted_path(out, prefix, path);
+	}
+}
+
+/// Write a `---`/`+++`/`rename` path, quoting it only when verbatim output
+/// would corrupt the record (quotes, backslashes, control bytes).
+fn push_record_path(out: &mut String, prefix: &str, path: &str) {
+	if path_needs_quoting(path) {
+		write_quoted_path(out, prefix, path);
+	} else {
+		out.push_str(prefix);
+		out.push_str(path);
+	}
+}
+
 fn push_old_path(out: &mut String, change: &FileChange) {
 	if change.old_mode.is_some() {
-		out.push_str("a/");
-		out.push_str(&change.old_path);
+		push_record_path(out, "a/", &change.old_path);
 	} else {
 		out.push_str("/dev/null");
 	}
@@ -1581,8 +1616,7 @@ fn push_old_path(out: &mut String, change: &FileChange) {
 
 fn push_new_path(out: &mut String, change: &FileChange) {
 	if change.new_mode.is_some() {
-		out.push_str("b/");
-		out.push_str(&change.new_path);
+		push_record_path(out, "b/", &change.new_path);
 	} else {
 		out.push_str("/dev/null");
 	}
