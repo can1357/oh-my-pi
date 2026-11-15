@@ -518,8 +518,12 @@ function sentFiles(command: ShellCommand): string[] {
 			if (value !== undefined) files.push(value);
 		}
 	} else if (name === "http" || name === "https" || name === "xh") {
+		// A request item's separator is the first run of `:`, `=` and `@` in it; one that ends in `@`
+		// reads a file: `field@file` (a form upload), `field=@file`, `field:=@file`, `@file`.
 		for (const arg of argv) {
-			if (arg.includes("=@") || arg.startsWith("@")) files.push(arg.slice(arg.indexOf("@") + 1));
+			if (arg.startsWith("-")) continue;
+			const separator = /[:=@]+/.exec(arg);
+			if (separator?.[0].endsWith("@")) files.push(arg.slice(separator.index + separator[0].length).split(";")[0]);
 		}
 	} else if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
 		// Only a copy to a remote destination sends anything; a local copy or a download does not.
