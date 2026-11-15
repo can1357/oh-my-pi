@@ -2883,7 +2883,13 @@ fn minimize_cargo_output(
 	projection: &mut v1::OutputProjection,
 	store: &BlobStore,
 ) -> Option<WireBlob> {
-	let config = omp_minimizer::MinimizerConfig { enabled: true, ..Default::default() };
+	// Defense in depth: the caller already gates on a single cargo command, and
+	// the engine's `only` set refuses every other program if that gate drifts.
+	let config = omp_minimizer::MinimizerConfig {
+		enabled: true,
+		only: std::iter::once(String::from("cargo")).collect(),
+		..Default::default()
+	};
 	let artifact = projection.artifact.as_ref()?;
 	if artifact.size > u64::from(config.max_capture_bytes) {
 		return None;
@@ -5914,6 +5920,59 @@ mod tests {
 				.as_ref(),
 			expected.as_slice(),
 		);
+	}
+
+	#[test]
+	fn single_cargo_command_gate_accepts_only_plain_cargo() {
+		assert!(is_single_cargo_command("cargo build"));
+		assert!(is_single_cargo_command("cargo nextest run -p omp-envd"));
+		assert!(is_single_cargo_command("cargo test --doc -p omp-minimizer"));
+		assert!(!is_single_cargo_command("cargo build | cat"));
+		assert!(!is_single_cargo_command("cargo build && true"));
+		assert!(!is_single_cargo_command("cat Cargo.toml"));
+		assert!(!is_single_cargo_command("just test-pkg omp-envd"));
+	}
+
+	#[test]
+	fn minimize_cargo_output_rewrites_model_text_and_returns_original_blob() {
+		let root = tempfile::tempdir().expect("temporary artifact root");
+		let store = BlobStore::open(root.path().join("artifacts")).expect("artifact store");
+		let original = format!(
+			"{}    Finished `dev` profile in 0.10s\n",
+			"   Compiling example v0.1.0\n".repeat(80)
+		);
+		let reference = store.put(original.as_bytes()).expect("store cargo capture");
+		let mut projection = v1::OutputProjection {
+			request:      v1::OutputRequest::Bounded as i32,
+			source_bytes: reference.size,
+			inline_bytes: reference.size,
+			omitted:      false,
+			artifact:     Some(wire_blob(&reference)),
+			model_text:   None,
+		};
+
+		let spilled = minimize_cargo_output("cargo build", 0, &mut projection, &store)
+			.expect("cargo build minimizes");
+		assert_eq!(spilled.hash.as_ref(), reference.hash.as_bytes());
+		assert_eq!(spilled.size, reference.size);
+		let model_text = projection.model_text.expect("minimized model_text");
+		assert!(!model_text.contains("Compiling example"));
+		assert!(model_text.len() * 4 < original.len());
+		assert_eq!(store.get(&reference).expect("original remains").as_ref(), original.as_bytes());
+
+		let mut passthrough = v1::OutputProjection {
+			request:      v1::OutputRequest::Bounded as i32,
+			source_bytes: reference.size,
+			inline_bytes: reference.size,
+			omitted:      false,
+			artifact:     Some(wire_blob(&reference)),
+			model_text:   None,
+		};
+		assert!(
+			minimize_cargo_output("cargo build | cat", 0, &mut passthrough, &store).is_none(),
+			"piped cargo must not rewrite the projection"
+		);
+		assert!(passthrough.model_text.is_none());
 	}
 
 	#[tokio::test]
