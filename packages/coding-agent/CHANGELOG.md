@@ -48,7 +48,7 @@
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
 ### Fixed
 
-- Automatic session titles now include operator-attributed `collab-prompt` messages, so sessions started through a collab guest receive titles and later title reviews use those prompts as user context.
+- Automatic session titles now include operator-attributed `collab-prompt` messages, so sessions started through a collab guest receive titles and later title reviews use those prompts as user context. The unexpected-stop judge also uses collab prompts as the latest operator request.
 
 ## [18.20.2] - 2026-11-14
 
