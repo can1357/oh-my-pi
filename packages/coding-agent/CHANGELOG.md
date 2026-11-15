@@ -4,12 +4,12 @@
 
 ### Added
 
-- The bash interceptor (`bashInterceptor.enabled`) redirects a bare `pwsh`/`powershell.exe` invocation to the `powershell` tool when it is available, so PowerShell runs in the persistent host with a correctly reset `$env:PSModulePath` instead of whatever bash's own environment carries
-- The `powershell` tool takes an `edition` argument (`pwsh` or `powershell`/Windows PowerShell) so a conversation can run both in the same session — each edition keeps its own independent session host, so switching never discards the other's state. New `powershell.defaultEdition` setting (default `pwsh`) picks which one a call uses when it doesn't specify
+- The bash interceptor (`bashInterceptor.enabled`) redirects a bare `pwsh`/`powershell.exe` invocation to the `powershell` tool when it is available, so PowerShell runs in the persistent host with a correctly reset `$env:PSModulePath` instead of whatever bash's own environment carries ([#13236](https://github.com/can1357/oh-my-pi/pull/13236) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
+- The `powershell` tool takes an `edition` argument (`pwsh` or `powershell`/Windows PowerShell) so a conversation can run both in the same session — each edition keeps its own independent session host, so switching never discards the other's state. New `powershell.defaultEdition` setting (default `pwsh`) picks which one a call uses when it doesn't specify ([#13236](https://github.com/can1357/oh-my-pi/pull/13236) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 
 ### Changed
 
-- Models now get explicit PowerShell routing even when the `powershell` tool is only listed in the `xd://` catalog: its catalog line names both editions and the configured default, the `bash` prompt says to use the `powershell` tool with `edition` instead of running pwsh/powershell.exe, and the tool docs warn against nesting `powershell.exe` inside a pwsh command
+- Models now get explicit PowerShell routing even when the `powershell` tool is only listed in the `xd://` catalog: its catalog line names both editions and the configured default, the `bash` prompt says to use the `powershell` tool with `edition` instead of running pwsh/powershell.exe, and the tool docs warn against nesting `powershell.exe` inside a pwsh command ([#13236](https://github.com/can1357/oh-my-pi/pull/13236) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 
 ## [18.20.2] - 2026-11-14
 
