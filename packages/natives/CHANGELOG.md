@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Committing or writing a tree now fails when the index still has unresolved conflicts, instead of publishing a commit that drops those files ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
