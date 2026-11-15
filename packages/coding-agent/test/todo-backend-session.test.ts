@@ -197,7 +197,7 @@ describe("todo backends in a real session", () => {
 
 		await todo(session, { op: "view" });
 		const failed = await todo(session, { op: "done", task: "does not exist" });
-		const accepted = await modelCall({ op: "done", task: "a", reason: null });
+		const accepted = await modelCall({ op: "done", task: "a", phase: null });
 		const rejected = await modelCall({ op: "done", task: "b", list: [{ phase: "x", items: [] }] });
 
 		expect(failed.isError).toBe(true);
