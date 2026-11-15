@@ -1,11 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { clearGuardProbeCache } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 
 function createSession(cwd: string, settings: Record<string, unknown> = {}): ToolSession {
 	return {
@@ -16,6 +20,7 @@ function createSession(cwd: string, settings: Record<string, unknown> = {}): Too
 		settings: Settings.isolated({
 			"async.enabled": false,
 			"bash.autoBackground.enabled": false,
+			// Probes run only where their answer can change the decision; yolo is covered separately.
 			"tools.approvalMode": "always-ask",
 			"tools.guardRules": true,
 			...settings,
@@ -142,6 +147,168 @@ describe("bash guard rules", () => {
 		const allowCat = { "bash.patterns": [{ match: "cat *", approval: "allow" }] };
 		expect(ruleOf(bashApproval(cwd, "cat ~/.ssh/id_rsa", {}, allowCat))).toBe("credential_read");
 		expect(bashApproval(cwd, "cat README.md", {}, allowCat)).toEqual({ tier: "write", policy: "allow" });
+	});
+});
+
+describe("discard_changes", () => {
+	let temp: TempDir;
+	let repo: string;
+
+	beforeEach(async () => {
+		temp = TempDir.createSync("@omp-guard-discard-");
+		repo = temp.path();
+		fs.writeFileSync(path.join(repo, "a.txt"), "one\n");
+		await $`git init -q && git add a.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(repo)
+			.quiet();
+	});
+	afterEach(() => {
+		clearGuardProbeCache();
+		temp.removeSync();
+	});
+
+	const discarding = [
+		"git reset --hard",
+		"git checkout .",
+		"git checkout -f main",
+		"git restore .",
+		"git switch -f main",
+	];
+
+	it("passes discarding commands on a clean tree", () => {
+		for (const command of [...discarding, "git clean -fd"]) {
+			expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
+		}
+	});
+
+	it("flags discarding commands when tracked changes would be lost", () => {
+		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+		for (const command of discarding) {
+			expect({ command, rule: ruleOf(bashApproval(repo, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		// Staged-only restores and dry runs keep the work.
+		expect(bashApproval(repo, "git restore --staged .")).toBe("exec");
+		expect(bashApproval(repo, "git clean -n")).toBe("exec");
+		// A matching `bash.patterns` allow does not bypass the rule, as with critical patterns.
+		const allowGit = { "bash.patterns": [{ match: "git *", approval: "allow" }] };
+		expect(ruleOf(bashApproval(repo, "git reset --hard", {}, allowGit))).toBe("discard_changes");
+		expect(bashApproval(repo, "git status", {}, allowGit)).toEqual({ tier: "write", policy: "allow" });
+	});
+
+	it("flags git clean only when it would delete untracked files", () => {
+		expect(bashApproval(repo, "git clean -f")).toBe("exec");
+		fs.writeFileSync(path.join(repo, "scratch.txt"), "x\n");
+		clearGuardProbeCache();
+		expect(ruleOf(bashApproval(repo, "git clean -f"))).toBe("discard_changes");
+		// An untracked file survives `reset --hard`, so that stays allowed.
+		expect(bashApproval(repo, "git reset --hard")).toBe("exec");
+	});
+
+	it("probes the directory the command runs in", () => {
+		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+		const outside = TempDir.createSync("@omp-guard-outside-");
+		try {
+			expect(bashApproval(outside.path(), "git reset --hard")).toBe("exec");
+			expect(ruleOf(bashApproval(outside.path(), `cd ${repo} && git reset --hard`))).toBe("discard_changes");
+			expect(ruleOf(bashApproval(outside.path(), "git reset --hard", { cwd: repo }))).toBe("discard_changes");
+			expect(ruleOf(bashApproval(outside.path(), `git -C ${repo} checkout .`))).toBe("discard_changes");
+			expect(ruleOf(bashApproval(outside.path(), `bash -c "cd ${repo}; eval 'git checkout .'"`))).toBe(
+				"discard_changes",
+			);
+		} finally {
+			outside.removeSync();
+		}
+	});
+
+	it("scopes a cd inside a ( ) subshell to the subshell", () => {
+		const clean = TempDir.createSync("@omp-guard-clean-");
+		try {
+			fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+			// The reset runs in the clean directory, so it destroys nothing.
+			expect(bashApproval(clean.path(), `(cd ${repo}; true); git reset --hard`)).toBe("exec");
+			// The reset runs in the dirty repo, not where the subshell went.
+			expect(ruleOf(bashApproval(repo, `(cd ${clean.path()}); git reset --hard`))).toBe("discard_changes");
+			// Inside the group the cd still applies.
+			expect(ruleOf(bashApproval(clean.path(), `(cd ${repo} && git reset --hard)`))).toBe("discard_changes");
+		} finally {
+			clean.removeSync();
+		}
+	});
+
+	it("runs no program the repository configures while probing", async () => {
+		const marker = path.join(path.dirname(repo), `${path.basename(repo)}-marker`);
+		const hook = path.join(repo, "hook.sh");
+		fs.writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\ncat\n`);
+		fs.chmodSync(hook, 0o755);
+		fs.writeFileSync(path.join(repo, ".gitattributes"), "a.txt filter=evil\n");
+		await $`git config core.fsmonitor ${hook} && git config filter.evil.clean ${hook} && git config filter.evil.required true`
+			.cwd(repo)
+			.quiet();
+		try {
+			// Same size, new mtime: git compares content, which runs the clean filter if allowed.
+			const future = new Date(Date.now() + 60_000);
+			fs.utimesSync(path.join(repo, "a.txt"), future, future);
+			expect(bashApproval(repo, "git reset --hard")).toBe("exec");
+			fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+			clearGuardProbeCache();
+			expect(ruleOf(bashApproval(repo, "git reset --hard"))).toBe("discard_changes");
+			expect(fs.existsSync(marker)).toBe(false);
+		} finally {
+			fs.rmSync(marker, { force: true });
+		}
+	});
+
+	it("ignores an ambient GIT_DIR that points at another repository", async () => {
+		const other = TempDir.createSync("@omp-guard-other-");
+		const previous = Bun.env.GIT_DIR;
+		try {
+			await $`git init -q`.cwd(other.path()).quiet();
+			fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+			Bun.env.GIT_DIR = path.join(other.path(), ".git");
+			expect(ruleOf(bashApproval(repo, "git reset --hard"))).toBe("discard_changes");
+		} finally {
+			if (previous === undefined) delete Bun.env.GIT_DIR;
+			else Bun.env.GIT_DIR = previous;
+			other.removeSync();
+		}
+	});
+});
+
+describe.skipIf(process.platform === "win32")("kills_harness", () => {
+	it("flags pkill/killall only when pgrep lists this process or an ancestor", () => {
+		const cwd = process.cwd();
+		// `-P <ppid>` matches every child of our parent, this test process included.
+		expect(ruleOf(bashApproval(cwd, `pkill -P ${process.ppid}`))).toBe("kills_harness");
+		expect(ruleOf(bashApproval(cwd, `bash -c "eval 'pkill -9 -P ${process.ppid}'"`))).toBe("kills_harness");
+		expect(bashApproval(cwd, "pkill -f my-dev-server")).toBe("exec");
+		expect(bashApproval(cwd, "killall omp-guard-no-such-process")).toBe("exec");
+	});
+
+	it("probes once per call across approval paths and skips probes when yolo ignores the result", () => {
+		const cwd = process.cwd();
+		const command = `pkill -P ${process.ppid}`;
+		clearGuardProbeCache();
+		const spawn = spyOn(Bun, "spawnSync");
+		try {
+			const tool = new BashTool(createSession(cwd));
+			const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
+			expect(ruleOf(approval({ command }))).toBe("kills_harness");
+			const probes = spawn.mock.calls.length;
+			expect(probes).toBeGreaterThan(0);
+			approval({ command });
+			tool.formatApprovalDetails({ command });
+			expect(spawn.mock.calls.length).toBe(probes);
+
+			clearGuardProbeCache();
+			spawn.mockClear();
+			expect(bashApproval(cwd, command, {}, { "tools.approvalMode": "yolo" })).toBe("exec");
+			expect(spawn).not.toHaveBeenCalled();
+			// A user bash policy makes the hit matter again under yolo.
+			const policy = { "tools.approvalMode": "yolo", "tools.approval": { bash: "prompt" } };
+			expect(ruleOf(bashApproval(cwd, command, {}, policy))).toBe("kills_harness");
+		} finally {
+			spawn.mockRestore();
+		}
 	});
 });
 

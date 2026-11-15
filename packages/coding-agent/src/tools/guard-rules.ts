@@ -23,15 +23,23 @@
  * - A secret copied to another file first is sent under that file's name:
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
  *
- * The `credential_read` and `secret_send` rules are derived from `src/intern/guard.py` of
- * nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit e1bbd096f9), Copyright Nace
- * AI, licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
- * Modified for omp: rewritten in TypeScript; a hit returns an approval override instead of refusing
- * the call; credential locations include omp's own stores. See
+ * `discard_changes` and `kills_harness` confirm a match with a read-only probe (the
+ * `@oh-my-pi/pi-natives/vcs` discard check, `pgrep`) and fire only when the probe shows something
+ * would be lost. A probe that fails, times out, or cannot run counts as no match.
+ *
+ * The `credential_read`, `secret_send`, `discard_changes`, and `kills_harness` rules are derived
+ * from `src/intern/guard.py` of nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit
+ * e1bbd096f9), Copyright Nace AI, licensed under the Apache License, Version 2.0
+ * (http://www.apache.org/licenses/LICENSE-2.0). Modified for omp: rewritten in TypeScript; a hit
+ * returns an approval override instead of refusing the call; credential locations include omp's own
+ * stores; the git probe runs through the native VCS helper without repository-configured programs;
+ * a `git stash` earlier in the same `&&` chain counts as keeping the work. See
  * packages/coding-agent/THIRD-PARTY-NOTICES.txt.
  */
 import * as os from "node:os";
 import * as path from "node:path";
+import { Process, type VcsDiscardCheck } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-utils";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
@@ -105,7 +113,13 @@ export const CRITICAL_BASH_PATTERNS = [
 /** Reason the bash tool reports for a {@link CRITICAL_BASH_PATTERNS} match. */
 export const CRITICAL_PATTERN_REASON = "Critical pattern detected";
 
-export type GuardRule = "critical_pattern" | "nesting_limit" | "credential_read" | "secret_send";
+export type GuardRule =
+	| "critical_pattern"
+	| "nesting_limit"
+	| "credential_read"
+	| "secret_send"
+	| "discard_changes"
+	| "kills_harness";
 
 /** A fixed rule a call breaks. */
 export interface GuardHit {
@@ -809,15 +823,457 @@ function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefi
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
+// -- probes ------------------------------------------------------------------------------------------
+
+const PROBE_TIMEOUT_MS = 3_000;
+/**
+ * How long a probe's answer is reused. One bash call resolves approval on several paths within
+ * milliseconds (`resolveApproval`, the extension wrapper before and after `tool_call` hooks,
+ * speculation, the approval prompt details), and a compound prompt asks the same question per
+ * segment; each must see one probe, not spawn its own. Kept short so a later call, after the
+ * agent has changed the tree, probes again.
+ */
+const PROBE_CACHE_TTL_MS = 1_000;
+const PROBE_CACHE_MAX = 64;
+const probeCache = new Map<string, { at: number; answer: string | boolean | undefined }>();
+
+/** Forgets every memoized probe answer; tests that change a repository between calls use it. */
+export function clearGuardProbeCache(): void {
+	probeCache.clear();
+}
+
+/**
+ * The answer to the probe `key`: reused while fresh, else `run`'s, which is memoized for
+ * {@link PROBE_CACHE_TTL_MS} from when it arrived, so a slow probe is reused like a fast one.
+ * A probe that throws answers `undefined`.
+ */
+function cachedProbe(key: string, run: () => string | boolean | undefined): string | boolean | undefined {
+	const cached = probeCache.get(key);
+	if (cached && Date.now() - cached.at < PROBE_CACHE_TTL_MS) return cached.answer;
+	let answer: string | boolean | undefined;
+	try {
+		answer = run();
+	} catch {
+		answer = undefined;
+	}
+	const now = Date.now();
+	probeCache.delete(key);
+	probeCache.set(key, { at: now, answer });
+	for (const [oldest, entry] of probeCache) {
+		if (probeCache.size <= PROBE_CACHE_MAX && now - entry.at < PROBE_CACHE_TTL_MS) break;
+		probeCache.delete(oldest);
+	}
+	return answer;
+}
+
+// -- discard_changes ---------------------------------------------------------------------------------
+
+const GIT_VALUE_OPTIONS: Record<string, true> = {
+	"-C": true,
+	"-c": true,
+	"--namespace": true,
+	"--exec-path": true,
+	"--config-env": true,
+};
+const MASS_PATHSPECS: Record<string, true> = { ".": true, ":/": true, "*": true, ":(top)": true, "./": true };
+
+/**
+ * Where a git command works: the directory it runs in after its `-C`s, and the repository and work
+ * tree it names with `--git-dir` and `--work-tree` (or `GIT_DIR=` and `GIT_WORK_TREE=` it runs
+ * with), resolved against that directory as git does.
+ */
+interface GitTarget {
+	where: string;
+	gitDir?: string;
+	workTree?: string;
+}
+
+/**
+ * A git command's subcommand, its arguments, and where it works; no `target` when a directory it
+ * names is a word the guard cannot resolve.
+ */
+function gitInvocation(command: ShellCommand, home: string): { sub: string; rest: string[]; target?: GitTarget } {
+	const argv = args(command);
+	let where: string | undefined = command.cwd;
+	const named: { gitDir?: string; workTree?: string } = {};
+	for (const assignment of command.assignments) {
+		const eq = assignment.indexOf("=");
+		const name = assignment.slice(0, eq);
+		if (name === "GIT_DIR") named.gitDir = assignment.slice(eq + 1);
+		else if (name === "GIT_WORK_TREE") named.workTree = assignment.slice(eq + 1);
+	}
+	let i = 0;
+	while (i < argv.length && argv[i].startsWith("-")) {
+		const arg = argv[i];
+		const eq = arg.indexOf("=");
+		const option = eq > 0 ? arg.slice(0, eq) : arg;
+		if (option === "--git-dir" || option === "--work-tree") {
+			const value = eq > 0 ? arg.slice(eq + 1) : argv[++i];
+			if (option === "--git-dir") named.gitDir = value;
+			else named.workTree = value;
+			i++;
+		} else if (Object.hasOwn(GIT_VALUE_OPTIONS, arg)) {
+			// Each `-C` is relative to the directory the one before it left.
+			if (arg === "-C" && where !== undefined && i + 1 < argv.length) {
+				where = resolveCommandWordPath(command, argv[i + 1], where, home);
+			}
+			i += 2;
+		} else {
+			i++;
+		}
+	}
+	const sub = i < argv.length ? argv[i] : "";
+	const rest = argv.slice(i + 1);
+	if (where === undefined) return { sub, rest };
+	const target: GitTarget = { where };
+	for (const key of ["gitDir", "workTree"] as const) {
+		const word = named[key];
+		if (word === undefined) continue;
+		const resolved = resolveCommandWordPath(command, word, where, home);
+		if (resolved === undefined) return { sub, rest };
+		target[key] = resolved;
+	}
+	return { sub, rest, target };
+}
+
+/** Whether `arg` is the long option `name` or an abbreviation git expands to it (`--har` for `--hard`). */
+function isLongOption(arg: string, name: string): boolean {
+	const flag = arg.split("=", 1)[0];
+	return flag.length > 2 && name.startsWith(flag);
+}
+
+/** A word the shell expands before git sees it: a variable, a substitution (its key), a leading `~`. */
+const SHELL_EXPANDED_RE = /[$\0]|^~/;
+/**
+ * A brace expansion, which can make one word several (`{build,dist}`, `out{1..3}`). A word records
+ * only that some part of it was quoted, not which, so a quoted one counts too.
+ */
+const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
+
+/**
+ * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run. Without
+ * `-f`, git refuses to clean (by default), so checking it anyway only prompts for a call that fails.
+ * `-q` and `-i` do not change what is deleted; a second `-f` adds untracked nested repositories. A
+ * pathspec the shell expands is resolved like a path (`"$PWD"`, `~/repo`); when one cannot be
+ * (another variable, a substitution, a brace expansion), the whole directory is previewed. An
+ * exclude the shell expands is dropped, which only widens the preview.
+ */
+function cleanCheck(rest: readonly string[], command: ShellCommand, scope: GuardScope): VcsDiscardCheck | undefined {
+	let force = 0;
+	let directories = false;
+	let includeIgnored = false;
+	let ignoredOnly = false;
+	const excludes: string[] = [];
+	const pathspecs: string[] = [];
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i];
+		if (arg === "--") {
+			pathspecs.push(...rest.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--") && arg.length > 2) {
+			if (isLongOption(arg, "--dry-run")) return undefined;
+			if (isLongOption(arg, "--force")) {
+				force++;
+			} else if (isLongOption(arg, "--exclude")) {
+				const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i];
+				if (value !== undefined) excludes.push(value);
+			}
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				if (letter === "n") return undefined;
+				if (letter === "f") force++;
+				else if (letter === "d") directories = true;
+				else if (letter === "x") includeIgnored = true;
+				else if (letter === "X") ignoredOnly = true;
+				else if (letter === "e") {
+					// `-e` takes the rest of the bundle, or the next word.
+					const value = k + 1 < arg.length ? arg.slice(k + 1) : rest[++i];
+					if (value !== undefined) excludes.push(value);
+					break;
+				}
+			}
+		} else {
+			pathspecs.push(arg);
+		}
+	}
+	const resolved = pathspecs.map(word => {
+		if (BRACE_EXPANSION_RE.test(word)) return undefined;
+		if (!SHELL_EXPANDED_RE.test(word)) return word;
+		return ABSOLUTE_EXPANSION_RE.test(word)
+			? resolveCommandWordPath(command, word, command.cwd, scope.home)
+			: undefined;
+	});
+	return {
+		clean: true,
+		directories,
+		includeIgnored,
+		ignoredOnly,
+		nestedRepositories: force > 1,
+		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word) && !BRACE_EXPANSION_RE.test(word)),
+		pathspecs: resolved.every((word): word is string => word !== undefined) ? resolved : [],
+	};
+}
+
+/** The discard check for a git command, with the rule's reason, or `undefined` when it discards nothing. */
+function discardProbe(
+	command: ShellCommand,
+	scope: GuardScope,
+	sub: string,
+	rest: readonly string[],
+): { check: VcsDiscardCheck; what: string } | undefined {
+	const has = (name: string) => rest.some(arg => arg.startsWith("--") && isLongOption(arg, name));
+	const short = rest
+		.filter(arg => /^-[A-Za-z]+$/.test(arg))
+		.map(arg => arg.slice(1))
+		.join("");
+	const massPath = rest.some(arg => !arg.startsWith("-") && Object.hasOwn(MASS_PATHSPECS, arg));
+	const tracked = {
+		check: {},
+		what: `\`git ${sub}\` would discard uncommitted changes; keep them recoverable first, e.g. \`git stash && git ${sub} ...\``,
+	};
+	if (sub === "reset" && (has("--hard") || has("--merge"))) return tracked;
+	if (
+		(sub === "checkout" || sub === "switch") &&
+		(has("--force") || has("--discard-changes") || short.includes("f") || massPath)
+	) {
+		return tracked;
+	}
+	if (sub === "restore" && massPath) {
+		const stagedOnly = (has("--staged") || short.includes("S")) && !(has("--worktree") || short.includes("W"));
+		return stagedOnly ? undefined : tracked;
+	}
+	if (sub === "clean") {
+		const check = cleanCheck(rest, command, scope);
+		return (
+			check && {
+				check,
+				what: "`git clean` would delete untracked files that exist nowhere else; delete specific files instead",
+			}
+		);
+	}
+	return undefined;
+}
+
+/**
+ * What a `git stash` saves besides every change to tracked files: untracked files (`-u`), and
+ * ignored ones too (`-a`).
+ */
+interface Stashed {
+	untracked: boolean;
+	ignored: boolean;
+}
+
+/**
+ * What `git stash` with these arguments saves, or `undefined` when it saves nothing or only part of
+ * the tracked changes: some paths, some hunks (`-p`), or the index alone (`--staged`).
+ */
+function stashSaves(rest: readonly string[]): Stashed | undefined {
+	const save = rest[0] === "save";
+	const options = rest[0] === "push" || save ? rest.slice(1) : rest;
+	// `list`, `show`, `apply`, `pop`, `drop`, ... save nothing.
+	if (options === rest && rest.length > 0 && !rest[0].startsWith("-")) return undefined;
+	const saved: Stashed = { untracked: false, ignored: false };
+	for (let i = 0; i < options.length; i++) {
+		const arg = options[i];
+		if (arg === "--") {
+			// `push -- <paths>` stashes only those paths; `save -- <message>` everything.
+			if (!save && i + 1 < options.length) return undefined;
+			break;
+		}
+		if (arg.startsWith("--") && arg.length > 2) {
+			if (isLongOption(arg, "--message")) {
+				if (!arg.includes("=")) i++;
+			} else if (["--patch", "--staged", "--pathspec-from-file"].some(name => isLongOption(arg, name))) {
+				return undefined;
+			} else if (isLongOption(arg, "--all")) {
+				saved.untracked = saved.ignored = true;
+			} else if (isLongOption(arg, "--include-untracked")) {
+				saved.untracked = true;
+			}
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				if (letter === "p" || letter === "S") return undefined;
+				if (letter === "a") saved.untracked = saved.ignored = true;
+				else if (letter === "u") saved.untracked = true;
+				else if (letter === "m") {
+					// `-m` takes the rest of the bundle, or the next word.
+					if (k === arg.length - 1) i++;
+					break;
+				}
+			}
+		} else if (!save) {
+			// A pathspec: only those paths are stashed.
+			return undefined;
+		}
+	}
+	return saved;
+}
+
+/** `git stash` subcommands that take saved work back out of the stash: into the tree, or away. */
+const STASH_RELEASES: Record<string, true> = { pop: true, drop: true, clear: true, branch: true };
+
+/**
+ * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its
+ * `&&` chain) saved where `target` points and still hold, or `undefined` for none. A later `pop`,
+ * `drop`, `clear` or `branch`, wherever it runs, gives that up.
+ */
+function stashedBefore(command: ShellCommand, target: GitTarget, scope: GuardScope): Stashed | undefined {
+	let stashed: Stashed | undefined;
+	for (const earlier of command.succeeded) {
+		if (earlier.argv[0] !== "git") continue;
+		const stash = gitInvocation(earlier, scope.home);
+		if (stash.sub !== "stash") continue;
+		if (stash.rest.length > 0 && Object.hasOwn(STASH_RELEASES, stash.rest[0])) {
+			stashed = undefined;
+			continue;
+		}
+		const same =
+			stash.target?.where === target.where &&
+			stash.target.gitDir === target.gitDir &&
+			stash.target.workTree === target.workTree;
+		const saved = same ? stashSaves(stash.rest) : undefined;
+		if (saved) {
+			stashed = {
+				untracked: saved.untracked || (stashed?.untracked ?? false),
+				ignored: saved.ignored || (stashed?.ignored ?? false),
+			};
+		}
+	}
+	return stashed;
+}
+
+function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
+	if (command.argv[0] !== "git") return undefined;
+	const { sub, rest, target } = gitInvocation(command, scope.home);
+	const probe = discardProbe(command, scope, sub, rest);
+	if (!probe || !target) return undefined;
+	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
+	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
+	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full.
+	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, target, scope);
+	if (stashed) {
+		if (!check.clean || stashed.ignored) return undefined;
+		if (stashed.untracked) {
+			if (!check.includeIgnored && !check.ignoredOnly) return undefined;
+			check = { ...check, includeIgnored: false, ignoredOnly: true };
+		}
+	}
+	const { where } = target;
+	const answer = cachedProbe(`git\0${where}\0${JSON.stringify(check)}`, () => vcs.discardsWorkSync(where, check));
+	return answer === true ? hit("discard_changes", probe.what) : undefined;
+}
+
+// -- kills_harness -----------------------------------------------------------------------------------
+
+/** This process and its ancestors below init. */
+function harnessLineage(): number[] {
+	const pids: number[] = [];
+	let pid: number | null = process.pid;
+	while (pid !== null && pid > 1 && !pids.includes(pid) && pids.length < 32) {
+		pids.push(pid);
+		pid = Process.fromPid(pid)?.ppid ?? null;
+	}
+	return pids;
+}
+
+/** A signal given as an option (`-9`, `-KILL`); single capitals such as `-P` are matching options. */
+const SIGNAL_OPTION_RE = /^-(?:\d+|[A-Z][A-Z0-9+-]+)$/;
+const KILLALL_VALUE_OPTIONS: Record<string, true> = {
+	"-u": true,
+	"--user": true,
+	"-o": true,
+	"--older-than": true,
+	"-y": true,
+	"--younger-than": true,
+	"-n": true,
+	"--ns": true,
+	"-Z": true,
+};
+
+/** The `pgrep` argument lists that match what a `pkill`/`killall` would signal. */
+function killMatchProbes(command: ShellCommand): string[][] {
+	const name = command.argv[0];
+	const signalValues = name === "pkill" ? ["--signal"] : ["-s", "--signal"];
+	const kept: string[] = [];
+	const argv = args(command);
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (signalValues.includes(arg)) i++;
+		else if (!(arg.startsWith("--signal=") || SIGNAL_OPTION_RE.test(arg) || arg === "-e" || arg === "--echo")) {
+			kept.push(arg);
+		}
+	}
+	if (name === "pkill") return kept.some(arg => !arg.startsWith("-")) ? [["pgrep", ...kept]] : [];
+	const names: string[] = [];
+	for (let i = 0; i < kept.length; i++) {
+		if (Object.hasOwn(KILLALL_VALUE_OPTIONS, kept[i])) i++;
+		else if (!kept[i].startsWith("-")) names.push(kept[i]);
+	}
+	const match = [
+		...(kept.includes("-I") || kept.includes("--ignore-case") ? ["-i"] : []),
+		...(kept.includes("-r") || kept.includes("--regexp") ? [] : ["-x"]),
+	];
+	return names.map(processName => ["pgrep", ...match, "--", processName]);
+}
+
+function killsHarness(command: ShellCommand): GuardHit | undefined {
+	const name = command.argv[0];
+	if (name !== "pkill" && name !== "killall") return undefined;
+	const probes = killMatchProbes(command);
+	if (probes.length === 0) return undefined;
+	const lineage = harnessLineage();
+	for (const probe of probes) {
+		if (probe.some(arg => arg.includes("\0"))) continue;
+		const output = cachedProbe(probe.join("\0"), () => {
+			const result = Bun.spawnSync(probe, {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+				timeout: PROBE_TIMEOUT_MS,
+			});
+			return result.success ? result.stdout.toString() : undefined;
+		});
+		if (typeof output !== "string") continue;
+		const matched = output
+			.split("\n")
+			.map(line => Number.parseInt(line.trim(), 10))
+			.filter(pid => lineage.includes(pid));
+		if (matched.length > 0) {
+			return hit(
+				"kills_harness",
+				`\`${name}\` would also kill the omp process running this session or a parent of it (PID ${matched.join(", ")}); stop only what you started, by PID or with a pattern that matches nothing else`,
+			);
+		}
+	}
+	return undefined;
+}
+
 // -- entry points ------------------------------------------------------------------------------------
+
+/** Options for {@link findShellGuardHit}. */
+export interface ShellGuardOptions {
+	/**
+	 * Whether `discard_changes` and `kills_harness` may run their probes. Without probes those
+	 * rules never fire; callers turn them off when the answer cannot change the decision.
+	 */
+	probe?: boolean;
+}
 
 /**
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
  * command it runs. A command nested deeper than the parser follows, or with more nested script
- * text than it reads, fails closed (`nesting_limit`).
+ * text than it reads, fails closed (`nesting_limit`). Probing rules run only after every cheap rule
+ * has passed.
  */
-export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
+export function findShellGuardHit(
+	command: string,
+	scope: GuardScope,
+	options: ShellGuardOptions = {},
+): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
 	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
@@ -851,6 +1307,13 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 			pipeline.map(c => secretSend(c, scope)).find(Boolean) ??
 			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
 		if (found) return found;
+	}
+	if (options.probe === false) return undefined;
+	for (const pipeline of pipelines) {
+		for (const simple of pipeline) {
+			const found = discardChanges(simple, scope) ?? killsHarness(simple);
+			if (found) return found;
+		}
 	}
 	return undefined;
 }
