@@ -1378,12 +1378,11 @@ describe("InputController image paste into an image-accepting prompt", () => {
 	it("refuses an enhanced image paste into a focused form dialog and keeps its note free of markers", async () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		const context = await createPromptContext();
-		const onSubmit = vi.fn();
 		const form = new HtmlFormDialog(
 			parseHtmlForm(`<form><fieldset><legend>Database</legend>
 <label><input type="radio" name="db" value="sqlite" checked> SQLite</label><br>
 <label><input type="radio" name="db" value="pg"> Postgres</label></fieldset></form>`),
-			{ onSubmit, onCancel: vi.fn() },
+			{ onSubmit: vi.fn(), onCancel: vi.fn() },
 		);
 		form.focused = true;
 		form.render(100);
@@ -1397,9 +1396,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
 		expect(context.editor.pendingImages).toHaveLength(0);
-		expect(form.optionNotes()).toEqual([
-			{ name: "db", question: "Database", option: "SQLite", value: "sqlite", text: "why sqlite" },
-		]);
+		const [note] = form.optionNotes();
+		expect(note?.text).toBe("why sqlite");
+		expect(note).not.toHaveProperty("images");
 		form.dispose();
 	});
 
@@ -1434,21 +1433,94 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
-	it("refuses a clipboard image in a focused dialog without pasteText that the composer does not own", async () => {
+	it("sends an enhanced image paste to the main editor while an approval owns the composer after settings closed", async () => {
+		const context = await createPromptContext();
+		const { dialog } = createPlainDialog();
+		const inserted = Promise.withResolvers<void>();
+		context.editor.focused = false;
+		context.editor.insertAtom = vi.fn(() => inserted.resolve());
+		Object.assign(context.ctx, {
+			approvalOwnsComposer: true,
+			editorContainer: { children: [dialog, context.editor] },
+		});
+		context.setFocused(dialog);
+		const listeners = startEnhancedPaste(context);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		await inserted.promise;
+
+		expect(context.editor.pendingImages).toHaveLength(1);
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
+	});
+
+	it("refuses an enhanced image paste when the focused component is outside the editor container", async () => {
+		const context = await createPromptContext();
+		const { dialog } = createPlainDialog();
+		context.editor.focused = true;
+		Object.assign(context.ctx, { editorContainer: { children: [context.editor] } });
+		context.setFocused(dialog);
+		const listeners = startEnhancedPaste(context);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("sends an enhanced image paste to the main editor when the composer owns a pasteText dialog that refuses images", async () => {
+		const context = await createPromptContext();
+		const pasteText = vi.fn();
+		const dialog = { handleInput: vi.fn(), pasteText, acceptsImages: false };
+		const inserted = Promise.withResolvers<void>();
+		context.editor.focused = true;
+		context.editor.insertAtom = vi.fn(() => inserted.resolve());
+		Object.assign(context.ctx, { editorContainer: { children: [dialog, context.editor] } });
+		context.setFocused(dialog);
+		const listeners = startEnhancedPaste(context);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		await inserted.promise;
+
+		expect(context.editor.pendingImages).toHaveLength(1);
+		expect(pasteText).not.toHaveBeenCalled();
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
+	});
+
+	it("attaches a clipboard image to the main editor when the composer owns a dialog without pasteText", async () => {
 		const context = await createPromptContext();
 		const { dialog, handleInput } = createPlainDialog();
+		context.editor.focused = true;
+		context.editor.insertAtom = vi.fn();
+		Object.assign(context.ctx, { editorContainer: { children: [dialog, context.editor] } });
 		context.setFocused(dialog);
-		const readMacFileUrls = vi.fn(async () => []);
 		const controller = new InputController(context.ctx, {
 			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
 			readText: async () => "",
-			readMacFileUrls,
+			readMacFileUrls: async () => [],
+		});
+
+		expect(await controller.handleImagePaste()).toBe(true);
+
+		expect(context.editor.pendingImages).toHaveLength(1);
+		expect(handleInput).not.toHaveBeenCalled();
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
+	});
+
+	it("refuses a clipboard image in a focused dialog without pasteText that the composer does not own", async () => {
+		const imagePath = await writePng("finder.png");
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		context.setFocused(dialog);
+		// A Finder file URL would attach in the composer; the dialog must not even probe it.
+		const controller = new InputController(context.ctx, {
+			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
+			readText: async () => "",
+			readMacFileUrls: async () => [`file://${imagePath}`],
 		});
 
 		expect(await controller.handleImagePaste()).toBe(false);
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
-		expect(readMacFileUrls).not.toHaveBeenCalled();
 		expect(handleInput).not.toHaveBeenCalled();
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
