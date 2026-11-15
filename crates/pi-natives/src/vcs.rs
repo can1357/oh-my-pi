@@ -240,6 +240,25 @@ pub struct VcsCleanOptions {
 	pub include_ignored: Option<bool>,
 	pub paths:           Option<Vec<String>>,
 }
+/// What [`vcs_git_discards_work`] checks: uncommitted changes to tracked
+/// files, or with `clean` the untracked files a `git clean` with these options
+/// would delete.
+#[napi(object)]
+#[derive(Default)]
+pub struct VcsDiscardCheck {
+	/// Preview `git clean` instead of tracked changes.
+	pub clean:           Option<bool>,
+	/// `-d`: untracked directories too.
+	pub directories:     Option<bool>,
+	/// `-x`: ignored files too.
+	pub include_ignored: Option<bool>,
+	/// `-X`: only ignored files.
+	pub ignored_only:    Option<bool>,
+	/// `-e` patterns.
+	pub excludes:        Option<Vec<String>>,
+	/// Pathspecs, relative to the checked directory.
+	pub pathspecs:       Option<Vec<String>>,
+}
 /// Push options.
 #[napi(object)]
 #[derive(Default)]
@@ -407,6 +426,20 @@ impl From<VcsRestoreOptions> for core::RestoreOptions {
 			worktree: v.worktree.unwrap_or(false),
 			files:    v.files.unwrap_or_default(),
 		}
+	}
+}
+impl From<VcsDiscardCheck> for core::DiscardCheck {
+	fn from(v: VcsDiscardCheck) -> Self {
+		if !v.clean.unwrap_or(false) {
+			return Self::Tracked;
+		}
+		Self::Clean(core::CleanCheck {
+			directories:     v.directories.unwrap_or(false),
+			include_ignored: v.include_ignored.unwrap_or(false),
+			ignored_only:    v.ignored_only.unwrap_or(false),
+			excludes:        v.excludes.unwrap_or_default(),
+			pathspecs:       v.pathspecs.unwrap_or_default(),
+		})
 	}
 }
 impl From<VcsCleanOptions> for core::CleanOptions {
@@ -739,6 +772,19 @@ pub fn vcs_git_discover(env: Env, dir: String) -> Result<Option<VcsGitRepo>> {
 pub fn vcs_git_repo_info(env: Env, dir: String) -> Result<Option<VcsGitRepoInfo>> {
 	pi_vcs::git::discover_info(Path::new(&dir))
 		.map(|v| v.map(Into::into))
+		.map_err(|err| rich_error(env, err))
+}
+/// Whether a work-discarding command run in `dir` would destroy anything.
+/// Synchronous, for approval checks; runs no program the repository
+/// configures.
+#[napi]
+pub fn vcs_git_discards_work(
+	env: Env,
+	dir: String,
+	check: Option<VcsDiscardCheck>,
+) -> Result<bool> {
+	let check = check.unwrap_or_default().into();
+	catch_panic("vcs.discardsWork", || pi_vcs::git::discards_work(Path::new(&dir), &check))
 		.map_err(|err| rich_error(env, err))
 }
 

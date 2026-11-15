@@ -345,6 +345,33 @@ pub struct CleanOptions {
 	pub paths:           Vec<String>,
 }
 
+/// What a work-discarding command would destroy, for
+/// [`discards_work`](crate::git::discards_work).
+#[derive(Debug, Clone, Default)]
+pub enum DiscardCheck {
+	/// Uncommitted changes to tracked files (`reset --hard`, `checkout .`,
+	/// `restore .`).
+	#[default]
+	Tracked,
+	/// The untracked files a `git clean` with these options would delete.
+	Clean(CleanCheck),
+}
+
+/// The options of a `git clean` that [`DiscardCheck::Clean`] previews.
+#[derive(Debug, Clone, Default)]
+pub struct CleanCheck {
+	/// Untracked directories too (`-d`).
+	pub directories:     bool,
+	/// Ignored files too (`-x`).
+	pub include_ignored: bool,
+	/// Only ignored files (`-X`).
+	pub ignored_only:    bool,
+	/// Extra ignore patterns (`-e`).
+	pub excludes:        Vec<String>,
+	/// Pathspecs, relative to the directory the check runs in.
+	pub pathspecs:       Vec<String>,
+}
+
 /// Options for the CLI-backed `push`.
 #[derive(Debug, Clone, Default)]
 pub struct PushOptions {
