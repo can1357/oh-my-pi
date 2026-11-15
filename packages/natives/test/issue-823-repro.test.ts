@@ -56,6 +56,7 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 							variant: "modern",
 							filename: "pi_natives.linux-x64-modern.node",
 							size: 1,
+							hash: "0000000000000001",
 							zstdPath: "/$bunfs/root/pi_natives.linux-x64-modern-a1b2c3d4.node.zst",
 						},
 					],
@@ -199,8 +200,14 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			await Bun.write(baselineZstdPath, Bun.zstdCompressSync(baseline));
 
 			const files: EmbeddedAddonFile[] = [
-				{ variant: "modern", filename: modernFilename, size: modern.length, zstdPath: modernZstdPath },
-				{ variant: "baseline", filename: baselineFilename, size: baseline.length, zstdPath: baselineZstdPath },
+				{ variant: "modern", filename: modernFilename, size: modern.length, hash: "m1", zstdPath: modernZstdPath },
+				{
+					variant: "baseline",
+					filename: baselineFilename,
+					size: baseline.length,
+					hash: "b1",
+					zstdPath: baselineZstdPath,
+				},
 			];
 
 			const written = extractEmbeddedAddons({ files, targetDir });
@@ -214,13 +221,45 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		}
 	});
 
+	it("replaces a same-size extracted addon from a different build", async () => {
+		// Same version and byte-identical size, different content: what a
+		// rebuild routinely produces (section alignment), and what a size-only
+		// currency check used to leave in place forever.
+		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-stale-"));
+		try {
+			const filename = "pi_natives.win32-x64-baseline.node";
+			const targetPath = path.join(testDir, filename);
+			const zstdPath = path.join(testDir, `${filename}.zst`);
+			await Bun.write(zstdPath, Bun.zstdCompressSync(Buffer.from("fixed addon")));
+			const fixed: EmbeddedAddonFile[] = [
+				{ variant: "baseline", filename, size: "fixed addon".length, hash: "fixed", zstdPath },
+			];
+
+			// Extracted by a build that predates the hash sidecar.
+			await Bun.write(targetPath, "stale addon");
+			expect(extractEmbeddedAddons({ files: fixed, targetDir: testDir })).toEqual([targetPath]);
+			expect(await Bun.file(targetPath).text()).toBe("fixed addon");
+
+			// Extracted by a different same-size build that did write a sidecar.
+			await Bun.write(targetPath, "stale addon");
+			await Bun.write(`${targetPath}.hash`, "stale");
+			expect(extractEmbeddedAddons({ files: fixed, targetDir: testDir })).toEqual([targetPath]);
+			expect(await Bun.file(targetPath).text()).toBe("fixed addon");
+
+			// And once current, it stays put.
+			expect(extractEmbeddedAddons({ files: fixed, targetDir: testDir })).toEqual([]);
+		} finally {
+			await fs.rm(testDir, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects a zstd frame whose size disagrees with the manifest", async () => {
 		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-zstd-"));
 		try {
 			const zstdPath = path.join(testDir, "pi_natives.linux-arm64.node.zst");
 			await Bun.write(zstdPath, Bun.zstdCompressSync(Buffer.from("addon")));
 			const files: EmbeddedAddonFile[] = [
-				{ variant: "default", filename: "pi_natives.linux-arm64.node", size: 6, zstdPath },
+				{ variant: "default", filename: "pi_natives.linux-arm64.node", size: 6, hash: "h", zstdPath },
 			];
 
 			expect(() => extractEmbeddedAddons({ files, targetDir: testDir })).toThrow(

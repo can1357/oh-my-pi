@@ -74,6 +74,7 @@ describe("native addon embedding", () => {
 					variant: "default",
 					filename: "pi_natives.win32-arm64.node",
 					size: addon.length,
+					hash: Bun.hash.xxHash64(addon).toString(16).padStart(16, "0"),
 					zstdPath: path.join(await fs.realpath(outDir), "pi_natives.win32-arm64.node.zst"),
 				},
 			]);

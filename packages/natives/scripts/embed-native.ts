@@ -95,7 +95,7 @@ export async function embeddedAddonFiles({
 	);
 	const files = available.map(
 		({ variant, filename, bytes }, index) =>
-			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, zstdPath: zstdPath${index} }`,
+			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, hash: ${JSON.stringify(Bun.hash.xxHash64(bytes).toString(16).padStart(16, "0"))}, zstdPath: zstdPath${index} }`,
 	);
 	const manifest = `${imports.join("\n")}
 

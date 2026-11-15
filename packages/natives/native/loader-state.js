@@ -453,11 +453,23 @@ function isSafeEmbeddedAddonFilename(filename) {
 	return filename.length > 0 && path.basename(filename) === filename && !filename.includes("/") && !filename.includes("\\");
 }
 
+/**
+ * Sidecar recording which embedded addon build produced the extracted file.
+ * Size alone cannot identify it: releases keep one version across rebuilds
+ * and PE/ELF section alignment routinely leaves a changed addon at the exact
+ * same size, so a size-only check kept serving a stale addon forever.
+ * Hashing the extracted file on every startup would cost a full read of a
+ * 100+ MB binary; the manifest's build-time hash is compared as plain text.
+ */
+function embeddedAddonHashPath(targetPath) {
+	return `${targetPath}.hash`;
+}
+
 function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
 		const stat = fs.statSync(targetPath);
-		if (!stat.isFile()) return false;
-		return stat.size === file.size;
+		if (!stat.isFile() || stat.size !== file.size) return false;
+		return fs.readFileSync(embeddedAddonHashPath(targetPath), "utf8") === file.hash;
 	} catch (err) {
 		if (err && err.code === "ENOENT") return false;
 		throw err;
@@ -494,6 +506,9 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
 		}
 		writeEmbeddedAddonFile(targetPath, content);
+		// Written last: a crash between the two leaves no matching sidecar, so
+		// the next start re-extracts instead of trusting a half-updated pair.
+		writeEmbeddedAddonFile(embeddedAddonHashPath(targetPath), file.hash);
 		writtenPaths.push(targetPath);
 	}
 	return writtenPaths;

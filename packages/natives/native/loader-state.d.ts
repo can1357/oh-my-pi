@@ -4,6 +4,8 @@ export interface EmbeddedAddonFile {
 	filename: string;
 	/** Decompressed addon size in bytes. */
 	size: number;
+	/** Build-time xxHash64 (hex) of the decompressed addon; identifies the build when versions and sizes match. */
+	hash: string;
 	/** Embedded zstd frame holding the addon bytes. */
 	zstdPath: string;
 }
@@ -91,7 +93,7 @@ export interface ExtractEmbeddedAddonsInput {
 	targetDir: string;
 }
 
-/** Decompress every manifest addon missing or wrong-sized in `targetDir`; returns the paths written. */
+/** Decompress every manifest addon missing, wrong-sized, or from a different build (hash sidecar) in `targetDir`; returns the paths written. */
 export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
 export interface SelectCpuVariantInput {
