@@ -202,6 +202,49 @@ declared_url = urls.parse("widget://records:2-3")
 assert declared_url.scheme is urls.Scheme.UNKNOWN
 assert declared_url.raw_scheme == "widget"
 assert declared_url.resource == "records:2-3" and declared_url.selector is None
+
+assert "live" in schemes.__all__
+assert "LiveDeclaration" in schemes.__all__
+typing.get_type_hints(schemes.LiveDeclaration)
+typing.get_type_hints(schemes.live)
+
+
+class ListingBackend:
+    async def request(self, operation, arguments):
+        assert operation == "omp.schemes.live"
+        return {
+            "schemes": [
+                {
+                    "name": "widget",
+                    "description": "live row",
+                    "immutable": True,
+                    "writable": False,
+                    "owner": "acme.widgets",
+                    "fetch": False,
+                    "credentials": False,
+                }
+            ]
+        }
+
+
+async def live_exercise():
+    try:
+        await schemes.live()
+    except omp.NotWiredError:
+        pass
+    else:
+        raise AssertionError("live without CONTROL must raise")
+    omp._install_control_backend(ListingBackend())
+    rows = await schemes.live()
+    assert rows[0].name == "widget"
+    assert rows[0].owner == "acme.widgets"
+    assert dict(urls.schemes()) == table_before
+
+
+import asyncio
+
+asyncio.run(live_exercise())
+assert dict(urls.schemes()) == table_before
 "#
 				),
 				Some(&globals),
