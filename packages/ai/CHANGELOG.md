@@ -6,6 +6,14 @@
 
 - Added `JUDGMENT_PROTOCOLS` and `judgmentProtocol` (each judgment API's label, request path and root help, taken from its wire definition), `JUDGMENT_API_PATHS` (derived from them), `catalogJudgmentApis` and `nativeJudgeRootDefault` (default endpoint roots from the model, the catalog seed or the provider's chat root), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models, and `timeoutMs` to `NativeJudgeConnection` so `createNativeJudge` callers can set the per-attempt timeout ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- Fixed Mistral (and other OpenAI-compatible) 429s reporting a zero `x-ratelimit-limit-*` allowance being retried for minutes; they now fail on the first request with an error naming the header and suggesting a model or plan switch ([#19300](https://github.com/can1357/oh-my-pi/issues/19300))
+- Fixed pooled Claude accounts presenting one device: an Anthropic OAuth request now reports the device and account id of the credential serving it, including after a rotation inside one call, when caller metadata named the previous account ([#19277](https://github.com/can1357/oh-my-pi/pull/19277) by [@Xytronix](https://github.com/Xytronix))
+### Removed
+
+- Removed `isXdDevicePath` from `providers/cursor-pi-args`; Cursor ranged reads of `xd://` docs now compose line selectors like any other path
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
