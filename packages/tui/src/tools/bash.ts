@@ -1,6 +1,6 @@
 import type { Component } from "../tui";
 import { getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
-import { highlightCode, type Theme } from "../theme/theme";
+import { highlightCode, type SymbolKey, type Theme, type ThemeColor } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
 import { formatOutputPaneLines } from "../render/output-pane";
@@ -27,7 +27,13 @@ import type {
 	RenderResultOptions,
 	ToolRenderer,
 } from "./renderer";
-import { INTENT_FIELD, type ShellTrace, type ShellVizPresentation, type TspTone } from "@oh-my-pi/pi-wire";
+import {
+	INTENT_FIELD,
+	type ShellTrace,
+	type ShellVizPresentation,
+	type TspText,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
 import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
 import {
@@ -40,7 +46,7 @@ import {
 	type RunState,
 } from "./native-view";
 import { renderShellVisualization, shellVizText } from "./shell-viz-render";
-import { node } from "../native/describe";
+import { node, span } from "../native/describe";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -113,6 +119,8 @@ export interface BashToolDetails {
 		jobId: string;
 		type: "bash";
 	};
+	/** Which PowerShell backend ran the command (`powershell` tool only); distinguishes its success-header icon. */
+	edition?: "pwsh" | "powershell";
 }
 
 function escapeBashEnvValueForDisplay(value: unknown): string {
@@ -262,13 +270,27 @@ export interface BashRenderContext {
 	timeout?: number;
 }
 
+/** Icon and color identifying which shell a card belongs to. */
+export interface ShellIdentity {
+	icon: SymbolKey;
+	/** Paints the success-header icon and the title in every state. */
+	color: ThemeColor;
+}
+
+const DEFAULT_SHELL_IDENTITY: ShellIdentity = { icon: "tool.bash", color: "accent" };
+
 /** Caller-supplied shell labels and argument projections. */
 export interface ShellRendererConfig<TArgs> {
-	resolveTitle: (args: TArgs | undefined, options: RenderResultOptions) => string;
+	/** `details` is absent until a result arrives. */
+	resolveTitle: (args: TArgs | undefined, options: RenderResultOptions, details?: BashToolDetails) => string;
 	resolveCommand?: (args: TArgs | undefined) => string | undefined;
 	resolveCwd?: (args: TArgs | undefined) => string | undefined;
 	resolveEnv?: (args: TArgs | undefined) => Record<string, unknown> | undefined;
 	showHeader?: boolean;
+	commandLanguage?: string;
+	commandPrefix?: string;
+	/** Defaults to the `tool.bash` icon in `accent`. `details` is absent until a result arrives. */
+	resolveIdentity?: (args: TArgs | undefined, details: BashToolDetails | undefined) => ShellIdentity;
 }
 
 function getPartialJson<TArgs>(args: TArgs | undefined): string | undefined {
@@ -294,19 +316,23 @@ export function getBashEnvForDisplay(args: BashRenderArgs): Record<string, unkno
  * reset SGR state at line boundaries, which made the previous single-string
  * `theme.fg("dim", ...)` form render only the first line as dim.
  */
-export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): string[] {
+export function formatBashCommandLines(
+	args: BashRenderArgs,
+	uiTheme: Theme,
+	config: Pick<ShellRendererConfig<unknown>, "commandLanguage" | "commandPrefix"> = {},
+): string[] {
 	const command = replaceTabs(sanitizeText(args.command || "…"));
-	const prefix = bashCommandPrefix(args, uiTheme);
-	const highlightedLines = highlightCode(command, "bash");
+	const prefix = bashCommandPrefix(args, uiTheme, config.commandPrefix);
+	const highlightedLines = highlightCode(command, config.commandLanguage ?? "bash");
 	if (highlightedLines.length === 0) return [prefix.trimEnd()];
 	return highlightedLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
 }
 
 /** The dim `$ cd <dir> && NAME="…" ` prefix ahead of a command's first line (trailing space included). */
-export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string {
+export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme, commandPrefix?: string): string {
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
-	const prefixParts = ["$"];
+	const prefixParts = [commandPrefix ?? "$"];
 	if (displayWorkdir) prefixParts.push(cdPrefix(displayWorkdir, args.cdSeparator));
 	if (envAssignments) prefixParts.push(envAssignments);
 	return uiTheme.fg("dim", `${prefixParts.join(" ")} `);
@@ -406,7 +432,7 @@ function bashStatsParts(
  * backgrounded job's state draw in the run box.
  */
 function shellToolHead(
-	title: string,
+	title: TspText,
 	command: string,
 	intent: string | undefined,
 	details: BashToolDetails | undefined,
@@ -503,6 +529,17 @@ function executedScriptArgs(args: BashRenderArgs, details: BashToolDetails | und
 
 /** Builds a shell transcript renderer with caller-supplied command labels. */
 export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
+	// Plain title unless the caller supplies an identity, so shells without
+	// one (bash) keep the terminal's own tool-title styling on native heads.
+	const nativeTitle = (
+		args: TArgs | undefined,
+		options: RenderResultOptions,
+		details: BashToolDetails | undefined,
+	): TspText => {
+		const title = config.resolveTitle(args, options, details);
+		const identity = config.resolveIdentity?.(args, details);
+		return identity ? [span(title, identity.color)] : title;
+	};
 	return {
 		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const renderArgs = toBashRenderArgs(args, config);
@@ -519,7 +556,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const presentation = options.shellPresentation;
 					const commandLines = presentation
 						? visualCommandLines(presentation, renderArgs, undefined, uiTheme, contentWidth)
-						: (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme));
+						: (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme, config));
 					const header =
 						config.showHeader === false
 							? undefined
@@ -528,6 +565,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 										icon: options.spinnerFrame !== undefined ? "running" : "pending",
 										spinnerFrame: options.spinnerFrame,
 										title: config.resolveTitle(args, options),
+										titleColor: (config.resolveIdentity?.(args, undefined) ?? DEFAULT_SHELL_IDENTITY).color,
 									},
 									uiTheme,
 								);
@@ -563,18 +601,22 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const success = !isPartial && !isError;
 			const details = result.details;
 			const isTimeout = details?.timedOut === true;
+			const identity = config.resolveIdentity?.(args, details) ?? DEFAULT_SHELL_IDENTITY;
+			const title = config.resolveTitle(args, options, details);
 			const header =
 				config.showHeader === false
 					? undefined
 					: renderStatusLine(
 							success
 								? {
-										iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
-										title: config.resolveTitle(args, options),
+										iconOverride: uiTheme.styledSymbol(identity.icon, identity.color),
+										title,
+										titleColor: identity.color,
 									}
 								: {
 										icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
-										title: config.resolveTitle(args, options),
+										title,
+										titleColor: identity.color,
 									},
 							uiTheme,
 						);
@@ -726,7 +768,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									presentation
 										? visualCommandLines(presentation, renderArgs, scriptDetails, uiTheme, contentWidth)
 										: args
-											? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme))
+											? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme, config))
 											: [],
 									uiTheme,
 									{ expanded },
@@ -756,7 +798,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// No foot until the command starts; once it runs (before any output) the clock shows.
 			const started = options.executionStarted === true;
 			return {
-				tool: shellToolHead(config.resolveTitle(args, options), command, callIntent(args), undefined, false),
+				tool: shellToolHead(nativeTitle(args, options, undefined), command, callIntent(args), undefined, false),
 				body: [
 					runBox(
 						[
@@ -865,7 +907,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				{ key: "run", tone: RUN_BOX_TONE[state] },
 			);
 			return {
-				tool: shellToolHead(config.resolveTitle(args, options), command, callIntent(args), details, !isPartial),
+				tool: shellToolHead(nativeTitle(args, options, details), command, callIntent(args), details, !isPartial),
 				body: [box],
 				tone: state === "timed-out" ? "warning" : undefined,
 				preview: "children",
