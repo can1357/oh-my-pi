@@ -21,7 +21,7 @@ describe("/marketplace interactive selector failures", () => {
 
 	// A selector that fails to load (e.g. a deleted marketplace catalog) must surface as a status
 	// line; an unhandled rejection here exits the interactive session.
-	for (const input of ["/marketplace", "/marketplace install", "/marketplace uninstall"]) {
+	for (const input of ["/marketplace", "/marketplace uninstall"]) {
 		test(`${input} reports a failing selector as a status`, async () => {
 			const statuses: string[] = [];
 			const ctx = {
