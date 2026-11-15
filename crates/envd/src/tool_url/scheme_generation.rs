@@ -1,4 +1,4 @@
-//! Envd-owned URL-scheme generation for ADR 0050 S2/S3.
+//! Envd-owned URL-scheme generation for ADR 0050 S2–S4.
 //!
 //! One [`SchemeGeneration`] is the unknown-scheme broker (`HostResources`) that
 //! `HostUriResolver` already calls. Publish replaces the envd-owned map (same
@@ -7,7 +7,8 @@
 //! `omp.schemes.read` on the owning extension host.
 //!
 //! S3 adds declaration-based [`HostUriJudgment`] and live-only line-selector
-//! peel gating via [`SchemeGeneration::is_live`].
+//! peel gating via [`SchemeGeneration::is_live`]. S4 adds [`Self::clear_owner`]
+//! for reload / quarantine (D6: not live while the host is down).
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -196,11 +197,20 @@ impl SchemeGeneration {
 			.map_or(HostUriJudgment::Undeclared, LiveScheme::judgment)
 	}
 
+	/// Removes every scheme owned by `owner` (ADR 0050 S4 / D6).
+	///
+	/// Idempotent. Other owners' rows are preserved. A refused co-claimant does
+	/// not auto-inherit the freed spelling.
+	pub fn clear_owner(&self, owner: impl Into<Str>) {
+		let _ = self.replace_owner(owner, None, Vec::new());
+	}
+
 	/// Replaces every scheme owned by `owner` with `claims` (union publish).
 	///
 	/// Schemes owned by other owners are preserved. Built-in wire names,
 	/// collisions with another owner, and a union above 32 are refused. On
-	/// refusal the generation is unchanged.
+	/// refusal the generation is unchanged. An empty `claims` list clears the
+	/// owner (see [`Self::clear_owner`]).
 	pub fn replace_owner(
 		&self,
 		owner: impl Into<Str>,
@@ -531,5 +541,23 @@ mod tests {
 			generation.judge("widget://id"),
 			HostUriJudgment::Fetch(FetchEffects { credentials: true })
 		);
+	}
+
+	#[test]
+	fn clear_owner_is_idempotent_and_preserves_other_owners() {
+		let generation = SchemeGeneration::new();
+		generation
+			.replace_owner("acme.widgets", None, vec![claim("widget")])
+			.expect("fold widget");
+		generation
+			.replace_owner("acme.gadgets", None, vec![claim("gadget")])
+			.expect("fold gadget");
+		generation.clear_owner("acme.widgets");
+		assert!(!generation.is_live("widget"));
+		assert!(generation.is_live("gadget"));
+		generation.clear_owner("acme.widgets");
+		assert!(!generation.is_live("widget"));
+		assert!(generation.is_live("gadget"));
+		assert_eq!(generation.snapshot().len(), 1);
 	}
 }
