@@ -5,8 +5,9 @@
 //! progress, `ulimit` values, cwd) and the kernel's counters (`next_vpid`,
 //! `next_job`, `$RANDOM`, `$SECONDS` base) and child-process table are in
 //! the store at all times; restore reads them there, with or without a
-//! blob. A subshell vproc's scopes, overlay and fields are execution
-//! position and are in the blob.
+//! blob. A forked vproc's scopes, global state (its [`crate::bash::Image`],
+//! as what it changed from the root's) and fields are execution position
+//! and are in the blob.
 //!
 //! Layout: a postcard [`Header`] (magic `OBF1`, IR version, frames version,
 //! engine build id, ids of the scripts in flight) followed by a postcard
@@ -33,7 +34,7 @@ use super::{
 		PendingWrite, Probe, ProbeResult, RedirProgress, Run, Saved, Scratch, ScratchIo, ScratchZsh,
 		ScriptKind, Stage, Target, Vproc,
 	},
-	state::{self, Overlay, Root, Scope},
+	state::{self, Root, Scope},
 };
 use crate::bash::{
 	engine::Engine,
@@ -43,6 +44,7 @@ use crate::bash::{
 	fs::FileKind,
 	host::{Host, StdFd},
 	ids::{CallId, ModeId, RunId, UnitId, Vpid},
+	image::ImageDiff,
 	ir::{
 		AssignVal, CondIr, IR_VERSION, Op, OpIr, Opcode, Part, RedirTargetIr, SpawnKind, SubIr, Unit,
 		materialize,
@@ -56,7 +58,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 30;
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -284,7 +286,9 @@ struct Fields {
 	cwd:        BString,
 	status:     i32,
 	pipestatus: Vec<i32>,
-	overlay:    Overlay,
+	/// Its global state, against the root's when saved
+	/// ([`crate::bash::Image::diff`]).
+	image:      ImageDiff,
 	jobs:       super::proc::JobTable,
 	last_bg:    super::proc::LastBg,
 	getopts:    super::proc::GetoptsState,
@@ -504,8 +508,16 @@ impl Shell {
 				funcs.push(*unit);
 			}
 		})?;
-		for ov in self.procs.iter().filter_map(|p| p.overlay.as_ref()) {
-			for rec in ov.records.values().flatten() {
+		// A forked vproc's global state, as what it changed from the
+		// root's: shared records cost nothing.
+		let base = cx.store.snapshot()?;
+		let mut diffs: Vec<Option<ImageDiff>> = self
+			.procs
+			.iter()
+			.map(|p| p.image.as_ref().map(|image| image.diff(&base)))
+			.collect();
+		for diff in diffs.iter().flatten() {
+			for rec in diff.records() {
 				if let Record::Func { unit, .. } = rec {
 					funcs.push(*unit);
 				}
@@ -524,7 +536,7 @@ impl Shell {
 		let mut procs = Vec::with_capacity(self.procs.len());
 		let mut runs = Vec::new();
 		let mut fds = FdImager::default();
-		for p in &mut self.procs {
+		for (p, diff) in self.procs.iter_mut().zip(&mut diffs) {
 			let mut frames = Vec::with_capacity(p.frames.len());
 			for f in &mut p.frames {
 				if let Some(unit) = &f.unit
@@ -586,16 +598,16 @@ impl Shell {
 				},
 				None => None,
 			};
-			let fields = p.overlay.as_ref().map(|overlay| Fields {
-				scopes:     p.scopes.clone(),
-				cwd:        p.cwd.clone(),
-				status:     p.status,
+			let fields = diff.take().map(|image| Fields {
+				scopes: p.scopes.clone(),
+				cwd: p.cwd.clone(),
+				status: p.status,
 				pipestatus: p.pipestatus.clone(),
-				overlay:    overlay.clone(),
-				jobs:       p.jobs.clone(),
-				last_bg:    p.last_bg,
-				getopts:    p.getopts.clone(),
-				rlimits:    p.rlimits.clone(),
+				image,
+				jobs: p.jobs.clone(),
+				last_bg: p.last_bg,
+				getopts: p.getopts.clone(),
+				rlimits: p.rlimits.clone(),
 			});
 			procs.push(ProcImage {
 				vpid: p.vpid,
@@ -707,7 +719,7 @@ impl Shell {
 			Some(ns) => ns,
 			None => cx.host.now_ns(),
 		};
-		// The overlays restored below may hold DEBUG/ERR/RETURN actions a
+		// The images restored below may hold DEBUG/ERR/RETURN actions a
 		// subshell set: `start_trap` takes its full path for them.
 		k.pseudo_traps.note_all();
 		let mut stdio = [None, None, None];
@@ -805,6 +817,9 @@ impl Shell {
 			built,
 			stdio,
 		};
+		// The root's global state as saved: a forked vproc's image is what
+		// it changed from it.
+		let base = cx.store.snapshot()?;
 		let mut procs = Vec::with_capacity(img.procs.len());
 		for p in img.procs {
 			let vpid = p.vpid;
@@ -818,7 +833,8 @@ impl Shell {
 				}
 			}
 			let mut vp = if let Some(f) = p.fields {
-				let mut vp = Vproc::new(vpid, p.parent, fds, f.cwd, Some(f.overlay), p.transient);
+				let image = crate::bash::Image::patched(base.clone(), f.image);
+				let mut vp = Vproc::new(vpid, p.parent, fds, f.cwd, Some(image), p.transient);
 				vp.scopes = f.scopes;
 				vp.status = f.status;
 				vp.pipestatus = f.pipestatus;

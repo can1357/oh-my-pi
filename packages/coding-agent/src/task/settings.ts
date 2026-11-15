@@ -180,8 +180,8 @@ export const cfgOvnfsPath = register({
 /**
  * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
  * or `undefined` when that binary is not found. Read by the system prompt (checkout
- * guidance), the bash git guard, `grep`/`glob` (searches through the daemon), and the
- * task runner (ovnfs-backed isolation when `isolation.backend` is auto).
+ * guidance), the bash git guard, and the task runner (ovnfs-backed isolation when
+ * `isolation.backend` is auto).
  */
 export function ovnfsCommand(settings: Settings): string | undefined {
 	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
@@ -268,6 +268,34 @@ export const cfgTaskEager = register({
 	},
 });
 
+export const cfgTaskAutoParallel = register({
+	id: "task.autoParallel",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "suggest", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Auto Parallel",
+		description:
+			"Ask the native judge resolved through the 'judge' role which parts of each new top-level prompt can run concurrently. Needs a native judge and the task tool; without them nothing is judged.",
+		options: [
+			{ value: "off", label: "Off", description: "Never split prompts" },
+			{
+				value: "suggest",
+				label: "Suggest",
+				description: "Judge each prompt and report the split without acting on it",
+			},
+			{
+				value: "on",
+				label: "On",
+				description: "When a prompt splits into independent subtasks, tell the agent to delegate them in parallel",
+			},
+		],
+	},
+});
+
 export const cfgTaskBatch = register({
 	id: "task.batch",
 	protocolDefault: ["rpc", "acp"],
@@ -282,16 +310,17 @@ export const cfgTaskBatch = register({
 	},
 });
 
-export const cfgTaskFile = register({
-	id: "task.file",
+export const cfgTaskSteps = register({
+	id: "task.steps",
+	protocolDefault: ["rpc", "acp"],
 	type: "boolean",
 	default: false,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "Task Instructions from Files",
+		label: "Sequential Task Steps",
 		description:
-			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+			"Spawns take ordered `steps` instead of one `task`: the subagent gets the first step, then each next one once it finishes the previous; past 4 steps, earlier messages carry two or more. The last step's result is the task's result.",
 	},
 });
 

@@ -267,7 +267,7 @@ export class DownloadManager {
 				return;
 			}
 		}
-		// Chromium saves on its own machine: a browser reached through `app.cdp_url` may run on another one.
+		// Chromium saves on its own machine: a browser reached through an `app` CDP URL may run on another one.
 		if (!(await savedFileAppears(source))) {
 			this.#settleFailure(
 				new ToolError(

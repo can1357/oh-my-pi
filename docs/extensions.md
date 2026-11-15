@@ -347,7 +347,7 @@ interface TodoBackend {
 ```
 
 - omp applies each `todo` op natively, then calls `apply(op, params, next, signal)` before committing `next`. The session transcript stays the source of truth; the backend mirrors it. `params` is the call's arguments as the `todo` tool validated them for the native op, minus keys its schema does not declare. Optional fields can be absent: an `append` may omit `phase`, and the phase the items landed in is then only in `next`.
-- `replace(phases)` receives the full new list for edits the user or a client makes outside the `todo` tool: the interactive `/todo` verbs (append, start, done, drop, rm, import, edit), the ACP/text-mode `/todo` command and the RPC `set_todos` command. If `replace` throws, the edit is refused: the list is unchanged and each writer reports the error as it does its other failures. Changes that already happened elsewhere (the Cursor todo mirror, the interactive subagent auto-complete) and, once the backend has been resolved (by the first prompt at the latest), a reset or reload (`/new`, a session switch including `/resume`, a rewind, tree navigation, a fork from an earlier message) are in place before the backend hears of them: omp calls `replace` with the list the session now holds (which can be empty) unless the backend already has it, and a throw only shows a warning. A `todo` call made from an eval cell goes through the `todo` tool, so it reaches `apply` and never `replace`. Before resolution, and for a session opened at start-up (`--resume`, `-c`), the backend gets the list with the next write.
+- `replace(phases)` receives the full new list for edits the user or a client makes outside the `todo` tool: the interactive `/todo` verbs (append, start, done, drop, rm, import, edit), the ACP/text-mode `/todo` command and the RPC `set_todos` command. If `replace` throws, the edit is refused: the list is unchanged and each writer reports the error as it does its other failures. Changes that already happened elsewhere (the Cursor todo mirror) and, once the backend has been resolved (by the first prompt at the latest), a reset or reload (`/new`, a session switch including `/resume`, a rewind, tree navigation, a fork from an earlier message) are in place before the backend hears of them: omp calls `replace` with the list the session now holds (which can be empty) unless the backend already has it, and a throw only shows a warning. A `todo` call made from an eval cell goes through the `todo` tool, so it reaches `apply` and never `replace`. Before resolution, and for a session opened at start-up (`--resume`, `-c`), the backend gets the list with the next write.
 - A reset reaches the same backend instance: after `/new`, omp calls `replace([])` on it unless it already has an empty list, and `create` does not run again. The call carries no reason, so it looks like a user emptying the list; while it runs, `ctx.sessionManager.getSessionId()` already returns the new session's id, and it can arrive before your `session_switch` handler. A mirror takes the list as is. A backend whose store outlives a session should key it by session id, or `/new` empties it. omp sends nothing when only the session id changes and the list stays the same: a fork of the whole session (`/fork`), a `/btw` branch, or a switch to a session that holds the same list. The next `apply` or `replace` then runs under the new id without the full list being sent first, so a backend keyed by session id that applies ops (rather than `next`) starts the new id from an empty store.
 - Calls run one at a time per session. A throwing `apply` fails that `todo` call and leaves the list unchanged.
 - `create`, `apply` and `replace` run like event handlers: in the session's settings scope and within the 30-second handler budget. When the budget runs out, or the user aborts the `todo` call while `apply` is pending, omp aborts `signal`, fails the call with the list unchanged and stops waiting, so the next call can start while one that ignores `signal` is still running. Your backend may still apply that op; whenever a call failed, timed out or its write did not commit, omp sends `replace` with the committed list before the next `apply`. A `create` that runs out of the budget falls back to native todos, and dialogs it opened through `ctx.ui` close. A write aborted before it started never reaches `apply`, and a write queued across `/new`, a session switch, a rewind or a fork from an earlier message is dropped rather than applied to the new list. A fork of the whole session keeps the list, so its queued writes still apply.
@@ -561,6 +561,7 @@ Canonical event unions and payload types are in `types.ts`.
 
 - `session_start`
 - `session_before_switch` / `session_switch`
+- `session_clear`
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
@@ -575,6 +576,13 @@ loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply fro
 the first request. Events emitted before it binds are not replayed. Resumed
 sessions, `--tools`, and launches with flags omp does not recognize load every
 extension before the session starts.
+
+`session_clear` receives `{ type: "session_clear" }` after a successful in-place
+context reset (`/clear` or `AgentSession.resetSessionContext()`), including an
+empty clear. Handlers are awaited before the reset returns and can invalidate
+caches of instructions already injected into model context. The session id,
+file, and persisted history are unchanged; this is not `session_switch` and
+cannot cancel the reset. A busy/rejected reset emits no event.
 
 `session.compacting` receives `{ sessionId, messages }` and can return
 `{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`

@@ -24,7 +24,7 @@
 		{
 			"name": "dedupes blank gap rows left adjacent by omitted removed lines and trims edge separators",
 			"input": "\n 1|alpha\n\n-5|beta\n\n 9|gamma\n\n-12|omitted",
-			"expect": { "preview": "1:alpha\n\n8:gamma", "addedLines": 0, "removedLines": 2 }
+			"expect": { "preview": "1:alpha\n…\n8:gamma", "addedLines": 0, "removedLines": 2 }
 		}
 	]
 }

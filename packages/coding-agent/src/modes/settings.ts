@@ -1436,7 +1436,7 @@ export const cfgAskTimeout = register({
 		group: "Notifications",
 		label: "Ask Timeout",
 		description:
-			"Auto-select the recommended ask option after this many seconds (0 disables). Also bounds cfg:// approval prompts; an unanswered approval denies the write instead of auto-selecting",
+			"Submit an ask form's current values (your preselected answers) after this many seconds (0 disables). Also bounds cfg:// approval prompts; an unanswered approval denies the write instead of auto-submitting",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "15", label: "15 seconds" },

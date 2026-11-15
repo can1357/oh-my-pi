@@ -27,6 +27,7 @@ export const AudioCapture = nativeBindings.AudioCapture ?? missingNativeClass("A
 export const AudioPlayback = nativeBindings.AudioPlayback ?? missingNativeClass("AudioPlayback");
 export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
 export const DiffStream = nativeBindings.DiffStream ?? missingNativeClass("DiffStream");
+export const DirectoryWatcher = nativeBindings.DirectoryWatcher ?? missingNativeClass("DirectoryWatcher");
 export const EditSession = nativeBindings.EditSession ?? missingNativeClass("EditSession");
 export const EditStore = nativeBindings.EditStore ?? missingNativeClass("EditStore");
 export const FileLock = nativeBindings.FileLock ?? missingNativeClass("FileLock");
@@ -140,6 +141,7 @@ export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng ?? missi
 export const runShellMain = nativeBindings.runShellMain ?? missingNativeExport("runShellMain");
 export const search = nativeBindings.search ?? missingNativeExport("search");
 export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride ?? missingNativeExport("setHangulCompatJamoWidthOverride");
+export const shellBuiltins = nativeBindings.shellBuiltins ?? missingNativeExport("shellBuiltins");
 export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExport("sliceWithWidth");
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars ?? missingNativeExport("snapcompactSupportedChars");
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missingNativeExport("structuredPatchHunks");
@@ -176,6 +178,13 @@ export const AstMatchStrictness = {
 export const DiffSide = {
 	Old: "Old",
 	New: "New",
+};
+export const DirectoryChangeAction = {
+	Added: "added",
+	Removed: "removed",
+	Modified: "modified",
+	RenamedFrom: "renamedFrom",
+	RenamedTo: "renamedTo",
 };
 export const Ellipsis = {
 	Unicode: 0,

@@ -1,13 +1,16 @@
 //! Shell state as one virtual process sees it: its function-local scopes,
-//! then its subshell overlay, then the root state in the [`StateStore`].
+//! then its global state.
 //!
-//! The store is the root state: reads go to it and every
-//! write is applied to it when the engine makes it. The root vproc's scopes
-//! are store records too ([`Key::Scope`], [`Key::Local`]); a subshell vproc
-//! keeps its own (`Vproc::scopes`) and its overlay, which reach the store
-//! only inside the `Frames` blob. The engine keeps only facts derived from
-//! the store ([`Root`]), kept exact by its own writes and dropped when the
-//! store's epoch says another writer changed it.
+//! The root vproc's global state is the [`StateStore`]: reads go to it and
+//! every write is applied to it when the engine makes it; its scopes are
+//! store records too ([`Key::Scope`], [`Key::Local`]). A forked vproc owns
+//! its scopes (`Vproc::scopes`) and an [`Image`] (`Vproc::image`): a copy of
+//! its parent's global state at the fork, shared until either side writes,
+//! as `fork(2)` shares memory. It reads and writes only those, except the
+//! kernel records every vproc shares ([`Key::forked`]), which stay in the
+//! store; both reach the store only inside the `Frames` blob. The engine
+//! keeps only facts derived from the store ([`Root`]), kept exact by its own
+//! writes and dropped when the store's epoch says another writer changed it.
 
 use std::collections::HashMap;
 
@@ -18,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use super::proc::{GetoptsState, JobTable, LastBg, Vproc};
 pub use crate::bash::store::Var;
 use crate::bash::{
+	Image,
 	host::Rlimit,
 	ids::{JobId, Vpid},
 	store::{
@@ -244,21 +248,10 @@ impl Var {
 	}
 }
 
-/// Variables of a function scope or subshell overlay, by name. Hashed with
-/// foldhash rather than the std default: name lookups run on every expansion
-/// and assignment, and the default hasher dominated the dispatch loop.
+/// Variables of a function scope, by name. Hashed with foldhash rather
+/// than the std default: name lookups run on every expansion and
+/// assignment, and the default hasher dominated the dispatch loop.
 pub type VarMap = HashMap<BString, Option<Var>, DefaultHashBuilder>;
-
-/// A subshell's copy-on-write view over its parent's state.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Overlay {
-	/// Variables written (`Some`) or unset (`None`) in the subshell.
-	pub vars:       VarMap,
-	/// Other records (functions, aliases, options, misc) written or removed.
-	pub records:    HashMap<KeyBuf, Option<Record>, DefaultHashBuilder>,
-	/// The subshell's positional parameters, when they differ.
-	pub positional: Option<Vec<BString>>,
-}
 
 /// A function's local scope, or the temporary environment of a builtin
 /// (`IFS=: read …`).
@@ -409,7 +402,7 @@ const fn is_nameref(rec: &Record) -> bool {
 }
 
 /// Whether `name` is a locale variable [`Root`] counts writes of.
-fn is_locale_name(name: &[u8]) -> bool {
+pub fn is_locale_name(name: &[u8]) -> bool {
 	name == b"LANG" || name.starts_with(b"LC_")
 }
 
@@ -900,7 +893,7 @@ pub fn innermost_private(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<bool, StoreError> {
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		let Some(depth) = root_binding_below(root, store, name, root.depth, false)? else {
 			return Ok(false);
 		};
@@ -941,11 +934,11 @@ fn root_params_scope(root: &Root, store: &mut dyn StateStore) -> Result<Option<u
 }
 
 /// Whether a variable `vp` sees may be a name reference: always for a
-/// subshell (its scopes and overlay are not tracked), for the root vproc
+/// forked vproc (its scopes and image are not tracked), for the root vproc
 /// once one was written ([`Root`]'s flag). While `false`, every variable is
 /// plain: callers skip their nameref checks.
 pub const fn may_be_nameref(root: &Root, vp: &Vproc) -> bool {
-	vp.overlay.is_some() || root.namerefs
+	vp.image.is_some() || root.namerefs
 }
 
 /// A scope of a vproc: an index into `Vproc::scopes` (a subshell's) or the
@@ -960,12 +953,11 @@ enum In {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum At {
 	Scope(In),
-	Overlay,
 	Global,
 }
 
 /// Where `name` is bound for a dynamic lookup: the innermost scope binding
-/// it, else the overlay when it has it, else the global variables.
+/// it, else the global variables.
 #[inline]
 fn bound_at(
 	root: &Root,
@@ -973,20 +965,45 @@ fn bound_at(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<At, StoreError> {
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		return Ok(root_binding(root, store, name)?.map_or(At::Global, |d| At::Scope(In::Store(d))));
 	}
-	if let Some(i) = vec_binding(vp, name) {
-		return Ok(At::Scope(In::Vec(i)));
+	Ok(vec_binding(vp, name).map_or(At::Global, |i| At::Scope(In::Vec(i))))
+}
+
+/// The global state a child forked from `vp` starts with, and its locale
+/// count ([`locale_token`]): a clone of `vp`'s image, or of the root's
+/// ([`StateStore::snapshot`]). O(1) for a `MemStore` root: the clone shares
+/// every record until one side writes.
+///
+/// # Errors
+/// [`StoreError`] when the store cannot take the snapshot.
+pub fn fork_image(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<(Image, Option<u64>), StoreError> {
+	match &vp.image {
+		Some(image) => Ok((image.clone(), vp.locale_gen)),
+		None => Ok((store.snapshot()?, Some(root.locale_gen))),
 	}
-	if vp
-		.overlay
-		.as_ref()
-		.is_some_and(|ov| ov.vars.contains_key(name))
-	{
-		return Ok(At::Overlay);
+}
+
+/// Global variable `name` as `vp` sees it: its image's for a forked vproc,
+/// the store's for the root (a scope may hide it; see [`lookup`]).
+///
+/// # Errors
+/// [`StoreError`] when the store fails or the record is no variable.
+#[inline]
+pub fn global_in<'a>(
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+) -> Result<Option<&'a Var>, StoreError> {
+	match &vp.image {
+		Some(image) => Ok(image.var(name)),
+		None => global(store, name),
 	}
-	Ok(At::Global)
 }
 
 /// The variable bound at `at` (`None`: declared but unset there, or absent).
@@ -1004,17 +1021,12 @@ fn var_at<'a>(
 			Some(Record::Unset) | None => None,
 			Some(_) => return Err(StoreError::Shape { table: Table::Local }),
 		},
-		At::Overlay => vp
-			.overlay
-			.as_ref()
-			.and_then(|ov| ov.vars.get(name))
-			.and_then(Option::as_ref),
-		At::Global => global(store, name)?,
+		At::Global => global_in(store, vp, name)?,
 	})
 }
 
 /// Where an assignment to `name` at `level` lands among `vp`'s scopes;
-/// `None`: its overlay or the root.
+/// `None`: its global state.
 #[inline]
 fn level_at(
 	root: &Root,
@@ -1023,7 +1035,7 @@ fn level_at(
 	name: &[u8],
 	level: Level,
 ) -> Result<Option<In>, StoreError> {
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		return Ok(match level {
 			Level::Global => None,
 			Level::Local => root_func_scope(root, store)?.map(In::Store),
@@ -1122,8 +1134,8 @@ pub fn deref(
 	Ok(Deref::Circular)
 }
 
-/// A variable as `vp` sees it: its scopes first, then its overlay, then the
-/// root state, through name references (a reference to an array element,
+/// A variable as `vp` sees it: its scopes first, then its global state,
+/// through name references (a reference to an array element,
 /// or a circular one, reads as unset here; see [`deref`]). A
 /// declared-but-unset ([`Attrs::INVISIBLE`]) variable is `None` (it still
 /// hides outer ones).
@@ -1175,7 +1187,7 @@ pub fn lookup_declared<'a>(
 }
 
 /// A declared variable and its binding scope, from one dynamic lookup.
-/// The scope is `None` for an overlay or global binding; name references
+/// The scope is `None` for a global binding; name references
 /// are not followed and declared-but-unset variables are returned.
 ///
 /// # Errors
@@ -1191,19 +1203,20 @@ pub fn lookup_declared_scoped<'a>(
 	let scope = match at {
 		At::Scope(In::Vec(i)) => Some(i),
 		At::Scope(In::Store(depth)) => Some(depth as usize),
-		At::Overlay | At::Global => None,
+		At::Global => None,
 	};
 	Ok((var_at(store, vp, name, at)?, scope))
 }
 
 /// A token for a cache of something derived from the locale variables
 /// `names` (each `LANG` or `LC_*`) as `vp` sees them: equal tokens mean
-/// equal values. `None` when one of them is bound in `vp`'s scopes or
-/// overlay (a temporary `LC_ALL=C cmd`, a `local LANG`, a subshell's own
-/// value): the caller reads them then. The token is the root's count of
-/// locale-variable writes ([`Root::set_var`], [`edit_var`]) and store
-/// invalidations, so a root write or an out-of-band store change of any
-/// locale variable changes it.
+/// equal values. `None` when one of them is bound in `vp`'s scopes (a
+/// temporary `LC_ALL=C cmd`, a `local LANG`) or a forked vproc assigned
+/// one (`Vproc::locale_gen`): the caller reads them then. The token is the
+/// root's count of locale-variable writes ([`Root::set_var`], [`edit_var`])
+/// and store invalidations, so a root write or an out-of-band store change
+/// of any locale variable changes it; a forked vproc keeps the count of
+/// its fork, its values being the root's then.
 pub fn locale_token(
 	root: &Root,
 	store: &mut dyn StateStore,
@@ -1212,15 +1225,17 @@ pub fn locale_token(
 ) -> Option<u64> {
 	debug_assert!(names.iter().all(|n| is_locale_name(n)), "not a locale variable");
 	let bound = |vars: &VarMap| names.iter().any(|n| vars.contains_key(*n));
-	let in_vp = if vp.overlay.is_none() {
-		// A failed read counts as bound: the caller then reads the values.
-		names
-			.iter()
-			.any(|n| !matches!(root_binding(root, store, n), Ok(None)))
-	} else {
-		vp.scopes.iter().any(|s| bound(&s.vars))
-			|| vp.overlay.as_ref().is_some_and(|ov| bound(&ov.vars))
-	};
+	if vp.image.is_some() {
+		return if vp.scopes.iter().any(|s| bound(&s.vars)) {
+			None
+		} else {
+			vp.locale_gen
+		};
+	}
+	// A failed read counts as bound: the caller then reads the values.
+	let in_vp = names
+		.iter()
+		.any(|n| !matches!(root_binding(root, store, n), Ok(None)));
 	(!in_vp).then_some(root.locale_gen)
 }
 
@@ -1236,18 +1251,7 @@ pub fn binding<'a>(
 	name: &[u8],
 	level: Level,
 ) -> Result<Option<&'a Var>, StoreError> {
-	let at = match level_at(root, store, vp, name, level)? {
-		Some(scope) => At::Scope(scope),
-		None
-			if vp
-				.overlay
-				.as_ref()
-				.is_some_and(|ov| ov.vars.contains_key(name)) =>
-		{
-			At::Overlay
-		},
-		None => At::Global,
-	};
+	let at = level_at(root, store, vp, name, level)?.map_or(At::Global, At::Scope);
 	var_at(store, vp, name, at)
 }
 
@@ -1302,8 +1306,8 @@ pub enum VarEdit<'e> {
 }
 
 impl VarEdit<'_> {
-	/// Apply the change to a variable in memory (a scope's or an
-	/// overlay's); the store's fine-grained changes do the same.
+	/// Apply the change to a variable in memory (a scope's or an image's);
+	/// the store's fine-grained changes do the same.
 	fn apply(self, var: &mut Var) {
 		match self {
 			Self::Replace(v) => *var = v,
@@ -1574,10 +1578,10 @@ fn store_edit(
 }
 
 /// Change the variable [`store_var`] at `level` would replace, in place:
-/// a scope's or an overlay's in memory (a subshell's overlay first takes a
-/// copy of the variable it shadows), a root one through the store's
-/// fine-grained changes. `false` when no variable is bound there (absent,
-/// or declared but unset).
+/// a scope's or a forked vproc's image's in memory (the image copies the
+/// variable first when its parent still shares it), a root one through
+/// the store's fine-grained changes. `false` when no variable is bound there
+/// (absent, or declared but unset).
 ///
 /// # Errors
 /// [`StoreError`] when a variable cannot be read.
@@ -1622,17 +1626,16 @@ pub fn edit_seen(
 		},
 		None => {},
 	}
-	if let Some(ov) = vp.overlay.as_mut() {
-		if !ov.vars.contains_key(name) {
-			let shadowed = global(store, name)?.cloned();
-			ov.vars.insert(BString::from(name), shadowed);
-		}
-		return Ok(match ov.vars.get_mut(name).and_then(Option::as_mut) {
-			Some(var) => {
+	if vp.image.is_some() && is_locale_name(name) {
+		vp.locale_gen = None;
+	}
+	if let Some(image) = vp.image.as_mut() {
+		return Ok(match image.var_mut(name) {
+			Some(Record::Var(var)) => {
 				edit.apply(var);
 				true
 			},
-			None => false,
+			_ => false,
 		});
 	}
 	if is_locale_name(name) {
@@ -1660,8 +1663,8 @@ fn put_scope(
 	}
 }
 
-/// Write `var` (or unset with `None`) in `vp`'s overlay, or globally for
-/// the root vproc.
+/// Write global variable `name` (or unset it, `None`) for `vp`: in its
+/// image, or the store for the root vproc.
 fn put_outer(
 	root: &mut Root,
 	store: &mut dyn StateStore,
@@ -1669,9 +1672,12 @@ fn put_outer(
 	name: &[u8],
 	var: Option<Var>,
 ) {
-	match &mut vp.overlay {
-		Some(ov) => {
-			ov.vars.insert(BString::from(name), var);
+	match &mut vp.image {
+		Some(image) => {
+			image.set_var(name, var);
+			if is_locale_name(name) {
+				vp.locale_gen = None;
+			}
 		},
 		None => root.set_var(store, name, var),
 	}
@@ -1688,7 +1694,7 @@ pub fn store_var_below(
 	var: Option<Var>,
 	top: usize,
 ) {
-	let found = if vp.overlay.is_none() {
+	let found = if vp.image.is_none() {
 		let top = u32::try_from(top).unwrap_or(u32::MAX);
 		match root_binding_below(root, store, name, top, true) {
 			Ok(depth) => depth.map(In::Store),
@@ -1787,7 +1793,8 @@ pub fn store_var(
 	}
 }
 
-/// A non-variable record as `vp` sees it.
+/// A non-variable record as `vp` sees it: a forked vproc's image holds
+/// its own, the store the root's and the kernel's ([`Key::forked`]).
 ///
 /// # Errors
 /// [`StoreError`] when the store fails.
@@ -1796,13 +1803,9 @@ pub fn record<'a>(
 	vp: &'a Vproc,
 	key: Key<'_>,
 ) -> Result<Option<&'a Record>, StoreError> {
-	let record = match vp
-		.overlay
-		.as_ref()
-		.and_then(|ov| ov.records.get(&key.to_buf()))
-	{
-		Some(entry) => entry.as_ref(),
-		None => store.get(key)?,
+	let record = match &vp.image {
+		Some(image) if key.forked() => image.get(key),
+		_ => store.get(key)?,
 	};
 	// Caught signals are reset in a subshell, while ignored signals remain
 	// ignored.
@@ -1814,11 +1817,10 @@ pub fn record<'a>(
 	Ok(record)
 }
 
-/// Whether `record` (the `key` trap as `vp`'s overlay or the root holds
-/// it) is a caught-signal trap `vp` inherited instead of setting it: a
-/// subshell lists it (bash 5.3, [`listed_traps`]) but does not run it.
-/// Called by [`record`] and [`scan`]; the `trap` builtin drops them when a
-/// subshell changes a trap.
+/// Whether `record` (the `key` trap as `vp` holds it) is a caught-signal trap
+/// `vp` inherited instead of setting it: a subshell lists it (bash 5.3,
+/// [`listed_traps`]) but does not run it. Called by [`record`] and [`scan`];
+/// the `trap` builtin drops them when a subshell changes a trap.
 pub fn inherited_trap(
 	vp: &Vproc,
 	key: crate::bash::store::TrapKey,
@@ -1886,8 +1888,8 @@ pub fn sync_option_vars(
 		// An exported one stays exported (bash updates the value in place).
 		let current = lookup(root, store, vp, name)?;
 		// Unchanged (the common case: a `$( )` that found `errexit` off, a
-		// `set` that changed nothing): no write, so a subshell's overlay
-		// keeps reading its parent's variable.
+		// `set` that changed nothing): no write, so a subshell's image
+		// keeps sharing its parent's variable.
 		let unchanged = current.is_some_and(|v| {
 			v.attrs.contains(Attrs::READONLY) && matches!(&v.value, VarValue::Str(s) if *s == value)
 		});
@@ -2054,7 +2056,8 @@ pub fn umask(store: &mut dyn StateStore, vp: &Vproc) -> Result<u32, StoreError> 
 	})
 }
 
-/// Write a non-variable record for `vp`: its overlay's, or the root's.
+/// Write a non-variable record for `vp`: its image's, or the root's (and a
+/// kernel record, [`Key::forked`], for every vproc).
 pub fn store_record(
 	root: &mut Root,
 	store: &mut dyn StateStore,
@@ -2062,11 +2065,9 @@ pub fn store_record(
 	key: KeyBuf,
 	rec: Option<Record>,
 ) {
-	match &mut vp.overlay {
-		Some(ov) => {
-			ov.records.insert(key, rec);
-		},
-		None => root.set_record(store, key, rec),
+	match &mut vp.image {
+		Some(image) if key.as_key().forked() => image.set(key.as_key(), rec),
+		_ => root.set_record(store, key, rec),
 	}
 }
 
@@ -2081,10 +2082,8 @@ pub fn option(
 	vp: &Vproc,
 	opt: OptId,
 ) -> Result<bool, StoreError> {
-	if let Some(ov) = &vp.overlay
-		&& let Some(entry) = ov.records.get(&KeyBuf::Opt(opt))
-	{
-		return Ok(opt_value(opt, entry.as_ref()));
+	if let Some(image) = &vp.image {
+		return Ok(opt_value(opt, image.get(Key::Opt(opt))));
 	}
 	root.option(store, opt)
 }
@@ -2103,10 +2102,8 @@ pub fn zsh_option(
 	if let Some((twin, inverted)) = opt.env_twin() {
 		return Ok(option(root, store, vp, twin)? != inverted);
 	}
-	if let Some(ov) = &vp.overlay
-		&& let Some(entry) = ov.records.get(&KeyBuf::ZshOpt(opt))
-	{
-		return Ok(zsh_opt_value(opt, entry.as_ref()));
+	if let Some(image) = &vp.image {
+		return Ok(zsh_opt_value(opt, image.get(Key::ZshOpt(opt))));
 	}
 	root.zsh_option(store, opt)
 }
@@ -2249,7 +2246,7 @@ pub fn exported(
 	vp: &Vproc,
 	out: &mut Vec<(BString, BString)>,
 ) -> Result<(), StoreError> {
-	let locals = if vp.overlay.is_none() && root.depth > 0 {
+	let locals = if vp.image.is_none() && root.depth > 0 {
 		root_locals(store)?
 	} else {
 		Vec::new()
@@ -2264,16 +2261,7 @@ pub fn exported(
 			exported_level(&mut seen, out, name.as_slice(), entry.as_ref());
 		}
 	}
-	if let Some(ov) = &vp.overlay {
-		for (name, entry) in &ov.vars {
-			if seen.insert(name.as_slice())
-				&& let Some(v) = entry
-			{
-				push_exported(out, name.as_slice(), v);
-			}
-		}
-	}
-	store.scan(Table::Var, &mut |key, rec| {
+	scan_globals(store, vp, Table::Var, &mut |key, rec| {
 		if let (Key::Var(name), Record::Var(v)) = (key, rec) {
 			let name: &[u8] = name;
 			if !seen.contains(name) {
@@ -2281,6 +2269,30 @@ pub fn exported(
 			}
 		}
 	})
+}
+
+/// Visit every global record of `table` `vp` sees, in no particular order:
+/// its image's, or the store's for the root vproc.
+///
+/// # Errors
+/// [`StoreError`] when the store cannot be scanned.
+fn scan_globals(
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	table: Table,
+	f: &mut dyn FnMut(Key<'_>, &Record),
+) -> Result<(), StoreError> {
+	match &vp.image {
+		Some(image) if table == Table::Var => {
+			image.each_var(&mut |name, rec| f(Key::Var(name), rec));
+			Ok(())
+		},
+		Some(image) if !matches!(table, Table::Scope | Table::Local | Table::Proc) => {
+			image.each_record(table, f);
+			Ok(())
+		},
+		_ => store.scan(table, f),
+	}
 }
 
 /// Push `name` with `var`'s value when it is an exported, set scalar
@@ -2331,29 +2343,11 @@ pub fn exported_funcs(
 	vp: &Vproc,
 	out: &mut Vec<(BString, BString)>,
 ) -> Result<(), StoreError> {
-	let mut seen: hashbrown::HashSet<&[u8]> = hashbrown::HashSet::new();
-	let push = |out: &mut Vec<(BString, BString)>, name: &[u8], rec: &Record| {
-		if let Record::Func { source, attrs, .. } = rec
+	scan_globals(store, vp, Table::Func, &mut |key, rec| {
+		if let (Key::Func(name), Record::Func { source, attrs, .. }) = (key, rec)
 			&& attrs.contains(Attrs::EXPORT)
 		{
-			out.push((BString::from(name), (**source).clone()));
-		}
-	};
-	let overlay = vp.overlay.as_ref().map(|ov| ov.records.iter());
-	for (key, entry) in overlay.into_iter().flatten() {
-		if let KeyBuf::Func(name) = key
-			&& seen.insert(name.as_slice())
-			&& let Some(rec) = entry
-		{
-			push(out, name.as_slice(), rec);
-		}
-	}
-	store.scan(Table::Func, &mut |key, rec| {
-		if let Key::Func(name) = key {
-			let name: &[u8] = name;
-			if !seen.contains(name) {
-				push(out, name, rec);
-			}
+			out.push((BString::from(&**name), (**source).clone()));
 		}
 	})
 }
@@ -2370,38 +2364,9 @@ fn scan_vars(
 	invisible_hides: bool,
 ) -> Result<Vec<(KeyBuf, Record)>, StoreError> {
 	let mut all: std::collections::BTreeMap<KeyBuf, Record> = std::collections::BTreeMap::new();
-	store.scan(table, &mut |k, r| {
+	scan_globals(store, vp, table, &mut |k, r| {
 		all.insert(k.to_buf(), r.clone());
 	})?;
-	if let Some(ov) = &vp.overlay {
-		if table == Table::Var {
-			for (name, var) in &ov.vars {
-				let key = KeyBuf::Var(name.clone());
-				match var {
-					Some(v) => {
-						all.insert(key, Record::Var(v.clone()));
-					},
-					None => {
-						all.remove(&key);
-					},
-				}
-			}
-		} else {
-			for (key, rec) in &ov.records {
-				if key.as_key().table() != table {
-					continue;
-				}
-				match rec {
-					Some(r) => {
-						all.insert(key.clone(), r.clone());
-					},
-					None => {
-						all.remove(key);
-					},
-				}
-			}
-		}
-	}
 	if table == Table::Var {
 		let mut shadow = |name: &BString, var: Option<&Var>| {
 			let key = KeyBuf::Var(name.clone());
@@ -2418,7 +2383,7 @@ fn scan_vars(
 		// A zsh private parameter hidden from the running function
 		// ([`private_hidden`]) leaves the outer one listed.
 		let private = |var: Option<&Var>| var.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
-		if vp.overlay.is_none() && root.depth > 0 {
+		if vp.image.is_none() && root.depth > 0 {
 			let innermost = root_func_scope(root, store)?.map(|f| f as usize);
 			for (depth, name, var) in &root_locals(store)? {
 				if private(var.as_ref()) && private_hidden(*depth as usize, innermost) {
@@ -2440,8 +2405,8 @@ fn scan_vars(
 	Ok(all.into_iter().collect())
 }
 
-/// Positional parameters of `vp` (the innermost function call's, else the
-/// subshell's, else the root's).
+/// Positional parameters of `vp` (the innermost function call's, else its
+/// global ones).
 ///
 /// # Errors
 /// [`StoreError`] when the store cannot be read.
@@ -2462,19 +2427,20 @@ pub fn positional_ref<'a>(
 	store: &'a mut dyn StateStore,
 	vp: &'a Vproc,
 ) -> Result<&'a [BString], StoreError> {
-	if vp.overlay.is_none() {
+	let Some(image) = &vp.image else {
 		return match root_params_scope(root, store)? {
 			Some(depth) => Ok(root_scope(store, depth)?.1.unwrap_or_default()),
 			None => root_positional(store),
 		};
-	}
+	};
 	if let Some(p) = vp.scopes.iter().rev().find_map(|s| s.positional.as_deref()) {
 		return Ok(p);
 	}
-	if let Some(p) = vp.overlay.as_ref().and_then(|o| o.positional.as_deref()) {
-		return Ok(p);
+	match image.get(Key::Misc(MiscKey::Positional)) {
+		Some(Record::Words(w)) => Ok(w.as_slice()),
+		Some(_) => Err(StoreError::Shape { table: Table::Misc }),
+		None => Ok(&[]),
 	}
-	root_positional(store)
 }
 
 /// Replace the positional parameters of `vp`'s current level.
@@ -2484,7 +2450,7 @@ pub fn set_positional(
 	vp: &mut Vproc,
 	params: Vec<BString>,
 ) {
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		let found = match root_params_scope(root, store) {
 			Ok(Some(depth)) => root_scope(store, depth)
 				.map(|(func, _, zsh)| Some((depth, func.cloned(), zsh.cloned().map(Box::new)))),
@@ -2501,16 +2467,16 @@ pub fn set_positional(
 		}
 	} else if let Some(scope) = vp.scopes.iter_mut().rev().find(|s| s.positional.is_some()) {
 		scope.positional = Some(params);
-	} else if let Some(ov) = &mut vp.overlay {
-		ov.positional = Some(params);
+	} else if let Some(image) = &mut vp.image {
+		image.put(Key::Misc(MiscKey::Positional), Record::Words(params));
 	}
 }
 
-// ---- Scopes: the root vproc's in the store, a subshell's in its `Vproc`.
+// ---- Scopes: the root vproc's in the store, a forked one's in its `Vproc`.
 
 /// Number of function and temporary-environment scopes of `vp`.
 pub const fn scope_count(root: &Root, vp: &Vproc) -> usize {
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		(root.depth + root.lazy) as usize
 	} else {
 		vp.scopes.len()
@@ -2519,7 +2485,7 @@ pub const fn scope_count(root: &Root, vp: &Vproc) -> usize {
 
 /// Scope `i` (0 = outermost) of `vp`.
 fn scope_in(vp: &Vproc, i: usize) -> In {
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		In::Store(u32::try_from(i).unwrap_or(u32::MAX))
 	} else {
 		In::Vec(i)
@@ -2688,7 +2654,7 @@ pub fn scope_var(
 /// scope [`Root`] knows holds no local (a function that declared nothing),
 /// so a caller can skip reading it.
 pub const fn scope_may_bind(root: &Root, vp: &Vproc, i: usize) -> bool {
-	if vp.overlay.is_some() || i >= SCOPE_BITS as usize {
+	if vp.image.is_some() || i >= SCOPE_BITS as usize {
 		return true;
 	}
 	root.locals & (1 << i) != 0
@@ -2847,7 +2813,7 @@ pub fn set_scope_positional(
 
 /// Push a function or temporary-environment scope on `vp`.
 pub fn push_scope(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, scope: Scope) {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		vp.scopes.push(scope);
 		return;
 	}
@@ -2873,7 +2839,7 @@ pub fn push_scope(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, s
 /// Pop `vp`'s innermost scope without reading it back (a function's
 /// return); `false` when it has none.
 pub fn drop_scope(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) -> bool {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		return vp.scopes.pop().is_some();
 	}
 	if root.lazy > 0 {
@@ -2890,7 +2856,7 @@ pub fn drop_scope(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) -
 
 /// Pop `vp`'s innermost scope and return it.
 pub fn pop_scope(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) -> Option<Scope> {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		return vp.scopes.pop();
 	}
 	if root.lazy > 0 {
@@ -2933,7 +2899,7 @@ pub fn insert_scope(
 	at: usize,
 	scope: Scope,
 ) {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		let at = at.min(vp.scopes.len());
 		vp.scopes.insert(at, scope);
 		return;
@@ -2961,7 +2927,7 @@ pub fn copy_scopes(
 	store: &mut dyn StateStore,
 	vp: &Vproc,
 ) -> Result<Vec<Scope>, StoreError> {
-	if vp.overlay.is_some() {
+	if vp.image.is_some() {
 		return Ok(vp.scopes.clone());
 	}
 	(0..(root.depth + root.lazy) as usize)
@@ -3094,7 +3060,7 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable) {
 /// `Step::Call` included), by `externalize` and by `restore`: the store
 /// contract's granularity for these fields.
 pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
-	debug_assert!(vp.overlay.is_none(), "only the root vproc's fields are in the store");
+	debug_assert!(vp.image.is_none(), "only the root vproc's fields are in the store");
 	if vp.status != root.synced.status {
 		root.synced.status = vp.status;
 		root.set_misc(store, MiscKey::Status, decimal(vp.status));
@@ -3282,15 +3248,18 @@ mod tests {
 		(store, root, vp)
 	}
 
-	fn subshell(parent: &Vproc) -> Vproc {
-		Vproc::new(
+	fn subshell(root: &Root, store: &mut crate::bash::MemStore, parent: &Vproc) -> Vproc {
+		let (image, locale_gen) = fork_image(root, store, parent).unwrap();
+		let mut sub = Vproc::new(
 			Vpid(parent.vpid.0 + 1),
 			Some(parent.vpid),
 			FdTable::default(),
 			BString::from("/"),
-			Some(Overlay::default()),
+			Some(image),
 			true,
-		)
+		);
+		sub.locale_gen = locale_gen;
+		sub
 	}
 
 	fn func_scope_named(name: &str) -> Scope {
@@ -3333,8 +3302,8 @@ mod tests {
 		let on = option(&mut root, &mut store, &vp, OptId::Braceexpand).unwrap();
 		assert!(on, "removed: the default");
 		check(&mut root, &mut store, &vp);
-		// A subshell's overlay shadows the root bit both ways.
-		let mut sub = subshell(&vp);
+		// A subshell's own options shadow the root bit both ways.
+		let mut sub = subshell(&root, &mut store, &vp);
 		store_record(
 			&mut root,
 			&mut store,
@@ -3391,9 +3360,10 @@ mod tests {
 		let defaults = VarValue::Str("braceexpand:hashall:interactive-comments".into());
 		assert_eq!(value(&root, &mut store, &vp), Some(defaults.clone()));
 		// Nothing changed: no write (a `$( )` with `errexit` off).
-		let mut sub = subshell(&vp);
+		let mut sub = subshell(&root, &mut store, &vp);
 		sync_option_vars(&mut root, &mut store, &mut sub).unwrap();
-		assert!(sub.overlay.as_ref().unwrap().vars.is_empty());
+		let base = store.snapshot().unwrap();
+		assert_eq!(sub.image.as_ref().unwrap().diff(&base), Default::default());
 		// A change is written where the vproc writes.
 		store_record(
 			&mut root,
@@ -3419,7 +3389,7 @@ mod tests {
 	}
 
 	#[test]
-	fn lookup_sees_scopes_overlay_root_and_namerefs() {
+	fn lookup_sees_scopes_image_root_and_namerefs() {
 		let (mut store, mut root, mut vp) = shell();
 		store
 			.put_out_of_band(Key::Var(BStr::new("a")), Record::Var(Var::scalar("root", Attrs::NONE)))
@@ -3482,7 +3452,7 @@ mod tests {
 		);
 		assert_eq!(get(&root, &mut store, &vp, "a"), Some(b"root".to_vec()));
 		// A subshell's own value, then the root's again for the parent.
-		let mut sub = subshell(&vp);
+		let mut sub = subshell(&root, &mut store, &vp);
 		store_var(
 			&mut root,
 			&mut store,
@@ -3559,7 +3529,7 @@ mod tests {
 		assert_eq!(locale_token(&root, &mut store, &vp, names), None);
 		drop_scope(&mut root, &mut store, &mut vp);
 		assert_eq!(locale_token(&root, &mut store, &vp, names), Some(t4));
-		let mut sub = subshell(&vp);
+		let mut sub = subshell(&root, &mut store, &vp);
 		assert_eq!(locale_token(&root, &mut store, &sub, names), Some(t4));
 		store_var(
 			&mut root,
@@ -3648,7 +3618,7 @@ mod tests {
 			KeyBuf::Func("hidden".into()),
 			Some(func("h", Attrs::NONE)),
 		);
-		let mut sub = subshell(&vp);
+		let mut sub = subshell(&root, &mut store, &vp);
 		store_var(&mut root, &mut store, &mut sub, b"gone", None, Level::Global);
 		store_var(
 			&mut root,
@@ -3754,7 +3724,7 @@ mod tests {
 	}
 
 	/// The store's fine-grained changes of a root variable leave it exactly
-	/// as the in-memory edit of a scope's or an overlay's does.
+	/// as the in-memory edit of a scope's or an image's does.
 	#[test]
 	fn edit_var_in_the_store_matches_the_edit_in_memory() {
 		let s = |v: &str| BString::from(v);
@@ -3827,7 +3797,7 @@ mod tests {
 	#[test]
 	fn root_scopes_and_subshell_scopes_behave_alike() {
 		let (mut store, mut root, mut vp) = shell();
-		let mut sub = subshell(&vp);
+		let mut sub = subshell(&root, &mut store, &vp);
 		let both = |root: &mut Root,
 		            store: &mut crate::bash::MemStore,
 		            vp: &mut Vproc,

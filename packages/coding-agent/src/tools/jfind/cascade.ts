@@ -6,7 +6,7 @@
  *    or Spotlight scores them all in one request (the `spotlight` ranker).
  * 3. Passage scoring reads the strongest files, cuts them into byte-bounded
  *    windows, and judges a budgeted verbatim sketch of each window.
- * 4. Verification judges the complete text of the sketches that survived.
+ * 4. Verification judges the complete text of the sketches that survived, through `verifyJudge` when one is given.
  *
  * Sketch judgments are only routing signals: a reported heat range always
  * comes from a complete passage. Each judged phase runs its requests through
@@ -15,7 +15,7 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindCoverage, FindHit, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { type SpotlightClient, SpotlightError } from "../../spotlight/client";
@@ -56,10 +56,15 @@ const SKETCH_BYTES = 384;
 const FULL_LIMIT = 40;
 /** Sketch probability below which a passage is not verified. */
 const CUTOFF = 0.45;
-/** Verified-passage probability at or above which a file is a hit. */
+/** Verified-passage probability at or above which a file is a hit, unless {@link CascadeOptions.threshold} sets one. */
 const THRESHOLD = 0.2;
 /** Bytes of a file read for windowing. */
 const READ_LIMIT = 4 * 1024 * 1024;
+
+/** Unranked literal rows listed when every judge request failed. */
+const LEXICAL_FALLBACK_ROWS = 20;
+/** Longest fallback snippet, in characters. */
+const LEXICAL_FALLBACK_SNIPPET = 160;
 /** Sketch state budget per request; sized so cards stay well inside the judge's context. */
 const SKETCH_STATE_BYTES = 18_000;
 /** Hard cap on sketch cards per request. */
@@ -104,6 +109,8 @@ export interface CascadeOptions {
 	/** Caller-supplied lexical keywords, added to those derived from the query. */
 	extraKeywords: readonly string[];
 	judge: Judge;
+	/** Answers verification (wave 3); `judge` when absent. Requests, failures, and spend fold into the same stats. */
+	verifyJudge?: Judge;
 	/** Rank filenames with Spotlight; the judge ranks them when absent or when Spotlight fails. */
 	spotlight?: CascadeSpotlight;
 	includeHidden: boolean;
@@ -114,12 +121,16 @@ export interface CascadeOptions {
 	 * earlier, or a `signal` abort, rejects.
 	 */
 	deadline?: AbortSignal;
+	/** Verified-passage probability at or above which a file is a hit and a range is listed; defaults to 0.2. */
+	threshold?: number;
 	onProgress?: (message: string) => void;
 }
 
 export interface CascadeResult {
 	/** Files whose verified passages cleared the threshold, strongest first. */
 	hits: FindHit[];
+	/** Literal keyword lines from the already-read files; non-empty only when `coverage` is `unavailable`. */
+	lexicalFallback: FindLexicalMatch[];
 	/** Whether the judge answered; an empty `hits` proves nothing when `unavailable`. */
 	coverage: FindCoverage;
 	threshold: number;
@@ -157,6 +168,50 @@ function compareRel(a: FileEntry, b: FileEntry): number {
 	return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
 }
 
+/**
+ * Literal keyword lines from the already-read windows, in selection order.
+ * Only windows that matched lexically (`score > 0`) contribute; each matching
+ * line becomes one `rel:line` row. Rows are dealt round-robin across files,
+ * capped at {@link LEXICAL_FALLBACK_ROWS}, so one keyword-dense file cannot
+ * crowd out every other file that was read.
+ */
+function fallbackMatches(
+	files: readonly FilePlan[],
+	entries: readonly FileEntry[],
+	keywords: readonly string[],
+): FindLexicalMatch[] {
+	if (keywords.length === 0) return [];
+	const perFile: FindLexicalMatch[][] = [];
+	for (const plan of files) {
+		const rows: FindLexicalMatch[] = [];
+		for (const passage of plan.passages) {
+			if (passage.score <= 0 || rows.length >= LEXICAL_FALLBACK_ROWS) continue;
+			const stripped = lines(plainContent(passage));
+			for (let i = 0; i < stripped.length && rows.length < LEXICAL_FALLBACK_ROWS; i++) {
+				const snippet = stripped[i]!;
+				const lower = snippet.toLowerCase();
+				if (!keywords.some(keyword => lower.includes(keyword))) continue;
+				rows.push({
+					rel: entries[plan.node]!.rel,
+					line: passage.start + i,
+					snippet: takeChars(snippet.trim(), LEXICAL_FALLBACK_SNIPPET),
+				});
+			}
+		}
+		if (rows.length > 0) perFile.push(rows);
+	}
+	const out: FindLexicalMatch[] = [];
+	for (let i = 0; ; i++) {
+		let added = false;
+		for (const rows of perFile) {
+			if (i >= rows.length || out.length >= LEXICAL_FALLBACK_ROWS) continue;
+			out.push(rows[i]!);
+			added = true;
+		}
+		if (!added || out.length >= LEXICAL_FALLBACK_ROWS) return out;
+	}
+}
+
 class Cascade {
 	readonly #options: CascadeOptions;
 	/** Caller cancellation and the deadline: every request and scan stops on either. */
@@ -191,8 +246,7 @@ class Cascade {
 		if (failures.length < FAILURES_KEPT && !failures.includes(message)) failures.push(message);
 	}
 
-	async #ask(request: Request): Promise<Outcome> {
-		const { judge } = this.#options;
+	async #ask(judge: Judge, request: Request): Promise<Outcome> {
 		const signal = this.#signal;
 		const started = performance.now();
 		try {
@@ -214,17 +268,21 @@ class Cascade {
 	}
 
 	/**
-	 * Run every job with at most {@link PARALLEL} requests in flight, handing each
+	 * Run every job through `judge`, with at most {@link PARALLEL} requests in flight, handing each
 	 * outcome to `settle` in completion order. Resolves once the queue drains;
 	 * on an abort, rejects once every worker has stopped.
 	 */
-	async #dispatch<J extends { request: Request }>(jobs: readonly J[], settle: (job: J, outcome: Outcome) => void) {
+	async #dispatch<J extends { request: Request }>(
+		judge: Judge,
+		jobs: readonly J[],
+		settle: (job: J, outcome: Outcome) => void,
+	) {
 		let next = 0;
 		const worker = async () => {
 			while (next < jobs.length) {
 				throwIfAborted(this.#signal);
 				const job = jobs[next++]!;
-				settle(job, await this.#ask(job.request));
+				settle(job, await this.#ask(judge, job.request));
 			}
 		};
 		const settled = await Promise.allSettled(Array.from({ length: Math.min(PARALLEL, jobs.length) }, worker));
@@ -289,7 +347,7 @@ class Cascade {
 		if (ranking.ranker === "judge") {
 			let named = 0;
 			onProgress?.(`filename ranking 0/${ranked.length}`);
-			await this.#dispatch(nameJobs, (job, outcome) => {
+			await this.#dispatch(this.#options.judge, nameJobs, (job, outcome) => {
 				named += job.batch.length;
 				if (!outcome.ok) this.#fail("filenames", outcome.error);
 				job.batch.forEach((node, k) => {
@@ -350,7 +408,7 @@ class Cascade {
 		this.stats.mapCards += cards.length;
 		onProgress?.(`scoring ${cards.length} passage sketches across ${files.length} files`);
 		const candidates: { f: number; p: number; score: number }[] = [];
-		await this.#dispatch(sketchJobs, (job, outcome) => {
+		await this.#dispatch(this.#options.judge, sketchJobs, (job, outcome) => {
 			if (!outcome.ok) this.#fail("sketches", outcome.error);
 			job.batch.forEach(({ f, p }, k) => {
 				const score = noul(outcome, passageKey(k));
@@ -388,7 +446,8 @@ class Cascade {
 		onProgress?.(`verifying ${survivors.length} passages in ${chosen.size} files`);
 		const results = new Map<number, { score: number; heat: HeatRange[]; lines: number; bytes: number }>();
 		let timeout: FindTimeout | undefined;
-		const verification = this.#dispatch(verifyJobs, (job, outcome) => {
+		const verifier = this.#options.verifyJudge ?? this.#options.judge;
+		const verification = this.#dispatch(verifier, verifyJobs, (job, outcome) => {
 			if (!outcome.ok) {
 				this.#fail("verification", outcome.error);
 				return;
@@ -424,17 +483,18 @@ class Cascade {
 			timeout = { verified: this.stats.windowsJudged, passages: survivors.length };
 		}
 
+		const threshold = this.#options.threshold ?? THRESHOLD;
 		const hits: FindHit[] = [];
 		for (const [f, entry] of results) {
 			const plan = files[f]!;
 			this.stats.filesRead++;
 			this.stats.fileBytes += entry.bytes;
-			if (entry.score < THRESHOLD) continue;
+			if (entry.score < threshold) continue;
 			hits.push({
 				rel: entries[plan.node]!.rel,
 				nameScore: nameScore[plan.node],
 				contentScore: entry.score,
-				ranges: mergeHeat(entry.heat, THRESHOLD),
+				ranges: mergeHeat(entry.heat, threshold),
 				linesSeen: entry.lines,
 				truncated: plan.truncated || entry.lines < plan.total,
 			});
@@ -445,7 +505,11 @@ class Cascade {
 		const { requests, failed } = this.stats;
 		const coverage: FindCoverage =
 			failed > 0 && failed === requests ? "unavailable" : failed > 0 || timeout ? "partial" : "complete";
-		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats, ranking, timeout };
+		// Every judge request failed, but the lexical pass already read the
+		// strongest files and cut keyword windows: surface those literal matches
+		// so the caller need not re-run the search with grep.
+		const lexicalFallback = coverage === "unavailable" ? fallbackMatches(files, entries, keywords) : [];
+		return { hits, coverage, threshold, keywords, stats: this.stats, ranking, timeout, lexicalFallback };
 	}
 
 	/**

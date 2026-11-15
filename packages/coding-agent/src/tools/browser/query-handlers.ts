@@ -324,6 +324,7 @@ export function roleRules(): RoleRules {
 					selectedOptions?: ArrayLike<{ text: string }>;
 				};
 				const inputType = tag === "input" ? (control.type ?? "").toLowerCase() : "";
+				const value = inputType === "password" ? "•".repeat((control.value ?? "").length) : (control.value ?? "");
 				const inputButton = ["button", "submit", "reset"].includes(inputType);
 				const childRole = childElement.getAttribute("role")?.trim().split(/\s+/)[0]?.toLowerCase();
 				// A range reads its ARIA value text, then value, before the DOM value.
@@ -339,13 +340,11 @@ export function roleRules(): RoleRules {
 				// A nested field contributes its value, not its own label.
 				if (range) {
 					text += shown
-						? childElement.getAttribute("aria-valuetext") ||
-							childElement.getAttribute("aria-valuenow") ||
-							(control.value ?? "")
+						? childElement.getAttribute("aria-valuetext") || childElement.getAttribute("aria-valuenow") || value
 						: "";
 				} else if (tag === "select") {
 					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
-				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
+				} else if (valueIsText) text += shown ? value : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
 				else if (inputType === "image") text += shown ? imageInputName(childElement) : "";

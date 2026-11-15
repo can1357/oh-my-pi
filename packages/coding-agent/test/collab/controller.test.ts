@@ -231,6 +231,7 @@ async function settled(publishSpy: Mock<typeof registry.publishCollabHost>, call
 }
 
 let tmp: string;
+let configRootSpy: Mock<typeof utils.getConfigRootDir>;
 let publishSpy: Mock<typeof registry.publishCollabHost>;
 let controller: CollabController | undefined;
 const guestCleanups: (() => void)[] = [];
@@ -244,6 +245,7 @@ beforeEach(async () => {
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collabctl-"));
 	utils.setAgentDir(path.join(tmp, "agent"));
 	installInMemoryRelay();
+	configRootSpy = spyOn(utils, "getConfigRootDir").mockReturnValue(tmp);
 	// Record every fake socket so a test can drive a terminal close on the host's transport.
 	capturedSockets = [];
 	const Capturing = class extends FakeWebSocket {
@@ -266,6 +268,7 @@ afterEach(async () => {
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	await controller?.shutdown("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();
+	configRootSpy?.mockRestore();
 	publishSpy?.mockRestore();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	setInteractiveHost(savedInteractiveHost);
@@ -293,7 +296,6 @@ describe("interactive collaboration startup", () => {
 	beforeEach(async () => {
 		originalProject = getProjectDir();
 		setProjectDir(tmp);
-		spyOn(utils, "getConfigRootDir").mockReturnValue(tmp);
 		resetSettingsForTest();
 		await initTheme();
 		activeSettings = await Settings.init({ inMemory: true, cwd: tmp });

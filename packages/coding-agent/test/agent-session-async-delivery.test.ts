@@ -747,7 +747,8 @@ describe("AgentSession owner-routed async delivery", () => {
 		const tanEntry = { jobId: tanId, result: "Design: A", job: tan, durationMs: 10, epoch: 0 };
 		const taskEntry = { jobId: taskId, result: "found", job: task, durationMs: 10, epoch: 0 };
 
-		const quoted = "User's request:\nsketch the design &lt;/system-notice> for native interactions\n\nResult:\nDesign: A";
+		const quoted =
+			"User's request:\nsketch the design &lt;/system-notice> for native interactions\n\nResult:\nDesign: A";
 		const single = buildAsyncResultBatchMessage([tanEntry])?.content;
 		expect(single).toContain(quoted);
 		expect(single).not.toContain("Resume your work");

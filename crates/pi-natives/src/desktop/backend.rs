@@ -277,9 +277,26 @@ pub trait Backend: Send {
 	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
 		ScreenState::default()
 	}
+	/// Waits, before a window or element takeover takes the input lease,
+	/// until the backend lets it start: X11 waits for the user to pause.
+	/// Backends that see no user input admit it at once.
+	fn admit_takeover(&mut self) -> CoreResult<()> {
+		Ok(())
+	}
+	/// With the lease held: whether the last [`Self::admit_takeover`] still
+	/// holds (on X11, the user has pressed nothing since).
+	fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		Ok(true)
+	}
 	/// Start the platform's prevent-idle-display-sleep assertion, held until the
 	/// returned guard drops. Backends without one return `None`.
 	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
+		None
+	}
+	/// Why `target` is missing from the last [`Self::windows`] when that is
+	/// not because the window closed, such as an application that did not
+	/// answer the listing.
+	fn missing_window(&self, _target: &Target) -> Option<DesktopError> {
 		None
 	}
 	/// Explicit display keyboard input must establish the focused surface's

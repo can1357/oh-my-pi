@@ -33,6 +33,7 @@ use x11rb::{
 };
 
 use super::{
+	activity::UserActivity,
 	keymap::{self, KeyStep, Keymap},
 	mpx::Mpx,
 	toolkit, uinput,
@@ -72,6 +73,18 @@ pub struct X11Input {
 	keymap:           Keymap,
 	takeover_target:  Option<Window>,
 	takeover_pointer: Cell<Option<(i16, i16)>>,
+	/// The user's press count a takeover in progress started from.
+	takeover_presses: Option<u64>,
+	/// The press count [`Self::admit_takeover`] let the request's takeover
+	/// start from, before the worker took the input lease.
+	admitted:         Option<u64>,
+	/// The user's own presses, watched from the session's first capture or
+	/// takeover ([`Self::watch_user`]).
+	activity:         Option<UserActivity>,
+	/// The display `activity` listens on; `None` is `DISPLAY`'s.
+	display:          Option<String>,
+	/// XI2 could not report the user's presses; not asked again.
+	activity_failed:  Option<DesktopError>,
 	/// Session-lived virtual master pair, created on first background use.
 	mpx:              Option<Mpx>,
 	/// Why the XI2-MPX route is unusable. Set once, so a host that cannot
@@ -113,7 +126,11 @@ impl Keys<'_> {
 }
 
 impl X11Input {
-	pub(crate) fn new(conn: Arc<RustConnection>, root: Window) -> CoreResult<Self> {
+	pub(crate) fn new(
+		conn: Arc<RustConnection>,
+		root: Window,
+		display: Option<String>,
+	) -> CoreResult<Self> {
 		conn
 			.xtest_get_version(2, 2)
 			.map_err(input_failed)?
@@ -131,6 +148,11 @@ impl X11Input {
 			keymap,
 			takeover_target: None,
 			takeover_pointer: Cell::new(None),
+			takeover_presses: None,
+			admitted: None,
+			activity: None,
+			display,
+			activity_failed: None,
 			mpx: None,
 			mpx_unavailable,
 		})
@@ -151,12 +173,27 @@ impl X11Input {
 			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
 				pointer_endpoint(&event)?;
+				// Takeover presses through the same grab: refuse rather than
+				// report a press the popup took.
+				if let Some(popup) = self.popup_outside(window, &event)? {
+					return Err(DesktopError::input_failed(format!(
+						"window {id}: {}; no input was sent",
+						popup_press_reason(popup)
+					)));
+				}
 				self.with_foreground(window, FOREGROUND_POINTER_SETTLE, |this| {
 					this.pointer_xtest(&event)
 				})
 			},
 			(Target::Window(id), DeliveryMode::Background) => {
 				let window = parse_window(id)?;
+				if let Some(popup) = self.popup_outside(window, &event)? {
+					return Err(background_unavailable(
+						id,
+						event_kind(&event),
+						&popup_press_reason(popup),
+					));
+				}
 				if self.requires_core_events(window) {
 					if self.drops_synthetic_input(window) {
 						return Err(background_unavailable(
@@ -183,8 +220,8 @@ impl X11Input {
 						let result = pointer_mpx(wm, mpx, window, &event);
 						if control::check().is_err() {
 							// Retire cancelled devices, never replay uncertain queued
-							// input. A later explicit operation
-							// may create a fresh isolated pair.
+							// input. A later explicit operation takes a pair again
+							// with fresh slaves.
 							self.mpx = None;
 						}
 						return result;
@@ -243,6 +280,7 @@ impl X11Input {
 		};
 		let steps = keys.plan(&self.keymap)?;
 		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+			this.check_user()?;
 			prepare()?;
 			this.xtest_steps(&steps, keys.duration())
 		})
@@ -264,11 +302,76 @@ impl X11Input {
 			mpx.release_focus(window)?;
 		}
 		let wm = self.wm();
-		wm.request_activation(window, wm.active_window())
+		wm.request_activation(window, wm.active_window(), || Ok(()))
+	}
+
+	/// Starts watching the user's presses, so the session's first takeover
+	/// knows whether they were just typing.
+	pub(super) fn watch_user(&mut self) -> CoreResult<&UserActivity> {
+		if let Some(error) = &self.activity_failed {
+			return Err(error.clone());
+		}
+		if self.activity.is_none() {
+			match UserActivity::start(self.display.as_deref()) {
+				Ok(activity) => self.activity = Some(activity),
+				Err(error) => {
+					self.activity_failed = Some(error.clone());
+					return Err(error);
+				},
+			}
+		}
+		Ok(self.activity.as_ref().expect("listener started"))
+	}
+
+	/// Waits until the user has paused ([`UserActivity::admit`]), before the
+	/// worker takes the input lease for a window or element takeover.
+	pub(crate) fn admit_takeover(&mut self) -> CoreResult<()> {
+		self.admitted = None;
+		self.admitted = Some(self.watch_user()?.admit()?);
+		Ok(())
+	}
+
+	/// Whether the user has pressed nothing since [`Self::admit_takeover`].
+	pub(crate) fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		let Some(baseline) = self.admitted else {
+			return Ok(false);
+		};
+		match self.watch_user()?.check_admission(baseline) {
+			Ok(()) => Ok(true),
+			Err(error) if error.code == ErrorCode::UserIntervened => Ok(false),
+			Err(error) => Err(error),
+		}
 	}
 
 	fn wm(&self) -> Wm<'_> {
 		Wm { conn: &self.conn, root: self.root, atoms: &self.atoms }
+	}
+
+	/// The topmost popup of `window`'s process that may hold the pointer grab,
+	/// when `event` would press outside every such popup: the toolkit hands
+	/// that press to the popup, which closes and takes it, and the window never
+	/// gets it. An earlier session can leave such a menu open. Plain moves pass.
+	fn popup_outside(&self, window: Window, event: &PointerEvent) -> CoreResult<Option<Window>> {
+		let (x, y) = match event {
+			PointerEvent::Move { .. } => return Ok(None),
+			PointerEvent::Click { x, y, .. }
+			| PointerEvent::Hold { x, y, .. }
+			| PointerEvent::Scroll { x, y, .. } => (*x, *y),
+			PointerEvent::Drag { path, .. } => match path.first() {
+				Some(&point) => point,
+				None => return Ok(None),
+			},
+		};
+		let (x, y) = validate_xtest_point(x, y)?;
+		let wm = self.wm();
+		let Some(pid) = wm.owning_pid(window) else {
+			return Ok(None);
+		};
+		let popups = wm.grab_popups_of(pid);
+		if popups.iter().any(|&popup| wm.contains_point(popup, x, y)) {
+			return Ok(None);
+		}
+		Ok(popups.first().copied())
 	}
 
 	fn keys(&mut self, target: &Target, keys: Keys<'_>, mode: DeliveryMode) -> CoreResult<()> {
@@ -364,16 +467,26 @@ impl X11Input {
 		self.send_key_steps(window, &steps, keys.duration())
 	}
 
-	/// Activates `window`, confirms the WM made it the active window holding
-	/// the core focus, runs `body`, then restores the user's pointer position
-	/// and previously active window. Fails without sending input when the
-	/// activation is never confirmed.
+	/// Starts from the worker's admission ([`Self::admit_takeover`]), failing
+	/// if the user pressed a key or button since (without one, as when tests
+	/// drive this directly, waits for the user to pause here), activates
+	/// `window`, confirms the WM made it the active window holding the core
+	/// focus, runs `body` until the user presses a key or button, then restores
+	/// the user's pointer position and previously active window. Fails without
+	/// sending input when the activation is never confirmed.
 	fn with_foreground<T>(
 		&mut self,
 		window: Window,
 		budget: Duration,
 		body: impl FnOnce(&mut Self) -> CoreResult<T>,
 	) -> CoreResult<T> {
+		let presses = match self.admitted {
+			Some(baseline) => {
+				self.watch_user()?.check_admission(baseline)?;
+				baseline
+			},
+			None => self.watch_user()?.admit()?,
+		};
 		// The activation's core `FocusIn` reaches the target and its window
 		// manager only when no other keyboard focuses it.
 		if let Some(mpx) = &self.mpx {
@@ -384,30 +497,50 @@ impl X11Input {
 		let previous_active = wm.active_window();
 		let previous_focus = wm.input_focus();
 		let pointer = self.core_pointer();
+		self.takeover_presses = Some(presses);
 		if let Err(error) = self.activate_confirmed(window, ewmh, previous_active, budget) {
-			control::cleanup(|| {
-				self.restore_activation(window, ewmh, previous_active, previous_focus);
+			return self.finish_takeover(Err(error), |this| {
+				control::cleanup(|| {
+					this.restore_activation(window, ewmh, previous_active, previous_focus);
+				});
 			});
-			return Err(error);
 		}
 		self.takeover_target = Some(window);
 		self.takeover_pointer.set(None);
+		#[cfg(test)]
+		named_change_tests::before_body();
 		let result = body(self);
 		self.takeover_target = None;
 		let pointer_after = self.takeover_pointer.take();
-		control::settle(FOREGROUND_RESTORE_SETTLE);
-		control::cleanup(|| {
-			// A physical motion during the action is the user's new position.
-			// Keyboard-only actions never warp the pointer, even during restore.
-			if let Some(pointer) = pointer
-				&& pointer_after.is_some()
-				&& self.core_pointer() == pointer_after
-			{
-				self.restore_core_pointer(pointer);
-			}
-			self.restore_activation(window, ewmh, previous_active, previous_focus);
-		});
-		result
+		self.finish_takeover(result, |this| {
+			control::settle(FOREGROUND_RESTORE_SETTLE);
+			control::cleanup(|| {
+				// A physical motion during the action is the user's new position.
+				// Keyboard-only actions never warp the pointer, even during
+				// restore.
+				if let Some(pointer) = pointer
+					&& pointer_after.is_some()
+					&& this.core_pointer() == pointer_after
+					&& this.check_user().is_ok()
+					&& super::listener::buttons_held(&this.conn).is_ok_and(|held| !held)
+				{
+					this.restore_core_pointer(pointer);
+				}
+				this.restore_activation(window, ewmh, previous_active, previous_focus);
+			});
+		})
+	}
+
+	/// The successful body is not final until focus has been handed back.
+	fn finish_takeover<T>(
+		&mut self,
+		result: CoreResult<T>,
+		hand_back: impl FnOnce(&Self),
+	) -> CoreResult<T> {
+		hand_back(self);
+		let intervened = self.check_user();
+		self.takeover_presses = None;
+		result.and_then(|value| intervened.map(|()| value))
 	}
 
 	fn activate_confirmed(
@@ -418,17 +551,23 @@ impl X11Input {
 		budget: Duration,
 	) -> CoreResult<()> {
 		control::check()?;
+		self.check_user()?;
 		let wm = self.wm();
 		// Already active and focused: re-activating pops open menus down.
 		if wm.is_focused(window, ewmh) {
 			return Ok(());
 		}
-		wm.request_activation(window, previous_active)?;
+		wm.request_activation(window, previous_active, || self.check_user())?;
 		let start = Instant::now();
 		let retry_at = start + budget.mul_f32(0.4);
 		let mut retried = false;
 		loop {
-			control::check()?;
+			// The request is out: a cancel or press still lets the WM finish
+			// it, so the hand-back sees the move and undoes it.
+			if let Err(error) = control::check().and_then(|()| self.check_user()) {
+				wm.await_activation(window);
+				return Err(error);
+			}
 			if wm.is_focused(window, ewmh) {
 				return Ok(());
 			}
@@ -438,9 +577,10 @@ impl X11Input {
 			}
 			if !retried && now >= retry_at {
 				retried = true;
-				let _ = wm.request_activation(window, wm.active_window());
+				let _ = wm.request_activation(window, wm.active_window(), || self.check_user());
 			}
-			control::wait(FOREGROUND_POLL)?;
+			// A cancel is handled at the top of the loop.
+			let _ = control::wait(FOREGROUND_POLL);
 		}
 		Err(DesktopError::input_failed(format!(
 			"window {window} did not become the active, focused window within {}ms (it may be \
@@ -449,8 +589,8 @@ impl X11Input {
 		)))
 	}
 
-	/// Re-activates the window that was active before a foreground action
-	/// (or restores the core focus when no EWMH WM tracks activation).
+	/// Restores the previous WM activation and core focus while the target
+	/// still holds the keyboard; EWMH activation can lag the actual focus.
 	fn restore_activation(
 		&self,
 		window: Window,
@@ -459,24 +599,22 @@ impl X11Input {
 		previous_focus: Option<(Window, InputFocus)>,
 	) {
 		let wm = self.wm();
-		if ewmh {
-			let Some(previous) = previous_active.filter(|&previous| previous != window) else {
-				return;
-			};
-			// Never overwrite a deliberate switch to a third window.
-			if wm.active_window() != Some(window)
-				|| !wm
-					.input_focus()
-					.is_some_and(|(focus, _)| wm.is_within(focus, window))
-			{
-				return;
-			}
+		// Core focus says where keys land. A newer switch away from the
+		// target belongs to the user, regardless of the WM's property.
+		if !wm
+			.input_focus()
+			.is_some_and(|(focus, _)| wm.is_within(focus, window))
+		{
+			return;
+		}
+		if ewmh && let Some(previous) = previous_active.filter(|&previous| previous != window) {
 			let _ = wm.restore_activation(previous, window);
 			let deadline = Instant::now() + FOREGROUND_RESTORE_BUDGET;
-			while Instant::now() < deadline && wm.active_window() == Some(window) {
+			while Instant::now() < deadline
+				&& (wm.active_window() == Some(window) || wm.is_focused(window, false))
+			{
 				let _ = control::wait(FOREGROUND_POLL);
 			}
-			return;
 		}
 		if let Some((focus, revert)) = previous_focus
 			&& focus > 1
@@ -746,24 +884,42 @@ impl X11Input {
 			control::check()?;
 			self.check_takeover_focus()?;
 		}
-		self
-			.conn
-			.xtest_fake_input(
-				if press {
-					KEY_PRESS_EVENT
-				} else {
-					KEY_RELEASE_EVENT
-				},
-				keycode,
-				CURRENT_TIME,
-				self.root,
-				0,
-				0,
-				0,
-			)
-			.map_err(input_failed)?
-			.check()
-			.map_err(input_failed)
+		self.send_xtest(press, || {
+			self
+				.conn
+				.xtest_fake_input(
+					if press {
+						KEY_PRESS_EVENT
+					} else {
+						KEY_RELEASE_EVENT
+					},
+					keycode,
+					CURRENT_TIME,
+					self.root,
+					0,
+					0,
+					0,
+				)
+				.map_err(input_failed)?
+				.check()
+				.map_err(input_failed)
+		})
+	}
+
+	/// Sends one XTEST event, counting a press as this session's own before
+	/// it can reach the user-activity listener.
+	fn send_xtest(&self, press: bool, send: impl FnOnce() -> CoreResult<()>) -> CoreResult<()> {
+		let activity = self.activity.as_ref().filter(|_| press);
+		if let Some(activity) = activity {
+			activity.sending(false);
+		}
+		let result = send();
+		if result.is_err()
+			&& let Some(activity) = activity
+		{
+			activity.sending(true);
+		}
+		result
 	}
 
 	fn send_key(
@@ -984,24 +1140,26 @@ impl X11Input {
 				self.wm().check_pointer_target(window, x, y, true)?;
 			}
 		}
-		self
-			.conn
-			.xtest_fake_input(
-				if press {
-					BUTTON_PRESS_EVENT
-				} else {
-					BUTTON_RELEASE_EVENT
-				},
-				detail,
-				CURRENT_TIME,
-				self.root,
-				0,
-				0,
-				0,
-			)
-			.map_err(input_failed)?
-			.check()
-			.map_err(input_failed)
+		self.send_xtest(press, || {
+			self
+				.conn
+				.xtest_fake_input(
+					if press {
+						BUTTON_PRESS_EVENT
+					} else {
+						BUTTON_RELEASE_EVENT
+					},
+					detail,
+					CURRENT_TIME,
+					self.root,
+					0,
+					0,
+					0,
+				)
+				.map_err(input_failed)?
+				.check()
+				.map_err(input_failed)
+		})
 	}
 
 	fn check_released_keys(&self, keycodes: impl IntoIterator<Item = u8>) -> CoreResult<()> {
@@ -1023,6 +1181,7 @@ impl X11Input {
 	}
 
 	fn check_takeover_focus(&self) -> CoreResult<()> {
+		self.check_user()?;
 		if let Some(window) = self.takeover_target {
 			let wm = self.wm();
 			if !wm.is_focused(window, wm.tracks_active_window()) {
@@ -1032,6 +1191,15 @@ impl X11Input {
 			}
 		}
 		Ok(())
+	}
+
+	/// Refuses the rest of a takeover once the user has pressed a key or
+	/// button since it was admitted: the target holds the keyboard.
+	fn check_user(&self) -> CoreResult<()> {
+		match (&self.activity, self.takeover_presses) {
+			(Some(activity), Some(baseline)) => activity.check(baseline),
+			_ => Ok(()),
+		}
 	}
 
 	/// Whether `window`'s process takes keys only as core events
@@ -1071,7 +1239,7 @@ impl X11Input {
 }
 
 /// The session's MPX pair, created on first use; `Err` carries why the route
-/// is unavailable. A creation failure is remembered for the session.
+/// is unavailable. Capability failures, but not contention, are remembered.
 fn ensure_mpx<'a>(
 	slot: &'a mut Option<Mpx>,
 	unavailable: &mut Option<String>,
@@ -1082,7 +1250,7 @@ fn ensure_mpx<'a>(
 	let mpx = match slot.take() {
 		Some(mpx) => mpx,
 		None => Mpx::create().map_err(|error| {
-			if control::check().is_err() {
+			if error.code == ErrorCode::InputBusy || control::check().is_err() {
 				error.message
 			} else {
 				unavailable.insert(error.message).clone()
@@ -1202,6 +1370,13 @@ fn background_unavailable(window: &str, kind: &str, reason: &str) -> DesktopErro
 	))
 }
 
+fn popup_press_reason(popup: Window) -> String {
+	format!(
+		"popup {popup} of its app may hold the pointer grab, and a press outside it would only \
+		 close it; target window {popup} to press inside it, or close it first"
+	)
+}
+
 fn parse_window(id: &str) -> CoreResult<Window> {
 	id.parse::<u32>()
 		.map_err(|_| DesktopError::window_not_found(format!("invalid X11 window id {id}")))
@@ -1285,6 +1460,21 @@ mod tests {
 	use super::*;
 
 	#[test]
+	#[ignore = "needs an isolated Xorg display with uinput hotplug"]
+	fn temporary_pair_contention_does_not_disable_mpx_for_the_session() {
+		let first = Mpx::create().unwrap();
+		let _second = Mpx::create().unwrap();
+		let mut slot = None;
+		let mut unavailable = None;
+		assert!(ensure_mpx(&mut slot, &mut unavailable).is_err(), "both pairs are held");
+		drop(first);
+		assert!(
+			ensure_mpx(&mut slot, &mut unavailable).is_ok(),
+			"a later action takes the freed pair"
+		);
+	}
+
+	#[test]
 	fn a_refusal_that_disturbed_focus_is_not_rerunnable() {
 		let refused = || Err(DesktopError::background_unavailable("covered; no input was sent"));
 		let disturbed = || Err(DesktopError::input_failed("focus moved"));
@@ -1298,4 +1488,408 @@ mod tests {
 		assert_eq!(failed.message, "lost");
 		assert_eq!(isolated(Ok(()), disturbed()).unwrap_err().message, "focus moved");
 	}
+
+	/// Starts its own `Xvfb`: `cargo test -p pi-natives -- --ignored
+	/// typing_user`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn a_takeover_refuses_a_typing_user_but_not_its_own_keys() {
+		use std::{
+			io::{BufRead, BufReader},
+			process::{Child, Command, Stdio},
+		};
+
+		use x11rb::{
+			protocol::xproto::{CreateWindowAux, WindowClass},
+			wrapper::ConnectionExt as _,
+		};
+
+		use crate::desktop::{control::CancellationSource, keys::parse_key};
+
+		struct Server(Child);
+		impl Drop for Server {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+		let mut server = Server(
+			Command::new("Xvfb")
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("Xvfb starts"),
+		);
+		let mut number = String::new();
+		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		let display = format!(":{}", number.trim());
+		let connect = || x11rb::connect(Some(&display)).expect("connect").0;
+		// The target app, which counts the key presses it gets.
+		let app = connect();
+		let root = app.setup().roots[0].root;
+		let target = app.generate_id().expect("id");
+		app.create_window(
+			x11rb::COPY_DEPTH_FROM_PARENT,
+			target,
+			root,
+			0,
+			0,
+			100,
+			100,
+			0,
+			WindowClass::INPUT_OUTPUT,
+			x11rb::COPY_FROM_PARENT,
+			&CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+		)
+		.expect("window");
+		app.map_window(target).expect("map");
+		app.sync().expect("sync");
+		let keys_received = || {
+			app.sync().expect("sync");
+			std::iter::from_fn(|| app.poll_for_event().expect("event"))
+				.filter(|event| matches!(event, x11rb::protocol::Event::KeyPress(_)))
+				.count()
+		};
+		let conn = Arc::new(connect());
+		let mut input = X11Input::new(Arc::clone(&conn), root, Some(display.clone())).expect("input");
+		let user = connect();
+		let modifier = input
+			.keymap
+			.plan_chord(&[parse_key("shift").expect("modifier")])
+			.expect("modifier plan")[0]
+			.keycode;
+		// Both holds predate observation; the button is beyond the five
+		// buttons exposed in the core QueryPointer mask.
+		for (event, detail) in [(KEY_PRESS_EVENT, modifier), (BUTTON_PRESS_EVENT, 8)] {
+			user
+				.xtest_fake_input(event, detail, CURRENT_TIME, root, 0, 0, 0)
+				.expect("hold before watching")
+				.check()
+				.expect("held");
+		}
+		let activity = input.watch_user().expect("watching");
+		assert_eq!(activity.check_admission(0).unwrap_err().code, ErrorCode::UserIntervened);
+		user
+			.xtest_fake_input(KEY_RELEASE_EVENT, modifier, CURRENT_TIME, root, 0, 0, 0)
+			.expect("release modifier")
+			.check()
+			.expect("released");
+		assert_eq!(activity.check_admission(0).unwrap_err().code, ErrorCode::UserIntervened);
+		user
+			.xtest_fake_input(BUTTON_RELEASE_EVENT, 8, CURRENT_TIME, root, 0, 0, 0)
+			.expect("release button")
+			.check()
+			.expect("released");
+		activity.check_admission(0).expect("all inputs released");
+		let id = Target::Window(target.to_string());
+		let key = [parse_key("a").expect("key")];
+
+		input
+			.key_chord(&id, &key, DeliveryMode::Foreground)
+			.expect("takeover, user idle");
+		assert!(keys_received() >= 1, "the takeover's key reached the target");
+		// The user types through another XTEST client, as x11vnc does, while
+		// it holds a grab: XI 2.0 listeners miss precisely these presses.
+		let code = input.keymap.plan_chord(&key).expect("plan")[0].keycode;
+		let error = input
+			.with_foreground(target, Duration::from_secs(2), |input| {
+				let grabbed = user
+					.grab_keyboard(
+						false,
+						target,
+						CURRENT_TIME,
+						x11rb::protocol::xproto::GrabMode::ASYNC,
+						x11rb::protocol::xproto::GrabMode::ASYNC,
+					)
+					.expect("grab")
+					.reply()
+					.expect("grab reply");
+				assert_eq!(grabbed.status, x11rb::protocol::xproto::GrabStatus::SUCCESS);
+				for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
+					user
+						.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
+						.expect("type");
+				}
+				user.sync().expect("sync");
+				user
+					.ungrab_keyboard(CURRENT_TIME)
+					.expect("ungrab")
+					.check()
+					.expect("ungrabbed");
+				keys_received();
+				assert_eq!(input.xtest_key(code, true).unwrap_err().code, ErrorCode::UserIntervened);
+				// A final successful body result must still report the intervention
+				// after settle and focus hand-back, not overwrite it with success.
+				Ok(())
+			})
+			.expect_err("user input stops an active takeover");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(keys_received(), 0, "no further agent key reached the target");
+
+		let source = CancellationSource::default();
+		source.set_deadline(Some(Instant::now()));
+		let error = control::with_token_for_test(&source.token(), || {
+			input.key_chord(&id, &key, DeliveryMode::Foreground)
+		})
+		.expect_err("the user is typing");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(keys_received(), 0, "nothing reached the target");
+		// Read in order after the session's own press, which did not count.
+		assert_eq!(input.activity.as_ref().expect("watching").presses(), 1);
+
+		// The body has already succeeded when the user resumes during hand-back.
+		input.takeover_presses = Some(1);
+		let completed = Ok(());
+		let error = input
+			.finish_takeover(completed, |_| {
+				for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
+					user
+						.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
+						.expect("user resumes after body");
+				}
+				user.sync().expect("user press reached the server");
+			})
+			.expect_err("hand-back intervention cannot report success");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		keys_received();
+
+		// A WM can leave its active property at the previous window after
+		// our request has already moved core focus to the takeover target.
+		let previous = app.generate_id().expect("previous window");
+		app.create_window(
+			x11rb::COPY_DEPTH_FROM_PARENT,
+			previous,
+			root,
+			110,
+			0,
+			100,
+			100,
+			0,
+			WindowClass::INPUT_OUTPUT,
+			x11rb::COPY_FROM_PARENT,
+			&CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+		)
+		.expect("previous window");
+		app.map_window(previous).expect("map previous");
+		app.change_property32(
+			x11rb::protocol::xproto::PropMode::REPLACE,
+			root,
+			input.atoms.net_active_window,
+			AtomEnum::WINDOW,
+			&[previous],
+		)
+		.expect("lagging WM property");
+		app.set_input_focus(InputFocus::PARENT, previous, CURRENT_TIME)
+			.expect("previous focus");
+		app.sync().expect("previous is focused");
+		let error = input
+			.with_foreground::<()>(target, Duration::ZERO, |_| {
+				panic!("unconfirmed activation must not run the body")
+			})
+			.expect_err("the WM never confirms activation");
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert_eq!(input.wm().input_focus(), Some((previous, InputFocus::PARENT)));
+		assert!(input.takeover_presses.is_none());
+		for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
+			user
+				.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
+				.expect("user resumes after activation error");
+		}
+		user.sync().expect("user input reached the server");
+		app.sync().expect("user input delivered");
+		let recipients: Vec<_> = std::iter::from_fn(|| app.poll_for_event().expect("event"))
+			.filter_map(|event| match event {
+				x11rb::protocol::Event::KeyPress(event) => Some(event.event),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(recipients, [previous], "the user's key must not reach the takeover target");
+		// A newer core-focus switch away from the target is not ours to undo.
+		input.restore_activation(target, true, Some(root), Some((root, InputFocus::PARENT)));
+		assert_eq!(input.wm().input_focus(), Some((previous, InputFocus::PARENT)));
+		app.delete_property(root, input.atoms.net_active_window)
+			.expect("stop tracking activation");
+		app.sync().expect("property removed");
+		// Lost observation refuses further input, even without user presses.
+		input.activity = None;
+		input.watch_user().expect("fresh listener");
+		let error = input
+			.with_foreground(target, Duration::from_secs(2), |input| {
+				input.activity.as_mut().expect("watching").disconnect(&conn);
+				input.xtest_key(code, true)
+			})
+			.expect_err("lost listener stops active takeover");
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert_eq!(keys_received(), 0);
+		assert_eq!(
+			input
+				.key_chord(&id, &key, DeliveryMode::Foreground)
+				.unwrap_err()
+				.code,
+			ErrorCode::InputFailed
+		);
+		assert_eq!(keys_received(), 0);
+
+		// Inspection may try observation and fail, but a later takeover cannot
+		// move focus or send input without a listener.
+		let mut unwatched =
+			X11Input::new(Arc::clone(&conn), root, Some("invalid-display".into())).expect("input");
+		assert!(unwatched.watch_user().is_err());
+		let focus = input.wm().input_focus();
+		assert_eq!(
+			unwatched
+				.key_chord(&id, &key, DeliveryMode::Foreground)
+				.unwrap_err()
+				.code,
+			ErrorCode::InputFailed
+		);
+		assert_eq!(input.wm().input_focus(), focus);
+		assert_eq!(keys_received(), 0);
+	}
+
+	/// A press outside the open popups of the window's process is refused,
+	/// in the background and in takeover; inside one of them, with no popup,
+	/// or a plain move, it goes on. Starts its own `Xvfb`: `cargo test -p
+	/// pi-natives -- --ignored open_popup`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn a_press_outside_an_open_popup_is_refused() {
+		use std::{
+			io::{BufRead, BufReader},
+			process::{Child, Command, Stdio},
+		};
+
+		use x11rb::{
+			protocol::{
+				Event,
+				xproto::{CreateWindowAux, PropMode, WindowClass},
+			},
+			wrapper::ConnectionExt as _,
+		};
+
+		struct Reaped(Child);
+		impl Drop for Reaped {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+		let mut server = Reaped(
+			Command::new("Xvfb")
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("Xvfb starts"),
+		);
+		let mut number = String::new();
+		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		let display = format!(":{}", number.trim());
+		let (conn, screen) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let root = conn.setup().roots[screen].root;
+		let net_wm_pid = conn
+			.intern_atom(false, b"_NET_WM_PID")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		// The app's window at (0, 0) 200x200, and its menu at (20, 20) 50x50.
+		let window = |x: i16, size: u16, popup: bool| {
+			let window = conn.generate_id().unwrap();
+			conn
+				.create_window(
+					0,
+					window,
+					root,
+					x,
+					x,
+					size,
+					size,
+					0,
+					WindowClass::INPUT_OUTPUT,
+					0,
+					&CreateWindowAux::new()
+						.override_redirect(u32::from(popup))
+						.event_mask(EventMask::BUTTON_PRESS),
+				)
+				.unwrap()
+				.check()
+				.unwrap();
+			conn
+				.change_property32(PropMode::REPLACE, window, net_wm_pid, AtomEnum::CARDINAL, &[
+					std::process::id(),
+				])
+				.unwrap()
+				.check()
+				.unwrap();
+			conn.map_window(window).unwrap().check().unwrap();
+			window
+		};
+		let app = window(0, 200, false);
+		let presses = |window: Window| {
+			conn.sync().unwrap();
+			let mut count = 0;
+			while let Some(event) = conn.poll_for_event().unwrap() {
+				count +=
+					usize::from(matches!(event, Event::ButtonPress(press) if press.event == window));
+			}
+			count
+		};
+		let (input_conn, _) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let mut input = X11Input::new(Arc::new(input_conn), root, Some(display)).unwrap();
+		// `XSendEvent`, so no MPX device lands on an ambient `DISPLAY`.
+		input.mpx_unavailable = Some("test".to_owned());
+		let target = Target::Window(app.to_string());
+		let click = |x: f64, y: f64| PointerEvent::Click {
+			x,
+			y,
+			button: MouseButton::Left,
+			count: 1,
+			modifiers: Modifiers::default(),
+		};
+		input
+			.pointer(&target, click(150.0, 150.0), DeliveryMode::Background)
+			.expect("no popup is open");
+		assert_eq!(presses(app), 1);
+
+		let popup = window(20, 50, true);
+		let error = input
+			.pointer(&target, click(150.0, 150.0), DeliveryMode::Background)
+			.expect_err("a press outside the open popup");
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert!(error.message.contains(&format!("popup {popup}")), "{}", error.message);
+		assert_eq!(presses(app), 0, "nothing was sent");
+		let error = input
+			.pointer(&target, click(150.0, 150.0), DeliveryMode::ForegroundReturnFocus)
+			.expect_err("a takeover press outside the open popup");
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(error.message.contains(&format!("popup {popup}")), "{}", error.message);
+		assert_eq!(presses(app), 0, "nothing was sent in takeover");
+
+		// A submenu over its menu: a press in the menu is inside the grab.
+		let submenu = window(60, 50, true);
+		input
+			.pointer(&Target::Window(popup.to_string()), click(30.0, 30.0), DeliveryMode::Background)
+			.expect("a press inside the menu under a submenu");
+		assert_eq!(presses(popup), 1);
+		input
+			.pointer(
+				&Target::Window(submenu.to_string()),
+				click(100.0, 100.0),
+				DeliveryMode::Background,
+			)
+			.expect("a press inside the submenu");
+		assert_eq!(presses(submenu), 1);
+		input
+			.pointer(&target, PointerEvent::Move { x: 150.0, y: 150.0 }, DeliveryMode::Background)
+			.expect("a plain move");
+	}
 }
+
+#[cfg(test)]
+pub(super) mod named_change_tests;

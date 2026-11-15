@@ -200,7 +200,6 @@ it.each([
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(auth, temp.join("models.yml")),
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		active = { session, auth, temp };
@@ -357,7 +356,6 @@ it("continues once on a late nit at advisor.continueSeverity=nit without re-revi
 		sessionManager: SessionManager.inMemory(),
 		settings,
 		modelRegistry: new ModelRegistry(auth, temp.join("models.yml")),
-		advisorTools: [],
 		advisorStreamFn: (advisorModel, context, options) => {
 			if (context.messages.at(-1)?.role === "user") reviewStarts++;
 			return advisorMock.stream(advisorModel, context, options);

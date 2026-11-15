@@ -138,6 +138,9 @@ exec hosts. Replaces cargo-xwin.
   the newest release with archives for all four host tuples.
 - xwin version + manifest channel: `sysroot.bzl` (`_XWIN_VERSION` 0.6.5 — last
   release with darwin binaries; `_XWIN_MANIFEST_VERSION` "17").
+- Windows SDK: both splats pin `sdk_version = "10.0.22621"` in `MODULE.bazel`.
+  xwin's default (the manifest's latest, 10.0.26100) fails x86_64 with "unable
+  to find x86_64 headers" and arm64 with cab-less MSIs.
 - Compile/link flags, include/libpath set, CRT choice: wrapper templates and
   `cc_toolchain_config` attrs in `cc.bzl`.
 - Static CRT if ever needed: build with the standard `static_link_msvcrt`

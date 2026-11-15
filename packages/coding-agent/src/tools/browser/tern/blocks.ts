@@ -1,6 +1,6 @@
 /**
  * The browser blocks of a Tern window (Tern's `blocks` op) and how
- * `app.target` picks the one an open adopts.
+ * `target` picks the one an open adopts.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -23,9 +23,9 @@ export interface TernBlockEntry {
 	driven: boolean | undefined;
 }
 
-/** One block as `browser.targets()` lists it: `app.target` adopts it by `target` (its id). */
+/** One block as `browser.targets()` lists it: its `target` (the id) adopts it. */
 export interface TernTarget {
-	/** The block id, as `app.target` takes it. */
+	/** The block id, as `target` takes it. */
 	target: string;
 	title: string;
 	url: string;
@@ -76,7 +76,7 @@ export function describeTernTargets(blocks: readonly TernBlockEntry[], taken: Re
 	const update = oldTernNote(blocks);
 	if (blocks.length === 0) return `This Tern window lists no browser blocks.${update}`;
 	const list = blocks.map(entry => `- ${describeTernBlock(entry, taken.get(entry.block))}`).join("\n");
-	return `Tern browser blocks (adopt one with app.target set to its id):\n${list}${update}`;
+	return `Tern browser blocks (adopt one with target set to its id):\n${list}${update}`;
 }
 
 /** The window's browser blocks; malformed entries are skipped. */
@@ -137,7 +137,7 @@ export function describeTernBlock(entry: TernBlockEntry, takenBy?: string): stri
 	return `${entry.block} ${JSON.stringify(entry.title)} ${entry.url} (${facts.join(", ")})`;
 }
 
-/** The error of an `app.target` no block matches, listing the window's browser blocks. */
+/** The error of a `target` no block matches, listing the window's browser blocks. */
 export function noTernBlockError(
 	blocks: readonly TernBlockEntry[],
 	target: string,
@@ -146,11 +146,11 @@ export function noTernBlockError(
 	const update = oldTernNote(blocks);
 	if (blocks.length === 0) {
 		return new ToolError(
-			`No Tern browser block to adopt for app.target ${JSON.stringify(target)}: this Tern window lists no browser blocks. Ask the user to open one, or omit app.target to open a picture-in-picture over this pane. browser.targets() lists the blocks you can adopt.${update}`,
+			`No Tern browser block to adopt for target ${JSON.stringify(target)}: this Tern window lists no browser blocks. Ask the user to open one, or omit target to open a picture-in-picture over this pane. browser.targets() lists the blocks you can adopt.${update}`,
 		);
 	}
 	const list = blocks.map(entry => `- ${describeTernBlock(entry, taken.get(entry.block))}`).join("\n");
 	return new ToolError(
-		`No Tern browser block matches app.target ${JSON.stringify(target)} (a block id, or a URL/title substring). Browser blocks in this Tern window:\n${list}\nRetry with app.target set to one of these ids; browser.targets() lists them before adopting.${update}`,
+		`No Tern browser block matches target ${JSON.stringify(target)} (a block id, or a URL/title substring). Browser blocks in this Tern window:\n${list}\nRetry with target set to one of these ids; browser.targets() lists them before adopting.${update}`,
 	);
 }

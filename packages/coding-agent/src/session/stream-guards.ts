@@ -21,6 +21,7 @@ import {
 } from "./tool-call-loop-redirect";
 
 import { cfgEditStreamingAbort } from "../edit/settings";
+import { writeDeviceName } from "../tools/resolve";
 import {
 	cfgModelLoopGuardEnabled,
 	cfgModelLoopGuardToolCallReminder,
@@ -245,7 +246,7 @@ export class LoopGuards {
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
-			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
+			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools, exemptionAlias: writeDeviceName });
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
 		}
 		return this.#toolCallLoopGuard;

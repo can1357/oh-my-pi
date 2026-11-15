@@ -47,7 +47,7 @@ describe("read conflict-selector path lists", () => {
 		expect(text(result)).toContain("interpreted as 2 paths");
 		for (const [index, name] of names.entries()) {
 			expect(text(result)).toContain(`1 unresolved conflict in ${name}`);
-			expect(session.conflictHistory?.get(index + 1)?.absolutePath).toBe(path.join(cwd, name));
+			expect(session.state?.conflictHistory?.get(index + 1)?.absolutePath).toBe(path.join(cwd, name));
 		}
 	});
 
@@ -58,7 +58,7 @@ describe("read conflict-selector path lists", () => {
 		const result = await read.execute("literal", { path: "a;b.ts:conflicts" });
 
 		expect(text(result)).not.toContain("interpreted as");
-		expect(session.conflictHistory?.get(1)?.absolutePath).toBe(path.join(cwd, "a;b.ts"));
+		expect(session.state?.conflictHistory?.get(1)?.absolutePath).toBe(path.join(cwd, "a;b.ts"));
 	});
 
 	it("reports a missing list member without discarding another member's conflicts", async () => {
@@ -68,6 +68,6 @@ describe("read conflict-selector path lists", () => {
 		expect(text(result)).toContain("1 unresolved conflict in a.ts");
 		expect(text(result)).toContain("missing.ts");
 		expect(text(result)).toContain("not found");
-		expect(session.conflictHistory?.entries()).toHaveLength(1);
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(1);
 	});
 });

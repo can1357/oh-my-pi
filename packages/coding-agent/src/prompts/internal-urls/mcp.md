@@ -1,1 +1,1 @@
-`mcp://<uri>`: MCP resource.
+mcp://<uri>: MCP resource.

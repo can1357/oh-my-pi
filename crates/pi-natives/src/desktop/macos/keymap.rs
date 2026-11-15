@@ -27,6 +27,9 @@ pub(super) struct Keystroke {
 
 pub(super) struct Keymap {
 	strokes: HashMap<char, Keystroke>,
+	/// The key whose Command layer gives each character: what an app reads
+	/// from a Command shortcut. Non-Latin layouts put Latin letters there.
+	command: HashMap<char, u16>,
 }
 
 /// Virtual key codes of Return and Tab, which are the same on every layout;
@@ -38,6 +41,7 @@ const MAX_KEY_CODE: u16 = 127;
 /// `UCKeyTranslate` modifier bits (`EventModifiers` shifted right by 8).
 const SHIFT_STATE: u32 = 0x02;
 const OPTION_STATE: u32 = 0x08;
+const COMMAND_STATE: u32 = 0x01;
 const KEY_ACTION_DOWN: u16 = 0;
 
 /// Writes the current layout's keyboard type and `uchr` data to a file.
@@ -79,6 +83,12 @@ impl Keymap {
 		cached(&CURRENT, Instant::now(), Self::read)
 	}
 
+	/// Chords use the active input source, never a map from an earlier call.
+	/// Activation, focus restoration and the user can each switch layouts.
+	pub(super) fn for_chord() -> CoreResult<Option<Arc<Self>>> {
+		chord_layout(&CURRENT, Self::read)
+	}
+
 	/// Text Input Sources asserts that it runs on the main queue, which the
 	/// desktop worker thread is not, so a helper process reads the layout.
 	fn read() -> CoreResult<Option<Self>> {
@@ -115,7 +125,8 @@ impl Keymap {
 
 	/// Keeps, per character, the first key that types it, trying no
 	/// modifiers, then Shift, Option and Shift-Option, and main keys before
-	/// the keypad, whose digits and operators repeat the main row.
+	/// the keypad, whose digits and operators repeat the main row; and,
+	/// apart, the first key whose Command layer gives it.
 	fn build(translate: impl Fn(u16, u32) -> Option<char>) -> Self {
 		let codes = (0..=MAX_KEY_CODE)
 			.filter(|&code| !is_keypad(code))
@@ -131,14 +142,29 @@ impl Keymap {
 				}
 			}
 		}
+		let mut command = HashMap::new();
+		for code in codes {
+			if let Some(character) = translate(code, COMMAND_STATE) {
+				command.entry(character).or_insert(code);
+			}
+		}
 		for (character, code) in [('\r', RETURN), ('\n', RETURN), ('\t', TAB)] {
 			strokes.insert(character, Keystroke { code, shift: false, option: false });
 		}
-		Self { strokes }
+		Self { strokes, command }
 	}
 
 	pub(super) fn stroke(&self, character: char) -> Option<Keystroke> {
 		self.strokes.get(&character).copied()
+	}
+
+	/// The non-keypad key whose Command layer gives `character`.
+	pub(super) fn command_key(&self, character: char) -> Option<u16> {
+		self
+			.command
+			.get(&character)
+			.copied()
+			.filter(|&code| !is_keypad(code))
 	}
 }
 
@@ -159,6 +185,16 @@ fn cached(
 	let keymap = read()?.map(Arc::new);
 	*slot = Some((now, keymap.clone()));
 	Ok(keymap)
+}
+
+/// A chord's operation-local map. Forget any map from before a focus change,
+/// and never store this one: the source can change again before the next call.
+fn chord_layout(
+	slot: &CachedKeymap,
+	read: impl FnOnce() -> CoreResult<Option<Keymap>>,
+) -> CoreResult<Option<Arc<Keymap>>> {
+	*slot.lock() = None;
+	read().map(|keymap| keymap.map(Arc::new))
 }
 
 /// The current layout's keyboard type and `uchr` data, read by the helper;
@@ -215,7 +251,7 @@ fn current_layout() -> CoreResult<Option<(u32, Vec<u32>)>> {
 	Ok(Some((keyboard_type, layout)))
 }
 
-const fn is_keypad(code: u16) -> bool {
+pub(super) const fn is_keypad(code: u16) -> bool {
 	matches!(code, 65 | 67 | 69 | 71 | 75 | 76 | 78 | 81..=89 | 91 | 92)
 }
 
@@ -235,15 +271,18 @@ mod tests {
 
 	/// Key 0 types `q`/`Q`/`@`, key 1 types `é` only with Shift-Option, keypad
 	/// 83 and main 18 both type `1`, and Return yields a control character.
+	/// Key 2 types `ф`, and `a` under Command, as a Russian layout's does.
 	fn translate(code: u16, state: u32) -> Option<char> {
 		match (code, state) {
-			(0, 0) => Some('q'),
+			(0, 0 | COMMAND_STATE) => Some('q'),
 			(0, SHIFT_STATE) => Some('Q'),
 			(0, OPTION_STATE) => Some('@'),
 			(1, 0) => Some('e'),
 			(1, 0x0a) => Some('é'),
 			(18 | 83, 0) => Some('1'),
 			(83, SHIFT_STATE) => Some('+'),
+			(2, 0) => Some('ф'),
+			(2, COMMAND_STATE) => Some('a'),
 			(RETURN, _) => single_char(&[0x0d]),
 			_ => None,
 		}
@@ -266,6 +305,25 @@ mod tests {
 		assert_eq!(keymap.stroke('\r'), stroke(RETURN, false, false));
 		assert_eq!(keymap.stroke('\t'), stroke(TAB, false, false));
 		assert_eq!(keymap.stroke('😀'), None);
+	}
+
+	#[test]
+	fn command_shortcuts_map_to_the_key_of_the_layouts_command_layer() {
+		let keymap = Keymap::build(translate);
+		assert_eq!(keymap.command_key('q'), Some(0));
+		assert_eq!(keymap.command_key('a'), Some(2));
+		assert_eq!(keymap.stroke('a'), None);
+		assert_eq!(keymap.command_key('ф'), None);
+		assert_eq!(keymap.command_key('1'), None);
+		// AZERTY's keypad types 1 unmodified; its number-row Command layer
+		// has &, not 1. Typing can use the keypad, shortcuts must not.
+		let azerty = Keymap::build(|code, state| match (code, state) {
+			(83, _) | (18, SHIFT_STATE) => Some('1'),
+			(18, 0 | COMMAND_STATE) => Some('&'),
+			_ => None,
+		});
+		assert_eq!(azerty.stroke('1').unwrap().code, 83);
+		assert_eq!(azerty.command_key('1'), None);
 	}
 
 	#[test]
@@ -318,5 +376,25 @@ mod tests {
 		assert_eq!(cancelled.err().map(|error| error.code), Some(ErrorCode::Cancelled));
 		cached(&slot, later, read).unwrap();
 		assert_eq!(reads.get(), 3);
+		// A focus change can select AZERTY even while the old map is fresh.
+		let switched =
+			chord_layout(&slot, || Ok(Some(Keymap::build(|code, _| (code == 12).then_some('a')))))
+				.unwrap()
+				.unwrap();
+		assert_eq!(switched.command_key('a'), Some(12));
+		// Returning focus selects the previous layout again. Neither the
+		// pre-activation nor the operation-local map can be reused now.
+		let restored = cached(&slot, later, read).unwrap().unwrap();
+		assert_eq!(restored.command_key('a'), Some(2));
+		assert_eq!(reads.get(), 4);
+		// Desktop/background character chords also read each source anew,
+		// even when the user changes French -> US within the remote-text TTL.
+		for code in [12, 0] {
+			let active =
+				chord_layout(&slot, || Ok(Some(Keymap::build(|key, _| (key == code).then_some('a')))))
+					.unwrap()
+					.unwrap();
+			assert_eq!(active.command_key('a'), Some(code));
+		}
 	}
 }

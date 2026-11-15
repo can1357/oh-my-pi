@@ -320,6 +320,7 @@ Renders markdown with syntax highlighting and theming support.
 interface MarkdownTheme {
 	heading: (text: string, depth: number) => string; // depth 1–6
 	link: (text: string) => string;
+	extensionLink?: (text: string) => string; // links a registered extension scheme handles; defaults to link
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;

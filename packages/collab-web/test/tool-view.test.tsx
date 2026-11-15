@@ -186,6 +186,47 @@ describe("ToolView xd:// dispatches", () => {
 	});
 });
 
+describe("ToolView task renderer", () => {
+	it("renders batch items by name with their task or numbered steps", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="task"
+				defaultOpen
+				args={{
+					context: "# Goal\nship it",
+					tasks: [
+						{ name: "Fixer", agent: "task", task: "Patch the parser.", solutionSpace: "one fix" },
+						{
+							name: "Auditor",
+							agent: "scout",
+							steps: ["Map the callers.", "Report risky ones."],
+							solutionSpace: "open",
+						},
+					],
+				}}
+			/>,
+		);
+
+		expect(html).toContain("Fixer");
+		expect(html).toContain("Patch the parser.");
+		expect(html).toContain("2 steps");
+		expect(html).toContain("step 1/2");
+		expect(html).toContain("Map the callers.");
+		expect(html).toContain("step 2/2");
+		expect(html).toContain("Report risky ones.");
+		expect(html).toContain("2 tasks");
+	});
+
+	it("labels a flat stepped spawn by its first step when unnamed", () => {
+		const html = renderToStaticMarkup(
+			<ToolView name="task" args={{ agent: "task", steps: ["\n  Read the spec.\nThen more", "Write it."] }} />,
+		);
+
+		expect(html).toContain("Read the spec.");
+		expect(html).not.toContain("Then more");
+	});
+});
+
 describe("ToolView ask renderer", () => {
 	const form = `<form>
 <fieldset><legend>Storage backend</legend>

@@ -21,6 +21,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	exa: () => import("./providers/exa").then(m => new m.ExaProvider()),
 	tinyfish: () => import("./providers/tinyfish").then(m => new m.TinyFishProvider()),
 	keenable: () => import("./providers/keenable").then(m => new m.KeenableProvider()),
+	sofya: () => import("./providers/sofya").then(m => new m.SofyaProvider()),
 	jina: () => import("./providers/jina").then(m => new m.JinaProvider()),
 	kagi: () => import("./providers/kagi").then(m => new m.KagiProvider()),
 	tavily: () => import("./providers/tavily").then(m => new m.TavilyProvider()),

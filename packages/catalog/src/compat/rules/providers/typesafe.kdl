@@ -5,8 +5,9 @@ provider "typesafe" {
 	env "TYPESAFE_API_KEY"
 
 	// `GET /v1/models` lists only the aliases: `jev-latest` is the newest stable
-	// release (jev-1.13.0) and `jev-preview` the newest of any kind. The pinned
-	// default judge is authored here so it resolves without discovery.
+	// release (jev-1.14.0 since 2026-10-22) and `jev-preview` the newest of any
+	// kind. The pinned default judge is authored here so it resolves without
+	// discovery.
 	seed api="typesafe" base-url="https://api.typesafe.ai" bundle="always" {
 		model "jev-1.14.0" name="TypeSafe Jev 1.14" {
 			reasoning #false

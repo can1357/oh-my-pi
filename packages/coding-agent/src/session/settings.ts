@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
@@ -21,6 +22,7 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
+import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
@@ -31,6 +33,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
+const EMPTY_STRING_RECORD: Record<string, string> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
 /** Scope of the resume picker's current-folder list. */
@@ -382,7 +385,8 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
-		description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+		description:
+			"Tool names, or xd:// device names of write dispatches (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
 
@@ -421,6 +425,56 @@ export const cfgIncludeModelInPrompt = register({
 	},
 });
 
+/** Template paths must not depend on the session cwd: absolute, or under the user's home via `~`. */
+function isUserTemplatePath(templatePath: unknown): templatePath is string {
+	if (typeof templatePath !== "string") return false;
+	return templatePath.startsWith("~/") || templatePath.startsWith("~\\") || path.isAbsolute(templatePath);
+}
+
+/**
+ * `systemPromptTemplates` entries, unchanged.
+ *
+ * @throws Error naming every blank model pattern (use SYSTEM.md / APPEND_SYSTEM.md for all models)
+ * and every pattern whose template path is not absolute or `~/`-relative.
+ */
+export function validateSystemPromptTemplates(value: unknown): Record<string, string> {
+	if (!isRecord(value)) return EMPTY_STRING_RECORD;
+	const blankPatterns: string[] = [];
+	const invalidPaths: string[] = [];
+	for (const pattern in value) {
+		if (!pattern.trim()) blankPatterns.push(JSON.stringify(pattern));
+		else if (!isUserTemplatePath(value[pattern])) invalidPaths.push(pattern);
+	}
+	const problems: string[] = [];
+	if (blankPatterns.length > 0) {
+		problems.push(
+			`model patterns must not be blank (use SYSTEM.md or APPEND_SYSTEM.md for every model): ${blankPatterns.join(", ")}`,
+		);
+	}
+	if (invalidPaths.length > 0) {
+		problems.push(`template paths must be absolute or start with ~/: ${invalidPaths.join(", ")}`);
+	}
+	if (problems.length > 0) throw new Error(`systemPromptTemplates ${problems.join("; ")}`);
+	return value as Record<string, string>;
+}
+
+/**
+ * Per-model system prompt: model-selector substring (case-insensitive) → Handlebars template path. Config-file only.
+ * Templates should be copies of the bundled `src/prompts/system/system-prompt.md`; see docs/system-prompt-customization.md.
+ */
+export const cfgSystemPromptTemplates = register({
+	id: "systemPromptTemplates",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
+	validate: validateSystemPromptTemplates,
+	normalize: validateSystemPromptTemplates,
+});
+
+/** {@link cfgSystemPromptTemplates} compiled for `matchModelPattern`. */
+export const systemPromptTemplatePatterns = cfgSystemPromptTemplates.map(templates =>
+	compileModelPatterns(templates, (templatePath: string) => templatePath),
+);
+
 export const cfgIncludeWorkspaceTree = register({
 	id: "includeWorkspaceTree",
 	type: "boolean",
@@ -431,6 +485,19 @@ export const cfgIncludeWorkspaceTree = register({
 		label: "Include Workspace Tree",
 		description:
 			"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+	},
+});
+
+/** Whether the system prompt carries a critical rule making `edit` mandatory for file edits; off omits edit guidance. */
+export const cfgEncourageEdits = register({
+	id: "encourageEdits",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "model",
+		group: "Prompt",
+		label: "Encourage Edits",
+		description: "Require the edit tool for file edits and forbid sed/perl/python edits",
 	},
 });
 

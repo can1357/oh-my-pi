@@ -206,6 +206,30 @@ describe("AskTool form dialog", () => {
 		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
+	it("surfaces a failed form dialog as a tool error without aborting the turn", async () => {
+		const abort = vi.fn();
+		const outcome = new AskTool(createSession()).execute(
+			"call-failed",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({
+				formDialog: async () => {
+					throw new Error("ACP client failed the formDialog elicitation: Unsupported ACP elicitation form");
+				},
+				abort,
+			}),
+		);
+
+		const error = await outcome.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).not.toBeInstanceOf(ToolAbortError);
+		expect((error as Error).message).toContain("Unsupported ACP elicitation form");
+		expect(abort).not.toHaveBeenCalled();
+	});
+
 	it("tells the model a form without named controls needs one, without showing it", async () => {
 		const formDialog = vi.fn<FormDialog>();
 		const result = await new AskTool(createSession()).execute(
@@ -381,6 +405,72 @@ describe("AskTool without a form surface", () => {
 		});
 	});
 
+	it("titles each prompt with the form text around its field", async () => {
+		const select = vi.fn<Select>(async () => "Share it");
+		const input = vi.fn<Input>(async () => "4");
+		await new AskTool(createSession()).execute(
+			"call-context",
+			{
+				html: `<form>
+  <p>Both jobs read the same base image.</p>
+  <ul><li>build: needs the toolchain</li><li>test: only the runtime</li></ul>
+  <pre>FROM debian:12</pre>
+  <table><tr><th>Job</th><th>Time</th></tr><tr><td>build</td><td>4m</td></tr></table>
+  <p>How should these two jobs use the image?</p>
+  <label><input type="radio" name="mode" value="share" checked> Share it</label>
+  <label><input type="radio" name="mode" value="split"> Split it</label>
+  <fieldset><legend>Caching</legend>
+    <p>Layers are cached per runner.</p>
+    <label>Cache size (GB) <input type="number" name="cache"></label>
+  </fieldset>
+  <p>Both answers can change later.</p>
+</form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ select, input }),
+		);
+
+		// The paragraph right before the group is its question, so it shows once, last.
+		expect(select.mock.calls[0]?.[0]).toBe(
+			[
+				"Both jobs read the same base image.",
+				"- build: needs the toolchain\n- test: only the runtime",
+				"FROM debian:12",
+				"Job | Time\nbuild | 4m",
+				"How should these two jobs use the image?",
+			].join("\n\n"),
+		);
+		// A later field shows only the text since the previous one, plus what follows the last field.
+		expect(input.mock.calls[0]?.[0]).toBe(
+			["Caching", "Layers are cached per runner.", "Both answers can change later.", "Cache size (GB)"].join("\n\n"),
+		);
+	});
+
+	it("keeps the text before a field that sits between another group's options with that field", async () => {
+		const titles: string[] = [];
+		const select: Select = async (title, options) => {
+			titles.push(title);
+			return label(options[0]);
+		};
+		await new AskTool(createSession()).execute(
+			"call-intervening",
+			{
+				html: `<form>
+  <label><input type="radio" name="plan" value="basic" checked> Basic</label>
+  <p>Choose a compliant region</p>
+  <label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
+  <label><input type="radio" name="plan" value="premium"> Premium</label>
+</form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ select }),
+		);
+
+		expect(titles).toEqual(["plan", "Choose a compliant region\n\nRegion"]);
+	});
+
 	it("takes a radio's typed Other text as its value and appends a checkbox group's", async () => {
 		const selects: { title: string; checked?: readonly number[] }[] = [];
 		const picks = ["Other (type your own)", "Other (type your own)", "CI", "Other (type your own)"];
@@ -395,11 +485,13 @@ describe("AskTool without a form surface", () => {
 			"call-other",
 			{
 				html: `<form>
+  <p>Replica policy: retain one database in each region.</p>
   <fieldset><legend>Database</legend>
     <label><input type="radio" name="db" value="postgres" checked> Postgres</label>
     <label><input type="radio" name="db" value="sqlite"> SQLite</label>
   </fieldset>
   <fieldset><legend>Tools</legend>
+    <p>Automation rules must be audited.</p>
     <label><input type="checkbox" name="tools" value="ci"> CI</label>
     <label><input type="checkbox" name="tools" value="lint"> Lint</label>
   </fieldset>
@@ -410,7 +502,11 @@ describe("AskTool without a form surface", () => {
 			createContext({ select, input }),
 		);
 
-		expect(input.mock.calls.map(call => call[0])).toEqual(["Database", "Database", "Tools"]);
+		expect(input.mock.calls.map(call => call[0])).toEqual([
+			"Replica policy: retain one database in each region.\n\nDatabase",
+			"Replica policy: retain one database in each region.\n\nDatabase",
+			"Tools\n\nAutomation rules must be audited.",
+		]);
 		expect(selects.at(-1)?.checked).toEqual([0, 2]);
 		expect(JSON.parse(text(result)?.replace("User answers:\n", "") ?? "")).toEqual({
 			db: "MySQL 8",

@@ -22,7 +22,7 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
-import { getShouldRetryFromHeaders } from "./retry-after";
+import { getShouldRetryFromHeaders, getZeroRateLimitHeader } from "./retry-after";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -112,9 +112,11 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			// under the removed SDK client. A proxy concurrency-admission 429
 			// (`rate_limit_type: max_parallel_requests`) surfaces immediately instead of
 			// being slept-and-retried here; session recovery owns its backoff/fallback
-			// (issue #8854).
+			// (issue #8854). So does a 429 with a zero `x-ratelimit-limit-*`
+			// allowance: the plan cannot serve this model, so no replay succeeds (#19300).
 			shouldRetryResponse: async (response, bodyText) =>
 				getShouldRetryFromHeaders(response.headers) !== false &&
+				!(response.status === 429 && getZeroRateLimitHeader(response.headers) !== undefined) &&
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
 				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
 			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
@@ -198,8 +200,12 @@ export async function captureOpenAIHttpError(response: Response): Promise<AIErro
 	const { detail, code } = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
 	// "status code (no body)" matches the SDK's former APIError phrasing;
 	// `finalizeErrorMessage` keys a repair path on that exact wording.
-	const message = detail
+	let message = detail
 		? `${response.status} ${detail.length > MAX_DETAIL_CHARS ? detail.slice(0, MAX_DETAIL_CHARS) : detail}`
 		: `${response.status} status code (no body)`;
+	// Headers do not reach persisted turns; carry a zero allowance in the text so
+	// retry/rotation classifiers and the user both see it (#19300).
+	const zeroLimitHeader = response.status === 429 ? getZeroRateLimitHeader(response.headers) : undefined;
+	if (zeroLimitHeader) message += ` ${AIError.formatZeroAllowanceNotice(zeroLimitHeader)}`;
 	return new AIError.OpenAIHttpError(message, captured, code);
 }

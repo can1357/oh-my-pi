@@ -7,7 +7,6 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	markdownToPhases,
 	nextActionableTask,
-	phasesToMarkdown,
 	resolveTodoMarkdownPath,
 	TodoTool,
 } from "@oh-my-pi/pi-coding-agent/tools";
@@ -17,6 +16,7 @@ import {
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
+	type TodoStatus,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-tui/tools/todo";
@@ -183,6 +183,68 @@ describe("TodoTool operations", () => {
 		expect(allTasks.map(task => task.status)).toEqual(["pending", "pending", "in_progress"]);
 	});
 
+	it("applies done and rm to every task in an array across phases", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", {
+			op: "init",
+			list: [
+				{ phase: "A", items: ["a1", "a2"] },
+				{ phase: "B", items: ["b1", "b2"] },
+			],
+		});
+
+		const done = await tool.execute("call-2", { op: "done", task: ["a1", "b1"] });
+		expect(done.isError).toBeUndefined();
+		expect(done.details?.completedTasks).toEqual([
+			{ phase: "A", content: "a1" },
+			{ phase: "B", content: "b1" },
+		]);
+		expect(done.details?.phases.flatMap(phase => phase.tasks.map(task => task.status))).toEqual([
+			"completed",
+			"in_progress",
+			"completed",
+			"pending",
+		]);
+
+		const removed = await tool.execute("call-3", { op: "rm", task: ["a2", "b2"] });
+		expect(removed.details?.phases.map(phase => phase.tasks.map(task => task.content))).toEqual([["a1"], ["b1"]]);
+	});
+
+	it("splits a flattened task string like a path list, preferring verbatim content", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["Fix foo, bar", "a1", "a2", "a3"] }] });
+		const statuses = (phases: TodoPhase[] | undefined) => phases?.[0]?.tasks.map(task => task.status);
+
+		const verbatim = await tool.execute("call-2", { op: "done", task: "Fix foo, bar" });
+		expect(statuses(verbatim.details?.phases)).toEqual(["completed", "in_progress", "pending", "pending"]);
+
+		const partial = await tool.execute("call-3", { op: "done", task: "a2; nope" });
+		const partialText = partial.content.find(part => part.type === "text");
+		expect(partialText?.type === "text" && partialText.text).toContain('Errors: Task "nope" not found');
+
+		const spaced = await tool.execute("call-4", { op: "done", task: " a1  a2 " });
+		expect(statuses(spaced.details?.phases)).toEqual(["completed", "completed", "completed", "in_progress"]);
+
+		const quoted = await tool.execute("call-5", { op: "drop", task: '"a3",' });
+		expect(statuses(quoted.details?.phases)).toEqual(["completed", "completed", "completed", "abandoned"]);
+	});
+
+	it("rejects a task array with a missing entry, or more than one task to start, without changing state", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["a1", "a2", "a3"] }] });
+		const before: TodoStatus[] = ["in_progress", "pending", "pending"];
+
+		const missing = await tool.execute("call-2", { op: "done", task: ["a2", "nope"] });
+		expect(missing.isError).toBe(true);
+		const missingText = missing.content.find(part => part.type === "text");
+		expect(missingText?.type === "text" && missingText.text).toContain('Task "nope" not found');
+		expect(missing.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
+
+		const start = await tool.execute("call-3", { op: "start", task: ["a2", "a3"] });
+		expect(start.isError).toBe(true);
+		expect(start.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
+	});
+
 	it("appends items to an existing phase", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["First"] }] });
@@ -234,10 +296,10 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
-	it("uses the first pending phase when no task is active, skipping blocked tasks", async () => {
+	it("uses the first pending phase when no task is active, skipping closed phases", async () => {
 		const tool = new TodoTool(
 			createSession([
-				{ name: "Waiting", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] },
+				{ name: "Done", tasks: [{ content: "wait", status: "completed" }] },
 				{ name: "Next", tasks: [{ content: "next", status: "pending" }] },
 				{ name: "Later", tasks: [{ content: "later", status: "pending" }] },
 			]),
@@ -245,7 +307,7 @@ describe("TodoTool operations", () => {
 		const result = await tool.execute("append", { op: "append", items: ["new"] });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.phases).toEqual([
-			{ name: "Waiting", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] },
+			{ name: "Done", tasks: [{ content: "wait", status: "completed" }] },
 			{
 				name: "Next",
 				tasks: [
@@ -299,116 +361,10 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
-	it("blocks a task (excluded from remaining, counted distinctly) and unblocks it", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a", "b"] }] });
-
-		const blocked = await tool.execute("call-2", { op: "block", task: "b", reason: "waiting on sign-off" });
-		const bTask = blocked.details?.phases[0]?.tasks.find(task => task.content === "b");
-		expect(bTask?.status).toBe("blocked");
-		expect(bTask?.blocker).toBe("waiting on sign-off");
-		const summary = blocked.content.find(part => part.type === "text");
-		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
-		// `a` stays the only open item; `b` leaves the remaining/open set but is surfaced as blocked.
-		expect(summary.text).toContain("Remaining items (1):");
-		expect(summary.text).toContain("1 blocked");
-
-		const unblocked = await tool.execute("call-3", { op: "unblock", task: "b" });
-		const bAfter = unblocked.details?.phases[0]?.tasks.find(task => task.content === "b");
-		expect(bAfter?.status).toBe("pending");
-		expect(bAfter?.blocker).toBeUndefined();
-	});
-
-	it("does not auto-promote a blocked task to in_progress", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["only"] }] });
-
-		const result = await tool.execute("call-2", { op: "block", task: "only" });
-
-		// `only` was in_progress; blocking it leaves no pending/in_progress, so normalization must not revive it.
-		expect(result.details?.phases[0]?.tasks[0]?.status).toBe("blocked");
-	});
-
-	it("blocking a phase leaves completed/abandoned tasks closed", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a", "b", "c"] }] });
-		await tool.execute("call-2", { op: "done", task: "a" });
-		await tool.execute("call-3", { op: "drop", task: "c" });
-
-		const result = await tool.execute("call-4", { op: "block", phase: "Work", reason: "waiting on infra" });
-		const tasks = result.details?.phases[0]?.tasks ?? [];
-		const byContent = (content: string) => tasks.find(task => task.content === content);
-		// Completed/abandoned work is untouched; only the open task becomes blocked.
-		expect(byContent("a")?.status).toBe("completed");
-		expect(byContent("c")?.status).toBe("abandoned");
-		expect(byContent("b")?.status).toBe("blocked");
-		expect(byContent("b")?.blocker).toBe("waiting on infra");
-		// A completed task must never carry a blocker note.
-		expect(byContent("a")?.blocker).toBeUndefined();
-	});
-
-	it("re-blocking an already-blocked task refines its blocker note", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a", "b"] }] });
-		// First block with no reason, then block again to add one — the agent often
-		// learns what it's waiting on only after the initial block.
-		await tool.execute("call-2", { op: "block", task: "b" });
-		const first = await tool.execute("call-3", { op: "block", task: "b" });
-		expect(first.details?.phases[0]?.tasks.find(task => task.content === "b")?.blocker).toBeUndefined();
-
-		const refined = await tool.execute("call-4", { op: "block", task: "b", reason: "waiting on user" });
-		const bTask = refined.details?.phases[0]?.tasks.find(task => task.content === "b");
-		expect(bTask?.status).toBe("blocked");
-		expect(bTask?.blocker).toBe("waiting on user");
-	});
-
-	it("rejects a block with neither task nor phase target", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a", "b"] }] });
-
-		const result = await tool.execute("call-2", { op: "block", reason: "oops" });
-		expect(result.isError).toBe(true);
-		const summary = result.content.find(part => part.type === "text");
-		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
-		expect(summary.text).toContain("block requires a task or phase target");
-		// Nothing was blocked — state is unchanged.
-		const tasks = result.details?.phases[0]?.tasks ?? [];
-		expect(tasks.every(task => task.status !== "blocked")).toBe(true);
-	});
-
-	it("rejects an unblock with neither task nor phase target", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a"] }] });
-		await tool.execute("call-2", { op: "block", task: "a", reason: "x" });
-
-		const result = await tool.execute("call-3", { op: "unblock" });
-		expect(result.isError).toBe(true);
-		const summary = result.content.find(part => part.type === "text");
-		if (summary?.type !== "text") throw new Error("Expected text summary from todo");
-		expect(summary.text).toContain("unblock requires a task or phase target");
-		// The blocked task stays blocked — the targetless unblock was rejected.
-		expect(result.details?.phases[0]?.tasks[0]?.status).toBe("blocked");
-	});
-
-	it("preserves blocked status across the markdown round-trip", () => {
-		const phases: TodoPhase[] = [
-			{
-				name: "Work",
-				tasks: [
-					{ content: "a", status: "blocked", blocker: "x" },
-					{ content: "b", status: "completed" },
-				],
-			},
-		];
-		const md = phasesToMarkdown(phases);
-		expect(md).toContain("- [!] a");
-
-		const { phases: parsed, errors } = markdownToPhases(md);
-		expect(errors).toEqual([]);
-		const parsedA = parsed[0]?.tasks.find(task => task.content === "a");
-		expect(parsedA?.status).toBe("blocked");
-		// The blocker reason must survive the round-trip, not just the status.
-		expect(parsedA?.blocker).toBe("x");
+	it("rejects the retired [!] checklist marker from /todo edit", () => {
+		const { phases, errors } = markdownToPhases("# Work\n- [!] a\n- [ ] b\n");
+		expect(errors).toEqual(['Line 2: unknown status marker "[!]" (use [ ], [x], [/], [-])']);
+		expect(phases[0]?.tasks.map(task => task.content)).toEqual(["b"]);
 	});
 
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
@@ -424,33 +380,6 @@ describe("TodoTool operations", () => {
 			{ content: "second", status: "pending" },
 			{ content: "third", status: "in_progress" },
 		]);
-	});
-
-	it("normalizes a multi-line blocker reason so the markdown round-trip survives", async () => {
-		const tool = new TodoTool(createSession());
-		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a"] }] });
-		// A blocker reason lifted from a multi-line external error or user question.
-		const blocked = await tool.execute("call-2", {
-			op: "block",
-			task: "a",
-			reason: "waiting on user:\nline two\n\tindented three",
-		});
-		const phases = blocked.details?.phases ?? [];
-		const stored = phases[0]?.tasks.find(task => task.content === "a");
-		// Normalized at the source: whitespace runs (incl. newlines) collapse to
-		// single spaces, so every one-line consumer stays intact.
-		expect(stored?.blocker).toBe("waiting on user: line two indented three");
-
-		// Without normalization the embedded newline splits the HTML comment across
-		// two markdown lines: line one is an unclosed `<!-- blocker: …` and line two
-		// parses as unrecognized syntax, losing the reason and adding an error.
-		const md = phasesToMarkdown(phases);
-		expect(md.split("\n").filter(line => line.includes("- [!]"))).toHaveLength(1);
-		const { phases: parsed, errors } = markdownToPhases(md);
-		expect(errors).toEqual([]);
-		const parsedA = parsed[0]?.tasks.find(task => task.content === "a");
-		expect(parsedA?.status).toBe("blocked");
-		expect(parsedA?.blocker).toBe("waiting on user: line two indented three");
 	});
 
 	it("creates a phase when append targets a missing phase", async () => {
@@ -1073,18 +1002,6 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 		expect(Bun.stripANSI(rendered)).toContain("screen");
 	});
 
-	it("strips control sequences from a blocker note", () => {
-		const rendered = renderPhases([
-			{
-				name: "Execution",
-				tasks: [{ content: "ship it", status: "blocked", blocker: "waiting\u001b[2Jhere" }],
-			},
-		] as unknown as TodoPhase[]);
-
-		expect(rendered).not.toContain("\u001b[2J");
-		expect(Bun.stripANSI(rendered)).toContain("waiting");
-	});
-
 	it("keeps a completed label intact under the strikethrough path", () => {
 		// The completed branch runs the label through `strikethroughText`, which
 		// splices per character — sanitizing first keeps that from interleaving
@@ -1129,13 +1046,12 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 		// `sanitizeText` deliberately preserves tabs, and a raw tab punches holes
 		// in bordered TUI output — so the display path must replace them too.
 		const rendered = renderPhases([
-			{ name: "Set\tup", tasks: [{ content: "ship\tit", status: "blocked", blocker: "waiting\there" }] },
+			{ name: "Set\tup", tasks: [{ content: "ship\tit", status: "in_progress" }] },
 			{ name: "Ship", tasks: [{ content: "b", status: "pending" }] },
 		] as unknown as TodoPhase[]);
 
 		expect(rendered).not.toContain("\t");
 		expect(Bun.stripANSI(rendered)).toContain("ship");
-		expect(Bun.stripANSI(rendered)).toContain("waiting");
 		expect(Bun.stripANSI(rendered)).toContain("Set");
 	});
 

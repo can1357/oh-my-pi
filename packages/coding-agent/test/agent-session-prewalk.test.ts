@@ -867,69 +867,76 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(primary.id);
 	});
 
-	it("does not switch on a read-only xd:// device dispatched through write (issue #7312)", async () => {
-		const primary = modelOrThrow("claude-sonnet-4-5");
-		const target = modelOrThrow("claude-sonnet-4-6");
+	it.each([
+		{ tier: "read", tool: "lsp" },
+		{ tier: "exec", tool: "bun-test" },
+	])(
+		"does not switch on a $tier-tier xd:// device dispatched through write (issues #7312, #19002)",
+		async ({ tier, tool }) => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
 
-		// A read-only lsp navigation is dispatched as `write xd://lsp`; the write
-		// result carries the wrapped tool's read tier. Like a bash step, it must
-		// not arm the hand-off — the model keeps reasoning about code shape on the
-		// strong model. Mirrors the bounded-continuation flow: one continuation,
-		// four turns, all primary, then a clean stop.
-		const readDeviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
-			{
-				name: "write",
-				label: "Write",
-				description: "Dispatch a read-only device",
-				parameters: writeToolSchema,
-				async execute() {
-					return {
-						content: [{ type: "text", text: "references" }],
-						details: { xdev: { tool: "lsp", mode: "execute", tier: "read" } },
-					};
+			// A read-only lsp navigation or an exec-tier test run is dispatched as
+			// `write xd://<device>`; the write result carries the wrapped tool's tier.
+			// Like a direct bash step, neither mutates the workspace through `write`,
+			// so neither may arm the hand-off — the model keeps investigating on the
+			// strong model. Mirrors the bounded-continuation flow: one continuation,
+			// four turns, all primary, then a clean stop.
+			const deviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
+				{
+					name: "write",
+					label: "Write",
+					description: "Dispatch a non-mutating device",
+					parameters: writeToolSchema,
+					async execute() {
+						return {
+							content: [{ type: "text", text: "device output" }],
+							details: { xdev: { tool, mode: "execute", tier } },
+						};
+					},
+				};
+			const mock = createMockModel({
+				responses: [
+					toolCall("t1", "record"),
+					toolCall("t2", "write"),
+					{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+					{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+				],
+			});
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [recordTool as AgentTool, deviceWrite as AgentTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
 				},
-			};
-		const mock = createMockModel({
-			responses: [
-				toolCall("t1", "record"),
-				toolCall("t2", "write"),
-				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
-				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
-			],
-		});
-		const requested: string[] = [];
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model: primary,
-				systemPrompt: ["Test"],
-				tools: [recordTool as AgentTool, readDeviceWrite as AgentTool],
-				messages: [],
-				thinkingLevel: Effort.Medium,
-			},
-			convertToLlm,
-			streamFn: (model, context, options) => {
-				requested.push(`${model.provider}/${model.id}`);
-				return mock.stream(model, context, options);
-			},
-		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[recordTool.name, recordTool as AgentTool],
-				[readDeviceWrite.name, readDeviceWrite as AgentTool],
-			]),
-			prewalk: { target },
-		});
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[recordTool.name, recordTool as AgentTool],
+					[deviceWrite.name, deviceWrite as AgentTool],
+				]),
+				prewalk: { target },
+			});
 
-		await session.prompt("investigate the code shape");
+			await session.prompt("investigate the code shape");
 
-		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
-		expect(session.model?.id).toBe(primary.id);
-	});
+			expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+			expect(session.model?.id).toBe(primary.id);
+		},
+	);
 
 	it.each([
 		{ readOnlyHint: true, thirdTurnModel: "claude-sonnet-4-5" },

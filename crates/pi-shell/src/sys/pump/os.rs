@@ -481,9 +481,9 @@ mod imp {
 	}
 
 	/// Where this process may create named pipes: `\\.\pipe\LOCAL\` inside an
-	/// AppContainer, which may create them nowhere else (any other name fails
+	/// `AppContainer`, which may create them nowhere else (any other name fails
 	/// with access denied, so every spawn would), else `\\.\pipe\`. Not
-	/// `LOCAL\` everywhere: outside an AppContainer it is a plain name with a
+	/// `LOCAL\` everywhere: outside an `AppContainer` it is a plain name with a
 	/// backslash, and programs that probe the path first, like `cmd`'s
 	/// `type`, report it not found.
 	pub static PIPE_PREFIX: LazyLock<&'static str> = LazyLock::new(|| {

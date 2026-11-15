@@ -14,6 +14,7 @@
 
 import type { Database, Statement } from "bun:sqlite";
 import * as path from "node:path";
+import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { getTimeRangeConfig } from "./aggregator";
 import { initDb } from "./db";
 import { classifyAgentType } from "./parser";
@@ -49,6 +50,7 @@ import {
 	parseFailureCauses,
 	parseReadSelection,
 	resolveReadPath,
+	type SpotlightWindowFacts,
 	selectedLines,
 } from "./spotlight-ingest";
 import {
@@ -62,6 +64,7 @@ import {
 	holdoutBaselines,
 	type SessionMoney,
 } from "./spotlight-measures";
+import type { SpotlightWorkerRequest, SpotlightWorkerResponse } from "./spotlight-worker";
 
 const CHARS_PER_TOKEN = 4;
 /** A request whose prompt is under this share of the previous request's follows a compaction. */
@@ -142,6 +145,7 @@ interface ResultRow {
 	gated: number;
 	heat: string | null;
 	kept: string | null;
+	windows: string | null;
 	need_reread: string | null;
 	need_edit: string | null;
 }
@@ -199,11 +203,13 @@ export interface Result {
 	kept: [number, number][];
 	/** Original lines (1-based positions) later calls needed; null for results that collect none. */
 	needs: { reread: [number, number][]; edit: [number, number][] } | null;
-	path: string | null;
-	/** The original window (`details.spotlight.original`): first line and line count; 0 lines without one. */
-	start: number;
+	/** The original's line count (all its windows'); 0 without one. */
 	lines: number;
-	hidden: [number, number][];
+	/**
+	 * The windows of the original (`details.spotlight.original`): its one window, or a `;`/`,` list read's several;
+	 * none without an original.
+	 */
+	windows: SpotlightWindowFacts[];
 	hiddenLines: number;
 	spotlightCalls: number;
 	spotlightFailures: number;
@@ -313,14 +319,44 @@ function failureCausesColumn(json: string | null): Record<string, number> | null
 function parseRanges(json: string | null): [number, number][] {
 	if (!json) return [];
 	try {
-		const value: unknown = JSON.parse(json);
-		if (!Array.isArray(value)) return [];
-		return value.filter(
-			(pair): pair is [number, number] =>
-				Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "number",
-		);
+		return rangeList(JSON.parse(json));
 	} catch {
 		return [];
+	}
+}
+
+function rangeList(value: unknown): [number, number][] {
+	if (!Array.isArray(value)) return [];
+	return value.filter(
+		(pair): pair is [number, number] =>
+			Array.isArray(pair) && typeof pair[0] === "number" && typeof pair[1] === "number",
+	);
+}
+
+/** The `windows` column: a list read's windows; null for a single-window original (or a value with none valid). */
+function parseWindowsColumn(json: string | null): SpotlightWindowFacts[] | null {
+	if (!json) return null;
+	try {
+		const value: unknown = JSON.parse(json);
+		if (!Array.isArray(value)) return null;
+		const windows = value.flatMap((window: unknown): SpotlightWindowFacts[] => {
+			if (typeof window !== "object" || window === null) return [];
+			const { path, start, lines, at, hidden, wholeFile } = window as Record<string, unknown>;
+			if (typeof start !== "number" || typeof lines !== "number" || typeof at !== "number") return [];
+			return [
+				{
+					path: typeof path === "string" ? path : null,
+					start,
+					lines,
+					at,
+					hidden: rangeList(hidden),
+					wholeFile: wholeFile === true,
+				},
+			];
+		});
+		return windows.length > 0 ? windows : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -345,7 +381,21 @@ function parseSteps(json: string): string[] {
 }
 
 function toResult(row: ResultRow): Result {
-	const hidden = parseRanges(row.hidden);
+	// A list read's windows, else the one window the columns describe (none without an original).
+	const windows =
+		parseWindowsColumn(row.windows) ??
+		(row.lines === null
+			? []
+			: [
+					{
+						path: row.path,
+						start: row.start_line ?? 1,
+						lines: row.lines,
+						at: 0,
+						hidden: parseRanges(row.hidden),
+						wholeFile: false,
+					},
+				]);
 	const steps = parseSteps(row.steps);
 	// A cut wider than plain pi did not apply: the model got plain's text, as for a result shaping kept.
 	const capped = row.capped_tokens !== null || steps.at(-1) === "plain-cap";
@@ -379,10 +429,8 @@ function toResult(row: ResultRow): Result {
 			row.need_reread !== null || row.need_edit !== null
 				? { reread: parseRanges(row.need_reread), edit: parseRanges(row.need_edit) }
 				: null,
-		path: row.path,
-		start: row.start_line ?? 1,
 		lines: row.lines ?? 0,
-		hidden,
+		windows,
 		hiddenLines: row.hidden_lines,
 		spotlightCalls: row.sp_calls ?? 0,
 		spotlightFailures: row.sp_failures ?? 0,
@@ -433,7 +481,7 @@ class SessionLoader {
 			`SELECT r.tool_call_id, r.timestamp, r.tool, r.in_chars, r.out_chars, r.in_tokens, r.out_tokens,
 			 r.steps, r.holdout, r.path, r.start_line, r.lines, r.hidden, r.hidden_lines, r.artifacts, r.sp_calls,
 			 r.sp_failures, r.sp_failure_causes, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
-			 r.gated, r.heat, r.kept,
+			 r.gated, r.heat, r.kept, r.windows,
 			 n.reread AS need_reread, n.edit AS need_edit
 			 FROM spotlight_results r
 			 LEFT JOIN spotlight_needs n ON n.session_file = r.session_file AND n.tool_call_id = r.tool_call_id
@@ -623,33 +671,41 @@ export class EditLog {
 }
 
 /**
- * Whether `call` re-reads the file `source` read, unless that file was edited in between: `hidden` given, the
- * later selection must overlap it (a recovery of a cut); else it must overlap the source's own window (the
- * fetch-back rule, where a whole-file read overlaps everything).
+ * Whether `call` re-reads a file `source` read (any window of a `;`/`,` list read), unless that file was edited in
+ * between: `recovery`, the later selection must overlap the window's hidden lines (a recovery of a cut); else it must
+ * overlap the window itself (the fetch-back rule, where a whole-file read overlaps everything).
  */
-function rereads(call: Call, source: Call, analysis: SessionAnalysis, hidden?: [number, number][]): boolean {
-	const result = source.result;
-	const sourceSelection = parseReadSelection(source.target);
-	const sourcePath = result?.path ?? sourceSelection.path;
+function rereads(call: Call, source: Call, analysis: SessionAnalysis, recovery = false): boolean {
+	const windows = source.result?.windows ?? [];
+	// A list read's target (`a.py;b.txt`) is no one path: only its windows name its files and tell which are whole.
+	const sourceSelection = windows.length > 1 ? null : parseReadSelection(source.target);
 	const selection = parseReadSelection(call.target);
-	if (!sourcePath) return false;
 	const file = resolveReadPath(selection.path, analysis.cwd);
-	if (file !== resolveReadPath(sourcePath, analysis.cwd)) return false;
-	if (analysis.edits.between(source.seq, call.seq, file)) return false;
 	const later = selectedLines(selection);
-	if (later === null) return true;
-	if (hidden) {
-		if (!result) return false;
-		const end = result.start + result.lines - 1;
-		const ranges = selection.tail === null ? later : [...later, [end - selection.tail + 1, end] as [number, number]];
-		return overlaps(ranges, hidden);
-	}
-	// A tail read lands somewhere unknown in a windowed read.
-	const window = selectedLines(sourceSelection);
-	if (window === null) return true;
-	const own: [number, number][] =
-		result && result.lines > 0 ? [[result.start, result.start + result.lines - 1]] : window;
-	return overlaps(later, own);
+	const reads: (SpotlightWindowFacts | null)[] = windows.length > 0 ? windows : [null];
+	return reads.some(window => {
+		const sourcePath = window?.path ?? sourceSelection?.path;
+		if (!sourcePath || file !== resolveReadPath(sourcePath, analysis.cwd)) return false;
+		if (analysis.edits.between(source.seq, call.seq, file)) return false;
+		if (later === null) return true;
+		const wholeFile = sourceSelection ? selectedLines(sourceSelection) === null : window?.wholeFile === true;
+		if (recovery) {
+			if (!window) return false;
+			const end = window.start + window.lines - 1;
+			// A list part's tail is known only when it read its file whole.
+			const ranges: [number, number][] =
+				selection.tail !== null && (sourceSelection !== null || wholeFile)
+					? [...later, [end - selection.tail + 1, end]]
+					: later;
+			return overlaps(ranges, window.hidden);
+		}
+		// A whole-file read overlaps any later selection; a tail read lands somewhere unknown in a windowed read.
+		if (wholeFile) return true;
+		const span = sourceSelection ? (selectedLines(sourceSelection) ?? []) : [];
+		const own: [number, number][] =
+			window && window.lines > 0 ? [[window.start, window.start + window.lines - 1]] : span;
+		return overlaps(later, own);
+	});
 }
 
 /** Jaccard similarity of two token sets; 0 when both are empty. */
@@ -697,7 +753,7 @@ function recoveryKind(
 		(result?.shortened || (wouldBe && (result?.holdout || result?.gated))) &&
 		result.tool === "read"
 	) {
-		if (rereads(call, source, analysis, result.hidden)) return "reread";
+		if (rereads(call, source, analysis, true)) return "reread";
 	}
 	if (reruns(call, source, analysis)) return "rerun";
 	return null;
@@ -1745,14 +1801,89 @@ function contextPoints(analysis: SessionAnalysis): SpotlightContextPoint[] {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/** `GET /api/stats/spotlight?range=&agent=`; an unknown `agent` measures every transcript. */
+/** The dashboard for a `?range=` and `?agent=`; an unknown `agent` measures every transcript. */
+export function spotlightDashboard(
+	database: Database,
+	range: string | null | undefined,
+	agent: string | null | undefined,
+): SpotlightDashboardStats {
+	const scope: SpotlightAgentScope = agent === "main" || agent === "subagent" ? agent : "all";
+	return buildSpotlightDashboard(database, getTimeRangeConfig(range), scope);
+}
+
+/** `GET /api/stats/spotlight?range=&agent=`, built on the calling thread. */
 export async function getSpotlightDashboardStats(
 	range?: string | null,
 	agent?: string | null,
 ): Promise<SpotlightDashboardStats> {
-	const database = await initDb();
-	const scope: SpotlightAgentScope = agent === "main" || agent === "subagent" ? agent : "all";
-	return buildSpotlightDashboard(database, getTimeRangeConfig(range), scope);
+	return spotlightDashboard(await initDb(), range, agent);
+}
+
+/**
+ * A fresh Spotlight worker: through the CLI entry with its argv selector when the process started from one (source
+ * `cli.ts`, the npm bundle, the compiled binary), else this package's worker module (standalone `omp-stats`, tests,
+ * SDK embedding).
+ */
+function createSpotlightWorker(): Worker {
+	const hostEntry = workerHostEntry();
+	if (hostEntry) {
+		return new Worker(hostEntry, { type: "module", argv: ["__omp_worker_stats_spotlight"] });
+	}
+	return new Worker(new URL("./spotlight-worker.ts", import.meta.url).href, { type: "module" });
+}
+
+/**
+ * Send one request to a fresh worker and terminate it after the reply, so a build's memory goes with it. Aborting
+ * `signal` terminates it early and rejects with the signal's reason.
+ */
+async function askSpotlightWorker(
+	request: SpotlightWorkerRequest,
+	signal?: AbortSignal,
+): Promise<Extract<SpotlightWorkerResponse, { ok: true }>> {
+	signal?.throwIfAborted();
+	const worker = createSpotlightWorker();
+	const { promise, resolve, reject } = Promise.withResolvers<SpotlightWorkerResponse>();
+	const onAbort = () => reject(signal?.reason);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	worker.onmessage = (event: MessageEvent<SpotlightWorkerResponse>) => resolve(event.data);
+	worker.onerror = (event: ErrorEvent) => {
+		reject(event.error instanceof Error ? event.error : new Error(event.message || "spotlight worker error"));
+	};
+	worker.addEventListener("close", () => reject(new Error("spotlight worker exited without replying")));
+	try {
+		worker.postMessage(request);
+		const response = await promise;
+		if (!response.ok) throw new Error(response.error);
+		return response;
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		worker.terminate();
+	}
+}
+
+/**
+ * `GET /api/stats/spotlight?range=&agent=` as JSON, built on a worker: a build takes seconds, and on the server's
+ * thread it held every other request and ingest until it ended. Aborting `signal` ends the build.
+ */
+export async function buildSpotlightDashboardJson(
+	range: string | null,
+	agent: string | null,
+	signal?: AbortSignal,
+): Promise<string> {
+	// The worker opens the database read-only, so it must already exist with the current schema.
+	await initDb();
+	const response = await askSpotlightWorker({ kind: "build", dbPath: getStatsDbPath(), range, agent }, signal);
+	if (response.kind !== "build") throw new Error(`spotlight worker: expected a build, got ${response.kind}`);
+	return response.json;
+}
+
+/**
+ * Smoke test for `omp --smoke-test`: spawns a Spotlight worker, pings it, and asserts the pong, so install-method CI
+ * catches a worker that fails to load from the compiled binary or npm bundle.
+ */
+export async function smokeTestSpotlightWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+	const response = await askSpotlightWorker({ kind: "ping" }, AbortSignal.timeout(timeoutMs));
+	if (response.kind !== "pong") throw new Error(`spotlight worker: expected pong, got ${response.kind}`);
 }
 
 /** `GET /api/stats/spotlight/session?file=`; null when the file is not an experiment session. */

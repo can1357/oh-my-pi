@@ -746,6 +746,102 @@ describe("tool-owned dynamic approval declarations", () => {
 			policy: "allow",
 		});
 	});
+
+	it("allows leading environment assignments only when permitted by bash.allowedEnvVars or rule.env, and strips them for deny/prompt", () => {
+		const settingsOverrides = {
+			"bash.allowedEnvVars": ["GOOS", "GOARCH", "CGO_ENABLED", "CARGO_TARGET_DIR", "GOFIPS140"],
+			"bash.patterns": [
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "curl *", approval: "prompt" },
+				{ match: "go test*", approval: "allow" },
+				{ match: "bun run build:native*", approval: "allow", env: ["CMAKE_GENERATOR"] },
+			],
+		};
+
+		for (const command of [
+			"GOOS=linux go test ./...",
+			"CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFIPS140=latest go test ./...",
+			'CARGO_TARGET_DIR="/tmp/target dir" CMAKE_GENERATOR=Ninja bun run build:native',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Unlisted env vars or bare assignments with no command must not ride the allow pattern.
+		for (const command of [
+			"LD_PRELOAD=/tmp/evil.so go test ./...",
+			"GOOS=linux LD_PRELOAD=/tmp/evil.so go test ./...",
+			"CMAKE_GENERATOR=Ninja go test ./...",
+			"GOOS=linux",
+			"GOOS=linux   ",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
+
+		// Leading env assignments cannot bypass deny or prompt rules.
+		for (const command of ["FOO=1 BAR=2 rm -rf build", "true && FOO=1 rm -rf build"]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({
+				tier: "exec",
+				override: true,
+				policy: "deny",
+				reason: "Blocked by bash pattern: rm -rf *",
+			});
+		}
+		expect(bashApproval("HTTP_PROXY=http://proxy.local curl https://example.com", settingsOverrides)).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: curl *",
+		});
+	});
+
+	it("matches bash.allowedEnvVars entries as exact names, never as wildcards", () => {
+		const settingsOverrides = {
+			"bash.allowedEnvVars": ["CARGO_*"],
+			"bash.patterns": [{ match: "cargo test*", approval: "allow", env: ["*"] }],
+		};
+
+		for (const command of [
+			"CARGO_BUILD_RUSTC_WRAPPER=/tmp/evil cargo test",
+			"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=/tmp/evil cargo test",
+			"LD_PRELOAD=/tmp/evil.so cargo test",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
+	});
+
+	it("resolves operator bash.patterns with operator bash.allowedEnvVars, not project ones", () => {
+		const operatorSettings = Settings.isolated({
+			"bash.patterns": [
+				{ match: "go test*", approval: "allow" },
+				{ match: "LD_PRELOAD=*", approval: "prompt" },
+			],
+		});
+		const sessionSettings = Settings.isolated({
+			"bash.allowedEnvVars": ["LD_PRELOAD"],
+			"bash.patterns": [
+				{ match: "go test*", approval: "allow" },
+				{ match: "LD_PRELOAD=*", approval: "prompt" },
+			],
+		});
+		spyOn(sessionSettings, "grantAuthority").mockReturnValue(operatorSettings);
+		spyOn(sessionSettings, "getShellConfig").mockReturnValue({
+			shell: "/bin/bash",
+			args: ["-c"],
+			env: {},
+			prefix: undefined,
+		});
+		const bash = new BashTool({ settings: sessionSettings } as unknown as ConstructorParameters<typeof BashTool>[0]);
+		const approval = bash.approval;
+		if (typeof approval !== "function") throw new Error("Bash approval must be dynamic");
+
+		expect(approval({ command: "LD_PRELOAD=/tmp/evil.so go test ./..." })).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: LD_PRELOAD=*",
+		});
+	});
+
 	it("never auto-approves a command that only prefixes an allow pattern", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "git *", approval: "allow" }],
@@ -1152,6 +1248,128 @@ describe("tool-owned dynamic approval declarations", () => {
 			policy: "allow",
 			source: "mode",
 		});
+	});
+
+	it("indicates covered and prompted segments in compound bash approval prompts", async () => {
+		const bash = createBashTool({
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "git diff*", approval: "allow" },
+				{ match: "go get*", approval: "prompt" },
+			],
+		});
+
+		const prompts: { full: string; compact: string }[] = [];
+		const ui = {
+			select: async () => undefined,
+			approve: async (prompt: { full: string; compact: string }) => {
+				prompts.push(prompt);
+				return "once" as const;
+			},
+		};
+
+		await requestApproval(ui, bash, {
+			command: "git status && git diff --stat && bun test && go get example.com/mod",
+		});
+		const expectedLines = [
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ✓ git diff --stat (allowed: git diff*)",
+			"  ? bun test (requires approval)",
+			"  ? go get example.com/mod (prompt: go get*)",
+		];
+		expect(prompts[0]!.full.split("\n")).toEqual(expectedLines);
+		expect(prompts[0]!.compact.split("\n")).toEqual(expectedLines);
+
+		// Non-stateful non-literal segment prompts for itself without tainting a following allowed segment.
+		expect(formatApprovalPrompt(bash, { command: "echo hi > /tmp/out && git status" }).split("\n")).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ? echo hi > /tmp/out (requires approval)",
+			"  ✓ git status (allowed: git status*)",
+		]);
+
+		// Stateful segment taints subsequent segments because shell state can change before they run,
+		// including when a leading redirection precedes the stateful builtin.
+		for (const command of [
+			"cd /tmp && git status",
+			">/dev/null cd /tmp && git status",
+			"> /dev/null cd /tmp && git status",
+			"BASH_CMDS[git]=/tmp/evil && git status",
+			"'BASH_CMDS[git]'=/tmp/evil && git status",
+			"PATH=/tmp : && git status",
+			"repeat 1 export PATH=/tmp && git status",
+		]) {
+			expect(formatApprovalPrompt(bash, { command }).split("\n")).toEqual([
+				"Allow tool: bash",
+				"Command:",
+				`  ? ${command.split(" && ")[0]} (requires approval)`,
+				"  ? git status (requires approval)",
+			]);
+		}
+
+		// `&&` inside `[[ ... ]]` stays within the conditional clause instead of splitting into false command rows.
+		expect(
+			formatApprovalPrompt(bash, { command: "git status && [[ -f a && -f b ]] && git diff" }).split("\n"),
+		).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? [[ -f a && -f b ]] (requires approval)",
+			"  ? git diff (requires approval)",
+		]);
+
+		// `&&` inside `${…}` and `{ … }` groups stays within its clause too.
+		expect(
+			formatApprovalPrompt(bash, { command: "git status && echo ${x:-a&&b} && { true && cd /tmp; }" }).split("\n"),
+		).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? echo ${x:-a&&b} (requires approval)",
+			"  ? { true && cd /tmp; } (requires approval)",
+		]);
+
+		// Long chains elide excess leading allowed rows in compact view so the first prompted segment is visible.
+		const longChain = [...Array.from({ length: 7 }, (_, i) => `git status -s dir${i}`), "rm -rf /"].join(" && ");
+		await requestApproval(ui, bash, { command: longChain }, { reason: "Critical pattern detected" });
+		expect(prompts[1]!.full.split("\n")).toHaveLength(11);
+		expect(prompts[1]!.compact.split("\n")).toEqual([
+			"Allow tool: bash",
+			"Reason: Critical pattern detected",
+			"Command:",
+			"  ✓ … (4 allowed segments)",
+			"  ✓ git status -s dir4 (allowed: git status*)",
+			"  ✓ git status -s dir5 (allowed: git status*)",
+			"  ✓ git status -s dir6 (allowed: git status*)",
+			"  ? rm -rf / (critical pattern)",
+		]);
+
+		// Critical segment is flagged even if an allow rule would otherwise match.
+		const rmAllowed = createBashTool({
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "rm *", approval: "allow" },
+			],
+		});
+		expect(formatApprovalPrompt(rmAllowed, { command: "git status && rm -rf /" }).split("\n")).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? rm -rf / (critical pattern)",
+		]);
+
+		// With allowCompoundCommands disabled, the command stays a single unsegmented line.
+		const compoundDisabled = createBashTool({
+			"bash.allowCompoundCommands": false,
+			"bash.patterns": [{ match: "git status*", approval: "allow" }],
+		});
+		expect(formatApprovalPrompt(compoundDisabled, { command: "git status && bun test" })).toBe(
+			"Allow tool: bash\nCommand: git status && bun test",
+		);
 	});
 });
 

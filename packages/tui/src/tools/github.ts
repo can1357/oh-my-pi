@@ -10,6 +10,7 @@ import type { RenderResultOptions } from "./renderer";
 import type { Theme, ThemeColor } from "../theme/theme";
 import { outputBlockContentWidth, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
+import { sanitizeDisplayLine } from "../overlays/extensions/display-text";
 
 import { formatShortSha, pushLine } from "./gh-format";
 import {
@@ -177,6 +178,82 @@ function getJobStateVisual(job: GhRunWatchJobDetails, theme: Theme): { icon: str
 	return { icon: theme.styledSymbol("status.shadowed", "muted"), textColor: "muted" };
 }
 
+/** First step that concluded in failure; the step a failed job broke on. */
+function findFailedStep<T extends { conclusion?: string }>(steps: readonly T[] | undefined): T | undefined {
+	return steps?.find(step => step.conclusion !== undefined && FAILURE_CONCLUSIONS.has(step.conclusion));
+}
+
+function getStepStateLabel(step: GhRunWatchStepDetails): string {
+	return sanitizeDisplayLine((step.conclusion || step.status || "unknown").replaceAll("_", " "));
+}
+
+function getStepTone(step: GhRunWatchStepDetails): TspTone {
+	if (step.conclusion && SUCCESS_CONCLUSIONS.has(step.conclusion)) return "success";
+	if (step.conclusion && FAILURE_CONCLUSIONS.has(step.conclusion)) return "error";
+	if (!step.conclusion && step.status && RUNNING_STATUSES.has(step.status)) return "warning";
+	return "muted";
+}
+
+function getStepStateVisual(step: GhRunWatchStepDetails, theme: Theme): { icon: string; textColor: ThemeColor } {
+	const tone = getStepTone(step);
+	const textColor: ThemeColor = tone === "success" || tone === "error" || tone === "warning" ? tone : "muted";
+	if (tone === "success") return { icon: formatStatusIcon("success", theme), textColor };
+	if (tone === "error") return { icon: formatStatusIcon("error", theme), textColor };
+	if (tone === "warning") return { icon: formatStatusIcon("running", theme), textColor };
+	if (!step.conclusion && step.status && PENDING_STATUSES.has(step.status))
+		return { icon: formatStatusIcon("pending", theme), textColor };
+	return { icon: theme.styledSymbol("status.shadowed", "muted"), textColor };
+}
+
+interface GhRunStepProgress {
+	total: number;
+	completed: number;
+	currentStep?: GhRunWatchStepDetails;
+	currentPosition?: number;
+	failedStep?: GhRunWatchStepDetails;
+	allSuccessful: boolean;
+}
+
+function getStepProgress(job: GhRunWatchJobDetails): GhRunStepProgress | undefined {
+	const steps = job.steps;
+	if (!steps || steps.length === 0) return undefined;
+
+	const completed = steps.filter(step => Boolean(step.conclusion) || step.status === "completed").length;
+	const currentIndex = steps.findIndex(step => !step.conclusion && step.status === "in_progress");
+	const failedStep = findFailedStep(steps);
+	const nextIndex =
+		currentIndex >= 0
+			? currentIndex
+			: failedStep
+				? -1
+				: steps.findIndex(
+						step =>
+							!step.conclusion &&
+							step.status !== "completed" &&
+							step.status !== undefined &&
+							PENDING_STATUSES.has(step.status),
+					);
+	const currentStep = nextIndex >= 0 ? steps[nextIndex] : undefined;
+	return {
+		total: steps.length,
+		completed,
+		currentStep,
+		currentPosition: currentStep ? nextIndex + 1 : undefined,
+		failedStep,
+		allSuccessful: steps.every(step => Boolean(step.conclusion && SUCCESS_CONCLUSIONS.has(step.conclusion))),
+	};
+}
+
+function getStepProgressLabel(progress: GhRunStepProgress): string {
+	if (progress.currentStep && progress.currentPosition !== undefined) {
+		return `${progress.currentPosition}/${progress.total} #${progress.currentStep.number} ${sanitizeDisplayLine(progress.currentStep.name)} · ${getStepStateLabel(progress.currentStep)}`;
+	}
+	if (progress.failedStep) {
+		return `#${progress.failedStep.number} ${sanitizeDisplayLine(progress.failedStep.name)} · ${getStepStateLabel(progress.failedStep)} · ${progress.completed}/${progress.total}`;
+	}
+	return `${progress.completed}/${progress.total} steps complete`;
+}
+
 function renderJobLine(job: GhRunWatchJobDetails, width: number, theme: Theme): string {
 	const visual = getJobStateVisual(job, theme);
 	const prefix = `${visual.icon} `;
@@ -184,7 +261,7 @@ function renderJobLine(job: GhRunWatchJobDetails, width: number, theme: Theme): 
 	const styledDuration = durationLabel ? theme.fg(visual.textColor, durationLabel) : undefined;
 	const reservedWidth = visibleWidth(prefix) + (styledDuration ? 1 + visibleWidth(styledDuration) : 0);
 	const nameWidth = Math.max(8, width - reservedWidth);
-	const jobName = theme.fg(visual.textColor, truncateVisualWidth(replaceTabs(job.name), nameWidth));
+	const jobName = theme.fg(visual.textColor, truncateVisualWidth(sanitizeDisplayLine(job.name), nameWidth));
 	let line = `${prefix}${jobName}`;
 	if (styledDuration) {
 		line += padding(Math.max(1, width - visibleWidth(line) - visibleWidth(styledDuration)));
@@ -193,15 +270,58 @@ function renderJobLine(job: GhRunWatchJobDetails, width: number, theme: Theme): 
 	return line;
 }
 
-function renderRunBlock(run: GhRunWatchRunDetails, width: number, theme: Theme): string[] {
+function renderStepProgressLine(
+	job: GhRunWatchJobDetails,
+	width: number,
+	theme: Theme,
+	showExpandHint: boolean,
+): string | undefined {
+	const progress = getStepProgress(job);
+	if (!progress) return undefined;
+
+	const summaryStep = progress.currentStep ?? progress.failedStep;
+	const visual = summaryStep ? getStepStateVisual(summaryStep, theme) : undefined;
+	const textColor: ThemeColor = visual?.textColor ?? (progress.allSuccessful ? "success" : "muted");
+	const icon =
+		visual?.icon ??
+		(progress.allSuccessful ? formatStatusIcon("success", theme) : formatStatusIcon("pending", theme));
+	const prefix = `  ${theme.fg("dim", "↳")} ${icon} `;
+	const hint = showExpandHint ? formatExpandHint(theme, false, true) : "";
+	const hintSuffix = hint ? ` ${hint}` : "";
+	const labelWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(hintSuffix));
+	const label = truncateVisualWidth(getStepProgressLabel(progress), labelWidth);
+	const line = `${prefix}${theme.fg(textColor, label)}${hintSuffix}`;
+	return truncateVisualWidth(line, Math.max(1, width));
+}
+
+function renderStepLine(step: GhRunWatchStepDetails, width: number, theme: Theme): string {
+	const visual = getStepStateVisual(step, theme);
+	const prefix = `    ${visual.icon} #${step.number} `;
+	const state = theme.fg(visual.textColor, getStepStateLabel(step));
+	const duration = step.durationSeconds !== undefined ? `  ${theme.fg("muted", `${step.durationSeconds}s`)}` : "";
+	const suffix = `  ${state}${duration}`;
+	const nameWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
+	const name = theme.fg(visual.textColor, truncateVisualWidth(sanitizeDisplayLine(step.name), nameWidth));
+	return truncateVisualWidth(`${prefix}${name}${suffix}`, Math.max(1, width));
+}
+
+function renderRunBlock(run: GhRunWatchRunDetails, width: number, theme: Theme, expanded: boolean): string[] {
 	const lines = [formatRunLine(run, theme)];
 	if (run.jobs.length === 0) {
 		lines.push(theme.fg("dim", "waiting for workflow jobs..."));
 		return lines;
 	}
 
+	let hintShown = false;
 	for (const job of run.jobs) {
 		lines.push(renderJobLine(job, width, theme));
+		if (expanded) {
+			for (const step of job.steps ?? []) lines.push(renderStepLine(step, width, theme));
+		} else if ((job.steps?.length ?? 0) > 0) {
+			const progress = renderStepProgressLine(job, width, theme, !hintShown);
+			if (progress) lines.push(progress);
+			hintShown = true;
+		}
 	}
 	return lines;
 }
@@ -262,7 +382,7 @@ function buildWatchSections(
 	}
 
 	if (watch.mode === "run" && watch.run) {
-		main.push(...renderRunBlock(watch.run, width, theme));
+		main.push(...renderRunBlock(watch.run, width, theme, options.expanded));
 	} else if (watch.mode === "commit") {
 		const runs = watch.runs ?? [];
 		if (runs.length === 0) {
@@ -272,7 +392,7 @@ function buildWatchSections(
 				if (index > 0) {
 					main.push("");
 				}
-				main.push(...renderRunBlock(run, width, theme));
+				main.push(...renderRunBlock(run, width, theme, options.expanded));
 			});
 		}
 	}
@@ -402,37 +522,76 @@ function jobTone(job: GhRunWatchJobDetails): TspTone {
 	return "muted";
 }
 
+function describeStep(step: GhRunWatchStepDetails): NativeNode {
+	const tone = getStepTone(step);
+	const value = [span(getStepStateLabel(step), tone)];
+	if (step.durationSeconds !== undefined) value.push(span(" "), span(`${step.durationSeconds}s`, "muted"));
+	return item(`step:${step.number}`, {
+		label: [span(`#${step.number} `, "muted"), span(plainText(sanitizeDisplayLine(step.name)), tone)],
+		value,
+		tone,
+	});
+}
+
+function describeJob(job: GhRunWatchJobDetails, expanded: boolean): NativeNode {
+	const tone = jobTone(job);
+	const progress = getStepProgress(job);
+	const summaryStep = progress?.currentStep ?? progress?.failedStep;
+	const head = [span(plainText(sanitizeDisplayLine(job.name)), tone)];
+	if (progress) {
+		const progressTone = summaryStep ? getStepTone(summaryStep) : progress.allSuccessful ? "success" : "muted";
+		head.push(span("  "), span(plainText(getStepProgressLabel(progress)), progressTone));
+	}
+	if (job.durationSeconds !== undefined) head.push(span(`  ${job.durationSeconds}s`, tone));
+
+	const steps = job.steps ?? [];
+	return node(
+		"section",
+		{ head, collapsible: steps.length > 0, collapsed: steps.length > 0 ? !expanded : false },
+		steps.length > 0 ? [list(steps.map(describeStep), undefined, `steps:${job.id}`)] : [],
+		`job:${job.id}`,
+	);
+}
+
 /** One workflow run: a section headed by workflow + branch/sha + id, listing its jobs. */
-function describeRun(run: GhRunWatchRunDetails): NativeNode {
+function describeRun(run: GhRunWatchRunDetails, expanded: boolean): NativeNode {
 	const metaParts = getRunMeta(run);
 	const head = [span(plainText(getRunLabel(run)), "accent")];
 	metaParts.forEach((part, index) => {
 		head.push(span("  "), span(plainText(part), index === metaParts.length - 1 ? "muted" : "text"));
 	});
+	const hasSteps = run.jobs.some(job => (job.steps?.length ?? 0) > 0);
 	const jobs =
 		run.jobs.length === 0
 			? noteText("waiting for workflow jobs...")
-			: list(
-					run.jobs.map(job => {
-						const tone = jobTone(job);
-						return item(`${job.id}`, {
-							label: [span(plainText(job.name), tone)],
-							tone,
-							icon: tone === "success" ? "check" : undefined,
-							value: job.durationSeconds !== undefined ? [span(`${job.durationSeconds}s`, tone)] : undefined,
-						});
-					}),
-				);
+			: hasSteps
+				? node(
+						"col",
+						undefined,
+						run.jobs.map(job => describeJob(job, expanded)),
+						"jobs",
+					)
+				: list(
+						run.jobs.map(job => {
+							const tone = jobTone(job);
+							return item(`${job.id}`, {
+								label: [span(plainText(job.name), tone)],
+								tone,
+								icon: tone === "success" ? "check" : undefined,
+								value: job.durationSeconds !== undefined ? [span(`${job.durationSeconds}s`, tone)] : undefined,
+							});
+						}),
+					);
 	return node("section", { head }, [jobs], `run:${run.id}`);
 }
 
-function describeWatch(watch: GhRunWatchViewDetails, isError: boolean): NativeToolView {
+function describeWatch(watch: GhRunWatchViewDetails, isError: boolean, expanded: boolean): NativeToolView {
 	const runs: NativeChild[] = [];
-	if (watch.mode === "run" && watch.run) runs.push(describeRun(watch.run));
+	if (watch.mode === "run" && watch.run) runs.push(describeRun(watch.run, expanded));
 	else if (watch.mode === "commit") {
 		const commitRuns = watch.runs ?? [];
 		if (commitRuns.length === 0) runs.push(noteText("waiting for workflow runs..."));
-		for (const run of commitRuns) runs.push(describeRun(run));
+		for (const run of commitRuns) runs.push(describeRun(run, expanded));
 	}
 	const failed = (watch.failedLogs ?? []).flatMap((entry): NativeChild[] => {
 		const context = entry.workflowName ? `${entry.workflowName}  #${entry.runId}` : `run #${entry.runId}`;
@@ -562,9 +721,9 @@ export const githubToolRenderer = {
 		args?: GithubToolRenderArgs,
 	): NativeToolView | undefined {
 		const watch = result.details?.watch;
-		const deps = [args?.op, options.isPartial, watch?.state, watch?.pollCount];
+		const deps = [args?.op, options.isPartial, options.expanded, watch?.state, watch?.pollCount];
 		return githubResultMemo.get(result, deps, () =>
-			watch ? describeWatch(watch, result.isError === true) : describeFallback(result, args ?? {}),
+			watch ? describeWatch(watch, result.isError === true, options.expanded) : describeFallback(result, args ?? {}),
 		);
 	},
 
@@ -604,6 +763,15 @@ export interface GhPrCheckoutSummary {
 	clonedWith?: IsoBackendKind;
 }
 
+/** Display state of one watched workflow step. */
+export interface GhRunWatchStepDetails {
+	number: number;
+	name: string;
+	status?: string;
+	conclusion?: string;
+	durationSeconds?: number;
+}
+
 /** Display state of a watched workflow job. */
 export interface GhRunWatchJobDetails {
 	id: number;
@@ -612,6 +780,7 @@ export interface GhRunWatchJobDetails {
 	conclusion?: string;
 	durationSeconds?: number;
 	url?: string;
+	steps?: GhRunWatchStepDetails[];
 }
 
 /** Display state of a watched workflow run. */
@@ -652,6 +821,16 @@ export interface GhRunWatchViewDetails {
 	failedLogs?: GhRunWatchFailedLogDetails[];
 }
 
+/** Normalized status and timestamps of one workflow step. */
+export interface GhRunStepSnapshot {
+	number: number;
+	name: string;
+	status?: string;
+	conclusion?: string;
+	startedAt?: string;
+	completedAt?: string;
+}
+
 /** Normalized status and timestamps of a workflow job. */
 export interface GhRunJobSnapshot {
 	id: number;
@@ -661,6 +840,7 @@ export interface GhRunJobSnapshot {
 	startedAt?: string;
 	completedAt?: string;
 	url?: string;
+	steps?: GhRunStepSnapshot[];
 }
 
 /** Normalized workflow run and job snapshot. */
@@ -703,6 +883,8 @@ export function renderJobsSection(jobs: GhRunJobSnapshot[]): string[] {
 	const lines: string[] = [`## Jobs (${jobs.length})`, ""];
 	for (const job of jobs) {
 		lines.push(`- [${formatJobState(job)}] ${job.name}`);
+		const failedStep = findFailedStep(job.steps);
+		if (failedStep) pushLine(lines, "  Failed step", `#${failedStep.number} ${sanitizeDisplayLine(failedStep.name)}`);
 		if (job.startedAt) {
 			pushLine(lines, "  Started", job.startedAt);
 		}
@@ -713,7 +895,6 @@ export function renderJobsSection(jobs: GhRunJobSnapshot[]): string[] {
 			pushLine(lines, "  URL", job.url);
 		}
 	}
-
 	return lines;
 }
 

@@ -3,6 +3,7 @@ import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
@@ -46,15 +47,18 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
  * Whether a completed tool result is the first workspace-mutating action that
  * arms the prewalk hand-off. A direct `edit`/`write` call counts unless the
  * write touched no files: a subagent messaging its parent through
- * `write agent://…`, a reply, or a background-work cancellation is
+ * `write agent://…`, a reply, process stdin, or background-work control is
  * coordination, not implementation, and must not hand the plan off. A `write`
  * that dispatched an `xd://` device (e.g. `lsp`, `ast_edit`, `debug`)
- * counts only when the wrapped tool resolved to a `write`/`exec` approval tier.
+ * counts only when the wrapped tool resolved to the `write` approval tier.
  * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
  * internal URLs, help lookups — leave the tier `read` (or absent) and must not
- * switch the model mid-investigation (issue #7312). MCP approval stays
- * conservatively `write`, so an MCP tool the server declared read-only is
- * excluded through the hint the dispatch recorded for the tool that ran.
+ * switch the model mid-investigation (issue #7312). Exec-tier devices (test
+ * runners, remote commands, and any tool without a declared approval) count no
+ * more than the same tool called directly, which never arms the hand-off
+ * (issue #19002). MCP approval stays conservatively `write`, so an MCP tool the
+ * server declared read-only is excluded through the hint the dispatch recorded
+ * for the tool that ran.
  */
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
@@ -64,10 +68,9 @@ function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
 	if (!("xdev" in details) || !details.xdev) return true;
 	const xdev = details.xdev;
-	// Device dispatch: switch only on a genuine mutation tier. An absent tier
-	// (help lookup, unresolved approval) declines the switch.
-	if (typeof xdev !== "object" || !("tier" in xdev)) return false;
-	if (xdev.tier !== "write" && xdev.tier !== "exec") return false;
+	// Device dispatch: switch only on the mutation tier. An absent tier (help
+	// lookup, unresolved approval) declines the switch.
+	if (typeof xdev !== "object" || !("tier" in xdev) || xdev.tier !== "write") return false;
 	return !("readOnlyHint" in xdev && xdev.readOnlyHint === true);
 }
 
@@ -227,6 +230,7 @@ export class PrewalkCoordinator {
 	}
 
 	async #restoreSource(handoff: PrewalkHandoff): Promise<void> {
+		if (cfgOffline.get(this.#host.settings) && handoff.source.provider !== this.#host.model()?.provider) return;
 		try {
 			await this.#host.setModelTemporary(handoff.source, handoff.sourceThinkingLevel);
 			// Temporary selection treats undefined as "keep/default"; restoration must preserve
@@ -324,6 +328,16 @@ export class PrewalkCoordinator {
 	async advanceAtTurnEnd(liveMessages: AgentMessage[], context: AgentTurnEndContext | undefined): Promise<void> {
 		const prewalk = this.#prewalk;
 		if (!prewalk || context?.message.role !== "assistant") return;
+		if (cfgOffline.get(this.#host.settings) && prewalk.target.provider !== this.#host.model()?.provider) {
+			this.#scrubPlanNudge(liveMessages);
+			this.#clearPrewalkState();
+			this.#host.emitNotice(
+				"warning",
+				"Prewalk disarmed: offline mode restricts handoffs to the active provider.",
+				"prewalk",
+			);
+			return;
+		}
 		if (this.#isNoop(prewalk)) {
 			this.#scrubPlanNudge(liveMessages);
 			this.#disarmNoop(prewalk);
@@ -564,6 +578,9 @@ export class PrewalkCoordinator {
 		const planYolo = this.#planYolo;
 		const state = this.#host.getPlanModeState();
 		if (!planYolo || !state?.enabled) throw new ToolError("Plan mode is not active.");
+		if (cfgOffline.get(this.#host.settings) && planYolo.target.provider !== this.#host.model()?.provider) {
+			throw new ToolError("Offline mode restricts plan handoffs to the active provider.");
+		}
 		const {
 			planFilePath,
 			planContent,

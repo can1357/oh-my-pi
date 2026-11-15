@@ -6,7 +6,6 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
-import { glob as ovnfsGlob } from "../ovnfs/search";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
@@ -32,7 +31,7 @@ import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgTaskDisabledAgents, ovnfsCommand } from "../task/settings";
+import { cfgTaskDisabledAgents } from "../task/settings";
 
 const findSchema = type({
 	"path?": "string",
@@ -100,8 +99,8 @@ export interface GlobToolOptions {
 	operations?: GlobOperations;
 	/** Remap slash-only paths to the session cwd before root-search validation. */
 	rootPathAlias?: boolean;
-	/** Glob backend (`natives.glob`, answered by the ovnfs daemon inside its mount). Override only in tests. */
-	nativeGlob?: typeof ovnfsGlob;
+	/** Glob backend (`natives.glob`). Override only in tests. */
+	nativeGlob?: typeof natives.glob;
 	/** Filesystem stat used before native scans. Override only in tests. */
 	stat?: typeof fs.promises.stat;
 	/** Native and user-facing scan timeout. Override only in tests. */
@@ -167,7 +166,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 	readonly #customOps?: GlobOperations;
 	readonly #rootPathAlias: boolean;
-	readonly #nativeGlob: typeof ovnfsGlob;
+	readonly #nativeGlob: typeof natives.glob;
 	readonly #stat: typeof fs.promises.stat;
 	readonly #timeoutMs: number;
 	#descriptionKey = -1;
@@ -179,7 +178,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	) {
 		this.#customOps = options?.operations;
 		this.#rootPathAlias = options?.rootPathAlias === true;
-		this.#nativeGlob = options?.nativeGlob ?? ovnfsGlob;
+		this.#nativeGlob = options?.nativeGlob ?? natives.glob;
 		this.#stat = options?.stat ?? fs.promises.stat;
 		this.#timeoutMs = options?.timeoutMs ?? DEFAULT_GLOB_TIMEOUT_MS;
 		if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) {
@@ -212,11 +211,17 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const formatScopePath = (targetPath: string): string => formatPathRelativeToCwd(targetPath, this.session.cwd);
 			const scopedPaths = toPathList(pathInput);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
+			const internalRouter = InternalUrlRouter.instance();
+			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
+				tier: resolveToolTier(this, params),
+			});
 			const rawPatternInputs = this.#customOps
 				? effectivePaths
 				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
 						splitter: parseFindPattern,
-						mixedLocalPaths: true,
+						mixedLocalPaths: urlFilesystem,
 					});
 			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
 			const aliasResolvedPatterns = this.#rootPathAlias
@@ -225,12 +230,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (aliasResolvedPatterns.some(pattern => /^\/+$/.test(pattern))) {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}
-			const internalRouter = InternalUrlRouter.instance();
-			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
-			const urlFilesystem = new InternalUrlFilesystem({
-				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
-				tier: resolveToolTier(this, params),
-			});
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");
@@ -597,7 +596,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							filesystem: urlFilesystem.shellFilesystem(),
 						},
 						makeOnMatch(formatTargetMatch),
-						ovnfsCommand(this.session.settings),
 					);
 					throwIfAborted(signal);
 					const out: Array<{ path: string; mtime: number }> = [];

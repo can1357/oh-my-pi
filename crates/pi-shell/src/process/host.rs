@@ -190,7 +190,7 @@ impl NativeHost {
 				.and_then(|(_, v)| v.to_str().ok())
 		};
 		let tools = crate::tools::ToolConfig {
-			extras: crate::extras::ExtrasGate::from_env(var),
+			extras: crate::extras::ExtrasGate::from_switches(|name| crate::git::flag_on(var(name))),
 			..crate::tools::ToolConfig::default()
 		};
 		self.extras = Some(Extras { tools, runtime: None });

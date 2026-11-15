@@ -3,18 +3,14 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/todo-command-controller";
-import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { handleTodoAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/todo";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { TodoPhasesUpdate } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
@@ -37,23 +33,17 @@ interface Harness {
 	session: AgentSession;
 	recorder: TodoBackendRecorder;
 	dir: string;
-	eventBus: EventBus;
 	sessionManager: SessionManager;
 }
 
-let mode: InteractiveMode | undefined;
 const cleanups: Array<() => Promise<void> | void> = [];
 
 beforeAll(async () => {
 	resetSettingsForTest();
-	await initTheme();
 	await Settings.init({ inMemory: true });
 });
 
 afterEach(async () => {
-	mode?.stop();
-	mode = undefined;
-	vi.useRealTimers();
 	vi.restoreAllMocks();
 	for (const cleanup of cleanups.splice(0)) await cleanup();
 });
@@ -65,20 +55,18 @@ afterAll(() => {
 async function createHarness(): Promise<Harness> {
 	const tempDir = await TempDir.create("@pi-todo-writers-");
 	const dir = tempDir.path();
-	const eventBus = new EventBus();
 	const sessionManager = SessionManager.create(dir, dir);
 	const recorder = createTodoBackendRecorder(BACKEND_ID);
 	const session = await createTodoSession(dir, {
 		backend: BACKEND_ID,
 		extensions: [recorder.extension()],
-		eventBus,
 		sessionManager,
 	});
 	cleanups.push(async () => {
 		await disposeTodoSession(session);
 		await tempDir.remove();
 	});
-	return { session, recorder, dir, eventBus, sessionManager };
+	return { session, recorder, dir, sessionManager };
 }
 
 async function seedList(h: Harness): Promise<TodoPhase[]> {
@@ -327,73 +315,5 @@ describe("todo writers reach the selected backend's replace", () => {
 		expect(contentsOf(h.session.getTodoPhases())).toContain("Focus item");
 		expect(ctx.agent.appendMessage).toHaveBeenCalledTimes(1);
 		expect(ctx.showError).not.toHaveBeenCalled();
-	});
-});
-
-describe("interactive mode with a backend", () => {
-	async function startMode(h: Harness): Promise<InteractiveMode> {
-		const started = new InteractiveMode(h.session, "test", undefined, undefined, undefined, h.eventBus);
-		mode = started;
-		vi.spyOn(started.statusLine, "watchBranch").mockImplementation(() => {});
-		const pending: TodoPhase[] = [{ name: "Plan", tasks: [{ content: "Fix review comments", status: "pending" }] }];
-		h.session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: pending });
-		h.session.setTodoPhases(pending);
-		started.setTodos(h.session.getTodoPhases());
-		await started.init();
-		return started;
-	}
-
-	function completeSubagent(h: Harness): void {
-		h.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id: "ReviewFixer",
-			index: 0,
-			agent: "task",
-			description: "Fix review comments",
-			status: "completed",
-			detached: true,
-		});
-		vi.advanceTimersByTime(100);
-	}
-
-	it("sends the completed list to replace, reconciled with a queued tool write, and updates the HUD", async () => {
-		const h = await createHarness();
-		const started = await startMode(h);
-		const gate = hold(h.recorder, "apply");
-		vi.useFakeTimers();
-
-		const toolCall = todo(h.session, { op: "append", phase: "Plan", items: ["Tool item"] });
-		await gate.started.promise;
-		completeSubagent(h);
-
-		gate.release.resolve();
-		await toolCall;
-		await flushTodoWrites(h.session);
-
-		const committed = h.session.getTodoPhases();
-		expect(committed[0]?.tasks).toEqual([
-			{ content: "Fix review comments", status: "completed" },
-			{ content: "Tool item", status: "pending" },
-		]);
-		const replaces = h.recorder.calls.filter(call => call.method === "replace");
-		expect(replaces).toHaveLength(1);
-		expect(replaces[0]?.phases).toEqual(committed);
-		expect(started.todoPhases).toEqual(committed);
-	});
-
-	it("commits the completed list and shows it on the HUD when replace throws, and warns once", async () => {
-		const h = await createHarness();
-		h.recorder.replaceError = new Error(REFUSAL);
-		const started = await startMode(h);
-		const warning = vi.spyOn(started, "showWarning").mockImplementation(() => {});
-		vi.useFakeTimers();
-
-		completeSubagent(h);
-		await flushTodoWrites(h.session);
-
-		expect(warning).toHaveBeenCalledTimes(1);
-		expect(warning).toHaveBeenCalledWith(expect.stringContaining(REFUSAL));
-		expect(h.session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
-		expect(started.todoPhases[0]?.tasks[0]?.status).toBe("completed");
-		expect(getLatestTodoPhasesFromEntries(h.sessionManager.getBranch())).toEqual(h.session.getTodoPhases());
 	});
 });

@@ -191,7 +191,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("background tab input", () => {
 		});
 	}, 60_000);
 
-	it("drives an app.cdp_url tab in the background", async () => {
+	it("drives an app CDP URL tab in the background", async () => {
 		const port = await findFreeCdpPort();
 		const browser = await puppeteer.launch({
 			executablePath: await ensureChromiumExecutable(),

@@ -107,6 +107,26 @@ describe("splitting a list that repeats its colon", () => {
 		});
 	});
 
+	it("reads a colon between two line numbers in a list as the range dash", () => {
+		expect(splitPathAndSel("a.ts:20:40,85:100,165:185,510:700")).toEqual({
+			path: "a.ts",
+			sel: "20-40,85-100,165-185,510-700",
+		});
+		expect(splitPathAndSel("a.ts:raw:5,20:40")).toEqual({ path: "a.ts", sel: "raw:5,20-40" });
+		expect(splitPathAndSel("a.ts:20:40,85-90:raw")).toEqual({ path: "a.ts", sel: "20-40,85-90:raw" });
+		// Without a comma the colon may be a timestamp or line:column, so it stays in the path.
+		expect(splitPathAndSel("clip.mp4:1:30")).toEqual({ path: "clip.mp4:1", sel: "30" });
+		expect(splitPathAndSel("a.ts:20:40,85:100", { foldListColons: false })).toEqual({
+			path: "a.ts:20:40,85",
+			sel: "100",
+		});
+		const linesSpec = () => ({ selectors: "lines" as const });
+		expect(splitInternalUrlSel("artifact://7:20:40,85:100:raw", linesSpec)).toEqual({
+			path: "artifact://7",
+			sel: "20-40,85-100:raw",
+		});
+	});
+
 	it("handles long lists in one pass", () => {
 		const list = `1${",:1".repeat(6400)}`;
 		expect(splitPathAndSel(`a.txt:${list}`).path).toBe("a.txt");
@@ -152,6 +172,16 @@ describe("read tool head+tail selectors", () => {
 			const output = getTextOutput(await tool.execute("head-tail-artifact", { path: `artifact://7:${selector}` }));
 
 			for (const line of [1, 12, 186, 200]) expect(output).toContain(`row-${line}.`);
+			expect(output).not.toContain("row-100.");
+		});
+	}
+
+	for (const target of ["file", "artifact"] as const) {
+		it(`reads every range of a ${target} list written with colon dashes`, async () => {
+			const base = target === "file" ? filePath : "artifact://7";
+			const output = getTextOutput(await tool.execute("colon-dash", { path: `${base}:2:3,198:199` }));
+
+			for (const line of [2, 3, 198, 199]) expect(output).toContain(`row-${line}.`);
 			expect(output).not.toContain("row-100.");
 		});
 	}

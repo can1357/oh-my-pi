@@ -384,7 +384,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			const surviving = await runInTab(names[1]!, { code: "return await tab.title();", timeoutMs: 10_000, session });
 			expect(surviving.returnValue).toBe("Second");
 
-			// `app.target` borrows the user's page; closing releases it without closing it.
+			// `target` borrows the user's page; closing releases it without closing it.
 			const borrowed = await acquireTab(names[2]!, relay, { target: "Human sentinel", timeoutMs: 15_000 });
 			expect(borrowed.tab.targetId).not.toBe(first.tab.targetId);
 			await releaseTab(names[2]!);

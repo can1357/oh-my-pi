@@ -1,0 +1,11 @@
+// Catalog entry for "chutes".
+
+provider "chutes" {
+	default-model "deepseek-ai/DeepSeek-V4-Flash-0731-TEE"
+	env "CHUTES_API_KEY"
+	dynamic-models-authoritative #true
+	// Chutes rows carry their own metadata; same-id rows from other
+	// providers describe different deployments.
+	skip-cross-provider-reference-fills #true
+	discovery label="Chutes"
+}

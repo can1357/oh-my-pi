@@ -11,13 +11,14 @@ const CHROME_FOR_TESTING_BASE_URL = "https://storage.googleapis.com/chrome-for-t
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 
 /**
- * Archive ceilings for the managed browser download. The default archive
- * limits (64 MiB per member / 256 MiB in memory) guard against attacker-
- * controlled archives, but the Chrome-for-Testing binary is a trusted
- * first-party download whose `chrome` executable already exceeds both
- * (~269 MB and growing), so extraction gets a ceiling sized for it.
+ * Archive ceilings for managed browser downloads (Chrome for Testing, omp's
+ * WebKit engine). The default archive limits (64 MiB per member / 256 MiB in
+ * memory) guard against attacker-controlled archives, but these are trusted
+ * first-party, digest-checked downloads whose engine binaries already exceed
+ * both (Chrome's `chrome` ~269 MB, WebKit's library ~114 MB), so extraction
+ * gets a ceiling sized for them.
  */
-const BROWSER_ARCHIVE_LIMITS: Partial<ArchiveLimits> = {
+export const BROWSER_ARCHIVE_LIMITS: Partial<ArchiveLimits> = {
 	maxMemberSize: 1024 * 1024 * 1024,
 	maxInMemorySize: 1024 * 1024 * 1024,
 };

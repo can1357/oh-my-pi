@@ -264,6 +264,7 @@ async fn file_root<M: Matcher + Sync>(
 		files_searched: 1,
 		limit_reached,
 		skipped_oversized: 0,
+		binary_matches: Vec::new(),
 	};
 	if let Some(sink) = sink {
 		for batch in batches(opts.mode, &path, matches, outcome.count) {
@@ -322,7 +323,7 @@ impl<R: io::Read> io::Read for Halting<'_, R> {
 /// One candidate's outcome in a budgeted pass.
 enum Outcome {
 	/// Searched; matches when `Some`.
-	Searched(Option<(FileHit, u64)>),
+	Searched { hit: Option<(FileHit, u64)>, binary_match: bool },
 	/// Over [`MAX_FILE_BYTES`]: searched in the second pass.
 	Defer,
 	/// Unreadable.
@@ -368,7 +369,7 @@ async fn search_candidate<M: Matcher + Sync>(
 	let mut matches = Vec::new();
 	let outcome = search.scan(&mut scratch.scanner, &scratch.buf, &mut matches);
 	if outcome.count == 0 {
-		return Outcome::Searched(None);
+		return Outcome::Searched { hit: None, binary_match: outcome.binary_match };
 	}
 	let hit = FileHit {
 		path: String::from_utf8_lossy(rel).into_owned(),
@@ -377,7 +378,10 @@ async fn search_candidate<M: Matcher + Sync>(
 		limit_reached: outcome.limit_reached,
 		oversized: prefix,
 	};
-	Outcome::Searched(Some((hit, outcome.collected)))
+	Outcome::Searched {
+		hit:          Some((hit, outcome.collected)),
+		binary_match: outcome.binary_match,
+	}
 }
 
 /// The settled prefix of a budgeted search.
@@ -391,6 +395,7 @@ struct Budget {
 	deferred:  Vec<Vec<u8>>,
 	searched:  u64,
 	oversized: u64,
+	binary:    Vec<String>,
 }
 
 impl Budget {
@@ -398,8 +403,11 @@ impl Budget {
 	/// whether `need` units are settled and the search can stop.
 	fn take(&mut self, rel: Vec<u8>, outcome: Outcome) -> bool {
 		match outcome {
-			Outcome::Searched(hit) => {
+			Outcome::Searched { hit, binary_match } => {
 				self.searched += 1;
+				if binary_match {
+					self.binary.push(String::from_utf8_lossy(&rel).into_owned());
+				}
 				if let Some((hit, collected)) = hit {
 					self.units = self
 						.units
@@ -418,11 +426,19 @@ impl Budget {
 
 /// pi's `aggregate_parallel_results`: applies `offset` and `max_count` to
 /// path-ordered hits and totals them.
-fn aggregate(hits: Vec<FileHit>, opts: &GrepOptions, searched: u64, oversized: u64) -> GrepResult {
+fn aggregate(
+	hits: Vec<FileHit>,
+	opts: &GrepOptions,
+	searched: u64,
+	oversized: u64,
+	mut binary: Vec<String>,
+) -> GrepResult {
+	binary.sort_unstable();
 	let (offset, max_count) = (opts.offset, opts.max_count);
 	let mut result = GrepResult {
 		files_searched: searched,
 		skipped_oversized: oversized,
+		binary_matches: binary,
 		..GrepResult::default()
 	};
 	let mut skipped = 0u64;
@@ -592,6 +608,7 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 		.file_type;
 	let content = opts.mode == Mode::Content;
 	let mut params = ScanParams {
+		text: file_type == Some(FileType::File),
 		content,
 		before: if content { opts.before } else { 0 },
 		after: if content { opts.after } else { 0 },
@@ -713,6 +730,7 @@ struct Found {
 	hits:      Vec<FileHit>,
 	searched:  u64,
 	oversized: u64,
+	binary:    Vec<String>,
 }
 
 impl Found {
@@ -827,6 +845,11 @@ async fn search_directory<M: Matcher + Sync>(
 		found.searched += 1;
 		let mut matches = Vec::new();
 		let outcome = search.scan(&mut scratch.scanner, &scratch.buf, &mut matches);
+		if outcome.binary_match {
+			found
+				.binary
+				.push(String::from_utf8_lossy(&candidate.rel).into_owned());
+		}
 		if outcome.count > 0 {
 			found.hits.push(FileHit {
 				path: String::from_utf8_lossy(&candidate.rel).into_owned(),
@@ -853,13 +876,14 @@ async fn unbounded(
 		walk::walk_sink(&shared.fs, &shared.root, &wopts, SearchSink { shared: Arc::clone(&shared) })
 			.await
 			.map_err(GrepError::Walk)?;
-	let (mut searched, mut oversized) = (0, 0);
+	let (mut searched, mut oversized, mut binary) = (0, 0, Vec::new());
 	let mut hits = Vec::new();
 	let mut streamed = GrepResult::default();
 	while let Some(batch) = walked.next().await {
 		for found in batch.items {
 			searched += found.searched;
 			oversized += found.oversized;
+			binary.extend(found.binary);
 			let Some(sink) = &sink else {
 				hits.extend(found.hits);
 				continue;
@@ -880,10 +904,12 @@ async fn unbounded(
 	if sink.is_some() {
 		streamed.files_searched = searched;
 		streamed.skipped_oversized = oversized;
+		binary.sort_unstable();
+		streamed.binary_matches = binary;
 		return Ok(streamed);
 	}
 	hits.sort_unstable_by(|a, b| (a.oversized, &a.path).cmp(&(b.oversized, &b.path)));
-	Ok(aggregate(hits, &shared.opts, searched, oversized))
+	Ok(aggregate(hits, &shared.opts, searched, oversized, binary))
 }
 
 /// What the budgeted producer does with its next event.
@@ -1019,6 +1045,7 @@ async fn budgeted(
 		deferred:  Vec::new(),
 		searched:  0,
 		oversized: 0,
+		binary:    Vec::new(),
 	};
 	let workers = wopts.parallelism(&shared.fs);
 	let tree = Tree::new(&shared.fs, &shared.root, &tree_opts)
@@ -1049,5 +1076,5 @@ async fn budgeted(
 			}
 		}
 	}
-	Ok(aggregate(budget.hits, &shared.opts, budget.searched, budget.oversized))
+	Ok(aggregate(budget.hits, &shared.opts, budget.searched, budget.oversized, budget.binary))
 }

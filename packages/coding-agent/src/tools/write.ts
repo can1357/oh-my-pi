@@ -42,6 +42,7 @@ import {
 	sessionResolveContext,
 	sessionWriteContext,
 } from "../internal-urls";
+import { readSnapshot } from "../commit/selective/journal";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -83,6 +84,7 @@ import {
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
+import { docTopicsReadable } from "./xdev";
 
 import {
 	cfgLspDiagnosticsDeduplicate,
@@ -214,10 +216,13 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 
 const writeSchema = type({
 	path: "string",
-	"content?": "string",
+	content: "string",
 });
 
-/** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
+/**
+ * Write arguments. `content` is required even where it is ignored (`proc://<id>/kill`): strict-mode
+ * providers turn an optional property into a nullable one, and models then send `content: null`.
+ */
 export type WriteToolInput = typeof writeSchema.infer;
 
 /**
@@ -625,7 +630,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly label = "Write";
 	get description(): string {
 		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
-		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
+		// The archive/SQLite target grammar lives in `xd://read/sources`; inline it when that doc is unreachable.
+		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription, {
+			readActive: docTopicsReadable(this.session),
+		});
 	}
 	readonly parameters = writeSchema;
 	readonly strict = true;
@@ -933,7 +941,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content: rawContent }: WriteParams,
+		{ path: rawPath, content }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -954,10 +962,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const path = recovered.path;
 		const target = router.writeTarget(path);
 		const policy = target?.spec.write;
-		if (rawContent === undefined && !(target && policy?.contentOptional?.(target.url))) {
-			throw new ToolError(`content is required for ${path}.`);
-		}
-		const content = rawContent ?? "";
 		// Coordination writes (peer messages, background-work cancellation) and replies to the
 		// user touch no files, so neither gate below applies to them.
 		const touchesNoFiles =
@@ -1162,10 +1166,23 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			emitWriteProgress(onUpdate, writeBytes, displayPath, absolutePath);
 
+			const before = this.session.recordFileChange ? await readSnapshot(absolutePath) : undefined;
+			const journal = (after: string) => {
+				if (!before) return;
+				this.session.recordFileChange?.({
+					path: absolutePath,
+					tool: "write",
+					before: before.text,
+					after,
+					beforeMtimeMs: before.mtimeMs,
+				});
+			};
+
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
 			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
 			if (bridgeWrite) {
+				journal(bridgeWrite.text);
 				// `write` always replaces the whole file, so (unlike hashline's
 				// hunk-scoped diff) there's no size cost to keying the header/
 				// executable-bit check on the verified post-write content —
@@ -1188,14 +1205,25 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			const { writethrough, deferred } = this.#lspWritethrough();
-			const diagnostics = await writethrough(absolutePath, writeContent, signal, undefined, batchRequest, dst =>
-				deferred?.begin(dst),
+			// Linters read a shebang's execute bits (Ruff's EXE001), so they are set once the final
+			// bytes land, before the writethrough collects diagnostics for them.
+			let madeExecutable = false;
+			const diagnostics = await writethrough(
+				absolutePath,
+				writeContent,
+				signal,
+				undefined,
+				batchRequest,
+				dst => deferred?.begin(dst),
+				async committed => {
+					madeExecutable = await maybeMarkExecutableForShebang(absolutePath, committed);
+				},
 			);
 			if (!deferred || batchRequest?.flush === false) {
 				this.session.bumpFileMutationVersion?.(absolutePath);
 			}
 			const finalContent = diagnostics.finalContent;
-			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
+			journal(finalContent);
 
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
 			const finalBytes = finalContent === writeContent ? writeBytes : Buffer.byteLength(finalContent, "utf8");

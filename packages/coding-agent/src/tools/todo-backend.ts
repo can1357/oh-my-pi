@@ -49,7 +49,7 @@ export interface TodoBackend {
 	/**
 	 * Called for edits the user or an RPC client makes outside the `todo` tool, where a throw refuses
 	 * the edit and leaves the list unchanged. Also called, only when this backend does not have the
-	 * committed list yet, after a change already in place (a Cursor mirror, a subagent auto-complete,
+	 * committed list yet, after a change already in place (a Cursor mirror,
 	 * a reset or reload: `/new`, a session switch, rewind, tree navigation, a fork from a message),
 	 * where a throw only warns, and before an `apply` that follows a lost call (see above).
 	 *
