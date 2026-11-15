@@ -8,6 +8,7 @@ import {
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
+import { resolveImageMaxEdge, resolveImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { TOOL_TIMEOUTS } from "../tool-timeouts";
@@ -291,7 +292,7 @@ const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
 // What every worker replacement resets, for results that report one.
 const WORKER_RESETS =
-	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals)";
+	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the mapping of positions on a scaled screenshot, the request log, HAR recording, run globals)";
 // What a worker recycle (`recycleTimedOutWorkerTab`) resets, for results that report one.
 const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
 // How to give a call that ran out of time a longer budget; nothing once it had the browser tool's maximum.
@@ -1068,6 +1069,7 @@ function notAliveMessage(name: string): string {
 }
 
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
+	const model = opts.session.getActiveModel?.();
 	const result = await runInTabWithSnapshot(
 		name,
 		{
@@ -1080,7 +1082,11 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 		{
 			cwd: opts.session.cwd,
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
-			excludeWebP: webpExclusionForModel(opts.session.getActiveModel?.()),
+			excludeWebP: webpExclusionForModel(model),
+			screenshotLimits: model && {
+				tokenization: resolveImageTokenization(model),
+				maxEdge: resolveImageMaxEdge(model),
+			},
 		},
 	).catch(error => {
 		// A worker's run reports this through its payload; an in-process (cmux, Tern) run throws the original.

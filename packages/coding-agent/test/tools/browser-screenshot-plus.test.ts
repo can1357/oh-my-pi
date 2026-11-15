@@ -1,5 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -10,12 +12,13 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
-function createHost() {
+function createHost(model?: Model) {
 	const session: ToolSession = {
 		cwd: process.cwd(),
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getActiveModel: () => model,
 		settings: Settings.isolated({
 			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
 			"browser.webkit": false,
@@ -212,56 +215,142 @@ button { margin: 80px; width: 180px; height: 60px; }
 		}
 	}, 30_000);
 
-	// Scale 0 keeps the browser's own device scale (1 in headless Chromium).
-	test.each([1.25, 2, 0])(
-		"the screenshot note maps image coordinates to clickAt at device scale %p",
-		async scale => {
-			// Backend overrides would send this open to a relay or cmux surface instead of headless Chromium.
-			const savedEnv = { ...process.env };
-			for (const key of ["PI_BROWSER_RELAY", "PI_BROWSER_CMUX", "PI_BROWSER_TERN"]) delete process.env[key];
-			const invoke = createHost();
-			const name = `screenshot-click-factor-${crypto.randomUUID()}`;
-			const html = `<!doctype html><html><head><style>
+	/** A page whose 40px button at (`left`, `top`) titles the document "hit"; a click anywhere else titles it "miss x,y". */
+	function targetPage(left: number, top: number): string {
+		const html = `<!doctype html><html><head><style>
 body { margin: 0; }
-#target { position: absolute; left: 700px; top: 500px; width: 40px; height: 40px; }
+#target { position: absolute; left: ${left}px; top: ${top}px; width: 40px; height: 40px; }
 </style></head><body>
 <button id="target" onclick="event.stopPropagation(); document.title = 'hit'">Go</button>
 <script>document.addEventListener("click", event => { document.title = "miss " + event.clientX + "," + event.clientY; });</script>
 </body></html>`;
+		return `data:text/html,${encodeURIComponent(html)}`;
+	}
+
+	/** Size of the image the model was shown for a screenshot call. */
+	function shownSize(shot: { details?: unknown }): [number, number] {
+		const shots =
+			shot.details && typeof shot.details === "object" && "screenshots" in shot.details
+				? (shot.details.screenshots as ScreenshotResult[])
+				: [];
+		return [shots[0]?.width ?? 0, shots[0]?.height ?? 0];
+	}
+
+	/** Run `body` with opens going to headless Chromium: backend overrides would send them to a relay or cmux surface. */
+	async function withoutBackendOverrides(body: () => Promise<void>): Promise<void> {
+		const savedEnv = { ...process.env };
+		for (const key of ["PI_BROWSER_RELAY", "PI_BROWSER_CMUX", "PI_BROWSER_TERN"]) delete process.env[key];
+		try {
+			await body();
+		} finally {
+			Object.assign(process.env, savedEnv);
+		}
+	}
+
+	// Scale 0 keeps the browser's own device scale (1 in headless Chromium).
+	test.each([1.25, 2, 0])(
+		"a screenshot at device scale %p is in CSS pixels, so a position read off it clicks there",
+		async scale => {
+			await withoutBackendOverrides(async () => {
+				const invoke = createHost();
+				const name = `screenshot-click-${crypto.randomUUID()}`;
+				try {
+					await invoke({
+						action: "open",
+						name,
+						url: targetPage(700, 500),
+						viewport: { width: 1200, height: 700, scale },
+					});
+					const shot = await invoke({ action: "call", name, chain: [{ method: "screenshot", args: [] }] });
+					expect(shownSize(shot)).toEqual([1200, 700]);
+					// The button's centre on the image is its centre on the page.
+					await invoke({ action: "call", name, chain: [{ method: "clickAt", args: [720, 520] }] });
+					expect(
+						valueFrom<string>(await invoke({ action: "call", name, chain: [{ method: "title", args: [] }] })),
+					).toBe("hit");
+				} finally {
+					await invoke({ action: "close", name, kill: true }).catch(() => undefined);
+				}
+			});
+		},
+		30_000,
+	);
+
+	test("sizes a viewport screenshot for the session's model, so the model's own resize never moves it", async () => {
+		// Claude's standard tier takes at most 1,568 patches of 28px: the API would shrink a 1440x900 image to
+		// 1389x868 after the tool had reported it, moving every position read off it by 3.5%.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-6");
+		await withoutBackendOverrides(async () => {
+			const invoke = createHost(model);
+			const name = `screenshot-model-${crypto.randomUUID()}`;
 			try {
 				await invoke({
 					action: "open",
 					name,
-					url: `data:text/html,${encodeURIComponent(html)}`,
-					viewport: { width: 1200, height: 700, scale },
+					url: targetPage(1380, 840),
+					viewport: { width: 1440, height: 900, scale: 1 },
 				});
 				const shot = await invoke({ action: "call", name, chain: [{ method: "screenshot", args: [] }] });
-				const text = shot.content
-					.filter(block => block.type === "text")
-					.map(block => block.text)
-					.join("\n");
-				const factor = Number(text.match(/Multiply (?:image )?coordinates by ([\d.]+)/)?.[1]);
-				const shots =
-					shot.details && typeof shot.details === "object" && "screenshots" in shot.details
-						? (shot.details.screenshots as ScreenshotResult[])
-						: [];
-				const displayedWidth = shots[0]?.width ?? 0;
-				// Where the button's centre (720, 520 CSS px) appears in the image the model sees.
-				const imageX = (720 * displayedWidth) / 1200;
-				const imageY = (520 * displayedWidth) / 1200;
-				await invoke({
-					action: "call",
-					name,
-					chain: [{ method: "clickAt", args: [Math.round(imageX * factor), Math.round(imageY * factor)] }],
-				});
+				expect(shownSize(shot)).toEqual([1389, 868]);
+				// The button's centre (1400, 860 CSS px) as it appears on that image.
+				const onImage = [Math.round((1400 * 1389) / 1440), Math.round((860 * 868) / 900)];
+				await invoke({ action: "call", name, chain: [{ method: "clickAt", args: onImage }] });
 				expect(
 					valueFrom<string>(await invoke({ action: "call", name, chain: [{ method: "title", args: [] }] })),
 				).toBe("hit");
 			} finally {
 				await invoke({ action: "close", name, kill: true }).catch(() => undefined);
-				Object.assign(process.env, savedEnv);
 			}
-		},
-		30_000,
-	);
+		});
+	}, 30_000);
+
+	test("a viewport past the size cap arrives scaled, and positions on that image still click there", async () => {
+		await withoutBackendOverrides(async () => {
+			const invoke = createHost();
+			const name = `screenshot-click-${crypto.randomUUID()}`;
+			const title = async () =>
+				valueFrom<string>(await invoke({ action: "call", name, chain: [{ method: "title", args: [] }] }));
+			try {
+				await invoke({
+					action: "open",
+					name,
+					url: targetPage(1400, 900),
+					viewport: { width: 2000, height: 1200, scale: 1 },
+				});
+				const shot = await invoke({ action: "call", name, chain: [{ method: "screenshot", args: [] }] });
+				expect(shownSize(shot)).toEqual([1568, 941]);
+				const text = shot.content
+					.filter(block => block.type === "text")
+					.map(block => block.text)
+					.join("\n");
+				expect(text).toContain("2000x1200 viewport");
+
+				// The button's centre (1420, 920 CSS px) as it appears on the image.
+				const onImage = [Math.round((1420 * 1568) / 2000), Math.round((920 * 941) / 1200)];
+				await invoke({ action: "call", name, chain: [{ method: "clickAt", args: onImage }] });
+				expect(await title()).toBe("hit");
+
+				// The same position measured on the page says so.
+				await invoke({ action: "call", name, chain: [{ method: "evaluate", args: ["document.title = ''"] }] });
+				await invoke({ action: "call", name, chain: [{ method: "clickAt", args: [1420, 920, { css: true }] }] });
+				expect(await title()).toBe("hit");
+
+				// A resized viewport is not the one pictured: image positions fail instead of landing elsewhere.
+				await invoke({
+					action: "call",
+					name,
+					chain: [{ method: "emulate", args: [{ viewport: { width: 1000, height: 600 } }] }],
+				});
+				const stale = await invoke({ action: "call", name, chain: [{ method: "clickAt", args: onImage }] }).then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				if (!(stale instanceof Error)) throw new Error("clickAt took an image position on a resized viewport");
+				expect(stale.message).toContain("new screenshot");
+			} finally {
+				await invoke({ action: "close", name, kill: true }).catch(() => undefined);
+			}
+		});
+	}, 30_000);
 });

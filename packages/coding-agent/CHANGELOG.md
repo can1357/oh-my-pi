@@ -5,9 +5,11 @@
 ### Breaking Changes
 
 - Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
+- After a browser viewport screenshot that had to be scaled for the model, `tab.clickAt()`, `tab.mouseMove()` and `tab.drag()` points are read as positions on that image and mapped to the page; pass `css: true` (`{ x, y, css: true }` for a drag point) for viewport CSS pixels
 
 ### Changed
 
+- Browser screenshots reach the model in CSS pixels, up to 1568px and whatever the model and its host take unscaled, so a position read off a viewport screenshot is the one `tab.clickAt()` takes; the "Multiply image coordinates by …" note remains only on scaled full-page and element captures
 - Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
 - omp's WebKit browser engine now installs and updates to the newest stable ABKit release instead of the one each omp release pinned; the first WebKit open in a process checks for a newer one
 - omp keeps each ABKit version in `~/.o2/lib/abkit-versions/<version>` and links `~/.o2/lib/abkit` to the current one, so an engine update no longer waits for running browser hosts to exit
