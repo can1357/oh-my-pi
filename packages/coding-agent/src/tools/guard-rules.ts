@@ -457,26 +457,23 @@ function secretOutput(command: ShellCommand, scope: GuardScope): string | undefi
 	return undefined;
 }
 
-function secretSend(pipeline: readonly ShellCommand[], scope: GuardScope): GuardHit | undefined {
-	for (let index = 0; index < pipeline.length; index++) {
-		const command = pipeline[index];
-		if (!Object.hasOwn(SENDERS, command.argv[0])) continue;
-		let found: string | undefined;
-		for (const file of sentFiles(command)) {
-			found = sentSecret(file, command.cwd, scope.home);
-			if (found) break;
-		}
-		for (const upstream of found ? [] : pipeline.slice(0, index)) {
-			found = secretOutput(upstream, scope);
-			if (found) break;
-		}
-		for (const inner of found ? [] : command.subs) {
-			found = secretOutput(inner, scope);
-			if (found) break;
-		}
-		if (found) return hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`);
+/** A network command sending a secret: in a file it uploads, an upstream stage's output, or a substitution's. */
+function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
+	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
+	let found: string | undefined;
+	for (const file of sentFiles(command)) {
+		found = sentSecret(file, command.cwd, scope.home);
+		if (found) break;
 	}
-	return undefined;
+	for (const upstream of found ? [] : command.upstream) {
+		found = secretOutput(upstream, scope);
+		if (found) break;
+	}
+	for (const inner of found ? [] : command.subs) {
+		found = secretOutput(inner, scope);
+		if (found) break;
+	}
+	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
 // -- probes ------------------------------------------------------------------------------------------
@@ -909,7 +906,9 @@ export function findShellGuardHit(
 		);
 	}
 	for (const pipeline of pipelines) {
-		const found = secretSend(pipeline, scope) ?? pipeline.map(c => credentialRead(c, scope)).find(Boolean);
+		const found =
+			pipeline.map(c => secretSend(c, scope)).find(Boolean) ??
+			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
 		if (found) return found;
 	}
 	if (options.probe === false) return undefined;

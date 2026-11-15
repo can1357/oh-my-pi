@@ -995,6 +995,12 @@ export interface ShellCommand {
 	 * `( )` group or nested script it is in, in order.
 	 */
 	succeeded: readonly ShellCommand[];
+	/**
+	 * Commands whose output can reach this one's input through pipes: the earlier stages of its
+	 * pipeline, where a compound command (`( )`, `{ }`, a loop, `if`, `case`) is one stage made of
+	 * every command run in it, and whatever is piped into a compound command it runs in.
+	 */
+	upstream: readonly ShellCommand[];
 }
 
 /** A shell script broken into pipelines, nested scripts included. */
@@ -1173,6 +1179,21 @@ const COMMAND_PREFIXES: Record<string, true> = {
 	until: true,
 	do: true,
 };
+
+/** Reserved words that open a compound command, and those that close one. */
+const COMPOUND_OPENERS: Record<string, true> = {
+	"{": true,
+	if: true,
+	while: true,
+	until: true,
+	for: true,
+	select: true,
+	case: true,
+};
+const COMPOUND_CLOSERS: Record<string, true> = { "}": true, fi: true, done: true, esac: true };
+
+/** Operators after which a newline does not end the pipeline or list: it goes on on the next line. */
+const SHELL_CONTINUATIONS: Record<string, true> = { "|": true, "|&": true, "&&": true, "||": true };
 
 /** A `case` command being read: the `(` depth it started at, and what comes next in it. */
 interface CaseReading {
@@ -1419,6 +1440,75 @@ class SucceededCommands {
 	}
 }
 
+/**
+ * Which commands feed each command's input through pipes, as a script runs. A compound command
+ * (`( )`, `{ }`, a loop, `if`, `case`) is one pipeline stage: every command run in it is upstream of
+ * the stage after it, and what is piped into it is upstream of every command in it.
+ */
+class PipelineStages {
+	/** The compound commands open around the current command, innermost last. */
+	readonly #compounds: { input: readonly ShellCommand[]; inside: ShellCommand[] }[] = [];
+	#upstream: readonly ShellCommand[] = [];
+	/** The commands of the current stage. */
+	#stage: ShellCommand[] = [];
+
+	/** Upstream of the current stage. */
+	get upstream(): readonly ShellCommand[] {
+		return this.#upstream;
+	}
+
+	/** Opens and closes the compound commands whose reserved words start a segment. */
+	keywords(words: readonly string[], quoted: readonly boolean[]): void {
+		for (let k = 0; k < words.length && !quoted[k]; k++) {
+			const word = words[k];
+			if (Object.hasOwn(COMPOUND_OPENERS, word)) {
+				this.#open();
+				// The words after `for`, `select` and `case` are no command.
+				if (word === "for" || word === "select" || word === "case") return;
+			} else if (Object.hasOwn(COMPOUND_CLOSERS, word)) {
+				this.#close();
+			} else if (!Object.hasOwn(COMMAND_PREFIXES, word)) {
+				return;
+			}
+		}
+	}
+
+	/** A command run in the current stage. */
+	add(command: ShellCommand): void {
+		this.#stage.push(command);
+		this.#compounds.at(-1)?.inside.push(command);
+	}
+
+	/** The operator after a segment. */
+	operator(operator: string): void {
+		if (operator === "(") {
+			this.#open();
+		} else if (operator === ")") {
+			this.#close();
+		} else if (Object.hasOwn(SHELL_PIPES, operator)) {
+			this.#upstream = [...this.#upstream, ...this.#stage];
+			this.#stage = [];
+		} else {
+			// The pipeline ended: the next one reads what is piped into the compound around it.
+			this.#upstream = this.#compounds.at(-1)?.input ?? [];
+			this.#stage = [];
+		}
+	}
+
+	#open(): void {
+		this.#compounds.push({ input: this.#upstream, inside: [] });
+		this.#stage = [];
+	}
+
+	#close(): void {
+		const compound = this.#compounds.pop();
+		if (!compound) return;
+		this.#compounds.at(-1)?.inside.push(...compound.inside);
+		this.#upstream = compound.input;
+		this.#stage = compound.inside;
+	}
+}
+
 class ShellScriptParser {
 	#count = 0;
 	/** `${ }`/`$[ ]` expansions being read inside one another. */
@@ -1451,20 +1541,24 @@ class ShellScriptParser {
 		const pipelines: ShellCommand[][] = [];
 		const nested: ShellCommand[][] = [];
 		const done = new SucceededCommands(scope.succeeded);
+		const stages = new PipelineStages();
+		// Per command, the texts it passes on to the next stage when that is a shell.
+		const passed = new Map<ShellCommand, string[]>();
 		let pipeline: ShellCommand[] = [];
-		let feeding: ShellScriptSegment[] = [];
 		let negated = false;
 		for (const segment of this.#segments(tokens)) {
 			if (pipeline.length === 0 && segment.words[0] === "!" && !segment.quoted[0]) negated = true;
-			const command = this.#command(segment, cwd, subs, depth, nested, done.current);
+			stages.keywords(segment.words, segment.quoted);
+			const command = this.#command(segment, cwd, subs, depth, nested, done.current, stages.upstream);
 			if (command) {
 				pipeline.push(command);
-				feeding.push(segment);
+				stages.add(command);
+				this.#feedShell(command, segment, passed, depth, nested);
 			}
+			stages.operator(segment.operator);
 			if (Object.hasOwn(SHELL_PIPES, segment.operator)) continue;
 			if (pipeline.length > 0) {
 				pipelines.push(pipeline);
-				this.#feedShells(pipeline, feeding, depth, nested);
 				const only = pipeline.length === 1 ? pipeline[0] : undefined;
 				if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
 					const target = shellPositionalArgs(only.argv)[0];
@@ -1472,7 +1566,6 @@ class ShellScriptParser {
 				}
 				done.finish(pipeline, negated);
 				pipeline = [];
-				feeding = [];
 				negated = false;
 			}
 			done.operator(segment.operator);
@@ -1483,26 +1576,25 @@ class ShellScriptParser {
 	}
 
 	/**
-	 * Parses the scripts a shell in `pipeline` reads on its stdin: heredocs and here-strings fed to it
-	 * or to an earlier stage (`cat <<EOF | sh`), and what `echo`/`printf` pipe into it.
+	 * Records in `passed` what `command` (read from `segment`) passes on to a shell piped after it:
+	 * the heredocs and here-strings it reads (`cat <<EOF | sh`), and what `echo`/`printf` prints.
+	 * When `command` is a shell that reads its script from stdin, parses what its upstream commands
+	 * and its own heredocs and here-strings give it.
 	 */
-	#feedShells(
-		pipeline: readonly ShellCommand[],
-		feeding: readonly ShellScriptSegment[],
+	#feedShell(
+		command: ShellCommand,
+		segment: ShellScriptSegment,
+		passed: Map<ShellCommand, string[]>,
 		depth: number,
 		nested: ShellCommand[][],
 	): void {
-		const shell = pipeline.findIndex(
-			command => Object.hasOwn(SCRIPT_SHELLS, command.argv[0]) && shellScriptSource(command.argv) === "stdin",
-		);
-		if (shell < 0) return;
-		const { cwd, succeeded } = pipeline[shell];
-		for (let stage = 0; stage <= shell; stage++) {
-			const texts = [...feeding[stage].heredocs.map(doc => doc.body), ...feeding[stage].herestrings];
-			const argv = pipeline[stage].argv;
-			if (stage < shell && Object.hasOwn(SHELL_ECHOES, argv[0]))
-				texts.push(argv.slice(1).join(" "), ...argv.slice(1));
-			for (const text of texts) nested.push(...this.parse(text, cwd, depth + 1, succeeded));
+		const { argv, cwd, succeeded } = command;
+		const texts = [...segment.heredocs.map(doc => doc.body), ...segment.herestrings];
+		if (Object.hasOwn(SHELL_ECHOES, argv[0])) texts.push(argv.slice(1).join(" "), ...argv.slice(1));
+		passed.set(command, texts);
+		if (!Object.hasOwn(SCRIPT_SHELLS, argv[0]) || shellScriptSource(argv) !== "stdin") return;
+		for (const source of [...command.upstream, command]) {
+			for (const text of passed.get(source) ?? []) nested.push(...this.parse(text, cwd, depth + 1, succeeded));
 		}
 	}
 
@@ -1872,7 +1964,11 @@ class ShellScriptParser {
 		return { key, after: end + 1 };
 	}
 
-	/** Each command's words, redirections, heredocs, and the operator after it. */
+	/**
+	 * Each command's words, redirections, heredocs, and the operator after it. A newline right after
+	 * `|`, `|&`, `&&` or `||` (a comment between them included) separates nothing: the pipeline or
+	 * list goes on on the next line.
+	 */
 	#segments(tokens: readonly ShellScriptToken[]): ShellScriptSegment[] {
 		const segments: ShellScriptSegment[] = [];
 		const empty = (): ShellScriptSegment => ({
@@ -1886,7 +1982,10 @@ class ShellScriptParser {
 		});
 		let current = empty();
 		let redirect: string | undefined;
+		let continued = false;
 		for (const token of tokens) {
+			if (continued && token.operator && token.text === "\n") continue;
+			continued = token.operator && Object.hasOwn(SHELL_CONTINUATIONS, token.text);
 			if (redirect !== undefined && !token.operator) {
 				if (
 					Object.hasOwn(SHELL_WRITE_REDIRECTS, redirect) ||
@@ -1924,6 +2023,7 @@ class ShellScriptParser {
 		depth: number,
 		nested: ShellCommand[][],
 		succeeded: readonly ShellCommand[],
+		upstream: readonly ShellCommand[],
 	): ShellCommand | undefined {
 		const { words, writes, reads } = segment;
 		const wrappers: string[] = [];
@@ -1952,20 +2052,21 @@ class ShellScriptParser {
 		}
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
 		if (script !== undefined) nested.push(...this.parse(script, cwd, depth + 1, succeeded));
-		return { argv, quoted, program, wrappers, reads, writes, subs: used, cwd, succeeded };
+		return { argv, quoted, program, wrappers, reads, writes, subs: used, cwd, succeeded, upstream };
 	}
 }
 
 /**
  * Parses a shell script into the simple commands it runs, for safety rules that must see through
- * shell syntax. Follows quotes (`$'...'` included), escapes, comments, `;`/`&&`/`||`/`|` chains,
- * `( )` groups, redirections, heredocs (quote-aware, so a quoted `<<` opens none), `$( )`/backtick/
- * `<( )` substitutions (read as commands to the `)` that closes them, and also found inside `${ }`
- * and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval` strings and scripts fed to a shell's stdin
- * (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd` between commands, and
- * wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a tokenizer, not a
- * shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code run by other interpreters
- * are not followed.
+ * shell syntax. Follows quotes (`$'...'` included), escapes, comments, `;`/`&&`/`||`/`|` chains
+ * (continued on the next line after `|`, `&&` or `||`), `( )` groups and the other compound
+ * commands (each one pipeline stage), redirections, heredocs (quote-aware, so a quoted `<<` opens
+ * none), `$( )`/backtick/`<( )` substitutions (read as commands to the `)` that closes them, and
+ * also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval` strings and
+ * scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd` between
+ * commands, and wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a
+ * tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code run by
+ * other interpreters are not followed.
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
