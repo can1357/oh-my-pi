@@ -346,6 +346,27 @@ function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): vo
 	}
 }
 
+const enhancedPastePacket = (metadata: string, payload?: string) =>
+	`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+const base64 = (value: string) => Buffer.from(value).toString("base64");
+
+/** Replay a kitty OSC 5522 listing that offers plain text and HTML; the controller then requests one of them. */
+function offerTextAndHtml(listeners: InputListener[]): void {
+	dispatchInput(listeners, enhancedPastePacket("type=read:status=OK"));
+	dispatchInput(
+		listeners,
+		enhancedPastePacket(`type=read:status=DATA:mime=${base64(".")}`, base64("text/plain text/html")),
+	);
+	dispatchInput(listeners, enhancedPastePacket("type=read:status=DONE"));
+}
+
+/** Deliver `body` as the `mime` the controller requested. */
+function deliverEnhancedPaste(listeners: InputListener[], mime: string, body: string): void {
+	dispatchInput(listeners, enhancedPastePacket("type=read:status=OK"));
+	dispatchInput(listeners, enhancedPastePacket(`type=read:status=DATA:mime=${base64(mime)}`, base64(body)));
+	dispatchInput(listeners, enhancedPastePacket("type=read:status=DONE"));
+}
+
 describe("InputController keybinding setup", () => {
 	it("registers model selector and display reset actions separately", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
@@ -1412,6 +1433,34 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 			expect(context.editor.pendingImages, row.name).toHaveLength(row.toEditor ? 1 : 0);
 			expect(showStatus.mock.calls.length > 0, row.name).toBe(!row.toEditor);
+		}
+	});
+
+	it("reads an HTML clipboard paste only for a dialog the composer owner owns", async () => {
+		const html = `<p>see</p><img src="data:image/png;base64,${TINY_PNG}">`;
+		for (const owns of [true, false]) {
+			const context = await createPromptContext();
+			const { dialog, handleInput } = createPlainDialog();
+			mountComposerOwner(context, dialog, { component: dialog, owns: () => owns });
+			const listeners = startEnhancedPaste(context);
+			const written = context.ctx.ui.terminal.write as Mock<(data: string) => void>;
+			const mime = owns ? "text/html" : "text/plain";
+
+			offerTextAndHtml(listeners);
+			expect(
+				written.mock.calls.some(([data]) => data.includes(`type=read;${base64(mime)}`)),
+				`requests ${mime}`,
+			).toBe(true);
+
+			if (owns) {
+				const attached = nextCall(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>);
+				deliverEnhancedPaste(listeners, mime, html);
+				await attached;
+				expect(context.editor.pendingImages).toHaveLength(1);
+			} else {
+				deliverEnhancedPaste(listeners, mime, "see");
+				expect(handleInput).toHaveBeenCalledWith("\x1b[200~see\x1b[201~");
+			}
 		}
 	});
 

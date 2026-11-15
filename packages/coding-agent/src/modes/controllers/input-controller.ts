@@ -1031,7 +1031,7 @@ export class InputController {
 			// Styled text goes where images do: the composer, or a prompt that takes them.
 			acceptsHtml: () => {
 				const focused = this.ctx.ui.getFocused();
-				return !focused || focused === this.ctx.editor || (hasPasteText(focused) && focused.acceptsImages === true);
+				return this.#composerTakesPaste(focused) || (hasPasteText(focused) && focused.acceptsImages === true);
 			},
 			pasteHtml: html => this.#pasteHtml(html),
 			showStatus: message => this.ctx.showStatus(message),
@@ -2644,8 +2644,9 @@ export class InputController {
 		});
 	}
 
-	/** Whether `focused` is the registered composer owner and currently lets the composer take typing. */
-	#composerOwnsInput(focused: Component): boolean {
+	/** Whether a paste goes to the main composer: nothing or the editor is focused, or the focused dialog is the composer owner and currently owns input. */
+	#composerTakesPaste(focused: Component | null): boolean {
+		if (!focused || focused === this.ctx.editor) return true;
 		const owner = this.ctx.composerOwner;
 		return owner?.component === focused && owner.owns();
 	}
@@ -2653,7 +2654,7 @@ export class InputController {
 	/** Route an image paste to the focused destination; a dialog that can't take the image refuses it (#6057). */
 	async #pasteImageIntoFocus(paste: (sink: ImagePasteSink) => Promise<unknown>): Promise<void> {
 		const focused = this.ctx.ui.getFocused();
-		if (!focused || focused === this.ctx.editor || this.#composerOwnsInput(focused)) {
+		if (this.#composerTakesPaste(focused)) {
 			await paste(this.#editorImageSink);
 			return;
 		}
@@ -2809,8 +2810,7 @@ export class InputController {
 			// A prompt that opted into images gets the main editor's full image flow
 			// instead, delivered through one reservation.
 			const focusedNow = this.ctx.ui.getFocused();
-			const modalFocus =
-				focusedNow && focusedNow !== this.ctx.editor && !this.#composerOwnsInput(focusedNow) ? focusedNow : null;
+			const modalFocus = this.#composerTakesPaste(focusedNow) ? null : focusedNow;
 			const promptTarget = modalFocus && hasPasteText(modalFocus) ? modalFocus : null;
 			const bareDialog = modalFocus && !promptTarget ? modalFocus : null;
 			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
