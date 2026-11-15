@@ -44,6 +44,7 @@ import {
 	SUBAGENT_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
 	TEXT_PREDICT_WORKER_ARG,
+	TTSR_REGEX_WORKER_ARG,
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
@@ -342,6 +343,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TEXT_PREDICT_WORKER_ARG) {
 		const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
 		await startTextPredictDaemonFromEnvironment();
+		return true;
+	}
+	if (arg === TTSR_REGEX_WORKER_ARG) {
+		const { runTtsrRegexWorker } = await import("./export/ttsr-regex-worker");
+		runTtsrRegexWorker();
 		return true;
 	}
 	if (arg === AUTO_UPDATE_WORKER_ARG) {

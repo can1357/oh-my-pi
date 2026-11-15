@@ -29,3 +29,5 @@ export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 export const TEXT_PREDICT_WORKER_ARG = "__omp_worker_text_predict";
 /** Terminal-output selector shared by the CLI dispatcher and worker launcher. */
 export const TERMINAL_OUTPUT_WORKER_ARG = "__omp_worker_terminal_output";
+/** TTSR regex-sandbox selector shared by the CLI dispatcher and `export/ttsr-regex-worker.ts`. */
+export const TTSR_REGEX_WORKER_ARG = "__omp_worker_ttsr_regex";
