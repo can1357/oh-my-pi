@@ -26,8 +26,18 @@ pub enum Error {
 	IndexVersion { version: u32 },
 	#[error("knowledge-base object digest mismatch")]
 	DigestMismatch,
-	#[error("repository changed while SCIP producers were running")]
-	ChangedDuringProducers,
+	/// `HEAD` resolved to a different commit after the producers ran than
+	/// before, so their output describes neither revision reliably.
+	#[error("repository HEAD moved while SCIP producers were running")]
+	RevisionChangedDuringProducers,
+	/// A snapshot file changed, or a new unignored file appeared outside the
+	/// producers' own documents, while they ran (for example build output
+	/// written into an unignored `target/`).
+	#[error("repository changed while SCIP producers were running: {path}")]
+	ChangedDuringProducers {
+		/// First repository-relative path whose content differs.
+		path: String,
+	},
 	#[error("repository changed while building the index")]
 	ChangedDuringBuild,
 	#[error("index has no definitions")]

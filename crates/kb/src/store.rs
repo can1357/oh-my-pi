@@ -196,17 +196,22 @@ impl Store {
 		}
 		let after = self.snapshot(&paths)?;
 		let covered: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
-		if before.revision != after.revision
-			|| before
-				.files
-				.iter()
-				.any(|(path, hash)| after.files.get(path) != Some(hash))
-			|| after
-				.files
-				.keys()
-				.any(|path| !before.files.contains_key(path) && !covered.contains(path.as_str()))
-		{
-			return Err(Error::ChangedDuringProducers);
+		if before.revision != after.revision {
+			return Err(Error::RevisionChangedDuringProducers);
+		}
+		let changed = before
+			.files
+			.iter()
+			.find(|(path, hash)| after.files.get(*path) != Some(hash))
+			.map(|(path, _)| path)
+			.or_else(|| {
+				after
+					.files
+					.keys()
+					.find(|path| !before.files.contains_key(*path) && !covered.contains(path.as_str()))
+			});
+		if let Some(path) = changed {
+			return Err(Error::ChangedDuringProducers { path: path.clone() });
 		}
 		let uncovered: Vec<&str> = sources
 			.iter()

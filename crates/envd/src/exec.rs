@@ -71,7 +71,7 @@ use super::{
 	},
 	exec_sandbox,
 	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxConsumer, SandboxDenialFact},
-	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings},
+	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings, ShellSettings},
 	process_identity::ProcessIdentity,
 	process_log,
 	process_log::{LogChunk, ProcessLog},
@@ -234,6 +234,10 @@ struct HostInner {
 	persistence:            Mutex<Option<ProcessPersistence>>,
 	next_order:             AtomicU64,
 	sandbox:                Mutex<Option<SandboxConfig>>,
+	/// Opt-in utility builtins (`sv_shell_builtins_extra`) that shells and
+	/// detached scripts built from now on register; empty unless the user
+	/// listed a name.
+	extra_builtins:         Mutex<Arc<[Str]>>,
 	/// The in-process approval route and the network grants its session
 	/// approved through it.
 	sandbox_approval_route: Mutex<Option<RouteBinding>>,
@@ -469,6 +473,7 @@ impl ExecHost {
 				persistence:            Mutex::new(None),
 				next_order:             AtomicU64::new(1),
 				sandbox:                Mutex::new(None),
+				extra_builtins:         Mutex::new(Arc::from([])),
 				sandbox_approval_route: Mutex::new(None),
 			}),
 		}
@@ -497,6 +502,18 @@ impl ExecHost {
 	/// recurse into itself.
 	fn drive_close_session(&self, session: &[u8]) -> Result<CloseSessionResponse, ExecError> {
 		self.close_session(session)
+	}
+
+	/// Fixes which opt-in utility builtins (ADR 0054) subsequently opened
+	/// sessions and detached processes register; shells already built keep the
+	/// set they were built with.
+	pub(crate) fn configure_shell(&self, settings: &ShellSettings) {
+		*self.inner.extra_builtins.lock() = Arc::from(settings.extra_builtins());
+	}
+
+	/// The opt-in utility builtin names a shell built now registers.
+	fn extra_builtins(&self) -> Arc<[Str]> {
+		Arc::clone(&self.inner.extra_builtins.lock())
 	}
 
 	/// Configures sandbox policy for subsequently opened sessions and detached
@@ -832,6 +849,11 @@ impl ExecHost {
 			.builtins(omp_shell::builtins::default_builtins())
 			.builtins(
 				omp_shell_builtins::utility_builtins()
+					.into_iter()
+					.map(|(name, registration)| (name.to_owned(), registration)),
+			)
+			.builtins(
+				omp_shell_builtins::extra_builtins(&self.extra_builtins())
 					.into_iter()
 					.map(|(name, registration)| (name.to_owned(), registration)),
 			)
@@ -1424,7 +1446,7 @@ impl ExecHost {
 			.clone();
 		let cwd = cwd_from_uri(&spec.cwd_uri)?.map_or_else(env::current_dir, Ok)?;
 		let sandbox = self.detached_sandbox()?;
-		let mut command = detached_command(&source, sandbox.as_deref())?;
+		let mut command = detached_command(&source, &self.extra_builtins(), sandbox.as_deref())?;
 		command
 			.current_dir(cwd)
 			.stdin(Stdio::null())
@@ -3758,10 +3780,19 @@ fn phase_for_state(state: i32) -> ProcessPhase {
 
 /// Detached scripts re-enter this executable as a hidden in-process shell
 /// child (ADR 0028): never `/bin/sh`, never `cmd.exe`.
-fn detached_command(source: &str, sandbox: Option<&ExecSandbox>) -> Result<Command, ExecError> {
+///
+/// The parent hands the child the opt-in builtin names (ADR 0054) it was
+/// configured with, as a trailing argument that exists only when the set is
+/// non-empty: the child cannot read the parent's convars, and the default
+/// command line stays unchanged.
+fn detached_command(
+	source: &str,
+	extra_builtins: &[Str],
+	sandbox: Option<&ExecSandbox>,
+) -> Result<Command, ExecError> {
 	let executable = env::current_exe()?;
-	let args = crate::shell_child::child_args(source);
-	let args = [args[0].as_os_str(), args[1].as_os_str()];
+	let args = crate::shell_child::child_args(source, extra_builtins);
+	let args = args.iter().map(OsString::as_os_str).collect::<Vec<_>>();
 	let mut command = sandbox.map_or_else(
 		|| Command::new(&executable),
 		|sandbox| sandbox.command(executable.as_os_str(), &args),
@@ -5831,13 +5862,42 @@ mod tests {
 	/// executable as the hidden in-process shell child.
 	#[test]
 	fn detached_scripts_reenter_the_in_process_shell() {
-		let command = detached_command("echo hi; sleep 1", None).expect("command builds");
+		let command = detached_command("echo hi; sleep 1", &[], None).expect("command builds");
 		assert_eq!(command.get_program(), env::current_exe().unwrap().as_os_str());
 		let args = command.get_args().collect::<Vec<_>>();
 		assert_eq!(args, [
 			OsStr::new(crate::shell_child::SHELL_CHILD_ARG),
 			OsStr::new("echo hi; sleep 1")
 		]);
+	}
+
+	/// ADR 0054 D2: the parent hands the detached child the opt-in builtin names
+	/// it was configured with, and the child decodes the same set.
+	#[test]
+	fn detached_scripts_carry_the_configured_extra_builtins() {
+		let extras = [Str::from("cp"), Str::from("dd")];
+		let command = detached_command("echo hi", &extras, None).expect("command builds");
+		let args = command.get_args().collect::<Vec<_>>();
+		assert_eq!(args, [
+			OsStr::new(crate::shell_child::SHELL_CHILD_ARG),
+			OsStr::new("echo hi"),
+			OsStr::new("cp,dd")
+		]);
+		assert_eq!(crate::shell_child::decode_extra_builtins(Some(args[2])), extras);
+	}
+
+	/// The configured set reaches `open_session`'s shell and detached children
+	/// only through `configure_shell`, and the master switch empties it.
+	#[test]
+	fn configure_shell_applies_the_master_switch() {
+		let host = ExecHost::new();
+		assert!(host.extra_builtins().is_empty());
+		let requested =
+			ShellSettings { builtins_extra: vec![Str::from("all")], ..Default::default() };
+		host.configure_shell(&requested);
+		assert_eq!(&*host.extra_builtins(), [Str::from("all")]);
+		host.configure_shell(&ShellSettings { embedded_builtins: false, ..requested });
+		assert!(host.extra_builtins().is_empty());
 	}
 
 	/// ADR 0028: configured host shell executables and `-c` arguments are not

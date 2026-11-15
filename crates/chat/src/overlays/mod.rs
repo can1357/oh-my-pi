@@ -8,13 +8,29 @@
 //! [`PanelEvent`] — a console line (ADR 0014), a composer recall, a notice,
 //! a clipboard write — and never touch the session DOM.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+	collections::BTreeMap,
+	fmt,
+	sync::Arc,
+	time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use omp_agent::{ApprovalDecision, ApprovalScope, ApprovalSource, ApprovalTicket};
 use omp_con::Ctx;
 use omp_core::{FastHashSet, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value};
-use omp_tui::{Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent, dom, tsp::wire};
+use omp_tui::{
+	Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent,
+	components::Select,
+	dom,
+	tsp::{
+		picker::{
+			ColumnFormat, Fact, Gesture, KindProps as _, PickerAct, PickerAction, PickerColumn,
+			PickerItem, PickerLayout, PickerPreview, PickerProps, PickerSize,
+		},
+		wire::{self, Node},
+	},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{history::HistoryEntry, host::HostCommand};
@@ -635,15 +651,19 @@ pub enum PickerEvent {
 
 /// Retained Ctrl+R prompt-history picker.
 pub struct HistoryPicker {
-	ui:       Ui,
-	source:   Vec<HistoryEntry>,
-	entries:  Vec<HistoryEntry>,
-	services: Option<Arc<dyn Services>>,
-	selected: Option<usize>,
-	ctx:      UiContext,
-	query:    Str,
-	width:    u16,
-	rows:     u16,
+	ui:         Ui,
+	source:     Vec<HistoryEntry>,
+	entries:    Vec<HistoryEntry>,
+	services:   Option<Arc<dyn Services>>,
+	selected:   Option<usize>,
+	ctx:        UiContext,
+	query:      Str,
+	width:      u16,
+	rows:       u16,
+	/// Bumped whenever the listed entries change.
+	generation: u64,
+	/// The native picker and the `(generation, selected)` it was built for.
+	tsp:        (Option<(u64, Option<usize>)>, Node),
 }
 
 impl HistoryPicker {
@@ -666,6 +686,8 @@ impl HistoryPicker {
 			query: Str::default(),
 			width,
 			rows: 6,
+			generation: 0,
+			tsp: (None, PickerProps::default().node(Str::new_static(HISTORY_PICKER_ID), Vec::new())),
 		};
 		picker.rebuild();
 		picker
@@ -795,6 +817,7 @@ impl HistoryPicker {
 			}
 		}
 		self.entries = entries;
+		self.generation += 1;
 	}
 
 	fn rebuild(&mut self) {
@@ -847,35 +870,126 @@ impl HistoryPicker {
 		self.ui = Ui::from_root(tree, self.width, self.ctx.clone());
 	}
 
-	/// Returns a TSP `picker` node representing the current history list.
+	/// The history list as a data-first TSP `picker` (v1 history search):
+	/// the listed prompts as items keyed by their history row id, the
+	/// selected one named by that id, and no preview pane.
 	///
-	/// Each filtered entry becomes a child `item` with its index as `id` and
-	/// the first prompt line as `text`.
-	#[must_use]
-	pub fn tsp_node(&self) -> omp_tui::tsp::wire::Node {
-		let children = self
+	/// The node is rebuilt only when the list or its selection changed.
+	pub fn tsp_node(&mut self) -> &Node {
+		let key = (self.generation, self.selected);
+		if self.tsp.0 != Some(key) {
+			self.tsp = (Some(key), self.build_tsp_node());
+		}
+		&self.tsp.1
+	}
+
+	fn build_tsp_node(&self) -> Node {
+		let now = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.ok()
+			.and_then(|duration| i64::try_from(duration.as_secs()).ok())
+			.unwrap_or_default();
+		let items = self
 			.entries
 			.iter()
-			.enumerate()
-			.map(|(i, entry)| {
-				let first = entry.prompt.lines().next().unwrap_or_default();
-				let mut p = serde_json::Map::new();
-				p.insert("text".into(), serde_json::Value::String(first.to_owned()));
-				omp_tui::tsp::wire::Node {
-					id: Str::from(format!("hp-{i}")),
-					k: omp_tui::tsp::wire::Kind::Item,
-					p,
-					c: Vec::new(),
+			.map(|entry| {
+				let mut facts = BTreeMap::new();
+				if let Some(age) = relative_history_time(now, entry.created_at) {
+					facts.insert(Str::new_static(HISTORY_AGE_COLUMN), Fact::Text(age));
+				}
+				PickerItem {
+					id: history_item_id(entry),
+					label: Str::new(entry.prompt.lines().next().unwrap_or_default().trim()),
+					detail: None,
+					mono: false,
+					facts,
+					chips: Vec::new(),
+					title: None,
 				}
 			})
 			.collect();
-		omp_tui::tsp::wire::Node {
-			id: Str::new_static("history-picker"),
-			k:  omp_tui::tsp::wire::Kind::Picker,
-			p:  serde_json::Map::new(),
-			c:  children,
+		PickerProps {
+			title: Some(Str::new_static("Search History")),
+			icon: Some(Str::new_static("history")),
+			noun: Some(Str::new_static("prompts")),
+			size: Some(PickerSize::Md),
+			layout: Some(PickerLayout::Rows),
+			query: Some(self.query.clone()),
+			placeholder: Some(Str::new_static("Search prompts…")),
+			columns: vec![PickerColumn {
+				id:     Str::new_static(HISTORY_AGE_COLUMN),
+				head:   None,
+				format: Some(ColumnFormat::Time),
+			}],
+			items,
+			selected: self
+				.selected
+				.and_then(|index| self.entries.get(index))
+				.map(history_item_id),
+			preview: Some(PickerPreview::None),
+			actions: vec![PickerAction::confirm("Edit"), PickerAction::close()],
+			empty: Some(Str::new_static(if self.query.is_empty() {
+				"No history yet"
+			} else {
+				"No matching history"
+			})),
+			..PickerProps::default()
+		}
+		.node(Str::new_static(HISTORY_PICKER_ID), Vec::new())
+	}
+
+	/// Applies a Tern pointer gesture on the native picker the way the cell
+	/// list's keys do (v1 history search): `select` moves the cursor to the
+	/// prompt, `activate` and the `confirm` action put it back into the
+	/// composer, `close` and `cancel` close. A prompt the list does not show
+	/// is ignored.
+	pub fn tsp_gesture(&mut self, gesture: Gesture) -> PickerEvent {
+		let (item, activate) = match gesture {
+			Gesture::Act(PickerAct::Close | PickerAct::Cancel) => return PickerEvent::Close,
+			Gesture::Act(PickerAct::Confirm) => {
+				return self
+					.selected_prompt()
+					.map_or(PickerEvent::Consumed, PickerEvent::Recall);
+			},
+			Gesture::Select(item) => (item, false),
+			Gesture::Activate(item) => (item, true),
+		};
+		let Some(index) = item
+			.parse::<i64>()
+			.ok()
+			.and_then(|id| self.entries.iter().position(|entry| entry.id == id))
+		else {
+			return PickerEvent::Consumed;
+		};
+		let value = sf!("{index}");
+		let shown = self
+			.ui
+			.with_component_mut::<Select, _>("prompts", |select| select.highlight_value(&value))
+			.unwrap_or(false);
+		if !shown {
+			return PickerEvent::Consumed;
+		}
+		self.ui.invalidate("prompts");
+		self.selected = Some(index);
+		if activate {
+			self
+				.selected_prompt()
+				.map_or(PickerEvent::Consumed, PickerEvent::Recall)
+		} else {
+			PickerEvent::Consumed
 		}
 	}
+}
+
+/// Id of the native history picker, which Tern names in its events.
+pub const HISTORY_PICKER_ID: &str = "history-picker";
+/// Fact column of a prompt's age.
+const HISTORY_AGE_COLUMN: &str = "when";
+
+/// A history prompt's native picker id: its history row id, which survives
+/// the list being filtered or reordered.
+fn history_item_id(entry: &HistoryEntry) -> Str {
+	sf!("{}", entry.id)
 }
 
 fn history_query_tokens(query: &str) -> Vec<String> {
@@ -1220,6 +1334,57 @@ mod tests {
 			Size::new(100, 40),
 			&UiContext::default(),
 		)
+	}
+
+	/// The native history picker names prompts by their history row id and
+	/// its gestures do what the keys do: `select` moves the cursor and recalls
+	/// nothing, `activate` and `confirm` recall, `close` closes, and an id the
+	/// list does not show is ignored.
+	#[test]
+	fn history_picker_native_rows_are_keyed_by_row_id_and_gestures_recall() {
+		use omp_tui::tsp::picker::{Gesture, PickerAct, PickerProps, read};
+
+		let entry = |id: i64, prompt: &'static str| HistoryEntry {
+			id,
+			prompt: Str::new_static(prompt),
+			created_at: 0,
+			cwd: None,
+			session_id: None,
+		};
+		let entries = vec![entry(7, "newest deploy"), entry(-1, "older\nsecond line")];
+		let mut picker = HistoryPicker::open(entries, None, 80, &UiContext::default());
+		let props: PickerProps = read(picker.tsp_node()).expect("picker props");
+		assert_eq!(
+			props
+				.items
+				.iter()
+				.map(|item| (item.id.as_str(), item.label.as_str()))
+				.collect::<Vec<_>>(),
+			[("7", "newest deploy"), ("-1", "older")]
+		);
+		assert_eq!(props.selected.as_deref(), Some("7"));
+
+		assert_eq!(picker.tsp_gesture(Gesture::Select(Str::new_static("-1"))), PickerEvent::Consumed);
+		let props: PickerProps = read(picker.tsp_node()).expect("picker props");
+		assert_eq!(props.selected.as_deref(), Some("-1"), "select moves the selection");
+		assert_eq!(
+			picker.key(Key::Enter),
+			PickerEvent::Recall(Str::new_static("older\nsecond line")),
+			"the cell list's cursor moved with it"
+		);
+		assert_eq!(
+			picker.tsp_gesture(Gesture::Act(PickerAct::Confirm)),
+			PickerEvent::Recall(Str::new_static("older\nsecond line"))
+		);
+		assert_eq!(
+			picker.tsp_gesture(Gesture::Activate(Str::new_static("7"))),
+			PickerEvent::Recall(Str::new_static("newest deploy"))
+		);
+		assert_eq!(
+			picker.tsp_gesture(Gesture::Activate(Str::new_static("42"))),
+			PickerEvent::Consumed
+		);
+		assert_eq!(picker.tsp_gesture(Gesture::Act(PickerAct::Close)), PickerEvent::Close);
 	}
 
 	#[test]

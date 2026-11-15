@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use omp_core::Str;
 use omp_shell::builtins::{self, builtin};
 
 #[allow(
@@ -92,6 +93,76 @@ pub fn utility_builtins<SE: omp_shell::ShellExtensions>()
 	m.push(("yes", yes::yes_builtin::<SE>()));
 
 	m
+}
+
+/// Keyword that selects every name [`extra_builtins`] offers in this build.
+pub const ALL_EXTRAS: &str = "all";
+
+/// Names [`extra_builtins`] can register in this build, in registration order.
+///
+/// Every name here is opt-in: it shadows a system command, so it is registered
+/// only when the embedding shell lists it (ADR 0054 D2). No name may collide
+/// with [`utility_builtins`], [`process_builtins`], or the shell's own
+/// builtins; the factory tests enforce that. The set is empty until a port
+/// lands, and a build that lacks a port's cargo feature leaves its name out.
+pub const OFFERED_EXTRAS: &[&str] = &[];
+
+/// Why a requested extra builtin name is rejected.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ExtraBuiltinError {
+	/// The name is neither [`ALL_EXTRAS`] nor in [`OFFERED_EXTRAS`].
+	#[error("`{name}` is not an extra builtin this build offers")]
+	Unknown {
+		/// The rejected name, as the embedder supplied it.
+		name: Str,
+	},
+}
+
+/// Checks that every requested extra builtin name is [`ALL_EXTRAS`] or one this
+/// build offers.
+///
+/// Embedders call this where the list enters (a convar's validation hook), so
+/// [`extra_builtins`] never has to guess what an unknown name meant.
+///
+/// # Errors
+///
+/// [`ExtraBuiltinError::Unknown`] names the first rejected entry.
+pub fn validate_extra_names(enabled: &[Str]) -> Result<(), ExtraBuiltinError> {
+	match enabled
+		.iter()
+		.find(|name| name.as_str() != ALL_EXTRAS && !OFFERED_EXTRAS.contains(&name.as_str()))
+	{
+		Some(name) => Err(ExtraBuiltinError::Unknown { name: name.clone() }),
+		None => Ok(()),
+	}
+}
+
+/// Returns the opt-in utility builtins named by `enabled` as
+/// `(name, registration)` pairs.
+///
+/// `enabled` lists names from [`OFFERED_EXTRAS`]; [`ALL_EXTRAS`] selects every
+/// one. An empty list yields no registration, and a name this build does not
+/// offer is skipped (reject it earlier with [`validate_extra_names`]).
+/// [`utility_builtins`] and every existing registration stay untouched.
+pub fn extra_builtins<SE: omp_shell::ShellExtensions>(
+	enabled: &[Str],
+) -> Vec<(&'static str, builtins::Registration<SE>)> {
+	let all = enabled.iter().any(|name| name.as_str() == ALL_EXTRAS);
+	OFFERED_EXTRAS
+		.iter()
+		.copied()
+		.filter(|name| all || enabled.iter().any(|wanted| wanted.as_str() == *name))
+		.filter_map(|name| extra_registration::<SE>(name).map(|registration| (name, registration)))
+		.collect()
+}
+
+/// Builds the registration for one offered extra name.
+///
+/// Each port adds its arm and its [`OFFERED_EXTRAS`] entry together.
+fn extra_registration<SE: omp_shell::ShellExtensions>(
+	_name: &str,
+) -> Option<builtins::Registration<SE>> {
+	None
 }
 
 /// Returns the process-inspection and process-control builtins:

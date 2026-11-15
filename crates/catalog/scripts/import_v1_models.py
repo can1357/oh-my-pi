@@ -27,10 +27,17 @@ schema (`SourceModelRecord` and friends, all `deny_unknown_fields`) rejects any
 other key the next step meets: extend the tables here, and the Rust schema when
 the field is real, rather than loosening either.
 
+The input is either the older provider -> model -> row map or pi's compact
+catalog (`{"version": 1, "keys", "nodes", ...}`, pi v18.20 onward), which
+`decode_compact` expands first. `--only provider,provider` imports just those
+providers and keeps every other provider's rows from the existing fixture, so a
+catalog addition does not churn the whole roster.
+
 Usage (from the repository root):
 
     git show origin/main:packages/catalog/src/models.json > /tmp/v1-models.json
     just catalog-import-v1 /tmp/v1-models.json
+    just catalog-import-v1 /tmp/v1-models.json sambanova,helmcode   # scoped
 
 which runs this script and then `just catalog-snapshot` (source lock and
 `catalog.postcard`). The pi tree needs no network here: `models.json` is the
@@ -92,6 +99,13 @@ DROPPED_COMPAT_KEYS = {
 	"firstPartyProvider": "derived from the provider id",
 }
 
+# `whenThinking.extraBody` keys outside `ReasoningBodyOverride` (thinking,
+# enable_thinking, venice_parameters), which the Rust schema rejects.
+DROPPED_EXTRA_BODY_KEYS = {
+	"reasoning": "Modular's `reasoning.enabled = true` for single-rung models; the typed "
+	"`ReasoningBodyOverride` has no `reasoning` field and no omp codec consumes one",
+}
+
 # `cost` keys pi added that omp's pricing schedule does not model.
 DROPPED_COST_KEYS = {
 	"timeBased": "DeepSeek peak/off-peak windows and dated rate schedules need a time-aware "
@@ -131,6 +145,76 @@ class ImportError_(Exception):
 	"""Input the importer refuses to guess about."""
 
 
+_UNDEFINED = object()
+
+
+def decode_compact(data: dict) -> dict:
+	"""Expands pi's compact `models.json` (`{"version": 1, "keys", "nodes", ...}`)
+	into the provider -> model-id -> row map the rest of this script reads.
+
+	Mirrors `packages/catalog/src/model-catalog-format.ts` (`openModelCatalog`,
+	`getCatalogProvider`): nodes are interned objects/arrays, a one-element
+	array is a node reference (`[-1]` is an explicitly undefined value), boolean
+	properties are bit-packed per shape, per-provider constants are folded out
+	of the rows, and each row's `compat` is a per-api base plus a delta."""
+	if data.get("version") != 1:
+		raise ImportError_(f"unsupported compact catalog version {data.get('version')!r}")
+	keys = data["keys"]
+	shapes = data["booleanShapes"]
+	nodes = data["nodes"]
+	cache: dict[int, object] = {}
+
+	def decode(value):
+		if not isinstance(value, list):
+			return value
+		node_id = value[0]
+		if node_id == -1:
+			return _UNDEFINED
+		if node_id in cache:
+			return cache[node_id]
+		node = nodes[node_id]
+		if node[0] == 1:
+			result = [None if (item := decode(entry)) is _UNDEFINED else item for entry in node[1]]
+		else:
+			result = {}
+			fill(result, node)
+		cache[node_id] = result
+		return result
+
+	def fill(target: dict, node: list) -> None:
+		props = node[1]
+		for index in range(0, len(props), 2):
+			item = decode(props[index + 1])
+			if item is not _UNDEFINED:
+				target[keys[props[index]]] = item
+		shape = shapes[node[2]]
+		for index, key_id in enumerate(shape):
+			target[keys[key_id]] = ((node[3][index >> 5] >> (index % 32)) & 1) != 0
+
+	bases = {api: decode(encoded) for api, encoded in data["compat"]}
+	out: dict = {}
+	for provider, encoded_constants, rows in data["providers"]:
+		constants = decode(encoded_constants)
+		models: dict = {}
+		for row in rows:
+			model_id, encoded, delta = row[0], row[1], (row[2] if len(row) > 2 else None)
+			if not isinstance(encoded, list) or encoded[0] < 0 or nodes[encoded[0]][0] != 0:
+				raise ImportError_(f"{provider}/{model_id}: invalid compact model row")
+			row_node = nodes[encoded[0]]
+			model = {"id": model_id, **constants}
+			fill(model, row_node)
+			if delta is not None:
+				compat = dict(bases[model["api"]])
+				for key_id in delta[0]:
+					compat.pop(keys[key_id], None)
+				for key, item in decode(delta[1]).items():
+					compat[key] = item
+				model["compat"] = compat
+			models[model_id] = model
+		out[provider] = models
+	return out
+
+
 def snake(key: str) -> str:
 	key = key.replace("OpenAI", "Openai")
 	return re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), key)
@@ -139,7 +223,15 @@ def snake(key: str) -> str:
 def when_thinking(value: dict) -> dict:
 	"""pi bakes the whole resolved compat object into `whenThinking`; only the
 	five keys `WhenThinkingPolicy` models are real overrides."""
-	return {key: item for key, item in value.items() if key in WHEN_THINKING_KEYS}
+	out = {key: item for key, item in value.items() if key in WHEN_THINKING_KEYS}
+	body = out.get("extraBody")
+	if isinstance(body, dict):
+		body = {key: item for key, item in body.items() if key not in DROPPED_EXTRA_BODY_KEYS}
+		if body:
+			out["extraBody"] = body
+		else:
+			del out["extraBody"]
+	return out
 
 
 def convert_compat(compat: dict) -> dict:
@@ -226,6 +318,12 @@ def main() -> int:
 	parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 	parser.add_argument("--v1", required=True, type=Path, help="pi packages/catalog/src/models.json")
 	parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="fixture to write (.zst) or a .json path")
+	parser.add_argument(
+		"--only",
+		type=lambda text: {name for name in text.split(",") if name},
+		help="comma-separated provider ids: import just these and keep every other provider's rows "
+		"from the existing --out fixture (a scoped roster refresh)",
+	)
 	args = parser.parse_args()
 
 	registry = tomllib.loads(PROVIDERS.read_text())["providers"]
@@ -234,6 +332,13 @@ def main() -> int:
 	}
 	v1 = json.loads(args.v1.read_text())
 	try:
+		if isinstance(v1.get("providers"), list):
+			v1 = decode_compact(v1)
+		if args.only is not None:
+			absent = args.only - set(v1)
+			if absent:
+				raise ImportError_("--only names providers absent from the input: " + ", ".join(sorted(absent)))
+			v1 = {name: models for name, models in v1.items() if name in args.only}
 		out, report = convert(v1, codec_providers, set(registry))
 	except ImportError_ as error:
 		print(f"import_v1_models: {error}", file=sys.stderr)
@@ -245,6 +350,12 @@ def main() -> int:
 			file=sys.stderr,
 		)
 		return 1
+	if args.only is not None:
+		raw = args.out.read_bytes()
+		if args.out.suffix == ".zst":
+			raw = subprocess.run(["zstd", "-q", "-d", "-c"], input=raw, capture_output=True, check=True).stdout
+		kept = {name: models for name, models in json.loads(raw).items() if name not in args.only}
+		out = dict(sorted({**kept, **out}.items()))
 	blob = json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode()
 	if args.out.suffix == ".zst":
 		compressed = subprocess.run(
@@ -254,7 +365,8 @@ def main() -> int:
 	else:
 		args.out.write_bytes(blob)
 	print(
-		f"wrote {args.out}: {len(out)} providers, {report['kept']} models; "
+		f"wrote {args.out}: {len(out)} providers, {sum(map(len, out.values()))} models "
+		f"({report['kept']} imported); "
 		f"specialist rows skipped {sum(report['specialist'].values())} "
 		f"({report['specialist']}); pseudo providers skipped {report['pseudo']}"
 	)

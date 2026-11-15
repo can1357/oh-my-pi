@@ -107,7 +107,7 @@ Settled by the code, not open: a side turn on a live child is possible without o
 
 ## Status in omp
 
-**Not started.** Reusable: `Journal::scan`, `SessionIndex`, `live_chain`, `copy_journal_blobs`, the `EphemeralJournal` pattern, `KernelOptions.tools`, the `/btw` side panel. New: `Journal::is_live`, the private-root guard and sweep, the `consult` module. Not verified: the cache behaviour of a copy (O2); how composition on a copy treats a source from another machine or cwd.
+**S0 landed; S1-S4 not started.** S0: `Journal::is_live(path) -> Result<bool, JournalError>` in `crates/journal/src/lib.rs` (backed by the private `WriterLock::is_held`, which shares `WriterLock::sidecar` with `acquire`), additive and ungated (no user-visible behaviour); tests in `crates/journal/tests/journal.rs` (`is_live_*`: held by `create` and `open` then dropped, absent sidecar and absent journal create nothing, a stale sidecar is untouched, cross-process observation, and a crashed writer is not live). Reusable: `Journal::scan`, `SessionIndex`, `live_chain`, `copy_journal_blobs`, the `EphemeralJournal` pattern, `KernelOptions.tools`, the `/btw` side panel. Still to build: the private-root guard and sweep, the `consult` module. Not verified: the cache behaviour of a copy (O2); how composition on a copy treats a source from another machine or cwd.
 
 ## Review (EGM, 2026-11-13)
 

@@ -3,11 +3,17 @@
 
 use std::{cell::Cell, fmt::Write as _, ops::Range, path::Path, rc::Rc, time::Duration};
 
-use omp_core::Str;
+use omp_core::{Str, StrMut};
 use omp_tui::{
-	Command, EditorOptions, Frame, Key, MouseReport, SpellingFeatures, Ui, UiContext, UiEvent,
+	Command, EditorOptions, Frame, Key, MouseReport, SpellingFeatures, SuggestionDisplay, Ui,
+	UiContext, UiEvent,
 	components::{
 		AttachmentContent, ComposerStyle, EditorPane, InlineAccent, PrefixAccent, marker_sized_paste,
+	},
+	tsp::{
+		edit::send_text,
+		picker::{ItemProps, KindProps as _, Lines, ListProps, OverlayAnchor, OverlayProps},
+		wire::Node,
 	},
 };
 
@@ -18,6 +24,28 @@ use crate::{
 		top_gap_shown,
 	},
 };
+
+/// Id of the TSP `overlay` that holds the completion list at the caret.
+pub const COMPLETION_ID: &str = "completion";
+/// Id of the completion `list`, which Tern names in a row's `select` and
+/// `activate` events.
+pub const COMPLETION_LIST_ID: &str = "completion-list";
+/// Prefix that keeps completion row ids apart from every other node id of the
+/// surface.
+const COMPLETION_ITEM_PREFIX: &str = "completion:";
+
+/// The TSP id of the completion row inserting `value`.
+fn completion_item_id(value: &str) -> Str {
+	let mut id = StrMut::with_capacity(COMPLETION_ITEM_PREFIX.len() + value.len());
+	id.push_str(COMPLETION_ITEM_PREFIX);
+	id.push_str(value);
+	id.freeze()
+}
+
+/// Whether `id` is the TSP id of the completion row inserting `value`.
+fn completion_item_matches(id: &str, value: &str) -> bool {
+	id.strip_prefix(COMPLETION_ITEM_PREFIX) == Some(value)
+}
 
 /// Editor row budget for a terminal of `rows` rows (
 /// `computeEditorMaxHeight`): roomy terminals get the comfortable `[6, 18]`
@@ -973,6 +1001,32 @@ impl Composer {
 			});
 	}
 
+	/// Stages the prompt of a TSP `send` as the draft, so that
+	/// [`Composer::preview_submission`] classifies it exactly as Enter would
+	/// (command, local `!` / `$` input, queue shorthand or prompt).
+	///
+	/// The prompt is `text` sanitized like a paste; blank text is a no-op and
+	/// returns `false`. A draft it displaces is not lost: it joins local
+	/// recall (Up), never the durable prompt index, unless it carries a
+	/// secret ([`should_skip_history`]). Its staged attachments go with it,
+	/// since the prompt is a self-contained text.
+	pub fn stage_send(&mut self, text: &str) -> bool {
+		let Some(prompt) = send_text(text) else {
+			return false;
+		};
+		let displaced = self.text();
+		self
+			.ui
+			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| {
+				if !displaced.trim().is_empty() && !should_skip_history(displaced.trim_start()) {
+					pane.add_to_history(&displaced);
+				}
+				pane.attachments().take();
+			});
+		self.set_text(&prompt);
+		true
+	}
+
 	/// Undoes the last edit (native TSP undo).
 	pub fn undo(&mut self) {
 		self
@@ -982,38 +1036,83 @@ impl Composer {
 			});
 	}
 
-	/// Returns a TSP `picker` node for the open autocomplete dropdown, or
-	/// `None` when the dropdown is closed.
+	/// The open completion dropdown as a TSP `overlay` anchored to the
+	/// composer's caret, around a `list` of the dropdown's window with its
+	/// selected row; `None` while the dropdown is closed (v1
+	/// `Editor.describe`).
+	///
+	/// Rows are keyed by the text they insert, so an event names the row it
+	/// meant even after the window moved; of two rows inserting the same text
+	/// only the first is listed.
 	#[must_use]
-	pub fn autocomplete_node(&self) -> Option<omp_tui::tsp::wire::Node> {
-		let items = self
+	pub fn autocomplete_node(&self) -> Option<Node> {
+		self
 			.ui
-			.with_component::<EditorPane, _>(COMPOSER_ID, EditorPane::autocomplete_items)
-			.flatten()?;
-		if items.is_empty() {
-			return None;
-		}
-		let children = items
-			.iter()
-			.enumerate()
-			.map(|(i, (value, label))| {
-				let mut p = serde_json::Map::new();
-				p.insert("text".into(), serde_json::Value::String(label.as_str().to_owned()));
-				p.insert("value".into(), serde_json::Value::String(value.as_str().to_owned()));
-				omp_tui::tsp::wire::Node {
-					id: Str::from(format!("ac-{i}")),
-					k: omp_tui::tsp::wire::Kind::Item,
-					p,
-					c: Vec::new(),
+			.with_component::<EditorPane, _>(COMPOSER_ID, |pane| {
+				let picker = pane.completion_picker()?;
+				let (start, rows) = picker.visible_suggestions();
+				let selected = rows
+					.get(picker.selected().checked_sub(start)?)
+					.map(|row| completion_item_id(row.value()));
+				let mut items: Vec<Node> = Vec::with_capacity(rows.len());
+				for row in rows {
+					let id = completion_item_id(row.value());
+					if items.iter().any(|item| item.id == id) {
+						continue;
+					}
+					let label = match row.display() {
+						SuggestionDisplay::Text(label) => label.clone(),
+						SuggestionDisplay::Emoji { shortcode, .. } => Str::new_static(shortcode),
+					};
+					let detail = row.description().map(Str::new);
+					items.push(ItemProps { label, detail }.node(id, Vec::new()));
 				}
+				let list = ListProps {
+					selected,
+					max: Some(Lines { lines: u32::try_from(picker.rows()).unwrap_or(u32::MAX) }),
+				}
+				.node(Str::new_static(COMPLETION_LIST_ID), items);
+				Some(
+					OverlayProps {
+						anchor: Some(OverlayAnchor::Caret { caret: Str::new_static(COMPOSER_ID) }),
+						role:   Some(Str::new_static("omp.autocomplete")),
+					}
+					.node(Str::new_static(COMPLETION_ID), vec![list]),
+				)
 			})
-			.collect();
-		Some(omp_tui::tsp::wire::Node {
-			id: Str::new_static("autocomplete"),
-			k:  omp_tui::tsp::wire::Kind::Picker,
-			p:  serde_json::Map::new(),
-			c:  children,
-		})
+			.flatten()
+	}
+
+	/// Accepts the dropdown row a TSP `select` or `activate` named, as a click
+	/// on the row does in the cell UI, and reports what that did. A row the
+	/// open window no longer lists is ignored.
+	pub fn accept_completion(&mut self, item: &str) -> ComposerAction {
+		let index = self
+			.ui
+			.with_component::<EditorPane, _>(COMPOSER_ID, |pane| {
+				let picker = pane.completion_picker()?;
+				let (start, rows) = picker.visible_suggestions();
+				rows
+					.iter()
+					.position(|row| completion_item_matches(item, row.value()))
+					.map(|offset| start + offset)
+			})
+			.flatten();
+		let Some(index) = index else {
+			return ComposerAction::Ignored;
+		};
+		let changed = self
+			.ui
+			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| pane.accept_completion(index))
+			.unwrap_or(false);
+		if let Some(action) = self.pending.take() {
+			return self.apply_prompt_action(action);
+		}
+		if changed {
+			ComposerAction::Changed
+		} else {
+			ComposerAction::Ignored
+		}
 	}
 
 	/// Replaces the draft with text edited outside the composer (
@@ -1448,6 +1547,39 @@ mod tests {
 			.collect()
 	}
 
+	/// The open dropdown is an `overlay` at the composer's caret around a
+	/// `list` of its window with the selected row; a Tern gesture naming a row
+	/// accepts it as a click does, and a row the window does not list is
+	/// ignored.
+	#[test]
+	fn the_completion_list_sits_at_the_caret_and_accepts_the_named_row() {
+		use omp_tui::tsp::picker::{ItemProps, ListProps, read};
+
+		let mut composer = composer();
+		assert!(composer.autocomplete_node().is_none(), "a closed dropdown sends nothing");
+		type_text(&mut composer, "/");
+		let overlay = composer.autocomplete_node().expect("the dropdown");
+		assert_eq!(overlay.id.as_str(), COMPLETION_ID);
+		let props: OverlayProps = read(&overlay).expect("overlay props");
+		assert_eq!(props.anchor, Some(OverlayAnchor::Caret { caret: Str::new_static(COMPOSER_ID) }));
+		let [list] = overlay.c.as_slice() else {
+			panic!("one list in the overlay: {overlay:?}");
+		};
+		assert_eq!(list.id.as_str(), COMPLETION_LIST_ID);
+		let selected = read::<ListProps>(list).expect("list props").selected;
+		assert_eq!(selected.as_ref(), list.c.first().map(|item| &item.id), "the first row leads");
+		let help = list
+			.c
+			.iter()
+			.find(|item| read::<ItemProps>(item).is_ok_and(|props| props.label == "help"))
+			.expect("the help row");
+
+		assert_eq!(composer.accept_completion("completion:/nothing "), ComposerAction::Ignored);
+		assert_eq!(composer.text(), "/", "an unknown row changes nothing");
+		assert_eq!(composer.accept_completion(help.id.as_str()), ComposerAction::Changed);
+		assert_eq!(composer.text(), "/help ", "the named row is accepted in place");
+	}
+
 	#[test]
 	fn typing_moves_the_caret_and_enter_submits_then_clears() {
 		let mut composer = composer();
@@ -1591,6 +1723,52 @@ mod tests {
 		assert_eq!(composer.text(), "!ls");
 		composer.key(Key::Up);
 		assert_eq!(composer.text(), "/help");
+	}
+
+	/// A TSP `send` is classified like Enter, sanitized like a paste, ignored
+	/// when blank, and the draft it displaces stays recallable with Up.
+	#[test]
+	fn a_staged_send_is_classified_like_enter_and_keeps_the_displaced_draft_for_recall() {
+		let mut composer = composer();
+		type_text(&mut composer, "unfinished thought");
+		assert!(!composer.stage_send(" \r\n\t"), "blank text is a no-op");
+		assert_eq!(composer.text(), "unfinished thought", "a blank send leaves the draft alone");
+
+		assert!(composer.stage_send("/help me"));
+		assert_eq!(composer.text(), "/help me", "the prompt replaces the draft");
+		assert!(matches!(composer.preview_submission(), ComposerAction::Command { .. }));
+		assert!(composer.commit_submission());
+		assert_eq!(composer.text(), "");
+
+		assert!(composer.stage_send("!ls\r\n"));
+		assert!(
+			matches!(composer.preview_submission(), ComposerAction::Submit(text) if &*text == "!ls\n")
+		);
+		assert!(composer.commit_submission());
+
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "!ls", "the sent line is the newest recall");
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "/help me");
+		composer.key(Key::Up);
+		assert_eq!(
+			composer.text(),
+			"unfinished thought",
+			"the displaced draft is recalled, not lost"
+		);
+	}
+
+	/// A displaced draft that carries a secret never enters local recall.
+	#[test]
+	fn a_staged_send_keeps_a_secret_draft_out_of_recall() {
+		let mut composer = composer();
+		type_text(&mut composer, "/login https://x?code=abc&state=1");
+		assert!(composer.stage_send("hello"));
+		assert!(composer.commit_submission());
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "hello");
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "hello", "no older entry: the secret draft was never recalled");
 	}
 
 	/// `shouldSkipHistory`: secret-bearing commands never enter recall.

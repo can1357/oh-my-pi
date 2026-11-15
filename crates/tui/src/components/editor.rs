@@ -18,7 +18,7 @@ use xutf::Text;
 
 use super::{ContextGaugeMode, Img, StatusPlacement, hr::truncate_to_width};
 use crate::{
-	Completion, EditBuffer, EditOutcome, Editor, EditorOptions, Icon, NativeEdit, PickerRow,
+	Completion, EditBuffer, EditOutcome, Editor, EditorOptions, Icon, NativeEdit, Picker, PickerRow,
 	SuggestionDisplay, anim,
 	component::{
 		Cached, Component, EventCtx, Flow, Hit, HitTag, IntoComponent, PaintCtx, Slot, next_slot,
@@ -801,25 +801,20 @@ impl EditInput {
 		buffer.cursor_line().saturating_add(1) >= buffer.line_count()
 	}
 
-	/// Returns the visible autocomplete suggestions as `(value, label)` pairs,
-	/// or `None` when the dropdown is closed.
-	pub fn autocomplete_items(&self) -> Option<Vec<(omp_core::Str, omp_core::Str)>> {
-		let picker = self.editor.picker()?;
-		let (_, suggestions) = picker.visible_suggestions();
-		Some(
-			suggestions
-				.iter()
-				.map(|s| {
-					let label = match s.display() {
-						SuggestionDisplay::Text(t) => t.clone(),
-						SuggestionDisplay::Emoji { shortcode, .. } => {
-							omp_core::Str::new_static(shortcode)
-						},
-					};
-					(s.value().clone(), label)
-				})
-				.collect(),
-		)
+	/// The open completion dropdown, or `None` when it is closed.
+	#[must_use]
+	pub const fn completion_picker(&self) -> Option<&Picker> {
+		self.editor.picker()
+	}
+
+	/// Promotes dropdown row `index` (absolute) to the selection and accepts
+	/// it, as a click on the row does. Returns whether the buffer changed.
+	pub fn accept_completion(&mut self, index: usize) -> bool {
+		if self.editor.click_picker(index) != EditOutcome::Changed {
+			return false;
+		}
+		self.refresh_keyword_spans();
+		true
 	}
 
 	fn max_rows(&self) -> u16 {
@@ -1787,9 +1782,8 @@ impl Component for EditInput {
 			return match mouse {
 				Mouse::Click => {
 					if let Some(index) = index
-						&& self.editor.click_picker(index) == EditOutcome::Changed
+						&& self.accept_completion(index)
 					{
-						self.refresh_keyword_spans();
 						ec.request_layout();
 					}
 					Flow::Consumed
@@ -2887,13 +2881,24 @@ impl EditorPane {
 		self.children[0].invalidate();
 	}
 
-	/// Returns visible autocomplete suggestions as `(value, label)` pairs,
-	/// or `None` when the dropdown is closed.
-	pub fn autocomplete_items(&self) -> Option<Vec<(omp_core::Str, omp_core::Str)>> {
+	/// The open completion dropdown under the editable surface, or `None`
+	/// when it is closed.
+	pub fn completion_picker(&self) -> Option<&Picker> {
 		self.children[0]
 			.comp()
 			.downcast_ref::<EditInput>()
-			.and_then(EditInput::autocomplete_items)
+			.and_then(EditInput::completion_picker)
+	}
+
+	/// Accepts dropdown row `index` (absolute) as a click on it does: the row
+	/// becomes the selection and is accepted in place, without submitting.
+	/// Returns whether the buffer changed.
+	pub fn accept_completion(&mut self, index: usize) -> bool {
+		let changed = self.input_mut().accept_completion(index);
+		if changed {
+			self.children[0].invalidate();
+		}
+		changed
 	}
 
 	#[cfg(test)]

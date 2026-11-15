@@ -13,7 +13,10 @@
 //! scope, role, or viewport change rebuilds the tree once; query edits only
 //! retext the rail's counts.
 
-use std::fmt::{self, Write as _};
+use std::{
+	collections::BTreeMap,
+	fmt::{self, Write as _},
+};
 
 use omp_core::{FastHashMap, Str, StrMut, sf};
 use omp_tui::{
@@ -23,8 +26,15 @@ use omp_tui::{
 	components::Select,
 	dom,
 	fuzzy::{Query, SearchIndex},
+	tsp::{
+		picker::{
+			ColumnFormat, Fact, Gesture, KindProps as _, PickerAct, PickerAction, PickerChip,
+			PickerColumn, PickerItem, PickerLayout, PickerPreview, PickerProps, PickerSize, TextProps,
+		},
+		wire::{Kind, Node},
+	},
 };
-use serde_json;
+use serde_json::Map;
 use smallvec::SmallVec;
 use strum::{EnumProperty as _, IntoEnumIterator as _};
 
@@ -42,6 +52,14 @@ const FACTS_ID: &str = "model-facts";
 const HINT_ID: &str = "model-hint";
 /// Rail value of the "All models" entry; providers use their group index.
 const ALL_VALUE: &str = "all";
+/// Id of the native model picker, which Tern names in its events.
+pub const MODEL_PICKER_ID: &str = "model-picker";
+/// Ids of the native picker's preview and its facts line.
+const MODEL_PREVIEW_ID: &str = "model-picker-preview";
+const MODEL_PREVIEW_FACTS_ID: &str = "model-picker-facts";
+/// Fact column ids of the native picker.
+const CONTEXT_COLUMN: &str = "context";
+const PRICE_COLUMN: &str = "price";
 
 /// Rows around the two panes: frame border ×2, status, rule, facts, role
 /// chips, and hint.
@@ -220,6 +238,33 @@ pub struct ModelPicker {
 	/// A rebuild deferred until the next entry point (the open-time build
 	/// waits for [`ModelPicker::with_roles`] instead of building twice).
 	pending:       Option<Restore>,
+	/// Bumped whenever the rows or the role marks change: what the native
+	/// picker's catalogue is built from.
+	generation:    u64,
+	/// The native picker, rebuilt only when what it shows changes.
+	tsp:           TspCache,
+}
+
+/// What the native picker shows: when none of it changed, the cached node is
+/// presented as it is.
+#[derive(Clone, Debug, PartialEq)]
+struct TspKey {
+	generation:   u64,
+	/// Value of the list option under the cursor.
+	cursor:       Option<Str>,
+	query:        Str,
+	scope:        Option<u16>,
+	role_mode:    bool,
+	task_mode:    bool,
+	current:      usize,
+	task_current: usize,
+	current_role: Option<usize>,
+}
+
+/// The native picker node and the state it was built for.
+struct TspCache {
+	key:  Option<TspKey>,
+	node: Node,
 }
 
 impl ModelPicker {
@@ -264,6 +309,11 @@ impl ModelPicker {
 			list_rows: list_rows(viewport.height),
 			width: viewport.width,
 			pending: Some(Restore::Highlight),
+			generation: 0,
+			tsp: TspCache {
+				key:  None,
+				node: PickerProps::default().node(Str::new_static(MODEL_PICKER_ID), Vec::new()),
+			},
 		};
 		picker.reindex();
 		picker
@@ -282,6 +332,7 @@ impl ModelPicker {
 			return;
 		}
 		self.roles = roles;
+		self.generation += 1;
 		if self.pending.is_none() {
 			self.rebuild(Restore::Highlight);
 		}
@@ -812,6 +863,7 @@ impl ModelPicker {
 			})
 			.collect();
 		self.counts = vec![0; self.groups.len() + 1];
+		self.generation += 1;
 		self.recount();
 	}
 
@@ -870,6 +922,16 @@ impl ModelPicker {
 		self.ui.set_text(STATUS_ID, self.status());
 	}
 
+	const fn title(&self) -> &'static str {
+		if self.role_mode {
+			"Switch Quick Role"
+		} else if self.task_mode {
+			"Switch Task Model"
+		} else {
+			"Switch Model"
+		}
+	}
+
 	fn hint(&self) -> &'static str {
 		if self.role_mode {
 			HINT_ROLES
@@ -918,28 +980,29 @@ impl ModelPicker {
 	}
 
 	fn show_detail(&mut self, selected: Option<usize>) {
-		let model = if self.role_mode {
+		let text = self.detail(selected).unwrap_or_else(|| sf!(" "));
+		self.ui.set_text(FACTS_ID, text);
+	}
+
+	/// The facts line of the model list option `selected` (a row index, or a
+	/// quick-role index in `@` mode): the model's facts and the roles it holds.
+	fn detail(&self, selected: Option<usize>) -> Option<Str> {
+		let row = if self.role_mode {
 			selected
 				.and_then(|index| self.quick_roles.get(index))
 				.and_then(|role| self.rows.get(role.model))
 		} else {
 			selected.and_then(|index| self.rows.get(index))
-		};
-		let text = model.map_or_else(
-			|| sf!(" "),
-			|row| {
-				let mut facts = model_facts(row);
-				if self.roles.iter().any(|mark| mark.key == row.key) {
-					let mut line = StrMut::new(facts.as_str());
-					for mark in self.roles.iter().filter(|mark| mark.key == row.key) {
-						push_fact(&mut line, format_args!("{}", mark.role.name()));
-					}
-					facts = line.freeze();
-				}
-				facts
-			},
-		);
-		self.ui.set_text(FACTS_ID, text);
+		}?;
+		let mut facts = model_facts(row);
+		if self.roles.iter().any(|mark| mark.key == row.key) {
+			let mut line = StrMut::new(facts.as_str());
+			for mark in self.roles.iter().filter(|mark| mark.key == row.key) {
+				push_fact(&mut line, format_args!("{}", mark.role.name()));
+			}
+			facts = line.freeze();
+		}
+		Some(facts)
 	}
 
 	fn rail_width(&self) -> u16 {
@@ -1000,13 +1063,7 @@ impl ModelPicker {
 		.collect::<Vec<_>>();
 		let rows = self.list_rows;
 		let rail = self.rail_width();
-		let title = if self.role_mode {
-			"Switch Quick Role"
-		} else if self.task_mode {
-			"Switch Task Model"
-		} else {
-			"Switch Model"
-		};
+		let title = self.title();
 		let status = self.status();
 		let hint = self.hint();
 		let list = if self.role_mode {
@@ -1201,42 +1258,240 @@ impl ModelPicker {
 }
 
 impl ModelPicker {
-	/// Returns a TSP `picker` node representing the current model list.
+	/// The model list as a data-first TSP `picker` (v1 model hub): every row
+	/// is an item keyed by its catalog key (a quick role by `@role`), `order`
+	/// is what the list shows under the live scope and query, `selected`
+	/// names the row under the cursor, and the children preview it.
 	///
-	/// Each row becomes a child `item` node with `id` = the model key,
-	/// `text` = the human-readable name, and `provider` for Tern's grouping.
-	#[must_use]
-	pub fn tsp_node(&self) -> omp_tui::tsp::wire::Node {
-		// Cap at 100 rows to stay within the 64 KiB TSP frame limit.
-		let children = self
+	/// The node is rebuilt only when what it shows changed, so presenting an
+	/// unchanged picker costs a comparison. The whole catalogue rides one
+	/// message; the encoder chunks it under the terminal's `apc` limit.
+	pub fn tsp_node(&mut self) -> &Node {
+		self.ensure();
+		let cursor = self
+			.ui
+			.with_component::<Select, _>(MODELS_ID, Select::highlighted_value)
+			.flatten();
+		let key = TspKey {
+			generation: self.generation,
+			cursor,
+			query: self.query.clone(),
+			scope: self.scope,
+			role_mode: self.role_mode,
+			task_mode: self.task_mode,
+			current: self.current,
+			task_current: self.task_current,
+			current_role: self.current_role,
+		};
+		if self.tsp.key.as_ref() != Some(&key) {
+			self.tsp.node = self.build_tsp_node(key.cursor.as_deref());
+			self.tsp.key = Some(key);
+		}
+		&self.tsp.node
+	}
+
+	/// Applies a Tern pointer gesture on the native picker the way the cell
+	/// list's keys do (v1 `routePickerItem`): `select` moves the cursor to the
+	/// row and previews it, `activate` and the `confirm` action pick, `close`
+	/// and `cancel` close. A row the list does not show is ignored.
+	pub fn tsp_gesture(&mut self, gesture: Gesture) -> PickerEvent {
+		self.ensure();
+		let (item, activate) = match gesture {
+			Gesture::Act(PickerAct::Close | PickerAct::Cancel) => return PickerEvent::Close,
+			Gesture::Act(PickerAct::Confirm) => {
+				let under = self
+					.ui
+					.with_component::<Select, _>(MODELS_ID, Select::highlighted_value)
+					.flatten()
+					.and_then(|value| value.as_str().parse().ok());
+				return self.pick(under);
+			},
+			Gesture::Select(item) => (item, false),
+			Gesture::Activate(item) => (item, true),
+		};
+		let Some((value, index)) = self.option_for(&item) else {
+			return PickerEvent::Consumed;
+		};
+		if self.focus != Pane::Models {
+			self.set_focus(Pane::Models);
+		}
+		let shown = self
+			.ui
+			.with_component_mut::<Select, _>(MODELS_ID, |select| select.highlight_value(&value))
+			.unwrap_or(false);
+		if !shown {
+			return PickerEvent::Consumed;
+		}
+		self.ui.invalidate(MODELS_ID);
+		self.note_highlight(Some(index));
+		if activate {
+			self.pick(Some(index))
+		} else {
+			PickerEvent::Consumed
+		}
+	}
+
+	/// The list option (its value and index) a native picker row id names in
+	/// the current mode.
+	fn option_for(&self, item: &str) -> Option<(Str, usize)> {
+		if self.role_mode {
+			let role = item.strip_prefix('@')?;
+			let index = self
+				.quick_roles
+				.iter()
+				.position(|quick| quick.role.as_str() == role)?;
+			return Some((sf!("{index}"), index));
+		}
+		let index = self.rows.iter().position(|row| row.key.as_str() == item)?;
+		Some((self.items[index].value.clone(), index))
+	}
+
+	fn build_tsp_node(&self, cursor: Option<&str>) -> Node {
+		let role_ids: Vec<Str> = self
+			.quick_roles
+			.iter()
+			.map(|role| sf!("@{}", role.role))
+			.collect();
+		let mut items: Vec<PickerItem> = self
 			.rows
 			.iter()
-			.take(100)
-			.enumerate()
-			.map(|(i, row)| {
-				let mut p = serde_json::Map::new();
-				p.insert("text".into(), serde_json::Value::String(row.name.as_str().to_owned()));
-				p.insert(
-					"provider".into(),
-					serde_json::Value::String(row.provider.as_str().to_owned()),
-				);
-				omp_tui::tsp::wire::Node {
-					id: Str::from(format!("mp-{i}")),
-					k: omp_tui::tsp::wire::Kind::Item,
-					p,
-					c: Vec::new(),
+			.zip(&self.items)
+			.map(|(row, item)| {
+				let mut facts = BTreeMap::new();
+				if !item.context.is_empty() {
+					facts.insert(Str::new_static(CONTEXT_COLUMN), Fact::Text(item.context.clone()));
+				}
+				if !item.cost.is_empty() {
+					facts.insert(Str::new_static(PRICE_COLUMN), Fact::Text(item.cost.clone()));
+				}
+				PickerItem {
+					id: row.key.clone(),
+					label: item.name.clone(),
+					detail: (!item.provider.is_empty()).then(|| item.provider.clone()),
+					mono: false,
+					facts,
+					chips: self
+						.roles
+						.iter()
+						.filter(|mark| mark.key == row.key)
+						.map(|mark| PickerChip {
+							text: Str::new_static(mark.role.name()),
+							on:   !mark.auto,
+							auto: mark.auto,
+						})
+						.collect(),
+					title: None,
 				}
 			})
 			.collect();
-		let mut p = serde_json::Map::new();
-		let selected = self.highlighted.unwrap_or(self.current);
-		p.insert("selected".into(), serde_json::Value::Number(selected.into()));
-		omp_tui::tsp::wire::Node {
-			id: Str::new_static("model-picker"),
-			k: omp_tui::tsp::wire::Kind::Picker,
-			p,
-			c: children,
+		items.extend(
+			self
+				.quick_roles
+				.iter()
+				.zip(&role_ids)
+				.filter_map(|(role, id)| {
+					let model = self.rows.get(role.model)?;
+					Some(PickerItem {
+						id:     id.clone(),
+						label:  id.clone(),
+						detail: Some(if model.name.is_empty() {
+							model.key.clone()
+						} else {
+							model.name.clone()
+						}),
+						mono:   false,
+						facts:  BTreeMap::new(),
+						chips:  Vec::new(),
+						title:  None,
+					})
+				}),
+		);
+		// List option values are row indexes, or quick-role indexes in `@` mode.
+		let id_of = |value: &str| -> Option<Str> {
+			let index: usize = value.parse().ok()?;
+			if self.role_mode {
+				role_ids.get(index).cloned()
+			} else {
+				self.rows.get(index).map(|row| row.key.clone())
+			}
+		};
+		let order = self
+			.ui
+			.with_component::<Select, _>(MODELS_ID, |select| {
+				select
+					.visible_values()
+					.filter_map(|value| id_of(value))
+					.collect::<Vec<_>>()
+			})
+			.unwrap_or_default();
+		let current = if self.role_mode {
+			self
+				.current_role
+				.and_then(|index| role_ids.get(index).cloned())
+		} else {
+			let current = if self.task_mode {
+				self.task_current
+			} else {
+				self.current
+			};
+			self.rows.get(current).map(|row| row.key.clone())
+		};
+		let total = if self.role_mode {
+			self.quick_roles.len() as u32
+		} else {
+			self
+				.scope
+				.map_or(self.rows.len() as u32, |group| self.groups[usize::from(group)].total)
+		};
+		let under = cursor.and_then(|value| value.parse::<usize>().ok());
+		let preview = self
+			.detail(under)
+			.map(|facts| {
+				vec![Node {
+					id: Str::new_static(MODEL_PREVIEW_ID),
+					k:  Kind::Col,
+					p:  Map::new(),
+					c:  vec![
+						TextProps { text: facts }
+							.node(Str::new_static(MODEL_PREVIEW_FACTS_ID), Vec::new()),
+					],
+				}]
+			})
+			.unwrap_or_default();
+		PickerProps {
+			title: Some(Str::new_static(self.title())),
+			icon: None,
+			noun: Some(Str::new_static(if self.role_mode { "roles" } else { "models" })),
+			size: Some(PickerSize::Lg),
+			layout: Some(PickerLayout::Rows),
+			query: Some(self.query.clone()),
+			placeholder: Some(Str::new_static("Search models…")),
+			columns: vec![
+				PickerColumn {
+					id:     Str::new_static(CONTEXT_COLUMN),
+					head:   Some(Str::new_static("Context")),
+					format: Some(ColumnFormat::Text),
+				},
+				PickerColumn {
+					id:     Str::new_static(PRICE_COLUMN),
+					head:   Some(Str::new_static("Price")),
+					format: Some(ColumnFormat::Text),
+				},
+			],
+			items,
+			order: Some(order),
+			selected: cursor.and_then(id_of),
+			current: current.into_iter().collect(),
+			total: Some(total),
+			preview: Some(PickerPreview::Side),
+			actions: vec![PickerAction::confirm("Select"), PickerAction::close()],
+			empty: Some(Str::new_static(if self.query.trim().is_empty() {
+				STATUS_EMPTY
+			} else {
+				STATUS_NO_MATCH
+			})),
 		}
+		.node(Str::new_static(MODEL_PICKER_ID), preview)
 	}
 }
 
@@ -1411,9 +1666,24 @@ fn compact_count(value: u64) -> Str {
 
 #[cfg(test)]
 mod tests {
-	use omp_tui::{Mods, MouseButton, frame_text};
+	use std::{mem, time::Duration};
+
+	use omp_tui::{
+		Mods, MouseButton, frame_text,
+		tsp::{
+			DEFAULT_APC_LIMIT,
+			doc::Document,
+			frame::{Incoming, split},
+			picker::read,
+			wire::{self, Op},
+		},
+	};
 
 	use super::*;
+	use crate::{
+		settings::TspStreamPacing,
+		tsp::{Sheet, Surface},
+	};
 
 	const VIEW: Size = Size::new(100, 40);
 	/// Columns holding the frame edge, padding, and the provider rail at
@@ -2016,5 +2286,224 @@ mod tests {
 		assert!(text.contains("3/7"), "three whole-word matches:\n{text}");
 		assert!(text.contains("Claude Opus 5 · anthropic"), "facts follow the best match:\n{text}");
 		assert_eq!(picker.key(Key::Enter), PickerEvent::Pick(5), "the current model ranks first");
+	}
+
+	/// What one presenter output did to the reference document: the frames
+	/// it applied (chunked bodies joined as Tern joins them) and the largest
+	/// body one APC string carried.
+	struct Applied {
+		frames:  Vec<wire::Frame>,
+		chunked: usize,
+		largest: usize,
+	}
+
+	fn apply(doc: &mut Document, output: &[u8]) -> Applied {
+		let mut applied = Applied { frames: Vec::new(), chunked: 0, largest: 0 };
+		let mut joined = Vec::new();
+		let mut rest = output;
+		while let Some(start) = rest.windows(2).position(|w| w == b"\x1b_") {
+			let after = &rest[start + 2..];
+			let end = after
+				.windows(2)
+				.position(|w| w == b"\x1b\\")
+				.expect("terminated message");
+			let raw = split(&after[..end]).expect("a TSP message");
+			rest = &after[end + 2..];
+			applied.largest = applied.largest.max(raw.body.len());
+			joined.extend_from_slice(raw.body);
+			if raw.param("m") == Some("1") {
+				continue;
+			}
+			if raw.param("c").is_some() {
+				applied.chunked += 1;
+			}
+			let body = mem::take(&mut joined);
+			if raw.verb == "f" {
+				let frame: wire::Frame = serde_json::from_slice(&body).expect("valid frame JSON");
+				let rejected = doc.apply(&frame);
+				assert!(rejected.is_empty(), "frame had rejected ops: {rejected:?}");
+				applied.frames.push(frame);
+			}
+		}
+		applied
+	}
+
+	/// A live session surface with the picker presented as its sheet.
+	fn mounted(picker: &mut ModelPicker) -> (Surface, Document, Applied) {
+		let mut surface = Surface::optimistic(false);
+		let mut doc = Document::new("omp-chat");
+		let mut out = Vec::new();
+		surface
+			.present(&mut out, &[], "", 0, "", Duration::ZERO, TspStreamPacing::Raw)
+			.expect("session frame");
+		surface
+			.present_sheet(&mut out, Sheet::Picker, Some(picker.tsp_node()))
+			.expect("picker frame");
+		let applied = apply(&mut doc, &out);
+		acknowledge(&mut surface, &applied);
+		(surface, doc, applied)
+	}
+
+	/// Tern acknowledges every frame it applied, freeing the credits.
+	fn acknowledge(surface: &mut Surface, applied: &Applied) {
+		if let Some(s) = applied.frames.iter().map(|frame| frame.s).max() {
+			surface.incoming(Incoming::Event(wire::Event::Ack { sf: Str::new_static("omp-chat"), s }));
+		}
+	}
+
+	fn sheet(doc: &Document) -> PickerProps {
+		let node = doc.get(MODEL_PICKER_ID).expect("the picker is mounted");
+		read(&node).expect("picker props")
+	}
+
+	fn preview(doc: &Document) -> String {
+		doc.get(MODEL_PREVIEW_FACTS_ID)
+			.and_then(|node| {
+				node
+					.p
+					.get("text")
+					.and_then(|text| text.as_str())
+					.map(str::to_owned)
+			})
+			.unwrap_or_default()
+	}
+
+	/// The native picker carries the catalogue as `items` keyed by catalog
+	/// key, names the cursor row by that key and previews it; moving the
+	/// cursor patches `selected` and the preview text in place and never
+	/// resends the catalogue.
+	#[test]
+	fn the_native_picker_is_data_first_and_patches_only_what_moved() {
+		let rows = catalog();
+		let mut picker = picker(rows.clone(), 1, 0);
+		let (mut surface, mut doc, _) = mounted(&mut picker);
+		let props = sheet(&doc);
+		let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+		assert_eq!(
+			props
+				.items
+				.iter()
+				.map(|item| item.id.as_str())
+				.collect::<Vec<_>>(),
+			keys
+		);
+		assert_eq!(
+			props
+				.order
+				.as_ref()
+				.map(|order| order.iter().map(Str::as_str).collect::<Vec<_>>()),
+			Some(keys.clone()),
+			"every row is shown, in list order"
+		);
+		assert_eq!(props.selected.as_deref(), Some("gpt-5"), "the cursor opens on the current model");
+		assert_eq!(props.current.iter().map(Str::as_str).collect::<Vec<_>>(), ["gpt-5"]);
+		assert!(preview(&doc).starts_with("gpt-5"), "the children preview the cursor row");
+		assert!(
+			doc.get(MODEL_PICKER_ID)
+				.is_some_and(|node| node.c.iter().all(|child| child.k != Kind::Item)),
+			"rows are data, not item children"
+		);
+
+		assert_eq!(picker.key(Key::Down), PickerEvent::Consumed);
+		let mut out = Vec::new();
+		surface
+			.present_sheet(&mut out, Sheet::Picker, Some(picker.tsp_node()))
+			.expect("patch frame");
+		let applied = apply(&mut doc, &out);
+		let [frame] = applied.frames.as_slice() else {
+			panic!("one frame patches the picker: {:?}", applied.frames);
+		};
+		for op in &frame.ops {
+			let Op::Set { id, props } = op else {
+				panic!("a cursor move only sets props: {op:?}");
+			};
+			assert!(!props.contains_key("items"), "the catalogue is not resent: {id} {props:?}");
+		}
+		assert_eq!(sheet(&doc).selected.as_deref(), Some("claude-haiku"));
+		assert!(preview(&doc).starts_with("claude-haiku"), "the preview follows the cursor");
+		acknowledge(&mut surface, &applied);
+
+		let mut out = Vec::new();
+		surface
+			.present_sheet(&mut out, Sheet::Picker, Some(picker.tsp_node()))
+			.expect("no frame");
+		assert!(out.is_empty(), "an unchanged picker sends nothing");
+	}
+
+	/// Typing filters the native picker through `query` and `order`, the rows
+	/// the list shows, while `items` stays the whole catalogue.
+	#[test]
+	fn the_native_picker_follows_the_filter_through_order() {
+		let mut picker = picker(catalog(), 0, 0);
+		for ch in "claude".chars() {
+			picker.key(Key::Char(ch));
+		}
+		let (_, doc, _) = mounted(&mut picker);
+		let props = sheet(&doc);
+		assert_eq!(props.query.as_deref(), Some("claude"));
+		assert_eq!(props.items.len(), 4, "the catalogue stays whole");
+		let order = props.order.expect("order");
+		assert!(!order.iter().any(|id| id.as_str() == "gpt-5"), "{order:?}");
+		assert_eq!(order.len(), 3, "{order:?}");
+		assert!(props.selected.is_some_and(|id| order.contains(&id)));
+	}
+
+	/// A catalogue over the `apc` limit rides one frame chunked under the
+	/// limit, and Tern's joined document holds every row.
+	#[test]
+	fn a_catalogue_over_the_apc_limit_is_chunked_and_arrives_whole() {
+		let rows: Vec<ModelRow> = (0..2_000)
+			.map(|index| ModelRow {
+				key:         sf!("provider-{}/model-with-a-long-name-{index}", index % 17),
+				name:        sf!("Model With A Long Display Name {index}"),
+				provider_id: sf!("provider-{}", index % 17),
+				provider:    sf!("Provider {}", index % 17),
+				context:     Some(200_000),
+				input_mtok:  Some(3.0),
+				output_mtok: Some(15.0),
+				efforts:     Vec::new(),
+			})
+			.collect();
+		let mut picker = picker(rows, 0, 0);
+		let (_, doc, applied) = mounted(&mut picker);
+		assert!(applied.chunked > 0, "a catalogue this large is chunked");
+		assert!(
+			applied.largest <= DEFAULT_APC_LIMIT,
+			"an APC string carried {} bytes",
+			applied.largest
+		);
+		assert_eq!(sheet(&doc).items.len(), 2_000, "every row arrives");
+	}
+
+	/// Tern's pointer gestures do what the list's keys do: `select` moves the
+	/// cursor and picks nothing, `activate` and `confirm` pick (for task
+	/// subagents in task mode), `close` closes, and a row the list does not
+	/// show is ignored.
+	#[test]
+	fn native_gestures_preview_on_select_and_pick_on_activate_or_confirm() {
+		let mut picker = picker(catalog(), 0, 0);
+		let select = |id: &str| Gesture::Select(Str::new(id));
+		let activate = |id: &str| Gesture::Activate(Str::new(id));
+		assert_eq!(picker.tsp_gesture(select("claude-haiku")), PickerEvent::Consumed);
+		assert_eq!(picker.highlighted, Some(2), "select moves the cursor");
+		assert_eq!(picker.key(Key::Enter), PickerEvent::Pick(2), "the keys agree with the move");
+		assert_eq!(picker.tsp_gesture(select("claude-haiku")), PickerEvent::Consumed);
+		assert_eq!(picker.tsp_gesture(Gesture::Act(PickerAct::Confirm)), PickerEvent::Pick(2));
+		assert_eq!(picker.tsp_gesture(activate("gpt-5")), PickerEvent::Pick(1));
+		assert_eq!(picker.tsp_gesture(activate("no/such-model")), PickerEvent::Consumed);
+		assert_eq!(picker.tsp_gesture(Gesture::Act(PickerAct::Close)), PickerEvent::Close);
+
+		for ch in "gpt".chars() {
+			picker.key(Key::Char(ch));
+		}
+		assert_eq!(
+			picker.tsp_gesture(activate("claude-haiku")),
+			PickerEvent::Consumed,
+			"a row the filter hides is not picked"
+		);
+
+		let mut task = picker_over(catalog());
+		assert_eq!(task.key(Key::Alt('p')), PickerEvent::Consumed);
+		assert_eq!(task.tsp_gesture(activate("gpt-5")), PickerEvent::PickTask(1));
 	}
 }

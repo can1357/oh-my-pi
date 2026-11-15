@@ -6,11 +6,18 @@
 //! script to `/bin/sh`.  The environment host re-enters `omp` with
 //! [`SHELL_CHILD_ARG`] and the script text; this entry builds the same
 //! interpreter production sessions use (default, utility, and process
-//! builtins) and runs the script in the inherited working directory and
-//! environment.
+//! builtins, plus the opt-in extras its parent passes as an optional third
+//! argument, ADR 0054) and runs the script in the inherited working directory
+//! and environment.
 
-use std::{env, ffi::OsString, io, process::ExitCode};
+use std::{
+	env,
+	ffi::{OsStr, OsString},
+	io,
+	process::ExitCode,
+};
 
+use omp_core::Str;
 use omp_shell::{ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo};
 
 /// Private argv selector used to re-enter `omp` as a detached shell child.
@@ -40,8 +47,11 @@ pub async fn run_shell_child_entry() -> Result<ExitCode, ShellChildError> {
 		.nth(2)
 		.ok_or(ShellChildError::MissingScript)?;
 	let cwd = env::current_dir().map_err(ShellChildError::WorkingDir)?;
+	// The parent's opt-in builtin set; absent unless the user listed a name.
+	let extra_builtins = decode_extra_builtins(env::args_os().nth(3).as_deref());
 	// The same interpreter production sessions use: every default, utility,
-	// and process builtin; no profile or rc files; inherited environment.
+	// opted-in extra, and process builtin; no profile or rc files; inherited
+	// environment.
 	let mut shell = Shell::builder()
 		.profile(ProfileLoadBehavior::Skip)
 		.rc(RcLoadBehavior::Skip)
@@ -49,6 +59,11 @@ pub async fn run_shell_child_entry() -> Result<ExitCode, ShellChildError> {
 		.builtins(omp_shell::builtins::default_builtins())
 		.builtins(
 			omp_shell_builtins::utility_builtins()
+				.into_iter()
+				.map(|(name, registration)| (name.to_owned(), registration)),
+		)
+		.builtins(
+			omp_shell_builtins::extra_builtins(&extra_builtins)
 				.into_iter()
 				.map(|(name, registration)| (name.to_owned(), registration)),
 		)
@@ -76,6 +91,57 @@ pub async fn run_shell_child_entry() -> Result<ExitCode, ShellChildError> {
 }
 
 /// Argument vector that re-enters the current executable as a shell child.
-pub(crate) fn child_args(script: &str) -> [OsString; 2] {
-	[OsString::from(SHELL_CHILD_ARG), OsString::from(script)]
+///
+/// `extra_builtins` is the parent's opt-in builtin set (ADR 0054 D2). It rides
+/// as a third, comma-separated argument only when non-empty, so the default
+/// command line is just the selector and the script.
+pub(crate) fn child_args(script: &str, extra_builtins: &[Str]) -> Vec<OsString> {
+	let mut args = vec![OsString::from(SHELL_CHILD_ARG), OsString::from(script)];
+	if !extra_builtins.is_empty() {
+		args.push(OsString::from(
+			extra_builtins
+				.iter()
+				.map(Str::as_str)
+				.collect::<Vec<_>>()
+				.join(","),
+		));
+	}
+	args
+}
+
+/// Decodes the optional third argument written by [`child_args`]. Names the
+/// child's build does not offer are skipped by `extra_builtins`, so a stale
+/// list cannot fail startup.
+pub(crate) fn decode_extra_builtins(argument: Option<&OsStr>) -> Vec<Str> {
+	argument
+		.map(OsStr::to_string_lossy)
+		.iter()
+		.flat_map(|names| names.split(','))
+		.filter(|name| !name.is_empty())
+		.map(Str::from)
+		.collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// ADR 0054 D2: the default command line is the selector and the script, and
+	/// the child decodes it to no extras.
+	#[test]
+	fn the_default_child_command_line_has_no_extras_argument() {
+		let args = child_args("echo hi", &[]);
+		assert_eq!(args, [OsString::from(SHELL_CHILD_ARG), OsString::from("echo hi")]);
+		assert!(decode_extra_builtins(None).is_empty());
+		assert!(decode_extra_builtins(Some(OsStr::new(""))).is_empty());
+	}
+
+	/// The set a parent encodes is the set the child decodes, in order.
+	#[test]
+	fn the_extras_argument_round_trips() {
+		let extras = [Str::from("rmdir"), Str::from("chmod"), Str::from("all")];
+		let args = child_args("echo hi", &extras);
+		assert_eq!(args.len(), 3);
+		assert_eq!(decode_extra_builtins(args.get(2).map(OsString::as_os_str)), extras);
+	}
 }

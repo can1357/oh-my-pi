@@ -1,7 +1,7 @@
 //! Native shell profile, interception, and direnv settings.
 
 use omp_con::{Ctx, Kv, Value};
-use omp_core::Str;
+use omp_core::{Str, sf};
 use serde::{Deserialize, Serialize};
 
 /// Whether the nearest allowed direnv environment is loaded.
@@ -96,6 +96,16 @@ omp_con::var! {
 		default: true,
 		flags: archive,
 	};
+	/// Opt-in utility builtins to register in agent shell sessions and detached process scripts,
+	/// by name, or `all` for every name this build offers. Each shadows the system command of
+	/// the same name, so none is registered by default. `sv_shell_embedded_builtins = false`
+	/// suppresses them. Read when a shell is constructed. Deliberately not `PROJECT`: a
+	/// repository must not decide whether a command is shadowed (ADR 0054 D2).
+	pub static SV_SHELL_BUILTINS_EXTRA = sv_shell_builtins_extra: Vec<Str> {
+		default: Vec::new(),
+		validate: |_ctx, values| validate_extra_builtins(values),
+		flags: archive,
+	};
 	/// Automatically background long-running bash commands and deliver the result later.
 	pub static SV_SHELL_AUTO_BACKGROUND_ENABLED = sv_shell_auto_background_enabled: bool {
 		default: true,
@@ -173,6 +183,10 @@ pub struct ShellSettings {
 	pub command_prefix:         Option<Str>,
 	/// Whether embedded shell builtins are advertised and enabled.
 	pub embedded_builtins:      bool,
+	/// Opt-in utility builtin names requested by `sv_shell_builtins_extra`,
+	/// before the `embedded_builtins` master switch applies; read them through
+	/// [`ShellSettings::extra_builtins`].
+	pub builtins_extra:         Vec<Str>,
 	/// Long-call detachment policy.
 	pub auto_background:        AutoBackgroundSettings,
 	/// Dedicated-tool interception policy.
@@ -189,6 +203,7 @@ impl Default for ShellSettings {
 			enabled:                true,
 			command_prefix:         None,
 			embedded_builtins:      true,
+			builtins_extra:         Vec::new(),
 			auto_background:        AutoBackgroundSettings::default(),
 			interceptor:            InterceptorSettings::default(),
 			direnv:                 DirenvMode::Auto,
@@ -205,6 +220,7 @@ impl ShellSettings {
 			enabled:                SV_SHELL_ENABLED.get(ctx),
 			command_prefix:         nonempty(SV_SHELL_COMMAND_PREFIX.get(ctx)),
 			embedded_builtins:      SV_SHELL_EMBEDDED_BUILTINS.get(ctx),
+			builtins_extra:         SV_SHELL_BUILTINS_EXTRA.get(ctx),
 			auto_background:        AutoBackgroundSettings {
 				enabled:      SV_SHELL_AUTO_BACKGROUND_ENABLED.get(ctx),
 				threshold_ms: SV_SHELL_AUTO_BACKGROUND_THRESHOLD_MS.get(ctx) as u64,
@@ -221,6 +237,28 @@ impl ShellSettings {
 			direnv_load_timeout_ms: SV_SHELL_DIRENV_LOAD_TIMEOUT_MS.get(ctx) as u64,
 		}
 	}
+
+	/// The opt-in builtin names a shell constructed now registers: the
+	/// configured list, or none when `sv_shell_embedded_builtins` is off.
+	#[must_use]
+	pub fn extra_builtins(&self) -> &[Str] {
+		if self.embedded_builtins {
+			&self.builtins_extra
+		} else {
+			&[]
+		}
+	}
+}
+
+/// Rejects a name `omp_shell_builtins::extra_builtins` would not register, so a
+/// typo or a name this build lacks fails when the convar is set, not silently
+/// at the next shell.
+fn validate_extra_builtins(values: &[Str]) -> Result<(), Str> {
+	omp_shell_builtins::validate_extra_names(values).map_err(|error| match error {
+		omp_shell_builtins::ExtraBuiltinError::Unknown { name } => {
+			sf!("`{name}` is not an extra builtin this build offers")
+		},
+	})
 }
 
 fn nonempty(value: Str) -> Option<Str> {
@@ -294,6 +332,68 @@ mod tests {
 		let settings = ShellSettings::from_con(&Ctx::new());
 		assert!(settings.auto_background.enabled);
 		assert_eq!(settings.auto_background.threshold_ms, 60_000);
+	}
+
+	/// ADR 0054 D2: nothing extra is registered until the user lists a name.
+	#[test]
+	fn extra_builtins_are_empty_by_default() {
+		let ctx = Ctx::new();
+		assert_eq!(SV_SHELL_BUILTINS_EXTRA.get(&ctx), Vec::<Str>::new());
+		let settings = ShellSettings::from_con(&ctx);
+		assert!(settings.extra_builtins().is_empty());
+		assert!(
+			omp_shell_builtins::extra_builtins::<omp_shell::extensions::DefaultShellExtensions>(
+				settings.extra_builtins()
+			)
+			.is_empty()
+		);
+	}
+
+	/// ADR 0054 D2: the master switch suppresses the extras, whatever is listed.
+	#[test]
+	fn embedded_builtins_off_suppresses_extra_builtins() {
+		let on = ShellSettings { builtins_extra: vec![Str::from("all")], ..ShellSettings::default() };
+		assert_eq!(on.extra_builtins(), [Str::from("all")]);
+		let off = ShellSettings { embedded_builtins: false, ..on };
+		assert!(off.extra_builtins().is_empty());
+		assert!(
+			omp_shell_builtins::extra_builtins::<omp_shell::extensions::DefaultShellExtensions>(
+				off.extra_builtins()
+			)
+			.is_empty()
+		);
+	}
+
+	/// A name this build does not offer is refused where the convar is set, and
+	/// the refused value never lands.
+	#[test]
+	fn an_unknown_extra_builtin_name_fails_validation() {
+		let ctx = Ctx::new();
+		for rejected in ["rsync", "tar", "cat", "no-such-tool"] {
+			SV_SHELL_BUILTINS_EXTRA
+				.set(&ctx, vec![Str::from("all"), Str::from(rejected)])
+				.expect_err(rejected);
+		}
+		assert!(SV_SHELL_BUILTINS_EXTRA.get(&ctx).is_empty());
+		SV_SHELL_BUILTINS_EXTRA
+			.set(&ctx, vec![Str::from("all")])
+			.expect("the all keyword validates");
+		assert_eq!(SV_SHELL_BUILTINS_EXTRA.get(&ctx), [Str::from("all")]);
+		assert_eq!(ShellSettings::from_con(&ctx).builtins_extra, [Str::from("all")]);
+	}
+
+	/// The convar has no `PROJECT` flag: a repository's cfg cannot shadow a
+	/// command.
+	#[test]
+	fn extra_builtins_is_archived_and_not_project_settable() {
+		let ctx = Ctx::new();
+		let flags = ctx
+			.vars()
+			.find(|var| var.name == "sv_shell_builtins_extra")
+			.expect("the convar is registered")
+			.flags;
+		assert!(flags.contains(omp_con::VarFlags::ARCHIVE));
+		assert!(!flags.contains(omp_con::VarFlags::PROJECT));
 	}
 
 	#[test]

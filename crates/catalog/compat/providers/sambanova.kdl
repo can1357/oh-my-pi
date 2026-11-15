@@ -1,0 +1,38 @@
+// Provider-wire compat for "sambanova". SambaNova Cloud is an OpenAI-compatible
+// gateway whose preview roster changes on short notice, so the live `/v1/models`
+// roster is authoritative and carries no capability metadata: these rules own
+// reasoning, the thinking wire format, and image input for discovered rows.
+// Origin: upstream `packages/catalog/src/compat/rules/providers/sambanova.kdl`
+// (c308970263); see THIRD-PARTY-NOTICES.txt.
+
+provider "sambanova" {
+	// `/chat/completions` documents `reasoning_effort` as low/medium/high.
+	thinking-mode "effort"
+	thinking-format "openai"
+	// Replay the streamed `reasoning` field so turn-N prompts hit the gateway's prefix cache.
+	replay-reasoning-content #true
+	class "gpt-oss" {
+		thinking-efforts "low" "medium" "high"
+	}
+	class "minimax" {
+		family "m3" {
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+	// DeepSeek V3.x and Gemma 4 think only when the request sets
+	// `chat_template_kwargs.enable_thinking`; it is off by default and no
+	// effort reaches the template, so the ladder is one on-rung beside off.
+	class "deepseek" {
+		revision ">=3.1 <4" {
+			thinking-format "qwen-chat-template"
+			thinking-efforts "high"
+		}
+	}
+	class "gemma" {
+		revision ">=4" {
+			thinking-format "qwen-chat-template"
+			thinking-efforts "high"
+			input-modalities "text" "image"
+		}
+	}
+}
