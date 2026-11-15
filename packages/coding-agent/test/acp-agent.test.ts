@@ -1094,7 +1094,7 @@ describe("ACP agent", () => {
 		expect(texts).toEqual(["Hello", " there", "Warning: backend gone"]);
 
 		harness.abortController.abort();
-		await Bun.sleep(0);
+		await Bun.sleep(0); // one macrotask for the aborted connection to close, as the other tests here do
 	});
 
 	it("pushes config_option_update when thinking level changes internally", async () => {
