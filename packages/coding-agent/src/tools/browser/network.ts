@@ -555,10 +555,17 @@ function domainMatches(hostname: string, pattern: string): boolean {
 	return hostname === suffix || hostname.endsWith(`.${suffix}`);
 }
 
+const ROUTE_OPTION_KEYS = "{ abort?, status?, headers?, contentType?, body?, delay?, resourceType? }";
+
 /** Validate `tab.route()` options and return a normalised copy (resource types stringified, headers copied). */
 export function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
+	if (typeof options === "function") {
+		throw new ToolError(
+			`tab.route() takes no handler: its options say what matching requests get (${ROUTE_OPTION_KEYS}). To watch traffic, read tab.requests() and tab.request(id) for bodies; to wait for one response, tab.waitForResponse(pattern).`,
+		);
+	}
 	if (!options || typeof options !== "object" || Array.isArray(options)) {
-		throw new ToolError("tab.route() expects an options object");
+		throw new ToolError(`tab.route(pattern, options): options must be an object ${ROUTE_OPTION_KEYS}`);
 	}
 	if (options.delay !== undefined && (!Number.isFinite(options.delay) || options.delay < 0)) {
 		throw new ToolError("tab.route() delay must be a non-negative number");
@@ -629,7 +636,9 @@ export function validatePattern(pattern: NetworkPattern, label: string): void {
 		if (!pattern) throw new ToolError(`${label}() pattern must not be empty`);
 		return;
 	}
-	if (!(pattern instanceof RegExp)) throw new ToolError(`${label}() pattern must be a glob string or RegExp`);
+	if (!(pattern instanceof RegExp)) {
+		throw new ToolError(`${label}() takes a URL glob string ("**/api/*") or RegExp as its first argument`);
+	}
 }
 
 /** Whether two route patterns are identical (string equality, or same RegExp source and flags). */

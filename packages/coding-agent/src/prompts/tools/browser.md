@@ -29,7 +29,7 @@ downloads: waitForDownload downloads
 diagnostics: console errors clearConsole traceStart traceStop profileStart profileStop metrics
 recording: recordStart(path, options?) recordStop recordRestart(path, options?) recording
 vitals, React: vitals reactEnable reactTree reactInspect reactRenders reactSuspense
-network: route unroute routes requests request clearRequests harStart harStop allowedDomains
+network: route(urlGlob, {abort?, status?, headers?, contentType?, body?, delay?, resourceType?}) unroute routes requests({filter?, type?, method?, status?, since?, limit?}) → metadata request(id) → with bodies clearRequests harStart harStop allowedDomains
 WebMCP (experimental, Chromium only): webmcpList webmcpInvoke webmcpEvents
 execution: evaluate run(fnOrCode, {args?, timeout?})
 elements: id(n) ref("e5") → BrowserElement with click dblclick check uncheck highlight type fill press hover focus select uploadFile scrollIntoView boundingBox isVisible isHidden text html value attr styles isEnabled isChecked evaluate
