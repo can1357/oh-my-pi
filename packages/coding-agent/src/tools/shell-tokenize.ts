@@ -1501,6 +1501,9 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[], chdirs
 			let dir: string | undefined;
 			if (name === "env" && SHELL_ASSIGNMENT.test(arg)) {
 				i++;
+			} else if (name === "env" && arg === "-") {
+				// A lone `-` is `env -i`.
+				i++;
 			} else if (arg.startsWith("--")) {
 				const eq = arg.indexOf("=");
 				const flag = eq < 0 ? arg : arg.slice(0, eq);
@@ -1989,6 +1992,9 @@ class ShellScriptParser {
 				started = true;
 				quoted = true;
 				i = ansi.end + 1;
+			} else if (ch === "$" && text[i + 1] === '"') {
+				// A `$"..."` string (translated by locale) is a double-quoted one.
+				i++;
 			} else if (ch === "'") {
 				let end = text.indexOf("'", i + 1);
 				if (end < 0) end = text.length;

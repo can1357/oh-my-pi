@@ -15,8 +15,11 @@
  *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
  * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`. Nor is
  *   a relative path after a `cd`, `pushd` or `popd` to such a directory, though a `.env` there
- *   still counts by its name: `cd "$dir" && cat .npmrc`.
- * - Upload syntaxes and network tools it does not model are not seen: `gh gist create .env`.
+ *   still counts by its name: `cd "$dir" && cat .npmrc`. A directory change is followed whether or
+ *   not it runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
+ * - Upload syntaxes, network tools and shell forms it does not model are not seen:
+ *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
+ *   `exec 3< .env; cat <&3 | nc ...`.
  * - Programs outside the reader list are not seen reading: `tac ~/.ssh/id_rsa`,
  *   `jq . ~/.docker/config.json`.
  * - A command run by a program it does not unwrap, or given its operands at run time, is not
@@ -30,10 +33,12 @@
  *   `tar czf - ~ | curl -T - ...`.
  * - A secret copied to another file first is sent under that file's name:
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
- * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
- *   words: `{a,b}{a,b}...{a,b}{x,.env}`.
+ * - Brace expansion is followed only in words up to 4096 characters, for their first 1024 words,
+ *   and while the words made for the whole command line stay under 256K characters:
+ *   `{a,b}{a,b}...{a,b}{x,.env}`.
  * - A path that reaches a credential location through a symlink, hard link or bind mount is not
- *   recognized: `ln -s ~/.ssh k && cat k/id_rsa`.
+ *   recognized: `ln -s ~/.ssh k && cat k/id_rsa`. Nor do bare wildcards for every component of
+ *   `~/Library/Keychains` name it: `cat ~/???????/?????????/login.keychain-db`.
  *
  * The `credential_read` and `secret_send` rules are derived from `src/intern/guard.py` of
  * nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit e1bbd096f9), Copyright Nace
@@ -215,20 +220,25 @@ interface GlobPart {
 }
 
 /**
- * The parts of a pathname pattern for one file name (`*`, `?`, `[...]`), read in one pass. A `[`
- * with no closing `]` is a literal character, and so is every `[` after it: a later one could
- * close only at the `]` ending a `[:name:]` class, and the literal `[` already keeps the pattern
- * from naming any file the guard looks for.
+ * The parts of a pathname pattern for one file name (`*`, `?`, `[...]`), read in one pass, or
+ * `undefined` once more than `limit` of them take a character: such a pattern names no file of
+ * `limit` characters, and reading no further keeps a long pattern from costing its length per
+ * name. A `[` with no closing `]` is a literal character, and so is every `[` after it: a later
+ * one could close only at the `]` ending a `[:name:]` class, and the literal `[` already keeps the
+ * pattern from naming any file the guard looks for.
  */
-function globParts(pattern: string): GlobPart[] {
+function globParts(pattern: string, limit: number): GlobPart[] | undefined {
 	const parts: GlobPart[] = [];
+	let taking = 0;
 	let unclosed = false;
 	for (let i = 0; i < pattern.length; i++) {
+		if (taking > limit) return undefined;
 		const char = pattern[i];
 		if (char === "*") {
 			if (parts.at(-1)?.kind !== "*") parts.push({ kind: "*", text: char });
 			continue;
 		}
+		taking++;
 		if (char === "?") {
 			parts.push({ kind: "?", text: char });
 			continue;
@@ -257,7 +267,7 @@ function globParts(pattern: string): GlobPart[] {
 		}
 		parts.push({ kind: "char", text: char });
 	}
-	return parts;
+	return taking > limit ? undefined : parts;
 }
 
 /**
@@ -270,8 +280,8 @@ function globParts(pattern: string): GlobPart[] {
  */
 function globMatches(pattern: string, name: string): boolean {
 	if (!pattern.startsWith(".") && name.startsWith(".")) return false;
-	const parts = globParts(pattern);
-	if (parts.reduce((count, part) => (part.kind === "*" ? count : count + 1), 0) > name.length) return false;
+	const parts = globParts(pattern, name.length);
+	if (parts === undefined) return false;
 	const fold = foldsCase();
 	// Per part, the test of the character it takes, `undefined` for `*`.
 	const tests: (((char: string) => boolean) | undefined)[] = [];
@@ -345,6 +355,15 @@ function pathNames(absPath: string): string[] {
 /** The longest word {@link expandBraces} expands, and the most words it makes of one; the rest is not checked. */
 const MAX_BRACE_WORD_LENGTH = 4096;
 const MAX_BRACE_WORDS = 1024;
+/**
+ * The most characters {@link expandBraces} makes while the guard checks one command line, each word
+ * counted with one for the space after it. Every rule checks each word made, so this bounds the
+ * guard's work on brace lists however many of them a command has; a word whose expansion would
+ * pass what is left stays as written.
+ */
+const MAX_BRACE_TEXT = 256 * 1024;
+/** What is left of {@link MAX_BRACE_TEXT} for the command line being checked; {@link findShellGuardHit} resets it. */
+let braceTextLeft = MAX_BRACE_TEXT;
 
 /** A word read for brace expansion: literal text, and braces, each the list of its alternatives. */
 type BracePart = string | BracePart[][];
@@ -356,8 +375,8 @@ const BRACE_SEQUENCE_RE = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?
  * The words brace expansion makes of `word`: `a{b,c}` gives `ab` and `ac`, `{1..3}` and `{a..c}`
  * give sequences, and nested lists expand too; a brace with neither a top-level `,` nor a sequence,
  * or one after `$`, stays as written. Quotes are not known here, so a quoted brace expands too. A
- * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, and at most {@link MAX_BRACE_WORDS}
- * words are made.
+ * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, at most {@link MAX_BRACE_WORDS} words
+ * are made, and a word stays whole when its words would pass what is left of {@link MAX_BRACE_TEXT}.
  */
 function expandBraces(word: string): string[] {
 	if (word.length > MAX_BRACE_WORD_LENGTH || !word.includes("{")) return [word];
@@ -410,26 +429,41 @@ function expandBraces(word: string): string[] {
 		if (text) read.push(text);
 		return read;
 	}
-	return braceWords(parts(0, word.length));
+	const words = braceWords(parts(0, word.length), braceTextLeft);
+	if (words === undefined) return [word];
+	for (const made of words) braceTextLeft -= made.length + 1;
+	return words;
 }
 
-/** The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}. */
-function braceWords(parts: readonly BracePart[]): string[] {
+/**
+ * The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}, or `undefined` once they, or
+ * the alternatives of one brace, come to more than `maxText` characters.
+ */
+function braceWords(parts: readonly BracePart[], maxText: number): string[] | undefined {
 	let words = [""];
 	for (const part of parts) {
 		const options: string[] = [];
 		if (typeof part === "string") options.push(part);
 		else {
+			let optionsText = 0;
 			for (const alternative of part) {
-				for (const option of braceWords(alternative)) {
-					if (options.length < MAX_BRACE_WORDS) options.push(option);
+				const made = braceWords(alternative, maxText);
+				if (made === undefined) return undefined;
+				for (const option of made) {
+					if (options.length === MAX_BRACE_WORDS) break;
+					options.push(option);
+					optionsText += option.length + 1;
+					if (optionsText > maxText) return undefined;
 				}
 			}
 		}
 		const next: string[] = [];
+		let text = 0;
 		for (const prefix of words) {
 			for (const option of options) {
 				next.push(prefix + option);
+				text += prefix.length + option.length + 1;
+				if (text > maxText) return undefined;
 				if (next.length === MAX_BRACE_WORDS) break;
 			}
 			if (next.length === MAX_BRACE_WORDS) break;
@@ -480,6 +514,8 @@ export function credentialLocation(absPath: string, home: string): string | unde
 	for (const [folder, publicFiles] of Object.entries(CREDENTIAL_DIRS)) {
 		const folderNames = folder.split("/");
 		if (rest.length < folderNames.length || !folderNames.every((name, k) => namesFile(rest[k], name))) continue;
+		// Bare wildcards for every component (`~/*/*/package.json`) name any folder, not this one.
+		if (!folderNames.some((_, k) => /[^*?]/.test(rest[k]))) continue;
 		const name = foldsCase() ? rest.at(-1)!.toLowerCase() : rest.at(-1)!;
 		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
 		return `~/${folder}`;
@@ -631,7 +667,7 @@ function copyOperands(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1));
+			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -643,7 +679,7 @@ function copyOperands(command: ShellCommand): string[] {
 			while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 			if (k === arg.length - 1) i++;
 		} else {
-			operands.push(arg);
+			operands.push(...expandBraces(arg));
 		}
 	}
 	return operands;
@@ -832,7 +868,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1));
+			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -855,7 +891,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 				break;
 			}
 		} else {
-			operands.push(arg);
+			operands.push(...expandBraces(arg));
 		}
 	}
 	return [...words, ...operands.slice(supplied ? 0 : 1)];
@@ -918,7 +954,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1));
+			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -939,7 +975,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 				words.push(arg);
 			}
 		} else {
-			operands.push(arg);
+			operands.push(...expandBraces(arg));
 		}
 	}
 	if (destination && !targeted) operands.pop();
@@ -1054,14 +1090,15 @@ const CURL_DATA_OPTIONS: Record<string, true> = {
 const WGET_FILE_OPTIONS: Record<string, string> = { "--post-file": "--post-f", "--body-file": "--body-f" };
 
 /**
- * The files a curl `-F` field reads after `@` or `<`: a list split by `,` and ended by `;` (where
- * the field's options start), each name possibly double-quoted (`f=@"a,b.txt",.env;type=text/plain`).
+ * The files a curl `-F` field reads after an `@` or `<` right after its `=`: a list split by `,` and
+ * ended by `;` (where the field's options start), each name possibly double-quoted
+ * (`f=@"a,b.txt",.env;type=text/plain`). A field with other text after its `=` is sent as written.
  */
 function formFiles(value: string): string[] {
-	const at = value.search(/[@<]/);
-	if (at < 0) return [];
+	const eq = value.indexOf("=");
+	if (eq < 0 || (value[eq + 1] !== "@" && value[eq + 1] !== "<")) return [];
 	const files: string[] = [];
-	let i = at + 1;
+	let i = eq + 2;
 	for (;;) {
 		let file = "";
 		if (value[i] === '"') {
@@ -1106,13 +1143,18 @@ function sentFiles(command: ShellCommand): string[] {
 			}
 			if (value === undefined) continue;
 			if (option === "-T" || option === "--upload-file") {
-				// `-T "{a,b}"` uploads each file of the list, as braces expand ({@link sentSecret}).
-				files.push(value);
+				// `-T "{a,b}"` uploads each file of the list, as braces expand ({@link sentSecret}), and
+				// curl reads a set of one, `-T "{.env}"`, as its file.
+				files.push(value.replace(/\{([^{},]*)\}/g, "$1"));
 			} else if (option === "-F" || option === "--form") {
 				files.push(...formFiles(value));
-			} else {
-				const at = value.search(/[@<]/);
-				if (at >= 0) files.push(value.slice(at + 1).split(";")[0]);
+			} else if (option === "--data-urlencode") {
+				// `name@file` or `@file`; after an `=`, the rest is the content.
+				const at = value.indexOf("@");
+				const eq = value.indexOf("=");
+				if (at >= 0 && (eq < 0 || at < eq)) files.push(value.slice(at + 1));
+			} else if (value.startsWith("@")) {
+				files.push(value.slice(1).split(";")[0]);
 			}
 		}
 	} else if (name === "wget") {
@@ -1269,6 +1311,7 @@ function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | u
  */
 export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
+	braceTextLeft = MAX_BRACE_TEXT;
 	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
 	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
