@@ -209,7 +209,23 @@ fn repo_pins(root: &Path) -> Result<RepoPins, io::Error> {
 pub struct EnvironmentInputs(EnvClient);
 
 impl EnvironmentInputs {
-	async fn bytes(&self, digest: Digest) -> io::Result<Bytes> {
+	/// Shares the native capture reader without creating a remote backend.
+	pub(crate) fn new(environment: EnvClient) -> Self {
+		Self(environment)
+	}
+
+	/// Verified capture paths and blob lengths, using the execution manifest
+	/// reader.
+	pub(crate) async fn captured_files(&self, manifest: Digest) -> io::Result<Vec<(String, u64)>> {
+		Ok(self
+			.files(manifest)
+			.await?
+			.into_iter()
+			.map(|file| (file.path, file.digest.size))
+			.collect())
+	}
+
+	pub(crate) async fn bytes(&self, digest: Digest) -> io::Result<Bytes> {
 		let download = self
 			.0
 			.blob_get(GetRequest {
@@ -289,55 +305,69 @@ impl InputSource for EnvironmentInputs {
 	) -> impl Future<Output = io::Result<Vec<InputFile>>> + Send + '_ {
 		async move {
 			let bytes = self.bytes(manifest).await?;
-			if !bytes.starts_with(b"OMPWS2\0\0\0\0\0") {
-				return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid capture manifest"));
-			}
-			let mut offset = 11usize;
 			let mut files = Vec::new();
-			while offset < bytes.len() {
-				let count = bytes.get(offset..offset + 4).ok_or_else(|| {
-					io::Error::new(io::ErrorKind::InvalidData, "truncated path length")
-				})?;
-				let length =
-					u32::from_be_bytes(count.try_into().map_err(|_| io::ErrorKind::InvalidData)?)
-						as usize;
-				offset += 4;
-				let path = bytes
-					.get(offset..offset + length)
-					.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated path"))?;
-				let path = std::str::from_utf8(path)
-					.map_err(|_| io::ErrorKind::InvalidData)?
-					.to_owned();
-				offset += length;
-				let mode = bytes
-					.get(offset..offset + 4)
-					.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated file mode"))?;
-				let executable =
-					u32::from_be_bytes(mode.try_into().map_err(|_| io::ErrorKind::InvalidData)?) & 0o111
-						!= 0;
-				offset += 4;
-				let hash = bytes.get(offset..offset + 32).ok_or_else(|| {
-					io::Error::new(io::ErrorKind::InvalidData, "truncated file digest")
-				})?;
-				let hash: [u8; 32] = hash.try_into().map_err(|_| io::ErrorKind::InvalidData)?;
-				offset += 32;
+			for entry in capture_entries(&bytes)? {
 				let stat = self
 					.0
-					.blob_stat(StatRequest { hash: Bytes::copy_from_slice(&hash) })
+					.blob_stat(StatRequest { hash: Bytes::copy_from_slice(entry.hash.as_bytes()) })
 					.await
 					.map_err(io::Error::other)?;
 				if !stat.present {
 					return Err(io::Error::new(io::ErrorKind::NotFound, "capture blob missing"));
 				}
 				files.push(InputFile {
-					path,
-					digest: Digest::new(Hash32::new(hash), stat.size),
-					executable,
+					path:       entry.path,
+					digest:     Digest::new(entry.hash, stat.size),
+					executable: entry.executable,
 				});
 			}
 			Ok(files)
 		}
 	}
+}
+
+/// One native manifest entry before resolving its CAS blob length.
+pub(crate) struct CaptureEntry {
+	pub(crate) path:       String,
+	pub(crate) hash:       Hash32,
+	pub(crate) executable: bool,
+}
+
+/// Shared decoder for the native execution capture format.
+pub(crate) fn capture_entries(bytes: &[u8]) -> io::Result<Vec<CaptureEntry>> {
+	if !bytes.starts_with(b"OMPWS2\0\0\0\0\0") {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid capture manifest"));
+	}
+	let mut offset = 11usize;
+	let mut entries = Vec::new();
+	while offset < bytes.len() {
+		let count = bytes
+			.get(offset..offset + 4)
+			.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated path length"))?;
+		let length =
+			u32::from_be_bytes(count.try_into().map_err(|_| io::ErrorKind::InvalidData)?) as usize;
+		offset += 4;
+		let path = bytes
+			.get(offset..offset + length)
+			.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated path"))?;
+		let path = std::str::from_utf8(path)
+			.map_err(|_| io::ErrorKind::InvalidData)?
+			.to_owned();
+		offset += length;
+		let mode = bytes
+			.get(offset..offset + 4)
+			.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated file mode"))?;
+		let executable =
+			u32::from_be_bytes(mode.try_into().map_err(|_| io::ErrorKind::InvalidData)?) & 0o111 != 0;
+		offset += 4;
+		let hash = bytes
+			.get(offset..offset + 32)
+			.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated file digest"))?;
+		let hash = Hash32::new(hash.try_into().map_err(|_| io::ErrorKind::InvalidData)?);
+		offset += 32;
+		entries.push(CaptureEntry { path, hash, executable });
+	}
+	Ok(entries)
 }
 /// A non-secret destination suitable for persisting with an execution handle.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

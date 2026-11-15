@@ -1,0 +1,72 @@
+{
+  "comparisons": {
+    "original": {
+      "limits": {
+        "journal_payload_bytes": 1048576,
+        "max_blob_bytes": 8388608,
+        "max_blobs": 4096,
+        "max_record_bytes": 262144,
+        "max_total_bytes": 67108864
+      },
+      "model_checks": {
+        "aggregate_bytes": false,
+        "blob_count": false,
+        "individual_bytes": true,
+        "journal_payload_bytes": true,
+        "record_bytes": false
+      },
+      "model_fits": false
+    },
+    "revised": {
+      "limits": {
+        "journal_payload_bytes": 1048576,
+        "max_blob_bytes": 8388608,
+        "max_blobs": 8192,
+        "max_record_bytes": 491520,
+        "max_total_bytes": 268435456
+      },
+      "model_checks": {
+        "aggregate_bytes": true,
+        "blob_count": true,
+        "individual_bytes": true,
+        "journal_payload_bytes": true,
+        "record_bytes": true
+      },
+      "model_fits": true
+    }
+  },
+  "inventory_command": [
+    "git",
+    "ls-tree",
+    "-r",
+    "-l",
+    "-z",
+    "e960c471555c19a3a67afb98a77e3a7d69035c73"
+  ],
+  "limitations": [
+    "Git committed inventory only; not working-tree or native capture output",
+    "No content deduplication measured; all regular paths modeled as distinct",
+    "Auxiliary lengths and envelope sizes are model assumptions, not measurements",
+    "No security-filter, supplemental-input, publication, retention or performance proof"
+  ],
+  "measured_git_inventory": {
+    "excluded_modes": {},
+    "largest_blob_bytes": 4573616,
+    "logical_bytes": 85127183,
+    "regular_files": 4665
+  },
+  "revision": "e960c471555c19a3a67afb98a77e3a7d69035c73",
+  "serialization_model": {
+    "assume_every_regular_file_distinct": true,
+    "auxiliary_refs": 3,
+    "auxiliary_size_bytes_each": 8388608,
+    "closure_json_bytes": 383257,
+    "closure_refs": 4668,
+    "journal_envelope_bytes_estimate": 4096,
+    "journal_payload_bytes_estimate": 778802,
+    "record_bytes_estimate": 387353,
+    "record_envelope_bytes_estimate": 4096,
+    "retained_bytes_upper_bound_under_model": 110293007,
+    "synthetic_hashes": "ordinal 64-hex placeholders; not content identities"
+  }
+}

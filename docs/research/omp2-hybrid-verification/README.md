@@ -79,6 +79,12 @@ executed experiment; no native runtime tests were rerun here.
     local references and source-review limits.
 13. [S1 implementation and validation](13-required-inventory-s1.md): explicit
     required-check policy, locally executed tests and remaining runtime gaps.
+14. [S2 input snapshots and applicability](14-input-snapshots-s2.md): native CAS
+    capture, canonical input/action keys, trusted supplemental context and
+    observed-stability limits; no joined verification gate.
+15. [S3 evidence storage](15-evidence-storage-s3.md): session journal/CAS
+    publication, explicit retention closure, integrity and applicability checks,
+    and the remaining executable-admission boundary.
 
 ## Final comparison
 
@@ -113,12 +119,17 @@ No defect-recall, token saving, paid model or Mac performance measurement is cla
 `just check-pkg omp-exec` was blocked (exit 127, missing `just`); Rust/Bun tools
 and pytest were unavailable. See chapters 02 and 08 for commands and repro procedures.
 
-Documentation validation checks local links, pinned source file/range targets,
-patch whitespace and research-only scope. This PR deliberately implements no
-production engine, changes no runtime behavior and adds no dependency or lockfile.
+Original research validation checked local links, pinned source file/range
+targets, patch whitespace and research-only scope. The original research PR
+implemented no production engine, changed no runtime behavior and added no
+dependency or lockfile. Subsequent S1–S3 production progress and its separate
+validation are recorded in the linked implementation notes above; the original
+benchmark/tooling blockers are historical results, not current slice results.
 
 Publication initially encountered HTTP 403 from Git push and the connected
-GitHub app. Access was subsequently restored: the branch is pushed and
-[PR #618](https://github.com/blyzer/oh-my-pi/pull/618) is open against `omp2`.
+GitHub app. Access was subsequently restored, and the original research
+[PR #618](https://github.com/blyzer/oh-my-pi/pull/618) merged into `omp2` on
+2026-11-14 at 07:19:10 UTC as `355a324e4c52bb473eca53925807972d6491d265`.
 See [publication history](VALIDATION.md#publication-blocker) for the original
-errors and their resolution. The PR has not been merged.
+errors and their resolution. Later slice notes identify their own branch,
+dependency and publication status.

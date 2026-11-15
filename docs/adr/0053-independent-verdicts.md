@@ -90,14 +90,26 @@ Status: Partially implemented.
   required-check inventory and PASS/FAIL/INCONCLUSIVE reducer. It checks supplied
   scope/evidence identities and retains every declared result. Its public contract
   tests are in `crates/driver/tests/verification_policy.rs`.
-- Not yet implemented: source/environment capture, evidence integrity/provenance
-  validation, structured independent verdict, required-gate integration into ADW
-  acceptance, durable verification receipts, acceptance criteria and Issue-to-PR
-  recipe. The S1 reducer is not a live gate and does not complete D1–D5.
+- S2 adds native CAS source capture and canonical applicability keys in
+  `crates/driver/src/verification/snapshot.rs`. Supplemental dependency,
+  toolchain, environment and test identities are trusted host admissions;
+  unknown categories refuse capture. Matching captures detect observed drift,
+  not atomicity against external writers.
+- S3 adds the driver-owned evidence adapter in
+  `crates/driver/src/verification/evidence.rs`: native source/evidence bytes are
+  imported into the existing session CAS, with their complete retention closure
+  journaled through keyed session patches. Reads validate consumed bytes, selected
+  ancestry and exact snapshot/action applicability. This establishes retained
+  evidence integrity, not result truth or producer trust.
+- Not yet implemented: automatic supplemental-input closure, executable result
+  and provenance validation, structured independent verdict, required-gate
+  integration into ADW acceptance, acceptance criteria and Issue-to-PR recipe.
+  S1–S3 are not a live gate and do not complete D1–D5; S4 remains the first
+  joined verification milestone.
 - Unverified: OMP1 review prompts and aggregation, current live reviewer route
   independence, and the interaction of `ai_advisor_*` settings with judge routing.
-  Build/test observations for S1 are recorded in the verification research's
-  implementation validation note; source presence alone is not runtime proof.
+  Slice build/test observations are recorded in the verification research's
+  implementation notes; source presence alone is not runtime proof.
 
 ## References
 
