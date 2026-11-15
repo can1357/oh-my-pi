@@ -35,6 +35,7 @@ export type TernErrorKind =
 	| "unsupported"
 	| "js"
 	| "failed"
+	| "unresponsive"
 	| "connect"
 	| "closed"
 	| "timeout"
@@ -341,6 +342,8 @@ const PROTOCOL_ERROR_KINDS: Record<string, TernErrorKind> = {
 	unsupported: "unsupported",
 	js: "js",
 	failed: "failed",
+	// omp's WebKit host: the page's web process stopped answering (a script keeps it busy).
+	unresponsive: "unresponsive",
 };
 
 /**
