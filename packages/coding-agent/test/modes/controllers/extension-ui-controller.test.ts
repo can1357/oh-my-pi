@@ -406,7 +406,6 @@ describe("ExtensionUiController form dialog", () => {
 		expect(owns()).toBe(true);
 
 		harness.handleInput("\x1b[B");
-		dialog!.render(80);
 		expect(owns()).toBe(false);
 
 		harness.handleInput("\x1b");
@@ -515,7 +514,6 @@ describe("ExtensionUiController editor UI", () => {
 		expect(harness.ctx.composerOwner?.owns()).toBe(true);
 
 		ask?.handleInput?.("\x1b[B");
-		ask?.render?.(80);
 		expect(harness.ctx.composerOwner?.owns()).toBe(false);
 
 		ask?.handleInput?.("\r");

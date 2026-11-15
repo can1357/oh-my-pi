@@ -108,6 +108,7 @@ export type SubmittedUserInput = {
 	started: boolean;
 };
 
+/** A dialog that hands typing to the composer: registered by the ExtensionUiController approval, form and ask presenters, read by InputController's image and HTML paste routing. */
 export interface ComposerOwner {
 	component: Component;
 	owns(): boolean;
@@ -222,7 +223,7 @@ export interface InteractiveModeContext {
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
 	approvalOwnsComposer?: boolean;
-	/** The dialog that hands typing to the composer while it is mounted; image pastes go to the composer while `owns()`. */
+	/** The mounted dialog that currently hands typing to the composer, if any. */
 	composerOwner?: ComposerOwner;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
