@@ -51,6 +51,10 @@
 
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
 
+### Removed
+
+- Removed the `seance` agent, the `/seance` command, and the task tool's `sourceSession` parameter
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
