@@ -132,8 +132,10 @@ export class TodoWrites {
 			const phases = update(todo.phases);
 			if (phases === undefined) return undefined;
 			if (active) {
+				// Clone first: a malformed list must fail as it does natively, not as the backend's refusal.
+				const sent = todo.clonePhases(phases);
 				try {
-					await active.replace(todo.clonePhases(phases));
+					await active.replace(sent);
 				} catch (error) {
 					throw new Error(`Todo backend "${active.label}" refused the edit: ${sanitizeTodoBackendText(error)}`, {
 						cause: error,
