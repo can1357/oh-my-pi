@@ -815,19 +815,19 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
 	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
 	// matches like `rm -rf /`, while an argument quoted in the source (`git commit -m "reboot"`)
-	// stays quoted, as it is in the raw line.
-	const canonical = pipelines
-		.flat()
-		.map(c =>
-			[
-				...c.wrappers,
-				...c.argv.map((word, index) =>
-					/^[\w@%+=:,./-]+$/.test(word) && (index === 0 || !c.quoted[index])
-						? word
-						: `'${word.replaceAll("'", "'\\''")}'`,
-				),
-			].join(" "),
-		);
+	// stays quoted, as it is in the raw line. A program named by an absolute path (`/sbin/reboot`)
+	// is its basename; one named by a relative path (`./scripts/shutdown`) stays as written.
+	const canonical = pipelines.flat().map(c =>
+		[
+			...c.wrappers,
+			...c.argv.map((arg, index) => {
+				const word = index === 0 && !c.program.startsWith("/") ? c.program : arg;
+				return /^[\w@%+=:,./-]+$/.test(word) && (index === 0 || !c.quoted[index])
+					? word
+					: `'${word.replaceAll("'", "'\\''")}'`;
+			}),
+		].join(" "),
+	);
 	const texts = [command, ...scripts, ...canonical];
 	if (CRITICAL_BASH_PATTERNS.some(pattern => texts.some(text => pattern.test(text)))) {
 		return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };

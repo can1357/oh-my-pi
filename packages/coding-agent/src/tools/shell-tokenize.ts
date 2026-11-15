@@ -1596,8 +1596,8 @@ class ShellScriptParser {
 	 * when its line ends and attached to the delimiter word. With `heredocs` off (`$(( ))`), and
 	 * inside a `(( ))` command, `<<` is a shift. With `close`, reading stops at the `)` that closes a
 	 * `$( )` opened just before `start`: `end` is its index, or the text's length when none comes.
-	 * The `)` that ends a `case` pattern list is no parenthesis: it becomes a `;`, and the optional
-	 * `(` before the patterns is dropped.
+	 * The `)` that ends a `case` pattern list is no parenthesis: it becomes a `;`, and the patterns,
+	 * the `|` between them and the optional `(` before them are dropped.
 	 */
 	#tokens(
 		text: string,
@@ -1653,10 +1653,12 @@ class ShellScriptParser {
 					token.heredoc = { body: "", expands: !quoted, subs: [] };
 					pending.push({ delimiter: word, stripTabs: delimiter.stripTabs, doc: token.heredoc });
 					delimiter = undefined;
+					out.push(token);
 				} else {
 					caseWord();
+					// A `case` pattern is no command; substitutions in it are still read.
+					if (cases.at(-1)?.next !== "pattern") out.push(token);
 				}
-				out.push(token);
 			}
 			word = "";
 			started = false;
@@ -1738,7 +1740,10 @@ class ShellScriptParser {
 						i++;
 						continue;
 					}
-					if (operator === "(" && reading.next === "clause") {
+					if (
+						(operator === "(" && reading.next === "clause") ||
+						(operator === "|" && reading.next === "pattern")
+					) {
 						reading.next = "pattern";
 						i++;
 						continue;
