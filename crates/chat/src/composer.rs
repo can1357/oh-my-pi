@@ -9,6 +9,7 @@ use omp_tui::{
 	components::{
 		AttachmentContent, ComposerStyle, EditorPane, InlineAccent, PrefixAccent, marker_sized_paste,
 	},
+	tsp::edit::send_text,
 };
 
 use crate::{
@@ -973,6 +974,32 @@ impl Composer {
 			});
 	}
 
+	/// Stages the prompt of a TSP `send` as the draft, so that
+	/// [`Composer::preview_submission`] classifies it exactly as Enter would
+	/// (command, local `!` / `$` input, queue shorthand or prompt).
+	///
+	/// The prompt is `text` sanitized like a paste; blank text is a no-op and
+	/// returns `false`. A draft it displaces is not lost: it joins local
+	/// recall (Up), never the durable prompt index, unless it carries a
+	/// secret ([`should_skip_history`]). Its staged attachments go with it,
+	/// since the prompt is a self-contained text.
+	pub fn stage_send(&mut self, text: &str) -> bool {
+		let Some(prompt) = send_text(text) else {
+			return false;
+		};
+		let displaced = self.text();
+		self
+			.ui
+			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| {
+				if !displaced.trim().is_empty() && !should_skip_history(displaced.trim_start()) {
+					pane.add_to_history(&displaced);
+				}
+				pane.attachments().take();
+			});
+		self.set_text(&prompt);
+		true
+	}
+
 	/// Undoes the last edit (native TSP undo).
 	pub fn undo(&mut self) {
 		self
@@ -1591,6 +1618,52 @@ mod tests {
 		assert_eq!(composer.text(), "!ls");
 		composer.key(Key::Up);
 		assert_eq!(composer.text(), "/help");
+	}
+
+	/// A TSP `send` is classified like Enter, sanitized like a paste, ignored
+	/// when blank, and the draft it displaces stays recallable with Up.
+	#[test]
+	fn a_staged_send_is_classified_like_enter_and_keeps_the_displaced_draft_for_recall() {
+		let mut composer = composer();
+		type_text(&mut composer, "unfinished thought");
+		assert!(!composer.stage_send(" \r\n\t"), "blank text is a no-op");
+		assert_eq!(composer.text(), "unfinished thought", "a blank send leaves the draft alone");
+
+		assert!(composer.stage_send("/help me"));
+		assert_eq!(composer.text(), "/help me", "the prompt replaces the draft");
+		assert!(matches!(composer.preview_submission(), ComposerAction::Command { .. }));
+		assert!(composer.commit_submission());
+		assert_eq!(composer.text(), "");
+
+		assert!(composer.stage_send("!ls\r\n"));
+		assert!(
+			matches!(composer.preview_submission(), ComposerAction::Submit(text) if &*text == "!ls\n")
+		);
+		assert!(composer.commit_submission());
+
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "!ls", "the sent line is the newest recall");
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "/help me");
+		composer.key(Key::Up);
+		assert_eq!(
+			composer.text(),
+			"unfinished thought",
+			"the displaced draft is recalled, not lost"
+		);
+	}
+
+	/// A displaced draft that carries a secret never enters local recall.
+	#[test]
+	fn a_staged_send_keeps_a_secret_draft_out_of_recall() {
+		let mut composer = composer();
+		type_text(&mut composer, "/login https://x?code=abc&state=1");
+		assert!(composer.stage_send("hello"));
+		assert!(composer.commit_submission());
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "hello");
+		composer.key(Key::Up);
+		assert_eq!(composer.text(), "hello", "no older entry: the secret draft was never recalled");
 	}
 
 	/// `shouldSkipHistory`: secret-bearing commands never enter recall.

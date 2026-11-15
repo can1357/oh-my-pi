@@ -142,7 +142,19 @@ fn checked_in_model_source_carries_a_chat_roster_for_every_declared_provider() {
 			);
 		}
 	}
-	for provider in ["commandcode", "muse-code", "stepfun", "cline-pass", "abliteration"] {
+	// ADR 0059 S1 added the gateway rosters and filled Scaleway's empty one.
+	for provider in [
+		"commandcode",
+		"muse-code",
+		"stepfun",
+		"cline-pass",
+		"abliteration",
+		"sambanova",
+		"coralbricks",
+		"helmcode",
+		"modular",
+		"scaleway",
+	] {
 		assert!(providers.contains_key(provider), "{provider} roster is missing");
 	}
 }

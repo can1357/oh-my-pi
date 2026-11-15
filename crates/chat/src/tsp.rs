@@ -107,6 +107,11 @@ pub struct Surface {
 	composer_mounted: bool,
 	composer:         Str,
 	composer_cursor:  u32,
+	/// Whether the host wants the composer to accept a `send`
+	/// ([`Surface::set_sendable`]).
+	sendable:         bool,
+	/// Whether Tern was last told the composer is `sendable`.
+	sendable_sent:    bool,
 	status_mounted:   bool,
 	status_text:      Str,
 	approval_id:      Str,
@@ -235,6 +240,8 @@ impl Surface {
 			composer_mounted: false,
 			composer: Str::default(),
 			composer_cursor: u32::MAX,
+			sendable: false,
+			sendable_sent: false,
 			status_mounted: false,
 			status_text: Str::default(),
 			approval_id: Str::default(),
@@ -296,6 +303,7 @@ impl Surface {
 		self.composer_mounted = false;
 		self.composer = Str::default();
 		self.composer_cursor = u32::MAX;
+		self.sendable_sent = false;
 		self.status_mounted = false;
 		self.status_text = Str::default();
 		self.approval_id = Str::default();
@@ -513,6 +521,7 @@ impl Surface {
 				self.composer_mounted = false;
 				self.composer = Str::default();
 				self.composer_cursor = u32::MAX;
+				self.sendable_sent = false;
 				self.status_mounted = false;
 				self.status_text = Str::default();
 				self.approval_id = Str::default();
@@ -526,6 +535,25 @@ impl Surface {
 	/// Removes the next terminal interaction event for the host actor.
 	pub fn take_event(&mut self) -> Option<Event> {
 		self.events.pop_front()
+	}
+
+	/// Sets whether the composer is ready to accept a `send`: the host's
+	/// verdict on whether Enter would reach it. The next frame carries the
+	/// composer's `sendable` prop.
+	pub const fn set_sendable(&mut self, sendable: bool) {
+		self.sendable = sendable;
+	}
+
+	/// Whether `sf` and `id` name this surface's live composer: the inline
+	/// surface is open and not suspended behind a cell overlay, and the
+	/// editor node is mounted in it. A `send` for anything else is stale.
+	#[must_use]
+	pub fn addresses_composer(&self, sf: &str, id: &str) -> bool {
+		self.opened
+			&& !self.suspended
+			&& self.composer_mounted
+			&& sf == self.id.as_str()
+			&& id == COMPOSER_ID
 	}
 
 	/// Suspends native composition so the regular renderer can paint overlays.
@@ -615,12 +643,14 @@ impl Surface {
 	fn send_frame(&mut self, writer: &mut impl io::Write, ops: Vec<Op>) -> io::Result<()> {
 		let frame = Frame { sf: self.id.clone(), s: self.next_seq, ops };
 		self.next_seq = self.next_seq.saturating_add(1);
+		log_frame(&frame);
 		self.send(writer, Verb::Frame, &frame)
 	}
 
 	fn send_cover_frame(&mut self, writer: &mut impl io::Write, ops: Vec<Op>) -> io::Result<()> {
 		let frame = Frame { sf: Str::new_static(COVER_ID), s: self.cover.next_seq, ops };
 		self.cover.next_seq = self.cover.next_seq.saturating_add(1);
+		log_frame(&frame);
 		self.send(writer, Verb::Frame, &frame)
 	}
 
@@ -750,12 +780,22 @@ impl Surface {
 			let mut props = text_props(Str::new(text));
 			props.insert("placeholder".into(), Value::String(PLACEHOLDER.into()));
 			props.insert("cursor".into(), Value::from(cursor_utf16));
+			if self.sendable {
+				props.insert("sendable".into(), Value::Bool(true));
+			}
 			ops.push(add(COMPOSER_ID, DOCK_ID, Kind::Editor, props));
 			ops.push(Op::Focus(Some(id)));
 			self.composer_mounted = true;
 			self.composer = Str::new(text);
 			self.composer_cursor = cursor_utf16;
+			self.sendable_sent = self.sendable;
 			return;
+		}
+		if self.sendable_sent != self.sendable {
+			let mut sendable = Map::new();
+			sendable.insert("sendable".into(), Value::Bool(self.sendable));
+			ops.push(Op::Set { id: id.clone(), props: sendable });
+			self.sendable_sent = self.sendable;
 		}
 		if self.composer.as_str() != text {
 			ops.push(Op::Text { id: id.clone(), mode: TextMode::Replace, text: Str::new(text) });
@@ -783,6 +823,33 @@ impl Surface {
 			self.status_text = text;
 		}
 	}
+}
+
+/// Logs one frame at debug level with how many of its added nodes fell back to
+/// `rows` (ADR 0041 phase 2): the count is a field computed only when the
+/// event is enabled, so a build that does not log pays nothing per frame.
+fn log_frame(frame: &Frame) {
+	tracing::debug!(
+		surface = frame.sf.as_str(),
+		seq = frame.s,
+		ops = frame.ops.len(),
+		rows = rows_added(&frame.ops),
+		"tsp frame"
+	);
+}
+
+/// How many nodes `ops` add as `rows`, the pre-rendered ANSI fallback, anywhere
+/// in the added subtrees.
+fn rows_added(ops: &[Op]) -> usize {
+	fn rows_in(node: &Node) -> usize {
+		usize::from(node.k == Kind::Rows) + node.c.iter().map(rows_in).sum::<usize>()
+	}
+	ops.iter()
+		.map(|op| match op {
+			Op::Add { node, .. } => rows_in(node),
+			_ => 0,
+		})
+		.sum()
 }
 
 /// Whether a block's text grows by append, so deltas ride `text append`.
@@ -896,6 +963,8 @@ fn node_for(block: &RenderedBlock, hello: &Hello) -> (Node, Str) {
 
 #[cfg(test)]
 mod tests {
+	use std::{fmt, sync::Arc};
+
 	use omp_tui::{
 		IntoComponent as _,
 		components::TextLeaf,
@@ -905,6 +974,15 @@ mod tests {
 			frame::split,
 			wire::Mode as SurfaceMode,
 		},
+	};
+	use parking_lot::Mutex;
+	use tracing::{
+		Subscriber,
+		field::{Field, Visit},
+	};
+	use tracing_subscriber::{
+		layer::{Context, Layer, SubscriberExt as _},
+		registry,
 	};
 
 	use super::*;
@@ -1693,5 +1771,200 @@ mod tests {
 		let nested =
 			Node { id: Str::new_static("f"), k: Kind::El, p: Map::new(), c: vec![picker] };
 		assert!(!surface.draws(&nested), "one kind the terminal lacks keeps the whole view in cells");
+	}
+
+	fn ack(surface: &mut Surface, s: u64) {
+		surface.incoming(Incoming::Event(Event::Ack { sf: Str::new_static(SURFACE_ID), s }));
+	}
+
+	/// The composer's `sendable` prop as Tern holds it.
+	fn sendable_in(tern: &Tern) -> Option<Value> {
+		tern
+			.doc(SURFACE_ID)
+			.get(COMPOSER_ID)
+			.and_then(|composer| composer.p.get("sendable").cloned())
+	}
+
+	#[test]
+	fn the_composer_is_sendable_exactly_while_the_host_says_so() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		tern.read(&out);
+		assert_eq!(sendable_in(&tern), None, "a composer that is not ready omits the prop");
+
+		surface.set_sendable(true);
+		ack(&mut surface, 1);
+		out.clear();
+		session_present(&mut surface, &mut out, &[]);
+		tern.read(&out);
+		assert_eq!(sendable_in(&tern), Some(Value::Bool(true)), "ready: one `set` away");
+
+		ack(&mut surface, 2);
+		out.clear();
+		session_present(&mut surface, &mut out, &[]);
+		assert!(out.is_empty(), "an unchanged verdict is not resent");
+
+		surface.set_sendable(false);
+		session_present(&mut surface, &mut out, &[]);
+		tern.read(&out);
+		assert_eq!(sendable_in(&tern), Some(Value::Bool(false)), "an approval or modal withdraws it");
+
+		// A composer that mounts, or mounts again, carries the current verdict.
+		surface.set_sendable(true);
+		surface.incoming(Incoming::Event(Event::Gone {
+			sf:  None,
+			ids: vec![Str::new_static(SURFACE_ID)],
+		}));
+		let mut remounted = Tern::default();
+		out.clear();
+		session_present(&mut surface, &mut out, &[]);
+		remounted.read(&out);
+		assert_eq!(sendable_in(&remounted), Some(Value::Bool(true)));
+	}
+
+	#[test]
+	fn a_send_addresses_only_the_live_session_composer() {
+		let mut surface = Surface::optimistic(false);
+		assert!(
+			!surface.addresses_composer(SURFACE_ID, COMPOSER_ID),
+			"nothing is mounted before the first frame"
+		);
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		assert!(surface.addresses_composer(SURFACE_ID, COMPOSER_ID));
+		assert!(!surface.addresses_composer(COVER_ID, COMPOSER_ID), "another surface's id is stale");
+		assert!(!surface.addresses_composer(SURFACE_ID, STATUS_ID), "only the editor takes a send");
+		assert!(!surface.addresses_composer(SURFACE_ID, "composer-2"), "an invented id is stale");
+
+		surface.suspend(&mut out).unwrap();
+		assert!(
+			!surface.addresses_composer(SURFACE_ID, COMPOSER_ID),
+			"the cell overlay owns the keys while the surface is suspended"
+		);
+		ack(&mut surface, 1);
+		surface.resume(&mut out).unwrap();
+		assert!(surface.addresses_composer(SURFACE_ID, COMPOSER_ID));
+
+		surface.incoming(Incoming::Event(Event::Gone {
+			sf:  Some(Str::new_static(SURFACE_ID)),
+			ids: vec![Str::new_static(COMPOSER_ID)],
+		}));
+		assert!(
+			!surface.addresses_composer(SURFACE_ID, COMPOSER_ID),
+			"a composer Tern dropped is gone until it mounts again"
+		);
+
+		let mut flow = Surface::new(hello(&["flow"]), SurfaceMode::Flow, false);
+		session_present(&mut flow, &mut out, &[make_block(1, BlockKind::Assistant, "x", true)]);
+		assert!(
+			!flow.addresses_composer(SURFACE_ID, COMPOSER_ID),
+			"a flow surface mounts no composer"
+		);
+	}
+
+	#[test]
+	fn rows_are_counted_where_they_are_added_at_any_depth() {
+		let rows = |id: &'static str| Node {
+			id: Str::new_static(id),
+			k:  Kind::Rows,
+			p:  Map::new(),
+			c:  Vec::new(),
+		};
+		let card = Node {
+			id: Str::new_static("card"),
+			k:  Kind::Card,
+			p:  Map::new(),
+			c:  vec![rows("inner"), rows("inner-2")],
+		};
+		let ops = [
+			add_node(rows("top"), MAIN_ID),
+			add_node(card, MAIN_ID),
+			Op::Set { id: Str::new_static("top"), props: Map::new() },
+			Op::Del(Str::new_static("gone")),
+		];
+		assert_eq!(rows_added(&ops), 3, "a set or a delete adds nothing; children count");
+		assert_eq!(rows_added(&[]), 0);
+	}
+
+	/// What the frame log said: surface, sequence number and `rows` per event.
+	#[derive(Clone, Default)]
+	struct FrameLog(Arc<Mutex<Vec<(String, u64, u64)>>>);
+
+	#[derive(Default)]
+	struct FrameFields {
+		surface: String,
+		seq:     u64,
+		rows:    Option<u64>,
+	}
+
+	impl Visit for FrameFields {
+		fn record_str(&mut self, field: &Field, value: &str) {
+			if field.name() == "surface" {
+				self.surface = value.to_owned();
+			}
+		}
+
+		fn record_u64(&mut self, field: &Field, value: u64) {
+			match field.name() {
+				"seq" => self.seq = value,
+				"rows" => self.rows = Some(value),
+				_ => {},
+			}
+		}
+
+		fn record_debug(&mut self, _: &Field, _: &dyn fmt::Debug) {}
+	}
+
+	impl<S: Subscriber> Layer<S> for FrameLog {
+		fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+			let mut fields = FrameFields::default();
+			event.record(&mut fields);
+			if let Some(rows) = fields.rows {
+				self.0.lock().push((fields.surface, fields.seq, rows));
+			}
+		}
+	}
+
+	#[test]
+	fn every_frame_logs_how_many_of_its_nodes_fell_back_to_rows() {
+		// A Tern that draws no `md`: assistant text can only be `rows`.
+		let mut narrow = hello(&[]);
+		narrow.kinds.retain(|kind| kind.as_str() != "md");
+		let mut surface = Surface::new(narrow, SurfaceMode::Inline, false);
+		let log = FrameLog::default();
+		let subscriber = registry().with(log.clone());
+		tracing::subscriber::with_default(subscriber, || {
+			let mut out = Vec::new();
+			let blocks = [
+				make_block(1, BlockKind::Assistant, "one", true),
+				make_block(2, BlockKind::User, "two", true),
+				make_block(3, BlockKind::Assistant, "three", true),
+			];
+			session_present(&mut surface, &mut out, &blocks);
+			ack(&mut surface, 1);
+			let more = [
+				make_block(1, BlockKind::Assistant, "one", true),
+				make_block(2, BlockKind::User, "two", true),
+				make_block(3, BlockKind::Assistant, "three", true),
+				make_block(4, BlockKind::Assistant, "four", true),
+			];
+			session_present(&mut surface, &mut out, &more);
+			ack(&mut surface, 2);
+			surface
+				.present(&mut out, &more, "typing", 6, "ok", Duration::ZERO, TspStreamPacing::Raw)
+				.unwrap();
+		});
+		let frames = log.0.lock().clone();
+		assert_eq!(
+			frames,
+			[
+				(SURFACE_ID.to_owned(), 1, 2),
+				(SURFACE_ID.to_owned(), 2, 1),
+				(SURFACE_ID.to_owned(), 3, 0),
+			],
+			"two assistant blocks fell back in the first frame, one in the second, none in the third"
+		);
 	}
 }
