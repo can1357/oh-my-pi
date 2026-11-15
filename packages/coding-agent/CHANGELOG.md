@@ -9,6 +9,8 @@
 ### Changed
 
 - Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
+- omp's WebKit browser engine now installs and updates to the newest stable ABKit release instead of the one each omp release pinned; the first WebKit open in a process checks for a newer one
+- omp keeps each ABKit version in `~/.o2/lib/abkit-versions/<version>` and links `~/.o2/lib/abkit` to the current one, so an engine update no longer waits for running browser hosts to exit
 
 ### Fixed
 
