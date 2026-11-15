@@ -125,7 +125,14 @@ Three fresh-context reviewers (readiness, zoom-out, design critic) read the firs
 
 ## Status in omp
 
-**Status: Not started.** None of the 19 exists (`docs/research/shell-builtins.md` §2). The path-policy open call (`PathPolicy::open` / `FilePolicy::open`) and the test hooks exist; `Host::open_write` does not. `support/{mounts,human,entries,mode,backup,safe_traversal,checksum,xattr}` exist; `backup` and `safe_traversal` have no consumer yet and `safe_traversal` needs the D4 fix first.
+**Status: Slice 1 landed (the gate); no builtin is added yet.**
+
+- Convar `SV_SHELL_BUILTINS_EXTRA` (`sv_shell_builtins_extra: Vec<Str>`, default empty, `archive` only, no `PROJECT`) in `crates/envd/src/exec_settings/shell.rs`, validated by `omp_shell_builtins::validate_extra_names`; `ShellSettings::builtins_extra` and `ShellSettings::extra_builtins()` (empty when `sv_shell_embedded_builtins` is false).
+- Factory: `extra_builtins(enabled)`, `validate_extra_names`, `ExtraBuiltinError`, `ALL_EXTRAS`, `OFFERED_EXTRAS` (empty) in `crates/shell-builtins/src/factory.rs`. `utility_builtins()` is untouched and pinned by name by `crates/shell-builtins/tests/factory.rs` against `tests/utility_builtins.txt`.
+- Wiring: `ExecHost::configure_shell` (called from `ShellExecHost::new`, `crates/envd/src/tool_shell.rs`) feeds the agent shell builder in `crates/envd/src/exec.rs`; for detached scripts the parent passes the set as an optional third argument (`shell_child::child_args` / `decode_extra_builtins`), present only when non-empty. The interactive CLI shell and `omp-sh` are not wired, by design.
+- Analysis: `analyze_with(program, cwd, root, enabled)` in `crates/shell/src/analysis.rs`, `analyze` delegating with an empty set; no arm reads the set yet. Not yet done: passing the session's enabled set from `crates/envd/src/admission.rs` (`bash_ir`) to `analyze_with`; it has no effect until the first enabled-only arm, so it lands with slice 3.
+
+Still open: none of the 19 exists (`docs/research/shell-builtins.md` §2). The path-policy open call (`PathPolicy::open` / `FilePolicy::open`) and the test hooks exist; `Host::open_write` does not. `support/{mounts,human,entries,mode,backup,safe_traversal,checksum,xattr}` exist; `backup` and `safe_traversal` have no consumer yet and `safe_traversal` needs the D4 fix first.
 
 ## Upstream origin and license
 
