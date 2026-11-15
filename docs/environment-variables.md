@@ -407,7 +407,7 @@ therefore completes through the paste-code path.
 
 | Variable                   | Behavior                                                                                                                                                                                                          |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PI_AGY_ISOLATE_WORKSPACE` | `0`/`false` passes the session working directory to `agy` instead of an empty managed workspace directory (default `true`). Persisted equivalent: `omp config set providers.antigravity-cli.isolateWorkspace`     |
+| `PI_AGY_ISOLATE_WORKSPACE` | `0`/`false` passes the session working directory to `agy` instead of the per-account empty workspace directory `<geminiDir>/<account>/empty-workspace` (default `true`). Persisted equivalent: `omp config set providers.antigravity-cli.isolateWorkspace`     |
 
 ### Prompt cache compatibility switch
 

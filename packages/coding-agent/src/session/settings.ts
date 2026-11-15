@@ -1319,7 +1319,7 @@ export const cfgProvidersAntigravityCliIsolateWorkspace = register({
 		group: "Protocol",
 		label: "Antigravity CLI Isolate Workspace",
 		description:
-			"Pass an empty managed workspace directory to agy in bridge mode so agy does not index large repositories into memory while omp executes tools in the session directory.",
+			"Pass the per-account empty workspace directory (<geminiDir>/<account>/empty-workspace) to agy so agy does not index large repositories into memory while omp executes tools in the session directory.",
 	},
 });
 // Sessions pass their own value per request; this process-wide default covers
