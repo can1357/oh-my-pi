@@ -54,6 +54,9 @@
 ### Removed
 
 - Removed the `seance` agent, the `/seance` command, and the task tool's `sourceSession` parameter
+### Fixed
+
+- `/copy` now works while viewing a subagent and copies from that subagent's transcript instead of being rejected as a main-session-only command ([#19373](https://github.com/can1357/oh-my-pi/pull/19373) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
 ## [18.20.2] - 2026-11-14
 
