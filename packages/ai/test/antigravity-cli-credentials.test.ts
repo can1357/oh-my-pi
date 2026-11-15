@@ -272,6 +272,59 @@ try {
 	);
 });
 
+describe("Antigravity CLI logout", () => {
+	it("deletes only the logged-out account's staged grant and keeps its conversations", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "agy-logout-"));
+		directories.push(root);
+		const module = (file: string) => JSON.stringify(new URL(`../src/${file}`, import.meta.url).href);
+		const second = { ...grant, email: "second@example.test", accountId: "second" };
+		// agyGeminiDir() is resolved once per process from HOME/XDG, so isolate it in a child.
+		const runner = `
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { getOAuthApiKey, logoutOAuthCredentials } from ${module("registry/oauth/index.ts")};
+import { agyGeminiDir } from ${module("providers/antigravity-cli/binary.ts")};
+import { agyAccountKey, stageAgyCredentials } from ${module("providers/antigravity-cli/credentials.ts")};
+const grants = ${JSON.stringify([grant, second])};
+const token = dir => path.join(dir, "antigravity-cli", "antigravity-oauth-token");
+const dirs = [];
+for (const credentials of grants) {
+	const dir = path.join(agyGeminiDir(), agyAccountKey(credentials));
+	await stageAgyCredentials((await getOAuthApiKey("antigravity-cli", { "antigravity-cli": credentials })).apiKey, dir);
+	dirs.push(dir);
+}
+const conversation = path.join(dirs[0], "antigravity-cli", "conversations", "kept.db");
+await Bun.write(conversation, "history");
+await logoutOAuthCredentials("antigravity-cli", grants[0]);
+console.log(JSON.stringify({
+	isolated: dirs.every(dir => dir.startsWith(process.env.HOME)),
+	loggedOut: await Bun.file(token(dirs[0])).exists(),
+	other: await Bun.file(token(dirs[1])).exists(),
+	conversation: await Bun.file(conversation).exists(),
+}));
+`;
+		const child = Bun.spawn([process.execPath, "--eval", runner], {
+			env: {
+				...process.env,
+				HOME: root,
+				USERPROFILE: root,
+				XDG_DATA_HOME: path.join(root, "data"),
+				PI_CONFIG_DIR: ".omp-fixture",
+				PI_CODING_AGENT_DIR: path.join(root, "agent"),
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [text, stderr, code] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+		expect(JSON.parse(text)).toEqual({ isolated: true, loggedOut: false, other: true, conversation: true });
+	}, 15_000);
+});
+
 describe("Antigravity CLI refresh", () => {
 	it("uses the installed consumer client and preserves unrotated grant metadata", async () => {
 		const refreshed = await refreshAgyCredentials(grant, undefined, async (url, init) => {

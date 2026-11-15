@@ -152,6 +152,15 @@ export async function refreshOAuthToken(
 	// don't expire) return the credentials unchanged.
 	return def.refreshToken ? def.refreshToken(credentials, signal) : credentials;
 }
+
+/**
+ * Run a built-in provider's `logout` hook after `/logout` deleted one of its
+ * stored grants, so copies the provider made outside the credential store go
+ * too. No-op for providers without one; the hook's errors propagate.
+ */
+export async function logoutOAuthCredentials(provider: string, credentials: OAuthCredentials): Promise<void> {
+	await getProviderDefinition(provider)?.logout?.(credentials);
+}
 const JWT_EXPIRY_SKEW_MS = 5 * 60_000;
 export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provider: string, credentials: T): T {
 	if (authPolicyFor(provider)?.expiry !== "jwt-or-never") return credentials;

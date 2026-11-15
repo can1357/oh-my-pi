@@ -14,6 +14,9 @@ export type LoginHook = (callbacks: OAuthController) => Promise<OAuthCredentials
 /** Whole-flow refresh implementation (`refresh hook=…`). */
 export type RefreshHook = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
 
+/** Removes provider-owned local copies of a grant after `/logout` deleted it (`logout hook=…`). */
+export type LogoutHook = (credentials: OAuthCredentials) => Promise<void>;
+
 /** Runtime context handed to `after-exchange` / `after-refresh` hooks. */
 export interface ExchangeContext {
 	provider: string;
@@ -49,5 +52,6 @@ export interface HookTables {
 	value: Record<string, Lazy<ValueHook>>;
 	login: Record<string, Lazy<LoginHook>>;
 	refresh: Record<string, Lazy<RefreshHook>>;
+	logout: Record<string, Lazy<LogoutHook>>;
 	afterExchange: Record<string, Lazy<AfterExchangeHook>>;
 }

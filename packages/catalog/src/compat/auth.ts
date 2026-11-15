@@ -64,6 +64,7 @@ export function authHookNames(): Record<string, string[]> {
 			add("headers", refresh.headersHook);
 			add("value", refresh.token.url.hook);
 		}
+		add("logout", p.logout);
 	}
 	return names;
 }

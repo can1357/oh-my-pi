@@ -784,6 +784,11 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "refresh":
 				refreshChild = child;
 				break;
+			case "logout":
+				leaf(child, ["hook"]);
+				if (child.args.length > 0) malformed(child);
+				result.logout = hookName(child, "hook");
+				break;
 			default:
 				unexpected(child, "auth");
 		}
@@ -800,6 +805,9 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 	}
 	if (!login && result.refresh) {
 		throw new CompatCompileError(node.file, node.line, `auth "${id}" declares \`refresh\` without \`login\``);
+	}
+	if (result.logout && (!login || login.kind === "api-key")) {
+		throw new CompatCompileError(node.file, node.line, `auth "${id}" declares \`logout\` without an OAuth login`);
 	}
 	if (result.result && (!login || login.kind === "api-key" || (result.refresh && result.refresh.kind !== "none"))) {
 		throw new CompatCompileError(

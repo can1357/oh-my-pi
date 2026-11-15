@@ -1,4 +1,4 @@
-import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthCredentialProvider, logoutOAuthCredentials } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 
@@ -121,9 +121,10 @@ export async function listLogoutAccounts(
 }
 
 /**
- * Removes one stored credential and refreshes the provider's models.
- * `removed: false` means the credential was already gone; `remainingSource`
- * names the auth source that still authenticates the provider, if any.
+ * Removes one stored credential, refreshes the provider's models, then runs the
+ * provider's logout hook for an OAuth grant (deleting copies staged outside the
+ * store). `removed: false` means the credential was already gone;
+ * `remainingSource` names the auth source that still authenticates the provider, if any.
  */
 export async function logoutCredential(
 	session: Pick<AgentSession, "modelRegistry" | "sessionId" | "refreshScopedModels">,
@@ -135,6 +136,7 @@ export async function logoutCredential(
 	const authStorage = modelRegistry.authStorage;
 	// Reload so an id stored by another process is found, not reported missing.
 	await authStorage.credentials.reload();
+	const removed = authStorage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
 	if (!(await authStorage.credentials.removeById(provider, credentialId))) return { removed: false };
 	// Provider-scoped online refresh so the removed credential's stale
 	// endpoint/deployment models are invalidated deterministically; the
@@ -143,5 +145,6 @@ export async function logoutCredential(
 	// unlocked (#5780). Other providers are left untouched.
 	await modelRegistry.refreshProvider(provider, "online");
 	await session.refreshScopedModels();
+	if (removed?.type === "oauth") await logoutOAuthCredentials(provider, removed);
 	return { removed: true, remainingSource: authStorage.keys.describe(provider, session.sessionId) };
 }

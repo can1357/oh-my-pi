@@ -398,6 +398,7 @@ auth "anthropic" {
         credential { … }                        // defaults to the login map
         after-refresh hook="…"
     }
+    logout hook="name"                           // OAuth only: drop provider-owned local copies of a grant on /logout
     store-as "openai-codex"                      // persist under another provider id
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
@@ -429,6 +430,8 @@ Login kinds:
 - `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
 - `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
+
+`logout hook="name"` names a hook that `/logout` runs after deleting one of the provider's stored OAuth grants, for providers that copy a grant outside omp's credential store (e.g. into a managed CLI's own token file). It needs an OAuth login; the stored credential is already gone when it runs.
 
 Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registry/hooks` by that package's `auth-hooks-registry` test. Values marked `encoding="base64"` are public OAuth client ids stored obfuscated to keep secret scanners quiet; they are decoded at runtime.
 
