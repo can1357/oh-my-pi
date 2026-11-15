@@ -291,6 +291,7 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setRasterFigureRendering } from "@oh-my-pi/pi-tui/chat/raster-figure";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
@@ -453,6 +454,7 @@ import {
 	cfgTuiAutoGraph,
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
+	cfgTuiRenderImages,
 	cfgTuiRenderMermaid,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
@@ -533,6 +535,7 @@ const cfgLiveUiSettings = combine({
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"extensionRenderers.transcriptPresenters": cfgExtensionTranscriptPresenters,
+	"tui.renderImages": cfgTuiRenderImages,
 	"tui.autoGraph": cfgTuiAutoGraph,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
@@ -2187,6 +2190,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
+		setRasterFigureRendering(cfgTuiRenderImages.get(settings));
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
@@ -4409,6 +4413,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			rebuildChat = true;
 		}
 		if (any("extensionRenderers.transcriptPresenters")) this.#syncTranscriptPresenters();
+		if (any("tui.renderImages")) {
+			setRasterFigureRendering(cfgTuiRenderImages.get(this.settings));
+			rebuildChat = true;
+		}
 		if (any("tui.autoGraph")) {
 			this.#applyAutoGraphSetting();
 			rebuildChat = true;

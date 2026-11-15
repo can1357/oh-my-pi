@@ -7,11 +7,15 @@
  * images.
  */
 
-/** One run of an assistant text block: prose, or the body of a ```svg fence. */
+/**
+ * One run of an assistant text block: prose, the body of a ```svg fence, or
+ * the local file an image line names ({@link splitImageFigures}).
+ */
 export type FigureSegment =
 	| { readonly kind: "markdown"; readonly text: string }
 	/** `closed` once the fence's closing line arrived. */
-	| { readonly kind: "svg"; readonly source: string; readonly closed: boolean };
+	| { readonly kind: "svg"; readonly source: string; readonly closed: boolean }
+	| { readonly kind: "image"; readonly path: string; readonly alt: string };
 
 /** A top-level (≤3-space indent) ```svg / ~~~svg fence opener, info string compared ASCII-case-insensitively. */
 const SVG_FENCE = /^ {0,3}(?:`{3,}|~{3,})[ \t]*svg(?:[ \t]|$)/im;
