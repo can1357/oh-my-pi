@@ -397,9 +397,7 @@ import type {
 	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ResumeSessionOptions,
-	SessionPickHandler,
 	ShowStatusOptions,
-	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
 	YieldCompaction,
 } from "./types";
@@ -9607,7 +9605,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showGitTui(revision);
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
 	}
 
@@ -9635,8 +9633,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
-	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void {
-		void this.#selectorController.showSessionSelector(source, onSelect);
+	showSessionSelector(source?: ForeignSessionSource): void {
+		void this.#selectorController.showSessionSelector(source);
 	}
 
 	async handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void> {
