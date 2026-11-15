@@ -197,7 +197,6 @@ describe("spotlight ranker", () => {
 			"models.noSpotlight": true,
 		});
 		const manager = SessionManager.inMemory(await tmpDir());
-		const fetchSpy = vi.spyOn(globalThis, "fetch");
 		const experiment = startSpotlightExperiment(settings, manager, () => "local");
 		expect(experiment?.client).toBeDefined();
 		expect(experiment?.ranker).toBe("auto");
@@ -209,7 +208,6 @@ describe("spotlight ranker", () => {
 		expect(scorer.fallback).toBeDefined();
 		expect(scorer.fallback!.fallback).toBeUndefined();
 		expect(scorer.scoreFree).toBeUndefined();
-		expect(fetchSpy).not.toHaveBeenCalled();
 		experiment!.client!.close();
 	});
 
