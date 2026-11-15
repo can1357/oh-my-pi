@@ -557,12 +557,21 @@ function isLongOption(arg: string, name: string): boolean {
 	return flag.length > 2 && name.startsWith(flag);
 }
 
+/** A word the shell expands before git sees it: a variable, a substitution (its key), a leading `~`. */
+const SHELL_EXPANDED_RE = /[$\0]|^~/;
+/** An expansion up front that makes a word an absolute path: `~`, `$HOME`, `$PWD`. */
+const ABSOLUTE_EXPANSION_RE = /^(?:~(?:\/|$)|\$\{?(?:HOME|PWD)\b)/;
+
 /**
  * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run. Without
  * `-f`, git refuses to clean (by default), so checking it anyway only prompts for a call that fails.
- * `-q` and `-i` do not change what is deleted.
+ * `-q` and `-i` do not change what is deleted; a second `-f` adds untracked nested repositories. A
+ * pathspec the shell expands is resolved like a path (`"$PWD"`, `~/repo`); when one cannot be
+ * (another variable, a substitution), the whole directory is previewed. An exclude the shell
+ * expands is dropped, which only widens the preview.
  */
-function cleanCheck(rest: readonly string[]): VcsDiscardCheck | undefined {
+function cleanCheck(rest: readonly string[], command: ShellCommand, scope: GuardScope): VcsDiscardCheck | undefined {
+	let force = 0;
 	let directories = false;
 	let includeIgnored = false;
 	let ignoredOnly = false;
@@ -576,7 +585,9 @@ function cleanCheck(rest: readonly string[]): VcsDiscardCheck | undefined {
 		}
 		if (arg.startsWith("--") && arg.length > 2) {
 			if (isLongOption(arg, "--dry-run")) return undefined;
-			if (isLongOption(arg, "--exclude")) {
+			if (isLongOption(arg, "--force")) {
+				force++;
+			} else if (isLongOption(arg, "--exclude")) {
 				const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i];
 				if (value !== undefined) excludes.push(value);
 			}
@@ -584,7 +595,8 @@ function cleanCheck(rest: readonly string[]): VcsDiscardCheck | undefined {
 			for (let k = 1; k < arg.length; k++) {
 				const letter = arg[k];
 				if (letter === "n") return undefined;
-				if (letter === "d") directories = true;
+				if (letter === "f") force++;
+				else if (letter === "d") directories = true;
 				else if (letter === "x") includeIgnored = true;
 				else if (letter === "X") ignoredOnly = true;
 				else if (letter === "e") {
@@ -598,11 +610,28 @@ function cleanCheck(rest: readonly string[]): VcsDiscardCheck | undefined {
 			pathspecs.push(arg);
 		}
 	}
-	return { clean: true, directories, includeIgnored, ignoredOnly, excludes, pathspecs };
+	const resolved = pathspecs.map(word => {
+		if (!SHELL_EXPANDED_RE.test(word)) return word;
+		return ABSOLUTE_EXPANSION_RE.test(word) ? resolveShellWordPath(word, command.cwd, scope.home) : undefined;
+	});
+	return {
+		clean: true,
+		directories,
+		includeIgnored,
+		ignoredOnly,
+		nestedRepositories: force > 1,
+		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word)),
+		pathspecs: resolved.every((word): word is string => word !== undefined) ? resolved : [],
+	};
 }
 
 /** The discard check for a git command, with the rule's reason, or `undefined` when it discards nothing. */
-function discardProbe(sub: string, rest: readonly string[]): { check: VcsDiscardCheck; what: string } | undefined {
+function discardProbe(
+	command: ShellCommand,
+	scope: GuardScope,
+	sub: string,
+	rest: readonly string[],
+): { check: VcsDiscardCheck; what: string } | undefined {
 	const has = (name: string) => rest.some(arg => arg.startsWith("--") && isLongOption(arg, name));
 	const short = rest
 		.filter(arg => /^-[A-Za-z]+$/.test(arg))
@@ -625,7 +654,7 @@ function discardProbe(sub: string, rest: readonly string[]): { check: VcsDiscard
 		return stagedOnly ? undefined : tracked;
 	}
 	if (sub === "clean") {
-		const check = cleanCheck(rest);
+		const check = cleanCheck(rest, command, scope);
 		return (
 			check && {
 				check,
@@ -692,9 +721,13 @@ function stashSaves(rest: readonly string[]): Stashed | undefined {
 	return saved;
 }
 
+/** `git stash` subcommands that take saved work back out of the stash: into the tree, or away. */
+const STASH_RELEASES: Record<string, true> = { pop: true, drop: true, clear: true, branch: true };
+
 /**
  * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its
- * `&&` chain) saved in the directory `where`, or `undefined` for none.
+ * `&&` chain) saved in the directory `where` and still hold, or `undefined` for none. A later
+ * `pop`, `drop`, `clear` or `branch`, in whatever directory, gives that up.
  */
 function stashedBefore(command: ShellCommand, where: string, scope: GuardScope): Stashed | undefined {
 	let stashed: Stashed | undefined;
@@ -702,6 +735,10 @@ function stashedBefore(command: ShellCommand, where: string, scope: GuardScope):
 		if (earlier.argv[0] !== "git") continue;
 		const { sub, rest, directory } = gitInvocation(earlier);
 		if (sub !== "stash") continue;
+		if (rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0])) {
+			stashed = undefined;
+			continue;
+		}
 		const dir = directory === undefined ? earlier.cwd : resolveShellWordPath(directory, earlier.cwd, scope.home);
 		const saved = dir === where ? stashSaves(rest) : undefined;
 		if (saved) {
@@ -717,13 +754,14 @@ function stashedBefore(command: ShellCommand, where: string, scope: GuardScope):
 function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
 	const { sub, rest, directory } = gitInvocation(command);
-	const probe = discardProbe(sub, rest);
+	const probe = discardProbe(command, scope, sub, rest);
 	if (!probe) return undefined;
 	const where = directory === undefined ? command.cwd : resolveShellWordPath(directory, command.cwd, scope.home);
 	if (where === undefined) return undefined;
-	// A stash just before keeps what it saved; only what it left behind can be lost.
-	const stashed = stashedBefore(command, where, scope);
 	let check = probe.check;
+	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
+	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full.
+	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, where, scope);
 	if (stashed) {
 		if (!check.clean || stashed.ignored) return undefined;
 		if (stashed.untracked) {

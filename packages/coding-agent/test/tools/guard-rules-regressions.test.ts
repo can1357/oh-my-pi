@@ -176,6 +176,30 @@ describe("guard rule regressions", () => {
 		expect(ruleOf(bashApproval(cwd, "git clean --quiet --force -d"))).toBe("discard_changes");
 	});
 
+	it("previews a doubly forced `git clean` with the nested repositories only it deletes", async () => {
+		await dirtyRepo(cwd);
+		const nested = path.join(cwd, "nested");
+		fs.mkdirSync(nested);
+		fs.writeFileSync(path.join(nested, "b.txt"), "b\n");
+		await $`git init -q && git add b.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(nested)
+			.quiet();
+		expect(bashApproval(cwd, "git clean -fd")).toBe("exec");
+		expect(ruleOf(bashApproval(cwd, "git clean -ffd"))).toBe("discard_changes");
+		// A stash does not keep a nested repository, only a pointer to its commit.
+		expect(ruleOf(bashApproval(cwd, "git stash -u && git clean -f --force -d"))).toBe("discard_changes");
+	});
+
+	it("expands `git clean` pathspecs, and previews the whole directory for one it cannot expand", async () => {
+		await dirtyRepo(cwd);
+		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");
+		for (const command of [`git clean -fd "$PWD"`, `git clean -fd "$(git rev-parse --show-toplevel)"`]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		// An expanded pathspec still narrows the preview.
+		expect(bashApproval(cwd, `git clean -fd "$PWD/missing.txt"`)).toBe("exec");
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"runs no filter driver while checking, even one whose name contains `=`",
 		async () => {
@@ -230,6 +254,8 @@ describe("guard rule regressions", () => {
 			"git stash; git reset --hard",
 			"true || git stash && git reset --hard",
 			"! git stash && git checkout .",
+			"git stash 2>&1 | tail -n 3 && git reset --hard",
+			"git stash && git stash pop && git reset --hard",
 			"git stash push -- scratch.txt && git restore .",
 			"git stash -p && git switch -f main",
 			"git stash && git clean -f",
