@@ -600,8 +600,10 @@ export interface SpotlightOverhead {
 
 /**
  * The net once fetch-backs that would have happened anyway are taken out: held-out results (the model saw them
- * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool; only recoveries
- * beyond that baseline are the cut's cost. A tool's baseline is thin while it has fewer than `minHoldouts`.
+ * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool and size bin (whether
+ * `plain` capped the result: a capped result's cut hides lines beyond plain's page, which the agent fetches under plain
+ * as well); only recoveries beyond that baseline are the cut's cost. A bin with fewer than `minHoldouts` holdouts takes
+ * the tool's pooled rate. A tool's baseline is thin while it has fewer than `minHoldouts`.
  */
 export interface SpotlightAdjustedTool {
 	tool: SpotlightTool;
@@ -610,9 +612,14 @@ export interface SpotlightAdjustedTool {
 	recoveredTokens: number;
 	/** Held-out would-be cuts the baseline is measured on. */
 	holdouts: number;
-	/** Recovered tokens per held-out would-be cut, over all the tool's holdouts (session-clustered bootstrap). */
+	/**
+	 * Recovered tokens per held-out would-be cut, pooled over all the tool's holdouts (session-clustered bootstrap).
+	 */
 	baselinePerCut: SpotlightEstimate;
-	/** max(0, recovered − baseline per cut × cuts). */
+	/**
+	 * max(0, recovered − Σ bins' cuts × their rate): a bin's rate is its own holdouts' per-cut rate once it has
+	 * `minHoldouts` of them, else `baselinePerCut`.
+	 */
 	excessTokens: SpotlightEstimate;
 }
 

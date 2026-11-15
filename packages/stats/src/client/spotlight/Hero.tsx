@@ -113,7 +113,7 @@ export function SpotlightHero({ stats, windowLabel, stale }: SpotlightHeroProps)
 				<Stat
 					size="sm"
 					label="Fetched back beyond baseline"
-					title="Fetch-back tokens beyond what held-out results (shown whole) fetch anyway, per tool (reads split by whether the agent was likely to edit them); 90% interval below"
+					title="Fetch-back tokens beyond what held-out results (shown whole) fetch anyway, per tool and whether plain capped the result; 90% interval below"
 					value={adjusted.excessTokens.value === null ? "–" : formatSignedCompact(-adjusted.excessTokens.value)}
 					hint={
 						<>
