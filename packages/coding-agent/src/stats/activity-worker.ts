@@ -7,17 +7,31 @@
  */
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { getDailyActivity, readDailyActivity } from "@oh-my-pi/omp-stats/db";
+import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import type { StatsActivityTransport, StatsActivityWorkerInbound } from "./activity-protocol";
+
+/**
+ * The stored rows, read through a connection that never writes so another
+ * process mid-write cannot hold back or fail the heatmap. Null when nothing is
+ * readable yet: a database whose schema predates this build fails the read,
+ * and the sync's own open migrates it before the paint that follows.
+ */
+function readStoredActivity(): DailyActivityPoint[] | null {
+	try {
+		return readDailyActivity();
+	} catch {
+		return null;
+	}
+}
 
 async function handleLoad(
 	transport: StatsActivityTransport,
 	message: Extract<StatsActivityWorkerInbound, { type: "load" }>,
 ): Promise<void> {
 	try {
-		// The stored rows paint first through a connection that never writes, so
-		// another process mid-write cannot hold back or fail the heatmap; the
-		// incremental sync then converges it on fresh session data.
-		const cached = readDailyActivity();
+		// The stored rows paint first; the incremental sync then converges the
+		// heatmap on fresh session data.
+		const cached = readStoredActivity();
 		if (cached) transport.send({ type: "activity", id: message.id, points: cached });
 		await syncAllSessions();
 		transport.send({ type: "activity", id: message.id, points: await getDailyActivity() });
