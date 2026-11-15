@@ -345,6 +345,50 @@ describe("Spotlight overhead", () => {
 			{ cause: "unrecorded", results: 1, share: 1 / 5 },
 		]);
 	});
+
+	it("counts a cut the judge reranked after Spotlight failed as ranked, and bills the judge's spend", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo", "auto").marker();
+		b.user("go");
+		const [id] = b.request({
+			cacheRead: 10_000,
+			cacheWrite: 500,
+			calls: [{ name: "read", args: { path: "src/a.ts" } }],
+		});
+		b.result(id, {
+			text: "1\tconst a = 1;\n… [2-60] (read artifact://0:2-60)",
+			shape: {
+				inTokens: 3000,
+				outTokens: 1000,
+				failures: 1,
+				failureCauses: { waitlisted: 1 },
+				fallback: { calls: 1, failures: 0, costUsd: 0.004 },
+				original: { url: "artifact://0", lines: 60, path: "src/a.ts", kept: [[1, 1]] },
+			},
+		});
+		// No ranker answered here: the no-score rules cut it, so it stays out of the ranked groups.
+		const [unranked] = b.request({
+			cacheRead: 10_000,
+			cacheWrite: 500,
+			calls: [{ name: "read", args: { path: "src/b.ts" } }],
+		});
+		b.result(unranked, {
+			text: "1\tconst b = 1;\n… [2-60] (read artifact://1:2-60)",
+			shape: {
+				inTokens: 3000,
+				outTokens: 1000,
+				failures: 1,
+				failureCauses: { waitlisted: 1 },
+				fallback: { calls: 1, failures: 1, costUsd: 0.001 },
+				original: { url: "artifact://1", lines: 60, path: "src/b.ts", kept: [[1, 1]] },
+			},
+		});
+		await write("auto.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.fetchBack.find(c => c.tool === "read" && c.group === "applied")).toMatchObject({ results: 1 });
+		expect(stats.overhead.spotlightUsd).toBeCloseTo(0.005, 8);
+		expect(stats.overhead.failureCauses).toEqual([{ cause: "waitlisted", results: 2, share: 1 }]);
+	});
 });
 
 describe("Spotlight edits", () => {

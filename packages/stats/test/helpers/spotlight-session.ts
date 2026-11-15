@@ -58,6 +58,11 @@ export interface ShapeSpec {
 	/** The failed calls by cause, as pi journals them; omitted, the entry predates causes. */
 	failureCauses?: Record<string, number>;
 	/**
+	 * The `auto` ranker's fallback (the judge) reranked the call after Spotlight failed: its spend, journaled beside
+	 * Spotlight's under `fallback`.
+	 */
+	fallback?: { calls: number; failures: number; costUsd: number };
+	/**
 	 * Held out: the model saw the result unshaped (`text`), while the counts and `original` describe the would-be cut
 	 * and `shapedUrl` names its text.
 	 */
@@ -312,6 +317,7 @@ export class SpotlightSessionBuilder {
 					tokens: spec.inTokens,
 					costUsd: spec.costUsd ?? 0,
 				},
+				...(spec.fallback ? { fallback: { ms: 900, tokens: spec.inTokens, ...spec.fallback } } : {}),
 				stats: {},
 			},
 		});
