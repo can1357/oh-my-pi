@@ -178,11 +178,16 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			...hit,
 			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
 		}));
+		const lexicalFallback = result.lexicalFallback.map(match => ({
+			...match,
+			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, match.rel), cwd),
+		}));
 		const details: FindToolDetails = {
 			query,
 			keywords,
 			threshold,
 			hits,
+			lexicalFallback,
 			coverage,
 			stats,
 			timeout,
@@ -219,6 +224,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
 				out.push(`  ${hit.rel}:${span}  ${range.p.toFixed(2)}  ${range.snippet}`);
 			}
+		}
+		if (coverage === "unavailable" && lexicalFallback.length > 0) {
+			out.push("", "unranked literal keyword matches (not semantically judged):");
+			for (const match of lexicalFallback) out.push(`  ${match.rel}:${match.line}  ${match.snippet}`);
 		}
 		const unanswered = stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : "";
 		out.push(
