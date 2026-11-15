@@ -1259,6 +1259,12 @@ async function runInTabWithSnapshot(
 			// Tern and WebKit pages report url/title through the tab itself (no worker `ready`).
 			if (tab.backend === "tern" || tab.backend === "webkit") {
 				tab.info = { ...tab.info, url: tab.ternTab.url(), title: tab.ternTab.lastTitle };
+				// The backend no longer has the tab's block: drop the stale handle, so later calls say why
+				// and a reopen under this name opens afresh instead of reusing it.
+				const gone = tab.ternTab.gone;
+				if (gone !== undefined && tabs.get(name) === tab && tab.state === "alive") {
+					await forceKillTab(name, gone);
+				}
 			}
 		}
 	}

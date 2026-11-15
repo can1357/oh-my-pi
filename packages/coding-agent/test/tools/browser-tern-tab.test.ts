@@ -140,6 +140,7 @@ describe("TernTab", () => {
 		expect(tab.url()).toBe("https://example.test/");
 	});
 
+
 	it("opens at about:blank without a goto, which a Tern web view would never load", async () => {
 		const fake = await startPage({ eventBatches: [], kit: {} });
 		await openTab(fake, { url: "about:blank" });
@@ -426,6 +427,87 @@ describe("TernTab", () => {
 		});
 		expect(await tab.storage("local")).toEqual({ a: "1", b: "2" });
 		expect(await tab.storage("local", { key: "b" })).toBe("2");
+	});
+
+	it("reports a block the window no longer lists as gone, with how to reopen, and sends nothing more", async () => {
+		let gone = false;
+		daemon = await startFakeDaemon((op): FakeAnswer => {
+			switch (op.op) {
+				case "open":
+					return { ok: { block: 7, url: "about:blank" } };
+				case "events":
+					return { ok: { events: BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event })), next: 2 } };
+				case "blocks":
+					return { ok: { blocks: gone ? [] : [{ block: 7, url: "about:blank", title: "", owner: 3 }] } };
+				case "state":
+					return { ok: { url: "about:blank", width: 800, height: 600 } };
+				default:
+					return { ok: {} };
+			}
+		});
+		const fake = daemon;
+		const tab = await openTab(fake);
+		gone = true;
+		const failure = await tab.readyInfo().catch((error: unknown) => error);
+		expect(String(failure)).toContain(
+			'Tab "main" is gone: its Tern browser block 7 is no longer in this Tern window',
+		);
+		expect(String(failure)).toContain('browser.targets({ app: "tern" })');
+		expect(tab.gone).toContain("browser block 7 is no longer in this Tern window");
+		const before = fake.requests.length;
+		await expect(tab.readyInfo()).rejects.toBe(failure);
+		expect(fake.requests.length).toBe(before);
+	});
+
+	it("keeps a not_found for a block the window still lists as that op's own failure", async () => {
+		daemon = await startFakeDaemon((op): FakeAnswer => {
+			if (op.op === "open") return { ok: { block: 7, url: "about:blank" } };
+			if (op.op === "events") {
+				return { ok: { events: BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event })), next: 2 } };
+			}
+			if (op.op === "blocks") return { ok: { blocks: [{ block: 7, url: "about:blank", title: "", owner: 3 }] } };
+			if (op.op === "state") return { error: { kind: "not_found", message: "stale ref e3" } };
+			return { ok: {} };
+		});
+		const tab = await openTab(daemon);
+		await expect(tab.readyInfo()).rejects.toThrow("stale ref e3");
+		expect(tab.gone).toBeUndefined();
+	});
+
+	it("says how to get a fixed viewport when the block was docked", async () => {
+		daemon = await startFakeDaemon((op): FakeAnswer => {
+			switch (op.op) {
+				case "open":
+					return { ok: { block: 7, url: "about:blank" } };
+				case "events":
+					return { ok: { events: BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event })), next: 2 } };
+				case "viewport":
+					return { error: { kind: "failed", message: "the block is docked: its page takes the block's size" } };
+				case "blocks":
+					return { ok: { blocks: [{ block: 7, url: "https://example.test/", title: "", owner: null }] } };
+				case "state":
+					return { ok: { url: "https://example.test/", width: 843, height: 632 } };
+				default:
+					return { ok: {} };
+			}
+		});
+		const tab = await openTab(daemon);
+		const failure = await tab.setViewport({ width: 1000, height: 900 }).catch((error: unknown) => error);
+		expect(String(failure)).toContain("is docked, so its page takes the block's size (843x632 now)");
+		expect(String(failure)).toContain('app: "own"');
+	});
+
+	it("names the backend and the helpers to use for page event listeners", () => {
+		const tab = new TernTab({
+			client: new TernSocketClient({ socketPath: "/nonexistent" }),
+			block: 7,
+			name: "main",
+			viewport: { width: 800, height: 600 },
+		});
+		expect(() => tab.page.on("request", () => {})).toThrow(
+			/page\.on\("request"\) is not supported on the Tern browser backend: .*tab\.requests\(\)/,
+		);
+		expect(() => tab.page.once("console", () => {})).toThrow(/tab\.console\(\)/);
 	});
 
 	it("names the Tern backend and the reason for helpers it cannot provide", async () => {

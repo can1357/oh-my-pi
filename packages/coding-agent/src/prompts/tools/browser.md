@@ -71,7 +71,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
   - Python passes a JavaScript code string only: `await tab.run(code, timeout=…)`.
   - Executes in an isolated JavaScript tab runtime with raw Puppeteer `page`/`browser` and ordinary Eval helpers.
   - Text it prints shows in the outer Eval cell; screenshots surface as Eval images; helpers and `tab.run` return real structured values.
-  - Raw `page.setRequestInterception` and `page.on("request")` inside `tab.run` coexist with `tab.route` handlers and are cleaned up after that run.
+  - Chromium: raw `page.setRequestInterception` and `page.on("request")` inside `tab.run` coexist with `tab.route` handlers and are cleaned up after that run.
   - `tab.route` persists until `tab.unroute` or tab close.
 - `allowed_domains`: exact hosts and `*.example.com` patterns (bare domain included); other navigation, subresource, fetch, and WebSocket requests abort.
 
@@ -164,7 +164,7 @@ Tern and WebKit tab limits:
 - `pdf` supports only `path` and throws on WebKit; `a11y` covers the main frame.
 - `loadState` restores storage for the current origin only; `webmcp*` throw.
 - `traceStart`/`traceStop`/`profileStart`/`profileStop` are unsupported; clipboard helpers use the system clipboard.
-- Raw `page`/`browser` in `tab.run` are a Puppeteer-like subset: goto, evaluate, content, $, $$, locator, waits, screenshot, keyboard, mouse, cookies.
+- Raw `page`/`browser` in `tab.run` are a Puppeteer-like subset: goto, evaluate, content, $, $$, locator, waits, screenshot, keyboard, mouse, cookies; no event listeners (`page.on`): read `tab.requests()` or wait with `tab.waitForResponse`.
 
 Lifetime:
 

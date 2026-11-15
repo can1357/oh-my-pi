@@ -39,6 +39,10 @@
 - Fixed browser `waitForUrl` timeouts not saying which URL the page was at
 - Fixed browser `tab.route()` with a handler function failing with an unhelpful message; it now explains routes are declarative and how to watch traffic
 - Fixed the busy-tab error telling a subagent to stop running calls together when the tab was busy with another agent's call
+- Fixed `browser.open({ app: "tern", url })` returning at `about:blank` when Tern reported an about:blank load after the goto; the open now waits for the requested page, or fails with a goto timeout that says the page only loaded about:blank
+- Fixed a Tern tab whose browser block was closed outside omp staying registered and failing every call with `no browser block … in this window`; omp now closes the tab and says to reopen it, pointing to `browser.targets({ app: "tern" })`
+- Fixed `emulate({ viewport })` on a docked Tern block failing with Tern's bare `the block is docked` error; it now gives the block's current size and suggests `app: "own"` with a viewport, or floating the block again
+- Fixed `page.on()` and other event-listener methods inside `tab.run` on Tern and WebKit tabs throwing `page.on is not a function`; they now name the backend and the helpers to use instead (`tab.requests()`, `tab.waitForResponse()`, `tab.console()`)
 
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
 
