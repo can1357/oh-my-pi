@@ -5,7 +5,7 @@ import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { TernElementHandle, TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
 import { parseTernSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/selectors";
-import { TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
+import { TernError, TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
@@ -562,6 +562,71 @@ describe("TernTab", () => {
 			/resourceType image: only the page's fetch and xhr requests can be routed/,
 		);
 		expect(fake.requests.length).toBe(before);
+	});
+});
+
+describe("TernTab on an unresponsive page", () => {
+	async function runTab(fake: FakeDaemon, timeoutMs: number): Promise<TernTab> {
+		client = new TernSocketClient({ socketPath: fake.socketPath });
+		// The welcome says what the host does: a tab reads it from the connected client.
+		await client.connect();
+		const tab = new TernTab({ client, block: 7, name: "main", viewport: { width: 800, height: 600 } });
+		tab.setRunContext({
+			timeoutMs,
+			deadline: Date.now() + timeoutMs,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots: [],
+		});
+		return tab;
+	}
+
+	it.each([
+		{ ops: ["browser", "dom", "responsive"], failFast: true },
+		{ ops: ["browser", "dom"], failFast: undefined },
+	])(
+		"asks a host that watches responsiveness ($ops) to fail a read at once, and names the way out",
+		async ({ ops, failFast }) => {
+			daemon = await startFakeDaemon(
+				(op): FakeAnswer =>
+					op.op === "dom"
+						? {
+								error: {
+									kind: "unresponsive",
+									message:
+										"dom: the page is unresponsive: a script keeps its web process busy (no answer for 3.0 s)",
+								},
+							}
+						: { ok: {} },
+				{ welcome: { ops } },
+			);
+			const tab = await runTab(daemon, 5_000);
+			const error = await tab.observe().catch((failure: unknown) => failure);
+			// Only a host that lists `responsive` strips the member before the engine reads the request.
+			expect(daemon.requests.find(request => request.op.op === "dom")?.op.failUnresponsive).toBe(failFast);
+			if (!(error instanceof TernError)) throw error;
+			expect(error.kind).toBe("unresponsive");
+			if (failFast)
+				expect(error.message).toContain('In tab "main", tab.reload() or tab.goto() ends that web process');
+		},
+	);
+
+	it("names an unresponsive page as the cause of a timed-out call when the host's state says so", async () => {
+		daemon = await startFakeDaemon(
+			(op): FakeAnswer => {
+				if (op.op === "eval") return null;
+				if (op.op === "state") return { ok: { url: "https://example.test/", responsive: false } };
+				return { ok: {} };
+			},
+			{ welcome: { ops: ["browser", "dom", "responsive"] } },
+		);
+		const tab = await runTab(daemon, 1_500);
+		const error = await tab.evaluate(() => 1).catch((failure: unknown) => failure);
+		if (!(error instanceof TernError)) throw error;
+		expect(error.kind).toBe("unresponsive");
+		expect(error.message).toContain("timed out");
+		expect(error.message).toContain("the page is unresponsive");
 	});
 });
 

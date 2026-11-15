@@ -843,7 +843,37 @@ export class TernTab implements InProcessRunTab {
 		try {
 			return await this.#blockOp(op, fields, timeoutMs);
 		} catch (error) {
+			throw await this.#blockFailure(await this.#unresponsiveFailure(error));
 		}
+	}
+
+	/**
+	 * `error`, or an `unresponsive` error naming the way out when the page's web process does not answer (a script
+	 * keeps it busy): the host's own `unresponsive` failure, or a timeout while its `state` says the page is
+	 * unresponsive. Only a host that watches responsiveness (`responsive`: omp's WebKit host) tells.
+	 */
+	async #unresponsiveFailure(error: unknown): Promise<unknown> {
+		if (!(error instanceof TernError) || !this.#client.supports("responsive")) return error;
+		let cause = error.message;
+		if (error.kind === "timeout") {
+			try {
+				const state = await this.#client.request(
+					{ op: "state", block: this.block },
+					{ timeoutMs: 1_000, signal: this.#signal },
+				);
+				if (!isRecord(state) || state.responsive !== false) return error;
+			} catch {
+				return error;
+			}
+			cause += ": the page is unresponsive, a script keeps its web process busy";
+		} else if (error.kind !== "unresponsive") {
+			return error;
+		}
+		return new TernError(
+			"unresponsive",
+			`${cause}. In tab ${JSON.stringify(this.#name)}, tab.reload() or tab.goto() ends that web process and loads ` +
+				`the page in a new one; closing the tab ends it too.`,
+		);
 	}
 
 	/**
@@ -888,8 +918,15 @@ export class TernTab implements InProcessRunTab {
 			timeoutMs: Math.min(timeoutMs ?? Infinity, resolveOpTimeouts(this.#cellMs).budgetBound, remaining),
 			signal,
 		};
+		// A quick read fails fast on a page whose web process stopped answering, where the host can tell.
+		const request = {
+			op,
+			block: this.block,
+			...fields,
+			...(scope && this.#client.supports("responsive") ? { failUnresponsive: true } : {}),
+		};
 		const dialogMode = PAGE_OP_DIALOG[op];
-		if (!dialogMode) return await this.#client.request({ op, block: this.block, ...fields }, options);
+		if (!dialogMode) return await this.#client.request(request, options);
 		const label = `${this.product} ${op}`;
 		const held = this.#dialogState();
 		if (held.open) throw dialogBlocksPageError(label, held, "is open");
@@ -897,7 +934,7 @@ export class TernTab implements InProcessRunTab {
 		const opSignal = signal ? AbortSignal.any([signal, done.signal]) : done.signal;
 		try {
 			const answer = await Promise.race([
-				this.#client.request({ op, block: this.block, ...fields }, { ...options, signal: opSignal }),
+				this.#client.request(request, { ...options, signal: opSignal }),
 				this.#whenDialog(opSignal).then(dialog => {
 					if (dialogMode === "blocks") throw dialogBlocksPageError(label, dialog, "opened");
 					return undefined;
@@ -1562,6 +1599,8 @@ export class TernTab implements InProcessRunTab {
 		timeoutMs: number,
 		leavesBlank = false,
 	): Promise<TernRequestEntry | null> {
+		// A host that watches responsiveness ends an unresponsive page's web process on navigation: that recovers the tab.
+		if (this.#client.supports("responsive")) this.#rendererFailure = undefined;
 		await this.#pull();
 		const since = this.#cursor;
 		const responseCursor = this.#network.cursor;

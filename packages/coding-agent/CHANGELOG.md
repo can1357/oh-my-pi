@@ -34,6 +34,7 @@
 - Fixed `task.steps` subagents dropping what they delivered for every step but the last; each earlier step's report now reaches the agent that spawned them as a progress message
 - Bounded WebKit/Tern screenshot preparation and quick reads by one remaining-run deadline; WebKit captures no longer wait on a redundant JavaScript animation frame, and confirmed unresponsive renderers fail fast until explicitly closed and reopened
 - Waited for forced WebKit host termination before completing close, so immediate reopening cannot race the old process's exit
+- Fixed omp's WebKit browser waiting out whole calls on a page whose script keeps it busy: with an engine that watches page responsiveness, `observe()`, `screenshot()` and other quick reads fail after about 3 s with an `unresponsive` error naming the tab, other calls that time out say the page is unresponsive, and `tab.reload()`/`tab.goto()` end the busy web process and load the page in a new one, recovering the tab
 - Fixed eval `wait(1800)` returning at once as if it had slept; a number now throws, pointing to `tab.waitFor*` or a real sleep
 - Fixed browser `tab.setCookies(await other.cookies())` rejecting the array `cookies()` returns; malformed cookies now name the item and field
 - Fixed browser `waitForUrl` timeouts not saying which URL the page was at
