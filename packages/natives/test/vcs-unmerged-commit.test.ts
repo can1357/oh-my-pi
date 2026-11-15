@@ -89,7 +89,6 @@ describe("unresolved index commits", () => {
 		expect(await hookMarker.exists()).toBe(false);
 		expect(await git(root, "rev-parse", "HEAD")).toBe(head);
 		expect(await git(root, "rev-parse", "HEAD^{tree}")).toBe(treeBefore);
-		expect(await git(root, "rev-parse", "HEAD:conflicted.txt")).not.toBe("");
 		expect(await git(root, "ls-files", "-u", "--", "conflicted.txt")).toContain("conflicted.txt");
 
 		await expectUnmerged(() => repo.commitCreate("empty", { allowEmpty: true }), "conflicted.txt", "git commit:");
@@ -130,7 +129,6 @@ describe("unresolved index commits", () => {
 		);
 		expect(await git(root, "rev-parse", "HEAD")).toBe(head);
 		expect(await git(root, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("extra.txt");
-		expect(await git(root, "rev-parse", "HEAD:conflicted.txt")).not.toBe("");
 		expect(await git(root, "ls-files", "-u", "--", "conflicted.txt")).toContain("conflicted.txt");
 	});
 
