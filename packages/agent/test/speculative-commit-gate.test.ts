@@ -185,4 +185,214 @@ describe("speculative commit gate", () => {
 		expect(speculativeExecutions).toEqual(["/tmp/parent.txt", childArgs.path, "/tmp/grandchild.txt"]);
 		await coordinator.close("test complete");
 	});
+
+	it("unblocks a claimed direct candidate when host captureEvidence declines before execution", async () => {
+		const { tool, speculativeExecutions } = setup();
+		const captureStarted = Promise.withResolvers<void>();
+		const releaseCapture = Promise.withResolvers<void>();
+		const discarded: Array<{ id: string; reason: string }> = [];
+		const telemetry: Array<{ candidateId: string; outcome: string; reason?: string }> = [];
+		let policyDiscards = 0;
+		const wrappedTool: AgentTool<typeof schema> = {
+			...tool,
+			speculation: {
+				finalized: {
+					...tool.speculation!.finalized!,
+					discard() {
+						policyDiscards++;
+					},
+				},
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [wrappedTool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: messages =>
+				messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[],
+			beforeToolCall: async () => undefined,
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{
+				enabled: true,
+				onTelemetry(event) {
+					telemetry.push({ candidateId: event.candidateId, outcome: event.outcome, reason: event.reason });
+				},
+				host: {
+					authorize: () => ({ allowed: true, deferBeforeToolCall: true }),
+					async captureEvidence() {
+						captureStarted.resolve();
+						await releaseCapture.promise;
+						return false;
+					},
+					discard(discardContext) {
+						discarded.push({ id: discardContext.candidateId, reason: discardContext.reason });
+					},
+				},
+			},
+			{ context, loopConfig },
+		);
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "claimed-declined",
+			name: "read",
+			arguments: { path: "/tmp/image.png" },
+		};
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+		await coordinator.settleAdmissions();
+		await coordinator.reconcileFinalCalls(new Map([[toolCall.id, { ...toolCall }]]));
+		await coordinator.finalizeAdmissions();
+		await captureStarted.promise;
+
+		// Claim arrives while captureEvidence is still suspended in-flight.
+		const claimPromise = coordinator.claim(wrappedTool, toolCall, { path: "/tmp/image.png" });
+		await Bun.sleep(5);
+		releaseCapture.resolve();
+
+		await expect(claimPromise).resolves.toBeUndefined();
+		expect(speculativeExecutions).toEqual([]);
+		expect(policyDiscards).toBe(1);
+		expect(discarded).toEqual([{ id: "claimed-declined", reason: "host declined speculative evidence capture" }]);
+		expect(telemetry).toContainEqual({
+			candidateId: "claimed-declined",
+			outcome: "discarded",
+			reason: "host declined speculative evidence capture",
+		});
+		await coordinator.close("test complete");
+	});
+
+	it("unblocks a committed dependent child when its in-flight parent fails", async () => {
+		const parentStarted = Promise.withResolvers<void>();
+		const releaseParent = Promise.withResolvers<void>();
+		const speculativeExecutions: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "read",
+			label: "Read",
+			description: "Versioned read with controllable parent failure",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: ({ args }) =>
+						typeof args.path === "string"
+							? {
+									eligible: true,
+									effect: {
+										kind: "local_read",
+										resources: [{ scheme: "file", path: args.path, access: "read" }],
+									},
+								}
+							: { eligible: false, reason: "path must be a string" },
+					async execute({ args }) {
+						const target = String(args.path);
+						speculativeExecutions.push(target);
+						if (target === "/tmp/parent.txt") {
+							parentStarted.resolve();
+							await releaseParent.promise;
+							throw new Error("parent failed");
+						}
+						return { kind: "result", result: { content: [{ type: "text", text: "ok" }] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: messages =>
+				messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[],
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{
+				enabled: true,
+				host: { authorize: () => ({ allowed: true }) },
+			},
+			{ context, loopConfig },
+		);
+		const parent = await coordinator.admit({
+			candidateId: "parent",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: { type: "toolCall", id: "parent-call", name: "read", arguments: { path: "/tmp/parent.txt" } },
+			tool,
+			source: "eval_shadow",
+		});
+		await coordinator.finalizeAdmissions();
+		await parentStarted.promise;
+
+		const childArgs = { path: "/tmp/child.txt" };
+		const child = await coordinator.admit({
+			candidateId: "child",
+			parentToolCallId: "eval-1",
+			dependencies: ["parent"],
+			toolCall: { type: "toolCall", id: "child-call", name: "read", arguments: childArgs },
+			tool,
+			source: "eval_shadow",
+		});
+
+		const childCommitPromise = child?.commit(childArgs);
+		await Bun.sleep(5);
+		releaseParent.resolve();
+
+		await expect(childCommitPromise).resolves.toBeUndefined();
+		await expect(parent?.outcome).rejects.toThrow("parent failed");
+		expect(speculativeExecutions).toEqual(["/tmp/parent.txt"]);
+		await coordinator.close("test complete");
+	});
+
+	it("unblocks a claimed candidate when claim signal aborts before captureEvidence settles", async () => {
+		const { tool } = setup();
+		const captureStarted = Promise.withResolvers<void>();
+		const releaseCapture = Promise.withResolvers<void>();
+		const discarded: string[] = [];
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: messages =>
+				messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[],
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{
+				enabled: true,
+				host: {
+					authorize: () => ({ allowed: true }),
+					async captureEvidence() {
+						captureStarted.resolve();
+						await releaseCapture.promise;
+						return true;
+					},
+					discard(discardContext) {
+						discarded.push(discardContext.candidateId);
+					},
+				},
+			},
+			{ context, loopConfig },
+		);
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "aborted-claim",
+			name: "read",
+			arguments: { path: "/tmp/slow.png" },
+		};
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+		await coordinator.finalizeAdmissions();
+		await captureStarted.promise;
+
+		const abortController = new AbortController();
+		const claimPromise = coordinator.claim(
+			tool,
+			toolCall,
+			{ path: "/tmp/slow.png" },
+			undefined,
+			abortController.signal,
+		);
+		await Bun.sleep(5);
+		abortController.abort(new Error("cancelled"));
+
+		await expect(claimPromise).rejects.toThrow("cancelled");
+		expect(discarded).toEqual(["aborted-claim"]);
+		releaseCapture.resolve();
+		await coordinator.close("test complete");
+	});
 });
