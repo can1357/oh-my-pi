@@ -8,7 +8,18 @@
 
 ### Fixed
 
+- Fixed Mistral (and other OpenAI-compatible) 429s reporting a zero `x-ratelimit-limit-*` allowance being retried for minutes; they now fail on the first request with an error naming the header and suggesting a model or plan switch ([#19300](https://github.com/can1357/oh-my-pi/issues/19300))
+- Fixed pooled Claude accounts presenting one device: an Anthropic OAuth request now reports the device and account id of the credential serving it, including after a rotation inside one call, when caller metadata named the previous account ([#19277](https://github.com/can1357/oh-my-pi/pull/19277) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the receiving account and pauses the provider ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
+### Removed
+
+- Removed `isXdDevicePath` from `providers/cursor-pi-args`; Cursor ranged reads of `xd://` docs now compose line selectors like any other path
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added the Antigravity CLI ACP provider with managed installation, Google sign-in, refreshable distributed credentials, host tools, and retained conversations across tool steps and history changes.
 
 ## [18.20.1] - 2026-11-14
 
