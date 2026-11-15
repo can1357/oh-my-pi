@@ -12,7 +12,7 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "@oh-my-pi/pi-tui/overlays/copy-targets";
-import { restartBrowserForModeChange } from "../tools/browser";
+import { applyBrowserModeChange } from "../tools/browser";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
@@ -527,12 +527,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			else return usage("Usage: /browser [headless|visible]", runtime);
 			cfgBrowserHeadless.set(runtime.settings, next);
 			try {
-				await restartBrowserForModeChange();
+				await applyBrowserModeChange(next);
 			} catch (err) {
-				// Setting was already mutated; surface the restart failure so the
+				// Setting was already mutated; surface the failure so the
 				// user knows the browser is in an inconsistent state.
 				await runtime.output(
-					`Browser mode set to ${next ? "headless" : "visible"}, but restart failed: ${errorMessage(err)}`,
+					`Browser mode set to ${next ? "headless" : "visible"}, but applying it failed: ${errorMessage(err)}`,
 				);
 				return commandConsumed();
 			}
@@ -561,9 +561,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			cfgBrowserHeadless.set(settings, next);
 			try {
-				await restartBrowserForModeChange();
+				await applyBrowserModeChange(next);
 			} catch (error) {
-				runtime.ctx.showWarning(`Failed to restart browser: ${errorMessage(error)}`);
+				runtime.ctx.showWarning(`Failed to apply the browser mode: ${errorMessage(error)}`);
 				clearSubmittedText(runtime);
 				return;
 			}

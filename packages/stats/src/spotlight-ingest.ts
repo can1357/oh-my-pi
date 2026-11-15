@@ -31,14 +31,19 @@ export function experimentMarker(customType: unknown, data: Record<string, unkno
 /** Longest stored call target. */
 export const SPOTLIGHT_TARGET_CHARS = 500;
 
-/** A shaped read still collecting the lines the agent needs later (see {@link SpotlightCollector}). */
+/**
+ * A window of a shaped read still collecting the lines the agent needs later (see {@link SpotlightCollector}): a
+ * `;`/`,` list read opens one per window that shows a file, all under its call.
+ */
 export interface SpotlightOpenRead {
 	toolCallId: string;
 	/** The read file, resolved against the session's working directory. */
 	file: string;
-	/** First file line of the original and its line count. */
+	/** First file line of the window and its line count. */
 	start: number;
 	lines: number;
+	/** 0-based position of the window's first line in the original; absent (0) in states persisted before windows. */
+	at?: number;
 	/** `original.url`: the session artifact holding the original text. */
 	url: string | null;
 }
@@ -107,21 +112,52 @@ export interface SpotlightShapeRow {
 	original: SpotlightOriginalFacts | null;
 	/** Artifact ids the result names (its text's `artifact://N` plus `original.url`); null before the result lands. */
 	artifacts: number[] | null;
-	/** Spotlight's own usage, from the shape entry; null before it lands. */
-	spotlight: { calls: number; failures: number; ms: number; costUsd: number } | null;
+	/**
+	 * Spotlight's own usage, from the shape entry; null before it lands. `failureCauses` counts failed calls by cause
+	 * (`no_credential`, `timeout`, …); null when none failed or the entry predates it.
+	 */
+	spotlight: {
+		calls: number;
+		failures: number;
+		failureCauses: Record<string, number> | null;
+		ms: number;
+		costUsd: number;
+	} | null;
 	/** Wall time shaping took, from the shape entry. */
 	shapeMs: number | null;
 }
 
-export interface SpotlightOriginalFacts {
-	url: string | null;
+/**
+ * One window of an original (`details.spotlight.original.windows`, else the one window the original is): the lines of
+ * one read it shows.
+ */
+export interface SpotlightWindowFacts {
+	/** The file it shows; null for text no file names. */
 	path: string | null;
-	/** First original line of the window (1-based file line for reads, else 1). */
+	/** Line number of its first line (1-based file line for reads, else 1). */
 	start: number;
 	lines: number;
-	/** Hidden absolute line ranges, inclusive: the window minus the kept ranges. */
+	/** 0-based position of its first line in the original. */
+	at: number;
+	/** Hidden absolute line ranges (numbered from {@link start}), inclusive: the window minus the kept ranges. */
+	hidden: [number, number][];
+	/**
+	 * A list read's part read its file whole (no line selector): a tail of the file lies in it. Always false for a single
+	 * window, whose call target tells.
+	 */
+	wholeFile: boolean;
+}
+
+export interface SpotlightOriginalFacts {
+	url: string | null;
+	/** The single window's file, start and hidden lines; of a multi-window original null, 1 and its hidden positions. */
+	path: string | null;
+	start: number;
+	lines: number;
 	hidden: [number, number][];
 	hiddenLines: number;
+	/** The windows it is made of, in order: one for an original without `windows`. */
+	windows: SpotlightWindowFacts[];
 	/** Spotlight's per-line heat (`0`–`9`, `-` unscored) over the first lines; null when the trace has none. */
 	heat: string | null;
 	/** Kept runs, 1-based positions in the original (of a held-out result: what the cut would have kept). */
@@ -129,14 +165,16 @@ export interface SpotlightOriginalFacts {
 }
 
 /**
- * `spotlight_needs` row (merged on upsert): original lines (1-based positions in the original) a shaped read's later
- * calls needed. Ranges of later parses are added to the stored ones; `open` is the latest.
+ * `spotlight_needs` row (merged on upsert): original lines (1-based positions in the whole original) a shaped read's
+ * later calls needed. Ranges of later parses are added to the stored ones; `open` is the latest. One row per call:
+ * `file` is the read's file, of a `;`/`,` list read the file of its first window that shows one (the first row
+ * stored keeps it).
  */
 export interface SpotlightNeedRow {
 	sessionFile: string;
 	toolCallId: string;
 	file: string;
-	/** Still collecting: no edit, whole-file read or later shaped read of the file yet. */
+	/** Still collecting: some window's file has no edit, whole-file read or later shaped read yet. */
 	open: boolean;
 	/** Lines later `read` selections covered. */
 	reread: [number, number][];
@@ -522,19 +560,56 @@ function parseKept(value: unknown): [number, number][] {
 	return out;
 }
 
+/** Ranges of 1-based original positions clipped to a window (`at + 1 … at + lines`), renumbered 1-based within it. */
+export function windowRanges(ranges: readonly [number, number][], at: number, lines: number): [number, number][] {
+	const out: [number, number][] = [];
+	for (const [a, b] of ranges) {
+		const from = Math.max(a - at, 1);
+		const to = Math.min(b - at, lines);
+		if (from <= to) out.push([from, to]);
+	}
+	return out;
+}
+
+/** The original's windows: its `windows` when it joins several reads, else the one window it is. */
+function parseWindows(
+	value: Record<string, unknown>,
+	lines: number,
+	kept: readonly [number, number][],
+): SpotlightWindowFacts[] {
+	const raw: Record<string, unknown>[] = Array.isArray(value.windows) ? value.windows.filter(isRecord) : [value];
+	return raw.map(window => {
+		const own = window === value;
+		const start = finite(window.start) || 1;
+		const at = own ? 0 : finite(window.at);
+		const count = own ? lines : finite(window.lines);
+		return {
+			path: typeof window.path === "string" ? window.path : null,
+			start,
+			lines: count,
+			at,
+			hidden: hiddenRanges(start, count, windowRanges(kept, at, count)),
+			// A single window's call target tells whether it is whole (the aggregator reads it there).
+			wholeFile: !own && window.wholeFile === true,
+		};
+	});
+}
+
 function parseOriginal(value: unknown): SpotlightOriginalFacts | null {
 	if (!isRecord(value)) return null;
 	const lines = finite(value.lines);
-	const start = finite(value.start) || 1;
 	const kept = parseKept(value.kept);
-	const hidden = hiddenRanges(start, lines, kept);
+	const windows = parseWindows(value, lines, kept);
+	const single = windows.length === 1 ? windows[0] : null;
+	const hidden = single ? single.hidden : hiddenRanges(1, lines, kept);
 	return {
 		url: typeof value.url === "string" ? value.url : null,
-		path: typeof value.path === "string" ? value.path : null,
-		start,
+		path: single ? single.path : null,
+		start: single ? single.start : 1,
 		lines,
 		hidden,
 		hiddenLines: hidden.reduce((sum, [a, b]) => sum + b - a + 1, 0),
+		windows,
 		heat: typeof value.heat === "string" ? value.heat : null,
 		kept,
 	};
@@ -579,11 +654,25 @@ export function shapeFromEntry(
 		spotlight: {
 			calls: finite(usage.calls),
 			failures: finite(usage.failures),
+			failureCauses: parseFailureCauses(usage.failureCauses),
 			ms: finite(usage.ms),
 			costUsd: finite(usage.costUsd),
 		},
 		shapeMs: finite(data.ms),
 	};
+}
+
+/**
+ * Failed calls by cause, keeping positive finite counts; null when none is left. Normalizes both a shape entry's
+ * `failureCauses` at ingest and the decoded `sp_failure_causes` column at aggregation.
+ */
+export function parseFailureCauses(value: unknown): Record<string, number> | null {
+	if (!isRecord(value)) return null;
+	const causes: Record<string, number> = {};
+	for (const [cause, count] of Object.entries(value)) {
+		if (typeof count === "number" && Number.isFinite(count) && count > 0) causes[cause] = count;
+	}
+	return Object.keys(causes).length > 0 ? causes : null;
 }
 
 /** The row a result message's `details.spotlight` describes, or null when it carries none. */
@@ -735,13 +824,14 @@ export class SpotlightCollector {
 			const original = await text;
 			if (!original) continue;
 			const row = this.#need(read);
+			const at = read.at ?? 0;
+			// A list read's original joins several windows: a Find block lies in its own window's lines.
+			const lines = original.slice(at, at + read.lines);
 			for (const block of blocks) {
-				const spans = locateFind(original, block.lines);
+				const spans = locateFind(lines, block.lines);
 				// Without `all` the edit needs exactly one match; more is a Find this text cannot place.
 				const located = block.all ? spans : spans.length === 1 ? spans : [];
-				for (const [a, b] of located) {
-					if (a <= read.lines) row.edit.push([a, Math.min(b, read.lines)]);
-				}
+				for (const [a, b] of located) row.edit.push([a + at, Math.min(b, read.lines) + at]);
 			}
 			row.edit = mergeRanges(row.edit);
 		}
@@ -766,27 +856,38 @@ export class SpotlightCollector {
 	}
 
 	#close(read: SpotlightOpenRead): void {
-		const open = this.state.open ?? [];
-		this.state.open = open.filter(other => other !== read);
-		if (this.#record) this.#need(read).open = false;
+		const open = (this.state.open ?? []).filter(other => other !== read);
+		this.state.open = open;
+		// A list read collects until none of its windows does.
+		if (this.#record) this.#need(read).open = open.some(other => other.toolCallId === read.toolCallId);
 	}
 
-	/** Start collecting for a shaped read whose result just landed; it stops an earlier one of the same file. */
+	/**
+	 * Start collecting for a shaped read whose result just landed, one open read per window showing a file that shaping
+	 * cut (hid lines of, or would have: a held-out window's would-be cut); a window shown unchanged was never ranked.
+	 * Each stops an earlier read's window of the same file.
+	 */
 	#openRead(row: SpotlightShapeRow): void {
 		const original = row.original;
-		if (row.tool !== "read" || !original?.path || original.lines <= 0) return;
+		if (row.tool !== "read" || !original) return;
 		if ((this.state.open ?? []).some(read => read.toolCallId === row.toolCallId)) return;
-		const file = resolveReadPath(original.path, this.state.cwd);
-		for (const read of this.state.open ?? []) if (read.file === file) this.#close(read);
-		const read: SpotlightOpenRead = {
-			toolCallId: row.toolCallId,
-			file,
-			start: original.start,
-			lines: original.lines,
-			url: original.url,
-		};
-		this.state.open = [...(this.state.open ?? []), read];
-		if (this.#record) this.#need(read);
+		for (const window of original.windows) {
+			if (!window.path || window.lines <= 0 || window.hidden.length === 0) continue;
+			const file = resolveReadPath(window.path, this.state.cwd);
+			for (const read of this.state.open ?? []) {
+				if (read.file === file && read.toolCallId !== row.toolCallId) this.#close(read);
+			}
+			const read: SpotlightOpenRead = {
+				toolCallId: row.toolCallId,
+				file,
+				start: window.start,
+				lines: window.lines,
+				at: window.at,
+				url: original.url,
+			};
+			this.state.open = [...(this.state.open ?? []), read];
+			if (this.#record) this.#need(read);
+		}
 	}
 
 	/** What a later call needs of the open reads, and which ones it stops. */
@@ -804,16 +905,19 @@ export class SpotlightCollector {
 					continue;
 				}
 				if (!this.#record) continue;
+				// Positions in the whole original: the window's own, past the windows before it.
+				const at = read.at ?? 0;
 				const end = read.start + read.lines - 1;
+				const offset = at - read.start + 1;
 				const positions: [number, number][] = [];
 				for (const [a, b] of ranges) {
 					const from = Math.max(a, read.start);
 					const to = Math.min(b, end);
-					if (from <= to) positions.push([from - read.start + 1, to - read.start + 1]);
+					if (from <= to) positions.push([from + offset, to + offset]);
 				}
 				// The last N lines are known only when the original reaches the file's end: a whole-file read's does.
 				if (selection.tail !== null && read.start === 1)
-					positions.push([Math.max(1, read.lines - selection.tail + 1), read.lines]);
+					positions.push([Math.max(1, read.lines - selection.tail + 1) + at, read.lines + at]);
 				const row = this.#need(read);
 				row.reread = mergeRanges([...row.reread, ...positions]);
 			}

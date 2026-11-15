@@ -44,6 +44,7 @@ describe("Factory Droid image generation", () => {
 			authorization: `Bearer ${WORKOS_TOKEN}`,
 			"x-api-provider": "openai",
 			"x-factory-client": "cli",
+			"x-factory-request-surface": "cli_tui",
 			"x-factory-org-id": "org-1",
 		});
 		expect(request.headers["user-agent"]).toStartWith("factory-cli/");

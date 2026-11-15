@@ -184,6 +184,23 @@ zpty -d x",
 	);
 }
 
+/// A mode change on the pty (`read -k`'s cbreak) with output the shell has
+/// not read yet goes on at once: the shell is asleep, not reading it.
+#[test]
+fn zsh_mod_zpty_mode_change_does_not_wait_for_the_shell_to_read() {
+	check(
+		"zmodload zsh/zpty
+zpty x 'print hi; read -k c; print got:$c'
+zpty -w -n x q
+sleep 0.5
+zpty -r -m x out '*got:?*'
+print -r -- st=$? ${(q+)out}
+zpty -d x",
+		"st=0 $'hi\\C-M\\ngot:q'\n",
+		"",
+	);
+}
+
 /// The command's `/dev/tty` is the pty, an external started under it has
 /// it as its standard input, and output after the external still arrives.
 #[test]

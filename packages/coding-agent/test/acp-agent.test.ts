@@ -22,6 +22,7 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -1826,6 +1827,109 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("adds background subagent spend to usage_update cost (#19102)", async () => {
+		const harness = await createHarness();
+		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(live.sessionId)!;
+		(session as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		session.sessionManager.appendMessage(costing(1));
+		// A blocking `task` result carries its child's $0.30; a background spawn's carries nothing.
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "blocking",
+			toolName: "task",
+			content: [{ type: "text", text: "done" }],
+			details: { usage: costing(0.3).usage },
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await session.sessionManager.ensureOnDisk();
+		const artifacts = session.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = (id: string, cost: number): AgentRef => ({
+			id,
+			displayName: id,
+			kind: "sub",
+			status: "parked",
+			session: null,
+			sessionFile: path.join(artifacts, `${id}.jsonl`),
+			generation: 0,
+			createdAt: 0,
+			lastActivity: 0,
+			history: { metrics: { tokens: 1, requests: 1, tools: 0, cost, durationMs: 0 } },
+		});
+		// ACP registers the root itself as `kind: "main"` under `acp:<id>`; it is not part of its own tree.
+		const rootRef: AgentRef = {
+			...child(`acp:${live.sessionId}`, 1.3),
+			kind: "main",
+			sessionFile: session.sessionManager.getSessionFile()!,
+		};
+		const list = spyOn(AgentRegistry.global(), "list").mockReturnValue([
+			rootRef,
+			child("Blocking", 0.3),
+			child("Background", 0.2),
+		]);
+		try {
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+		} finally {
+			list.mockRestore();
+		}
+
+		const usageUpdates = harness.updates.filter(
+			update => update.sessionId === live.sessionId && update.update.sessionUpdate === "usage_update",
+		);
+		const last = usageUpdates.at(-1)?.update as { cost?: { amount: number } } | undefined;
+		expect(last?.cost?.amount).toBeCloseTo(1.5, 10);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("counts a loaded session's persisted background subagent spend (#19102)", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		stored.sessionManager.appendMessage({ role: "user", content: "spawn", timestamp: Date.now() });
+		stored.sessionManager.appendMessage(costing(1));
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+		// A background child from before the restart: only its own transcript records its spend.
+		const artifacts = stored.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = SessionManager.create(harness.cwdA, artifacts);
+		child.appendMessage({ role: "user", content: "probe", timestamp: Date.now() });
+		child.appendMessage(costing(0.2));
+		await child.ensureOnDisk();
+		await child.flush();
+		await child.close();
+
+		try {
+			await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+			const loaded = harness.sessions.at(-1)!;
+			(loaded as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+			await harness.agent.prompt({ sessionId: stored.sessionId, prompt: [{ type: "text", text: "ping" }] });
+
+			const last = harness.updates
+				.filter(update => update.sessionId === stored.sessionId && update.update.sessionUpdate === "usage_update")
+				.at(-1)?.update as { cost?: { amount: number } } | undefined;
+			expect(last?.cost?.amount).toBeCloseTo(1.2, 10);
+		} finally {
+			for (const ref of AgentRegistry.global().list()) {
+				if (ref.sessionFile?.startsWith(artifacts)) AgentRegistry.global().unregister(ref.id);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("loads a session stored under a legacy/hashed project directory (#7779)", async () => {
@@ -3958,7 +4062,7 @@ describe("ACP agent", () => {
 					],
 					default: "staging",
 				},
-				target_other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
+				target__other: { type: "string", title: "Target — Other", description: "Your own answer instead" },
 				checks: {
 					type: "array",
 					title: "Checks",
@@ -3970,7 +4074,7 @@ describe("ACP agent", () => {
 					},
 					default: ["lint"],
 				},
-				checks_other: {
+				checks__other: {
 					type: "string",
 					title: "Checks — Other",
 					description: "Another answer, added to those checked",
@@ -3996,9 +4100,9 @@ describe("ACP agent", () => {
 				action: "accept",
 				content: {
 					target: "staging",
-					target_other: " canary ",
+					target__other: " canary ",
 					checks: ["lint"],
-					checks_other: "smoke",
+					checks__other: "smoke",
 					replicas: 2,
 				},
 			}));
@@ -4209,6 +4313,25 @@ describe("ACP agent", () => {
 			expect(await ctx.confirm("X", "Y")).toBe(false);
 			expect(await ctx.input("X")).toBeUndefined();
 			expect(calls).toHaveLength(3);
+		});
+
+		it("rejects form and ask dialogs with the client's error instead of reporting a cancel", async () => {
+			const clientError = new RequestError(-32602, "Unsupported ACP elicitation form");
+			const { connection } = createElicitConnection(async () => {
+				throw clientError;
+			});
+			const ctx = createAcpExtensionUiContext(connection, () => "session-form-reject", FORM_CAPABILITIES);
+
+			const formError = await ctx.formDialog!(DEPLOY_FORM).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			expect(formError).toBeInstanceOf(Error);
+			expect((formError as Error).message).toContain("Unsupported ACP elicitation form");
+			expect((formError as Error).cause).toBe(clientError);
+			await expect(
+				ctx.askDialog!([{ id: "choice", question: "Choose", options: [{ label: "A" }] }]),
+			).rejects.toThrow("Unsupported ACP elicitation form");
 		});
 
 		it("skips the SDK call entirely when dialogOptions.signal is already aborted", async () => {

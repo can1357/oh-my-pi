@@ -73,7 +73,7 @@ describe("JSON query in read tool", () => {
 
 		await fs.writeFile(jsonFile, JSON.stringify(testData, null, 2), "utf-8");
 		await fs.writeFile(jsonlFile, testLines.join("\n") + "\n", "utf-8");
-		// Literals JS numbers cannot hold; jaq prints them verbatim.
+		// Literals JS numbers cannot hold; jq prints them verbatim.
 		await fs.writeFile(numbersFile, '{"ids":[12345678901234567890,1.0,3]}', "utf-8");
 		// `.name` fails on the third element.
 		await fs.writeFile(mixedFile, '[{"name":"a"},{"name":"b"},3]', "utf-8");
@@ -141,7 +141,7 @@ describe("JSON query in read tool", () => {
 		);
 	});
 
-	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+	it("retains the reason and key when jq rejects a large JSON value", async () => {
 		const largeFile = path.join(tempDir, "large.json");
 		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
 		await Bun.write(largeFile, JSON.stringify([{ rows }]));
@@ -151,8 +151,7 @@ describe("JSON query in read tool", () => {
 			error => error,
 		);
 		const message = String(error);
-		expect(message).toContain("cannot index");
-		expect(message).toContain('with "changedFiles"');
+		expect(message).toContain('Cannot index array with string ("changedFiles")');
 		expect(message.length).toBeLessThan(1000);
 	});
 
@@ -277,7 +276,7 @@ describe("JSON query in read tool", () => {
 
 	it("stops jq once the page is full, before later results fail", async () => {
 		const result = await readTool.execute("call_early_stop", { path: `${mixedFile}?q=.[] | .name&raw=true&limit=1` });
-		// jaq may report the later failure before it is stopped; the page still stands
+		// jq may report the later failure before it is stopped; the page still stands
 		expect(getText(result).split("\n").slice(-2)).toEqual([
 			"a",
 			"[more results; append ?q=.[] | .name&raw=true&limit=1&offset=1 to continue]",

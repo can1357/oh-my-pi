@@ -1,7 +1,9 @@
 import { Database } from "bun:sqlite";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AdvisorToolFactory } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
 
 /**
@@ -51,4 +53,9 @@ export function activateTodoTool(session: AgentSession, cwd: string): void {
 			settings: session.settings,
 		}),
 	]);
+}
+
+/** Advisor tools that hand every advisor the same fixture instances; for mocks whose state does not matter. */
+export function fixedAdvisorTools(...tools: AgentTool[]): AdvisorToolFactory {
+	return { names: () => tools.map(tool => tool.name), create: () => ({ tools }) };
 }

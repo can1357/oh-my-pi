@@ -19,7 +19,7 @@ export const stateDefs = {
 		"'full' | 'delta'",
 		"`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.",
 	),
-	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'",
+	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned'",
 	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop'",
 	GoalStatus: "'active' | 'paused' | 'budget-limited' | 'complete' | 'dropped'",
 	SlashCommandSource: "'builtin' | 'skill' | 'extension' | 'custom' | 'mcp_prompt' | 'file'",
@@ -33,7 +33,6 @@ export const stateDefs = {
 	TodoItem: {
 		content: "string",
 		status: "TodoStatus",
-		"blocker?": doc("string", "What a `blocked` task is waiting on."),
 		"details?": "string",
 		"notes?": "string[]",
 	},

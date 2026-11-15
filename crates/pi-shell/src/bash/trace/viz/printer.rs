@@ -23,7 +23,8 @@ use super::{
 use crate::bash::{
 	event::ResolvedKind,
 	syntax::{
-		AndOrOp, CaseTerm, Features, NO_ALIASES, NodeId, Parser, RedirOp, Sep, Span,
+		AndOrOp, CaseTerm, Features, NO_ALIASES, NodeId, ParseErrorKind, Parser, Pos, RedirOp, Sep,
+		Span,
 		tree::{
 			AndOr, Command, CommandKind, For, HereDoc, List, Part, Pipeline, RedirFd, RedirTarget,
 			Seq, Simple, Tree, Word, WordPart,
@@ -89,7 +90,7 @@ struct Cached {
 	docs:         HashMap<NodeKey, Arc<Vec<Option<Span>>>>,
 	script_utf16: Option<Arc<[u32]>>,
 	/// Parses of uncompiled script byte ranges; the script never changes.
-	ahead:        HashMap<(usize, usize), Option<Arc<Ahead>>>,
+	ahead:        HashMap<(usize, usize, bool), Option<Arc<Ahead>>>,
 }
 #[derive(Clone, Debug)]
 struct UnitStamp {
@@ -173,6 +174,16 @@ struct Ahead {
 	ids:      Vec<u32>,
 	map:      SourceMap,
 	analysis: Analysis,
+	/// The text parsed when it is not the script's own: a streamed tail
+	/// repaired by [`repair_tail`] or cut back by [`parsed_head`].
+	repaired: Option<Box<[u8]>>,
+	/// Bytes of the range `repaired` keeps as they are; what follows them
+	/// in it was appended, past the script.
+	kept:     usize,
+	/// Bytes at the end of the range drawn nowhere: an unfinished end, a
+	/// dangling operator or redirection, or the start of an awaited keyword.
+	/// Bytes between `kept` and them stay literal.
+	hidden:   usize,
 }
 #[derive(Clone, Debug)]
 struct ByteOrigins {
@@ -325,6 +336,9 @@ fn physical_rows(rows: Vec<Row>) -> Vec<Row> {
 		}
 		let segments = std::mem::take(&mut row.segments);
 		let mut continuation = row.clone();
+		// The head row keeps the statement's full source; copying it onto every
+		// continuation would cost lines × command bytes.
+		continuation.detail = None;
 		continuation.meta = None;
 		continuation.executed_at_ns = None;
 		continuation.execution_seq = None;
@@ -589,7 +603,11 @@ impl<S: VizSource> Printer<'_, S> {
 			return;
 		};
 		let lo = from;
-		let bytes = &script[lo..stop];
+		let bytes = match &ahead.repaired {
+			Some(repaired) => repaired,
+			None => &script[lo..stop],
+		};
+		let first_row = self.rows.len();
 		let mut cursor = 0;
 		for (((tree, root), span), id) in ahead.commands.iter().zip(&ahead.spans).zip(&ahead.ids) {
 			let start = span.lo as usize;
@@ -609,31 +627,86 @@ impl<S: VizSource> Printer<'_, S> {
 			self.chain_list(List::at(tree, *root), &context, 0, lead.take());
 			cursor = span.hi as usize;
 		}
-		self.pending(&script[lo + cursor..hi], (lo + cursor) as u32, 0);
+		if ahead.repaired.is_some() {
+			// A row drawn only from appended bytes, as the `:` an empty body
+			// is closed with, has no source of its own: it is not drawn.
+			let mut index = 0;
+			self.rows.retain(|row| {
+				index += 1;
+				index <= first_row || row.range.is_none_or(|[lo, hi]| lo != hi)
+			});
+		}
+		// Bytes past `kept` are not the script's; only a repair at the
+		// script's end hides bytes, so `stop == hi`.
+		let shown = hi - ahead.hidden;
+		let cursor = (lo + cursor.min(ahead.kept)).min(shown);
+		self.pending(&script[cursor..shown], cursor as u32, 0);
 	}
 
 	fn parsed_ahead(&self, lo: usize, hi: usize) -> Option<Arc<Ahead>> {
-		if let Some(cached) = self.source.cache().inner.lock().ahead.get(&(lo, hi)) {
+		// Only a command its caller says is still streaming in can end
+		// mid-construct, and only as a live draft: a stored snapshot is final,
+		// and once a run starts the script is whole, so an error past what it
+		// has compiled is its own and stays literal.
+		let streaming =
+			self.options.streaming && self.source.streaming() && self.runtime.timeline.length == 0;
+		if let Some(cached) = self
+			.source
+			.cache()
+			.inner
+			.lock()
+			.ahead
+			.get(&(lo, hi, streaming))
+		{
 			return cached.clone();
 		}
 		let script: &[u8] = self.source.script().as_ref();
-		let mut parser = Parser::new(&script[lo..hi], Features::NONE, NO_ALIASES);
-		let mut commands = Vec::new();
-		let mut spans = Vec::new();
-		while let Some(Ok(command)) = parser.next_command() {
-			spans.push(command.span);
-			commands.push((command.tree, command.root.index()));
+		// Streaming cuts off only the script's end; anywhere else the text
+		// is the script's own.
+		let streamed = streaming && hi == script.len();
+		let end = if streamed {
+			hi - unfinished_end(&script[lo..hi])
+		} else {
+			hi
+		};
+		let text = &script[lo..end];
+		let Parsed { mut commands, mut spans, rest, error } = parse_commands(text, Pos::START);
+		let mut repaired = None;
+		let mut kept = text.len();
+		let mut hidden = hi - end;
+		if let Some(error) = error
+			&& streamed
+		{
+			let budget = Budget::new();
+			let repair = match repair_tail(text, rest, &error, true, &budget) {
+				Some(repair) => {
+					hidden += text.len() - repair.kept;
+					Some(repair)
+				},
+				// What follows the head stays literal.
+				None => parsed_head(text, rest, true, &budget),
+			};
+			if let Some(repair) = repair {
+				commands.extend(repair.commands);
+				spans.extend(repair.spans);
+				kept = repair.kept;
+				repaired = Some(repair.text);
+			}
 		}
 		let parsed = (!commands.is_empty()).then(|| {
 			let ids: Vec<u32> = spans.iter().map(|span| lo as u32 + span.lo + 1).collect();
 			let mut analysis = analysis::program(&commands, AHEAD, &ids);
 			analysis.arithmetic = Arc::clone(&self.analysis.arithmetic);
+			let appended = repaired.as_deref().map_or(kept, <[u8]>::len) - kept;
 			Arc::new(Ahead {
-				map: source::script_map(self.source, lo, hi - lo),
+				map: source::script_map(self.source, lo, kept, appended),
 				commands,
 				spans,
 				ids,
 				analysis,
+				repaired,
+				kept,
+				hidden,
 			})
 		});
 		self
@@ -642,7 +715,7 @@ impl<S: VizSource> Printer<'_, S> {
 			.inner
 			.lock()
 			.ahead
-			.insert((lo, hi), parsed.clone());
+			.insert((lo, hi, streaming), parsed.clone());
 		parsed
 	}
 
@@ -2531,6 +2604,744 @@ fn leading_operator(bytes: &[u8]) -> Option<(Option<AndOrOp>, usize)> {
 			.count(),
 	))
 }
+
+/// Complete commands of a text up to the first that does not parse.
+struct Parsed {
+	commands: Vec<(Tree, u32)>,
+	spans:    Vec<Span>,
+	/// Where the first command that does not parse starts.
+	rest:     Pos,
+	/// Why it fails.
+	error:    Option<ParseErrorKind>,
+}
+
+/// The commands of `text` from `from`: [`Pos::START`], or the
+/// [`Parsed::rest`] of a text with the same bytes before it.
+fn parse_commands(text: &[u8], from: Pos) -> Parsed {
+	let mut parser = Parser::new(text, Features::NONE, NO_ALIASES).with_pos(from);
+	let mut commands = Vec::new();
+	let mut spans = Vec::new();
+	loop {
+		let rest = parser.pos();
+		let error = match parser.next_command() {
+			Some(Ok(command)) => {
+				spans.push(command.span);
+				commands.push((command.tree, command.root.index()));
+				continue;
+			},
+			Some(Err(error)) => Some(error.kind),
+			None => None,
+		};
+		return Parsed { commands, spans, rest, error };
+	}
+}
+
+/// A streamed tail parsed as it will most likely continue.
+struct Repair {
+	text:     Box<[u8]>,
+	/// Bytes of the original text `text` starts with; the rest of it was
+	/// appended.
+	kept:     usize,
+	commands: Vec<(Tree, u32)>,
+	spans:    Vec<Span>,
+}
+
+/// Closers one repair appends at most; each closes one construct.
+const MAX_CLOSERS: usize = 16;
+
+/// What one repair may spend. Its candidates and the `$(` it repairs inside
+/// recurse: the parses bound the work, so a draft stays cheap to draw at
+/// every streamed update, and the nesting bounds the stack.
+struct Budget {
+	parses:  std::cell::Cell<u32>,
+	nesting: std::cell::Cell<u32>,
+}
+impl Budget {
+	const NESTING: u32 = 16;
+	const PARSES: u32 = 256;
+
+	const fn new() -> Self {
+		Self {
+			parses:  std::cell::Cell::new(Self::PARSES),
+			nesting: std::cell::Cell::new(Self::NESTING),
+		}
+	}
+
+	/// One parse more; `None` once the parses are spent.
+	fn spend(&self) -> Option<()> {
+		self.parses.set(self.parses.get().checked_sub(1)?);
+		Some(())
+	}
+
+	/// `repair` one `$(` deeper; `None` past the deepest.
+	fn nested<T>(&self, repair: impl FnOnce() -> Option<T>) -> Option<T> {
+		let left = self.nesting.get().checked_sub(1)?;
+		self.nesting.set(left);
+		let repaired = repair();
+		self.nesting.set(left + 1);
+		repaired
+	}
+}
+
+/// Bytes ending a streamed `text` that parse, but not as they will: a line
+/// continuation with the indentation after it, whose `\` would draw as a
+/// word, and a lone `&`, so far the first of `&&`, which would background
+/// the command.
+fn unfinished_end(text: &[u8]) -> usize {
+	let mut end = text.len();
+	loop {
+		let blanks = text[..end]
+			.iter()
+			.rev()
+			.take_while(|byte| matches!(byte, b' ' | b'\t'))
+			.count();
+		// Blanks are hidden only after a continuation: after a `\` they are
+		// the escaped word character.
+		let at = match text[..end - blanks].strip_suffix(b"\n") {
+			Some(line) => line.len(),
+			None if blanks == 0 => end,
+			None => break,
+		};
+		if !escaped(&text[..at]) {
+			break;
+		}
+		end = at - 1;
+	}
+	if end == text.len()
+		&& let [.., before, b'&'] = text
+		&& !matches!(before, b'&' | b'>' | b'<' | b'|' | b';')
+		&& !escaped(&text[..end - 1])
+	{
+		end -= 1;
+	}
+	text.len() - end
+}
+
+/// A script still streaming in usually ends mid-construct: inside a quote or
+/// `$(`, in a compound command before its closing keyword, after a `|`, `&&`
+/// or `>` whose operand has not arrived, or in a command name that is so far
+/// a reserved word (`fi` of `find`). Parsed as is, the whole command stays
+/// literal until the construct closes, so its rows flip between Pseudo and
+/// source as the script streams in. Instead parse it as it most likely
+/// continues: drop what cannot be drawn yet, then append the closers the
+/// parser awaits. Only the command at `from`, the first that fails with
+/// `error`, is reparsed, and only the commands from there are returned.
+/// `None` when `error` is not an unfinished end, or no repaired text parses.
+fn repair_tail(
+	text: &[u8],
+	from: Pos,
+	error: &ParseErrorKind,
+	fill: bool,
+	budget: &Budget,
+) -> Option<Repair> {
+	// Candidate ends, most likely first: the bytes kept, then what is
+	// appended before the closers the parser awaits.
+	let mut ends: Vec<(usize, &[u8])> = Vec::with_capacity(4);
+	// A compound keyword with no header yet (`; for`) reads as the command
+	// name it was a byte ago (`fo`); quoted, it is one until its header
+	// arrives. In a quote or `$(` still open, which would draw the quotes
+	// inline, it is hidden instead.
+	if fill
+		&& let Some((start, end)) = bare_keyword(text)
+		&& start >= from.offset as usize
+		&& !matches!(parse_commands(&text[..start], from).error, Some(ParseErrorKind::Unmatched(_)))
+	{
+		ends.push((end, b"''"));
+	}
+	// Bash reads `((` as arithmetic only once its `))` is there; closed
+	// after an operator, it draws the operator, and before, it reads as
+	// nested subshells. Only a quote still open goes first.
+	if !matches!(error, ParseErrorKind::Unmatched("\"" | "'" | "`" | "}"))
+		&& let Some(end) = open_arithmetic(text)
+	{
+		ends.push(end);
+	}
+	match error {
+		ParseErrorKind::Unmatched(close) => {
+			// A backtick body is parsed only once closed: an operator
+			// dangling in it would draw it empty.
+			if *close == "`"
+				&& let Some(cut) = dangling_operator(text)
+			{
+				ends.push((cut, b""));
+			}
+			ends.push((text.len(), b""));
+		},
+		ParseErrorKind::UnexpectedEof { from: open } => {
+			// An operator awaiting its operand draws nothing yet, nor does
+			// the start of the keyword the compound awaits.
+			if let Some(cut) = dangling_operator(text)
+				.or_else(|| open.and_then(|(keyword, _)| awaited_prefix(text, keyword)))
+			{
+				ends.push((cut, b""));
+			}
+			ends.push((text.len(), b""));
+		},
+		ParseErrorKind::UnexpectedToken { token, .. } => {
+			// Before a newline: a redirection awaiting its target, or a case
+			// pattern awaiting its `)`. Otherwise only a reserved word ending
+			// the text (`fi` of `find`) can still grow into something else.
+			let newline = **token == *b"newline";
+			if newline && let Some(cut) = dangling_redirection(text) {
+				ends.push((cut, b""));
+				// After a compound, its fd is no argument: it waits too.
+				let fd = text[..cut]
+					.iter()
+					.rev()
+					.take_while(|byte| byte.is_ascii_digit())
+					.count();
+				if fd > 0 {
+					ends.push((cut - fd, b""));
+				}
+			}
+			// A function header awaiting its `)` (`gen(`) is the command it
+			// read as a byte ago.
+			if newline && text.trim_ascii_end().ends_with(b"(") {
+				ends.push((text.trim_ascii_end().len() - 1, b""));
+			}
+			// The start of the header word a compound awaits (`for f i`), or
+			// the fd of a redirection still arriving after a compound (`(a)
+			// 2`): hidden until whole.
+			if text.ends_with(token)
+				&& ([&b"in"[..], b"do"]
+					.iter()
+					.any(|word| word.len() > token.len() && word.starts_with(token))
+					|| token.iter().all(u8::is_ascii_digit))
+			{
+				ends.push((text.len() - token.len(), b""));
+			}
+			let reserved = token.iter().all(u8::is_ascii_lowercase) && text.ends_with(token);
+			if newline || reserved {
+				let word = text
+					.iter()
+					.rposition(|byte| !byte.is_ascii_lowercase())
+					.map_or(0, |at| at + 1);
+				// A word that starts the keyword its compound awaits (`d` or
+				// `do` of `done`, `e` of `esac`) is hidden like any prefix of
+				// it; that compound may be open in a `$(` still open.
+				let (scope, at) = match open_substitutions(text)
+					.pop()
+					.filter(|&start| start >= from.offset as usize && start <= word)
+				{
+					Some(start) => (Pos::START, start),
+					None => (from, 0),
+				};
+				if word < text.len()
+					&& word >= from.offset as usize
+					&& let Some(ParseErrorKind::UnexpectedEof { from: Some((keyword, _)) }) =
+						parse_commands(&text[at..word], scope).error
+					&& awaited_prefix(&text[at..], keyword) == Some(word - at)
+				{
+					ends.push((word, b""));
+				}
+				// Otherwise a pattern gets its `)` appended; quoted, a reserved
+				// word is a plain command name, as it will be once the rest of
+				// the name arrives.
+				ends.push((text.len(), if newline { b"" } else { b"''" }));
+			}
+		},
+		_ => {},
+	}
+	// Inside `$(` a dangling operator surfaces as the unclosed `$(`, and
+	// closing it leaves `|)`: drop the operator first, then close.
+	if let Some(cut) = dangling_operator(text).or_else(|| dangling_redirection(text))
+		&& !ends.contains(&(cut, b""))
+	{
+		ends.push((cut, b""));
+	}
+	ends
+		.into_iter()
+		.filter(|&(kept, _)| kept >= from.offset as usize)
+		.find_map(|(kept, appended)| {
+			let mut repaired = Vec::with_capacity(kept + appended.len());
+			repaired.extend_from_slice(&text[..kept]);
+			repaired.extend_from_slice(appended);
+			close(repaired, kept, from, true, fill, budget)
+		})
+		// Still inside a `$(`, the error is its body's: repair that.
+		.or_else(|| close_substitution(text, text.len(), from, fill, false, budget))
+}
+
+/// What a repair appended last.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Appended {
+	/// The closer of a quote or `$(`.
+	Quote,
+	/// Anything else: a compound's completion, a pattern's `)`.
+	Other,
+}
+
+/// `text`, whose first `kept` bytes are the script's, parsed from `from`
+/// with what the parser awaits appended: the completions of compound
+/// commands, the closers of quotes and `$(` when `quotes` (after the end of
+/// a heredoc still open in them), and a case pattern's `)`. When `fill`, a
+/// `:` may fill a body or header still empty; its row, drawn from no
+/// source, is dropped, but a `$(` would draw it inline, so the compounds
+/// still open in one are completed without.
+fn close(
+	mut text: Vec<u8>,
+	mut kept: usize,
+	mut from: Pos,
+	quotes: bool,
+	fill: bool,
+	budget: &Budget,
+) -> Option<Repair> {
+	let mut commands = Vec::new();
+	let mut spans = Vec::new();
+	let mut last: Option<(usize, &[u8], Appended)> = None;
+	let mut document = false;
+	for _ in 0..=MAX_CLOSERS {
+		budget.spend()?;
+		let tail = parse_commands(&text, from);
+		commands.extend(tail.commands);
+		spans.extend(tail.spans);
+		from = tail.rest;
+		let (awaited, appended): (&[u8], Appended) = match tail.error {
+			None => return Some(Repair { text: text.into(), kept, commands, spans }),
+			Some(ParseErrorKind::Unmatched(close)) if quotes => {
+				// Awaited again right after it was appended, the closer may
+				// have been read as a line of a heredoc still open: end that
+				// first, once. Otherwise another construct awaits it too.
+				if let Some((at, previous, Appended::Quote)) = last
+					&& previous == close.as_bytes()
+					&& !document
+					&& let Some((cut, end)) = heredoc_end(&text[..at])
+					&& cut >= from.offset as usize
+				{
+					document = true;
+					kept = kept.min(cut);
+					text.truncate(cut);
+					text.extend_from_slice(&end);
+				}
+				(close.as_bytes(), Appended::Quote)
+			},
+			Some(ParseErrorKind::UnexpectedEof { from: open }) => {
+				// A function's header reports no opener: its body is awaited.
+				let keyword = open
+					.map(|(keyword, _)| keyword)
+					.or_else(|| function_header(&text).then_some("function"))?;
+				// The first completion that closes the compound, leaving at
+				// most an outer construct open.
+				let at = text.len();
+				let completion = completions(keyword)
+					.iter()
+					.filter(|completion| fill || !completion.contains(&b':'))
+					.find(|completion| {
+						text.truncate(at);
+						text.extend_from_slice(completion);
+						budget.spend().is_some()
+							&& matches!(
+								parse_commands(&text, from).error,
+								None
+									| Some(
+										ParseErrorKind::Unmatched(_) | ParseErrorKind::UnexpectedEof { .. }
+									)
+							)
+					})?;
+				text.truncate(at);
+				(*completion, Appended::Other)
+			},
+			Some(ParseErrorKind::UnexpectedToken { token, .. }) if *token == *b"newline" => {
+				(b")", Appended::Other)
+			},
+			// The `)` of a `$(` met a command still open in it: repair the
+			// body first.
+			Some(ParseErrorKind::UnexpectedToken { token, .. })
+				if *token == *b")" && matches!(last, Some((_, b")", Appended::Quote))) =>
+			{
+				let at = last.map_or(text.len(), |(at, ..)| at);
+				let rest = close_substitution(&text[..at], kept, from, fill, true, budget)?;
+				commands.extend(rest.commands);
+				spans.extend(rest.spans);
+				return Some(Repair { text: rest.text, kept: rest.kept, commands, spans });
+			},
+			Some(_) => return None,
+		};
+		last = Some((text.len(), awaited, appended));
+		text.extend_from_slice(awaited);
+	}
+	None
+}
+
+/// `$(` bodies [`close_substitution`] tries.
+const MAX_SUBSTITUTIONS: usize = 4;
+
+/// `text`, whose first `kept` bytes are the script's, with the body of a
+/// `$(` still open at its end repaired, then closed and parsed from `from`.
+/// The innermost `$(` the balance scan finds goes first, then every `$(`
+/// from the last: a `case` pattern's `)` misleads the scan. A `$(` whose
+/// body meets a `)` is closed in `text`. The body's commands before its
+/// last stay; that one is repaired like a script's tail, else cut back to a
+/// head, else hidden. `retry` marks a `text` that already failed with the
+/// `)` appended: a body left as it is would fail again.
+fn close_substitution(
+	text: &[u8],
+	kept: usize,
+	from: Pos,
+	fill: bool,
+	retry: bool,
+	budget: &Budget,
+) -> Option<Repair> {
+	let positional = text
+		.windows(2)
+		.enumerate()
+		.filter(|&(at, pair)| pair == b"$(" && text.get(at + 2) != Some(&b'('))
+		.map(|(at, _)| at + 2)
+		.rev();
+	let mut starts: Vec<usize> = Vec::with_capacity(MAX_SUBSTITUTIONS);
+	for start in open_substitutions(text).into_iter().rev().chain(positional) {
+		if start >= from.offset as usize && !starts.contains(&start) {
+			starts.push(start);
+		}
+		if starts.len() == MAX_SUBSTITUTIONS {
+			break;
+		}
+	}
+	budget.nested(|| {
+		starts.into_iter().find_map(|start| {
+			let body = &text[start..];
+			budget.spend()?;
+			let parsed = parse_commands(body, Pos::START);
+			let repair = match &parsed.error {
+				Some(ParseErrorKind::UnexpectedToken { token, .. }) if **token == *b")" => {
+					return None;
+				},
+				Some(error) => repair_tail(body, parsed.rest, error, false, budget)
+					.or_else(|| parsed_head(body, parsed.rest, false, budget)),
+				None => None,
+			};
+			let rest = parsed.rest.offset as usize;
+			let (repaired, body_kept) = repair
+				.as_ref()
+				.map_or((&body[..rest], rest), |repair| (&repair.text[..], repair.kept));
+			if retry && repaired == body {
+				return None;
+			}
+			let mut closed = Vec::with_capacity(start + repaired.len() + 1);
+			closed.extend_from_slice(&text[..start]);
+			closed.extend_from_slice(repaired);
+			closed.push(b')');
+			close(closed, kept.min(start + body_kept), from, true, fill, budget)
+		})
+	})
+}
+
+/// Where the bodies of the `$(` still open at the end of `text` start,
+/// outermost first. Quoted text and comments are skipped; quotes restart
+/// in each `$(`.
+fn open_substitutions(text: &[u8]) -> Vec<usize> {
+	// Each `(` still open: the body a `$(` starts, and whether it opened
+	// inside double quotes.
+	let mut open: Vec<(Option<usize>, bool)> = Vec::new();
+	let mut double = false;
+	let mut at = 0;
+	while at < text.len() {
+		match text[at] {
+			b'\\' => at += 1,
+			b'\'' if !double => match text[at + 1..].iter().position(|&byte| byte == b'\'') {
+				Some(len) => at += len + 1,
+				None => break,
+			},
+			b'"' => double = !double,
+			b'#'
+				if !double
+					&& (at == 0 || text[at - 1].is_ascii_whitespace() || text[at - 1] == b';') =>
+			{
+				match text[at..].iter().position(|&byte| byte == b'\n') {
+					Some(len) => at += len,
+					None => break,
+				}
+			},
+			b'$' if text.get(at + 1) == Some(&b'(') => {
+				let body = (text.get(at + 2) != Some(&b'(')).then_some(at + 2);
+				open.push((body, double));
+				double = false;
+				at += 1;
+			},
+			b'(' if !double => open.push((None, false)),
+			b')' if !double => {
+				if let Some((_, outer)) = open.pop() {
+					double = outer;
+				}
+			},
+			_ => {},
+		}
+		at += 1;
+	}
+	open.into_iter().filter_map(|(body, _)| body).collect()
+}
+
+/// What ends the heredoc still open at the end of `text`, the last one
+/// opened: where `text` is cut, before a last line that so far is a prefix
+/// of its delimiter, and the delimiter on a line of its own. `None` when
+/// none is open.
+fn heredoc_end(text: &[u8]) -> Option<(usize, Vec<u8>)> {
+	let operator = text.windows(2).rposition(|pair| pair == b"<<")?;
+	// `<<<` is a here-string.
+	if text.get(operator + 2) == Some(&b'<') || (operator > 0 && text[operator - 1] == b'<') {
+		return None;
+	}
+	let mut at = operator + 2;
+	let tabs = text.get(at) == Some(&b'-');
+	at += usize::from(tabs);
+	at += text[at..]
+		.iter()
+		.take_while(|byte| matches!(byte, b' ' | b'\t'))
+		.count();
+	let word_end = text[at..]
+		.iter()
+		.position(|byte| byte.is_ascii_whitespace() || b";|&<>()".contains(byte))
+		.map_or(text.len(), |len| at + len);
+	let word = &text[at..word_end];
+	// A quote still open in the word is closed first; a word that is no name
+	// (`1 << 2`) is no delimiter.
+	let quotes = |quote| {
+		word
+			.iter()
+			.fold(false, |open, &byte| open ^ (byte == quote))
+	};
+	let delimiter: Vec<u8> = word
+		.iter()
+		.copied()
+		.filter(|byte| !matches!(byte, b'\'' | b'"' | b'\\'))
+		.collect();
+	if quotes(b'\'')
+		|| quotes(b'"')
+		|| !delimiter
+			.first()
+			.is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+	{
+		return None;
+	}
+	// The tabs `<<-` strips from a document line.
+	let content = |line: &'_ [u8]| -> usize {
+		if tabs {
+			line.iter().take_while(|&&byte| byte == b'\t').count()
+		} else {
+			0
+		}
+	};
+	let terminates = |line: &[u8]| line[content(line)..] == delimiter[..];
+	// The delimiter on a line of its own, after a newline when `lead`.
+	let end = |lead: bool| {
+		let mut end = Vec::with_capacity(delimiter.len() + 2);
+		if lead {
+			end.push(b'\n');
+		}
+		end.extend_from_slice(&delimiter);
+		end.push(b'\n');
+		end
+	};
+	// The document starts on the line after the operator's.
+	let Some(len) = text[word_end..].iter().position(|&byte| byte == b'\n') else {
+		return Some((text.len(), end(true)));
+	};
+	let mut document = text[word_end + len + 1..].split(|&byte| byte == b'\n');
+	let partial = document.next_back().unwrap_or_default();
+	if document.any(terminates) {
+		None
+	} else if terminates(partial) {
+		Some((text.len(), b"\n".to_vec()))
+	} else if delimiter.starts_with(&partial[content(partial)..]) {
+		// Empty, or the delimiter so far: it is the line that ends it.
+		Some((text.len() - partial.len(), end(false)))
+	} else {
+		Some((text.len(), end(true)))
+	}
+}
+
+/// Candidate cuts [`parsed_head`] tries, from the end.
+const MAX_HEAD_CUTS: usize = 8;
+
+/// The commands from `from`, the first command of `text` that fails, up to
+/// its last list or pipeline operator before which it parses once closed:
+/// what precedes a compound command still opening (`&& for f in`, `do\n
+/// if`), which nothing appended completes. The rest stays literal, rather
+/// than the whole command.
+fn parsed_head(text: &[u8], from: Pos, fill: bool, budget: &Budget) -> Option<Repair> {
+	let cuts = text
+		.iter()
+		.enumerate()
+		.skip(from.offset as usize)
+		.filter(|&(at, byte)| {
+			matches!(byte, b';' | b'&' | b'|' | b'\n')
+				&& (at == 0 || !matches!(text[at - 1], b';' | b'&' | b'|' | b'<' | b'>'))
+		});
+	for (at, &byte) in cuts.rev().take(MAX_HEAD_CUTS) {
+		// A lone `&` backgrounds the head and a `;` ends it: both stay with it.
+		let lone =
+			matches!(byte, b';' | b'&') && !matches!(text.get(at + 1), Some(b'&' | b'>' | b';'));
+		let end = if lone { at + 1 } else { at };
+		// A cut inside quotes or `$(` leaves the head unterminated: it does
+		// not parse.
+		if let Some(head) = close(text[..end].to_vec(), end, from, false, fill, budget)
+			&& !head.commands.is_empty()
+		{
+			return Some(head);
+		}
+	}
+	None
+}
+
+/// The `)` an open arithmetic appends at most.
+const PARENS: &[u8; 16] = b"))))))))))))))))";
+
+/// An open arithmetic `((` or `$((` ending `text`: where it is cut, before a
+/// trailing operator or `(` awaiting its operand, and the `)` closing what
+/// is open in it, then it. Still empty, it is hidden whole.
+fn open_arithmetic(text: &[u8]) -> Option<(usize, &'static [u8])> {
+	let start = text.windows(2).rposition(|pair| pair == b"((")?;
+	let open = start + 2;
+	let cut = text
+		.iter()
+		.rposition(|byte| !b" \t+-*/%<>=&|^!~?:,(".contains(byte))
+		.map_or(0, |at| at + 1)
+		.max(open);
+	if cut == open {
+		let start = if start > 0 && text[start - 1] == b'$' {
+			start - 1
+		} else {
+			start
+		};
+		return Some((start, b""));
+	}
+	let (mut depth, mut closed) = (0, 0);
+	for &byte in &text[open..cut] {
+		match byte {
+			b'(' => depth += 1,
+			b')' if depth > 0 => depth -= 1,
+			b')' => closed += 1,
+			_ => {},
+		}
+	}
+	if closed >= 2 {
+		return None;
+	}
+	Some((cut, PARENS.get(..depth + 2 - closed)?))
+}
+
+/// What closes the compound command opened by `keyword`, in the order
+/// tried: its closer; a `:` filling its body still empty; the rest of its
+/// header still arriving, with that body. An empty brace group is not
+/// filled: drawn from no source, it would have no row of its own left.
+fn completions(keyword: &str) -> &'static [&'static [u8]] {
+	match keyword {
+		"if" => &[b"\nfi", b"\n:\nfi", b"\nthen :\nfi"],
+		"for" | "select" | "while" | "until" => &[b"\ndone", b"\n:\ndone", b"\ndo :\ndone"],
+		"case" => &[b"\nesac", b"\nin\nesac", b")\nesac"],
+		"{" => &[b"\n}"],
+		"(" => &[b"\n)", b"\n:\n)"],
+		"function" => &[b" {\n:\n}"],
+		_ => &[b" ]]"],
+	}
+}
+
+/// Whether `text` ends in a function header whose body is still to come:
+/// `gen()`, `function gen`.
+fn function_header(text: &[u8]) -> bool {
+	let text = text.trim_ascii_end();
+	if text.ends_with(b"()") {
+		return true;
+	}
+	let mut words = text
+		.rsplit(u8::is_ascii_whitespace)
+		.filter(|word| !word.is_empty());
+	words.next().is_some() && words.next() == Some(b"function")
+}
+
+/// Start and end of the compound command keyword ending `text` before
+/// blanks with no header yet (`; for`, `&& while `), which no completion
+/// closes.
+fn bare_keyword(text: &[u8]) -> Option<(usize, usize)> {
+	let end = text.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+	let at = text[..end]
+		.iter()
+		.rposition(|&byte| !(byte.is_ascii_lowercase() || byte == b'['))
+		.map_or(0, |at| at + 1);
+	let keyword =
+		matches!(&text[at..end], b"if" | b"for" | b"select" | b"while" | b"until" | b"case" | b"[[");
+	(keyword && command_position(text, at)).then_some((at, end))
+}
+
+/// Start of the `|`, `|&`, `&&` or `||` ending `text` before blanks: a
+/// pipeline or list awaiting its next command.
+fn dangling_operator(text: &[u8]) -> Option<usize> {
+	let end = text.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+	let width = match &text[..end] {
+		[.., b'&', b'&'] | [.., b'|', b'|' | b'&'] => 2,
+		[.., b'|'] => 1,
+		_ => return None,
+	};
+	let at = end - width;
+	// An escaped `\|` is a word, not an operator.
+	(!escaped(&text[..at])).then_some(at)
+}
+
+/// Whether the byte after `text` is escaped: `text` ends in an odd number
+/// of backslashes (`\\` is an escaped backslash).
+fn escaped(text: &[u8]) -> bool {
+	text.iter().rev().take_while(|&&byte| byte == b'\\').count() % 2 == 1
+}
+
+/// Start of the redirection operator ending `text` before blanks, awaiting
+/// its target. A leading fd stays: `2` reads as an argument, as it did
+/// before the `>` arrived.
+fn dangling_redirection(text: &[u8]) -> Option<usize> {
+	let mut end = text.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+	if text[..end].ends_with(b"<<-") {
+		end -= 1;
+	}
+	let at = text[..end]
+		.iter()
+		.rposition(|byte| !matches!(byte, b'<' | b'>' | b'&' | b'|'))
+		.map_or(0, |at| at + 1);
+	let operator = text[at..end].iter().any(|byte| matches!(byte, b'<' | b'>'));
+	(operator && !escaped(&text[..at])).then_some(at)
+}
+
+/// Start of the command name ending `text` when it is so far a prefix of a
+/// keyword the compound opened by `keyword` awaits (`d`, `do`, `don` in a
+/// loop). Drawn as a command, it would vanish once the keyword completes.
+fn awaited_prefix(text: &[u8], keyword: &str) -> Option<usize> {
+	let awaited: &[&[u8]] = match keyword {
+		"if" => &[b"then", b"fi", b"else", b"elif"],
+		"for" | "select" | "while" | "until" => &[b"do", b"done"],
+		"case" => &[b"esac"],
+		_ => return None,
+	};
+	let at = text
+		.iter()
+		.rposition(|byte| !byte.is_ascii_lowercase())
+		.map_or(0, |at| at + 1);
+	let word = &text[at..];
+	if word.is_empty() || !awaited.iter().any(|keyword| keyword.starts_with(word)) {
+		return None;
+	}
+	// A body keyword (`then`, `do`, `else`) cannot be followed by the
+	// closing one, but a case's `in` can.
+	let before = text[..at].trim_ascii_end();
+	let after_in = keyword == "case"
+		&& before.len() < at
+		&& before.ends_with(b"in")
+		&& before[..before.len() - 2]
+			.last()
+			.is_some_and(u8::is_ascii_whitespace);
+	(after_in || command_position(text, at)).then_some(at)
+}
+
+/// Whether a word starting at `at` is in command position: after a
+/// separator, past blanks.
+fn command_position(text: &[u8], at: usize) -> bool {
+	let blanks = text[..at]
+		.iter()
+		.rev()
+		.take_while(|byte| matches!(byte, b' ' | b'\t'))
+		.count();
+	text[..at - blanks]
+		.last()
+		.is_none_or(|byte| matches!(byte, b';' | b'\n' | b'&' | b'|' | b'(' | b'{'))
+}
+
 fn single(a: AndOr<'_>) -> Option<Command<'_>> {
 	let first = a.first();
 	if a.rest().len() != 0 || first.bang() || first.time().is_some() {

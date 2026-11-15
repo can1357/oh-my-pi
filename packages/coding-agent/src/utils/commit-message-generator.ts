@@ -8,6 +8,7 @@ import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -44,8 +45,11 @@ function filterDiffNoise(diff: string): string {
 function getSmolModelCandidates(
 	registry: ModelRegistry,
 	settings: Settings,
+	activeProvider?: string,
 ): Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> {
-	const availableModels = registry.getAvailable();
+	const availableModels = cfgOffline.get(settings)
+		? registry.getAvailable().filter(model => activeProvider !== undefined && model.provider === activeProvider)
+		: registry.getAvailable();
 	if (availableModels.length === 0) return [];
 
 	const candidates: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> = [];
@@ -84,8 +88,9 @@ export async function generateCommitMessage(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	activeProvider?: string,
 ): Promise<string | null> {
-	const candidates = getSmolModelCandidates(registry, settings);
+	const candidates = getSmolModelCandidates(registry, settings, activeProvider);
 	if (candidates.length === 0) {
 		logger.debug("commit-msg-generator: no smol model found");
 		return null;

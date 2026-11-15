@@ -4,6 +4,7 @@ import type { Context, FetchImpl, Model, Tool, Usage } from "@oh-my-pi/pi-ai/typ
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 
 /**
  * Mirrors what `fetchClinePassModels` produces for a free-bucket entry with a
@@ -29,6 +30,39 @@ const freeTierDeepseek = buildModel({
 	},
 	compat: { wireModelIdMode: "raw" },
 }) as Model<"openai-completions">;
+
+/**
+ * Shaped like the retired ClinePass Qwen 3.7 rows: one effort-ladder model and
+ * one budget-mode model. Synthetic so the Qwen wire contract survives roster
+ * changes.
+ */
+function clinePassQwen(id: string, name: string, thinking: ThinkingConfig): Model<"openai-completions"> {
+	return buildModel({
+		id,
+		name,
+		api: "openai-completions",
+		provider: "cline-pass",
+		baseUrl: "https://api.cline.bot/api/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking,
+	}) as Model<"openai-completions">;
+}
+
+const qwenMax = clinePassQwen("qwen3.7-max", "Qwen3.7 Max", {
+	mode: "effort",
+	efforts: [Effort.High, Effort.XHigh],
+});
+
+const qwenPlus = clinePassQwen("qwen3.7-plus", "Qwen3.7 Plus", {
+	mode: "budget",
+	defaultLevel: Effort.High,
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+	effortBudgets: { minimal: 13_107, low: 26_214, medium: 65_536, high: 104_857, xhigh: 124_518, max: 131_072 },
+});
 
 const markerTool: Tool = {
 	name: "get_marker",
@@ -247,7 +281,7 @@ describe("ClinePass OpenAI transport", () => {
 
 	it("downgrades a forced ClinePass Qwen tool choice to auto while preserving reasoning", async () => {
 		const { payload } = await capturePayload({
-			modelId: "qwen3.7-max",
+			model: qwenMax,
 			reasoning: Effort.High,
 			toolChoice: { type: "tool", name: "get_marker" },
 		});
@@ -259,7 +293,7 @@ describe("ClinePass OpenAI transport", () => {
 
 	it("maps Qwen budget reasoning to Cline's nested max_tokens field", async () => {
 		const { payload } = await capturePayload({
-			modelId: "qwen3.7-plus",
+			model: qwenPlus,
 			reasoning: Effort.High,
 		});
 
@@ -293,7 +327,7 @@ describe("ClinePass OpenAI transport", () => {
 	});
 
 	it("serializes a Qwen tool continuation without requiring reasoning replay", async () => {
-		const model = getBundledModel<"openai-completions">("cline-pass", "qwen3.7-max") as Model<"openai-completions">;
+		const model = qwenMax;
 		const firstFetch: FetchImpl = Object.assign(async () => toolCompletionResponse(model.id), {
 			preconnect: fetch.preconnect,
 		});
@@ -304,7 +338,7 @@ describe("ClinePass OpenAI transport", () => {
 			reasoning: Effort.High,
 		}).result();
 		const { payload } = await capturePayload({
-			modelId: "qwen3.7-max",
+			model,
 			context: {
 				...context,
 				messages: [

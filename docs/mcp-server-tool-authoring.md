@@ -265,7 +265,6 @@ Supported operations:
 - `reconnect`
 - `reload`
 - `resources`, `prompts`, `notifications`
-- Smithery search/login/logout flows
 
 Config writes are atomic (`writeMCPConfigFile`: unique temp file + rename), and
 read-modify-write operations hold a per-file lock.

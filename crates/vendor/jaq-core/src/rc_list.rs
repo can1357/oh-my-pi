@@ -5,6 +5,8 @@ pub struct List<T>(alloc::rc::Rc<Node<T>>);
 enum Node<T> {
     Nil,
     Cons(T, List<T>),
+    /// a path that the value it belongs to is not at, see [`List::invalid`]
+    Invalid,
 }
 
 impl<T> Clone for List<T> {
@@ -22,7 +24,7 @@ impl<T> Default for List<T> {
 impl<T: Clone> List<T> {
     pub fn pop(self) -> Option<(T, Self)> {
         match alloc::rc::Rc::try_unwrap(self.0).unwrap_or_else(|rc| (*rc).clone()) {
-            Node::Nil => None,
+            Node::Nil | Node::Invalid => None,
             Node::Cons(head, tail) => Some((head, tail)),
         }
     }
@@ -32,6 +34,17 @@ impl<T> List<T> {
     /// Return an empty list.
     pub fn new() -> Self {
         Self(Node::Nil.into())
+    }
+
+    /// Return a list that marks a value as not being at any path,
+    /// such as the output of `1` in `path(1)`.
+    pub fn invalid() -> Self {
+        Self(Node::Invalid.into())
+    }
+
+    /// Whether the list is [`Self::invalid`].
+    pub fn is_invalid(&self) -> bool {
+        matches!(&*self.0, Node::Invalid)
     }
 
     /// Append a new element to the list.
@@ -47,7 +60,7 @@ impl<T> List<T> {
     /// Return the element most recently added to the list.
     pub fn head(&self) -> Option<&T> {
         match &*self.0 {
-            Node::Nil => None,
+            Node::Nil | Node::Invalid => None,
             Node::Cons(x, _) => Some(x),
         }
     }
@@ -65,7 +78,7 @@ impl<T> List<T> {
         for _ in 0..n {
             match &*cur.0 {
                 Node::Cons(_, xs) => cur = xs,
-                Node::Nil => break,
+                Node::Nil | Node::Invalid => break,
             }
         }
         cur
@@ -83,7 +96,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         let (x, xs) = match &*self.0 .0 {
             Node::Cons(x, xs) => (x, xs),
-            Node::Nil => return None,
+            Node::Nil | Node::Invalid => return None,
         };
         self.0 = xs;
         Some(x)

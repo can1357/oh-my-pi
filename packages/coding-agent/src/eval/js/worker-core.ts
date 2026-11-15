@@ -102,7 +102,20 @@ function foldFloatingRejections(active: ActiveRun, result: RunResult, hooks: Run
 	let reported = rejections;
 	if (result.ok) {
 		const error = errorPayload(rejections[0]);
-		error.message = `Unhandled rejection (missing await?): ${error.message}`;
+		const message = `Unhandled rejection (missing await?): ${error.message}`;
+		if (error.stack) {
+			const name = error.name ?? "Error";
+			const header = error.message ? `${name}: ${error.message}` : name;
+			const annotatedHeader = `${name}: ${message}`;
+			// A cached/custom stack may no longer describe the current message. Keep
+			// its diagnostics intact and append the annotation; the formatter then
+			// deliberately leaves that mismatched stack unfiltered.
+			error.stack =
+				error.stack === header || error.stack.startsWith(`${header}\n`)
+					? annotatedHeader + error.stack.slice(header.length)
+					: `${error.stack}\n${annotatedHeader}`;
+		}
+		error.message = message;
 		folded = { type: "result", runId: active.runId, ok: false, error };
 		reported = rejections.slice(1);
 	}

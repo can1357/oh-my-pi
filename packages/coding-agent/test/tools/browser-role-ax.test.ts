@@ -360,13 +360,49 @@ function unreselectable(): { role: string; name: string }[] {
 }
 
 interface TernKitProbe {
-	observe(options: { includeAll: boolean }): { elements: { id: number; role: string; name?: string }[] };
+	observe(options: { includeAll: boolean }): {
+		elements: { id: number; role: string; name?: string; value?: string | number; description?: string }[];
+	};
 	count(selector: unknown): number;
 	mark(selector: unknown): string;
 	markAll(selector: unknown): string[];
 }
 
 describe.skipIf(!available)("Tern kit roles and names", () => {
+	it("masks filled password values in serialized kit observations without changing text values", async () => {
+		const puppeteer = await loadPuppeteer();
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent(`<input id="pw" type="password" aria-label="Password">
+				<input aria-label="Username">
+				<input aria-labelledby="pw">
+				<input aria-label="Described" aria-describedby="pw">
+				<button>Reveal <input type="password" value="SENTINEL-pw-123"></button>`);
+			await page.locator("#pw").fill("SENTINEL-pw-123");
+			await page.locator('input[aria-label="Username"]').fill("plain-text");
+			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			const observed = await page.evaluate(() => {
+				// The serialized kit installs this object in the page's realm.
+				const pageGlobal = globalThis as unknown as { __ompTernKit: TernKitProbe };
+				const kit = pageGlobal.__ompTernKit;
+				return kit.observe({ includeAll: true });
+			});
+			expect(observed.elements).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ role: "textbox", name: "Password", value: "•".repeat(15) }),
+					expect.objectContaining({ role: "textbox", name: "Username", value: "plain-text" }),
+					expect.objectContaining({ role: "textbox", name: "•".repeat(15) }),
+					expect.objectContaining({ role: "textbox", name: "Described", description: "•".repeat(15) }),
+					expect.objectContaining({ role: "button", name: "Reveal " + "•".repeat(15) }),
+				]),
+			);
+			expect(JSON.stringify(observed)).not.toContain("SENTINEL-pw-123");
+		} finally {
+			await browser.close();
+		}
+	});
+
 	it("keeps DOM roles and names independent of a Turkish default locale", async () => {
 		const puppeteer = await loadPuppeteer();
 		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });

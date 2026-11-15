@@ -12,6 +12,15 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+// An on-screen window that lies wholly on `display` is cropped from it at
+// `sourceRect` (display-local points). Any other window (spanning displays,
+// partly off screen, or not on screen) is captured on its own instead.
+static BOOL WindowCaptureDisplay(CGRect window, BOOL onScreen, CGRect display, CGRect *sourceRect) {
+	if (!onScreen || CGRectIsEmpty(window) || !CGRectContainsRect(display, window)) return NO;
+	*sourceRect = CGRectOffset(window, -display.origin.x, -display.origin.y);
+	return YES;
+}
+
 static BOOL WriteAll(const void *bytes, size_t count) {
 	const uint8_t *cursor = bytes;
 	while (count) {
@@ -44,11 +53,22 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	uint32_t identifier = [request[@"id"] unsignedIntValue];
 	SCContentFilter *filter = nil;
 	CGRect bounds = CGRectZero;
-	if ([kind isEqualToString:@"window"]) {
+	CGRect sourceRect = CGRectZero;
+	BOOL windowCapture = [kind isEqualToString:@"window"];
+	if (windowCapture) {
 		for (SCWindow *window in content.windows) {
 			if (window.windowID != identifier) continue;
-			filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
 			bounds = window.frame;
+			// The independent filter draws the window with its child windows and
+			// shrinks them all into the image when a sheet extends past the frame;
+			// a display crop keeps the frame's geometry. Only the independent
+			// filter has the pixels of a window spanning displays or off screen.
+			for (SCDisplay *display in content.displays) {
+				if (!WindowCaptureDisplay(window.frame, window.isOnScreen, display.frame, &sourceRect)) continue;
+				filter = [[SCContentFilter alloc] initWithDisplay:display includingWindows:@[window]];
+				break;
+			}
+			if (!filter) filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
 			break;
 		}
 	} else {
@@ -60,11 +80,12 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 		}
 	}
 	if (!filter) {
-		Failure([kind isEqualToString:@"window"] ? @"WindowNotFound" : @"InvalidTarget", @"Capture target is no longer available");
+		Failure(windowCapture ? @"WindowNotFound" : @"InvalidTarget", @"Capture target is no longer available");
 		done(); return;
 	}
-	double width = ceil(filter.contentRect.size.width * filter.pointPixelScale);
-	double height = ceil(filter.contentRect.size.height * filter.pointPixelScale);
+	CGSize captureSize = CGRectIsEmpty(sourceRect) ? filter.contentRect.size : sourceRect.size;
+	double width = ceil(captureSize.width * filter.pointPixelScale);
+	double height = ceil(captureSize.height * filter.pointPixelScale);
 	if (!isfinite(width) || !isfinite(height) || width < 1 || height < 1 ||
 		width > UINT32_MAX || height > UINT32_MAX || width * height > maxPixels) {
 		Failure(@"CaptureFailed", @"Native screenshot dimensions exceed the safety limit");
@@ -73,11 +94,20 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	SCStreamConfiguration *configuration = [SCStreamConfiguration new];
 	configuration.width = (size_t)width;
 	configuration.height = (size_t)height;
+	if (!CGRectIsEmpty(sourceRect)) configuration.sourceRect = sourceRect;
 	configuration.pixelFormat = kCVPixelFormatType_32BGRA;
 	configuration.colorSpaceName = kCGColorSpaceSRGB;
 	configuration.showsCursor = NO;
 	configuration.ignoreShadowsSingleWindow = YES;
 	configuration.ignoreGlobalClipSingleWindow = YES;
+	if (windowCapture) {
+		// On macOS 26 the independent filter keeps the shadow's extent unless the
+		// display flag is set too, and shrinks the window to fit it into the
+		// frame-sized image. Its backing scale can differ from pointPixelScale
+		// (larger part on a display of another scale), so fit fills the frame.
+		configuration.ignoreShadowsDisplay = YES;
+		configuration.scalesToFit = YES;
+	}
 	[SCScreenshotManager captureImageWithFilter:filter configuration:configuration completionHandler:^(CGImageRef image, NSError *error) {
 		@autoreleasepool {
 			if (error || !image) {

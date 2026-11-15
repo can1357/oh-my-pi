@@ -9,6 +9,7 @@ import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-tim
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext } from "./context-manager";
+import { formatCellError } from "./error-text";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -125,9 +126,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		: options.signal;
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
+	const filename = options.filename ?? `js-cell-${crypto.randomUUID()}.js`;
+	const cwd = options.cwd ?? options.session.cwd;
 
 	try {
-		const cwd = options.cwd ?? options.session.cwd;
 		const installOptions = {
 			cwd,
 			packages,
@@ -167,7 +169,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			packageEnvironment: install.environment.description,
 			reset: options.reset,
 			code,
-			filename: options.filename ?? `js-cell-${crypto.randomUUID()}.js`,
+			filename,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
@@ -232,7 +234,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		const message =
+			error instanceof Error
+				? formatCellError(error.stack ?? error.message, {
+						filename,
+						cwd,
+						header: Error.prototype.toString.call(error),
+					})
+				: String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

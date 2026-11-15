@@ -51,3 +51,17 @@ on-api "openrouter-decisions" {
 		judgment-questions-max 64
 	}
 }
+// Nace Drex rejects more than 512 questions with `at most 512 questions
+// allowed` (console.nace.ai/docs/drex/guides/questions#batch-questions-into-one-call).
+on-api "nace-systemone" {
+	models "*" {
+		judgment-questions-max 512
+	}
+}
+// Gemini Decisions takes 1 to 1,000 questions per request
+// (aistudio.google.com/docs/decisions-api#limits).
+on-api "google-decisions" {
+	models "*" {
+		judgment-questions-max 1000
+	}
+}

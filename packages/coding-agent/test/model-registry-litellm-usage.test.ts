@@ -44,7 +44,9 @@ describe("ModelRegistry LiteLLM usage registration", () => {
 			async (input: string | URL | Request, init?: RequestInit) => {
 				const url = new URL(String(input));
 				const bearer = new Headers(init?.headers).get("authorization")?.replace("Bearer ", "") ?? "";
-				probes.push(`${bearer} ${url.host}${url.pathname}`);
+				// Built-in providers keyed by the host's own dotenv files (e.g. `~/.env`) probe too;
+				// only the models.yml gateways under test live on `.example` hosts.
+				if (url.host.endsWith(".example")) probes.push(`${bearer} ${url.host}${url.pathname}`);
 				if (url.pathname !== "/v2/user/info") return new Response(null, { status: 404 });
 				return Response.json({ user_id: bearer, spend: bearer.length, max_budget: 100 });
 			},

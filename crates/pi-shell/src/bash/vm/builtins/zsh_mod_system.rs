@@ -21,7 +21,7 @@ use super::{
 	zsh_mod_util::zsh_errmsg,
 };
 use crate::bash::{
-	diag::{Diag, strerror},
+	diag::Diag,
 	fd::FdFlags,
 	fs::{OpenFlags, SeekFrom},
 	ids::IntrinsicId,
@@ -437,7 +437,12 @@ pub fn errnos() -> Vec<BString> {
 
 /// The platform's `strerror(num)` text.
 fn strerror_of(num: i32) -> String {
-	strerror(&io::Error::from_raw_os_error(num)).into_owned()
+	// Off Unix `from_raw_os_error` reads the Win32 message table, whose
+	// numbers are not errnos: the names above are Linux's, so are the texts.
+	#[cfg(not(unix))]
+	return crate::bash::vm::fsprobe::posix::text(num).into_owned();
+	#[cfg(unix)]
+	crate::bash::diag::strerror(&io::Error::from_raw_os_error(num)).into_owned()
 }
 
 /// zsh `bin_syserror`.

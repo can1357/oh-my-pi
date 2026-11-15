@@ -992,6 +992,7 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 		trustExplicitThinkingOnly: false,
 		modelRouter: false,
 		supportsParallelToolCalls: false,
+		temperatureFloor: undefined,
 	};
 	applyWireAxes(compat, axes.wire, "devin-agent");
 	applyCompatOverrides(compat, spec.compat);

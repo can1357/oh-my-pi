@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export type Transferable = Bun.Transferable;
 
@@ -55,6 +56,23 @@ export function ownsPage(payload: WorkerInitPayload): boolean {
 	return payload.mode === "headless" || payload.page.kind !== "borrowed";
 }
 
+/** Globals every page has and omp's Bun runtime lacks: run code that cannot find one was written for the page. */
+const PAGE_ONLY_GLOBAL_RE =
+	/^(document|window|location|history|localStorage|sessionStorage|customElements|getComputedStyle|CSS|HTML\w*Element|Element|Node) is not defined$/;
+
+/**
+ * Whether run code itself, in omp's runtime, reached for a page-only global. An exception thrown in the page arrives
+ * as a plain `Error` that Puppeteer names after it, so it never counts. A floating rejection arrives wrapped: one
+ * reason as the wrapper's `cause`, or, once an in-process run returned, all of them in its `rejections`.
+ */
+export function isMissingPageGlobal(error: unknown): boolean {
+	if (error instanceof ReferenceError) return PAGE_ONLY_GLOBAL_RE.test(error.message);
+	if (!(error instanceof Error)) return false;
+	if (error.cause instanceof ReferenceError) return isMissingPageGlobal(error.cause);
+	const rejections = error instanceof ToolError ? error.context?.rejections : undefined;
+	return Array.isArray(rejections) && rejections.some(isMissingPageGlobal);
+}
+
 export type WorkerInitPayload =
 	| {
 			mode: "headless";
@@ -75,7 +93,7 @@ export type WorkerInitPayload =
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
-			ignoreHttpsErrors?: boolean;
+			insecure?: boolean;
 	  }
 	| {
 			mode: "attach";
@@ -95,7 +113,7 @@ export type WorkerInitPayload =
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
-			ignoreHttpsErrors?: boolean;
+			insecure?: boolean;
 			/**
 			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
 			 * stop a pending navigation so a blocked target cannot stall worker init (which
@@ -148,6 +166,8 @@ export interface RunErrorPayload {
 	isAbort: boolean;
 	/** The worker could not restore tab-scoped browser state and must be recycled. */
 	recoverTab?: boolean;
+	/** The run's own code reached for a page-only global ({@link isMissingPageGlobal}). */
+	missingPageGlobal?: boolean;
 	/** `tab.goto` outlasted its budget; the page stays on what loaded. */
 	navigationTimeout?: boolean;
 	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */

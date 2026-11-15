@@ -178,19 +178,31 @@ fn bind_vars<'a, D: DataT, T: 'a + Clone>(
     }
 }
 
+/// Bind the variables of `pat` destructuring `cv.1` to `ctx`;
+/// keys of object patterns are evaluated in the context `cv.0`.
 fn bind_pat<'a, D: DataT>(
+    pat: &'a Pattern<Id>,
+    ctx: Ctx<'a, D>,
+    cv: Cv<'a, D>,
+) -> ValXs<'a, Ctx<'a, D>, D::V<'a>> {
+    match pat {
+        Pattern::Var => box_once(Ok(ctx.cons_var(cv.1))),
+        Pattern::Idx(pats) => bind_pats(pats, ctx, cv),
+        Pattern::Both(pat) => {
+            let ctx = ctx.cons_var(cv.1.clone());
+            bind_pat(pat, ctx, cv)
+        }
+    }
+}
+
+fn bind_idx<'a, D: DataT>(
     (idxs, pat): &'a (Id, Pattern<Id>),
     ctx: Ctx<'a, D>,
     cv: Cv<'a, D>,
 ) -> ValXs<'a, Ctx<'a, D>, D::V<'a>> {
     let (ctx0, v0) = cv.clone();
     let v1 = map_with(idxs.run(cv), v0, move |i, v0| Ok(v0.index(&i?)?));
-    match pat {
-        Pattern::Var => Box::new(v1.map(move |v| Ok(ctx.clone().cons_var(v?)))),
-        Pattern::Idx(pats) => flat_map_then_with(v1, (ctx, ctx0), move |v, (ctx, ctx0)| {
-            bind_pats(pats, ctx, (ctx0, v))
-        }),
-    }
+    flat_map_then_with(v1, (ctx, ctx0), move |v, (ctx, ctx0)| bind_pat(pat, ctx, (ctx0, v)))
 }
 
 fn bind_pats<'a, D: DataT>(
@@ -200,8 +212,8 @@ fn bind_pats<'a, D: DataT>(
 ) -> ValXs<'a, Ctx<'a, D>, D::V<'a>> {
     match pats.split_first() {
         None => box_once(Ok(ctx)),
-        Some((pat, [])) => bind_pat(pat, ctx, cv),
-        Some((pat, rest)) => flat_map_then_with(bind_pat(pat, ctx, cv.clone()), cv, |ctx, cv| {
+        Some((pat, [])) => bind_idx(pat, ctx, cv),
+        Some((pat, rest)) => flat_map_then_with(bind_idx(pat, ctx, cv.clone()), cv, |ctx, cv| {
             bind_pats(rest, ctx, cv)
         }),
     }
@@ -215,9 +227,7 @@ fn run_and_bind<'a, D: DataT>(
     let xs = xs.run((cv.0.clone(), cv.1));
     match pat {
         Pattern::Var => map_with(xs, cv.0, move |y, ctx| Ok(ctx.cons_var(y?))),
-        Pattern::Idx(pats) => {
-            flat_map_then_with(xs, cv.0, |y, ctx| bind_pats(pats, ctx.clone(), (ctx, y)))
-        }
+        pat => flat_map_then_with(xs, cv.0, |y, ctx| bind_pat(pat, ctx.clone(), (ctx, y))),
     }
 }
 
@@ -230,11 +240,43 @@ fn bind_run<'a, D: DataT, T: Clone + 'a>(
 ) -> ValXs<'a, T, D::V<'a>> {
     match pat {
         Pattern::Var => run(r, (cv.0.cons_var(y), cv.1)),
-        Pattern::Idx(pats) => {
+        pat => {
             let r = move |ctx, vp| run(r, (ctx, vp));
-            flat_map_then_with(bind_pats(pats, cv.0.clone(), (cv.0, y)), cv.1, r)
+            flat_map_then_with(bind_pat(pat, cv.0.clone(), (cv.0, y)), cv.1, r)
         }
     }
+}
+
+/// Run `y as p1 ?// p2 ?// ... | r`, as jq's `DESTRUCTURE_ALT`:
+/// an error while binding an alternative or running its body
+/// discards the alternative and tries the next one, except for the last one.
+fn alt_run<'a, D: DataT, T: Clone + 'a>(
+    alts: &'a [(usize, Pattern<Id>, Id)],
+    cv: Cv<'a, D, T>,
+    y: D::V<'a>,
+    run: IdRunFn<'a, D, T>,
+) -> ValXs<'a, T, D::V<'a>> {
+    let Some(((nulls, pat, r), rest)) = alts.split_first() else {
+        return Box::new(core::iter::empty());
+    };
+    let ctx = (0..*nulls).fold(cv.0.clone(), |ctx, _| ctx.cons_var(D::V::null()));
+    if rest.is_empty() {
+        return bind_run(pat, r, (ctx, cv.1), y, run);
+    }
+    let mut ys = Some(bind_run(pat, r, (ctx, cv.1.clone()), y.clone(), run));
+    let mut next: Option<ValXs<'a, T, D::V<'a>>> = None;
+    Box::new(core::iter::from_fn(move || loop {
+        if let Some(next) = &mut next {
+            return next.next();
+        }
+        match ys.as_mut()?.next() {
+            Some(Err(Exn(exn::Inner::Err(_)))) => {
+                ys = None;
+                next = Some(alt_run(rest, cv.clone(), y.clone(), run));
+            }
+            y => return y,
+        }
+    }))
 }
 
 fn label_run<'a, D: DataT, T: 'a>(
@@ -419,8 +461,10 @@ fn recurse_update<'a, V: ValT + 'a>(v: V, f: &dyn Update<'a, V>) -> ValXs<'a, V>
 /// A filter which is implemented using function pointers.
 pub struct Native<D: DataT + ?Sized> {
     run: RunPtr<D>,
-    paths: PathsPtr<D>,
-    update: UpdatePtr<D>,
+    /// `None` if the filter is not a path expression
+    paths: Option<PathsPtr<D>>,
+    /// `None` if the filter is not a path expression
+    update: Option<UpdatePtr<D>>,
 }
 
 type IdRunFn<'a, D, T> = fn(&Id, Cv<'a, D, T>) -> ValXs<'a, T, <D as DataT>::V<'a>>;
@@ -441,21 +485,21 @@ impl<D: DataT> Native<D> {
     pub const fn new(run: RunPtr<D>) -> Self {
         Self {
             run,
-            paths: |cv| box_once(Err(Exn::from(Error::path_expr(cv.1 .0)))),
-            update: |cv, _| box_once(Err(Exn::from(Error::path_expr(cv.1)))),
+            paths: None,
+            update: None,
         }
     }
 
     /// Specify a paths function (used for `path(...)`).
     pub const fn with_paths(self, paths: PathsPtr<D>) -> Self {
-        Self { paths, ..self }
+        Self { paths: Some(paths), ..self }
     }
 
     /// Specify an update function (used for `filter |= ...`).
     ///
     /// If an update function is given, then a paths function should be implemented too.
     pub const fn with_update(self, update: UpdatePtr<D>) -> Self {
-        Self { update, ..self }
+        Self { update: Some(update), ..self }
     }
 }
 
@@ -463,17 +507,35 @@ impl<D: DataT> Native<D> {
 /// `reduce`) produces no output until its input iterator is exhausted.
 fn stop_on_cancel<'a, D: DataT, T: 'a>(
     data: D::Data<'a>,
-    mut values: ValXs<'a, T, D::V<'a>>,
+    values: ValXs<'a, T, D::V<'a>>,
 ) -> ValXs<'a, T, D::V<'a>> {
-    Box::new(core::iter::from_fn(move || {
-        if D::cancelled(&data) { None } else { values.next() }
-    }))
+    // keep the upper size bound of `values`: `next_if_one` relies on it to
+    // move values instead of cloning them, which keeps updates in place
+    struct StopOnCancel<'a, D: DataT, I>(D::Data<'a>, I);
+    impl<'a, D: DataT, I: Iterator> Iterator for StopOnCancel<'a, D, I> {
+        type Item = I::Item;
+        fn next(&mut self) -> Option<I::Item> {
+            if D::cancelled(&self.0) { None } else { self.1.next() }
+        }
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, self.1.size_hint().1)
+        }
+    }
+    Box::new(StopOnCancel::<D, _>(data, values))
+}
+
+/// The output of a filter that [`DataT::may_recurse`] refused to enter.
+fn too_deep<'a, T: 'a, V: 'a>() -> ValXs<'a, T, V> {
+    box_once(Err(Exn::from(Error::too_deep())))
 }
 
 impl Id {
     /// `f.run((c, v))` returns the output of `v | f` in the context `c`.
     pub fn run<'a, D: DataT>(&self, cv: Cv<'a, D>) -> ValXs<'a, D::V<'a>> {
         use core::iter::once;
+        if !D::may_recurse(&cv.0.data) {
+            return too_deep();
+        }
         let cancel = D::CHECK_CANCELLATION.then(|| cv.0.data.clone());
         let values = match &cv.0.lut().terms[self.0] {
             Ast::Id => box_once(Ok(cv.1)),
@@ -482,11 +544,15 @@ impl Id {
             Ast::Int(n) => box_once(Ok(D::V::from(*n))),
             Ast::Num(x) => box_once(D::V::from_num(x).map_err(Exn::from)),
             Ast::Str(s) => box_once(Ok(D::V::from(s.clone()))),
+            Ast::Bool(b) => box_once(Ok(D::V::from(*b))),
+            Ast::Null => box_once(Ok(D::V::null())),
+            Ast::Fail(s) => box_once(Err(Exn::from(Error::str(s.clone())))),
             Ast::Arr(f) => box_once(f.run(cv).collect()),
             Ast::ObjEmpty => box_once(D::V::from_map([]).map_err(Exn::from)),
             Ast::ObjSingle(k, v) => {
                 Box::new(cartesian(k, v, cv).map(|(k, v)| Ok(D::V::from_map([(k?, v?)])?)))
             }
+            Ast::ObjCat(l, r) => Box::new(cartesian(l, r, cv).map(|(l, r)| Ok((l? + r?)?))),
             Ast::TryCatch(f, c) => try_catch_run(f.run((cv.0.clone(), cv.1)), move |e| {
                 c.run((cv.0.clone(), e.into_val()))
             }),
@@ -502,6 +568,7 @@ impl Id {
             Ast::Pipe(l, Some(pat), r) => pipe(l, cv, move |cv, y| {
                 bind_run(pat, r, cv, y, |f, cv| f.run(cv))
             }),
+            Ast::PipeAlt(l, alts) => pipe(l, cv, move |cv, y| alt_run(alts, cv, y, |f, cv| f.run(cv))),
             Ast::Comma(l, r) => Box::new(l.run(cv.clone()).chain(lazy(|| r.run(cv)))),
             Ast::Alt(l, r) => {
                 let mut l = l
@@ -527,7 +594,7 @@ impl Id {
                 })
             }
 
-            Ast::Update(path, f) => path.update(
+            Ast::Update(path, f) => path.modify(
                 (cv.0.clone(), cv.1),
                 Box::new(move |v| f.run((cv.0.clone(), v))),
             ),
@@ -549,10 +616,16 @@ impl Id {
                     Box::new(r.run(cv).map(|r| Ok(D::V::from(r?.as_bool()))))
                 }
             }),
-            Ast::Math(l, op, r) => Box::new(cartesian(l, r, cv).map(|(x, y)| Ok(op.run(x?, y?)?))),
-            Ast::Cmp(l, op, r) => {
-                Box::new(cartesian(l, r, cv).map(|(x, y)| Ok(D::V::from(op.run(&x?, &y?)))))
-            }
+            // jq evaluates the right operand first and varies it slowest,
+            // because it calls `_plus(a; b)` etc. with arguments bound from the last
+            Ast::Math(l, op, r) => Box::new(cartesian(r, l, cv).map(|(y, x)| {
+                let y = y?;
+                Ok(op.run(x?, y)?)
+            })),
+            Ast::Cmp(l, op, r) => Box::new(cartesian(r, l, cv).map(|(y, x)| {
+                let y = y?;
+                Ok(D::V::from(x?.cmp_op(*op, &y)?))
+            })),
 
             Ast::Fold(xs, pat, init, update, fold_type) => {
                 let xs = rc_lazy_list::List::from_iter(run_and_bind(xs, cv.clone(), pat));
@@ -588,68 +661,99 @@ impl Id {
     ///
     /// In particular, `v | path(f)` in context `c` yields the same paths as
     /// `f.paths((c, (v, Default::default())))`.
+    ///
+    /// An output that is not at a path, such as the output of `1` in `path(1)`,
+    /// fails with jq's `Invalid path expression with result ...`.
     pub fn paths<'a, D: DataT>(&self, cv: Cvp<'a, D>) -> ValPathXs<'a, D::V<'a>> {
-        let err = |v| box_once(Err(Exn::from(Error::path_expr(v))));
+        Box::new(self.paths_rec(cv).map(|y| match y {
+            Ok((v, p)) if p.is_invalid() => Err(Exn::from(Error::path_expr(v))),
+            y => y,
+        }))
+    }
+
+    /// The outputs of `v | f`, as not being at any path, as jq tracks
+    /// paths with the outputs of filters that are not path expressions.
+    fn not_path<'a, D: DataT>(&self, cv: Cvp<'a, D>) -> ValPathXs<'a, D::V<'a>> {
+        let (ctx, (v, _)) = cv;
+        Box::new(self.run((ctx, v)).map(|y| Ok((y?, RcList::invalid()))))
+    }
+
+    fn paths_rec<'a, D: DataT>(&self, cv: Cvp<'a, D>) -> ValPathXs<'a, D::V<'a>> {
         let proj_cv = |cv: &Cvp<'a, D>| (cv.0.clone(), cv.1 .0.clone());
         let proj_val = |(val, _path): &(D::V<'a>, _)| val.clone();
+        if !D::may_recurse(&cv.0.data) {
+            return too_deep();
+        }
         let cancel = D::CHECK_CANCELLATION.then(|| cv.0.data.clone());
         let values = match &cv.0.lut().terms[self.0] {
-            Ast::ToString => err(cv.1 .0),
-            Ast::Int(_) | Ast::Num(_) | Ast::Str(_) => err(cv.1 .0),
-            Ast::Arr(_) | Ast::ObjEmpty | Ast::ObjSingle(..) => err(cv.1 .0),
-            Ast::Neg(_) | Ast::Logic(..) | Ast::Math(..) | Ast::Cmp(..) => err(cv.1 .0),
-            Ast::Update(..) | Ast::Assign(..) => err(cv.1 .0),
-            Ast::UpdateMath(..) | Ast::UpdateAlt(..) => err(cv.1 .0),
+            // `tostring` yields a string input itself, which jq still sees at its path
+            Ast::ToString if cv.1 .0.clone().into_string() == cv.1 .0 => box_once(Ok(cv.1)),
+            Ast::ToString | Ast::Int(_) | Ast::Num(_) | Ast::Str(_) | Ast::Bool(_) | Ast::Null => {
+                self.not_path(cv)
+            }
+            Ast::Fail(_) | Ast::Arr(_) | Ast::ObjEmpty | Ast::ObjSingle(..) | Ast::ObjCat(..) => {
+                self.not_path(cv)
+            }
+            Ast::Neg(_) | Ast::Logic(..) | Ast::Math(..) | Ast::Cmp(..) => self.not_path(cv),
+            Ast::Update(..) | Ast::Assign(..) => self.not_path(cv),
+            Ast::UpdateMath(..) | Ast::UpdateAlt(..) => self.not_path(cv),
             Ast::Id => box_once(Ok(cv.1)),
+            Ast::Recurse if cv.1 .1.is_invalid() => {
+                let err = Error::path_iter(&cv.1 .0);
+                Box::new([Ok(cv.1), Err(Exn::from(err))].into_iter())
+            }
             Ast::Recurse => recurse_run(cv.1, &|(v, p)| {
                 v.key_values()
                     .map(move |r| r.map(|(k, v_)| (v_, p.clone().cons(k))))
             }),
             Ast::Pipe(l, None, r) => {
-                flat_map_then_with(l.paths((cv.0.clone(), cv.1)), cv.0, move |y, ctx| {
-                    r.paths((ctx, y))
+                flat_map_then_with(l.paths_rec((cv.0.clone(), cv.1)), cv.0, move |y, ctx| {
+                    r.paths_rec((ctx, y))
                 })
             }
             Ast::Pipe(l, Some(pat), r) => {
                 flat_map_then_with(l.run(proj_cv(&cv)), cv, move |y, cv| {
-                    bind_run(pat, r, cv, y, |f, cv| f.paths(cv))
+                    bind_run(pat, r, cv, y, |f, cv| f.paths_rec(cv))
                 })
             }
-            Ast::Comma(l, r) => Box::new(l.paths(cv.clone()).chain(lazy(|| r.paths(cv)))),
+            Ast::PipeAlt(l, alts) => flat_map_then_with(l.run(proj_cv(&cv)), cv, move |y, cv| {
+                alt_run(alts, cv, y, |f, cv| f.paths_rec(cv))
+            }),
+            Ast::Comma(l, r) => Box::new(l.paths_rec(cv.clone()).chain(lazy(|| r.paths_rec(cv)))),
             Ast::Alt(l, r) => {
                 let any_true = l
                     .run(proj_cv(&cv))
                     .any(|v| v.as_ref().map_or(true, ValT::as_bool));
-                if any_true { l } else { r }.paths(cv)
+                if any_true { l } else { r }.paths_rec(cv)
             }
             Ast::Ite(if_, then_, else_) => {
                 flat_map_then_with(if_.run(proj_cv(&cv)), cv, move |v, cv| {
-                    if v.as_bool() { then_ } else { else_ }.paths(cv)
+                    if v.as_bool() { then_ } else { else_ }.paths_rec(cv)
                 })
             }
-            Ast::TryCatch(f, c) => try_catch_run(f.paths((cv.0.clone(), cv.1)), move |e| {
+            Ast::TryCatch(f, c) => try_catch_run(f.paths_rec((cv.0.clone(), cv.1)), move |e| {
                 c.run((cv.0.clone(), e.into_val()))
-                    .map(|e| Err(Exn::from(Error::path_expr(e?))))
+                    .map(|e| Ok((e?, RcList::invalid())))
             }),
             Ast::Path(f, path) => {
                 let path = path.map_ref(|i| {
                     let cv = (cv.0.clone(), cv.1 .0.clone());
                     crate::into_iter::collect_if_once(move || i.run(cv))
                 });
-                flat_map_then_with(f.paths(cv), path, |y, path| {
+                flat_map_then_with(f.paths_rec(cv), path, |y, path| {
                     flat_map_then_with(path.explode(), y, |path, y| {
                         Box::new(path.paths(y).map(|r| r.map_err(Exn::from)))
                     })
                 })
             }
             Ast::Var(v) => match cv.0.vars.get(*v).unwrap() {
-                Bind::Var(_) => err(cv.1 .0),
-                Bind::Fun(l) => l.0.paths((cv.0.with_vars(l.1.clone()), cv.1)),
+                Bind::Var(_) => self.not_path(cv),
+                Bind::Fun(l) => l.0.paths_rec((cv.0.with_vars(l.1.clone()), cv.1)),
                 Bind::Label(l) => box_once(Err(Exn(exn::Inner::Break(*l)))),
             },
             Ast::Fold(xs, pat, init, update, fold_type) => {
                 let xs = rc_lazy_list::List::from_iter(run_and_bind(xs, proj_cv(&cv), pat));
-                fold_run(xs, cv, init, update, fold_type, |f, cv| f.paths(cv))
+                fold_run(xs, cv, init, update, fold_type, |f, cv| f.paths_rec(cv))
             }
             Ast::CallDef(id, args, skip, call_typ) => {
                 let data = cv.0.data.clone();
@@ -660,15 +764,86 @@ impl Id {
                 };
                 let cvs = bind_vars(args, cv.0.clone().skip_vars(*skip), cv, proj_val);
                 let (into, from) = (exn::CallInput::Paths, exn::CallInput::unwrap_paths);
-                def_run(id, call_typ, cvs, Id::paths, with_vars, into, from)
+                def_run(id, call_typ, cvs, Id::paths_rec, with_vars, into, from)
             }
-            Ast::Label(id) => label_run(cv, |cv| id.paths(cv)),
-            Ast::Native(id, args) => {
-                let cvs = bind_vars(args, cv.0.with_vars(Vars::new([])), cv, proj_val);
-                flat_map_then(cvs, |cv| (cv.0.lut().funs[*id].paths)(cv))
-            }
+            Ast::Label(id) => label_run(cv, |cv| id.paths_rec(cv)),
+            Ast::Native(id, args) => match cv.0.lut().funs[*id].paths {
+                Some(paths) => {
+                    let cvs = bind_vars(args, cv.0.with_vars(Vars::new([])), cv, proj_val);
+                    flat_map_then(cvs, move |cv| paths(cv))
+                }
+                None => self.not_path(cv),
+            },
         };
         if let Some(data) = cancel { stop_on_cancel::<D, _>(data, values) } else { values }
+    }
+
+    /// The error of updating `v | f`, where `f` is not a path expression,
+    /// as jq's `_modify` reports it: with the first output of `f`.
+    fn not_path_update<'a, D: DataT>(&self, cv: Cv<'a, D>) -> ValXs<'a, D::V<'a>> {
+        let v = cv.1.clone();
+        box_once(match self.run(cv).next() {
+            Some(Ok(y)) => Err(Exn::from(Error::path_expr(y))),
+            Some(Err(e)) => Err(e),
+            None => Ok(v),
+        })
+    }
+
+    /// `v | self |= f`, as jq's `_modify`: for every path of `v | self`, in
+    /// order, the value there becomes the first output of `f` on it; the paths
+    /// where `f` yields nothing are deleted at the end, all at once, as
+    /// `delpaths` does, so that a deletion never shifts a later path.
+    fn modify<'a, D: DataT>(&self, cv: Cv<'a, D>, f: BoxUpdate<'a, D::V<'a>>) -> ValXs<'a, D::V<'a>> {
+        use alloc::vec::Vec;
+        let (ctx, v) = cv;
+        let paths = self.paths_rec((ctx, (v.clone(), RcList::new())));
+        let modified = (|| {
+            let mut acc = v;
+            let mut deleted = Vec::new();
+            for p in paths {
+                let p = match p? {
+                    (y, p) if p.is_invalid() => return Err(Exn::from(Error::path_expr(y))),
+                    (_, p) => p,
+                };
+                let mut keys: Vec<_> = p.iter().cloned().collect();
+                keys.reverse();
+                let p: D::V<'a> = keys.into_iter().collect();
+                match f(acc.clone().getpath(&p)?).next() {
+                    Some(y) => acc = acc.setpath(&p, y?)?,
+                    None => deleted.push(p),
+                }
+            }
+            if deleted.is_empty() {
+                Ok(acc)
+            } else {
+                Ok(acc.delpaths(&deleted.into_iter().collect())?)
+            }
+        })();
+        box_once(modified)
+    }
+
+    /// Update the value at every path of `v | p`, as jq's `_modify` does it.
+    fn update_by_paths<'a, D: DataT>(&self, cv: Cv<'a, D>, f: BoxUpdate<'a, D::V<'a>>) -> ValXs<'a, D::V<'a>> {
+        use crate::path::{Opt, Part, Path};
+        use alloc::vec::Vec;
+        let (ctx, v) = cv;
+        let paths = self.paths_rec((ctx, (v.clone(), RcList::new()))).map(|y| match y {
+            Ok((y, p)) if p.is_invalid() => Err(Exn::from(Error::path_expr(y))),
+            y => y.map(|(_, p)| p),
+        });
+        let paths: Result<Vec<_>, _> = paths.collect();
+        let paths = match paths {
+            Ok(paths) => paths,
+            Err(e) => return box_once(Err(e)),
+        };
+        box_once(paths.into_iter().try_fold(v, |acc, p| {
+            let mut parts: Vec<_> = p.iter().map(|k| (Part::Index(k.clone()), Opt::Essential)).collect();
+            if parts.is_empty() {
+                return f(acc).next().unwrap_or_else(|| Ok(D::V::null()));
+            }
+            parts.reverse();
+            Path(parts).update(acc, &f)
+        }))
     }
 
     /// `p.update((c, v), f)` returns the output of `v | p |= f` in the context `c`.
@@ -677,18 +852,21 @@ impl Id {
         cv: Cv<'a, D>,
         f: BoxUpdate<'a, D::V<'a>>,
     ) -> ValXs<'a, D::V<'a>> {
-        let err = |v| box_once(Err(Exn::from(Error::path_expr(v))));
+        if !D::may_recurse(&cv.0.data) {
+            return too_deep();
+        }
         let cancel = D::CHECK_CANCELLATION.then(|| cv.0.data.clone());
         let values = match &cv.0.lut().terms[self.0] {
-            Ast::ToString => err(cv.1),
-            Ast::Int(_) | Ast::Num(_) | Ast::Str(_) => err(cv.1),
-            Ast::Arr(_) | Ast::ObjEmpty | Ast::ObjSingle(..) => err(cv.1),
-            Ast::Neg(_) | Ast::Logic(..) | Ast::Math(..) | Ast::Cmp(..) => err(cv.1),
-            Ast::Update(..) | Ast::Assign(..) => err(cv.1),
-            Ast::UpdateMath(..) | Ast::UpdateAlt(..) => err(cv.1),
-            // jq implements updates on `try ... catch` and `label`, but
-            // I do not see how to implement this in jaq
-            Ast::TryCatch(..) | Ast::Label(..) => err(cv.1),
+            Ast::ToString | Ast::Int(_) | Ast::Num(_) | Ast::Str(_) | Ast::Bool(_) | Ast::Null => {
+                self.not_path_update(cv)
+            }
+            Ast::Fail(_) | Ast::Arr(_) | Ast::ObjEmpty | Ast::ObjSingle(..) | Ast::ObjCat(..) => {
+                self.not_path_update(cv)
+            }
+            Ast::Neg(_) | Ast::Logic(..) | Ast::Math(..) | Ast::Cmp(..) => self.not_path_update(cv),
+            Ast::Update(..) | Ast::Assign(..) => self.not_path_update(cv),
+            Ast::UpdateMath(..) | Ast::UpdateAlt(..) => self.not_path_update(cv),
+            Ast::TryCatch(..) | Ast::Label(..) | Ast::PipeAlt(..) => self.update_by_paths(cv, f),
 
             Ast::Id => f(cv.1),
             Ast::Recurse => recurse_update(cv.1, &f),
@@ -697,11 +875,28 @@ impl Id {
                     let cv = cv.clone();
                     crate::into_iter::collect_if_once(move || i.run(cv))
                 });
+                let parts = path.clone();
                 let f = move |v| {
                     let mut paths = path.clone().explode();
-                    box_once(paths.try_fold(v, |acc, path| path?.update(acc, &f)))
+                    let v = paths.try_fold(v, |acc, path| path?.update(acc, &f));
+                    box_once(v.map_err(seal))
                 };
-                l.update(cv, Box::new(f))
+                // `l` not being a path expression shows when indexing its output
+                let near = move |e: Exn<'a, D::V<'a>>| match &e.0 {
+                    exn::Inner::Err(err) => match err.not_path() {
+                        Some(y) => match parts.clone().explode().next() {
+                            Some(Ok(p)) => match p.0.first() {
+                                Some((part, _)) => Exn::from(part.not_at_path(y)),
+                                None => e,
+                            },
+                            Some(Err(e)) => e,
+                            None => e,
+                        },
+                        None => e,
+                    },
+                    _ => e,
+                };
+                Box::new(l.update(cv, Box::new(f)).map(move |y| y.map_err(&near)))
             }
             Ast::Pipe(l, None, r) => l.update(
                 (cv.0.clone(), cv.1),
@@ -730,7 +925,7 @@ impl Id {
                 init.update(cv, Box::new(rec))
             }
             Ast::Var(v) => match cv.0.vars.get(*v).unwrap() {
-                Bind::Var(_) => err(cv.1),
+                Bind::Var(_) => self.not_path_update(cv),
                 Bind::Fun(l) => l.0.update((cv.0.with_vars(l.1.clone()), cv.1), f),
                 Bind::Label(l) => box_once(Err(Exn(exn::Inner::Break(*l)))),
             },
@@ -739,14 +934,23 @@ impl Id {
                 let cvs = bind_vars(args, cv.0.clone().skip_vars(*skip), cv, Clone::clone);
                 reduce(cvs, init, move |cv, v| id.update((cv.0, v), f.clone()))
             }
-            Ast::Native(id, args) => {
-                let init = cv.1.clone();
-                let cvs = bind_vars(args, cv.0.with_vars(Vars::new([])), cv, Clone::clone);
-                reduce(cvs, init, move |cv, v| {
-                    (cv.0.lut().funs[*id].update)((cv.0, v), f.clone())
-                })
-            }
+            Ast::Native(id, args) => match cv.0.lut().funs[*id].update {
+                Some(update) => {
+                    let init = cv.1.clone();
+                    let cvs = bind_vars(args, cv.0.with_vars(Vars::new([])), cv, Clone::clone);
+                    reduce(cvs, init, move |cv, v| update((cv.0, v), f.clone()))
+                }
+                None => self.update_by_paths(cv, f),
+            },
         };
         if let Some(data) = cancel { stop_on_cancel::<D, _>(data, values) } else { values }
+    }
+}
+
+/// Fix the message of an error that a path expression nested in another one raised.
+fn seal<V: From<alloc::string::String> + core::fmt::Display>(e: Exn<'_, V>) -> Exn<'_, V> {
+    match e.0 {
+        exn::Inner::Err(err) => Exn::from((*err).seal()),
+        e => Exn(e),
     }
 }

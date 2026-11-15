@@ -222,11 +222,4 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		await bridge.deliver({ id: "p2", from: "Peer", to: "Child", body: "question?", ts: 9 });
 		expect(bridge.hasQueuedFrom("Peer")).toBe(true);
 	});
-
-	it("keeps the broadcast flag on a message drained from the inbox", async () => {
-		const { bridge } = makeStreamingChild();
-		await bridge.deliver({ id: "b2", from: "Peer", to: "Child", body: "everyone: rebase", ts: 3, broadcast: true });
-
-		expect(bridge.drainInboxMessages("Child")).toMatchObject([{ id: "b2", from: "Peer", broadcast: true }]);
-	});
 });

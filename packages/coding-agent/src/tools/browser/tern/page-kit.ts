@@ -152,14 +152,17 @@ export interface TernKitApi {
 		request: { depth?: number; boxes?: boolean },
 		urls: boolean,
 	): AriaSnapshotPayload;
-	/** Install numbered overlays over connected, non-empty registry ids. */
-	annotate(ids: number[]): TernAnnotation;
+	/**
+	 * Install numbered overlays over connected, non-empty registry ids, or over boxes omp measured
+	 * itself (viewport CSS px, labelled with their `id`).
+	 */
+	annotate(targets: Array<number | TernAnnotation["boxes"][number]>): TernAnnotation;
 	/** Tag the first match with a fresh handle token (null when missing). */
 	mark(sel: TernSelector): string | null;
 	/** Tag every match with a fresh handle token each, in document order. */
 	markAll(sel: TernSelector): string[];
-	/** Drop a handle token. */
-	unmark(token: string): void;
+	/** Drop a handle token, or several. */
+	unmark(tokens: string | string[]): void;
 	/** Every descendant frame reachable through `window.frames`. */
 	frames(): TernFrameInfo[];
 	/** Frame path (relative to this document) of the matched `<iframe>`/`<frame>`, or null. */
@@ -178,7 +181,7 @@ export interface TernKitApi {
 }
 
 /** Roles `observe()` lists by default; mirrors the Chromium backend's AX-tree observe. */
-const INTERACTIVE_ROLES = [
+export const INTERACTIVE_ROLES = [
 	"button",
 	"link",
 	"textbox",
@@ -537,10 +540,11 @@ const observeValue = (el, role) => {
 		return el.selectedOptions[0] ? normalizeSpace(el.selectedOptions[0].text) : undefined;
 	}
 	if (role === "slider" || role === "spinbutton" || role === "progressbar" || role === "meter") {
-		const raw = el.getAttribute("aria-valuenow") || (tag === "input" || tag === "progress" || tag === "meter" ? String(el.value) : "");
+		const raw = el.getAttribute("aria-valuenow") || ((tag === "input" && inputType(el) !== "password") || tag === "progress" || tag === "meter" ? String(el.value) : "");
 		const number = Number(raw);
 		return raw !== "" && Number.isFinite(number) ? number : undefined;
 	}
+	if (tag === "input" && inputType(el) === "password") return el.value ? "•".repeat(String(el.value).length) : undefined;
 	if ((tag === "input" || tag === "textarea") && (role === "textbox" || role === "searchbox" || role === "combobox")) {
 		return el.value ? String(el.value) : undefined;
 	}
@@ -920,7 +924,10 @@ const kit = {
 			el.selectedIndex = first ? first.index : -1;
 		}
 		fireInputChange(el);
-		return options.filter(option => option.selected).map(option => option.value);
+		// The handlers may have reset the choice or replaced the options.
+		return Array.from(el.options)
+			.filter(option => option.selected)
+			.map(option => option.value);
 	},
 	setFiles: (sel, files) => {
 		const el = requireFirst(sel);
@@ -1003,17 +1010,21 @@ const kit = {
 		}
 		return { snapshot, hrefs };
 	},
-	annotate: ids => {
+	annotate: targets => {
 		const token = "omp-screenshot-" + randomToken();
 		const boxes = [];
 		const root = document.createElement("div");
 		root.setAttribute("data-omp-screenshot-annotations", token);
 		root.setAttribute(OVERLAY_ATTR, token);
 		root.style.cssText = "position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none";
-		for (const id of ids) {
-			const el = registry.get(id);
-			if (!el || !el.isConnected) continue;
-			const box = boxOf(el);
+		for (const target of targets) {
+			const id = typeof target === "number" ? target : target.id;
+			let box = target;
+			if (typeof target === "number") {
+				const el = registry.get(id);
+				if (!el || !el.isConnected) continue;
+				box = boxOf(el);
+			}
 			if (box.width <= 0 || box.height <= 0) continue;
 			boxes.push({ id, x: box.x, y: box.y, width: box.width, height: box.height });
 			const outline = document.createElement("div");
@@ -1035,9 +1046,12 @@ const kit = {
 		return el ? markElement(el) : null;
 	},
 	markAll: sel => resolveAll(sel).map(markElement),
-	unmark: token => {
-		for (const el of pierceAll("[" + HANDLE_ATTR + "~=\"" + CSS.escape(token) + "\"]")) {
-			const rest = (el.getAttribute(HANDLE_ATTR) || "").split(/\s+/).filter(value => value && value !== token);
+	unmark: tokens => {
+		const dropped = new Set([].concat(tokens));
+		for (const el of pierceAll("[" + HANDLE_ATTR + "]")) {
+			const held = (el.getAttribute(HANDLE_ATTR) || "").split(/\s+/).filter(Boolean);
+			const rest = held.filter(value => !dropped.has(value));
+			if (rest.length === held.length) continue;
 			if (rest.length) el.setAttribute(HANDLE_ATTR, rest.join(" "));
 			else el.removeAttribute(HANDLE_ATTR);
 		}
@@ -1100,7 +1114,10 @@ const kit = {
 };
 
 Object.defineProperty(globalThis, "__ompTernKit", { value: kit, configurable: true });
+`;
 
+// Page-side frame announcement, plain JS under the same rules as KIT_BODY.
+const FRAME_ANNOUNCE_BODY = String.raw`
 // Child frames announce their index path so omp can address them by name.
 if (window !== window.parent) {
 	const path = [];
@@ -1147,5 +1164,13 @@ export const TERN_KIT_SOURCE = [
 	`const INTERACTIVE_ROLES = new Set(${JSON.stringify(INTERACTIVE_ROLES)});`,
 	`const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLE_PROPERTIES)};`,
 	KIT_BODY,
+	FRAME_ANNOUNCE_BODY,
 	"})();",
 ].join("\n");
+
+/**
+ * Script (same forms as {@link TERN_KIT_SOURCE}) that only registers a child frame's index path, for
+ * tabs whose engine reads the page natively: they install the kit on demand, yet still address frames
+ * by path.
+ */
+export const TERN_FRAME_ANNOUNCE_SOURCE = ["(function () {", '"use strict";', FRAME_ANNOUNCE_BODY, "})();"].join("\n");

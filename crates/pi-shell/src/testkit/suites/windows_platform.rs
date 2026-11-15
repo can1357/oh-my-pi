@@ -119,3 +119,14 @@ fn async_commands_ignore_interrupts_on_windows_only() {
 	assert_eq!(run_on(ModeId::Zsh, Platform::Linux, zsh), "trap -- 'print own' INT\n\ndone\n");
 	assert_eq!(run_on(ModeId::Bash, Platform::Linux, bash), "trap -- 'echo own' SIGINT\ndone\n");
 }
+
+/// Asynchronous commands forked from the same state share its ignores; one
+/// forked after the shell set a trap lists it beside the ignore.
+#[test]
+fn async_commands_list_traps_set_between_them_on_windows() {
+	let bash = "( trap -p ) & wait; trap 'echo t' TERM; ( trap -p ) & wait; echo done";
+	assert_eq!(
+		run_on(ModeId::Bash, Platform::Windows, bash),
+		"trap -- '' SIGINT\ntrap -- '' SIGINT\ntrap -- 'echo t' SIGTERM\ndone\n"
+	);
+}

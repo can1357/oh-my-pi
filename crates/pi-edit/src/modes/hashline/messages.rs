@@ -835,23 +835,6 @@ pub const HEADTAIL_DRIFT_WARNING: &str =
 	"Applied the `PUT <1:`/`PUT >$:` edit despite a stale snapshot tag (file changed since your \
 	 read) — head/tail position is content-independent. Re-read if the drift was unexpected.";
 
-/// Disk content after write differs from what was sent (e.g. IDE format on
-/// save).
-///
-/// See `WriteResult.text` — most commonly an ACP-connected editor reformatting
-/// the buffer on save (e.g. `format_on_save` with tab/space settings that don't
-/// match the file). The recorded snapshot is re-keyed on the real, post-write
-/// content so the next edit's tag validation matches reality instead of
-/// silently drifting.
-pub fn write_drift_warning(path: &str) -> String {
-	format!(
-		"{path}: the file on disk after this write differs from what was sent — the client \
-		 (editor/IDE) likely reformatted it on save (e.g. format-on-save, tab/space settings). The \
-		 returned snapshot reflects the actual file; re-read before further edits if the extra \
-		 changes were unexpected."
-	)
-}
-
 /// Section named a nonexistent path matching an earlier snapshot's name and
 /// tag.
 ///

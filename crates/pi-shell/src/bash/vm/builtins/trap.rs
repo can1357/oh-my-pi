@@ -436,7 +436,7 @@ fn zsh_change(
 		ctx.store_record(KeyBuf::Misc(MiscKey::ZshEntryIgnored), None);
 	}
 	let mut effective = action;
-	if ctx.vp.overlay.is_none()
+	if ctx.vp.image.is_none()
 		&& let TrapKey::Signal(sig) = key
 		&& !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld)
 	{
@@ -613,7 +613,7 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			}
 			((first.as_slice() != b"-").then(|| first.clone()), specs)
 		};
-	let hard_ignored = match ctx.vp.overlay {
+	let hard_ignored = match ctx.vp.image {
 		Some(_) => match ctx.record(Key::Misc(MiscKey::HardIgnored))? {
 			Some(Record::Words(names)) => names,
 			_ => Vec::new(),
@@ -650,7 +650,7 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			continue;
 		}
 		let mut effective = action.clone();
-		if ctx.vp.overlay.is_none()
+		if ctx.vp.image.is_none()
 			&& let TrapKey::Signal(sig) = key
 			// `CHLD` comes from the engine (one per reaped child), not the OS.
 			&& !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld)

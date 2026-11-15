@@ -2881,8 +2881,10 @@ fn paramsubst(
 						ps.isarr = 1;
 						arrasg = 0;
 					} else {
-						let mut val = ps.val.clone();
-						untokenize(&mut val);
+						// zsh untokenizes the word in place: the expansion is
+						// the assigned text, not a pattern (`${x=*}` is `*`).
+						untokenize(&mut ps.val);
+						let val = ps.val.clone();
 						let mut name = idbeg;
 						untokenize(&mut name);
 						redo(ex, &name, |ex| {

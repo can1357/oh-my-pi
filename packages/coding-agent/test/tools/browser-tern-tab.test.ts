@@ -468,6 +468,7 @@ describe("TernTab screenshots", () => {
 		const screenshots: ScreenshotResult[] = [];
 		tab.setRunContext({
 			timeoutMs: 5_000,
+			deadline: 5_000,
 			signal: new AbortController().signal,
 			session: { cwd: os.tmpdir() },
 			output,

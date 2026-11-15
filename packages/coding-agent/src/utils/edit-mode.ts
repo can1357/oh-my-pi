@@ -4,12 +4,11 @@ import { $flag } from "@oh-my-pi/pi-utils";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { Settings } from "../config/settings";
 import { cfgEditMode, type EditModeSetting, editModelVariants } from "../edit/settings";
+import { matchModelPattern } from "./model-patterns";
 
-/** First `edit.modelVariants` entry whose pattern occurs in `model` (case-insensitive). */
+/** `edit.modelVariants` entry for `model`: the longest pattern occurring in it (case-insensitive). */
 export function editVariantForModel(settings: Settings, model: string | undefined): EditMode | undefined {
-	if (!model) return undefined;
-	const modelLower = model.toLowerCase();
-	return editModelVariants.get(settings).find(variant => modelLower.includes(variant.patternLower))?.mode;
+	return matchModelPattern(editModelVariants.get(settings), model);
 }
 
 export interface EditModeSessionLike {

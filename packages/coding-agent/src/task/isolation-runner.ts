@@ -27,9 +27,11 @@ import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { 
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import type { ToolSession } from "../tools";
+import { readSnapshot } from "../commit/selective/journal";
+import type { FileChangeReport, ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
@@ -174,7 +176,8 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 		const registry = session.modelRegistry;
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
-		return async (diff: string) => generateCommitMessage(diff, registry, settings, sessionId);
+		return async (diff: string) =>
+			generateCommitMessage(diff, registry, settings, sessionId, session.getActiveModel?.()?.provider);
 	};
 }
 
@@ -729,6 +732,24 @@ export interface IsolationMergeOptions {
 	result: SingleResult;
 	repoRoot: string;
 	mergeMode: "patch" | "branch";
+	/**
+	 * Journal each file a patch-mode merge rewrites as the subagent's change
+	 * (see {@link ToolSession.recordFileChange}); the subagent's own edit records
+	 * name its isolated checkout, not this repository.
+	 */
+	recordFileChange?: (change: FileChangeReport) => void;
+	/** Agent id of the session merging the result (the subagent's parent). */
+	parentAgentId?: string;
+}
+
+/** Repo-relative paths a git patch touches (both sides of each `diff --git` header). */
+function patchPaths(patch: string): string[] {
+	const paths = new Set<string>();
+	for (const match of patch.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+		paths.add(match[1]);
+		paths.add(match[2]);
+	}
+	return [...paths];
 }
 
 export interface IsolationMergeOutcome {
@@ -835,31 +856,28 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				hadAnyChanges = false;
 			} else {
 				const normalized = patchText.endsWith("\n") ? patchText : `${patchText}\n`;
-				// Idempotence: declare a no-op only when the reverse patch applies AND
-				// the forward patch does not. `--reverse --check` alone can theoretically
-				// succeed if the file happens to carry the postimage at another location
-				// via git-apply's fuzz factor; requiring the forward check to fail
-				// removes that ambiguity while still catching true already-applied
-				// runs. Reads only — neither call touches the worktree, unlike
-				// `--3way --check`, which exits 0 even when the real apply would
-				// leave conflict markers and unmerged index entries.
-				const [alreadyApplied, forwardApplies] = await Promise.all([
-					repo.canApplyPatch(normalized, { reverse: true }).catch(() => false),
-					repo.canApplyPatch(normalized, {}).catch(() => false),
-				]);
-				hadAnyChanges = false;
-				if (alreadyApplied && !forwardApplies) {
-					changesApplied = true;
-				} else if (forwardApplies) {
-					changesApplied = true;
-					try {
-						await repo.applyPatch(normalized, {});
-						hadAnyChanges = true;
-					} catch {
-						changesApplied = false;
+				const touched = opts.recordFileChange
+					? await Promise.all(
+							patchPaths(normalized).map(async file => {
+								const absolute = path.join(repoRoot, file);
+								return { absolute, before: await readSnapshot(absolute) };
+							}),
+						)
+					: [];
+				({ changesApplied, hadAnyChanges } = await applyRootPatch(repo, repoRoot, normalized));
+				if (changesApplied && hadAnyChanges) {
+					for (const { absolute, before } of touched) {
+						const after = await readSnapshot(absolute);
+						if (!before || !after || before.text === after.text) continue;
+						opts.recordFileChange?.({
+							path: absolute,
+							tool: "task",
+							before: before.text,
+							after: after.text,
+							beforeMtimeMs: before.mtimeMs,
+							agent: { agent: result.id, parent: opts.parentAgentId },
+						});
 					}
-				} else {
-					changesApplied = false;
 				}
 			}
 		}
@@ -891,6 +909,43 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			mergedBranchForNestedPatches: false,
 		};
 	}
+}
+
+/**
+ * Check and apply one isolated run's root patch to the parent worktree.
+ *
+ * Holds the per-repo lock across the checks and the apply: `git apply`
+ * rewrites each touched file whole, so concurrent merge-backs touching the
+ * same file would otherwise read the same preimage and the last writer would
+ * silently drop the others' hunks while every caller reports success.
+ */
+async function applyRootPatch(
+	repo: natives.VcsGitRepo,
+	repoRoot: string,
+	patch: string,
+): Promise<{ changesApplied: boolean; hadAnyChanges: boolean }> {
+	return withRepoLock(repoRoot, async () => {
+		// Idempotence: declare a no-op only when the reverse patch applies AND
+		// the forward patch does not. `--reverse --check` alone can theoretically
+		// succeed if the file happens to carry the postimage at another location
+		// via git-apply's fuzz factor; requiring the forward check to fail
+		// removes that ambiguity while still catching true already-applied
+		// runs. Reads only — neither call touches the worktree, unlike
+		// `--3way --check`, which exits 0 even when the real apply would
+		// leave conflict markers and unmerged index entries.
+		const [alreadyApplied, forwardApplies] = await Promise.all([
+			repo.canApplyPatch(patch, { reverse: true }).catch(() => false),
+			repo.canApplyPatch(patch, {}).catch(() => false),
+		]);
+		if (alreadyApplied && !forwardApplies) return { changesApplied: true, hadAnyChanges: false };
+		if (!forwardApplies) return { changesApplied: false, hadAnyChanges: false };
+		try {
+			await repo.applyPatch(patch, {});
+			return { changesApplied: true, hadAnyChanges: true };
+		} catch {
+			return { changesApplied: false, hadAnyChanges: false };
+		}
+	});
 }
 
 export interface NestedPatchApplyOptions {

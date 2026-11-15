@@ -1,6 +1,6 @@
 # pi's in-process extras for the embedded shell: the command-line utilities
 # (`cat`, `grep`, `sed`, `ls`, `jq`, …) and the process builtins (`ps`, `top`,
-# `sleep`, `pgrep`, `pkill`, `pidwait`), one module per command. The shell's
+# `sleep`, `pgrep`, `pkill`, `pidwait`, `lsof`), one module per command. The shell's
 # bash builtins live in its engine; hosts run these through `extras::run`.
 #
 # The utilities used to be ~50 separate vendored crates driven through a
@@ -83,10 +83,14 @@ pi-vfs.workspace = true
 rand = { version = "0.10.0", features = ["std_rng"] }
 rayon = "1.10"
 regex = "1.11"
+# `awk`: POSIX leftmost-longest matching (hybrid DFA, `MatchKind::All`).
+regex-automata = "0.4"
 rustc-hash = "2.1.1"
 self_cell = "1.0.4"
 serde_json = "1"
 smallvec.workspace = true
+# `jq` evaluates on a grown stack and bounds its recursion by the stack left.
+stacker = "0.1.25"
 tempfile = "3.15.0"
 tokio-util = "0.7"
 xutf.workspace = true
@@ -142,6 +146,10 @@ sha1 = "0.10"
 sha2 = "0.10"
 xxhash-rust = { workspace = true, features = ["xxh3", "xxh64"] }
 zstd.workspace = true
+# `tar`: the archive format and its bzip2/xz codecs (pure Rust).
+bzip2 = "0.6"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "encoder", "xz"] }
+tar = { version = "0.4.46", default-features = false }
 
 [target."cfg(any(unix, windows))".dependencies.tokio]
 version = "1.50.0"
@@ -185,6 +193,7 @@ default = ["utils"]
 # One feature per ported utility so a single utility can be built (and checked)
 # in isolation. `utils` turns on the whole set and is part of `default`.
 "util.ast-grep" = ["dep:pi-ast"]
+"util.awk" = []
 "util.b2sum" = ["util.cksum"]
 "util.base32" = []
 "util.base64" = ["util.base32"]
@@ -215,6 +224,9 @@ default = ["utils"]
 "util.jq" = []
 "util.ln" = []
 "util.ls" = []
+# Lists open files and sockets per process: linux, macos and windows targets.
+"util.lsof" = ["util.procs"]
+"util.md5" = ["util.cksum"]
 "util.md5sum" = ["util.cksum"]
 "util.mkdir" = []
 "util.mktemp" = []
@@ -256,10 +268,14 @@ default = ["utils"]
 "util.sha256sum" = ["util.cksum"]
 "util.sha384sum" = ["util.cksum"]
 "util.sha512sum" = ["util.cksum"]
+"util.shasum" = ["util.cksum"]
 "util.sort" = []
 "util.stat" = []
+"util.strings" = []
 "util.tac" = []
 "util.tail" = ["util.tac"]
+# Needs the gzip/zstd codecs: unix and windows targets.
+"util.tar" = []
 "util.tee" = []
 "util.touch" = []
 "util.tr" = []
@@ -275,6 +291,7 @@ default = ["utils"]
 
 utils = [
   "util.ast-grep",
+  "util.awk",
   "util.b2sum",
   "util.base32",
   "util.base64",
@@ -304,6 +321,8 @@ utils = [
   "util.jq",
   "util.ln",
   "util.ls",
+  "util.lsof",
+  "util.md5",
   "util.md5sum",
   "util.mkdir",
   "util.mktemp",
@@ -341,10 +360,13 @@ utils = [
   "util.sha256sum",
   "util.sha384sum",
   "util.sha512sum",
+  "util.shasum",
   "util.sort",
   "util.stat",
+  "util.strings",
   "util.tac",
   "util.tail",
+  "util.tar",
   "util.tee",
   "util.touch",
   "util.tr",

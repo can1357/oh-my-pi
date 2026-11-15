@@ -158,12 +158,12 @@ func TestSmoke(t *testing.T) {
 
 	phases, err := client.SetTodos(ctx, SetTodosCommand{Phases: []TodoPhase{{
 		Name:  "Smoke",
-		Tasks: []TodoItem{{Content: "Wait for review", Status: TodoStatusBlocked, Blocker: Ptr("needs approval")}},
+		Tasks: []TodoItem{{Content: "Wait for review", Status: TodoStatusInProgress}},
 	}}})
-	if err != nil || len(phases) != 1 || phases[0].Tasks[0].Status != TodoStatusBlocked {
+	if err != nil || len(phases) != 1 || phases[0].Tasks[0].Status != TodoStatusInProgress {
 		t.Fatalf("set_todos: %#v %v", phases, err)
 	}
-	t.Logf("set_todos: %s/%s status=%s blocker=%q", phases[0].Name, phases[0].Tasks[0].Content, phases[0].Tasks[0].Status, deref(phases[0].Tasks[0].Blocker))
+	t.Logf("set_todos: %s/%s status=%s", phases[0].Name, phases[0].Tasks[0].Content, phases[0].Tasks[0].Status)
 
 	events, err := client.SetEventFilter(ctx, SetEventFilterCommand{Events: nil})
 	if err != nil || events != nil {

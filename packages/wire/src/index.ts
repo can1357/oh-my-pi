@@ -316,6 +316,8 @@ export type CollabUiRequestDraft =
 			checkedIndices?: number[];
 			markableCount?: number;
 			helpText?: string;
+			/** The select asks for a permission (a tool approval, a settings change), not an answer. */
+			approval?: boolean;
 	  }
 	| {
 			kind: "editor";

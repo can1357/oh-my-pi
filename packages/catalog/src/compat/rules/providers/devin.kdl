@@ -12,25 +12,17 @@ provider "devin" {
 	// Cascade catalog is credential-scoped (gated per account/team), so catalog
 	// generation never fetches it: baking one account's roster into the shared
 	// bundle would misstate every other account's entitlements and leave zombie
-	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
-	// SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
-	// seed's `default-model` (`swe-1-6`) must resolve synchronously at boot;
+	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). SWE-1.6
+	// is verified live against `GetCliModelConfigs` (SWE-1.6 Fast is retired);
+	// the seed's `default-model` (`swe-1-6`) must resolve synchronously at boot;
 	// discovery then replaces the seed and the account default it marks wins. Field
 	// shape mirrors `devinModelSpec` so seeded and discovered rows are
 	// indistinguishable downstream.
 	seed api="devin-agent" base-url="https://server.codeium.com" bundle="always" {
-		model "swe-1-6-fast" name="SWE-1.6 Fast" {
-			reasoning #true
-			// SWE-1.6 lanes ignore inline images despite upstream `supports_images`
-			// (see DEVIN_IMAGE_BLIND_UIDS in ../discovery/devin.ts).
-			input "text"
-			supports-tools #true
-			cost input=0.3 output=1.5 cache-read=0.03 cache-write=0
-			limits context=200000 max-tokens=128000
-			supports-parallel-tool-calls #true
-		}
 		model "swe-1-6" name="SWE-1.6" {
 			reasoning #true
+			// SWE-1.6 ignores inline images despite upstream `supports_images`
+			// (see DEVIN_IMAGE_BLIND_UIDS in ../discovery/devin.ts).
 			input "text"
 			supports-tools #true
 			// Included in the Coding Plan: upstream reports no cost dimensions.
@@ -40,6 +32,13 @@ provider "devin" {
 		}
 	}
 
+
+	// Cascade rejects `temperature: 0` with an opaque `invalid_argument`
+	// ("an internal error occurred") while any positive value is accepted;
+	// 0.0001 is the smallest verified accepted. Local features that pin 0 for
+	// deterministic decoding (session titles, Mnemopi memory extraction) would
+	// otherwise fail and silently fall back to the next model (issue #18423).
+	temperature-floor 0.0001
 
 	// Enterprise (ACUs) fallback prices: https://docs.devin.ai/desktop/models
 	// (as of 2026-11-05). Seed only when upstream reports no token price.

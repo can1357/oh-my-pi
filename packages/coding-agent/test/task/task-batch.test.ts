@@ -223,7 +223,7 @@ describe("task.batch schema gating", () => {
 		]);
 		const session = createSession({ settings: { "task.batch": true, "async.enabled": true } });
 		const tool = await TaskTool.create(session);
-		const navigation = "nested `/reports/0/data`";
+		const navigation = "nested /reports/0/data";
 
 		const optedIn = tool.description;
 		expect(optedIn).toContain(navigation);

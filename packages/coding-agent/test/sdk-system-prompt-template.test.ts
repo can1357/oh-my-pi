@@ -7,12 +7,13 @@ import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
 import { CONFIG_DIR_NAME, TempDir } from "@oh-my-pi/pi-utils";
 
 type SystemPromptOption = string | string[] | ((defaultPrompt: string[]) => string | string[]);
 type SessionOverrides = Pick<
 	CreateAgentSessionOptions,
-	"systemPromptTemplate" | "customSystemPrompt" | "settings" | "taskDepth"
+	"systemPromptTemplate" | "customSystemPrompt" | "settings" | "taskDepth" | "contextFiles"
 >;
 
 async function withSession<T>(
@@ -117,5 +118,20 @@ describe("SDK systemPrompt replacements", () => {
 		const subagentPrompt = await render(1);
 		expect(subagentPrompt).toContain("MODEL_POLICY");
 		expect(subagentPrompt).not.toContain("EAGER");
+	});
+
+	it("attributes instruction files a prompt callback keeps while appending a block", async () => {
+		await withSession(
+			"Fixture policy.",
+			defaultPrompt => [...defaultPrompt, "Additional policy."],
+			async session => {
+				const data = buildSessionContextView(session);
+				expect(data.categories.find(category => category.id === "instruction-files")?.entries).toEqual([
+					expect.objectContaining({ text: expect.stringContaining("Retained instruction") }),
+				]);
+				expect(data.notices).toEqual([]);
+			},
+			{ contextFiles: [{ path: "/fixture/instructions.md", content: "Retained instruction" }] },
+		);
 	});
 });

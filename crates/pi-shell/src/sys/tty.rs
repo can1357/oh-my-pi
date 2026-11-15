@@ -633,7 +633,9 @@ mod unix {
 /// them, so an embedding process gets its terminal back as it was; it
 /// always does when dropped during a panic. Ptys the shell opened itself
 /// (`zpty`) are never held or restored: their master must see the hang-up
-/// when their program ends.
+/// when their program ends. Nor are they drained before a mode change:
+/// the engine reads their masters itself, so `TCSADRAIN` would wait on
+/// the read it blocks.
 #[derive(Default)]
 pub struct NativeTerminal {
 	#[cfg(unix)]
@@ -641,6 +643,9 @@ pub struct NativeTerminal {
 	/// The device of the terminal [`Terminal::open_controlling`] opened.
 	#[cfg(unix)]
 	shtty:   Option<libc::dev_t>,
+	/// The devices of the ptys [`Terminal::open_pty`] opened.
+	#[cfg(unix)]
+	ptys:    Vec<libc::dev_t>,
 	/// The console (whose modes always go back: it is shared with the
 	/// shell that started this one).
 	#[cfg(windows)]
@@ -659,6 +664,8 @@ impl NativeTerminal {
 			guards: Vec::new(),
 			#[cfg(unix)]
 			shtty: None,
+			#[cfg(unix)]
+			ptys: Vec::new(),
 			#[cfg(windows)]
 			console: crate::sys::console::WindowsConsole::new(),
 			restore,
@@ -718,6 +725,15 @@ impl Terminal for NativeTerminal {
 			let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 			self.guards.push(TermiosGuard::save(borrowed)?);
 		}
+		// A pty processes output as it is written: changing its modes at
+		// once leaves what is queued as draining first would.
+		let when = if when == SetWhen::Drain
+			&& unix::device(fd).is_some_and(|dev| self.ptys.contains(&dev))
+		{
+			SetWhen::Now
+		} else {
+			when
+		};
 		set_attrs(fd, attrs, when)
 	}
 
@@ -768,7 +784,14 @@ impl Terminal for NativeTerminal {
 	}
 
 	fn open_pty(&mut self, size: Option<TtyInfo>) -> io::Result<Pty> {
+		use std::os::fd::AsRawFd;
 		let (master, slave, name) = open_pty(size)?;
+		// Device numbers come back as ptys are reused: one entry each.
+		if let Some(dev) = unix::device(slave.as_raw_fd())
+			&& !self.ptys.contains(&dev)
+		{
+			self.ptys.push(dev);
+		}
 		Ok(Pty { master: file(master), slave: file(slave), name })
 	}
 }

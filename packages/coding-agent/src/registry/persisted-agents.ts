@@ -4,7 +4,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
-import { assistantTurnProducedOutput } from "../session/messages";
+import { assistantTurnProducedOutput, usageContextTokens } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { readSessionHeaderId, visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
@@ -135,7 +135,7 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 		tokens: usageTokens(usage),
 		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
 		cost: finiteNumber(cost?.total),
-		contextTokens: finiteNumber(usage.totalTokens) || undefined,
+		contextTokens: usageContextTokens(usage) || undefined,
 		resolvedModel: provider && model ? `${provider}/${model}` : undefined,
 		served: assistantTurnProducedOutput({
 			stopReason: message.stopReason,

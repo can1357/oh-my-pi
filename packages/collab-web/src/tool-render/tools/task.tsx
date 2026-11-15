@@ -6,36 +6,39 @@ import { detailsRecord, isRecord, normalizeWs, num, str, truncate } from "../uti
 
 const MISSING_YIELD_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
 
-/** One spawned unit of work, normalized across the batch and flat/legacy arg shapes. */
+/** One spawned unit of work, normalized across the batch (`tasks[]`) and flat arg shapes. */
 interface TaskItemView {
-	id: string | null;
-	description: string | null;
-	assignment: string | null;
+	name: string | null;
+	agent: string | null;
+	/** Single-prompt instructions; null for a stepped spawn. */
+	task: string | null;
+	/** Ordered stages sent one prompt at a time (`task.steps`); empty for a `task` spawn. */
+	steps: string[];
 	isolated: boolean;
 }
 
-function taskItems(args: Record<string, unknown>): TaskItemView[] {
-	const raw = args.tasks;
-	if (Array.isArray(raw)) {
-		const items: TaskItemView[] = [];
-		for (const entry of raw) {
-			if (!isRecord(entry)) continue;
-			items.push({
-				id: str(entry.id),
-				description: str(entry.description),
-				assignment: str(entry.assignment),
-				isolated: entry.isolated === true,
-			});
-		}
-		return items;
-	}
-	const flat: TaskItemView = {
-		id: str(args.id),
-		description: str(args.description),
-		assignment: str(args.assignment),
-		isolated: args.isolated === true,
+/** Read one item; args stream in token by token, so non-string steps (still partial) are skipped. */
+function taskItem(entry: Record<string, unknown>): TaskItemView {
+	return {
+		name: str(entry.name),
+		agent: str(entry.agent),
+		task: str(entry.task),
+		steps: Array.isArray(entry.steps) ? entry.steps.filter(step => typeof step === "string") : [],
+		isolated: entry.isolated === true,
 	};
-	return flat.id || flat.description || flat.assignment ? [flat] : [];
+}
+
+function taskItems(args: Record<string, unknown>): TaskItemView[] {
+	if (Array.isArray(args.tasks)) return args.tasks.filter(isRecord).map(taskItem);
+	const flat = taskItem(args);
+	return flat.name || flat.task || flat.steps.length > 0 ? [flat] : [];
+}
+
+/** First non-blank line of the work: the `task`, else the first step. */
+function taskBrief(item: TaskItemView): string | null {
+	const text = item.task ?? item.steps[0] ?? "";
+	const line = text.split("\n").find(l => l.trim() !== "");
+	return line ? normalizeWs(line) : null;
 }
 
 /** "Anna.Bob" nesting → "Anna>Bob" breadcrumb (mirrors the TUI's formatTaskId). */
@@ -64,16 +67,16 @@ function resultStatus(res: Record<string, unknown>): { label: string; tone: "ok"
 }
 
 function Summary({ args }: ToolRenderProps): ReactNode {
-	const agent = str(args.agent);
-	const resume = str(args.resume);
 	const tasks = taskItems(args);
+	// One badge when every spawn runs the same agent; mixed batches badge each row in the body.
+	const agents = new Set(tasks.map(t => t.agent));
+	const agent = agents.size === 1 ? tasks[0].agent : null;
 	const first = tasks.length > 0 ? tasks[0] : null;
-	const label = first ? (first.description ?? first.id) : null;
+	const label = first ? (first.name ?? taskBrief(first)) : null;
 	return (
 		<>
 			{agent && <Badge tone="accent">{agent}</Badge>}
-			{!agent && resume && <Badge>resume {resume}</Badge>}
-			{label && <span className="tv-muted">{truncate(normalizeWs(label), 72)}</span>}
+			{label && <span className="tv-muted">{truncate(label, 72)}</span>}
 			{tasks.length > 1 && <Badge>{tasks.length} tasks</Badge>}
 		</>
 	);
@@ -169,7 +172,6 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 }
 
 function Body({ args, result, host }: ToolRenderProps): ReactNode {
-	const resume = str(args.resume);
 	const context = str(args.context);
 	const tasks = taskItems(args);
 	const details = detailsRecord(result);
@@ -210,27 +212,32 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 
 	return (
 		<>
-			{resume && <Badge>resume {resume}</Badge>}
 			{context && <Output text={context} maxLines={4} title="context" />}
 			{tasks.length > 0 && (
 				<div className="tv-list">
 					{tasks.map((t, i) => (
-						<div key={t.id ?? i}>
+						<div key={t.name ?? i}>
 							<Row
 								k={
-									t.id ? (
-										<AgentLink id={t.id} host={host}>
-											{taskIdLabel(t.id)}
+									t.name ? (
+										<AgentLink id={t.name} host={host}>
+											{taskIdLabel(t.name)}
 										</AgentLink>
 									) : (
 										<Badge tone="accent">{`#${i + 1}`}</Badge>
 									)
 								}
 							>
-								{t.isolated && <Badge>isolated</Badge>}{" "}
-								{t.description && <span>{truncate(normalizeWs(t.description), 120)}</span>}
+								{t.agent && <Badge>{t.agent}</Badge>}{" "}
+								{t.steps.length > 0 && (
+									<Badge>{`${t.steps.length} ${t.steps.length === 1 ? "step" : "steps"}`}</Badge>
+								)}{" "}
+								{t.isolated && <Badge>isolated</Badge>}
 							</Row>
-							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}
+							{t.task && <Output text={t.task} maxLines={6} title="task" />}
+							{t.steps.map((step, n) => (
+								<Output key={n} text={step} maxLines={4} title={`step ${n + 1}/${t.steps.length}`} />
+							))}
 						</div>
 					))}
 				</div>

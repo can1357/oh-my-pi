@@ -44,8 +44,9 @@ export interface WarpEventEmitter {
 /**
  * Creates the Warp event transport for a top-level interactive TUI session.
  * The caller MUST enforce that install-site invariant; the sole production
- * caller is gated by `isInteractive`, so ACP, RPC, print, headless, and
- * subagent sessions never construct an emitter.
+ * caller is the event bridge below, which the CLI installs only for interactive
+ * sessions and as a `topLevelExtensions` entry, so ACP, RPC, print, headless,
+ * and subagent sessions never construct an emitter.
  */
 export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEventEmitter | undefined {
 	if (!isWarpCliAgentProtocolActive()) {
@@ -161,7 +162,11 @@ function messageText(content: unknown): string {
 		.join("");
 }
 
-/** Internal event bridge installed only by the top-level interactive TUI runner. */
+/**
+ * Internal event bridge installed only by the top-level interactive TUI runner,
+ * through `topLevelExtensions`: a child session rebinding it would report the
+ * child to Warp as a session of its own.
+ */
 export function createWarpEventBridgeExtension(): ExtensionFactory {
 	return api => {
 		let emitter: WarpEventEmitter | undefined;

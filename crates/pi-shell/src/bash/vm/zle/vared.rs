@@ -171,10 +171,7 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		(lp.unwrap_or_default(), rp.unwrap_or_default())
 	};
 	let curhist = super::hist::curhist(ctx.cx.store, ctx.vp);
-	let z = zle_mut(ctx.k, ctx.cx, ctx.vp);
-	if z.tty.is_none() {
-		z.tty = Tty::open(ctx.k);
-	}
+	Tty::attach(ctx.k, ctx.cx, ctx.vp);
 	let Some(z) = ctx.vp.zle.as_deref_mut() else {
 		return done(1);
 	};

@@ -318,6 +318,35 @@ await runRpcMode(session);
 		expect(await result).toBe("Deploy");
 	});
 
+	it("carries checkbox state so hosts can show which options are already checked", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const checkedIndices = [0, 1];
+		const result = requestRpcSelect(
+			pendingRequests,
+			output,
+			"(2 selected) Choose enabled jobs",
+			["pytest", "go-quality", "lint", "Other (type your own)", "Done selecting"],
+			{ initialIndex: 2, selectionMarker: "checkbox", checkedIndices, markableCount: 4 },
+		);
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		expect(JSON.parse(JSON.stringify(output.mock.calls[0]?.[0]))).toEqual({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "select",
+			title: "(2 selected) Choose enabled jobs",
+			options: ["pytest", "go-quality", "lint", "Other (type your own)", "Done selecting"],
+			initialIndex: 2,
+			selectionMarker: "checkbox",
+			checkedIndices: [0, 1],
+			markableCount: 4,
+		});
+
+		respond(pendingRequests, request.id, { value: "lint" });
+		expect(await result).toBe("lint");
+	});
+
 	it("cancels the remote dialog when its signal aborts", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

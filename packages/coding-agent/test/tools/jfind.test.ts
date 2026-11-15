@@ -288,6 +288,92 @@ describe("jfind cascade", () => {
 		}
 	});
 
+	it("verifies with verifyJudge and routes filenames and sketches with judge", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-verifier-"));
+		try {
+			await Bun.write(
+				path.join(dir, "src", "retry.ts"),
+				Array.from({ length: 600 }, (_, i) =>
+					i === 250 ? "function retryBudget() { return attempts * 2; } // retry" : `const noise${i} = ${i};`,
+				).join("\n"),
+			);
+			await Bun.write(path.join(dir, "src", "other.ts"), "export const unrelated = 1;\n");
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state) return String(state.tree).includes(`${key} retry.ts`) ? 0.9 : 0.1;
+				if ("files" in state) {
+					return (state.passages as Record<string, [string, string]>)[key]![1].includes("retryBudget") ? 0.8 : 0.2;
+				}
+				return 0.3;
+			});
+			const verifyJudge = new FakeJudge((request, key) =>
+				(stateOf(request).passages as Record<string, string>)[key]!.includes("retryBudget") ? 0.95 : 0.05,
+			);
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "how is the retry budget computed?",
+				extraKeywords: ["attempts"],
+				judge,
+				verifyJudge,
+				includeHidden: false,
+			});
+
+			expect(result.hits.map(hit => hit.rel)).toEqual(["src/retry.ts"]);
+			expect(result.hits[0]!.contentScore).toBe(0.95);
+			expect(judge.requests.some(request => "tree" in stateOf(request))).toBe(true);
+			expect(judge.requests.some(request => "files" in stateOf(request))).toBe(true);
+			expect(judge.requests.some(request => "file" in stateOf(request))).toBe(false);
+			expect(verifyJudge.requests.length).toBeGreaterThan(0);
+			expect(verifyJudge.requests.every(request => "file" in stateOf(request))).toBe(true);
+			expect(result.stats.requests).toBe(judge.requests.length + verifyJudge.requests.length);
+			expect(result.stats.inputTokens).toBe(100 * result.stats.requests);
+			expect(result.coverage).toBe("complete");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("a failing verifyJudge degrades coverage without retrying verification on judge", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-verifier-down-"));
+		try {
+			await Bun.write(
+				path.join(dir, "src", "retry.ts"),
+				Array.from({ length: 600 }, (_, i) =>
+					i === 250 ? "function retryBudget() { return attempts * 2; } // retry" : `const noise${i} = ${i};`,
+				).join("\n"),
+			);
+			await Bun.write(path.join(dir, "src", "other.ts"), "export const unrelated = 1;\n");
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state) return String(state.tree).includes(`${key} retry.ts`) ? 0.9 : 0.1;
+				if ("files" in state) {
+					return (state.passages as Record<string, [string, string]>)[key]![1].includes("retryBudget") ? 0.8 : 0.2;
+				}
+				return 0.3;
+			});
+			const verifyJudge = new FakeJudge(() => new Error("verifier down"));
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "how is the retry budget computed?",
+				extraKeywords: ["attempts"],
+				judge,
+				verifyJudge,
+				includeHidden: false,
+			});
+
+			expect(result.hits).toEqual([]);
+			expect(verifyJudge.requests.length).toBeGreaterThan(0);
+			expect(result.stats.failed).toBe(verifyJudge.requests.length);
+			expect(result.coverage).toBe("partial");
+			expect(result.stats.failures).toContain("verification: verifier down");
+			expect(judge.requests.some(request => "file" in stateOf(request))).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("routes sketches onward when their judgment fails and reports the failure", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-fail-"));
 		try {
@@ -356,6 +442,51 @@ describe("jfind cascade", () => {
 		} finally {
 			await removeWithRetries(dir);
 		}
+	});
+
+	it("keeps only files whose best verified passage reaches the caller's threshold", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-threshold-"));
+		try {
+			await Bun.write(
+				path.join(dir, "src", "parse.ts"),
+				'export function parseToken(text: string) { return text.split("."); }\n',
+			);
+			await Bun.write(
+				path.join(dir, "src", "use.ts"),
+				'import { parseToken } from "./parse";\nexport const parts = parseToken("a.b");\n',
+			);
+			// Every name and sketch routes onward. Verification scores the definition 0.9 and the caller 0.3.
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state || "files" in state) return 0.9;
+				return (state.passages as Record<string, string>)[key]!.includes("export function parseToken") ? 0.9 : 0.3;
+			});
+			const search = (threshold?: number) =>
+				runCascade({
+					root: { path: dir, type: "directory" },
+					filesystem: urlFs(dir),
+					query: "where is the token parser defined?",
+					extraKeywords: ["parseToken"],
+					judge,
+					includeHidden: false,
+					threshold,
+				});
+
+			const permissive = await search();
+			expect(permissive.threshold).toBe(0.2);
+			expect(permissive.hits.map(hit => hit.rel)).toEqual(["src/parse.ts", "src/use.ts"]);
+
+			const strict = await search(0.5);
+			expect(strict.threshold).toBe(0.5);
+			expect(strict.hits.map(hit => hit.rel)).toEqual(["src/parse.ts"]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("rejects a find.hitThreshold that would otherwise read as the default or admit unscored files", () => {
+		expect(() => Settings.isolated({ "find.hitThreshold": "0.5" })).toThrow("Invalid find.hitThreshold");
+		expect(() => Settings.isolated({ "find.hitThreshold": 0 })).toThrow("Invalid find.hitThreshold");
 	});
 
 	it("counts unusable answers apart from failed requests", async () => {

@@ -176,9 +176,10 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 });
 
 describe("owned Chromium profile preferences", () => {
-	it("disables password leak detection while keeping a reused profile's other preferences", async () => {
+	it("disables password leak detection and printing while keeping a reused profile's other preferences", async () => {
 		const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-test-"));
 		const file = path.join(dir, "Default", "Preferences");
+		const seeded = { password_manager_leak_detection: false };
 		try {
 			await Bun.write(
 				file,
@@ -187,14 +188,21 @@ describe("owned Chromium profile preferences", () => {
 			await seedOwnedProfilePreferences(dir);
 			expect(JSON.parse(await Bun.file(file).text())).toEqual({
 				intl: { accept_languages: "en-US" },
-				profile: { exit_type: "Normal", password_manager_leak_detection: false },
+				profile: { exit_type: "Normal", ...seeded },
+				printing: { enabled: false },
+			});
+
+			// A profile seeded before printing was turned off already has leak detection off.
+			await Bun.write(file, JSON.stringify({ profile: seeded, printing: { print_preview_sticky_settings: "{}" } }));
+			await seedOwnedProfilePreferences(dir);
+			expect(JSON.parse(await Bun.file(file).text())).toEqual({
+				profile: seeded,
+				printing: { print_preview_sticky_settings: "{}", enabled: false },
 			});
 
 			await fs.promises.rm(path.join(dir, "Default"), { recursive: true });
 			await seedOwnedProfilePreferences(dir);
-			expect(JSON.parse(await Bun.file(file).text())).toEqual({
-				profile: { password_manager_leak_detection: false },
-			});
+			expect(JSON.parse(await Bun.file(file).text())).toEqual({ profile: seeded, printing: { enabled: false } });
 		} finally {
 			await fs.promises.rm(dir, { recursive: true, force: true });
 		}
@@ -255,7 +263,10 @@ describe("owned Chromium profile preferences", () => {
 			expect(winner?.wsEndpoint).toBe(wsEndpoint);
 			expect(loser?.wsEndpoint).toBe(wsEndpoint);
 			expect(broker.starts).toBe(1);
-			expect(launchPrefs).toEqual({ profile: { password_manager_leak_detection: false } });
+			expect(launchPrefs).toEqual({
+				profile: { password_manager_leak_detection: false },
+				printing: { enabled: false },
+			});
 			// One seed, by the client that launched Chrome, before the launch. A
 			// seed after the launch can rename a snapshot it read before Chrome
 			// started over the live profile's Preferences.

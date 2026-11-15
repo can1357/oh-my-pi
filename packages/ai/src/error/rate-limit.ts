@@ -141,7 +141,8 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
+/** Parse an embedded JSON object from an error message. */
+export function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
 	const start = errorMessage.indexOf("{");
 	const end = errorMessage.lastIndexOf("}");
 	if (start < 0 || end < start) return undefined;

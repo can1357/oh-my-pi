@@ -176,59 +176,6 @@ export class IrcBridge {
 		return records;
 	}
 
-	/** Surfaces and consumes every queued incoming record before automatic injection; with
-	 *  `ifAny`, takes nothing unless at least one of them satisfies it. */
-	drainInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
-		const messages: IrcMessage[] = [];
-		const remainingInterrupts: AgentMessage[] = [];
-		const remainingAsides: AgentMessage[] = [];
-		const queues = [
-			{ records: this.#interrupts, remaining: remainingInterrupts },
-			{ records: this.#asides, remaining: remainingAsides },
-		];
-		for (const queue of queues) {
-			for (const record of queue.records) {
-				if (record.role !== "custom") {
-					queue.remaining.push(record);
-					continue;
-				}
-				if (record.customType !== "irc:incoming") {
-					queue.remaining.push(record);
-					continue;
-				}
-				const details = record.details;
-				if (!details || typeof details !== "object") {
-					queue.remaining.push(record);
-					continue;
-				}
-				const id = Reflect.get(details, "id");
-				const from = Reflect.get(details, "from");
-				const body = Reflect.get(details, "message");
-				const replyTo = Reflect.get(details, "replyTo");
-				const broadcast = Reflect.get(details, "broadcast") === true;
-				const progress = Reflect.get(details, "progress") === true;
-				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
-					queue.remaining.push(record);
-					continue;
-				}
-				messages.push({
-					id,
-					from,
-					to: agentId,
-					body,
-					ts: record.timestamp,
-					...(typeof replyTo === "string" ? { replyTo } : {}),
-					...(broadcast ? { broadcast: true } : {}),
-					...(progress ? { progress: true } : {}),
-				});
-			}
-		}
-		if (opts?.ifAny && !messages.some(opts.ifAny)) return [];
-		this.#interrupts = remainingInterrupts;
-		this.#asides = remainingAsides;
-		return messages;
-	}
-
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");

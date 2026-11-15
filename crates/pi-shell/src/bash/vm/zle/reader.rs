@@ -193,11 +193,8 @@ fn with_reader<T>(
 	vp: &mut Vproc,
 	f: impl FnOnce(&mut Reader, &mut Kernel, &mut Cx<'_>, &mut Vproc) -> T,
 ) -> T {
-	let z = zle_mut(k, cx, vp);
-	let mut r = z.reader.take().unwrap_or_default();
-	if z.tty.is_none() {
-		z.tty = Tty::open(k);
-	}
+	let mut r = zle_mut(k, cx, vp).reader.take().unwrap_or_default();
+	Tty::attach(k, cx, vp);
 	let out = f(&mut r, k, cx, vp);
 	if let Some(z) = vp.zle.as_deref_mut() {
 		z.reader = Some(r);

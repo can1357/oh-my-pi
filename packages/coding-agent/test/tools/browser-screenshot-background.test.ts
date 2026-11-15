@@ -52,7 +52,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
 });
 
-/** A headless Chromium on a CDP port, attached the way `app.cdp_url` attaches a user's browser. */
+/** A headless Chromium on a CDP port, attached the way an `app` CDP URL attaches a user's browser. */
 async function connectedBrowser(): Promise<PuppeteerBrowserHandle> {
 	const exe = await ensureChromiumExecutable();
 	if (!exe) throw new Error("Expected a Chromium executable");
@@ -100,10 +100,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser screenshots of background tabs", (
 			await releaseTab(name);
 		});
 		await acquireTab(name, handle, { target: "agent-tab", timeoutMs: 30_000 });
+		// Attaching emulates focus, which macOS Chromium reports as `visible` and Linux as `hidden`;
+		// either way the capture itself must leave it as it was.
+		const agentVisibility = await visibility(agentPage);
 
 		expect(await repaintAndCapture(name, "#00ff00")).toEqual([0, 255, 0]);
 		expect(await visibility(userPage)).toBe("visible");
-		expect(await visibility(agentPage)).toBe("hidden");
+		expect(await visibility(agentPage)).toBe(agentVisibility);
 	}, 45_000);
 
 	it("captures the adopted tab after the user switched away from it", async () => {

@@ -29,6 +29,9 @@ fn main() {
 	build_syntax_set();
 	build_oauth_callback_helper();
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+		// Without an explicit install name, ld64 records cargo's build-dir path,
+		// which varies per build (and per Nix sandbox).
+		println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libpi_natives.dylib");
 		build_darwin_native_helper(
 			"src/desktop/macos/capture/helper.m",
 			"omp-capture-helper",
@@ -73,7 +76,8 @@ fn build_syntax_set() {
 /// `src/applefm/build-bridge.sh` (shared with Bazel) and exposes it to the
 /// crate as `OMP_APPLEFM_BRIDGE` for embedding: `bridge.swift` when a Swift
 /// 6.4+ / macOS 27 SDK toolchain exists and the target is Apple silicon,
-/// otherwise an empty file (bridge not built).
+/// otherwise an empty file (bridge not built). A set `OMP_APPLEFM_SWIFTC`
+/// must be usable: it is never replaced by another toolchain or a stub.
 ///
 /// Cargo reruns this only when the sources, the toolchain selection inputs, or
 /// the selected compiler/SDK change; Swift module caches persist across builds
@@ -87,7 +91,13 @@ fn build_applefm_bridge() {
 	for file in ["build-bridge.sh", "bridge.swift"] {
 		println!("cargo:rerun-if-changed={}", sources.join(file).display());
 	}
-	for variable in ["OMP_APPLEFM_SWIFTC", "OMP_APPLEFM_MODULE_CACHE", "SDKROOT", "DEVELOPER_DIR"] {
+	for variable in [
+		"OMP_APPLEFM_SWIFTC",
+		"OMP_APPLEFM_DISABLE",
+		"OMP_APPLEFM_MODULE_CACHE",
+		"SDKROOT",
+		"DEVELOPER_DIR",
+	] {
 		println!("cargo:rerun-if-env-changed={variable}");
 	}
 	// SDK installs and upgrades change which toolchain is detected. Watch files,
@@ -129,7 +139,7 @@ fn build_applefm_bridge() {
 		println!("cargo:rerun-if-changed={}", swiftc.display());
 		println!("cargo:rerun-if-changed={}", sdk.join("SDKSettings.plist").display());
 		command.arg(swiftc).arg(sdk);
-	} else if architecture == "arm64" {
+	} else if architecture == "arm64" && env::var("OMP_APPLEFM_DISABLE").as_deref() != Ok("1") {
 		println!(
 			"cargo:warning=no Swift 6.4+ toolchain with the macOS 27 SDK; Apple Foundation Models \
 			 support is stubbed out"
@@ -150,13 +160,16 @@ fn build_applefm_bridge() {
 }
 
 /// Returns `(swiftc, sdk)` for the first toolchain `build-bridge.sh detect`
-/// accepts.
+/// accepts; panics with its message when it rejects an explicit compiler.
 fn detect_swift_toolchain(script: &Path) -> Option<(PathBuf, PathBuf)> {
 	let output = Command::new("/bin/sh")
 		.arg(script)
 		.arg("detect")
 		.output()
-		.ok()?;
+		.unwrap_or_else(|error| {
+			panic!("failed to run Apple Foundation Models toolchain detection: {error}")
+		});
+	assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim_end());
 	let line = String::from_utf8(output.stdout).ok()?;
 	let mut fields = line.trim_end().split('\t');
 	let swiftc = PathBuf::from(fields.next().filter(|field| !field.is_empty())?);

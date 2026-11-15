@@ -35,8 +35,9 @@
 //!   ([`crate::sys::job`]).
 //! - **Fds.** No fd beyond the three standard ones is inherited. A `/dev/fd/N`
 //!   the arguments name (a process substitution's) becomes a named pipe
-//!   `\\.\pipe\obash-pump-…` the child opens by path, pumped from or to fd N's
-//!   engine object ([`bridge_fds`]); other extra fds stay with the shell.
+//!   `\\.\pipe\obash-pump-…` (`\\.\pipe\LOCAL\…` in an `AppContainer`) the
+//!   child opens by path, pumped from or to fd N's engine object
+//!   ([`bridge_fds`]); other extra fds stay with the shell.
 
 use std::{
 	collections::HashMap,

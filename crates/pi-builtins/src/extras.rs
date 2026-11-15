@@ -2,7 +2,7 @@
 //!
 //! The extras are the in-process utilities (`cat`, `sort`, `grep`, `sed`, …)
 //! and the process builtins (`ps`, `top`, `sleep`, `pgrep`, `pkill`,
-//! `pidwait`). A host fills an [`Invocation`] and awaits [`run`]; one table,
+//! `pidwait`, `lsof`). A host fills an [`Invocation`] and awaits [`run`]; one table,
 //! [`extras`], names every extra this build compiled.
 //!
 //! [`run`] must be awaited on a tokio runtime: synchronous utilities run on its
@@ -35,6 +35,7 @@ macro_rules! for_each_extra {
 		$callback! {
 			async_utility [feature = "util.ast-grep"] "ast-grep" ast_grep::AstGrep;
 			async_utility [feature = "util.ast-grep"] "sg" ast_grep::AstGrep;
+			utility [feature = "util.awk"] "awk" awk::Awk;
 			utility [feature = "util.b2sum"] "b2sum" b2sum::B2sum;
 			utility [feature = "util.base32"] "base32" base32::Base32;
 			utility [feature = "util.base64"] "base64" base64::Base64;
@@ -68,6 +69,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.jq"] "jq" jq::Jq;
 			utility [feature = "util.ln"] "ln" ln::Ln;
 			utility [feature = "util.ls"] "ls" ls::Ls;
+			utility [feature = "util.md5"] "md5" md5::Md5;
 			utility [feature = "util.md5sum"] "md5sum" md5sum::Md5sum;
 			utility [feature = "util.mkdir"] "mkdir" mkdir::Mkdir;
 			utility [feature = "util.mktemp"] "mktemp" mktemp::Mktemp;
@@ -90,11 +92,14 @@ macro_rules! for_each_extra {
 			utility [feature = "util.sha256sum"] "sha256sum" sha256sum::Sha256sum;
 			utility [feature = "util.sha384sum"] "sha384sum" sha384sum::Sha384sum;
 			utility [feature = "util.sha512sum"] "sha512sum" sha512sum::Sha512sum;
+			utility [feature = "util.shasum"] "shasum" shasum::Shasum;
 			utility [feature = "util.sort"] "sort" sort::Sort;
 			utility [feature = "util.sponge"] "sponge" sponge::Sponge;
 			utility [feature = "util.stat"] "stat" stat::Stat;
+			utility [feature = "util.strings"] "strings" strings::Strings;
 			utility [feature = "util.tac"] "tac" tac::Tac;
 			utility [feature = "util.tail"] "tail" tail::Tail;
+			utility [all(feature = "util.tar", any(unix, windows))] "tar" tar::Tar;
 			utility [feature = "util.tee"] "tee" tee::Tee;
 			utility [feature = "util.touch"] "touch" touch::Touch;
 			utility [feature = "util.tr"] "tr" tr::Tr;
@@ -111,6 +116,10 @@ macro_rules! for_each_extra {
 			process [feature = "util.pgrep"] "pgrep" pgrep::PgrepCommand;
 			process [feature = "util.pidwait"] "pidwait" pidwait::PidwaitCommand;
 			process [feature = "util.pkill"] "pkill" pkill::PkillCommand;
+			process [all(
+				feature = "util.lsof",
+				any(target_os = "linux", target_os = "macos", target_os = "windows")
+			)] "lsof" lsof::LsofCommand;
 			process [feature = "util.ps"] "ps" ps::PsCommand;
 			process [feature = "util.sleep"] "sleep" sleep::SleepCommand;
 			process [feature = "util.top"] "top" top::TopCommand;
@@ -129,7 +138,7 @@ pub enum ExtraKind {
 		runs_commands: bool,
 	},
 	/// A process builtin (`ps`, `top`, `sleep`, `pgrep`, `pkill`,
-	/// `pidwait`), run by [`run`].
+	/// `pidwait`, `lsof`), run by [`run`].
 	Process,
 }
 

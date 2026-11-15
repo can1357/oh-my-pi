@@ -16,8 +16,8 @@ mod spaces;
 
 #[cfg(test)]
 pub(super) use ax::application_handle;
-pub(super) use ax::{ax_window_ids, has_open_window, menus};
-pub(super) use capture::{application_windows, has_onscreen_window};
+pub(super) use ax::{ax_window_ids, has_open_window, is_standard_window, menus};
+pub(super) use capture::{application_windows, has_onscreen_window, window_titles};
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;
@@ -80,6 +80,7 @@ impl Backend for MacosBackend {
 			0
 		};
 		let screen = session::screen_state(self.capture.selector());
+		let (secure_input, secure_input_app) = session::secure_input();
 		DesktopCapabilities {
 			backend: "quartz".to_string(),
 			display_server: Some("Quartz WindowServer".to_string()),
@@ -92,7 +93,10 @@ impl Backend for MacosBackend {
 			menus: ax_trusted,
 			held_input: ax_trusted,
 			spaces: spaces::supported(),
-			global_escape: permission::listen_events(),
+			// The Escape monitor sees no key at all while secure input holds.
+			global_escape: permission::listen_events() && !secure_input,
+			secure_input,
+			secure_input_app,
 			capture_permission: permission_label(capture_permission),
 			input_permission: permission_label(permission::post_events()),
 			ax_permission: permission_label(ax_trusted),
@@ -247,6 +251,7 @@ impl Backend for MacosBackend {
 		// is busy; the user's front app is read before it
 		// ([`EntryFront::before`]).
 		let (entry_front, id) = EntryFront::before(skylight::front_pid, || {
+			ax::require_element_read_as(ax::mac_handle(element)?)?;
 			let windows = self.capture.windows()?;
 			self.ax.window_id(element, &windows)
 		})?;
@@ -272,8 +277,10 @@ impl Backend for MacosBackend {
 		Self::require_input_permission()?;
 		// The element's bounds and window are read from its application, which
 		// blocks while it is busy; the user's front app is read before them.
-		let (entry_front, (target, event)) =
-			EntryFront::before(skylight::front_pid, || locate_element_click(self, element, click))?;
+		let (entry_front, (target, event)) = EntryFront::before(skylight::front_pid, || {
+			ax::require_element_read_as(ax::mac_handle(element)?)?;
+			locate_element_click(self, element, click)
+		})?;
 		if click.checks_menu_press() {
 			self.refuse_menu_press(&target, &event)?;
 		}

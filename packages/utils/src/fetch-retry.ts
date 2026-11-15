@@ -1,7 +1,8 @@
 import { scheduler } from "node:timers/promises";
 
-// "reset after 1h2m3s" / "10m15s" / "39s"
-const QUOTA_RESET_PATTERN = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i;
+// "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" / "quotaResetDelay": "17h48m25.5s" / "835ms"
+const QUOTA_RESET_PATTERN =
+	/(?:reset after|resets?\s+in|"quotaResetDelay":\s*")\s*(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)\b/i;
 // "Please retry in 250ms" / "Please retry in 12s"
 const PLEASE_RETRY_PATTERN = /Please retry in ([0-9.]+)(ms|s)/i;
 // JSON field: "retryDelay": "34.074824224s"
@@ -24,7 +25,14 @@ const WILL_RESET_AT_PATTERN =
 // a provider-specific offset (Z.AI/Zhipu Beijing time) is applied only through
 // `RetryHintOptions.naiveResetTimezoneOffset`, never inferred from the language.
 const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\s*重置/;
-const RESET_AT_PATTERNS: readonly RegExp[] = [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN];
+// Google Cloud Code Assist structured RPC error timestamp ("quotaResetTimeStamp": "2026-10-31T20:38:36Z")
+const GOOGLE_RPC_RESET_TIMESTAMP_PATTERN =
+	/"quotaResetTimeStamp":\s*"([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z)"/i;
+const RESET_AT_PATTERNS: readonly RegExp[] = [
+	WILL_RESET_AT_PATTERN,
+	CN_RESET_AT_PATTERN,
+	GOOGLE_RPC_RESET_TIMESTAMP_PATTERN,
+];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 
@@ -55,12 +63,12 @@ export interface RetryHintOptions {
  *  - `x-ratelimit-reset-after` (seconds)
  *
  * Body patterns:
- *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s`
+ *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s` / `Resets in 71h48m47s`
  *  - `Please retry in 250ms` / `Please retry in 12s`
- *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
+ *  - `"retryDelay": "34.074824224s"` / `"quotaResetDelay": "17h48m25.5s"` (JSON error detail fields)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
  *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
- *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置`
+ *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置` / `"quotaResetTimeStamp": "..."`
  *    (a provider offset makes a naive wall clock authoritative; otherwise it
  *    resolves only when no relative signal is present)
  *
@@ -152,7 +160,8 @@ export function extractRetryHint(
 		const minutes = quotaMatch[2] ? Number.parseInt(quotaMatch[2], 10) : 0;
 		const seconds = Number.parseFloat(quotaMatch[3]!);
 		if (!Number.isNaN(seconds)) {
-			const totalMs = ((hours * 60 + minutes) * 60 + seconds) * 1000;
+			const subMinuteMs = quotaMatch[4]!.toLowerCase() === "ms" ? seconds : seconds * 1000;
+			const totalMs = (hours * 60 + minutes) * 60_000 + subMinuteMs;
 			consider(totalMs > 0 ? totalMs : undefined);
 		}
 	}

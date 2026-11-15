@@ -609,8 +609,8 @@ contains `"rpc"`; this covers both `--mode rpc` and `--mode rpc-ui`. When enable
 turn, sent as a hidden `goal-continuation` message.
 
 - The turn starts once the yielding run has fully unwound. At that moment the goal
-  must still be active, the session idle with nothing queued, plan mode off, open
-  todos not all blocked, and the session not being disposed.
+  must still be active, the session idle with nothing queued, plan mode off, and
+  the session not being disposed.
 - While the turn is decided but not yet started, `get_state.isSettled`,
   `prompt_result.sessionSettled` and `session_settled` treat the session as busy.
   `session_settled` follows if the continuation is abandoned.
@@ -760,9 +760,9 @@ fallback when enabling fails.
 ### `set_todos` payload
 
 Replaces the todo state for the current session and returns `{ todoPhases }`. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit.
-Phases use `{ name, tasks }`; tasks retain `{ content, status, blocker? }`. There
+Phases use `{ name, tasks }`; tasks retain `{ content, status }`. There
 are no phase or task IDs. Status is `"pending"`, `"in_progress"`, `"completed"`,
-`"abandoned"`, or `"blocked"`. Snapshot cloning drops extra fields, including
+or `"abandoned"`. Snapshot cloning drops extra fields, including
 task `details` and `notes`.
 
 ```json
@@ -1303,7 +1303,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 
 `--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
 
-- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`.
+- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`. Each `ask` prompt's `title` can span several lines: the form's context text for that field (paragraphs, lists, `<pre>` blocks, tables) separated by blank lines, then the field's question on the last line.
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
@@ -1320,6 +1320,17 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      description, emits a positionally aligned
      `optionDetails: Array<{ description?: string }>` array. Hosts that do not
      render descriptions can continue using `options` alone.
+     When the caller supplies them, it also carries `initialIndex?: number`
+     (option to focus first), `selectionMarker?: "radio" | "checkbox"`,
+     `checkedIndices?: number[]` (options currently checked in a checkbox
+     list) and `markableCount?: number` (leading options that get a marker;
+     trailing ones are actions, such as the `ask` tool's "Done selecting";
+     absent means every option when `selectionMarker` is set). The `ask`
+     tool's "Other" row is marked and appears in `checkedIndices` once a custom
+     answer is entered.
+     The `ask` tool's checkbox fallback re-sends `select` after
+     every toggle, so `checkedIndices` is the authoritative checked state; a
+     host that ignores it cannot show which options are already checked.
    - `input` carries `title: string` and optional `placeholder?: string`,
      `timeout?: number`, and `secret?: boolean`. `secret` is an unnegotiated
      host hint from `ExtensionUIDialogOptions.secret`; hosts that support

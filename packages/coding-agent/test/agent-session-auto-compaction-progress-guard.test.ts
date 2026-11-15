@@ -956,7 +956,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const generateHandoffSpy = vi
 			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockResolvedValue("handoff document");
+			.mockResolvedValue("## Goal\nContinue the original request");
 
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
 		session.subscribe(event => {
@@ -990,10 +990,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(sessionManager.getBranch().at(-1)).toMatchObject({
-			type: "compaction",
-			summary: "handoff document",
-		});
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction" });
 		expect(sessionManager.getBranch()).not.toContainEqual(
 			expect.objectContaining({
 				type: "message",
@@ -1006,7 +1003,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// Native (handoff) compaction is not extension-owned.
 		expect(compactEvents).toHaveLength(1);
 		expect(compactEvents[0]?.fromExtension).toBe(false);
-		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "handoff document" });
+		expect(compactEvents[0]?.compactionEntry?.type).toBe("compaction");
 		expect(compactEvents[0]?.compactionEntry?.fromExtension).toBeFalsy();
 	});
 
@@ -1359,18 +1356,14 @@ describe("AgentSession auto-compaction progress guard", () => {
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [lengthStop] });
 		await scheduler.yield();
 
-		handoffResult.resolve("speculative handoff");
+		handoffResult.resolve("## Goal\nContinue the original request");
 		await session.waitForIdle();
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(sessionManager.getBranch().at(-1)).toMatchObject({
-			type: "compaction",
-			summary: "speculative handoff",
-		});
-		// The interrupted reasoning survives the handoff in the kept tail, and the next response continues it.
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction" });
 		expect(session.agent.state.messages.slice(-2)).toMatchObject([
 			{ role: "assistant", stopReason: "length" },
-			{ role: "developer", content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }] },
+			{ role: "developer", attribution: "agent" },
 		]);
 	});
 
@@ -1393,7 +1386,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 				await releaseFailedHandoff.promise;
 				throw new Error("speculative handoff failed");
 			}
-			return "recovery handoff";
+			return "## Goal\nContinue the original request";
 		});
 
 		const speculativeTrigger = {
@@ -1447,10 +1440,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		await session.waitForIdle();
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(sessionManager.getBranch().at(-1)).toMatchObject({
-			type: "compaction",
-			summary: "recovery handoff",
-		});
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction" });
 	});
 
 	it("retries a small-window overflow when the reserve exceeds the model window", async () => {

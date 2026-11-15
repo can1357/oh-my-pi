@@ -1858,6 +1858,8 @@ export interface MarkdownTheme {
 	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
 	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
+	/** Color the label of a link an extension handles (a registered extension scheme); defaults to `link`. */
+	extensionLink?: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
@@ -3029,6 +3031,12 @@ export class Markdown implements Component {
 		for (let i = 0; i < index; i++) start += tokens[i]!.raw.length;
 		const key = tableLockKey(start, token.raw);
 		if (key === undefined) return;
+		// Widths locked before a body row ends would come from the header
+		// alone, and every later row would wrap inside them. Such a lock
+		// settles no rows either (see below), so offer one only once the first
+		// body row has ended.
+		const body = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		if (!token.raw.includes("\n", body)) return;
 		this.#openTableKey = key;
 		if (!this.tableLocks?.has(key)) return;
 		// Like a list, the table must start at the settled boundary: a
@@ -3049,7 +3057,7 @@ export class Markdown implements Component {
 		// the settled rows also stop in front of the first row holding one.
 		const table = token as TableToken;
 		if (table.header.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) return;
-		let finished = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		let finished = body;
 		for (const row of table.rows) {
 			const next = token.raw.indexOf("\n", finished) + 1;
 			if (next === 0) break;
@@ -4532,7 +4540,10 @@ export class Markdown implements Component {
 					// Its label gets its own (dotted) underline instead of the web-link one.
 					if (href && extensionLinkScheme(href)) {
 						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
-						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						const styledLabel = this.#theme.extensionLink
+							? this.#theme.extensionLink(linkText)
+							: this.#theme.link(linkText);
+						result += formatExtensionLink(styledLabel, href, key) + stylePrefix;
 						break;
 					}
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
@@ -4689,8 +4700,19 @@ export class Markdown implements Component {
 				continue;
 			}
 			const rowStart = lines.length;
-			const bullet = token.ordered ? `${startNumber + i}. ` : "- ";
-			const firstPrefix = indent + this.#theme.listBullet(bullet);
+			const marker = token.ordered ? `${startNumber + i}. ` : "- ";
+			// A task item's leading checkbox token draws nothing in #renderListItem;
+			// draw it after the marker so wrapped rows hang under the task text.
+			// `listBullet` only ever sees the bare marker (`- `, `10. `), so themes
+			// that match or replace it never touch the checkbox, which takes the
+			// item's text style instead.
+			const checkbox = item.tokens?.[0];
+			const taskBox = checkbox?.type === "checkbox" ? `[${checkbox.checked ? "x" : " "}] ` : "";
+			const bullet = marker + taskBox;
+			let firstPrefix = indent + this.#theme.listBullet(marker);
+			if (taskBox !== "") {
+				firstPrefix += styleContext ? styleContext.applyText(taskBox) : this.#applyDefaultStyle(taskBox);
+			}
 			// Continuation rows align under the item text, so the hang matches the
 			// actual bullet width (`10. ` is 4 cells, not 2).
 			const continuationIndent = indent + padding(visibleWidth(bullet));

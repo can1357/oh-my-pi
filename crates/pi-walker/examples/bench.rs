@@ -1,13 +1,14 @@
 //! Walk timing harness, mirrored by gogrep's `walkbench`.
 //!
-//! Usage: bench (collect|parallel) ROOT [--hidden] [--gitignore] [--skip-git]
-//!        [--skip-nm] [--detail=min|full] [--cache] [--sorted] [--workers=N]
-//!        [--iters=N] [--list]
+//! Usage: bench (collect|parallel|tree) ROOT [--hidden] [--gitignore]
+//! [--skip-git]        [--skip-nm] [--detail=min|full] [--cache] [--sorted]
+//! [--workers=N]        [--iters=N] [--list]
 //!
 //! `collect` gathers every entry (path-sorted with `--sorted`, as
 //! `walkbench collect` always does) and counts regular files; `parallel`
-//! counts files from the streaming walk. `--list` prints the files' sorted
-//! relative paths instead of timing.
+//! counts files from the streaming walk; `tree` counts files of the ordered
+//! [`walk::Tree`] traversal (`--workers=1`: no read-ahead). `--list` prints
+//! the files' sorted relative paths instead of timing.
 
 use std::{
 	hint::black_box,
@@ -104,10 +105,38 @@ async fn parallel(args: &Args, mut list: Option<&mut Vec<String>>) -> usize {
 	files
 }
 
+async fn tree(args: &Args, mut list: Option<&mut Vec<String>>) -> usize {
+	let opts = walk::TreeOptions {
+		hidden: args.opts.hidden,
+		gitignore: args.opts.gitignore,
+		skip_git: args.opts.skip_git,
+		skip_node_modules: args.opts.skip_node_modules,
+		detail: args.opts.detail,
+		workers: args.opts.workers,
+		..walk::TreeOptions::default()
+	};
+	let mut tree = walk::Tree::new(&Fs::native(), &args.root, &opts)
+		.await
+		.expect("tree");
+	let mut files = 0;
+	while let Some(event) = tree.next().await {
+		if let walk::Event::Entry(entry) = event
+			&& entry.file_type == FileType::File
+		{
+			files += 1;
+			if let Some(list) = &mut list {
+				list.push(String::from_utf8_lossy(entry.path).into_owned());
+			}
+		}
+	}
+	files
+}
+
 async fn run(args: &Args, list: Option<&mut Vec<String>>) -> usize {
 	match args.mode.as_str() {
 		"collect" => collect(args, list).await,
 		"parallel" => parallel(args, list).await,
+		"tree" => tree(args, list).await,
 		other => panic!("unknown mode {other}"),
 	}
 }

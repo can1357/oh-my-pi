@@ -17,6 +17,11 @@ export interface EvalPreludeContext {
 	toolCallId: string;
 	/** Cancellation signal for the active eval cell. */
 	signal?: AbortSignal;
+	/**
+	 * The eval cell's `timeout` in ms, which the cell's watchdog suspends while this call runs; a call that sets
+	 * no budget of its own takes this one. 0 when the cell has no timeout; absent when the call comes from no cell.
+	 */
+	cellTimeoutMs?: number;
 	/** Ordinary agent tool context used for settings, UI, and provider metadata. */
 	context?: AgentToolContext;
 	/** Progress receiver shared with the active eval call. */

@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import type { CustomTool } from "../../src/extensibility/custom-tools/types";
 import { bindPreparedExtensions, importExtensionModule } from "../../src/extensibility/extensions/loader";
+import type { PreparedExtension } from "../../src/extensibility/extensions/types";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../../src/internal-urls/local-protocol";
 import { MCPManager } from "../../src/mcp/manager";
 import type { MCPStdioServerConfig } from "../../src/mcp/types";
@@ -81,6 +82,7 @@ describe("integrations thread service", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await fixture.stop();
 		MCPManager.resetForTests();
 		await manager.disconnectAll();
@@ -228,5 +230,29 @@ describe("integrations thread service", () => {
 		expect(local.extensions.flatMap(extension => [...extension.commands.keys()])).toEqual(["thread-main"]);
 
 		expect(await probe.bindExtensions([prepared], dir)).toEqual({ commands: ["thread-worker"], errors: [] });
+	}, 20_000);
+
+	it("binds module-backed extensions in the worker and reports, once, an inline factory it cannot import", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const inline: PreparedExtension = {
+			path: "<inline-0>",
+			resolvedPath: "<inline-0>",
+			factory: function sdkInlineFactory(pi) {
+				pi.registerCommand("inline-hook", { description: "SDK inline factory", handler: async () => {} });
+			},
+			error: null,
+		};
+		const fileBacked = await importExtensionModule(path.join(FIXTURES, "integrations-extension.ts"), dir);
+
+		// Two worker-hosted spawns: neither treats the `<inline-0>` source id as a module to import.
+		for (let spawn = 0; spawn < 2; spawn++) {
+			expect(await probe.bindExtensions([inline, fileBacked], dir)).toEqual({
+				commands: ["thread-worker"],
+				errors: [],
+			});
+		}
+		// The lost hooks are reported by the parent once, naming the extension, not dropped silently.
+		const reports = warn.mock.calls.filter(([, context]) => context?.extension === inline.path);
+		expect(reports.map(([, context]) => context)).toEqual([{ extension: "<inline-0>", factory: "sdkInlineFactory" }]);
 	}, 20_000);
 });

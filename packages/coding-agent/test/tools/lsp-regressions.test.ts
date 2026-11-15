@@ -27,6 +27,7 @@ import {
 	type CreateFile,
 	type DeleteFile,
 	type Diagnostic,
+	FileChangeType,
 	type LspClient,
 	lspSchema,
 	type RenameFile,
@@ -2669,7 +2670,7 @@ describe("lsp regressions", () => {
 
 			await Bun.write(modulePath, "export class MissingClass {}\n");
 			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
-				{ filePath: modulePath, type: lspClient.FileChangeType.Created },
+				{ filePath: modulePath, type: FileChangeType.Created },
 			]);
 
 			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
@@ -4533,11 +4534,11 @@ describe("lsp regressions", () => {
 				]);
 
 				await lspClient.notifyWorkspaceWatchedFiles(sessionRoot, [
-					{ filePath: siblingFile, type: lspClient.FileChangeType.Changed },
+					{ filePath: siblingFile, type: FileChangeType.Changed },
 				]);
 				const watched = await server.waitFor(message => message.method === "workspace/didChangeWatchedFiles");
 				expect(watched.params).toEqual({
-					changes: [{ uri: fileToUri(siblingFile), type: lspClient.FileChangeType.Changed }],
+					changes: [{ uri: fileToUri(siblingFile), type: FileChangeType.Changed }],
 				});
 			} finally {
 				configCache.delete(sessionRoot);
@@ -4556,6 +4557,69 @@ describe("lsp regressions", () => {
 				expect(server.received.some(message => message.method === "workspace/didChangeWorkspaceFolders")).toBe(
 					false,
 				);
+			} finally {
+				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("watches the files a watchFiles server registers and reports changes made outside omp", async () => {
+			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-watched-files-");
+			try {
+				const { server } = useServer({}, undefined, { watchFiles: true });
+				await references(new LspTool(makeLspSession(sessionRoot)), path.join(sessionRoot, "src", "target.py"));
+				const initialize = await server.waitFor(message => message.method === "initialize");
+				expect(initialize.params).toMatchObject({
+					capabilities: { workspace: { didChangeWatchedFiles: { dynamicRegistration: true } } },
+				});
+
+				server.send({
+					jsonrpc: "2.0",
+					id: 9101,
+					method: "client/registerCapability",
+					params: {
+						registrations: [
+							{
+								id: "py-files",
+								method: "workspace/didChangeWatchedFiles",
+								registerOptions: {
+									watchers: [{ globPattern: { baseUri: fileToUri(sessionRoot), pattern: "**/*.py" } }],
+								},
+							},
+						],
+					},
+				});
+				await server.waitFor(message => message.id === 9101 && message.method === undefined);
+
+				// The watch is armed shortly after the registration is acknowledged; wait until a
+				// probe file is reported, then check the exact notification for a fresh file.
+				const deadline = Date.now() + 5_000;
+				for (let attempt = 0; ; attempt++) {
+					const probe = path.join(sessionRoot, "src", `probe-${attempt}.py`);
+					await Bun.write(probe, "");
+					const seen = await server
+						.waitFor(
+							message =>
+								message.method === "workspace/didChangeWatchedFiles" &&
+								JSON.stringify(message.params).includes(fileToUri(probe)),
+							300,
+						)
+						.catch(() => undefined);
+					if (seen) break;
+					if (Date.now() > deadline) throw new Error("the watch never reported a probe file");
+				}
+
+				// Written behind the client's back, as a shell command or another editor would.
+				const created = path.join(sessionRoot, "src", "created.py");
+				await Bun.write(created, "value = 2\n");
+				const watched = await server.waitFor(
+					message =>
+						message.method === "workspace/didChangeWatchedFiles" &&
+						JSON.stringify(message.params).includes(fileToUri(created)),
+					5_000,
+				);
+				expect(watched.params).toEqual({ changes: [{ uri: fileToUri(created), type: FileChangeType.Created }] });
 			} finally {
 				configCache.delete(sessionRoot);
 				await lspClient.shutdownAll();
@@ -5782,7 +5846,7 @@ describe("lsp regressions", () => {
 
 			await fsp.unlink(consumer);
 			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
-				{ filePath: consumer, type: lspClient.FileChangeType.Deleted },
+				{ filePath: consumer, type: FileChangeType.Deleted },
 			]);
 
 			const closed = server.received

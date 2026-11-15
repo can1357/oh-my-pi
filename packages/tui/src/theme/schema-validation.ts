@@ -28,6 +28,7 @@ const themeColorsSchema = type({
 	toolOutput: "string | number",
 	mdHeading: "string | number",
 	mdLink: "string | number",
+	"mdExtensionLink?": "string | number",
 	mdLinkUrl: "string | number",
 	mdCode: "string | number",
 	mdCodeBlock: "string | number",

@@ -190,6 +190,9 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 				? options.noEmbeddings
 				: nestedEmbeddings?.disabled;
 	const embeddingModel = options.embeddingModel ?? nestedEmbeddings?.model;
+	const embeddingAllowRemote = nestedEmbeddings?.allowRemote;
+	const embeddingAllowLocal = nestedEmbeddings?.allowLocal;
+	const embeddingAllowLocalLoad = nestedEmbeddings?.allowLocalLoad;
 	const embeddingApiUrl = options.embeddingApiUrl ?? nestedEmbeddings?.apiUrl;
 	const embeddingApiKey = options.embeddingApiKey ?? nestedEmbeddings?.apiKey;
 	const embeddingProvider = resolveEmbeddingProvider(nestedEmbeddings?.provider);
@@ -199,6 +202,9 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 	const embeddings =
 		embeddingDisabled !== undefined ||
 		embeddingModel !== undefined ||
+		embeddingAllowRemote !== undefined ||
+		embeddingAllowLocal !== undefined ||
+		embeddingAllowLocalLoad !== undefined ||
 		embeddingApiUrl !== undefined ||
 		embeddingApiKey !== undefined ||
 		embeddingProvider !== undefined ||
@@ -207,6 +213,9 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 			? {
 					disabled: embeddingDisabled,
 					model: embeddingModel,
+					allowRemote: embeddingAllowRemote,
+					allowLocal: embeddingAllowLocal,
+					allowLocalLoad: embeddingAllowLocalLoad,
 					apiUrl: embeddingApiUrl,
 					apiKey: embeddingApiKey,
 					provider: embeddingProvider,
@@ -238,6 +247,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 						hasOwn(options, "llmModel")))
 				? true
 				: undefined;
+		const llmAllowRemote = nestedLlm?.allowRemote;
 		const llmBaseUrl = options.llmBaseUrl ?? nestedLlm?.baseUrl;
 		const llmApiKey = options.llmApiKey ?? nestedLlm?.apiKey;
 		const llmMaxTokens = nestedLlm?.maxTokens;
@@ -246,6 +256,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		const llmConsolidationPrompt = nestedLlm?.consolidationPrompt;
 		if (
 			llmEnabled !== undefined ||
+			llmAllowRemote !== undefined ||
 			llmBaseUrl !== undefined ||
 			llmApiKey !== undefined ||
 			llmModel !== undefined ||
@@ -256,6 +267,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		) {
 			llm = {
 				enabled: llmEnabled,
+				allowRemote: llmAllowRemote,
 				baseUrl: llmBaseUrl,
 				apiKey: llmApiKey,
 				model: llmModel,

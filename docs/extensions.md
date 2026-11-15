@@ -35,6 +35,14 @@ Extensions can combine all of the following in one module:
 - custom message rendering
 - session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
 
+Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper paths such as `@oh-my-pi/pi-tui/native/spans` also resolve inside the omp binary, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. Besides the extension types and the theme (`theme`, `getSettingsListTheme`), the root exports these helpers:
+
+- `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
+- `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
+- `parseXdUrl` to read the device name from an `xd://` URL, plus `parseXdTopicUrl`, `stripXdUrlPrefix`, `couldBecomeXdUrl` and `XD_URL_PREFIX`
+- `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
+- `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
+
 ## Runtime model
 
 1. Extension modules are imported concurrently; their factory functions then run sequentially in path order.
@@ -507,6 +515,7 @@ Canonical event unions and payload types are in `types.ts`.
 
 - `session_start`
 - `session_before_switch` / `session_switch`
+- `session_clear`
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
@@ -521,6 +530,13 @@ loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply fro
 the first request. Events emitted before it binds are not replayed. Resumed
 sessions, `--tools`, and launches with flags omp does not recognize load every
 extension before the session starts.
+
+`session_clear` receives `{ type: "session_clear" }` after a successful in-place
+context reset (`/clear` or `AgentSession.resetSessionContext()`), including an
+empty clear. Handlers are awaited before the reset returns and can invalidate
+caches of instructions already injected into model context. The session id,
+file, and persisted history are unchanged; this is not `session_switch` and
+cannot cancel the reset. A busy/rejected reset emits no event.
 
 `session.compacting` receives `{ sessionId, messages }` and can return
 `{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`

@@ -36,6 +36,7 @@
 
 #![forbid(unsafe_code)]
 
+mod cow_map;
 pub mod diag;
 mod engine;
 mod error;
@@ -44,6 +45,7 @@ mod fd;
 pub mod fs;
 mod host;
 mod ids;
+mod image;
 pub mod invocation;
 pub mod ir;
 mod mem;
@@ -85,6 +87,7 @@ pub use crate::bash::{
 		AstNodeId, CallId, CmdTag, Dialect, IntrinsicId, JobId, ModeId, NativeRef, Platform, RunId,
 		ToolRef, UnitId, Vpid,
 	},
+	image::Image,
 	mem_store::MemStore,
 	signal::{SigSet, SigTarget, Signal},
 	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},

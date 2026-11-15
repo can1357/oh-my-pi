@@ -26,10 +26,13 @@ import {
  * its own connection instead of exercising the host.
  */
 const HELLO_FLOOD = 200;
-const cleanups: (() => void)[] = [];
-afterEach(() => {
-	for (const cleanup of cleanups.splice(0).reverse()) cleanup();
-	uninstallInMemoryRelay();
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+	try {
+		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	} finally {
+		uninstallInMemoryRelay();
+	}
 });
 
 it("sheds a flooding guest's backlog instead of ending the room for everyone", async () => {
@@ -38,7 +41,7 @@ it("sheds a flooding guest's backlog instead of ending the room for everyone", a
 	const snapshot = makeSnapshot();
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(snapshot, seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
@@ -119,7 +122,7 @@ it("tells a served peer it never welcomed to resync instead of rejecting it as r
 	instrumentRelay(relay, { throttle: false });
 	const seen: HostObservations = { notices: [], participantCounts: [] };
 	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
-	cleanups.push(() => void host.stop("test done"));
+	cleanups.push(() => host.stop("test done"));
 
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
