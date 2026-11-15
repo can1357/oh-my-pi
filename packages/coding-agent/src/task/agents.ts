@@ -17,6 +17,9 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
 
+/** The bundled general-purpose subagent's name. Its model is the `task` entry of `task.agentModelOverrides`. */
+export const TASK_AGENT_NAME = "task";
+
 interface AgentFrontmatter {
 	name: string;
 	description: string;

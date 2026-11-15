@@ -36,7 +36,7 @@ function harness(draft = "") {
 			getEntry: (id: string) => branch.find(e => e.id === id),
 			getLeafId: () => "a2",
 		},
-		session: { navigateTree },
+		session: { navigateTree, registerSessionTaskModelResolver: () => () => {} },
 		editor: {
 			getText: () => editor.text,
 			get pendingImages() {

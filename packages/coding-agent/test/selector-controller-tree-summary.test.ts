@@ -104,6 +104,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 		session: {
 			navigateTree,
 			abortBranchSummary: vi.fn(),
+			registerSessionTaskModelResolver: () => () => {},
 		},
 	} as unknown as InteractiveModeContext;
 	const controller = new SelectorController(ctx);

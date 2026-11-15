@@ -102,7 +102,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			getEntry: (id: string) => (id === leafEntry.id ? leafEntry : undefined),
 			getSessionName: () => undefined,
 		},
-		session: { navigateTree, resumeAfterAskReanswer },
+		session: { navigateTree, resumeAfterAskReanswer, registerSessionTaskModelResolver: () => () => {} },
 		ui: {
 			setFocus: vi.fn(),
 			getFocused: () => undefined,

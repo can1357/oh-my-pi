@@ -47,6 +47,7 @@ function createCtx(slot: EditorSlot, editor: unknown, focused: unknown = editor,
 			setFocus,
 			requestRender: vi.fn(),
 		},
+		session: { registerSessionTaskModelResolver: () => () => {} },
 		...extra,
 	} as unknown as InteractiveModeContext;
 	return { ctx, setFocus };
@@ -174,6 +175,7 @@ describe("SelectorController session replacement overlay", () => {
 			editor,
 			editorContainer,
 			settings: Settings.isolated(),
+			session: { registerSessionTaskModelResolver: () => () => {} },
 			sessionManager: {
 				getCwd: () => "/tmp",
 				getSessionDir: () => "/tmp",
