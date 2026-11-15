@@ -35,11 +35,14 @@ const readTool: Tool = { name: "read", description: "Read a file", parameters: t
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const originalAgyPath = process.env.PI_AGY_PATH;
+const originalPath = process.env.PATH;
 
 afterEach(async () => {
 	await sharedAgyPool.drain();
 	if (originalAgyPath === undefined) delete process.env.PI_AGY_PATH;
 	else process.env.PI_AGY_PATH = originalAgyPath;
+	if (originalPath === undefined) delete process.env.PATH;
+	else process.env.PATH = originalPath;
 	while (cleanups.length > 0) {
 		const fn = cleanups.pop()!;
 		await fn();
@@ -152,6 +155,8 @@ describe.skipIf(process.platform === "win32")("antigravity-cli thread service", 
 			{ mode: 0o755 },
 		);
 		process.env.PI_AGY_PATH = wrapperPath;
+		await fs.writeFile(path.join(root, "nc"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		process.env.PATH = originalPath ? `${root}${path.delimiter}${originalPath}` : root;
 
 		const { worker, peer, link, probe } = await startWorker();
 

@@ -127,10 +127,13 @@ function isProcessAlive(pid: number): boolean {
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const originalAgyPath = process.env.PI_AGY_PATH;
+const originalPath = process.env.PATH;
 
 afterEach(async () => {
 	if (originalAgyPath === undefined) delete process.env.PI_AGY_PATH;
 	else process.env.PI_AGY_PATH = originalAgyPath;
+	if (originalPath === undefined) delete process.env.PATH;
+	else process.env.PATH = originalPath;
 	while (cleanups.length > 0) {
 		const fn = cleanups.pop()!;
 		await fn();
@@ -510,6 +513,9 @@ describe.skipIf(process.platform === "win32")("SharedAgyPool + AgyHost subproces
 			{ mode: 0o755 },
 		);
 		process.env.PI_AGY_PATH = wrapperPath;
+		// fake-agy connects over node:net directly; stub nc so spawnAgyCliProcess runs on hosts without netcat.
+		await fs.writeFile(path.join(root, "nc"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		process.env.PATH = originalPath ? `${root}${path.delimiter}${originalPath}` : root;
 		return { root, geminiDir, wrapperPath };
 	}
 
