@@ -390,6 +390,7 @@ import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
+	ComposerOwner,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
@@ -1959,6 +1960,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 	approvalOwnsComposer = false;
+	composerOwner?: ComposerOwner;
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
 	}

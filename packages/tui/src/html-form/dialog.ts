@@ -547,7 +547,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (this.#guardBlocks()) {
-			if (matchesSelectUp(data) || matchesSelectDown(data)) this.#guardReleased = true;
+			if (matchesSelectUp(data) || matchesSelectDown(data)) this.#releaseGuard();
 			else this.#options.inputGuard?.handleInput(data);
 			return;
 		}
@@ -999,10 +999,16 @@ export class HtmlFormDialog implements Component, Focusable {
 		return !this.#guardReleased && (this.#options.inputGuard?.isBlocked() ?? false);
 	}
 
+	/** Tells the guard right away, so its host stops owning the composer before the next render. */
+	#releaseGuard(): void {
+		this.#guardReleased = true;
+		this.#options.inputGuard?.syncPresentation?.(false);
+	}
+
 	/** A pointer pick or action on the form is the user handing the keys over, as up/down does. */
 	#releaseGuardForPointer(): void {
 		if (!this.#guardBlocks()) return;
-		this.#guardReleased = true;
+		this.#releaseGuard();
 		this.#changed();
 	}
 
