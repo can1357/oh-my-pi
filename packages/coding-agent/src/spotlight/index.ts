@@ -249,7 +249,7 @@ export async function shapeToolBlocks(
 		ms: Math.round(performance.now() - started),
 		spotlight: { ...scorer.usage, costUsd: Number(scorer.usage.costUsd.toFixed(8)) },
 		ranker: experiment.ranker,
-		...(fallbackUsage(scorer) ?? {}),
+		...fallbackUsage(scorer),
 		stats,
 		plainChars: plainText.length,
 		plainTokens: plainTokensOrIn,
