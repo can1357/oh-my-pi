@@ -203,4 +203,43 @@ describe("selective commit flow", () => {
 			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
 	});
+
+	it("rejects an unknown hunk unit id without changing the selection", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
+		await Bun.write(path.join(root, "b.ts"), "export const b = 1;\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await write("Main", undefined, "a.ts", "export const a = 2;\nexport const extra = 3;\n");
+		await write(
+			"Other",
+			undefined,
+			"a.ts",
+			"export const a = 2;\nexport const extra = 3;\nexport const foreign = 4;\n",
+		);
+		await write("Main", undefined, "b.ts", "export const b = 2;\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.diff();
+		expect(selected).toContain("export const a = 2");
+		expect(selected).not.toContain("foreign");
+
+		expect(() => draft.take({ path: "a.ts", units: ["1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		expect(() => draft.drop({ path: "a.ts", units: ["1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		// b.ts has hunk 1 but no unit 1b; the call must fail before a.ts's 1b is selected.
+		expect(() => draft.take({ path: "*.ts", units: ["1b"] })).toThrow(/has no unit "1b"/);
+		expect(() => draft.take({ path: "a.ts", units: ["1b", "1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		expect(draft.diff()).toBe(selected);
+
+		expect(draft.take({ path: "a.ts", units: ["1b"] })).toBe("Selected 1 change line(s).");
+		expect(draft.diff()).toContain("+export const foreign = 4;");
+		expect(draft.drop({ path: "a.ts", units: ["1a"] })).toBe("Deselected 3 change line(s).");
+		expect(draft.diff()).not.toContain("export const extra = 3");
+
+		const byHunk = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(byHunk.take({ path: "a.ts", units: ["1"] })).toBe("Selected 1 change line(s).");
+		expect(byHunk.diff()).toContain("+export const foreign = 4;");
+		expect(byHunk.diff()).toContain("export const a = 2");
+	});
 });

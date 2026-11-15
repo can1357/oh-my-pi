@@ -8,6 +8,7 @@
 - The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
 - Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))
 - Fixed the TUI freezing when a session was resumed from `/resume` typed into an open tool approval; switching sessions now closes the pending approval instead of waiting on it ([#19239](https://github.com/can1357/oh-my-pi/issues/19239))
+- `take()` and `drop()` now reject a hunk unit that does not exist, such as `1z`, instead of reporting that no lines were selected ([#19310](https://github.com/can1357/oh-my-pi/pull/19310) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.2] - 2026-11-14
 
