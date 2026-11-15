@@ -179,6 +179,24 @@ export function blockText(block: FormBlock): string | undefined {
 }
 
 /**
+ * The form's section titles and context blocks as plain text, in order, for a
+ * host that shows the whole form with each named field titled by its question
+ * ({@link fieldQuestions}): text that already is such a question is left out,
+ * so it shows once. Blank parts are dropped.
+ */
+export function formContext(form: HtmlForm): string[] {
+	const questions = new Set<string>();
+	for (const [field, question] of fieldQuestions(form)) if (field.name) questions.add(question);
+	const parts: string[] = [];
+	for (const section of form.sections) {
+		for (const text of [spansText(section.title).trim(), ...section.blocks.map(blockText)]) {
+			if (text?.trim() && !questions.has(oneLine(text))) parts.push(text);
+		}
+	}
+	return parts;
+}
+
+/**
  * The form text each named field's prompt carries when a host asks the form
  * one field at a time: section titles and context blocks since the previous
  * named field, text between the field's own options (unless another named

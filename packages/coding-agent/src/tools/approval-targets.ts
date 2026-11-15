@@ -44,6 +44,8 @@ export function isApprovalPublicUrl(url: string): boolean {
 		}
 	}
 	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+	// An absolute name (`intranet.`, `localhost.`) resolves to the same host as its relative form.
+	host = host.replace(/\.+$/, "");
 	if (host.length === 0) return false;
 	// Intranet names: a single label, or a reserved local suffix.
 	if (!host.includes(".") || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".internal")) {
