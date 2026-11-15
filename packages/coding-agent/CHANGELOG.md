@@ -17,6 +17,7 @@
 - On Linux, JS eval keeps working in a session that outlives an in-place upgrade (pacman, `omp update`) instead of failing prelude calls such as `browser.open` with "`globalThis.__omp_display__` is not a function": its worker now runs the session's own build via `/proc/self/exe` ([#19259](https://github.com/can1357/oh-my-pi/pull/19259) by [@tuschla](https://github.com/tuschla))
 - ACP form elicitations no longer repeat each field's question (section title or caption) in the elicitation message ([#19305](https://github.com/can1357/oh-my-pi/issues/19305))
 - Deleting a session that cannot be removed no longer erases its prompt history and statistics while the session itself remains ([#19271](https://github.com/can1357/oh-my-pi/pull/19271) by [@eggpeat](https://github.com/eggpeat))
+- Fixed quoted and Unicode filenames being omitted from task change tracking or failing selective commits ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.2] - 2026-11-14
 
