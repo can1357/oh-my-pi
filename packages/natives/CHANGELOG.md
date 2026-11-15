@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `vcs.discardsWorkSync()` to check whether a git command would discard uncommitted work
+- Added `vcs.discardsWorkSync()` to check, within an optional timeout, whether a git command would discard uncommitted work
 
 ## [18.20.1] - 2026-11-14
 

@@ -64,6 +64,7 @@ import {
 	CRITICAL_PATTERN_REASON,
 	findShellGuardHit,
 	type GuardHit,
+	GuardProbeBudget,
 	type GuardScope,
 } from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
@@ -688,9 +689,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * The fixed rule `command` breaks. With `tools.guardRules` off, a critical pattern matched against
 	 * the raw command line; on, every guard rule, through shell nesting.
 	 */
-	#guardHit(command: string, cwd: unknown, probe: boolean): GuardHit | undefined {
+	#guardHit(command: string, cwd: unknown, probe: boolean, budget?: GuardProbeBudget): GuardHit | undefined {
 		if (cfgToolsGuardRules.get(this.session.settings)) {
-			return findShellGuardHit(command, this.#guardScope(cwd), { probe });
+			return findShellGuardHit(command, this.#guardScope(cwd), { probe, budget });
 		}
 		return command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))
 			? { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON }
@@ -757,15 +758,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
+		// The segments and the whole chain are checks for one call: their probes share one budget.
+		const budget = new GuardProbeBudget();
 		const segmentHits = segments.map((segment): GuardHit | undefined => {
 			const literalCommand = segment.literal?.argv.join(" ");
 			if (literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
 				return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
 			}
-			return this.#guardHit(segment.text, cwd, true);
+			return this.#guardHit(segment.text, cwd, true, budget);
 		});
 		const wholeChainOnlyCritical =
-			this.#guardHit(command, cwd, true) !== undefined && !segmentHits.some(hit => hit !== undefined);
+			this.#guardHit(command, cwd, true, budget) !== undefined && !segmentHits.some(hit => hit !== undefined);
 		if (wholeChainOnlyCritical) return null;
 
 		let chainUntainted = true;

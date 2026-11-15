@@ -802,13 +802,16 @@ pub fn vcs_git_repo_info(env: Env, dir: String) -> Result<Option<VcsGitRepoInfo>
 		.map_err(|err| rich_error(env, err))
 }
 /// Whether a work-discarding command run in `dir` would destroy anything.
+///
 /// Synchronous, for approval checks; runs no program the repository
-/// configures.
+/// configures. `timeout_ms` bounds the whole check (three seconds when
+/// unset).
 #[napi]
 pub fn vcs_git_discards_work(
 	env: Env,
 	dir: String,
 	check: Option<VcsDiscardCheck>,
+	timeout_ms: Option<u32>,
 ) -> Result<bool> {
 	let mut check = check.unwrap_or_default();
 	let repository = core::RepositoryPaths {
@@ -816,8 +819,9 @@ pub fn vcs_git_discards_work(
 		work_tree: check.work_tree.take().map(PathBuf::from),
 	};
 	let check = check.into();
+	let timeout = Duration::from_millis(u64::from(timeout_ms.unwrap_or(3_000)));
 	catch_panic("vcs.discardsWork", || {
-		pi_vcs::git::discards_work(Path::new(&dir), &repository, &check)
+		pi_vcs::git::discards_work(Path::new(&dir), &repository, &check, timeout)
 	})
 	.map_err(|err| rich_error(env, err))
 }

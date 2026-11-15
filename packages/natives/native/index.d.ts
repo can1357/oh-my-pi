@@ -4339,10 +4339,12 @@ export declare function vcsGitClone(url: string, target: string, options: VcsClo
 
 /**
  * Whether a work-discarding command run in `dir` would destroy anything.
+ *
  * Synchronous, for approval checks; runs no program the repository
- * configures.
+ * configures. `timeout_ms` bounds the whole check (three seconds when
+ * unset).
  */
-export declare function vcsGitDiscardsWork(dir: string, check?: VcsDiscardCheck | undefined | null): boolean
+export declare function vcsGitDiscardsWork(dir: string, check?: VcsDiscardCheck | undefined | null, timeoutMs?: number | undefined | null): boolean
 
 /** Discover the Git checkout containing a directory. */
 export declare function vcsGitDiscover(dir: string): VcsGitRepo | null

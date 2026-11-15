@@ -8,14 +8,14 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseShellScript } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
-import { clearGuardProbeCache } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
+import { clearGuardProbeCache, findShellGuardHit } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
 // Bypasses and false positives found in review of the fixed guard rules. Every case runs in its own
 // directory or with its own command, so no probe answer is reused across cases.
 
-function createSession(cwd: string): ToolSession {
+function createSession(cwd: string, settings: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd,
 		hasUI: true,
@@ -26,6 +26,7 @@ function createSession(cwd: string): ToolSession {
 			"bash.autoBackground.enabled": false,
 			"tools.approvalMode": "always-ask",
 			"tools.guardRules": true,
+			...settings,
 		}),
 	};
 }
@@ -542,6 +543,53 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32")("stops probing once a call's probes have used up their shared time", () => {
+		clearGuardProbeCache();
+		const timeouts: unknown[] = [];
+		const spawn = spyOn(Bun, "spawnSync").mockImplementation((_argv: unknown, options?: unknown) => {
+			timeouts.push(options && typeof options === "object" && "timeout" in options ? options.timeout : undefined);
+			return { success: false, stdout: Buffer.from("") } as never;
+		});
+		// Each probe takes one second of clock time; the call's probes may take three together.
+		const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_000);
+		try {
+			const tool = new BashTool(createSession(cwd));
+			const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
+			const command = `killall ${Array.from({ length: 40 }, (_, i) => `zz-n${i}`).join(" ")}`;
+			expect(approval({ command })).toBe("exec");
+			// Each probe gets the time left as its timeout; the 37 names after them are not probed.
+			expect(timeouts).toEqual([3_000, 2_000, 1_000]);
+			// The next approval path of the same call probes nothing.
+			expect(approval({ command })).toBe("exec");
+			expect(spawn.mock.calls.length).toBe(3);
+		} finally {
+			clock.mockRestore();
+			spawn.mockRestore();
+			clearGuardProbeCache();
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("shares one probe budget among the segments of a compound prompt", () => {
+		clearGuardProbeCache();
+		const spawn = spyOn(Bun, "spawnSync").mockImplementation(
+			() => ({ success: false, stdout: Buffer.from("") }) as never,
+		);
+		// Each probe takes one second of clock time.
+		const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_000);
+		try {
+			const tool = new BashTool(createSession(cwd, { "bash.allowCompoundCommands": true }));
+			const command = Array.from({ length: 10 }, (_, i) => `pkill zz-n${i}`).join(" && ");
+			const rows = tool.formatApprovalDetails({ command });
+			expect(rows.filter(row => row.includes("pkill"))).toHaveLength(10);
+			// Ten segment checks and the whole chain's, three seconds of probes among them.
+			expect(spawn.mock.calls.length).toBe(3);
+		} finally {
+			clock.mockRestore();
+			spawn.mockRestore();
+			clearGuardProbeCache();
+		}
+	});
+
 	it("parses a long `&&` chain in time linear in its length", () => {
 		// Each `&&` once copied the whole chain before it: quadratic, and seconds at this length.
 		const members = 15_000;
@@ -567,6 +615,28 @@ describe("guard rule regressions", () => {
 		const start = performance.now();
 		expect(ruleOf(bashApproval(cwd, command))).toBeUndefined();
 		expect(performance.now() - start).toBeLessThan(1_000);
+	});
+
+	it("answers an `&&` chain of discarding commands in as many directories in time linear in its length", () => {
+		// Each command once walked the whole chain before it, again for every directory: quadratic,
+		// and seconds at this length.
+		const scope = { cwd, home: os.homedir() };
+		const timed = (command: string): number => {
+			clearGuardProbeCache();
+			const start = performance.now();
+			expect(findShellGuardHit(command, scope)).toBeUndefined();
+			return performance.now() - start;
+		};
+		for (const member of [
+			(k: number) => `git -C /nonexistent/d${k} reset --hard`,
+			// A stash in another directory before each: none keeps anything for the reset after it.
+			(k: number) => `git -C /nonexistent/s${k} stash && git -C /nonexistent/d${k} reset --hard`,
+		]) {
+			const commands = Array.from({ length: 3_000 }, (_, k) => member(k));
+			const separate = timed(commands.join(" ; "));
+			const chained = timed(commands.join(" && "));
+			expect(chained).toBeLessThan(separate * 4 + 250);
+		}
 	});
 
 	it("reads a `!` after a reserved word as negating the pipeline it opens", async () => {

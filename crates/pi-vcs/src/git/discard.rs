@@ -16,10 +16,6 @@ use crate::{
 	types::{CleanCheck, DiscardCheck, RepositoryPaths, TrackedCheck},
 };
 
-/// Deadline for [`discards_work`], shared by every git call it makes: it runs
-/// synchronously while a tool call waits for approval.
-const DISCARD_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// Whether a work-discarding command run in `dir` would destroy anything.
 ///
 /// That is uncommitted changes to tracked files under the check's pathspecs
@@ -28,7 +24,9 @@ const DISCARD_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// clean` with the check's options would delete (`git clean --dry-run`), with
 /// pathspecs relative to `dir`, in the repository and work tree the command
 /// names in `repository` (`--git-dir`, `--work-tree`), or else the ones git
-/// discovers from `dir`. `false` outside a repository.
+/// discovers from `dir`. `false` outside a repository. `timeout` bounds the
+/// whole check, every git call it makes included: it runs synchronously while
+/// a tool call waits for approval.
 ///
 /// The question is asked while the command awaits approval, about a
 /// repository the agent may have just rewritten, so git runs through
@@ -44,6 +42,7 @@ pub fn discards_work(
 	dir: &Path,
 	repository: &RepositoryPaths,
 	check: &DiscardCheck,
+	timeout: Duration,
 ) -> Result<bool> {
 	if repository.git_dir.is_none() && discover_info(dir)?.is_none() {
 		return Ok(false);
@@ -55,7 +54,7 @@ pub fn discards_work(
 	if let Some(work_tree) = &repository.work_tree {
 		location.push(("GIT_WORK_TREE", work_tree.as_os_str()));
 	}
-	let deadline = Instant::now() + DISCARD_CHECK_TIMEOUT;
+	let deadline = Instant::now() + timeout;
 	let git = cli::InertGit::open(dir, &location, remaining(deadline))?;
 	match check {
 		DiscardCheck::Tracked(tracked) if tracked.merge => {
@@ -323,6 +322,16 @@ mod tests {
 	use crate::types::{CleanCheck, TrackedCheck};
 
 	type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+	/// [`super::discards_work`] with the three seconds an approval check gives
+	/// it.
+	fn discards_work(
+		dir: &Path,
+		repository: &RepositoryPaths,
+		check: &DiscardCheck,
+	) -> Result<bool> {
+		super::discards_work(dir, repository, check, Duration::from_secs(3))
+	}
 
 	fn git(cwd: &Path, args: &[&str]) -> TestResult {
 		let output = Command::new("git").current_dir(cwd).args(args).output()?;
