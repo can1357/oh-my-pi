@@ -365,6 +365,8 @@ export interface JobTile {
 	/** What the job is doing now, when its widget names nothing: a task's stage in its own words. */
 	stage?: string;
 	exitCode?: number;
+	/** Progress delivery mode in effect, drawn as a badge; absent when the job has no progress channel. */
+	progress?: "wake" | "ambient";
 }
 
 const TILE_GLYPH: Record<JobTileStatus, string> = {
@@ -433,6 +435,7 @@ export function describeJobTile(tile: JobTile): NativeNode {
 						role: "omp.job.tile.id",
 						wrap: "none",
 					}),
+			tile.progress && node("badge", { text: tile.progress, tone: "accent", role: "omp.job.tile.progress" }),
 			// Tern tints the ring by its value and shows the label on hover.
 			percent === undefined
 				? undefined
