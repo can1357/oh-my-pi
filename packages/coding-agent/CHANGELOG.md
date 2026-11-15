@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/commit` and the eval `commit` namespace dropping a file's UTF-8 BOM from the committed blob, which left the committed file showing as modified ([#19327](https://github.com/can1357/oh-my-pi/issues/19327))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

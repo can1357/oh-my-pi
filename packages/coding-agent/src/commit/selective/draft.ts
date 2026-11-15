@@ -112,13 +112,16 @@ interface FileChange {
 	hint?: CallRecord;
 }
 
-/** Content of `bytes` as text, or `undefined` when it must be handled as an opaque whole file. */
+/**
+ * Content of `bytes` as text, or `undefined` when it must be handled as an opaque whole file.
+ * A leading UTF-8 BOM is kept: the text is rendered back into the committed blob.
+ */
 function decodeText(bytes: Uint8Array): string | undefined {
 	if (bytes.byteLength > MAX_TEXT_BYTES || isProbablyBinaryHeader(bytes.subarray(0, BINARY_SNIFF_BYTES))) {
 		return undefined;
 	}
 	try {
-		return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 	} catch {
 		return undefined;
 	}
