@@ -1,8 +1,9 @@
-import { createShellRenderer, type BashToolDetails } from "./bash";
+import { createShellRenderer, type BashToolDetails, type ShellIdentity } from "./bash";
 
 export interface PowerShellRenderArgs {
 	command?: string;
 	host?: "session" | "ephemeral" | "new-session";
+	edition?: "pwsh" | "powershell";
 }
 
 export interface PowerShellToolDetails extends BashToolDetails {
@@ -12,15 +13,29 @@ export interface PowerShellToolDetails extends BashToolDetails {
 	hadErrors?: boolean;
 }
 
+/**
+ * The two editions run in independent pooled hosts and can be used side by
+ * side in one session, so each card names its edition and wears that
+ * edition's logo color (theme tokens `toolPowerShell` / `toolWindowsPowerShell`).
+ * The call's own `edition` wins; a call that omitted it is known from the
+ * result. Before then, `pwsh` is assumed, which is the stock default.
+ */
+const EDITIONS = {
+	pwsh: { title: "PowerShell", identity: { icon: "tool.pwsh", color: "toolPowerShell" } },
+	powershell: { title: "Windows PowerShell", identity: { icon: "tool.powershell", color: "toolWindowsPowerShell" } },
+} as const satisfies Record<string, { title: string; identity: ShellIdentity }>;
+
+function editionOf(args: PowerShellRenderArgs | undefined, details: BashToolDetails | undefined) {
+	return EDITIONS[args?.edition ?? details?.edition ?? "pwsh"];
+}
+
 export const powershellToolRenderer = createShellRenderer<PowerShellRenderArgs>({
-	resolveTitle: args => (args?.host && args.host !== "session" ? `PowerShell · ${args.host}` : "PowerShell"),
+	resolveTitle: (args, _options, details) => {
+		const { title } = editionOf(args, details);
+		return args?.host && args.host !== "session" ? `${title} · ${args.host}` : title;
+	},
 	resolveCommand: args => args?.command,
 	commandLanguage: "powershell",
 	commandPrefix: "PS>",
-	// `pwsh` (nf-dev-powershell) vs Windows PowerShell (nf-seti-powershell):
-	// the two editions run in independent pooled hosts and can be used side
-	// by side in one session, so the icon is the call's visual distinguisher.
-	// Missing `edition` (older transcripts, or a result still in flight) is
-	// treated as `pwsh`, the configured default.
-	resolveIcon: details => (details?.edition === "powershell" ? "tool.powershell" : "tool.pwsh"),
+	resolveIdentity: (args, details) => editionOf(args, details).identity,
 });

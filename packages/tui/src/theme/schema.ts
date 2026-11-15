@@ -35,8 +35,10 @@ export type AnsiColor = keyof typeof ANSI_COLOR_INDEX;
  * Tokens a theme is allowed to omit. They resolve to the terminal default
  * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
  * never declared (e.g. a `modelTags.<role>.color` reference) while
- * `Theme.hasColor()` still reports them as unset. `mdExtensionLink` is the
- * exception: `createTheme` derives it from `mdLink` and `text` when omitted.
+ * `Theme.hasColor()` still reports them as unset. The exceptions are derived
+ * when omitted by `createTheme`: `mdExtensionLink` from `mdLink` and `text`,
+ * and the PowerShell edition colors from the official logos, picked for the
+ * theme's surface brightness.
  */
 export const OPTIONAL_THEME_COLOR_RECORD = {
 	assistantMessageText: true,
@@ -47,6 +49,8 @@ export const OPTIONAL_THEME_COLOR_RECORD = {
 	subagent4: true,
 	subagent5: true,
 	subagent6: true,
+	toolPowerShell: true,
+	toolWindowsPowerShell: true,
 } satisfies Partial<Record<ThemeColor, true>>;
 
 export interface ThemeJson {
@@ -107,6 +111,8 @@ export type ThemeColor =
 	| "customMessageLabel"
 	| "toolTitle"
 	| "toolOutput"
+	| "toolPowerShell"
+	| "toolWindowsPowerShell"
 	| "mdHeading"
 	| "mdLink"
 	| "mdExtensionLink"
@@ -179,6 +185,8 @@ const THEME_COLOR_RECORD = {
 	customMessageLabel: true,
 	toolTitle: true,
 	toolOutput: true,
+	toolPowerShell: true,
+	toolWindowsPowerShell: true,
 	mdHeading: true,
 	mdLink: true,
 	mdExtensionLink: true,

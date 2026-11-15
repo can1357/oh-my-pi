@@ -658,37 +658,37 @@ test("renderer tags non-default host modes and renders the output", async () => 
 	expect(sessionPlain).not.toContain("PowerShell ·");
 });
 
-test("renderer shows a distinct icon for the pwsh and powershell editions", async () => {
+test("renderer names each edition and paints its icon and title in that edition's logo color", async () => {
 	const theme = await getThemeByName("dark");
 	expect(theme).toBeDefined();
 	if (!theme) return;
 
-	const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
-	const renderWithEdition = (edition: "pwsh" | "powershell" | undefined) =>
-		stripAnsi(
-			powershellToolRenderer
-				.renderResult(
-					{
-						content: [{ type: "text", text: "ok" }],
-						details: { host: "session", edition } as PowerShellToolDetails,
-					},
-					{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
-					theme,
-					{ command: "'ok'" },
-				)
-				.render(80)
-				.join("\n"),
-		);
+	const render = (args: { command: string; edition?: "pwsh" | "powershell" }, edition?: "pwsh" | "powershell") =>
+		powershellToolRenderer
+			.renderResult(
+				{ content: [{ type: "text", text: "ok" }], details: { host: "session", edition } as PowerShellToolDetails },
+				{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
+				theme,
+				args,
+			)
+			.render(80)
+			.join("\n");
+	const pwsh = [theme.styledSymbol("tool.pwsh", "toolPowerShell"), theme.fg("toolPowerShell", "PowerShell")];
+	const windows = [
+		theme.styledSymbol("tool.powershell", "toolWindowsPowerShell"),
+		theme.fg("toolWindowsPowerShell", "Windows PowerShell"),
+	];
+	const expectIdentity = (out: string, want: string[], not: string[]) => {
+		for (const part of want) expect(out).toContain(part);
+		for (const part of not) expect(out).not.toContain(part);
+	};
 
-	// Unicode preset (getThemeByName's default) glyphs: nf-dev-powershell's
-	// stand-in is "⚡", nf-seti-powershell's is "⊞" — see symbols.ts.
-	expect(renderWithEdition("pwsh")).toContain("⚡");
-	expect(renderWithEdition("pwsh")).not.toContain("⊞");
-	expect(renderWithEdition("powershell")).toContain("⊞");
-	expect(renderWithEdition("powershell")).not.toContain("⚡");
-	// Missing edition (older transcript, or a result still in flight) falls
-	// back to pwsh, the configured default.
-	expect(renderWithEdition(undefined)).toContain("⚡");
+	expectIdentity(render({ command: "'ok'" }, "pwsh"), pwsh, windows);
+	expectIdentity(render({ command: "'ok'" }, "powershell"), windows, pwsh);
+	// The call's own `edition` decides before the result reports one.
+	expectIdentity(render({ command: "'ok'", edition: "powershell" }), windows, pwsh);
+	// Neither known (older transcripts): pwsh, the stock default.
+	expectIdentity(render({ command: "'ok'" }), pwsh, windows);
 });
 
 test("collapsed preview shows the output TAIL, not the first lines", async () => {
