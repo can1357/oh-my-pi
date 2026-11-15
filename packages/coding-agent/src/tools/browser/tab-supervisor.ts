@@ -465,6 +465,9 @@ async function acquireTabImpl(
 	if (reattaching) await reattaching;
 	const existing = tabs.get(name);
 	if (existing) {
+		if (existing.backend === "webkit" && existing.ternTab.rendererFailure) {
+			throw existing.ternTab.rendererFailure;
+		}
 		if (existing.browser === browser && existing.state === "alive") {
 			const requestedCmuxSurface = "client" in browser ? (opts.cmuxSurface ?? browser.surface) : undefined;
 			if (existing.backend === "cmux" && existing.cmuxAttachedSurface !== requestedCmuxSurface) {

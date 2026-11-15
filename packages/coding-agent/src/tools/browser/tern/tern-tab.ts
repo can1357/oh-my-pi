@@ -14,6 +14,7 @@
  * and screenshot annotations, `styles`, `uploadFile`, `ariaSnapshot`, frame
  * listing, focusing an element that takes no text, element `evaluate`).
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -489,6 +490,9 @@ export class TernTab implements InProcessRunTab {
 	readonly #events: TernEvent[] = [];
 	#pulling: Promise<void> | undefined;
 	#runContext: InProcessRunContext | undefined;
+	readonly #readScope = new AsyncLocalStorage<{ deadline: number; signal: AbortSignal }>();
+	#rendererFailure: ToolError | undefined;
+	#rendererProbe: Promise<void> | undefined;
 	#runtime: JsRuntime | undefined;
 	#pageFacade: TernPageFacade | undefined;
 	#browserFacade: TernBrowserFacade | undefined;
@@ -656,8 +660,14 @@ export class TernTab implements InProcessRunTab {
 		return this.#browserFacade;
 	}
 
+	/** The renderer failure that requires an explicit close/reopen; ordinary timeouts do not quarantine a tab. */
+	get rendererFailure(): ToolError | undefined {
+		return this.#rendererFailure;
+	}
+
 	/** The tab's JavaScript runtime for `tab.run`. */
 	ensureRuntime(session: SessionSnapshot): JsRuntime {
+		if (this.#rendererFailure) throw this.#rendererFailure;
 		this.#runtime ??= new JsRuntime({ initialCwd: session.cwd, sessionId: `tern-tab-${this.block}` });
 		return this.#runtime;
 	}
@@ -721,11 +731,92 @@ export class TernTab implements InProcessRunTab {
 	// ─── Protocol plumbing ────────────────────────────────────────────────
 
 	get #signal(): AbortSignal | undefined {
-		return this.#runContext?.signal;
+		return this.#readScope.getStore()?.signal ?? this.#runContext?.signal;
 	}
 
 	get #cellMs(): number {
-		return this.#runContext?.timeoutMs ?? 30_000;
+		return this.#runContext ? Math.max(1, this.#runContext.deadline - Date.now()) : 30_000;
+	}
+
+	/** Give a multi-stage read one deadline, including selector preparation and image processing. */
+	async #quickRead<T>(label: string, read: () => Promise<T>): Promise<T> {
+		if (this.#rendererFailure) throw this.#rendererFailure;
+		if (this.#readScope.getStore()) return await read();
+		const timeoutMs = resolveOpTimeouts(this.#cellMs).quickOpMs;
+		const deadline = Date.now() + timeoutMs;
+		const expired = new TernError("timeout", `${this.product} ${label} timed out after ${timeoutMs}ms`);
+		const controller = new AbortController();
+		const parent = this.#runContext?.signal;
+		const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+		const timer = setTimeout(() => controller.abort(expired), timeoutMs);
+		try {
+			return await this.#readScope.run({ deadline, signal }, () => untilAborted(signal, read));
+		} catch (error) {
+			const timedOut = controller.signal.aborted && !parent?.aborted;
+			if (
+				!parent?.aborted &&
+				(timedOut || (error instanceof TernError && (error.kind === "timeout" || error.kind === "failed")))
+			) {
+				await this.#checkRenderer();
+			}
+			throw this.#rendererFailure ?? (timedOut ? expired : error);
+		} finally {
+			clearTimeout(timer);
+			controller.abort(new ToolAbortError("Browser read ended"));
+		}
+	}
+
+	/** A second, independent renderer request distinguishes a stuck page from a slow individual read. */
+	async #checkRenderer(): Promise<void> {
+		if (
+			this.product !== "WebKit" ||
+			this.#client.supports("responsive") ||
+			this.#dialogState().open ||
+			this.#rendererFailure
+		)
+			return;
+		if (this.#rendererProbe) return await this.#rendererProbe;
+		const signal = this.#runContext?.signal;
+		// The quick read leaves a second for attribution/recovery; do not diagnose a hang on an expired run.
+		if (signal?.aborted || this.#cellMs < 750) return;
+		this.#rendererProbe = (async () => {
+			// A confirm/prompt can stop renderer work without a renderer fault.
+			try {
+				this.#ingestEvents(
+					await this.#client.request(
+						{ op: "events", block: this.block, after: this.#cursor },
+						{ timeoutMs: 250, signal },
+					),
+				);
+			} catch {
+				return;
+			}
+			if (this.#dialogState().open || signal?.aborted || this.#cellMs < 500) return;
+			try {
+				await this.#client.request(
+					{ op: "eval", block: this.block, function: "function () { return true; }", args: [], world: "isolated" },
+					{ timeoutMs: 500, signal },
+				);
+			} catch (error) {
+				if (
+					error instanceof TernError &&
+					error.kind === "timeout" &&
+					!signal?.aborted &&
+					!this.#dialogState().open
+				) {
+					this.#rendererFailure = new ToolError(
+						`WebKit renderer for tab ${JSON.stringify(this.#name)} (block ${this.block}) is unresponsive: ` +
+							`both a page read and an independent renderer probe timed out. ` +
+							`Close and reopen this tab; no browser processes were terminated automatically.`,
+					);
+				}
+			}
+		})();
+		try {
+			await this.#rendererProbe;
+		} finally {
+			this.#rendererProbe = undefined;
+		}
 	}
 
 	/**
@@ -734,9 +825,16 @@ export class TernTab implements InProcessRunTab {
 	 * fails it too, except for input, which ends as done (the dialog is what the click or key press did).
 	 */
 	async #op(op: string, fields: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
+		if (this.#rendererFailure) throw this.#rendererFailure;
+		const block = `its ${this.product} browser block ${this.block}${this.adopted ? " (the user's)" : ""}`;
 		const signal = this.#signal;
 		throwIfAborted(signal);
-		const options = { timeoutMs: timeoutMs ?? resolveOpTimeouts(this.#cellMs).budgetBound, signal };
+		const scope = this.#readScope.getStore();
+		const remaining = scope ? Math.max(1, scope.deadline - Date.now()) : Infinity;
+		const options = {
+			timeoutMs: Math.min(timeoutMs ?? Infinity, resolveOpTimeouts(this.#cellMs).budgetBound, remaining),
+			signal,
+		};
 		const dialogMode = PAGE_OP_DIALOG[op];
 		if (!dialogMode) return await this.#client.request({ op, block: this.block, ...fields }, options);
 		const label = `${this.product} ${op}`;
@@ -2617,18 +2715,20 @@ export class TernTab implements InProcessRunTab {
 		selector?: string;
 		compact?: boolean;
 	}): Promise<Observation> {
-		if (this.#native) return (await this.#observeNative(opts)).observation;
-		const observation = await this.#kit<Observation>("observe", [
-			{
-				includeAll: opts?.includeAll,
-				viewportOnly: opts?.viewportOnly,
-				compact: opts?.compact,
-				...(opts?.selector ? { root: this.#spec(opts.selector) } : {}),
-			},
-		]);
-		this.#url = observation.url;
-		if (observation.title !== undefined) this.#title = observation.title;
-		return observation;
+		return await this.#quickRead("tab.observe()", async () => {
+			if (this.#native) return (await this.#observeNative(opts)).observation;
+			const observation = await this.#kit<Observation>("observe", [
+				{
+					includeAll: opts?.includeAll,
+					viewportOnly: opts?.viewportOnly,
+					compact: opts?.compact,
+					...(opts?.selector ? { root: this.#spec(opts.selector) } : {}),
+				},
+			]);
+			this.#url = observation.url;
+			if (observation.title !== undefined) this.#title = observation.title;
+			return observation;
+		});
 	}
 
 	/** Playwright-format ARIA snapshot (refs resolve through `ref()`/`aria-ref=`). */
@@ -2642,15 +2742,17 @@ export class TernTab implements InProcessRunTab {
 		opts: AriaSnapshotOptions | undefined,
 		frame: FramePath,
 	): Promise<string | AriaSnapshotDiffResult> {
-		const payload = await this.#kit<{ snapshot: string; hrefs: Record<string, string> }>(
-			"ariaSnapshot",
-			[selector ? this.#spec(selector) : null, { depth: opts?.depth, boxes: opts?.boxes }, opts?.urls === true],
-			frame,
-		);
-		const snapshot = postProcessAriaSnapshot(payload.snapshot, opts, payload.hrefs);
-		if (!opts?.diff || frame) return snapshot;
-		await this.#refreshState();
-		return diffAriaSnapshot(this.#ariaBaselines, ariaSnapshotBaselineKey(selector, opts), this.#url, snapshot);
+		return await this.#quickRead("tab.ariaSnapshot()", async () => {
+			const payload = await this.#kit<{ snapshot: string; hrefs: Record<string, string> }>(
+				"ariaSnapshot",
+				[selector ? this.#spec(selector) : null, { depth: opts?.depth, boxes: opts?.boxes }, opts?.urls === true],
+				frame,
+			);
+			const snapshot = postProcessAriaSnapshot(payload.snapshot, opts, payload.hrefs);
+			if (!opts?.diff || frame) return snapshot;
+			await this.#refreshState();
+			return diffAriaSnapshot(this.#ariaBaselines, ariaSnapshotBaselineKey(selector, opts), this.#url, snapshot);
+		});
 	}
 
 	/** axe-core audit of the main document (run in the isolated world). */
@@ -2675,17 +2777,19 @@ export class TernTab implements InProcessRunTab {
 
 	/** Readable text/markdown of the page. */
 	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
-		const html = await this.pageContent();
-		const readable = await extractReadableFromHtml(html, this.#url, format, opts);
-		if (!readable)
-			throw new ToolError(`tab.extract(${JSON.stringify(format)}) found no readable content on ${this.#url}`);
-		const content = format === "markdown" ? readable.markdown : readable.text;
-		if (!content) {
-			throw new ToolError(
-				`tab.extract(${JSON.stringify(format)}) produced empty ${format} content for ${this.#url}`,
-			);
-		}
-		return content;
+		return await this.#quickRead("tab.extract()", async () => {
+			const html = await this.pageContent();
+			const readable = await extractReadableFromHtml(html, this.#url, format, opts);
+			if (!readable)
+				throw new ToolError(`tab.extract(${JSON.stringify(format)}) found no readable content on ${this.#url}`);
+			const content = format === "markdown" ? readable.markdown : readable.text;
+			if (!content) {
+				throw new ToolError(
+					`tab.extract(${JSON.stringify(format)}) produced empty ${format} content for ${this.#url}`,
+				);
+			}
+			return content;
+		});
 	}
 
 	/** The document's outer HTML. */
@@ -2707,29 +2811,33 @@ export class TernTab implements InProcessRunTab {
 		},
 		frame: FramePath = null,
 	): Promise<Buffer> {
-		const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
-		const fields: Record<string, unknown> = { scale, format: opts.format };
-		if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
-		if (opts.selector !== undefined) {
-			// Scrolls the element into view and waits for it to be visible before measuring it.
-			await this.#target(`tab.screenshot(${describe(opts.selector)})`, opts.selector, "point", frame);
-			const rect = await this.box(opts.selector, frame);
-			if (!rect) throw new ToolError("Screenshot selector did not resolve to a visible element");
-			fields.rect = rect;
-		} else if (opts.fullPage) {
-			fields.full = true;
-		}
-		// Let the page paint the state the caller just produced.
-		await this.#eval(
-			"function () { return new Promise(resolve => requestAnimationFrame(() => resolve(true))); }",
-			[],
-			"isolated",
-			null,
-		).catch(() => undefined);
-		const answer = await this.#op("capture", fields, resolveOpTimeouts(this.#cellMs).quickOpMs);
-		if (!isRecord(answer) || typeof answer.data !== "string")
-			throw new ToolError(`${this.product} capture answered without image data`);
-		return Buffer.from(answer.data, "base64");
+		return await this.#quickRead("tab.screenshot()", async () => {
+			const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
+			const fields: Record<string, unknown> = { scale, format: opts.format };
+			if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
+			if (opts.selector !== undefined) {
+				// Scrolls the element into view and waits for it to be visible before measuring it.
+				await this.#target(`tab.screenshot(${describe(opts.selector)})`, opts.selector, "point", frame);
+				const rect = await this.box(opts.selector, frame);
+				if (!rect) throw new ToolError("Screenshot selector did not resolve to a visible element");
+				fields.rect = rect;
+			} else if (opts.fullPage) {
+				fields.full = true;
+			}
+			// ABHost settles paint within its bounded native capture; a renderer-side preflight can itself hang.
+			if (this.product !== "WebKit") {
+				await this.#eval(
+					"function () { return new Promise(resolve => requestAnimationFrame(() => resolve(true))); }",
+					[],
+					"isolated",
+					null,
+				);
+			}
+			const answer = await this.#op("capture", fields);
+			if (!isRecord(answer) || typeof answer.data !== "string")
+				throw new ToolError(`${this.product} capture answered without image data`);
+			return Buffer.from(answer.data, "base64");
+		});
 	}
 
 	/** Screenshot with selector/fullPage/annotate/format/quality and change detection. */
@@ -2739,6 +2847,10 @@ export class TernTab implements InProcessRunTab {
 
 	/** {@link screenshot} inside `frame` (selector captures). */
 	async screenshotIn(opts: ScreenshotOptions, frame: FramePath): Promise<string | ScreenshotChangeResult> {
+		return await this.#quickRead("tab.screenshot()", () => this.#screenshotIn(opts, frame));
+	}
+
+	async #screenshotIn(opts: ScreenshotOptions, frame: FramePath): Promise<string | ScreenshotChangeResult> {
 		const context = this.#requireRunContext("tab.screenshot()");
 		screenshotQuality(opts);
 		const threshold = screenshotThreshold(opts.threshold);
@@ -2805,6 +2917,7 @@ export class TernTab implements InProcessRunTab {
 				excludeWebP: context.session.excludeWebP,
 			},
 		);
+		throwIfAborted(this.#signal);
 		const saveFullRes = !!context.session.browserScreenshotDir || opts.format !== undefined;
 		const savedBuffer = saveFullRes ? buffer : Buffer.from(resized.buffer);
 		const savedMimeType = saveFullRes ? mime : resized.mimeType;
@@ -2816,6 +2929,7 @@ export class TernTab implements InProcessRunTab {
 				)
 			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
 		await Bun.write(dest, savedBuffer);
+		throwIfAborted(this.#signal);
 		context.screenshots.push({
 			dest,
 			mimeType: savedMimeType,

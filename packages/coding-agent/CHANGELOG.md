@@ -25,6 +25,7 @@
 - Skill-prompt advisor transcript no longer drops the user's request past a long skill body ([#19164](https://github.com/can1357/oh-my-pi/issues/19164)) ([#19267](https://github.com/can1357/oh-my-pi/pull/19267) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed `task.steps` subagents dropping what they delivered for every step but the last; each earlier step's report now reaches the agent that spawned them as a progress message
 - Bounded WebKit/Tern screenshot preparation and quick reads by one remaining-run deadline; WebKit captures no longer wait on a redundant JavaScript animation frame, and confirmed unresponsive renderers fail fast until explicitly closed and reopened
+- Waited for forced WebKit host termination before completing close, so immediate reopening cannot race the old process's exit
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
 
 ## [18.20.2] - 2026-11-14
