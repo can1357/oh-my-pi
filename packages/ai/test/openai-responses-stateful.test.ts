@@ -186,6 +186,137 @@ describe("openai-responses stateful chaining", () => {
 		expect(JSON.stringify(deltaInput)).not.toContain("Answer 1");
 	});
 
+	it("replays compacted history without storing it or chaining unstored responses", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-compacted-replay",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			statefulResponses: true,
+			reasoning: "low" as const,
+			fetch: createCapturingFetch(sentRequests),
+			onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), store: true }),
+		};
+		const compaction = { type: "compaction", id: "cmp_1", encrypted_content: "enc_compact" };
+		const messages: Context["messages"] = [
+			{
+				role: "user",
+				content: "Compacted history",
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: "openai",
+					items: [compaction],
+				},
+				timestamp: 1000,
+			},
+			{ role: "user", content: "First question", timestamp: 1001 },
+		];
+		const firstResponse = await streamOpenAIResponses(model, { systemPrompt, messages }, options).result();
+		expect(firstResponse.stopReason).toBe("stop");
+		messages.push(firstResponse, { role: "user", content: "Second question", timestamp: 1002 });
+		const secondResponse = await streamOpenAIResponses(model, { systemPrompt, messages }, options).result();
+		expect(secondResponse.stopReason).toBe("stop");
+
+		// A later context without compaction can establish a normal stored chain again.
+		const freshUser = { role: "user" as const, content: "New conversation", timestamp: 1003 };
+		const freshResponse = await streamOpenAIResponses(
+			model,
+			{ systemPrompt, messages: [freshUser] },
+			options,
+		).result();
+		expect(freshResponse.stopReason).toBe("stop");
+		const followup = await streamOpenAIResponses(
+			model,
+			{
+				systemPrompt,
+				messages: [freshUser, freshResponse, { role: "user", content: "Continue", timestamp: 1004 }],
+			},
+			options,
+		).result();
+		expect(followup.stopReason).toBe("stop");
+
+		expect(sentRequests).toHaveLength(4);
+		for (const request of sentRequests.slice(0, 2)) {
+			expect(request.store).toBe(false);
+			expect(request.previous_response_id).toBeUndefined();
+			expect(request.input).toContainEqual({ type: "compaction", encrypted_content: "enc_compact" });
+		}
+		expect(sentRequests[2]?.store).toBe(true);
+		expect(sentRequests[2]?.previous_response_id).toBeUndefined();
+		expect(sentRequests[3]?.store).toBe(true);
+		expect(sentRequests[3]?.previous_response_id).toBe("resp_3");
+	});
+
+	it("keeps compacted delta chaining but does not store a stale-anchor full replay", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			sentRequests.push(request);
+			if (sentRequests.length === 1) {
+				const events = [
+					{ type: "response.created", response: { id: "resp_1" } },
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", id: "cmp_1", encrypted_content: "enc_compact" },
+					},
+					{
+						type: "response.output_item.done",
+						output_index: 1,
+						item: {
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Compacted answer" }],
+						},
+					},
+					{ type: "response.completed", response: { id: "resp_1", status: "completed" } },
+				];
+				return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			if (sentRequests.length === 3) {
+				return new Response(
+					JSON.stringify({
+						error: {
+							message: "Previous response not found.",
+							code: "previous_response_not_found",
+						},
+					}),
+					{ status: 404, headers: { "content-type": "application/json" } },
+				);
+			}
+			return createStatefulSse(`Answer ${sentRequests.length}`, `resp_${sentRequests.length}`);
+		}) as FetchImpl;
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-compacted-stale-anchor",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			statefulResponses: true,
+			reasoning: "low" as const,
+			fetch: fetchMock,
+		};
+		const messages: Context["messages"] = [{ role: "user", content: "First question", timestamp: 1000 }];
+		for (let turn = 1; turn <= 4; turn++) {
+			const result = await streamOpenAIResponses(model, { systemPrompt, messages }, options).result();
+			expect(result.stopReason).toBe("stop");
+			messages.push(result, { role: "user", content: `Question ${turn + 1}`, timestamp: 1000 + turn });
+		}
+
+		expect(sentRequests).toHaveLength(5);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[1]?.store).toBe(true);
+		expect(sentRequests[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Question 2" }] }]);
+		expect(sentRequests[2]?.previous_response_id).toBe("resp_2");
+		for (const request of sentRequests.slice(3)) {
+			expect(request.store).toBe(false);
+			expect(request.previous_response_id).toBeUndefined();
+			expect(request.input).toContainEqual({ type: "compaction", encrypted_content: "enc_compact" });
+		}
+	});
+
 	it("breaks the response chain when replay sanitization removes an output item", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];
 		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {

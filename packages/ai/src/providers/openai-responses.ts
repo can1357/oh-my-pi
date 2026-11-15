@@ -160,11 +160,11 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	 * option, then `PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then a
 	 * transport default. WebSockets default ON with socket-local continuation and
 	 * no forced storage; HTTP/SSE defaults ON only against the official OpenAI API
-	 * and forces `store: true` (the platform only resolves stored responses).
+	 * and uses `store: true` for chainable requests. Full HTTP replays containing
+	 * native compaction items use `store: false` and cannot become chain anchors.
 	 * Three consecutive stale-anchor rejections disable chaining for the session.
 	 * HTTP/SSE chaining requires `sessionId` + `providerSessionState`. Falls back
-	 * to a full replay whenever history
-	 * mutates or the server reports a stale id.
+	 * to a full replay whenever history mutates or the server reports a stale id.
 	 */
 	statefulResponses?: boolean;
 	/**
@@ -978,7 +978,16 @@ const streamOpenAIResponsesOnce = (
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
 				);
 				activeRequestParams = requestParams;
-				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
+				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id == null;
+				if (
+					!useWebSocket &&
+					lastSubmittedRequestWasFullReplay &&
+					Array.isArray(requestParams.input) &&
+					requestParams.input.some(item => item.type === "compaction")
+				) {
+					// Persisting a replayed compaction payload can conflict even after its item ID is removed.
+					requestParams.store = false;
+				}
 				let requestTimeout: NodeJS.Timeout | undefined;
 				if (!useWebSocket && requestTimeoutMs !== undefined) {
 					requestTimeout = setTimeout(
@@ -1337,11 +1346,8 @@ const streamOpenAIResponsesOnce = (
 						resumeId !== undefined &&
 						canResumeOpenAIResponsesResultAfterDrop({
 							responseId: resumeId,
-							// Gate on the host contract, not the wire flag: stateful chaining
-							// forces `store: true` on official OpenAI too, where a dropped run
-							// is not known to finish server-side and polling would only park
-							// a turn that used to fail fast.
-							storeEnabled: storesResponsesServerSide(model, options),
+							// Require both the host's resume contract and actual request storage.
+							storeEnabled: storesResponsesServerSide(model, options) && activeRequestParams?.store === true,
 							partialContent: output.content,
 							failure: streamFailure,
 						})
@@ -1520,7 +1526,11 @@ const streamOpenAIResponsesOnce = (
 							: activeParams,
 					);
 					chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
-					if (output.responseId && replayableResponseItems.length === nativeOutputItems.length) {
+					if (
+						activeRequestParams?.store === true &&
+						output.responseId &&
+						replayableResponseItems.length === nativeOutputItems.length
+					) {
 						chainState.lastResponseId = output.responseId;
 						chainState.lastResponseItems = replayableResponseItems;
 						chainState.canAppend = true;
@@ -1528,9 +1538,8 @@ const streamOpenAIResponsesOnce = (
 						// full-context success must not mask categorical rejection.
 						if (sentPreviousResponseId) chainState.staleFailures = 0;
 					} else {
-						// No response id, or replay sanitization dropped an item the server
-						// still holds. Sanitization is 1:1-or-fewer, so either case makes the
-						// append baseline untrustworthy; next turn must replay in full.
+						// Unstored responses have no HTTP anchor; missing response IDs or
+						// dropped native items also make the append baseline untrustworthy.
 						chainState.canAppend = false;
 						chainState.lastResponseId = undefined;
 						chainState.lastResponseItems = undefined;

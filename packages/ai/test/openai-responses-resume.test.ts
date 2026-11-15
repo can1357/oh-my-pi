@@ -281,6 +281,41 @@ describe("openai-responses socket-drop resume", () => {
 		expect(scenario.gets).toEqual([]);
 	});
 
+	it("does not poll an unstored compaction replay on a storage-enabled host", async () => {
+		const scenario = dropScenario(
+			"resp_unstored_compact",
+			[() => new Response(JSON.stringify(completedResult("resp_unstored_compact")), { status: 200 })],
+			{ completedReasoning: true },
+		);
+		const compactedContext: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "Compacted history",
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "muse-code",
+						items: [{ type: "compaction", encrypted_content: "enc_compact" }],
+					},
+					timestamp: 1,
+				},
+				{ role: "user", content: "Continue", timestamp: 2 },
+			],
+		};
+		const result = await streamOpenAIResponses(bundledModel("muse-code"), compactedContext, {
+			fetch: scenario.fetchImpl,
+			apiKey: "test-key",
+			providerRetryWait: noWait,
+			storeResponses: true,
+		}).result();
+
+		expect(scenario.postBodies[0]).toMatchObject({ store: false });
+		expect(scenario.posts).toHaveLength(1);
+		expect(scenario.gets).toEqual([]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/socket connection was closed/);
+	});
+
 	it("records each adopted output item once when reasoning finished before the drop", async () => {
 		// The replay re-emits every output item. A reasoning item that already hit
 		// `output_item.done` before the drop must not be recorded twice: the history
