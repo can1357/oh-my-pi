@@ -354,6 +354,44 @@ describe("default grep rule and pipeline stdin", () => {
 	});
 });
 
+describe("default powershell rule", () => {
+	const tools = ["powershell"];
+
+	it("blocks bare pwsh/powershell invocations, case-insensitively", () => {
+		expect(checkBashInterception("pwsh -Command 'echo hi'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("pwsh.exe -Command 'echo hi'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			true,
+		);
+		expect(checkBashInterception("PowerShell.exe -NoProfile", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			true,
+		);
+		expect(checkBashInterception("powershell", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+	});
+
+	it("suggests the powershell tool", () => {
+		expect(
+			checkBashInterception("pwsh -Command 'echo hi'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool,
+		).toBe("powershell");
+	});
+
+	it("is inert when the powershell tool is unavailable", () => {
+		expect(checkBashInterception("pwsh -Command 'echo hi'", ["bash"], DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+	});
+
+	it("does not match a command that merely mentions pwsh/powershell as an argument or path component", () => {
+		expect(checkBashInterception("echo pwsh-wrapper", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(
+			checkBashInterception(
+				"'/c/Program Files/PowerShell/7/pwsh.exe' -Command x",
+				tools,
+				DEFAULT_BASH_INTERCEPTOR_RULES,
+			).block,
+		).toBe(false);
+	});
+});
+
 describe("default bash service rules", () => {
 	const tools = ["bash"];
 
