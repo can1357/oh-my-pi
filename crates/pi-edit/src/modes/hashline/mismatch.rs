@@ -93,7 +93,9 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				"Edit rejected{path}: the header needs this file's current tag, #{}.",
 				details.actual_file_hash
 			)
-		} else if is_placeholder_tag(&details.expected_file_hash) {
+		} else if details.tag_origin_paths.is_empty()
+			&& is_placeholder_tag(&details.expected_file_hash)
+		{
 			format!(
 				"Edit rejected{path}: hash #{} is not from this session: it is a placeholder, not a \
 				 tag, and no read or search output issues it.",
