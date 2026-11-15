@@ -12,6 +12,39 @@ provider "amazon-bedrock" {
 			revision ">=4.6 <4.7" {
 				thinking-mode "anthropic-adaptive"
 			}
+			// Family rules win over the class-level ladders below (rank counts the
+			// extra dimension), so unrecognized revisions keep the fallback there.
+			// The host accepts xhigh per family from these revisions:
+			// https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
+			revision ">=4.7" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
+		}
+		family "sonnet" {
+			// priority: Sonnet 4.6 is `max`-capable on Bedrock only; this must
+			// outrank the shared classes/anthropic.kdl row that also covers
+			// cursor/google-antigravity/openrouter (#13274).
+			revision ">=4.6 <5" priority=1 {
+				thinking-efforts "low" "medium" "high" "max"
+			}
+			revision ">=5" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
+		}
+		family "fable" {
+			revision ">=5" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
+		}
+		family "mythos" {
+			revision ">=5" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
+		}
+		family "haiku" {
+			revision ">=5.5" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
 		}
 		revision ">=4.7 <5.1" {
 			// Replaces the adaptive Anthropic Bedrock timeout branch.

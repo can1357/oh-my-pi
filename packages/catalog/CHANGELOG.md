@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bedrock Claude effort ladders now match the AWS adaptive-thinking table: Opus 4.7+, Sonnet 5+, Fable/Mythos 5+ offer `xhigh`, and Sonnet 4.6 offers `max` ([#13274](https://github.com/can1357/oh-my-pi/issues/13274))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
