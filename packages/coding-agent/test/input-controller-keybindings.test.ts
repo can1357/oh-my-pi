@@ -1,5 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
@@ -10,7 +13,13 @@ import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
+import {
+	getKeybindings,
+	type KeybindingsManager as BaseKeybindingsManager,
+	type KeyId,
+	matchesKey,
+	setKeybindings,
+} from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -44,6 +53,8 @@ type FakeEditor = {
 	pasteText(text: string): void;
 	handleInput?(data: string): void;
 	imageLinks?: (string | undefined)[];
+	focused?: boolean;
+	insertAtom?(label: string, expansion: string): void;
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
 	clearDraft(historyText?: string): void;
@@ -1044,18 +1055,21 @@ describe("InputController keybinding setup", () => {
 describe("InputController image paste into an image-accepting prompt", () => {
 	let settingsState: SettingsTestState | undefined;
 	let tempDir: TempDir;
+	let keybindingsBefore: BaseKeybindingsManager;
 
 	beforeAll(async () => {
 		await initTheme(false);
 	});
 
 	beforeEach(async () => {
+		keybindingsBefore = getKeybindings();
 		settingsState = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		tempDir = await TempDir.create("@omp-prompt-image-");
 	});
 
 	afterEach(async () => {
+		setKeybindings(keybindingsBefore);
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
 		await tempDir.remove();
@@ -1069,6 +1083,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 				getCwd: () => tempDir.path(),
 				getArtifactsDir: () => tempDir.path(),
 				getSessionId: () => "session",
+				putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
 			},
 		});
 		return context;
@@ -1337,6 +1352,133 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+	});
+
+	/** A focused dialog with no `pasteText`, as the approval and ask dialogs are. */
+	function createPlainDialog() {
+		const handleInput = vi.fn<(data: string) => void>();
+		return { dialog: { handleInput }, handleInput };
+	}
+
+	function startEnhancedPaste(context: {
+		ctx: InteractiveModeContext;
+		spies: {
+			addInputListener: Mock<(listener: InputListener) => void>;
+			addStartListener: Mock<(listener: () => void) => void>;
+		};
+	}): InputListener[] {
+		new InputController(context.ctx).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+		return listeners;
+	}
+
+	it("refuses an enhanced image paste into a focused form dialog and keeps its note free of markers", async () => {
+		setKeybindings(KeybindingsManager.inMemory());
+		const context = await createPromptContext();
+		const onSubmit = vi.fn();
+		const form = new HtmlFormDialog(
+			parseHtmlForm(`<form><fieldset><legend>Database</legend>
+<label><input type="radio" name="db" value="sqlite" checked> SQLite</label><br>
+<label><input type="radio" name="db" value="pg"> Postgres</label></fieldset></form>`),
+			{ onSubmit, onCancel: vi.fn() },
+		);
+		form.focused = true;
+		form.render(100);
+		context.setFocused(form);
+		form.handleInput("n");
+		form.handleInput("why sqlite");
+		const listeners = startEnhancedPaste(context);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		form.handleInput("\r");
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(form.optionNotes()).toEqual([
+			{ name: "db", question: "Database", option: "SQLite", value: "sqlite", text: "why sqlite" },
+		]);
+		form.dispose();
+	});
+
+	it("sends an enhanced image paste to the main editor when the composer owns a dialog without pasteText", async () => {
+		const context = await createPromptContext();
+		const { dialog } = createPlainDialog();
+		const inserted = Promise.withResolvers<void>();
+		context.editor.focused = true;
+		context.editor.insertAtom = vi.fn(() => inserted.resolve());
+		Object.assign(context.ctx, { editorContainer: { children: [dialog, context.editor] } });
+		context.setFocused(dialog);
+		const listeners = startEnhancedPaste(context);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		await inserted.promise;
+
+		expect(context.editor.pendingImages).toHaveLength(1);
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
+	});
+
+	it("ignores a stale editor focus flag when the focused dialog replaced the composer slot", async () => {
+		const context = await createPromptContext();
+		const { dialog } = createPlainDialog();
+		context.editor.focused = true;
+		Object.assign(context.ctx, { editorContainer: { children: [dialog] } });
+		context.setFocused(dialog);
+		const listeners = startEnhancedPaste(context);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("refuses a clipboard image in a focused dialog without pasteText that the composer does not own", async () => {
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		context.setFocused(dialog);
+		const readMacFileUrls = vi.fn(async () => []);
+		const controller = new InputController(context.ctx, {
+			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
+			readText: async () => "",
+			readMacFileUrls,
+		});
+
+		expect(await controller.handleImagePaste()).toBe(false);
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(readMacFileUrls).not.toHaveBeenCalled();
+		expect(handleInput).not.toHaveBeenCalled();
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("delivers clipboard text to a focused dialog without pasteText as a bracketed paste", async () => {
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		context.setFocused(dialog);
+		const controller = new InputController(context.ctx, {
+			readImage: async () => null,
+			readText: async () => "sk-test-key",
+			readMacFileUrls: async () => [],
+		});
+
+		expect(await controller.handleImagePaste()).toBe(true);
+
+		expect(handleInput).toHaveBeenCalledWith("\x1b[200~sk-test-key\x1b[201~");
+		expect(context.editor.getText()).toBe("");
+	});
+
+	it("refuses an image-path paste in a focused dialog without pasteText that the composer does not own", async () => {
+		const imagePath = await writePng("shot.png");
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		context.setFocused(dialog);
+
+		await new InputController(context.ctx).handleImagePathPaste(imagePath);
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(handleInput).not.toHaveBeenCalled();
 		expect(context.editor.pendingImages).toHaveLength(0);
 		expect(context.editor.getText()).toBe("");
 	});

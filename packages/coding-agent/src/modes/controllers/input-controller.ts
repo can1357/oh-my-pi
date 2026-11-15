@@ -2645,16 +2645,31 @@ export class InputController {
 	}
 
 	/**
+	 * True when the focused dialog hands typing to the main composer on purpose: the approval
+	 * dialog's type-to-steer, and a form or ask dialog whose draft guard is blocking, both set
+	 * `editor.focused` while the editor stays mounted beside the dialog. The `editorContainer`
+	 * checks matter because `TUI.setFocus` clears `focused` only on the previously focused
+	 * component, so the flag goes stale under a selector that replaced the composer slot or
+	 * under a fullscreen overlay; a stale flag must not count.
+	 */
+	#composerOwnsInput(focused: Component): boolean {
+		if (focused === this.ctx.editor || this.ctx.editor.focused !== true) return false;
+		const children = this.ctx.editorContainer.children;
+		return children.includes(this.ctx.editor) && children.includes(focused);
+	}
+
+	/**
 	 * Route an image paste to the focused destination. A focused prompt that did not opt into
-	 * images refuses, so the image never lands in the hidden main editor (#6057).
+	 * images, or that has no `pasteText` at all, refuses, so the image never lands in the hidden
+	 * main editor (#6057). Dialogs that hand typing to the composer keep sending images there.
 	 */
 	async #pasteImageIntoFocus(paste: (sink: ImagePasteSink) => Promise<unknown>): Promise<void> {
 		const focused = this.ctx.ui.getFocused();
-		if (!focused || focused === this.ctx.editor || !hasPasteText(focused)) {
+		if (!focused || focused === this.ctx.editor || this.#composerOwnsInput(focused)) {
 			await paste(this.#editorImageSink);
 			return;
 		}
-		if (!focused.acceptsImages) {
+		if (!hasPasteText(focused) || !focused.acceptsImages) {
 			this.ctx.showStatus("Image paste is not supported in this prompt");
 			return;
 		}
@@ -2806,11 +2821,20 @@ export class InputController {
 			// A prompt that opted into images gets the main editor's full image flow
 			// instead, delivered through one reservation.
 			const focusedNow = this.ctx.ui.getFocused();
+			const composerOwned = focusedNow ? this.#composerOwnsInput(focusedNow) : false;
 			const promptTarget =
-				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
+				focusedNow && focusedNow !== this.ctx.editor && !composerOwned && hasPasteText(focusedNow)
+					? focusedNow
+					: null;
+			// A focused dialog without `pasteText` that the composer does not own: text arrives as a
+			// bracketed paste, an image is refused.
+			const rawPromptTarget =
+				focusedNow && focusedNow !== this.ctx.editor && !composerOwned && !hasPasteText(focusedNow)
+					? focusedNow
+					: null;
 			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
 			else finishPaste = promptTarget?.beginPaste?.();
-			const textOnlyPrompt = promptTarget !== null && promptPaste === undefined;
+			const textOnlyPrompt = (promptTarget !== null && promptPaste === undefined) || rawPromptTarget !== null;
 			const sink = promptPaste?.sink ?? this.#editorImageSink;
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
@@ -2892,7 +2916,12 @@ export class InputController {
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.
-			if (promptTarget && this.ctx.ui.getFocused() !== promptTarget) return false;
+			const initiator = promptTarget ?? rawPromptTarget;
+			if (initiator && this.ctx.ui.getFocused() !== initiator) return false;
+			if (rawPromptTarget) {
+				this.#pasteTextIntoFocus(text);
+				return true;
+			}
 			if (finishPaste) {
 				const accepted = finishPaste(text);
 				finishPaste = undefined;
