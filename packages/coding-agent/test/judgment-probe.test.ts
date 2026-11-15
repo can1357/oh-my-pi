@@ -53,50 +53,64 @@ describe("probeNativeJudgeRoute", () => {
 		);
 	});
 
+	// Bifrost's governance refusals: the decision as the top-level `type`, its reason as `error.message`.
+	const bifrost = (status: number, type: string, message: string) => () =>
+		Response.json({ type, status_code: status, error: { message } }, { status });
+
 	test.each([
-		["a refused key", () => new Response("unauthorized", { status: 401 }), "credential", "API key was refused"],
 		[
-			"a model the key may not use (Bifrost's 403 body)",
-			() =>
-				Response.json(
-					{
-						type: "model_blocked",
-						status_code: 403,
-						error: { message: "Model 'fixture/other-model' is not allowed for virtual key 'vk-test'" },
-					},
-					{ status: 403 },
-				),
-			"model-refused",
-			"HTTP 403: the endpoint refused model jev-test: Model 'fixture/other-model' is not allowed",
+			"a refused key",
+			() => new Response("unauthorized", { status: 401 }),
+			{ failure: "credential", status: 401 },
+			["unauthorized"],
 		],
 		[
-			"a key the body names as refused",
-			() =>
-				Response.json(
-					{ type: "virtual_key_required", error: { message: "virtual key is required." } },
-					{ status: 401 },
-				),
-			"credential",
-			"HTTP 401: the API key was refused: virtual key is required.",
+			"a model the key may not use",
+			bifrost(403, "model_blocked", "Model 'fixture/other-model' is not allowed for virtual key 'vk-test'"),
+			{ failure: "model-refused", status: 403 },
+			["jev-test", "Model 'fixture/other-model' is not allowed for virtual key 'vk-test'"],
+		],
+		[
+			"a model refusal only the top-level type names",
+			bifrost(
+				403,
+				"model_blocked",
+				"Passthrough on provider 'fixture' requires a model: this access restricts models, and the request names none that can be checked",
+			),
+			{ failure: "model-refused", status: 403 },
+			["jev-test", "this access restricts models"],
+		],
+		[
+			"a 403 refusing the key itself",
+			bifrost(403, "access_blocked", "virtual key has expired"),
+			{ failure: "credential", status: 403 },
+			["virtual key has expired"],
+		],
+		[
+			"a 403 naming what the key may not reach, not the model",
+			bifrost(403, "provider_blocked", "Provider 'fixture' is not allowed for virtual key 'vk-test'"),
+			{ failure: "forbidden", status: 403 },
+			["jev-test", "Provider 'fixture' is not allowed for virtual key 'vk-test'"],
 		],
 		[
 			"a 403 whose body names neither",
 			() => new Response("forbidden", { status: 403 }),
-			"credential",
-			"HTTP 403: the API key was refused, or the key may not use jev-test",
+			{ failure: "forbidden", status: 403 },
+			["jev-test"],
 		],
 		[
 			"an unknown root or model",
 			() => new Response("not found", { status: 404 }),
-			"not-found",
-			"does not serve jev-test",
+			{ failure: "not-found", status: 404 },
+			["jev-test"],
 		],
-		["a foreign envelope", () => Response.json({ choices: [] }), "protocol", "not a typesafe judgment response"],
-	])("%s fails with its class", async (_name, response, failure, message) => {
+		["a foreign envelope", () => Response.json({ choices: [] }), { failure: "protocol" }, ["typesafe"]],
+	])("%s fails with its class", async (_name, response, outcome, mentions) => {
 		const { fetch, calls } = respond(response);
 		const result = await probeNativeJudgeRoute(model, { apiKey: "key", fetch });
 		expect(calls).toHaveLength(1);
-		expect(result).toMatchObject({ ok: false, failure });
-		expect(formatNativeJudgeProbe("fixture/jev-test", result)).toContain(message);
+		expect(result).toMatchObject({ ok: false, ...outcome });
+		const line = formatNativeJudgeProbe("fixture/jev-test", result);
+		for (const mention of mentions) expect(line).toContain(mention);
 	});
 });

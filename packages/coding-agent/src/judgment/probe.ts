@@ -19,10 +19,12 @@ export interface NativeJudgeProbeOptions {
 
 /** Why a route test failed. */
 export type NativeJudgeProbeFailure =
-	/** 401/403: the key was refused (or, for a 403 whose body does not say, possibly the model). */
+	/** 401, or a 403 whose body says the key itself was refused (invalid, missing, expired, revoked). */
 	| "credential"
 	/** 401/403 whose body says the model is blocked, not allowed or unknown for this key. */
 	| "model-refused"
+	/** 403 whose body does not say what was refused: the key, or its use of the model. */
+	| "forbidden"
 	/** 402: billing or quota refused the request. */
 	| "billing"
 	/** 404: the endpoint root is wrong or does not serve the model. */
@@ -69,18 +71,22 @@ function detail(error: unknown): string {
 	return text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX - 1)}…` : text;
 }
 
+/** Words a 401/403 body denies a model with; they count only in a body that also says "model". */
+const MODEL_DENIAL = /not[ _]allowed|blocked|not[ _]found|does not exist|unknown|no access|not available/;
+/** Words naming the key, and words saying it is unusable; a body refuses the key only with one of each. */
+const KEY_TERM = /api[ _-]?key|virtual[ _-]?key|token|credential/;
+const KEY_DENIAL = /invalid|incorrect|required|missing|expired|revoked|inactive|not[ _]found|does not exist/;
+
 /**
  * What a 401/403 error body says was refused: the model (blocked, not allowed, unknown for this key) or the key
- * itself; `undefined` when the body says neither.
+ * itself (failed authentication, or invalid, missing, expired, revoked); `undefined` when the body says neither.
+ * A body that only names the key, as Bifrost's "Provider 'x' is not allowed for virtual key 'y'" does, says
+ * what the key may not reach, not that the key was refused.
  */
 function refusedSubject(error: JudgmentApiError): "model" | "key" | undefined {
 	const text = `${error.code ?? ""} ${error.detail ?? ""}`.toLowerCase();
-	if (
-		/model/.test(text) &&
-		/not[ _]allowed|blocked|not[ _]found|does not exist|unknown|no access|not available/.test(text)
-	)
-		return "model";
-	if (/api[ _-]?key|virtual[ _-]?key|token|unauthori[sz]ed|authenticat|credential/.test(text)) return "key";
+	if (/model/.test(text) && MODEL_DENIAL.test(text)) return "model";
+	if (/unauthori[sz]ed|authenticat/.test(text) || (KEY_TERM.test(text) && KEY_DENIAL.test(text))) return "key";
 	return undefined;
 }
 
@@ -134,7 +140,7 @@ export async function probeNativeJudgeRoute(
 				if (subject === "key" || status === 401)
 					return failed("credential", `HTTP ${status}: the API key was refused${why}`, status);
 				return failed(
-					"credential",
+					"forbidden",
 					`HTTP 403: the API key was refused, or the key may not use ${target}${why}`,
 					status,
 				);
