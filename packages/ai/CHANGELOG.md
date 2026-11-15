@@ -9,6 +9,9 @@
 ### Removed
 
 - Removed `isXdDevicePath` from `providers/cursor-pi-args`; Cursor ranged reads of `xd://` docs now compose line selectors like any other path
+### Changed
+
+- Debug logs now record which OAuth account each request used and why another account was skipped ([#19312](https://github.com/can1357/oh-my-pi/pull/19312) by [@pedropaulovc](https://github.com/pedropaulovc))
 
 ## [18.20.2] - 2026-11-14
 
