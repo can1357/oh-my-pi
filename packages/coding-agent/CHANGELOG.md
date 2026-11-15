@@ -15,6 +15,7 @@
 - Fixed `/commit` and the eval `commit` namespace dropping a file's UTF-8 BOM from the committed blob, which left the committed file showing as modified ([#19327](https://github.com/can1357/oh-my-pi/issues/19327))
 - On Wayland, pasting while the clipboard holds an image or nothing no longer logs a misleading `Executable not found in $PATH: "xsel"` warning ([#19260](https://github.com/can1357/oh-my-pi/pull/19260) by [@tuschla](https://github.com/tuschla))
 - On Linux, JS eval keeps working in a session that outlives an in-place upgrade (pacman, `omp update`) instead of failing prelude calls such as `browser.open` with "`globalThis.__omp_display__` is not a function": its worker now runs the session's own build via `/proc/self/exe` ([#19259](https://github.com/can1357/oh-my-pi/pull/19259) by [@tuschla](https://github.com/tuschla))
+- ACP form elicitations no longer repeat each field's question (section title or caption) in the elicitation message ([#19305](https://github.com/can1357/oh-my-pi/issues/19305))
 
 ## [18.20.2] - 2026-11-14
 

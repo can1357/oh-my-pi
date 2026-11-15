@@ -4051,7 +4051,8 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(1);
 			const request = calls[0]!;
 			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
-			expect(request.message).toContain("Staging is green; production has a pending migration.");
+			// Section titles are the fields' property titles; the message keeps only the other form text.
+			expect(request.message).toBe("Staging is green; production has a pending migration.");
 			expect(request.requestedSchema.required).toEqual(["replicas"]);
 			expect(request.requestedSchema.properties).toEqual({
 				target: {
