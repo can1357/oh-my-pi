@@ -1130,12 +1130,26 @@ async function runInTabWithSnapshot(
 		);
 	}
 	if (tab.pending.size > 0) {
-		const waitingForDownload = [...tab.pending.values()].some(run => run.waitsForDownload);
-		throw new ToolError(
-			waitingForDownload
-				? `Tab ${JSON.stringify(name)} is busy: tab.waitForDownload() holds the tab until a download finishes, so the step that starts the download cannot run beside it. Start the wait and that step in one run: await tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`
-				: `Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
-		);
+		const runs = [...tab.pending.values()];
+		const caller = opts.session?.getEvalKernelOwnerId?.() ?? undefined;
+		// Tabs are shared by name across agents: a subagent's sequential calls collide with its parent's.
+		const otherAgent =
+			caller !== undefined &&
+			runs.some(run => {
+				const owner = run.session.getEvalKernelOwnerId?.() ?? undefined;
+				return owner !== undefined && owner !== caller;
+			});
+		let reason: string;
+		if (runs.some(run => run.waitsForDownload)) {
+			reason = `tab.waitForDownload() holds the tab until a download finishes, so the step that starts the download cannot run beside it. Start the wait and that step in one run: await tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`;
+		} else if (otherAgent) {
+			reason =
+				"another agent is driving it and its call is still running. Tabs are shared by name: wait for that agent to finish, or open a tab of your own under another name.";
+		} else {
+			reason =
+				"another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)";
+		}
+		throw new ToolError(`Tab ${JSON.stringify(name)} is busy: ${reason}`);
 	}
 	// An already-aborted call never runs: without this early exit the worker
 	// branch below would send `abort` before `run`, which the worker ignores
