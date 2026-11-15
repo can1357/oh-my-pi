@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- `/login google-antigravity` accepts typing and pasted redirect URLs while waiting for the browser callback. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- `/login google-antigravity` accepts the code displayed by the official hosted callback; remote broker login no longer requests an invalid port-zero tunnel. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 
 ## [18.20.2] - 2026-11-14
 

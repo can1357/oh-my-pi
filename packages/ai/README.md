@@ -1204,14 +1204,17 @@ The existing `google-antigravity` provider remains paused by default, including
 its login/account-risk warning. This transport does not change that policy or
 the separate official `antigravity-cli` ACP provider.
 
-When explicitly enabled, `/login google-antigravity` starts browser OAuth with
-PKCE and a local HTTP callback (preferred address
-`http://127.0.0.1:51121/oauth-callback`). Browser completion is automatic when the
-callback reaches OMP. The dialog also keeps a focused input available: if the
-localhost page cannot connect, paste its **entire address** from the browser and
-press Enter. A separate displayed code is not required; the address contains it.
-A raw authorization code is also accepted. PKCE and validation of supplied
-OAuth state remain enabled.
+When explicitly enabled, `/login google-antigravity` uses the official CLI's
+hosted code page at `https://antigravity.google/oauth-callback`. After signing
+in, copy the displayed authorization code, paste it into OMP's focused login
+input, and press Enter. No localhost callback listener is started. PKCE remains
+S256; supplied OAuth state is still validated.
+
+The authorization endpoint, hosted redirect, and seven scopes (including
+`openid`) were observed from an isolated official Windows AGY 1.5.9 `acp --login`
+run. Google's [CLI walkthrough](https://codelabs.developers.google.com/antigravity-cli-hands-on)
+describes this interaction. Matching these parameters is not evidence about
+Google's client-detection rules.
 
 Default Antigravity chat, image, OAuth, and usage requests use a lazily started
 Go helper. Source checkouts build it with

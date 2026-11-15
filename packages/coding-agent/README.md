@@ -23,9 +23,9 @@ builds embed the target-specific helper. The `google-antigravity` provider
 remains paused by default; its risk warning and explicit opt-in are unchanged.
 The separate official `antigravity-cli` ACP provider is unchanged.
 
-For an explicitly enabled account, `/login google-antigravity` supports automatic
-browser callbacks and a focused fallback input. If the localhost page cannot
-connect, paste its entire browser address into that input and press Enter.
+For an explicitly enabled account, `/login google-antigravity` uses the official
+hosted code page. Copy the code Google displays after sign-in, paste it into
+the focused login input, and press Enter; no localhost listener is used.
 Esc cancels login. See the
 [AI transport notes](../ai/README.md#antigravity-transport-and-verification)
 for executable overrides, trusted CAs, lifecycle, and verification limits.

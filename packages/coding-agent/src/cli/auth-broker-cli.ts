@@ -247,10 +247,7 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 		);
 	}
 	const sshArgs = [
-		"-L",
-		`${port}:127.0.0.1:${port}`,
-		"-o",
-		"ExitOnForwardFailure=yes",
+		...(port > 0 ? ["-L", `${port}:127.0.0.1:${port}`, "-o", "ExitOnForwardFailure=yes"] : []),
 		via,
 		`${APP_NAME} auth-broker login ${provider}`,
 	];

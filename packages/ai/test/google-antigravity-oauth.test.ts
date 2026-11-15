@@ -227,11 +227,10 @@ describe("Antigravity OAuth login", () => {
 		vi.restoreAllMocks();
 	});
 
-	it.each(["callback", "redirect", "code"] as const)(
-		"completes %s login with PKCE and a usable manual fallback",
+	it.each(["redirect", "code"] as const)(
+		"completes hosted copy-code login from %s with PKCE and no local listener",
 		async mode => {
 			const auth = await AuthStorage.create(":memory:");
-			const callbackFetch = globalThis.fetch;
 			let tokenForm: URLSearchParams | undefined;
 			const stub = Object.assign(
 				async (input: string | URL | Request, init?: RequestInit) => {
@@ -266,28 +265,20 @@ describe("Antigravity OAuth login", () => {
 					{ preconnect: fetch.preconnect },
 				),
 			);
+			vi.spyOn(Bun, "serve").mockImplementation(() => {
+				throw new Error("Hosted copy-code login must not bind a local callback server");
+			});
 			let authorize: URL | undefined;
-			let callbackWork: Promise<void> | undefined;
 			let manualPrompts = 0;
-			const pendingInput = Promise.withResolvers<string>();
 			const riskWarning = loginRiskWarning("google-antigravity");
 			const ctrl: OAuthLoginController = {
 				onAuth: info => {
 					authorize = new URL(info.url);
-					if (mode === "callback") {
-						const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-						callback.searchParams.set("code", "auth-code");
-						callback.searchParams.set("state", authorize.searchParams.get("state")!);
-						callbackWork = callbackFetch(callback, { proxy: "" }).then(async response => {
-							expect(response.status).toBe(200);
-							await response.text();
-						});
-					}
+					expect(info.launchUrl).toBeUndefined();
 				},
 				onPrompt: async prompt => {
 					if (riskWarning !== undefined && prompt.message.includes(riskWarning)) return "yes";
 					manualPrompts++;
-					if (mode === "callback") return pendingInput.promise;
 					if (mode === "code") return "auth-code";
 					// A mismatched pasted state must re-prompt without exchanging a token.
 					expect(tokenForm).toBeUndefined();
@@ -307,20 +298,19 @@ describe("Antigravity OAuth login", () => {
 			setUnpausedProviders(["google-antigravity"]);
 			try {
 				identity = await auth.oauth.login("google-antigravity", ctrl);
-				await callbackWork;
 				expect(manualPrompts).toBe(mode === "redirect" ? 2 : 1);
 				const stored = auth.credentials.list("google-antigravity");
 				expect(stored.map(row => row.credential)).toMatchObject([
 					{ type: "oauth", access: "access-token", refresh: "refresh-token", projectId: "project-123" },
 				]);
 			} finally {
-				pendingInput.resolve("");
 				setUnpausedProviders([]);
-				await callbackWork?.catch(() => {});
 				auth.close();
 			}
 
 			const params = authorize!.searchParams;
+			expect(`${authorize!.origin}${authorize!.pathname}`).toBe("https://accounts.google.com/o/oauth2/auth");
+			expect(params.get("redirect_uri")).toBe("https://antigravity.google/oauth-callback");
 			expect(params.get("response_type")).toBe("code");
 			expect(params.get("access_type")).toBe("offline");
 			expect(params.get("prompt")).toBe("consent");
@@ -332,6 +322,7 @@ describe("Antigravity OAuth login", () => {
 				"https://www.googleapis.com/auth/cclog",
 				"https://www.googleapis.com/auth/experimentsandconfigs",
 				"https://www.googleapis.com/auth/aicode",
+				"openid",
 			]);
 			expect(tokenForm?.get("grant_type")).toBe("authorization_code");
 			expect(tokenForm?.get("code")).toBe("auth-code");
