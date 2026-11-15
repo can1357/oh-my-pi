@@ -5,6 +5,7 @@
 ### Fixed
 
 - Committing or writing a tree now fails when the index still has unresolved conflicts, instead of publishing a commit that drops those files ([#19309](https://github.com/can1357/oh-my-pi/pull/19309) by [@eggpeat](https://github.com/eggpeat))
+- Fixed shell `sed` failing with `internal error` on a global or numbered substitution whose regex matches empty text on a line with multibyte characters (`s/ */_/g` on `café au lait`) ([#19261](https://github.com/can1357/oh-my-pi/pull/19261) by [@tuschla](https://github.com/tuschla))
 
 ## [18.20.1] - 2026-11-14
 
