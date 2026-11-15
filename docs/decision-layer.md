@@ -52,8 +52,8 @@ In `automatic` mode the selected bodies are also delivered, in the same non-user
 
 Two `SKILL.md` frontmatter fields feed the decision layer:
 
-- `alwaysApply: true` — listed and preloaded under the progressive catalogue (below); otherwise metadata.
-- `requiresSkills: [name, ...]` (YAML `requires-skills`) — exact names of skills selected and loaded alongside this one. Missing names or cycles disable dependency expansion and the progressive catalogue.
+- `alwaysApply: true`: listed and preloaded under the progressive catalogue (below); otherwise metadata.
+- `requiresSkills: [name, ...]` (YAML `requires-skills`): exact names of skills selected and loaded alongside this one. Missing names or cycles disable dependency expansion and the progressive catalogue.
 
 ### Progressive catalogue
 
