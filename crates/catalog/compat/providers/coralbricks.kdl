@@ -1,0 +1,16 @@
+// Provider-wire compat for "coralbricks". CoralBricks serves open-weight models
+// behind a plain OpenAI-compatible wire; the gateway dialect (`max_tokens`, no
+// `developer` role, no `store`) is provider-level data in providers.toml so
+// rows discovered at runtime carry it too. Origin: upstream
+// `packages/catalog/src/compat/rules/providers/coralbricks.kdl` (c308970263);
+// see THIRD-PARTY-NOTICES.txt.
+
+provider "coralbricks" {
+	// DeepSeek V4.1 Flash is the one CoralBricks SKU that advertises a genuine
+	// off value (`none` in its reasoning-effort vocabulary), so a thinking-off
+	// request disables reasoning instead of clamping to the lowest effort like
+	// the GLM SKUs.
+	models "deepseek-v4.1-flash-fast" {
+		reasoning-disable-mode "none-effort"
+	}
+}

@@ -1,6 +1,6 @@
 //! The TSP `edit` event resolved for an editor: offsets in UTF-16 code
 //! units of the text the terminal saw, checked against the current text and
-//! mapped to UTF-8 bytes.
+//! mapped to UTF-8 bytes. The `send` event's prompt is sanitized here too.
 
 use xutf::{Utf8, Utf16Le, transcoded_len};
 
@@ -52,6 +52,14 @@ pub fn resolve(
 	Some(NativeEdit { range: start..end, insert, cursor })
 }
 
+/// The prompt a `send` event submits: its `text` sanitized like a paste, or
+/// `None` when that is blank, which the protocol defines as a no-op.
+#[must_use]
+pub fn send_text(text: &str) -> Option<String> {
+	let prompt = sanitize_paste(text);
+	(!prompt.trim().is_empty()).then_some(prompt)
+}
+
 fn utf16_len(text: &str) -> usize {
 	transcoded_len::<Utf8, Utf16Le>(text.as_bytes())
 }
@@ -73,7 +81,7 @@ fn byte_at(text: &str, units: usize, ceil: bool) -> usize {
 
 #[cfg(test)]
 mod tests {
-	use super::resolve;
+	use super::{resolve, send_text};
 	use crate::editcore::NativeEdit;
 
 	fn edit(range: std::ops::Range<usize>, insert: &str, cursor: usize) -> NativeEdit {
@@ -123,5 +131,17 @@ mod tests {
 	#[test]
 	fn the_replacement_is_sanitized_and_the_caret_lands_after_it() {
 		assert_eq!(resolve("ab", 1, 1, "x\r\ny\t", 6, 2), Some(edit(1..1, "x\ny   ", 7)));
+	}
+
+	#[test]
+	fn a_send_is_sanitized_like_a_paste_and_blank_text_is_a_no_op() {
+		assert_eq!(send_text("a\r\nb\t\u{7}c").as_deref(), Some("a\nb   c"));
+		assert_eq!(send_text("  \r\n\t \u{7}"), None, "whitespace and control bytes alone are blank");
+		assert_eq!(send_text(""), None);
+		assert_eq!(
+			send_text("  cafe\u{301} ").as_deref(),
+			Some("  caf\u{e9} "),
+			"the prompt is normalized and keeps its own spacing: only blankness is judged trimmed"
+		);
 	}
 }

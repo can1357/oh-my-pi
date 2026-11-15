@@ -1,6 +1,11 @@
 //! Laws for append, recovery, and branch selection.
 
-use std::{env, fs, process::Command};
+use std::{
+	env, fs,
+	path::Path,
+	process::{Command, abort},
+	time::SystemTime,
+};
 
 use omp_core::Str;
 use omp_journal::{
@@ -365,4 +370,134 @@ fn append_refuses_a_frame_the_reader_would_reject() {
 	huge.data = Str::new(format!("\"{}\"", "x".repeat(omp_journal::sse::DATA_HARD_CAP - 2)));
 	huge.label = Some(Str::new("l".repeat(omp_journal::sse::FRAME_OVERHEAD_CAP)));
 	assert!(matches!(journal.append(huge), Err(JournalError::FrameTooLarge { .. })));
+}
+
+/// Names, sizes and modification times of everything in `dir`: a probe that
+/// created, touched or removed a file changes this.
+fn listing(dir: &Path) -> Vec<(String, u64, SystemTime)> {
+	let mut rows = fs::read_dir(dir)
+		.expect("read directory")
+		.map(|entry| {
+			let entry = entry.expect("directory entry");
+			let metadata = entry.metadata().expect("entry metadata");
+			(
+				entry.file_name().to_string_lossy().into_owned(),
+				metadata.len(),
+				metadata.modified().expect("modified time"),
+			)
+		})
+		.collect::<Vec<_>>();
+	rows.sort();
+	rows
+}
+
+/// `is_live` is true exactly while a writer holds the journal, for both
+/// entry points that take the writer lock, and the probe leaves nothing held.
+#[test]
+fn is_live_is_true_while_a_writer_holds_the_journal() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("live.oms");
+	let mut created = Journal::create(&path).expect("create");
+	created.append(genesis()).expect("genesis");
+	assert!(Journal::is_live(&path).expect("probe a created journal"), "create holds the writer");
+	drop(created);
+	assert!(!Journal::is_live(&path).expect("probe after drop"), "the lock lifts with the writer");
+
+	let (opened, entries) = Journal::open(&path).expect("open");
+	assert_eq!(entries.len(), 1);
+	assert!(Journal::is_live(&path).expect("probe an opened journal"), "open holds the writer");
+	assert!(Journal::is_live(&path).expect("probe again"), "probing is repeatable");
+	drop(opened);
+	assert!(!Journal::is_live(&path).expect("probe after drop"));
+
+	let (reopened, _) = Journal::open(&path).expect("a probe leaves no lock behind");
+	drop(reopened);
+}
+
+/// With no lock sidecar the probe answers false and creates nothing, whether
+/// the journal exists or not.
+#[test]
+fn is_live_without_a_lock_file_is_false_and_creates_nothing() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("never-opened.oms");
+	fs::write(&path, b"").expect("journal file without a writer");
+	let before = listing(directory.path());
+	assert_eq!(before.len(), 1);
+
+	assert!(!Journal::is_live(&path).expect("probe without a sidecar"));
+	assert_eq!(listing(directory.path()), before, "the probe must not create or touch a file");
+
+	let missing = directory.path().join("missing.oms");
+	assert!(!Journal::is_live(&missing).expect("probe a path that does not exist"));
+	assert_eq!(listing(directory.path()), before, "a missing journal creates nothing either");
+}
+
+/// A sidecar left by a writer that has finished is not live, and the probe
+/// neither removes nor modifies it.
+#[test]
+fn is_live_ignores_a_stale_lock_file_and_leaves_it_untouched() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("stale.oms");
+	let mut journal = Journal::create(&path).expect("create");
+	journal.append(genesis()).expect("genesis");
+	drop(journal);
+	let before = listing(directory.path());
+	assert!(
+		before.iter().any(|(name, ..)| name == "stale.oms.lock"),
+		"the finished writer leaves its sidecar"
+	);
+
+	assert!(!Journal::is_live(&path).expect("probe a stale sidecar"));
+	assert_eq!(listing(directory.path()), before, "the probe must not alter the directory");
+}
+
+/// Subprocess half of the cross-process liveness test.
+#[test]
+#[ignore = "subprocess helper"]
+fn is_live_subprocess_helper() {
+	let path = env::var_os("OMP_JOURNAL_LIVE_TEST_PATH").expect("journal test path");
+	assert!(Journal::is_live(path).expect("probe"), "the parent process holds the writer");
+}
+
+/// Subprocess that takes the writer lock and dies without running any
+/// destructor.
+#[test]
+#[ignore = "subprocess helper"]
+fn crashing_writer_subprocess_helper() {
+	let path = env::var_os("OMP_JOURNAL_LIVE_TEST_PATH").expect("journal test path");
+	let (_journal, _) = Journal::open(path).expect("child takes the writer lock");
+	abort();
+}
+
+/// Liveness is observable across processes, and a writer that crashed while
+/// holding the journal leaves a sidecar that is no longer live.
+#[test]
+fn is_live_sees_other_processes_and_ignores_a_crashed_writer() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("process-live.oms");
+	let mut journal = Journal::create(&path).expect("create");
+	journal.append(genesis()).expect("genesis");
+	let exe = env::current_exe().expect("journal test executable");
+	let status = Command::new(&exe)
+		.args(["--ignored", "--exact", "is_live_subprocess_helper"])
+		.env("OMP_JOURNAL_LIVE_TEST_PATH", &path)
+		.status()
+		.expect("run liveness probe");
+	assert!(status.success(), "the subprocess must observe the live writer");
+	drop(journal);
+
+	let status = Command::new(&exe)
+		.args(["--ignored", "--exact", "crashing_writer_subprocess_helper"])
+		.env("OMP_JOURNAL_LIVE_TEST_PATH", &path)
+		.status()
+		.expect("run crashing writer");
+	assert!(!status.success(), "the helper aborts while holding the lock");
+	let before = listing(directory.path());
+	assert!(
+		before
+			.iter()
+			.any(|(name, ..)| name == "process-live.oms.lock")
+	);
+	assert!(!Journal::is_live(&path).expect("probe after the writer crashed"));
+	assert_eq!(listing(directory.path()), before);
 }

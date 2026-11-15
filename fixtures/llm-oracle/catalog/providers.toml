@@ -479,6 +479,63 @@ auth = { type = "bearer", env = ["OMP_DEEPINFRA_API_KEY", "DEEPINFRA_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "DeepInfra", authoritative = true }
 facets = ["chat"]
 
+# ADR 0059 D1: five public OpenAI-compatible gateways with fixed hosts. Their
+# env names, hosts and default models follow upstream's provider descriptors
+# (see THIRD-PARTY-NOTICES.txt). Each is unselectable until its key is set.
+[providers."sambanova"]
+name = "SambaNova"
+default_model = "gpt-oss-120b"
+transport = "open-ai-chat"
+base_url = "https://api.sambanova.ai/v1"
+auth = { type = "bearer", env = ["OMP_SAMBANOVA_API_KEY", "SAMBANOVA_API_KEY"] }
+discovery = { kind = "open-ai-models", label = "SambaNova", authoritative = true }
+facets = ["chat"]
+
+[providers."coralbricks"]
+name = "CoralBricks"
+default_model = "glm-5.3-fast"
+transport = "open-ai-chat"
+base_url = "https://inference.coralbricks.ai/v1"
+auth = { type = "bearer", env = ["OMP_CORALBRICKS_API_KEY", "CORAL_API_KEY"] }
+discovery = { kind = "open-ai-models", label = "CoralBricks", authoritative = true }
+facets = ["chat"]
+# Coral's plain Chat Completions dialect. Provider-level so rows discovered at
+# runtime (which carry only this policy) get it too.
+compat = { "max_tokens_field" = "max_tokens", "supports_developer_role" = false, "supports_store" = false }
+
+[providers."helmcode"]
+name = "Helmcode"
+default_model = "deepseek-v4-flash"
+transport = "open-ai-chat"
+base_url = "https://api.helmcode.com/v1"
+auth = { type = "bearer", env = ["OMP_HELMCODE_API_KEY", "HELMCODE_API_KEY"] }
+discovery = { kind = "open-ai-models", label = "Helmcode", authoritative = true }
+facets = ["chat"]
+
+# Catalog-only roster: Modular publishes no key-free discovery contract, so the
+# bundled rows are the whole list.
+[providers."modular"]
+name = "Modular"
+default_model = "modular/google/gemma-4-31b-it"
+transport = "open-ai-chat"
+base_url = "https://api.modular.com/v1"
+auth = { type = "bearer", env = ["OMP_MODULAR_API_KEY", "MODULAR_API_KEY"] }
+facets = ["chat"]
+
+# The roster is the set of models one workspace enables, so nothing is bundled
+# and no default model is declared (a default must name a bundled row).
+# Self-hosted gateways set `baseUrl` on this id in `models.toml`.
+[providers."otari"]
+name = "Otari"
+transport = "open-ai-chat"
+base_url = "https://api.otari.ai/api/v1"
+auth = { type = "bearer", env = ["OMP_OTARI_API_KEY", "OTARI_API_KEY"] }
+discovery = { kind = "open-ai-models", label = "Otari", authoritative = true }
+facets = ["chat"]
+# Requests forward through any-llm and some upstreams reject `developer`. This
+# is the only wire fact discovered rows get, since nothing is bundled.
+compat = { "supports_developer_role" = false }
+
 [providers."stepfun"]
 name = "StepFun"
 default_model = "step-5-preview"
