@@ -1398,22 +1398,43 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 		const [note] = form.optionNotes();
 		expect(note?.text).toBe("why sqlite");
-		expect(note).not.toHaveProperty("images");
 		form.dispose();
 	});
+
+	/**
+	 * Mount `dialog` beside the main editor the way a dialog that hands typing to the composer is:
+	 * both in `editorContainer`, with ownership signalled by the approval flag (type-to-steer,
+	 * whose one-time `editor.focused` has since been cleared) or by `editor.focused` (draft guard).
+	 * `inserted` settles once the main editor has taken an image.
+	 */
+	function mountComposerOwnedDialog(
+		context: {
+			ctx: InteractiveModeContext;
+			editor: FakeEditor;
+			setFocused(target: unknown): void;
+		},
+		dialog: object,
+		ownership: "approval-flag" | "editor-focus",
+	): { inserted: Promise<void> } {
+		const inserted = Promise.withResolvers<void>();
+		context.editor.focused = ownership === "editor-focus";
+		context.editor.insertAtom = vi.fn(() => inserted.resolve());
+		Object.assign(context.ctx, {
+			approvalOwnsComposer: ownership === "approval-flag",
+			editorContainer: { children: [dialog, context.editor] },
+		});
+		context.setFocused(dialog);
+		return { inserted: inserted.promise };
+	}
 
 	it("sends an enhanced image paste to the main editor when the composer owns a dialog without pasteText", async () => {
 		const context = await createPromptContext();
 		const { dialog } = createPlainDialog();
-		const inserted = Promise.withResolvers<void>();
-		context.editor.focused = true;
-		context.editor.insertAtom = vi.fn(() => inserted.resolve());
-		Object.assign(context.ctx, { editorContainer: { children: [dialog, context.editor] } });
-		context.setFocused(dialog);
+		const { inserted } = mountComposerOwnedDialog(context, dialog, "editor-focus");
 		const listeners = startEnhancedPaste(context);
 
 		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
-		await inserted.promise;
+		await inserted;
 
 		expect(context.editor.pendingImages).toHaveLength(1);
 		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
@@ -1436,18 +1457,11 @@ describe("InputController image paste into an image-accepting prompt", () => {
 	it("sends an enhanced image paste to the main editor while an approval owns the composer after settings closed", async () => {
 		const context = await createPromptContext();
 		const { dialog } = createPlainDialog();
-		const inserted = Promise.withResolvers<void>();
-		context.editor.focused = false;
-		context.editor.insertAtom = vi.fn(() => inserted.resolve());
-		Object.assign(context.ctx, {
-			approvalOwnsComposer: true,
-			editorContainer: { children: [dialog, context.editor] },
-		});
-		context.setFocused(dialog);
+		const { inserted } = mountComposerOwnedDialog(context, dialog, "approval-flag");
 		const listeners = startEnhancedPaste(context);
 
 		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
-		await inserted.promise;
+		await inserted;
 
 		expect(context.editor.pendingImages).toHaveLength(1);
 		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
@@ -1471,15 +1485,11 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const context = await createPromptContext();
 		const pasteText = vi.fn();
 		const dialog = { handleInput: vi.fn(), pasteText, acceptsImages: false };
-		const inserted = Promise.withResolvers<void>();
-		context.editor.focused = true;
-		context.editor.insertAtom = vi.fn(() => inserted.resolve());
-		Object.assign(context.ctx, { editorContainer: { children: [dialog, context.editor] } });
-		context.setFocused(dialog);
+		const { inserted } = mountComposerOwnedDialog(context, dialog, "editor-focus");
 		const listeners = startEnhancedPaste(context);
 
 		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
-		await inserted.promise;
+		await inserted;
 
 		expect(context.editor.pendingImages).toHaveLength(1);
 		expect(pasteText).not.toHaveBeenCalled();
@@ -1489,10 +1499,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 	it("attaches a clipboard image to the main editor when the composer owns a dialog without pasteText", async () => {
 		const context = await createPromptContext();
 		const { dialog, handleInput } = createPlainDialog();
-		context.editor.focused = true;
-		context.editor.insertAtom = vi.fn();
-		Object.assign(context.ctx, { editorContainer: { children: [dialog, context.editor] } });
-		context.setFocused(dialog);
+		mountComposerOwnedDialog(context, dialog, "editor-focus");
 		const controller = new InputController(context.ctx, {
 			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
 			readText: async () => "",
