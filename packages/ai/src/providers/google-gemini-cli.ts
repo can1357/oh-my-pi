@@ -31,7 +31,6 @@ import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTim
 import { notifyProviderResponse } from "../utils/provider-response";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
-import { normalizeSchemaForCCA } from "../utils/schema";
 import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
 import { type AgyFetch, agyFetch, getAgyHeaders } from "./agy-fetch";
 import { prepareAnthropicImageContext } from "./anthropic-images";
@@ -1139,25 +1138,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 const AGY_CLI_SESSION_ID = BigInt.asIntN(64, 0xcbf29ce484222325n).toString();
 const AGY_SKIP_THOUGHT_SIGNATURE = Buffer.from(SKIP_THOUGHT_SIGNATURE, "utf8").toString("base64");
 
-function normalizeAntigravityTools(
-	tools: CloudCodeAssistRequest["request"]["tools"],
-): CloudCodeAssistRequest["request"]["tools"] {
-	return tools?.map(tool => ({
-		...tool,
-		functionDeclarations: tool.functionDeclarations.map(declaration => {
-			if ("parameters" in declaration) {
-				return declaration;
-			}
-
-			const { parametersJsonSchema, ...rest } = declaration;
-			return {
-				...rest,
-				parameters: normalizeSchemaForCCA(parametersJsonSchema),
-			};
-		}),
-	}));
-}
-
 interface AntigravityRequestEnvelope {
 	sessionId: string;
 	requestId: string;
@@ -1294,8 +1274,7 @@ export function buildRequest(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		const convertedTools = convertTools(context.tools, model);
-		request.tools = isAntigravity ? normalizeAntigravityTools(convertedTools) : convertedTools;
+		request.tools = convertTools(context.tools, model, isAntigravity ? "protobuf" : "json");
 		if (options.toolChoice) {
 			const choice = options.toolChoice;
 			if (typeof choice === "string") {
