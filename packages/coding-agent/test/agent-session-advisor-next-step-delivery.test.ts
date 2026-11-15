@@ -20,6 +20,7 @@ import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/se
 import { isAdvisorCard } from "@oh-my-pi/pi-coding-agent/session/queued-messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 const ADVISOR_TYPE = "advisor";
 /** The one concern the advisor raises against the first (mid-turn) delta. */
@@ -94,7 +95,7 @@ describe("AgentSession advisor next-step delivery", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
+			advisorTools: fixedAdvisorTools(),
 			advisorStreamFn: options.advisorMock.stream,
 		});
 		return { session, sessionManager };
