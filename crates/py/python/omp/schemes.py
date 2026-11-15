@@ -10,7 +10,9 @@ loads (``https`` and ``pr`` included). One extension registers at most
 
 Registration gates on the loaded manifest's claims (ADR 0050 S2). An optional
 ``read`` callable is stored for CONTROL ``omp.schemes.read``; writable declared
-schemes are refused by the host in S2.
+schemes are refused by the host in S2. :func:`live` lists every scheme currently
+live in the Environment generation (ADR 0050 S5); :func:`declared` stays
+process-local. :func:`omp.urls.schemes` remains the built-in table only.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Final as _Final
 
 from _omp_url_vocab import SCHEMES as _SCHEMES
 
+from ._errors import NotWiredError as _NotWiredError
 from .urls import UrlError as _UrlError
 
 
@@ -114,6 +117,30 @@ class Declaration:
         for key in ("immutable", "writable"):
             if not isinstance(getattr(self, key), bool):
                 raise TypeError(f"scheme {key} must be bool")
+
+
+@_dataclass(frozen=True, slots=True)
+class LiveDeclaration:
+    """One live declared scheme from the Environment generation (ADR 0050 S5)."""
+
+    name: str
+    description: str | None = None
+    immutable: bool = False
+    writable: bool = False
+    owner: str = ""
+    fetch: bool = False
+    credentials: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise TypeError("live scheme name must be a non-empty str")
+        if self.description is not None and not isinstance(self.description, str):
+            raise TypeError("live scheme description must be str or None")
+        if not isinstance(self.owner, str) or not self.owner:
+            raise TypeError("live scheme owner must be a non-empty str")
+        for key in ("immutable", "writable", "fetch", "credentials"):
+            if not isinstance(getattr(self, key), bool):
+                raise TypeError(f"live scheme {key} must be bool")
 
 
 def configure_claims(claims: object | None) -> None:
@@ -205,6 +232,54 @@ def declared() -> tuple[Declaration, ...]:
     return _declared
 
 
+async def live() -> tuple[LiveDeclaration, ...]:
+    """Return every live declared scheme from the Environment generation.
+
+    Separate from :func:`declared`, which is this extension process's local
+    registration list. Requires the CONTROL bridge. Built-in schemes never
+    appear here; they stay on :func:`omp.urls.schemes`.
+    """
+    from . import _control_backend, _control_request
+
+    if _control_backend.get() is None:
+        raise _NotWiredError("omp.schemes.live")
+    result = await _control_request("omp.schemes.live")
+    if (
+        not isinstance(result, _Mapping)
+        or isinstance(result.get("schemes"), (str, bytes))
+        or not isinstance(result.get("schemes"), (list, tuple))
+    ):
+        raise SchemeError("omp.schemes.live returned an invalid inventory")
+    rows: list[LiveDeclaration] = []
+    for index, row in enumerate(result["schemes"]):
+        if not isinstance(row, _Mapping):
+            raise SchemeError(f"omp.schemes.live schemes[{index}] must be a mapping")
+        name = row.get("name")
+        owner = row.get("owner")
+        if not isinstance(name, str) or not name:
+            raise SchemeError(f"omp.schemes.live schemes[{index}].name must be a non-empty str")
+        if not isinstance(owner, str) or not owner:
+            raise SchemeError(f"omp.schemes.live schemes[{index}].owner must be a non-empty str")
+        description = row.get("description")
+        if description is not None and not isinstance(description, str):
+            raise SchemeError(f"omp.schemes.live schemes[{index}].description must be str or None")
+        for key in ("immutable", "writable", "fetch", "credentials"):
+            if not isinstance(row.get(key, False), bool):
+                raise SchemeError(f"omp.schemes.live schemes[{index}].{key} must be bool")
+        rows.append(
+            LiveDeclaration(
+                name=name,
+                description=description,
+                immutable=bool(row.get("immutable", False)),
+                writable=bool(row.get("writable", False)),
+                owner=owner,
+                fetch=bool(row.get("fetch", False)),
+                credentials=bool(row.get("credentials", False)),
+            )
+        )
+    return tuple(rows)
+
+
 def _publication_rows(
     declarations: tuple[Declaration, ...] | None = None,
 ) -> list[dict[str, object]]:
@@ -282,6 +357,7 @@ __all__ = (
     "BuiltinSchemeError",
     "Declaration",
     "DuplicateSchemeError",
+    "LiveDeclaration",
     "MAX_DESCRIPTION_BYTES",
     "MAX_SCHEMES",
     "MAX_SCHEME_BYTES",
@@ -293,5 +369,6 @@ __all__ = (
     "declared",
     "dispatch_read",
     "freeze_publication",
+    "live",
     "register",
 )
