@@ -149,6 +149,18 @@ const COLORBLIND_ADJUSTMENT = { h: 60, s: 0.71 };
 const EXTENSION_LINK_TINT = 0.45;
 
 /**
+ * PowerShell edition colors from the official logos, one per surface
+ * brightness so each stays readable: pwsh (`assets/ps_black_64.svg` in
+ * PowerShell/PowerShell) uses its light-blue backdrop on dark surfaces and its
+ * `#2C5591` shadow blue on light; Windows PowerShell (`Powershell_128.svg`)
+ * uses the top and bottom of its body gradient.
+ */
+const POWERSHELL_LOGO_COLORS = {
+	dark: { toolPowerShell: "#A9C8FF", toolWindowsPowerShell: "#5391FE" },
+	light: { toolPowerShell: "#2C5591", toolWindowsPowerShell: "#3E6DBF" },
+} as const;
+
+/**
  * A blend input as the theme intends it: `""` becomes the theme's
  * `terminal.foreground` and an index 0–15 its `terminal.ansi` slot, when the
  * theme declares them. Otherwise the value stays and {@link mixThemeColors}
@@ -189,6 +201,9 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 			isLightSurface(resolvedColors.statusLineBg),
 		);
 	}
+	const logoColors = POWERSHELL_LOGO_COLORS[isLightSurface(resolvedColors.statusLineBg) ? "light" : "dark"];
+	resolvedColors.toolPowerShell ??= logoColors.toolPowerShell;
+	resolvedColors.toolWindowsPowerShell ??= logoColors.toolWindowsPowerShell;
 
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
