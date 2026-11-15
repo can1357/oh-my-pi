@@ -1215,7 +1215,7 @@ export class UsageDashboardComponent implements Component {
 		const layout = points ? buildHeatmapLayout(points, NATIVE_HEATMAP_WEEKS) : undefined;
 		const figures = points && layout ? activityFigures(points, layout) : undefined;
 		const quiet = layout !== undefined && layout.totalCost <= 0 && layout.totalRequests <= 0;
-		if (framed.length === 0 && quiet && !this.#activityError) {
+		if (framed.length === 0 && quiet && !this.#activityError && !this.#syncError) {
 			const children: NativeChild[] = [
 				node("icon", { name: "gauge" }, undefined, "icon"),
 				text([span("No usage yet")], { role: "omp.usage.empty.title" }),
