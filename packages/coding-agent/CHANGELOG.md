@@ -34,6 +34,12 @@
 - Fixed `task.steps` subagents dropping what they delivered for every step but the last; each earlier step's report now reaches the agent that spawned them as a progress message
 - Bounded WebKit/Tern screenshot preparation and quick reads by one remaining-run deadline; WebKit captures no longer wait on a redundant JavaScript animation frame, and confirmed unresponsive renderers fail fast until explicitly closed and reopened
 - Waited for forced WebKit host termination before completing close, so immediate reopening cannot race the old process's exit
+- Fixed eval `wait(1800)` returning at once as if it had slept; a number now throws, pointing to `tab.waitFor*` or a real sleep
+- Fixed browser `tab.setCookies(await other.cookies())` rejecting the array `cookies()` returns; malformed cookies now name the item and field
+- Fixed browser `waitForUrl` timeouts not saying which URL the page was at
+- Fixed browser `tab.route()` with a handler function failing with an unhelpful message; it now explains routes are declarative and how to watch traffic
+- Fixed the busy-tab error telling a subagent to stop running calls together when the tab was busy with another agent's call
+
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
 
 ## [18.20.2] - 2026-11-14

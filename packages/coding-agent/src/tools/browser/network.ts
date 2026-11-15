@@ -653,9 +653,27 @@ export function globToRegExp(glob: string): RegExp {
 	return new RegExp(`${source}$`);
 }
 
+/**
+ * A URL string pattern as URL waits and the request-log filter read it: with a `*` it is a glob, as `tab.route()`
+ * takes ({@link globToRegExp}); without one, a substring of the URL. A RegExp passes through.
+ */
+export function urlPattern(pattern: NetworkPattern): NetworkPattern {
+	return typeof pattern === "string" && pattern.includes("*") ? globToRegExp(pattern) : pattern;
+}
+
+/** A test of URLs against `pattern` as {@link urlPattern} reads it, compiled once. */
+export function urlMatcher(pattern: NetworkPattern): (url: string) => boolean {
+	const resolved = urlPattern(pattern);
+	if (typeof resolved === "string") return url => url.includes(resolved);
+	return url => {
+		resolved.lastIndex = 0;
+		return resolved.test(url);
+	};
+}
+
 /** Whether a request record passes the `tab.requests()` filters (throws on an invalid status filter). */
 export function matchesRequest(record: NetworkRequestRecord, options: NetworkRequestsOptions): boolean {
-	if (options.filter !== undefined && !requestFilterMatches(options.filter, record.url)) return false;
+	if (options.filter !== undefined && !urlMatcher(options.filter)(record.url)) return false;
 	const types = normalizeStringList(options.type);
 	if (types && !types.includes(record.resourceType)) return false;
 	const methods = normalizeStringList(options.method)?.map(method => method.toUpperCase());
@@ -663,12 +681,6 @@ export function matchesRequest(record: NetworkRequestRecord, options: NetworkReq
 	if (options.status !== undefined && !statusMatches(record.status, options.status)) return false;
 	if (options.since !== undefined && record.ts < options.since) return false;
 	return true;
-}
-
-function requestFilterMatches(filter: NetworkPattern, url: string): boolean {
-	if (typeof filter === "string") return url.includes(filter);
-	filter.lastIndex = 0;
-	return filter.test(url);
 }
 
 function statusMatches(status: number | undefined, filter: number | string): boolean {

@@ -46,7 +46,7 @@ import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult 
 import type { BrowserFrameInfo } from "../frames";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { loadedKnownDevices, loadPuppeteer } from "../launch";
-import { assertUrlPattern, pushStateInPage, sameAddress } from "../navigation";
+import { parseUrlPattern, pushStateInPage, sameAddress } from "../navigation";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -57,7 +57,7 @@ import type {
 	NetworkRouteDescription,
 	NetworkRouteOptions,
 } from "../network";
-import { normalizeAllowedDomains } from "../network";
+import { normalizeAllowedDomains, urlMatcher } from "../network";
 import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS } from "../op-timeouts";
 import { DEFAULT_STYLE_PROPERTIES } from "../queries";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
@@ -1218,13 +1218,14 @@ export class TernTab implements InProcessRunTab {
 
 	/**
 	 * Poll `check` until it yields a value (not `undefined`), backing off
-	 * 25→100 ms; `pull` also refreshes Tern events before each check.
+	 * 25→100 ms; `pull` also refreshes Tern events before each check, and
+	 * `timeoutNote` says what the poll last saw in its timeout error.
 	 */
 	async #poll<T>(
 		label: string,
 		timeoutMs: number,
 		check: () => T | undefined | Promise<T | undefined>,
-		opts: { pull: boolean } = { pull: false },
+		opts: { pull: boolean; timeoutNote?: () => string } = { pull: false },
 	): Promise<T> {
 		const deadline = Date.now() + timeoutMs;
 		let delay = 25;
@@ -1233,7 +1234,10 @@ export class TernTab implements InProcessRunTab {
 			const value = await check();
 			if (value !== undefined) return value;
 			const left = deadline - Date.now();
-			if (left <= 0) throw new ToolError(`${label} timed out after ${timeoutMs}ms`);
+			if (left <= 0) {
+				const note = opts.timeoutNote ? `: ${opts.timeoutNote()}` : "";
+				throw new ToolError(`${label} timed out after ${timeoutMs}ms${note}`);
+			}
 			await untilAborted(this.#signal, () => Bun.sleep(Math.min(delay, left)));
 			delay = Math.min(100, Math.round(delay * 1.5));
 		}
@@ -1567,7 +1571,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Wait until the URL contains `pattern` (string) or matches it (RegExp). */
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
-		assertUrlPattern(pattern);
+		const matches = urlMatcher(parseUrlPattern(pattern));
 		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
 		let iteration = 0;
 		return await this.#poll(
@@ -1575,11 +1579,9 @@ export class TernTab implements InProcessRunTab {
 			timeoutMs,
 			async () => {
 				if (++iteration % 4 === 0) await this.#refreshState();
-				if (typeof pattern === "string") return this.#url.includes(pattern) ? this.#url : undefined;
-				pattern.lastIndex = 0;
-				return pattern.test(this.#url) ? this.#url : undefined;
+				return matches(this.#url) ? this.#url : undefined;
 			},
-			{ pull: true },
+			{ pull: true, timeoutNote: () => `the URL is ${this.#url}` },
 		);
 	}
 
@@ -3565,6 +3567,12 @@ export class TernTab implements InProcessRunTab {
 		await this.#pull();
 		// Responses arriving from now on, in arrival order (requests already in flight included).
 		let cursor = this.#network.settleCursor;
+		let test: (response: TernResponse) => boolean | Promise<boolean>;
+		if (typeof pattern === "function") test = pattern;
+		else {
+			const matches = urlMatcher(pattern);
+			test = response => matches(response.url());
+		}
 		return await this.#poll(
 			"tab.waitForResponse()",
 			resolveWaitTimeout(this.#cellMs, opts?.timeout ?? resolveOpTimeouts(this.#cellMs).budgetBound),
@@ -3573,11 +3581,7 @@ export class TernTab implements InProcessRunTab {
 					cursor = record.settledSeq ?? cursor;
 					if (record.status === undefined) continue;
 					const response = new TernResponse(record, this);
-					if (typeof pattern === "function") {
-						if (await pattern(response)) return response;
-					} else if (typeof pattern === "string" ? record.url.includes(pattern) : pattern.test(record.url)) {
-						return response;
-					}
+					if (await test(response)) return response;
 				}
 				return undefined;
 			},

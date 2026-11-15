@@ -31,10 +31,10 @@ import {
 } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
 import {
-	assertUrlPattern,
 	historyBackInPage,
 	historyForwardInPage,
 	locationHrefInPage,
+	parseUrlPattern,
 	pushStateInPage,
 	reloadInPage,
 } from "../navigation";
@@ -48,6 +48,7 @@ import type {
 	NetworkRouteDescription,
 	NetworkRouteOptions,
 } from "../network";
+import { urlMatcher } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { assertTabPressArgs } from "../tab-arguments";
 import { readFilePayloads } from "../upload-files";
@@ -1190,11 +1191,11 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
-		assertUrlPattern(pattern);
+		const resolved = parseUrlPattern(pattern);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
-		if (typeof pattern === "string") {
-			await this.#request("browser.wait", { url_contains: pattern, timeout_ms: timeoutMs }, timeoutMs, signal);
+		if (typeof resolved === "string") {
+			await this.#request("browser.wait", { url_contains: resolved, timeout_ms: timeoutMs }, timeoutMs, signal);
 			const result = (await this.#request("browser.url.get", {}, timeoutMs, signal)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
@@ -1211,11 +1212,12 @@ export class CmuxTab implements InProcessRunTab {
 			)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
-				if (pattern.test(result.url)) return result.url;
+				resolved.lastIndex = 0;
+				if (resolved.test(result.url)) return result.url;
 			}
 			await untilAborted(signal, () => Bun.sleep(200));
 		}
-		throw new ToolError(`tab.waitForUrl() timed out after ${timeoutMs}ms`);
+		throw new ToolError(`tab.waitForUrl() timed out after ${timeoutMs}ms: the URL is ${this.#lastUrl}`);
 	}
 
 	/** Init scripts require CDP document-start registration. */
@@ -1624,16 +1626,18 @@ export class CmuxTab implements InProcessRunTab {
 		const signal = this.#runContext?.signal;
 		await this.#installResponseObserver();
 		const startId = await this.#responseCursor();
+		let test: (response: CmuxResponse) => boolean | Promise<boolean>;
+		if (typeof pattern === "function") test = pattern;
+		else {
+			const matches = urlMatcher(pattern);
+			test = response => matches(response.url());
+		}
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() <= deadline) {
 			const records = await this.#responseRecordsAfter(startId);
 			for (const record of records) {
 				const response = new CmuxResponse(record);
-				if (typeof pattern === "function") {
-					if (await pattern(response)) return response;
-				} else if (pattern instanceof RegExp ? pattern.test(record.url) : record.url.includes(pattern)) {
-					return response;
-				}
+				if (await test(response)) return response;
 			}
 			await untilAborted(signal, () => Bun.sleep(100));
 		}

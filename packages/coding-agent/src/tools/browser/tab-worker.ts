@@ -134,6 +134,7 @@ import {
 	type NetworkRequestsOptions,
 	type NetworkRouteDescription,
 	type NetworkRouteOptions,
+	urlMatcher,
 } from "./network";
 import {
 	type BrowserCaptureResult,
@@ -233,10 +234,10 @@ import {
 	resolveFrame,
 } from "./frames";
 import {
-	assertUrlPattern,
 	isNavigatedContextError,
 	type NavigationWaitUntil,
 	navigateMainFrame,
+	parseUrlPattern,
 	pushState,
 	reloadPage,
 	traverseHistory,
@@ -372,6 +373,8 @@ interface OpOptions {
 	 * once the dialog is answered); `"answers"` ends it as done (an input the page answered with the dialog).
 	 */
 	dialog?: "blocks" | "answers";
+	/** What the call saw when its deadline fired (e.g. the current URL), appended to the timeout error. */
+	timeoutNote?: () => string;
 }
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
@@ -2660,6 +2663,7 @@ export class WorkerCore {
 					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
 				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
 				else if (countNote) hint = `; ${countNote}`;
+				if (opts?.timeoutNote) hint += `; ${opts.timeoutNote()}`;
 				throw markBrowserRunRejection(
 					new ToolError(`${label} timed out after ${perOpTimeoutMs}ms${hint}`),
 					active.rejectionOwner,
@@ -3104,9 +3108,11 @@ export class WorkerCore {
 				);
 			},
 			waitForUrl: (pattern, opts) => {
-				assertUrlPattern(pattern);
+				const resolved = parseUrlPattern(pattern);
 				const w = waitMs(opts?.timeout);
-				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
+				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(resolved, w, sig), {
+					timeoutNote: () => `the URL is ${page.url()}`,
+				});
 			},
 			waitForResponse: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
@@ -3860,12 +3866,12 @@ export class WorkerCore {
 		signal: AbortSignal,
 	): Promise<HTTPResponse> {
 		const page = this.#requirePage();
-		const predicate: (response: HTTPResponse) => boolean | Promise<boolean> =
-			typeof pattern === "function"
-				? pattern
-				: pattern instanceof RegExp
-					? response => pattern.test(response.url())
-					: response => response.url().includes(pattern);
+		let predicate: (response: HTTPResponse) => boolean | Promise<boolean>;
+		if (typeof pattern === "function") predicate = pattern;
+		else {
+			const matches = urlMatcher(pattern);
+			predicate = response => matches(response.url());
+		}
 		return (await untilAborted(signal, () => page.waitForResponse(predicate, { timeout, signal }))) as HTTPResponse;
 	}
 
