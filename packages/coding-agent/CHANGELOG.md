@@ -2,21 +2,15 @@
 
 ## [Unreleased]
 
-### Added
+### Breaking Changes
 
-- Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
-- Todo tool status line now displays task count for multiple targets
-- Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.
-- Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
-- Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
-- Added the `session_clear` hook and extension event, emitted after `/clear` resets the current session context without changing its session ID.
-- Added path-scoped entries for `bash.patterns` and `bashInterceptor.patterns`, project/config overlay precedence, and environment-variable-aware allow rules through `bash.allowedEnvVars` and per-rule `env` settings.
-- Subagents now preserve `@upstream` provider pinning when inheriting models.
-- Added deletion of selected prompts from Ctrl+R prompt history with the Delete key.
-- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict auxiliary services to the active model’s provider or disable off-provider services.
-- Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
-- Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
-- The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
+
+### Changed
+
+- Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
+- omp's WebKit browser engine now installs and updates to the newest stable ABKit release instead of the one each omp release pinned; the first WebKit open in a process checks for a newer one
+- omp keeps each ABKit version in `~/.o2/lib/abkit-versions/<version>` and links `~/.o2/lib/abkit` to the current one, so an engine update no longer waits for running browser hosts to exit
 
 ### Changed
 
@@ -24,11 +18,88 @@
 
 ### Fixed
 
-- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
-- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
-- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
-- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
-- A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
+- `ida` `exec` output no longer starts with IDA 9.5 `DeprecationWarning`s from omp's preloaded helpers; on IDA 9.5+ `func()` returns a `func_entry_info_t` (same `start_ea`/`end_ea`/`size()`) instead of `func_t`
+- `web_search` no longer returns Perplexity's "Sign up and repeat your request." wall as an answer when the stored Perplexity login or `PERPLEXITY_COOKIES` has expired; it reports the expired login and moves on to the next provider in the chain
+- `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
+- Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))
+- Fixed the TUI freezing when a session was resumed from `/resume` typed into an open tool approval; switching sessions now closes the pending approval instead of waiting on it ([#19239](https://github.com/can1357/oh-my-pi/issues/19239))
+- `take()` and `drop()` now reject a hunk unit that does not exist, such as `1z`, instead of reporting that no lines were selected ([#19310](https://github.com/can1357/oh-my-pi/pull/19310) by [@eggpeat](https://github.com/eggpeat))
+- `/marketplace` with no arguments (and `/marketplace install` or `/marketplace uninstall` with none) now shows `Marketplace error: …` when the plugin picker fails to load, such as when a marketplace's catalog is missing, instead of exiting the session ([#19234](https://github.com/can1357/oh-my-pi/pull/19234) by [@tuschla](https://github.com/tuschla))
+- An `edit` under a tag read before `write conflict://N` (or `conflict://*`) now carries over to the resolved file like after any other `write`, instead of failing with "hash is not from this session" ([#19233](https://github.com/can1357/oh-my-pi/pull/19233) by [@tuschla](https://github.com/tuschla))
+- ACP sessions now honor `mcp.startupTimeoutMs` when connecting the MCP servers a client declares in `session/new` ([#19253](https://github.com/can1357/oh-my-pi/issues/19253)) ([#19286](https://github.com/can1357/oh-my-pi/pull/19286) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed `/commit` and the eval `commit` namespace dropping a file's UTF-8 BOM from the committed blob, which left the committed file showing as modified ([#19327](https://github.com/can1357/oh-my-pi/issues/19327))
+- On Wayland, pasting while the clipboard holds an image or nothing no longer logs a misleading `Executable not found in $PATH: "xsel"` warning ([#19260](https://github.com/can1357/oh-my-pi/pull/19260) by [@tuschla](https://github.com/tuschla))
+- On Linux, JS eval keeps working in a session that outlives an in-place upgrade (pacman, `omp update`) instead of failing prelude calls such as `browser.open` with "`globalThis.__omp_display__` is not a function": its worker now runs the session's own build via `/proc/self/exe` ([#19259](https://github.com/can1357/oh-my-pi/pull/19259) by [@tuschla](https://github.com/tuschla))
+- ACP form elicitations no longer repeat each field's question (section title or caption) in the elicitation message ([#19305](https://github.com/can1357/oh-my-pi/issues/19305))
+- Deleting a session that cannot be removed no longer erases its prompt history and statistics while the session itself remains ([#19271](https://github.com/can1357/oh-my-pi/pull/19271) by [@eggpeat](https://github.com/eggpeat))
+- Fixed quoted and Unicode filenames being omitted from task change tracking or failing selective commits ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
+- Pasting HTML into the composer keeps the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Hello world`) and code indentation inside `<pre>` ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla))
+- `browser.open` with `app: "/usr/bin/chromium"` on Arch now reuses the Chromium already running on that profile instead of failing with "Timed out waiting for CDP endpoint" ([#19235](https://github.com/can1357/oh-my-pi/pull/19235) by [@tuschla](https://github.com/tuschla))
+- Editing a queued follow-up (`/queue`, `=>`, or the follow-up key) with Alt+Up now restores it as `=> <message>`, so Enter queues it again for when the agent yields instead of sending it into the running turn ([#19304](https://github.com/can1357/oh-my-pi/issues/19304))
+- `find` lists unranked literal keyword matches from the files it already read when every judge request fails, instead of returning an empty result ([#19231](https://github.com/can1357/oh-my-pi/pull/19231) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Skill-prompt advisor transcript no longer drops the user's request past a long skill body ([#19164](https://github.com/can1357/oh-my-pi/issues/19164)) ([#19267](https://github.com/can1357/oh-my-pi/pull/19267) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed `task.steps` subagents dropping what they delivered for every step but the last; each earlier step's report now reaches the agent that spawned them as a progress message
+- Bounded WebKit/Tern screenshot preparation and quick reads by one remaining-run deadline; WebKit captures no longer wait on a redundant JavaScript animation frame, and confirmed unresponsive renderers fail fast until explicitly closed and reopened
+- Waited for forced WebKit host termination before completing close, so immediate reopening cannot race the old process's exit
+- Fixed omp's WebKit browser waiting out whole calls on a page whose script keeps it busy: with an engine that watches page responsiveness, `observe()`, `screenshot()` and other quick reads fail after about 3 s with an `unresponsive` error naming the tab, other calls that time out say the page is unresponsive, and `tab.reload()`/`tab.goto()` end the busy web process and load the page in a new one, recovering the tab
+- Fixed eval `wait(1800)` returning at once as if it had slept; a number now throws, pointing to `tab.waitFor*` or a real sleep
+- Fixed browser `tab.setCookies(await other.cookies())` rejecting the array `cookies()` returns; malformed cookies now name the item and field
+- Fixed browser `waitForUrl` timeouts not saying which URL the page was at
+- Fixed browser `tab.route()` with a handler function failing with an unhelpful message; it now explains routes are declarative and how to watch traffic
+- Fixed the busy-tab error telling a subagent to stop running calls together when the tab was busy with another agent's call
+- Fixed `browser.open({ app: "tern", url })` returning at `about:blank` when Tern reported an about:blank load after the goto; the open now waits for the requested page, or fails with a goto timeout that says the page only loaded about:blank
+- Fixed a Tern tab whose browser block was closed outside omp staying registered and failing every call with `no browser block … in this window`; omp now closes the tab and says to reopen it, pointing to `browser.targets({ app: "tern" })`
+- Fixed `emulate({ viewport })` on a docked Tern block failing with Tern's bare `the block is docked` error; it now gives the block's current size and suggests `app: "own"` with a viewport, or floating the block again
+- Fixed `page.on()` and other event-listener methods inside `tab.run` on Tern and WebKit tabs throwing `page.on is not a function`; they now name the backend and the helpers to use instead (`tab.requests()`, `tab.waitForResponse()`, `tab.console()`)
+
+- Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
+
+### Removed
+
+- Removed the `seance` agent, the `/seance` command, and the task tool's `sourceSession` parameter
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added the `antigravity-cli` provider for Google Antigravity over ACP, with managed binary installation, `/login antigravity-cli` Google sign-in, host tool execution, and retained conversations across tool steps and history changes.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `/commit` to create commits containing only changes made by the agent or a selected subagent, while preserving other agents’ and the user’s work. The workflow is also available through the eval `commit` namespace, supports targeting repositories outside the session directory, handles binary and non-UTF-8 files, symlinks, file mode changes, and initial commits, and can optionally skip commit hooks with `no_verify`; use `commit.enabled` to disable it.
+- Added `auth.unpausedProviders` (the **Unpaused Providers** setting) to re-enable paused providers such as Google Antigravity at your own risk while preserving their stored login state.
+- Added configurable long-turn todo reminders through `todo.midRunNudges`, including options to disable reminders, limit them to two, or continue with increasing intervals.
+- Pasting styled content into the composer now preserves Markdown formatting and places embedded images at their original positions, while code copied from editors remains plain text.
+- Added the `session_clear` hook and extension event, emitted when `/clear` resets the current session context without changing its session ID.
+- Added path-scoped Bash allow rules, project and configuration overlay precedence, and environment-variable controls through `bash.allowedEnvVars` and per-rule `env` settings.
+- Subagents now preserve `@upstream` provider pinning when inheriting models.
+- Added deletion of individual prompts from Ctrl+R history with the Delete key.
+- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict or disable auxiliary services outside the active model’s provider.
+- Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
+- Bash approval prompts now show compound command segments individually and identify which segments are allowed or require approval.
+- Todo `done`, `drop`, and `rm` operations now accept multiple tasks in a single request, including newline-, semicolon-, comma-, or space-separated input without splitting exact task-name matches.
+- Todo status lines now display task counts when multiple targets are involved.
+
+### Changed
+
+- `/fork` and fork-from-transcript now abort an active response and fork immediately.
+- Reduced default `grep` output by showing only matching lines and limiting matches per file; configure `grep.contextBefore` and `grep.contextAfter` to include surrounding context.
+- Changed the default `spotlight.thinking` level from `low` to `med` for deeper result analysis and improved ranking, at a higher request cost.
+- When Spotlight is enabled, commonly reread source and issue or pull-request content is shown more completely before outlining, including support for additional source file types.
+
+### Fixed
+
+- `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).
+- Resuming a session whose directory was deleted now continues in the current directory with a warning instead of failing.
+- Model mentions and `/switch` completions now recover discovered models after provider discovery fails at startup, retrying discovery when needed.
+- Background job results that arrive after an ACP prompt ends are now carried into the next prompt instead of starting an invisible turn.
+- OpenAI server compaction failures now proceed to the next available compaction method instead of retrying server compaction on another model.
+- Language servers now recognize edits made shortly after a file is created, including on macOS.
+- Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
+- Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
 
 ## [18.20.0] - 2026-11-12
 

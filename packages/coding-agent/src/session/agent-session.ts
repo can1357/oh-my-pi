@@ -314,6 +314,7 @@ import type {
 	AsyncJobTree,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
+	DequeuedMessage,
 	DroppedPrompt,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
@@ -11413,11 +11414,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Pop the last queued message (steering first, then follow-up).
+	 * Pop the last queued message (steering first, then follow-up), tagged with its queue.
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
 	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).
 	 */
-	popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	popLastQueuedMessage(): DequeuedMessage | undefined {
 		const steering = this.agent.peekSteeringQueue();
 		const followUp = this.agent.peekFollowUpQueue();
 		const lastUserIndex = (queue: readonly AgentMessage[]): number => {
@@ -11431,14 +11432,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const removed = steering[fromSteer];
 			this.agent.replaceQueues(this.#withoutQueuedUserMessage(steering, fromSteer), followUp.slice());
 			this.#reconcileQueuedMessageDrain();
-			return toRestoredQueuedMessage(removed);
+			return { ...toRestoredQueuedMessage(removed), queue: "steering" };
 		}
 		const fromFollowUp = lastUserIndex(followUp);
 		if (fromFollowUp >= 0) {
 			const removed = followUp[fromFollowUp];
 			this.agent.replaceQueues(steering.slice(), this.#withoutQueuedUserMessage(followUp, fromFollowUp));
 			this.#reconcileQueuedMessageDrain();
-			return toRestoredQueuedMessage(removed);
+			return { ...toRestoredQueuedMessage(removed), queue: "followUp" };
 		}
 		return undefined;
 	}
@@ -14058,8 +14059,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `retry.modelFallback` on) instead keeps its current model and reports a
 	 * warning. Reloading the current session keeps the current model.
 	 *
-	 * With `onCwdChange`, a target whose recorded directory is missing or cannot be
-	 * entered throws `Cannot resume session: …` and the current session stays active.
+	 * A target whose recorded directory is missing or cannot be entered resumes in the
+	 * current cwd (the session manager keeps it there, runtime-only until relocated);
+	 * callers can detect this by comparing `getRecordedCwd()` with `getCwd()`.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
 	async switchSession(
@@ -14203,12 +14205,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
-					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
-						// setSessionFile kept the current cwd because the recorded one cannot be
-						// entered; resuming here would point tools at the wrong project.
-						throw new Error(
-							`Cannot resume session: its directory ${recordedCwd} is missing or cannot be entered`,
-						);
 					}
 				}
 			}

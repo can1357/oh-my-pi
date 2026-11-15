@@ -555,10 +555,17 @@ function domainMatches(hostname: string, pattern: string): boolean {
 	return hostname === suffix || hostname.endsWith(`.${suffix}`);
 }
 
+const ROUTE_OPTION_KEYS = "{ abort?, status?, headers?, contentType?, body?, delay?, resourceType? }";
+
 /** Validate `tab.route()` options and return a normalised copy (resource types stringified, headers copied). */
 export function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
+	if (typeof options === "function") {
+		throw new ToolError(
+			`tab.route() takes no handler: its options say what matching requests get (${ROUTE_OPTION_KEYS}). To watch traffic, read tab.requests() and tab.request(id) for bodies; to wait for one response, tab.waitForResponse(pattern).`,
+		);
+	}
 	if (!options || typeof options !== "object" || Array.isArray(options)) {
-		throw new ToolError("tab.route() expects an options object");
+		throw new ToolError(`tab.route(pattern, options): options must be an object ${ROUTE_OPTION_KEYS}`);
 	}
 	if (options.delay !== undefined && (!Number.isFinite(options.delay) || options.delay < 0)) {
 		throw new ToolError("tab.route() delay must be a non-negative number");
@@ -629,7 +636,9 @@ export function validatePattern(pattern: NetworkPattern, label: string): void {
 		if (!pattern) throw new ToolError(`${label}() pattern must not be empty`);
 		return;
 	}
-	if (!(pattern instanceof RegExp)) throw new ToolError(`${label}() pattern must be a glob string or RegExp`);
+	if (!(pattern instanceof RegExp)) {
+		throw new ToolError(`${label}() takes a URL glob string ("**/api/*") or RegExp as its first argument`);
+	}
 }
 
 /** Whether two route patterns are identical (string equality, or same RegExp source and flags). */
@@ -653,9 +662,27 @@ export function globToRegExp(glob: string): RegExp {
 	return new RegExp(`${source}$`);
 }
 
+/**
+ * A URL string pattern as URL waits and the request-log filter read it: with a `*` it is a glob, as `tab.route()`
+ * takes ({@link globToRegExp}); without one, a substring of the URL. A RegExp passes through.
+ */
+export function urlPattern(pattern: NetworkPattern): NetworkPattern {
+	return typeof pattern === "string" && pattern.includes("*") ? globToRegExp(pattern) : pattern;
+}
+
+/** A test of URLs against `pattern` as {@link urlPattern} reads it, compiled once. */
+export function urlMatcher(pattern: NetworkPattern): (url: string) => boolean {
+	const resolved = urlPattern(pattern);
+	if (typeof resolved === "string") return url => url.includes(resolved);
+	return url => {
+		resolved.lastIndex = 0;
+		return resolved.test(url);
+	};
+}
+
 /** Whether a request record passes the `tab.requests()` filters (throws on an invalid status filter). */
 export function matchesRequest(record: NetworkRequestRecord, options: NetworkRequestsOptions): boolean {
-	if (options.filter !== undefined && !requestFilterMatches(options.filter, record.url)) return false;
+	if (options.filter !== undefined && !urlMatcher(options.filter)(record.url)) return false;
 	const types = normalizeStringList(options.type);
 	if (types && !types.includes(record.resourceType)) return false;
 	const methods = normalizeStringList(options.method)?.map(method => method.toUpperCase());
@@ -663,12 +690,6 @@ export function matchesRequest(record: NetworkRequestRecord, options: NetworkReq
 	if (options.status !== undefined && !statusMatches(record.status, options.status)) return false;
 	if (options.since !== undefined && record.ts < options.since) return false;
 	return true;
-}
-
-function requestFilterMatches(filter: NetworkPattern, url: string): boolean {
-	if (typeof filter === "string") return url.includes(filter);
-	filter.lastIndex = 0;
-	return filter.test(url);
 }
 
 function statusMatches(status: number | undefined, filter: number | string): boolean {

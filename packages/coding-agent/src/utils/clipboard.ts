@@ -37,7 +37,7 @@ async function spawnCapture(
 	const timeoutMs = options.timeoutMs ?? 2000;
 	const proc = Bun.spawn(cmd, {
 		stdout: "pipe",
-		stderr: "ignore",
+		stderr: "pipe",
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
 		...(options.env ? { env: options.env } : {}),
 	});
@@ -47,6 +47,7 @@ async function spawnCapture(
 		proc.kill();
 	}, timeoutMs);
 	try {
+		const stderr = new Response(proc.stderr).text().catch(() => "");
 		const response = new Response(proc.stdout);
 		const stdout =
 			options.encoding === "bytes" ? new Uint8Array(await response.arrayBuffer()) : await response.text();
@@ -55,7 +56,8 @@ async function spawnCapture(
 			throw new Error(`${cmd[0]} timed out after ${timeoutMs}ms`);
 		}
 		if (proc.exitCode !== 0) {
-			throw new Error(`${cmd[0]} exited with code ${proc.exitCode}`);
+			const detail = (await stderr).trim();
+			throw new Error(`${cmd[0]} exited with code ${proc.exitCode}${detail ? `: ${detail}` : ""}`);
 		}
 		return stdout;
 	} finally {
@@ -157,7 +159,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 		// process teardown, or to another app that writes at the same moment. The
 		// copy itself is best-effort and the failure is swallowed here, but the
 		// AppKit line still lands in the user's terminal. The child's stderr is
-		// discarded by spawnCapture, and `pbcopy` ships with every macOS.
+		// kept off the terminal by spawnCapture, and `pbcopy` ships with every macOS.
 		//
 		// Two `pbcopy(1)` behaviours are worked around. It types input by sniffing
 		// the leading bytes: text opening with a PDF, EPS, or RTF header lands on the
@@ -301,6 +303,10 @@ async function readTextViaPowerShell(): Promise<string | null> {
 	}
 }
 
+// wl-paste's "nothing to paste" messages: wl-clipboard 2.2+, then the 1.0–2.1 wording.
+const WL_PASTE_NO_TEXT =
+	/Nothing is copied|Clipboard content is not available as requested type|No selection|No suitable type of content copied/;
+
 async function readTextFromX11Clipboard(): Promise<string> {
 	try {
 		return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
@@ -407,9 +413,16 @@ export async function readTextFromClipboard(): Promise<string> {
 		if (hasWaylandDisplay) {
 			try {
 				return await spawnCapture(["wl-paste", "--type", "text", "--no-newline"]);
-			} catch {
+			} catch (wlError) {
 				if (hasX11Display) {
-					return await readTextFromX11Clipboard();
+					try {
+						return await readTextFromX11Clipboard();
+					} catch (error) {
+						// wl-paste found no text (empty or image-only clipboard), so the X11
+						// tools failing too (often just a missing xsel) is not worth a warning.
+						if (WL_PASTE_NO_TEXT.test(String(wlError))) return "";
+						throw error;
+					}
 				}
 			}
 		} else if (hasX11Display) {
