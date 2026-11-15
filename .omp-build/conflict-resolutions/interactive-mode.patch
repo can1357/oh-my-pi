@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 3e3b2c0..dc99750 100644
+index 3e3b2c0..c47e97f 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
 @@ -182,7 +182,14 @@ import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -18,7 +18,15 @@ index 3e3b2c0..dc99750 100644
  import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
  import { labelEchoesHandle } from "../task/label";
  import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
-@@ -466,6 +473,7 @@ import {
+@@ -268,6 +275,7 @@ import {
+ 	initProgramStatus,
+ 	resendProgramStatus,
+ 	setProgramStatusEnabled,
++	setProgramStatusSupported,
+ 	settleStartupRun,
+ } from "../utils/run-status";
+ import {
+@@ -466,6 +474,7 @@ import {
  } from "./settings";
  import { cfgTasksTodoClearDelay } from "../tools/settings";
  import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
@@ -26,7 +34,7 @@ index 3e3b2c0..dc99750 100644
  import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
  import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
  import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
-@@ -2049,6 +2057,8 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2049,6 +2058,8 @@ export class InteractiveMode implements InteractiveModeContext {
  	#eventBus?: EventBus;
  	#subagentEventBus?: EventBus;
  	#eventBusUnsubscribers: Array<() => void> = [];
@@ -35,7 +43,25 @@ index 3e3b2c0..dc99750 100644
  	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
  	#mouseCapture = false;
  	/** A link-scheme change awaits its transcript rebuild; any rebuild before it covers it. */
-@@ -2948,7 +2958,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2719,9 +2730,14 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
+ 		initProgramStatus({ startupRun: options.startupRun });
+ 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+-		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
+-		// Only a frame that actually writes the mark needs a replacement; diff
+-		// paints that keep the user bubble must not resend on every update.
++		const unsubscribeProgramStatus = this.ui.terminal.onProgramStatusSupport?.(supported => {
++			setProgramStatusSupported(supported);
++			this.ui.requestRender();
++		});
++		if (unsubscribeProgramStatus) this.#eventBusUnsubscribers.push(unsubscribeProgramStatus);
++		// OSC 133;A starts a shell prompt and may drop the current status
++		// record. Confirmed OSC 7501 receivers omit the mark while working or
++		// blocked; only a frame that writes the mark needs a status replacement.
+ 		this.#eventBusUnsubscribers.push(
+ 			this.ui.addFrameWriteListener(frame => {
+ 				if (frame.includes("\x1b]133;A\x07")) resendProgramStatus();
+@@ -2948,7 +2964,7 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.#eventBusUnsubscribers.push(
  			this.session.subscribeCommandMetadataChanged(() => {
  				// Skills/commands rediscovery (live `skills.*`/`commands.*`/extension edits,
@@ -44,7 +70,7 @@ index 3e3b2c0..dc99750 100644
  				this.#pendingSlashCommands = this.#buildPendingSlashCommands();
  				this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
  				this.ui.requestRender();
-@@ -3051,6 +3061,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -3051,6 +3067,7 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.editor.disableSubmit = false;
  		this.#idleMaintenanceActivity.ready = true;
  		this.syncIdleMaintenanceView();
@@ -52,7 +78,7 @@ index 3e3b2c0..dc99750 100644
  		// Publish native send readiness even when no user input triggers another frame.
  		this.ui.requestRender();
  	}
-@@ -8338,6 +8349,29 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -8338,6 +8355,29 @@ export class InteractiveMode implements InteractiveModeContext {
  			message => this.showWarning(message),
  		);
  	}
