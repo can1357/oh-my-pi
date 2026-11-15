@@ -572,7 +572,7 @@
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
 ### Added
 
-- Shared `antigravity-cli` `agy acp` processes across concurrent sessions and subagent worker threads with matching credentials and tool sets, configurable via `providers.antigravity-cli.shareProcess` (`PI_AGY_SHARE_PROCESS`).
+- Shared `antigravity-cli` `agy acp` processes across concurrent sessions and subagent worker threads with matching credentials and tool sets, configurable via `providers.antigravity-cli.shareProcess` (`PI_AGY_SHARE_PROCESS`) ([#19329](https://github.com/can1357/oh-my-pi/pull/19329) by [@0xprincess](https://github.com/0xprincess))
 
 ### Changed
 

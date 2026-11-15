@@ -194,7 +194,7 @@
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
 ### Added
 
-- Shared `agy acp` processes and IDE MCP bridges across concurrent `antigravity-cli` sessions with matching credentials and tool sets (`shareProcess` / `antigravityShareProcess`, env `PI_AGY_SHARE_PROCESS`), with per-conversation MCP call routing, credential-rotation retirement, and unreferenced idle shutdown.
+- Shared `agy acp` processes and IDE MCP bridges across concurrent `antigravity-cli` sessions with matching credentials and tool sets (`shareProcess` / `antigravityShareProcess`, env `PI_AGY_SHARE_PROCESS`), with per-conversation MCP call routing, credential-rotation retirement, and unreferenced idle shutdown ([#19329](https://github.com/can1357/oh-my-pi/pull/19329) by [@0xprincess](https://github.com/0xprincess))
 
 ### Changed
 
