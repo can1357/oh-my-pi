@@ -307,5 +307,7 @@ export class WebKitHost {
 		if (exited) return;
 		logger.debug("WebKit host did not exit after its input closed; killing it", { pid: child.pid });
 		await gracefulKillTreeOnce(child.pid);
+		// Signal delivery is not exit/reaping; callers may start a replacement immediately.
+		await child.exited;
 	}
 }
