@@ -1955,10 +1955,9 @@ export class CustomEditor extends Editor {
 			return true;
 		}
 		if (image.kind === "paths" && this.onPasteImagePath) {
-			const attachmentPaths = image.paths;
 			this.#trackAsyncPaste(
 				(async () => {
-					for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
+					for (const p of image.paths) await this.onPasteImagePath?.(p);
 				})(),
 			);
 			return true;

@@ -5,6 +5,7 @@
 ### Added
 
 - `ask` form notes take pasted screenshots again: with a note open, `Ctrl+V` (`Alt+V` on Windows) or the terminal's own paste attaches the image, and it reaches the model after the answers as `[Image #N]`, described for text-only models
+- `ui.formDialog` accepts `acceptImages`: option notes then take pasted images, returned in `OptionNote.images` with their `[Image #N]` markers
 
 ### Fixed
 
