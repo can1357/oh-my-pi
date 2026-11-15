@@ -10,15 +10,14 @@
 import { TTSR_REGEX_WORKER_ARG } from "../cli/worker-selectors";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 
-/** Default wall-clock budget for one child invocation; tests pass a shorter one. */
-export const TTSR_REGEX_SANDBOX_TIMEOUT_MS = 500;
 /**
- * Child invocations per sandbox call. A deadline kill quarantines the running
- * condition only when it ran first in its round, so it alone used the whole
- * budget; otherwise it runs first in the next round. Finished conditions never
- * run again. One call therefore blocks at most `MAX_ROUNDS * timeout`.
+ * Wall-clock budget for one child invocation; tests pass a shorter one. A
+ * deadline kill quarantines the running condition only when it ran first in
+ * its child, so it alone used the whole budget; otherwise it runs first in the
+ * next child. Finished conditions never run again, so every child settles at
+ * least one condition and a call ends with a verdict or a quarantine for each.
  */
-const SANDBOX_MAX_ROUNDS = 3;
+export const TTSR_REGEX_SANDBOX_TIMEOUT_MS = 500;
 /**
  * An in-process `RegExp` call slower than this demotes its (user-authored)
  * condition to the sandbox for the rest of the session. The first slow call
@@ -41,7 +40,7 @@ export interface SandboxCondition {
 }
 
 export interface SandboxResult {
-	/** Verdicts keyed by the caller's condition index; a culprit or an unreached condition has none. */
+	/** Verdicts keyed by the caller's condition index; only culprits have none. */
 	verdicts: Map<number, SandboxVerdict>;
 	/** Indexes of conditions that alone outlived a whole deadline. */
 	culprits: number[];
@@ -50,9 +49,10 @@ export interface SandboxResult {
 }
 
 /**
- * Evaluate `conditions` against `text` in killable children, blocking the
- * caller for at most {@link SANDBOX_MAX_ROUNDS} deadlines. Conditions past the
- * last round have no verdict; the caller evaluates them on its next check.
+ * Evaluate `conditions` against `text` in killable children until each has a
+ * verdict or has alone outlived a whole deadline. Blocks for at most twice the
+ * conditions' own run time, plus one child start per round and two deadlines
+ * per culprit, once per session.
  */
 export function evaluateRegexConditionsSandbox(
 	text: string,
@@ -62,7 +62,7 @@ export function evaluateRegexConditionsSandbox(
 	const verdicts = new Map<number, SandboxVerdict>();
 	const culprits: number[] = [];
 	let pending = conditions.map((_, index) => index);
-	for (let attempt = 0; attempt < SANDBOX_MAX_ROUNDS && pending.length > 0; attempt++) {
+	while (pending.length > 0) {
 		const round = runChild(
 			text,
 			pending.map(index => conditions[index]),

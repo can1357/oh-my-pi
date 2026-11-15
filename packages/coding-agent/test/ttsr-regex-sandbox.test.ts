@@ -188,26 +188,28 @@ describe("TTSR regex sandbox", () => {
 
 describe("regex sandbox deadline", () => {
 	/**
-	 * Length of `a`s that makes `(a+)+X` fail in 150 ms or more, so each such
-	 * condition costs 150-350 ms: 14 of them overrun a 2 s deadline, and one
-	 * alone stays under it even when the host runs it 5x slower.
+	 * Length of `a`s that makes `(a+)+b` fail in 80 ms or more, so each such
+	 * condition costs 80-190 ms: 40 of them need over three 1 s deadlines, and
+	 * one alone stays under a deadline even when the host runs it 5x slower.
 	 */
 	function calibratedRun(): number {
 		for (let length = 16; ; length++) {
 			const started = performance.now();
 			/(a+)+b/.test(`${"a".repeat(length)}!`);
-			if (performance.now() - started >= 150) return length;
+			if (performance.now() - started >= 80) return length;
 		}
 	}
 
-	it("quarantines only a condition that alone outlives the deadline", () => {
+	it("settles every condition, quarantining only one that alone outlives the deadline", () => {
 		const text = `${"a".repeat(calibratedRun())}!`;
-		const conditions = Array.from("bcdefghijklmno", end => ({ source: `(a+)+${end}`, flags: "" }));
+		const slow = Array.from({ length: 40 }, () => ({ source: "(a+)+b", flags: "" }));
+		const conditions = [...slow, { source: "a!", flags: "" }];
 
-		const result = evaluateRegexConditionsSandbox(text, conditions, 2_000);
+		const result = evaluateRegexConditionsSandbox(text, conditions, 1_000);
 
 		expect(result.error).toBeUndefined();
 		expect(result.culprits).toEqual([]);
-		expect(result.verdicts.size).toBeGreaterThanOrEqual(3);
-	}, 30_000);
+		expect(result.verdicts.size).toBe(conditions.length);
+		expect(result.verdicts.get(slow.length)?.matched).toBe(true);
+	}, 60_000);
 });

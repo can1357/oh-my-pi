@@ -1062,7 +1062,7 @@ export class TtsrManager {
 		});
 	}
 
-	/** Run `conditions` against `text` in the sandbox; unreached conditions have no verdict. */
+	/** Run `conditions` against `text` in the sandbox; only quarantined conditions come back without a verdict. */
 	#evaluateInSandbox(text: string, conditions: readonly RegExp[]): Map<RegExp, SandboxVerdict> {
 		const result = evaluateRegexConditionsSandbox(
 			text,
