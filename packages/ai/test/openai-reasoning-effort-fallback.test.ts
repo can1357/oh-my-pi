@@ -435,7 +435,6 @@ describe("OpenAI reasoning effort fallback retry", () => {
 		expect(bodies.map(body => body.reasoning_effort)).toEqual(["xhigh", "max"]);
 	});
 
-
 	it("does not apply a cached enabled-effort fallback to tool-suppressed Azure Astra requests", async () => {
 		const bodies: Record<string, unknown>[] = [];
 		const fetchMock: FetchImpl = Object.assign(
