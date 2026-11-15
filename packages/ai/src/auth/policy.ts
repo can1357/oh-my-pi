@@ -96,6 +96,12 @@ export class AccountPolicies {
 			) {
 				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
 			}
+			if (
+				policy.reserveReleaseHours !== undefined &&
+				(!Number.isFinite(policy.reserveReleaseHours) || policy.reserveReleaseHours <= 0)
+			) {
+				throw new AIError.ConfigurationError(`${path}.reserveReleaseHours must be a finite number above 0`);
+			}
 			if (policy.reclaimAbovePct !== undefined) {
 				const reservePct = policy.reservePct ?? defaultReservePct;
 				if (
@@ -113,7 +119,7 @@ export class AccountPolicies {
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		if (canFetchUsage) return;
-		for (const field of ["reservePct", "reclaimAbovePct"] as const) {
+		for (const field of ["reservePct", "reserveReleaseHours", "reclaimAbovePct"] as const) {
 			const policyIndex = this.#accountPolicies.findIndex(
 				policy => policy.provider === provider && policy[field] !== undefined,
 			);

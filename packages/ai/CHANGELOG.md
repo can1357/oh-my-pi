@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `reserveReleaseHours` to `auth.accountPolicies`: an account's reserve shrinks to zero over the last hours before each usage window resets, so quota that would expire unused is spent first ([#19323](https://github.com/can1357/oh-my-pi/pull/19323) by [@FMsongX2](https://github.com/FMsongX2))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

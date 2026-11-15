@@ -4,7 +4,7 @@ import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
-import { isWithinUsageReserve } from "../usage";
+import { isAnyLimitWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import { raceSignal } from "./abort";
@@ -40,6 +40,7 @@ import {
 } from "./types";
 import type { UsageService } from "./usage";
 import {
+	activeReserveUsageLimits,
 	isUsageLimitReached,
 	normalizeUsageFraction,
 	remainingUsageFraction,
@@ -533,7 +534,13 @@ export class CredentialSelector {
 				inReserve:
 					reserveFraction !== undefined &&
 					remainingFraction !== undefined &&
-					isWithinUsageReserve(remainingFraction, reserveFraction),
+					usage !== null &&
+					isAnyLimitWithinUsageReserve(
+						activeReserveUsageLimits(strategy, usage, args.rankingContext, nowMs),
+						reserveFraction,
+						nowMs,
+						policy?.reserveReleaseHours,
+					),
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,

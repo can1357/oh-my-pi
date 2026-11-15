@@ -127,6 +127,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				key !== "account" &&
 				key !== "priority" &&
 				key !== "reservePct" &&
+				key !== "reserveReleaseHours" &&
 				key !== "reclaimAbovePct",
 		);
 		if (unknownPolicyFields.length > 0) {
@@ -177,6 +178,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
 		}
 		if (
+			policy.reserveReleaseHours !== undefined &&
+			(typeof policy.reserveReleaseHours !== "number" || !Number.isFinite(policy.reserveReleaseHours))
+		) {
+			throw new AIError.ConfigurationError(`${path}.reserveReleaseHours must be a finite number`);
+		}
+		if (
 			policy.reclaimAbovePct !== undefined &&
 			(typeof policy.reclaimAbovePct !== "number" || !Number.isFinite(policy.reclaimAbovePct))
 		) {
@@ -193,6 +200,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+			...(typeof policy.reserveReleaseHours === "number" ? { reserveReleaseHours: policy.reserveReleaseHours } : {}),
 			...(typeof policy.reclaimAbovePct === "number" ? { reclaimAbovePct: policy.reclaimAbovePct } : {}),
 		};
 	});

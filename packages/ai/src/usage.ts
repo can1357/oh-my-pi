@@ -178,6 +178,47 @@ export function isWithinUsageReserve(remainingFraction: number, reserveFraction:
 }
 
 /**
+ * Reserve in force for one window. With `releaseHours`, the reserve shrinks
+ * linearly to zero over the window's last `releaseHours` before it resets: quota
+ * held back past the reset expires unused, so it is released to routing instead.
+ * A window without a reset time keeps the full reserve.
+ */
+function releasedReserveFraction(
+	limit: UsageLimit,
+	reserveFraction: number,
+	nowMs: number,
+	releaseHours: number | undefined,
+): number {
+	const resetsAt = limit.window?.resetsAt;
+	if (releaseHours === undefined || typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) {
+		return reserveFraction;
+	}
+	return reserveFraction * Math.max(0, Math.min(1, (resetsAt - nowMs) / (releaseHours * 3_600_000)));
+}
+
+/**
+ * Whether any window's remaining quota is at or below its reserve (see
+ * {@link releasedReserveFraction} for `releaseHours`). Windows without a used
+ * fraction are ignored. Without `releaseHours` this equals comparing the
+ * most-consumed window against `reserveFraction`.
+ */
+export function isAnyLimitWithinUsageReserve(
+	limits: readonly UsageLimit[],
+	reserveFraction: number,
+	nowMs: number,
+	releaseHours?: number,
+): boolean {
+	return limits.some(limit => {
+		const usedFraction = resolveUsedFraction(limit);
+		if (usedFraction === undefined) return false;
+		return isWithinUsageReserve(
+			Math.max(0, 1 - usedFraction),
+			releasedReserveFraction(limit, reserveFraction, nowMs, releaseHours),
+		);
+	});
+}
+
+/**
  * One recorded usage-limit snapshot: a single limit window of one account at
  * a point in time. The usage cache itself is latest-snapshot-only; history
  * rows are appended by the auth storage layer whenever a fresh report is
