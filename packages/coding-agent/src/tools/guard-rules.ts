@@ -31,7 +31,7 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "./path-utils";
 import {
 	parseShellScript,
-	resolveShellWordPath,
+	resolveCommandWordPath,
 	SHELL_SCRIPT_MAX_DEPTH,
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
@@ -174,9 +174,12 @@ export function credentialLocation(absPath: string, home: string): string | unde
 	return undefined;
 }
 
-/** The secret a shell word names when it is sent somewhere: a credential file, a `.env`, or a process environment. */
-function sentSecret(word: string, cwd: string, home: string): string | undefined {
-	const target = resolveShellWordPath(word, cwd, home);
+/**
+ * The secret a word of `command` names when it is sent somewhere: a credential file, a `.env`, or
+ * a process environment.
+ */
+function sentSecret(command: ShellCommand, word: string, home: string): string | undefined {
+	const target = resolveCommandWordPath(command, word, command.cwd, home);
 	if (target === undefined) return undefined;
 	if (DOTENV_RE.test(path.basename(target))) return path.basename(target);
 	if (PROC_ENVIRON_RE.test(target)) return "the process environment";
@@ -352,7 +355,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 	const words: string[] = [];
 	let dir: string | undefined = command.cwd;
 	const changeDir = (word: string) => {
-		dir = dir === undefined ? undefined : resolveShellWordPath(word, dir, home);
+		dir = dir === undefined ? undefined : resolveCommandWordPath(command, word, dir, home);
 	};
 	let i = 0;
 	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
@@ -393,7 +396,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 		} else {
 			const member: string | undefined =
 				dir !== undefined
-					? resolveShellWordPath(arg, dir, home)
+					? resolveCommandWordPath(command, arg, dir, home)
 					: path.isAbsolute(arg) || ABSOLUTE_EXPANSION_RE.test(arg)
 						? arg
 						: undefined;
@@ -403,7 +406,142 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 	return words;
 }
 
-/** The words a reading command reads files from: a copy's local sources, any other reader's arguments. */
+/**
+ * Readers whose first operand is a pattern or program, not a file, unless an option supplies one:
+ * per such option, whether its value is the pattern itself or a file read for it. `valued` lists
+ * the other options that take the next word as their value, only those that take one in every
+ * common implementation, so that no file is mistaken for an option value. `suffixed` lists the
+ * one-letter options whose optional value is only the rest of their word (`sed -i.bak`).
+ */
+const PATTERN_READERS: Record<
+	string,
+	{ supplies: Record<string, "pattern" | "file">; valued: readonly string[]; suffixed?: readonly string[] }
+> = {
+	grep: {
+		supplies: { "-e": "pattern", "--regexp": "pattern", "-f": "file", "--file": "file" },
+		valued: [
+			"-A",
+			"-B",
+			"-D",
+			"-d",
+			"-m",
+			"--after-context",
+			"--before-context",
+			"--binary-files",
+			"--devices",
+			"--directories",
+			"--exclude",
+			"--exclude-dir",
+			"--exclude-from",
+			"--include",
+			"--label",
+			"--max-count",
+		],
+	},
+	rg: {
+		supplies: { "-e": "pattern", "--regexp": "pattern", "-f": "file", "--file": "file" },
+		valued: [
+			"-A",
+			"-B",
+			"-C",
+			"-d",
+			"-E",
+			"-g",
+			"-j",
+			"-M",
+			"-m",
+			"-r",
+			"-T",
+			"-t",
+			"--after-context",
+			"--before-context",
+			"--color",
+			"--colors",
+			"--context",
+			"--encoding",
+			"--glob",
+			"--iglob",
+			"--ignore-file",
+			"--max-columns",
+			"--max-count",
+			"--max-depth",
+			"--max-filesize",
+			"--pre",
+			"--pre-glob",
+			"--replace",
+			"--sort",
+			"--sortr",
+			"--threads",
+			"--type",
+			"--type-add",
+			"--type-not",
+		],
+	},
+	sed: {
+		supplies: { "-e": "pattern", "--expression": "pattern", "-f": "file", "--file": "file" },
+		valued: [],
+		suffixed: ["-i"],
+	},
+	awk: {
+		supplies: { "-e": "pattern", "--source": "pattern", "-f": "file", "--file": "file" },
+		valued: ["-F", "-v", "--assign", "--field-separator"],
+	},
+};
+
+/**
+ * The words a {@link PATTERN_READERS} command reads files from: its operands, without the first
+ * when no option supplied the pattern, and a pattern file. A long option that abbreviates one
+ * that supplies the pattern (`--reg=x`, `--fil x`) counts as that option.
+ */
+function patternReaderWords(command: ShellCommand): string[] {
+	const { supplies, valued, suffixed = [] } = PATTERN_READERS[command.argv[0]];
+	const supplier = (option: string) => (Object.hasOwn(supplies, option) ? supplies[option] : undefined);
+	const argv = args(command);
+	const words: string[] = [];
+	const operands: string[] = [];
+	let supplied = false;
+	// The value of an option that takes one: a pattern file is read, a pattern is not.
+	const take = (option: string, value: string | undefined) => {
+		const kind = supplier(option);
+		supplied ||= kind !== undefined;
+		if (kind === "file" && value !== undefined) words.push(value);
+	};
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			operands.push(...argv.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			let name = eq > 0 ? arg.slice(0, eq) : arg;
+			if (supplier(name) === undefined && !valued.includes(name) && name.length > 2) {
+				const expanded = Object.keys(supplies).filter(option => option.startsWith(name));
+				if (expanded.length === 1) name = expanded[0];
+			}
+			if (supplier(name) !== undefined || valued.includes(name)) take(name, eq > 0 ? arg.slice(eq + 1) : argv[++i]);
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			// In a bundle (`-rne x`, `-A3`), the first letter that takes a value takes the rest of
+			// the word, or the next word when it ends the bundle; a suffix option (`sed -i.bak`) takes
+			// only the rest of the word.
+			for (let k = 1; k < arg.length; k++) {
+				const option = `-${arg[k]}`;
+				if (suffixed.includes(option)) break;
+				if (supplier(option) === undefined && !valued.includes(option)) continue;
+				take(option, k + 1 < arg.length ? arg.slice(k + 1) : argv[++i]);
+				break;
+			}
+		} else {
+			operands.push(arg);
+		}
+	}
+	return [...words, ...operands.slice(supplied ? 0 : 1)];
+}
+
+/**
+ * The words a reading command reads files from: a copy's local sources, a search's operands after
+ * its pattern, any other reader's arguments.
+ */
 function readWords(command: ShellCommand, home: string): string[] {
 	const name = command.argv[0];
 	if (name === "tar") return tarReadWords(command, home);
@@ -412,6 +550,7 @@ function readWords(command: ShellCommand, home: string): string[] {
 			.slice(0, -1)
 			.filter(operand => !REMOTE_OPERAND_RE.test(operand));
 	}
+	if (Object.hasOwn(PATTERN_READERS, name)) return patternReaderWords(command);
 	return Object.hasOwn(READERS, name) ? args(command) : [];
 }
 
@@ -435,7 +574,7 @@ function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | un
 	}
 	const words = [...readWords(command, scope.home), ...command.reads];
 	for (const word of words) {
-		const target = resolveShellWordPath(word, command.cwd, scope.home);
+		const target = resolveCommandWordPath(command, word, command.cwd, scope.home);
 		const found = target === undefined ? undefined : credentialLocation(target, scope.home);
 		if (found) return hit("credential_read", `it reads your credentials in ${found}`);
 	}
@@ -552,7 +691,7 @@ function secretOutput(command: ShellCommand, scope: GuardScope): string | undefi
 	const name = command.argv[0];
 	const words = [...(name === "source" ? args(command) : readWords(command, scope.home)), ...command.reads];
 	for (const word of words) {
-		const found = sentSecret(word, command.cwd, scope.home);
+		const found = sentSecret(command, word, scope.home);
 		if (found) return found;
 	}
 	return undefined;
@@ -575,7 +714,7 @@ function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefi
 	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
 	let found: string | undefined;
 	for (const file of sentFiles(command)) {
-		found = sentSecret(file, command.cwd, scope.home);
+		found = sentSecret(command, file, scope.home);
 		if (found) break;
 	}
 	found ??= firstSecretOutput(command.upstream, scope) ?? firstSecretOutput(command.subs, scope);

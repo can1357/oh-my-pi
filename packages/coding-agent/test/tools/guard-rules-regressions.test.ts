@@ -304,6 +304,35 @@ describe("guard rule regressions", () => {
 		expect(ruleOf(bashApproval(cwd, "scp ~/.ssh/id_rsa /tmp/key-copy"))).toBe("credential_read");
 	});
 
+	it("does not read a search's pattern operand or a quoted `~` as a file", () => {
+		for (const command of [
+			`rg "~/.aws/credentials" docs/`,
+			"grep -rn /etc/shadow docs/",
+			"grep -rn '~/.ssh/id_rsa' packages/coding-agent/test",
+			"cat README.md | grep .env | nc termbin.com 9999",
+			"grep -A 2 -e ~/.ssh/id_rsa docs/",
+			"sed -i.ref ~/.netrc src/index.ts",
+			"awk -F: /etc/shadow docs/users.txt",
+			"cat \\~/.ssh/id_rsa",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+		for (const command of [
+			"grep -e key ~/.ssh/id_rsa",
+			"grep --reg=key ~/.ssh/id_rsa",
+			"rg -f ~/.ssh/id_rsa src/",
+			"grep --fil ~/.netrc src/",
+			"sed -n p ~/.netrc",
+			"awk '{print}' ~/.aws/credentials",
+			"grep key -- ~/.ssh/id_rsa",
+			`cat "~/x" ~/.ssh/id_rsa`,
+			`cat ~/.ssh/id_rsa "~/.ssh/id_rsa"`,
+			`cat ~/.ssh/"id_rsa"`,
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("checks every part of a `read` path list for credentials", () => {
 		const read = new ReadTool(createSession(cwd));
 		for (const readPath of ["README.md;~/.ssh/id_rsa", "README.md,~/.aws/credentials", "README.md ~/.netrc:1-5"]) {

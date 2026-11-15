@@ -1003,6 +1003,11 @@ export interface ShellCommand {
 	 * every command run in it, and whatever is piped into a compound command it runs in.
 	 */
 	upstream: readonly ShellCommand[];
+	/**
+	 * Arguments and redirection targets whose leading `~` was quoted or escaped (`"~/.ssh/id_rsa"`,
+	 * `\~/x`), so the shell does not expand it; a word the command also has with a bare `~` is not here.
+	 */
+	literalTildes: ReadonlySet<string>;
 }
 
 /** A shell script broken into pipelines, nested scripts included. */
@@ -1035,6 +1040,19 @@ export function resolveShellWordPath(word: string, cwd: string, home: string): s
 	if (expanded === "~" || expanded.startsWith("~/")) expanded = home + expanded.slice(1);
 	if (!expanded || expanded.includes("$") || expanded.includes("\0") || expanded.startsWith("~")) return undefined;
 	return path.resolve(cwd, expanded);
+}
+
+/**
+ * The absolute path a word of `command` names, as {@link resolveShellWordPath} resolves it, except
+ * that a leading `~` the source quoted ({@link ShellCommand.literalTildes}) stays a plain character.
+ */
+export function resolveCommandWordPath(
+	command: ShellCommand,
+	word: string,
+	cwd: string,
+	home: string,
+): string | undefined {
+	return resolveShellWordPath(command.literalTildes.has(word) ? `./${word}` : word, cwd, home);
 }
 
 // Longest first, so `&&` is never read as two `&`.
@@ -1149,6 +1167,8 @@ interface ShellScriptToken {
 	quoted: boolean;
 	/** Set on the delimiter word after `<<`/`<<-`. */
 	heredoc?: ShellHeredoc;
+	/** Set on a word whose leading `~` was quoted or escaped (`"~/x"`, `\~/x`), so the shell does not expand it. */
+	literalTilde?: true;
 }
 
 interface ShellScriptSegment {
@@ -1160,6 +1180,8 @@ interface ShellScriptSegment {
 	/** `<<<` words. */
 	herestrings: string[];
 	heredocs: ShellHeredoc[];
+	/** Words and redirection targets whose leading `~` the shell keeps, as in {@link ShellCommand.literalTildes}. */
+	literalTildes: Set<string>;
 	operator: string;
 }
 
@@ -1531,7 +1553,7 @@ class ShellScriptParser {
 				const only = pipeline.length === 1 ? pipeline[0] : undefined;
 				if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
 					const target = shellPositionalArgs(only.argv)[0];
-					cwd = target === undefined ? this.home : (resolveShellWordPath(target, cwd, this.home) ?? cwd);
+					cwd = target === undefined ? this.home : (resolveCommandWordPath(only, target, cwd, this.home) ?? cwd);
 				}
 				pipeline = [];
 			}
@@ -1588,6 +1610,8 @@ class ShellScriptParser {
 		let word = "";
 		let started = false;
 		let quoted = false;
+		// Whether the word starts with an unquoted `~`, which the shell expands.
+		let bareTilde = false;
 		// Set after `<<`/`<<-`: the next word is a heredoc delimiter.
 		let delimiter: { stripTabs: boolean } | undefined;
 		const pending: PendingHeredoc[] = [];
@@ -1624,6 +1648,7 @@ class ShellScriptParser {
 		const flush = () => {
 			if (started) {
 				const token: ShellScriptToken = { text: word, operator: false, quoted };
+				if (word.startsWith("~") && !bareTilde) token.literalTilde = true;
 				if (delimiter) {
 					token.heredoc = { body: "", expands: !quoted, subs: [] };
 					pending.push({ delimiter: word, stripTabs: delimiter.stripTabs, doc: token.heredoc });
@@ -1636,6 +1661,7 @@ class ShellScriptParser {
 			word = "";
 			started = false;
 			quoted = false;
+			bareTilde = false;
 		};
 		let i = start;
 		while (i < text.length) {
@@ -1691,6 +1717,7 @@ class ShellScriptParser {
 			} else {
 				const operator = SHELL_OPERATORS.find(op => text.startsWith(op, i));
 				if (operator === undefined) {
+					bareTilde ||= !started && ch === "~";
 					word += ch;
 					started = true;
 					i++;
@@ -1957,13 +1984,24 @@ class ShellScriptParser {
 			reads: [],
 			herestrings: [],
 			heredocs: [],
+			literalTildes: new Set(),
 			operator: ";",
 		});
 		let current = empty();
+		// Words of the current segment written with a bare `~`, which the shell expands.
+		let bareTildes = new Set<string>();
 		let redirect: string | undefined;
 		let continued = false;
 		for (const token of tokens) {
 			if (continued && token.operator && token.text === "\n") continue;
+			if (!token.operator && token.text.startsWith("~")) {
+				if (token.literalTilde && !bareTildes.has(token.text)) {
+					current.literalTildes.add(token.text);
+				} else {
+					bareTildes.add(token.text);
+					current.literalTildes.delete(token.text);
+				}
+			}
 			continued = token.operator && Object.hasOwn(SHELL_CONTINUATIONS, token.text);
 			if (redirect !== undefined && !token.operator) {
 				if (
@@ -1988,6 +2026,7 @@ class ShellScriptParser {
 				current.operator = token.text;
 				segments.push(current);
 				current = empty();
+				bareTildes = new Set();
 				redirect = undefined;
 			}
 		}
@@ -2032,7 +2071,18 @@ class ShellScriptParser {
 		}
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
 		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1));
-		return { argv, quoted, program, wrappers, reads, writes, subs: used, cwd, upstream };
+		return {
+			argv,
+			quoted,
+			program,
+			wrappers,
+			reads,
+			writes,
+			subs: used,
+			cwd,
+			upstream,
+			literalTildes: segment.literalTildes,
+		};
 	}
 }
 
