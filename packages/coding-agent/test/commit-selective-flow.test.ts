@@ -117,6 +117,19 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
 	});
 
+	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
+		const { root, journal } = await sharedWorkspace();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
+		// Someone else commits a conflicting a.ts meanwhile.
+		await git(root, ["commit", "-q", "-m", "other", "--only", "b.ts"]);
+		await Bun.write(path.join(root, "a.ts"), "export const a = 3;\n");
+		await git(root, ["commit", "-q", "-m", "conflict", "--only", "a.ts"]);
+
+		await expect(
+			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
+	});
+
 	it.skipIf(process.platform === "win32")("commits a filename that requires a quoted diff header", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-quoted-"));
 		const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-artifacts-"));
@@ -150,18 +163,5 @@ describe("selective commit flow", () => {
 
 		expect(outcome.paths).toEqual([filename]);
 		expect(await git(root, ["show", `HEAD:${filename}`])).toBe("after\n");
-	});
-
-	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
-		const { root, journal } = await sharedWorkspace();
-		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
-		// Someone else commits a conflicting a.ts meanwhile.
-		await git(root, ["commit", "-q", "-m", "other", "--only", "b.ts"]);
-		await Bun.write(path.join(root, "a.ts"), "export const a = 3;\n");
-		await git(root, ["commit", "-q", "-m", "conflict", "--only", "a.ts"]);
-
-		await expect(
-			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
-		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
 	});
 });

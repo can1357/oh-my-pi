@@ -17,6 +17,7 @@
 - Fixed the shell `cp` builtin so symlink-following options used with archive and directory-copy modes correctly override one another without disabling recursion or attribute preservation ([#19215](https://github.com/can1357/oh-my-pi/pull/19215)).
 - Fixed a built-in shell crash when `[ ]` or `test` expressions contained very long `-a`/`-o` chains; excessively deep parenthesized expressions now produce a clear error instead ([#18498](https://github.com/can1357/oh-my-pi/pull/18498)).
 - Fixed native diff and patch round-trips for filenames containing spaces: binary changes no longer fail to apply or land under a truncated path, and paths that cannot be written verbatim are C-quoted like git does ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
+- Fixed quoted filenames with short or overflowing octal escapes so those patches are rejected instead of applied under a truncated name ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.0] - 2026-11-12
 

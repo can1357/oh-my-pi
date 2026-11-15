@@ -713,7 +713,9 @@ fn split_diff_paths(paths: &str) -> std::result::Result<(String, String, bool), 
 	Ok((
 		strip_side_path(old_token, 'a'),
 		strip_side_path(new_token, 'b'),
-		old_token.contains(' ') || new_token.contains(' '),
+		// The first token ends at the first space, so only the remainder can
+		// still be ambiguous.
+		new_token.contains(' '),
 	))
 }
 
@@ -768,8 +770,8 @@ fn parse_quoted_path(quoted: &str) -> std::result::Result<(String, &str), ApplyF
 					return Err(ApplyFailure::Invalid("unterminated escape in quoted path".into()));
 				};
 				index += 1;
-				// Octal escapes wider than a byte truncate, like git's C
-				// quoting reader.
+				// Git's unquote_c_style accepts only a first octal digit 0-3
+				// followed by exactly two more octal digits.
 				let byte = match escape {
 					b'a' => 0x07,
 					b'b' => 0x08,
@@ -781,19 +783,24 @@ fn parse_quoted_path(quoted: &str) -> std::result::Result<(String, &str), ApplyF
 					b'"' => b'"',
 					b'\\' => b'\\',
 					octet @ b'0'..=b'7' => {
+						if octet > b'3' {
+							return Err(ApplyFailure::Invalid(
+								"invalid octal escape in quoted path".into(),
+							));
+						}
 						let mut value = u32::from(octet - b'0');
 						for _ in 0..2 {
-							match bytes
+							let Some(next) = bytes
 								.get(index)
 								.copied()
 								.filter(|next| matches!(next, b'0'..=b'7'))
-							{
-								Some(next) => {
-									value = (value << 3) | u32::from(next - b'0');
-									index += 1;
-								},
-								None => break,
-							}
+							else {
+								return Err(ApplyFailure::Invalid(
+									"invalid octal escape in quoted path".into(),
+								));
+							};
+							value = (value << 3) | u32::from(next - b'0');
+							index += 1;
 						}
 						value as u8
 					},
@@ -3119,6 +3126,25 @@ mod tests {
 		let patch = parse_file_patch(raw).expect("parse quoted header");
 		assert_eq!(patch.old_path.as_deref(), Some("weird \"name\".bin"));
 		assert_eq!(patch.new_path.as_deref(), Some("weird \"name\".bin"));
+	}
+
+	#[test]
+	fn patch_rejects_octal_escapes_git_rejects() {
+		for escape in ["\\7", "\\12", "\\777", "\\400"] {
+			let raw = format!(
+				"diff --git \"a/{escape}.txt\" \"b/{escape}.txt\"\nold mode 100644\nnew mode 100755\n"
+			);
+			let message = match parse_file_patch(&raw) {
+				Err(ApplyFailure::Invalid(message)) => message,
+				other => panic!("{escape}: {other:?}"),
+			};
+			assert!(message.contains("invalid octal escape"), "{escape}: {message}");
+		}
+		let raw =
+			"diff --git \"a/\\040name.txt\" \"b/\\040name.txt\"\nold mode 100644\nnew mode 100755\n";
+		let patch = parse_file_patch(raw).expect("three-digit octal space");
+		assert_eq!(patch.old_path.as_deref(), Some(" name.txt"));
+		assert_eq!(patch.new_path.as_deref(), Some(" name.txt"));
 	}
 
 	#[cfg(not(windows))]
