@@ -87,6 +87,7 @@ import {
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
 import { approvalDirectoryKey } from "./approval-cache";
 import { fileToolApproval } from "./guard-rules";
+import { approvalRootCandidates } from "./search-approval-targets";
 import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
 import {
 	postProcessToolResult,
@@ -206,6 +207,7 @@ import {
 	cfgReadRenderMarkdown,
 	cfgReadSummarizeEnabled,
 	cfgReadSummarizeProse,
+	cfgToolsGuardRules,
 } from "./settings";
 import { cfgImagesAutoResize } from "../modes/settings";
 
@@ -1211,12 +1213,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
+		// Execution reads a `;`, `,` or whitespace list part by part, as grep searches its roots, so the
+		// guard rules check every part, not only the whole string.
+		const targets = cfgToolsGuardRules.get(this.session.settings)
+			? approvalRootCandidates(readPath).map(part => splitImageQuestionTarget(part).path)
+			: [];
 		const urlTier = InternalUrlRouter.instance().readTier(readPath);
-		if (urlTier !== "read") return urlTier;
+		if (urlTier !== "read") return fileToolApproval(urlTier, targets, this.session.cwd);
 		readPath = splitImageQuestionTarget(readPath).path;
 		const target = splitPathAndSel(readPath);
 		const tier = target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
-		return fileToolApproval(tier, [readPath], this.session.cwd);
+		return fileToolApproval(tier, targets, this.session.cwd);
 	};
 	/**
 	 * `always-ask-cached` key: the file this read targets, with every selector

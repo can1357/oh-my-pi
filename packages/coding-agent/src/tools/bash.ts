@@ -59,7 +59,13 @@ import {
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
-import { CRITICAL_BASH_PATTERNS, CRITICAL_PATTERN_REASON, findShellGuardHit, type GuardScope } from "./guard-rules";
+import {
+	CRITICAL_BASH_PATTERNS,
+	CRITICAL_PATTERN_REASON,
+	findShellGuardHit,
+	type GuardHit,
+	type GuardScope,
+} from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -72,6 +78,7 @@ import {
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
+	cfgToolsGuardRules,
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
@@ -653,7 +660,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
-		const guardHit = findShellGuardHit(command, this.#guardScope(input.cwd), { probe });
+		const guardHit = this.#guardHit(command, input.cwd, probe);
 		const criticalCommand = guardHit !== undefined;
 		const criticalDecision: ToolApprovalDecision = {
 			tier: "exec",
@@ -673,6 +680,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
+	}
+	/**
+	 * The fixed rule `command` breaks. With `tools.guardRules` off, a critical pattern matched against
+	 * the raw command line; on, every guard rule, through shell nesting.
+	 */
+	#guardHit(command: string, cwd: unknown, probe: boolean): GuardHit | undefined {
+		if (cfgToolsGuardRules.get(this.session.settings)) {
+			return findShellGuardHit(command, this.#guardScope(cwd), { probe });
+		}
+		return command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))
+			? { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON }
+			: undefined;
 	}
 	/**
 	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
@@ -735,22 +754,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		const scope = this.#guardScope(cwd);
-		const segmentCritical = segments.map(segment => {
+		const segmentHits = segments.map((segment): GuardHit | undefined => {
 			const literalCommand = segment.literal?.argv.join(" ");
-			return (
-				findShellGuardHit(segment.text, scope) !== undefined ||
-				(literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand)))
-			);
+			if (literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
+				return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
+			}
+			return this.#guardHit(segment.text, cwd, true);
 		});
-		const wholeChainOnlyCritical = findShellGuardHit(command, scope) !== undefined && !segmentCritical.some(Boolean);
+		const wholeChainOnlyCritical =
+			this.#guardHit(command, cwd, true) !== undefined && !segmentHits.some(hit => hit !== undefined);
 		if (wholeChainOnlyCritical) return null;
 
 		let chainUntainted = true;
 		const rows: string[] = [];
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i]!;
-			const isCritical = segmentCritical[i]!;
+			const segmentHit = segmentHits[i];
+			const isCritical = segmentHit !== undefined;
 			const segmentRule = findBashApprovalPatternRule(segment.text, policy.rules, policy.allowedEnvVars);
 			const authorityRule =
 				authority === policy
@@ -775,8 +795,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			} else {
 				const reason = promptRule
 					? `prompt: ${promptRule.match}`
-					: isCritical
-						? "critical pattern"
+					: segmentHit
+						? segmentHit.rule === "critical_pattern"
+							? "critical pattern"
+							: segmentHit.rule
 						: "requires approval";
 				rows.push(`  ? ${truncateForPrompt(segment.text)} (${reason})`);
 			}

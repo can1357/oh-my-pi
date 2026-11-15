@@ -73,7 +73,7 @@ import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
+import { cfgGrepContextAfter, cfgGrepContextBefore, cfgToolsGuardRules } from "./settings";
 import { cfgTaskDisabledAgents } from "../task/settings";
 
 const searchSchema = type({
@@ -558,6 +558,7 @@ export interface GrepToolOptions {
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
+		if (!cfgToolsGuardRules.get(this.session.settings)) return searchPathTier(args);
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
 		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => approvalRootCandidates(root));
 		return fileToolApproval(searchPathTier(args), roots, this.session.cwd);

@@ -1,17 +1,27 @@
 /**
- * Fixed safety rules for tool calls: the critical shell patterns plus rules ported from
- * nace-ai/intern's tool guard (Apache-2.0). Each rule names an action that destroys work or
- * leaks credentials and does not fire on ordinary development commands. Rules run over every
- * simple command {@link parseShellScript} finds, nested `bash -c`/`eval` strings and
- * substitutions included.
+ * Fixed safety rules for tool calls (`tools.guardRules`): the critical shell patterns, matched
+ * through shell nesting, plus rules ported from nace-ai/intern's tool guard. Each rule names an
+ * action that destroys work or leaks credentials and does not fire on ordinary development
+ * commands. Rules run over every simple command {@link parseShellScript} finds, nested
+ * `bash -c`/`eval` strings and substitutions included.
  *
- * `discard_changes` and `kills_harness` confirm a match with a read-only probe (`git status`,
- * `git clean -n`, `pgrep`) and fire only when the probe shows something would be lost. A probe
- * that fails, times out, or cannot run counts as no match.
+ * `discard_changes` and `kills_harness` confirm a match with a read-only probe (the
+ * `@oh-my-pi/pi-natives/vcs` discard check, `pgrep`) and fire only when the probe shows something
+ * would be lost. A probe that fails, times out, or cannot run counts as no match.
+ *
+ * The `credential_read`, `secret_send`, `discard_changes`, and `kills_harness` rules are derived
+ * from `src/intern/guard.py` of nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit
+ * e1bbd096f9), Copyright Nace AI, licensed under the Apache License, Version 2.0
+ * (http://www.apache.org/licenses/LICENSE-2.0). Modified for omp: rewritten in TypeScript; a hit
+ * returns an approval override instead of refusing the call; credential locations include omp's own
+ * stores; the git probe runs through the native VCS helper without repository-configured programs;
+ * a `git stash` earlier in the same `&&` chain counts as keeping the work. See
+ * packages/coding-agent/THIRD-PARTY-NOTICES.txt.
  */
 import * as os from "node:os";
 import * as path from "node:path";
-import { Process } from "@oh-my-pi/pi-natives";
+import { Process, type VcsDiscardCheck } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-utils";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
@@ -221,6 +231,112 @@ const READERS: Record<string, true> = {
 	mv: true,
 };
 
+/** Options of `scp` and `rsync` that take the next word as their value (`-i key`, `--rsh cmd`). */
+const COPY_VALUE_OPTIONS: Record<string, readonly string[]> = {
+	scp: ["-c", "-D", "-F", "-i", "-J", "-l", "-o", "-P", "-S", "-X"],
+	rsync: [
+		"-B",
+		"-e",
+		"-f",
+		"-M",
+		"-T",
+		"-@",
+		"--address",
+		"--backup-dir",
+		"--block-size",
+		"--bwlimit",
+		"--checksum-choice",
+		"--checksum-seed",
+		"--chmod",
+		"--chown",
+		"--compare-dest",
+		"--compress-choice",
+		"--compress-level",
+		"--contimeout",
+		"--copy-as",
+		"--copy-dest",
+		"--debug",
+		"--early-input",
+		"--exclude",
+		"--exclude-from",
+		"--files-from",
+		"--filter",
+		"--groupmap",
+		"--iconv",
+		"--include",
+		"--include-from",
+		"--info",
+		"--link-dest",
+		"--log-file",
+		"--log-file-format",
+		"--max-alloc",
+		"--max-delete",
+		"--max-size",
+		"--min-size",
+		"--modify-window",
+		"--only-write-batch",
+		"--out-format",
+		"--outbuf",
+		"--partial-dir",
+		"--password-file",
+		"--port",
+		"--protocol",
+		"--read-batch",
+		"--remote-option",
+		"--rsh",
+		"--rsync-path",
+		"--skip-compress",
+		"--sockopts",
+		"--stderr",
+		"--stop-after",
+		"--stop-at",
+		"--suffix",
+		"--temp-dir",
+		"--timeout",
+		"--usermap",
+		"--write-batch",
+	],
+};
+/** A remote `scp`/`rsync` operand: `host:path`, `user@host:path`, `host::module`, `scp://`, `rsync://`. */
+const REMOTE_OPERAND_RE = /^[^/]*:/;
+
+/** The operands of a `scp`/`rsync` command, sources first and the destination last; option values are not operands. */
+function copyOperands(command: ShellCommand): string[] {
+	const valued = COPY_VALUE_OPTIONS[command.argv[0]];
+	const argv = args(command);
+	const operands: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			operands.push(...argv.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--")) {
+			if (!arg.includes("=") && valued.includes(arg)) i++;
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			// In a bundle (`-rvi key`, `-ikey`), the first letter that takes a value takes the rest of
+			// the word, or the next word when it ends the bundle.
+			let k = 1;
+			while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
+			if (k === arg.length - 1) i++;
+		} else {
+			operands.push(arg);
+		}
+	}
+	return operands;
+}
+
+/** The words a reading command reads files from: a copy's local sources, any other reader's arguments. */
+function readWords(command: ShellCommand): string[] {
+	const name = command.argv[0];
+	if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
+		return copyOperands(command)
+			.slice(0, -1)
+			.filter(operand => !REMOTE_OPERAND_RE.test(operand));
+	}
+	return Object.hasOwn(READERS, name) ? args(command) : [];
+}
+
 // -- credential_read ---------------------------------------------------------------------------------
 
 function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
@@ -239,7 +355,7 @@ function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | un
 	if (name === "gpg" && args(command).some(arg => arg.startsWith("--export-secret"))) {
 		return hit("credential_read", "it exports private keys");
 	}
-	const words = [...(Object.hasOwn(READERS, name) ? args(command) : []), ...command.reads];
+	const words = [...readWords(command), ...command.reads];
 	for (const word of words) {
 		const target = resolveShellWordPath(word, command.cwd, scope.home);
 		const found = target === undefined ? undefined : credentialLocation(target, scope.home);
@@ -266,7 +382,6 @@ const SENDERS: Record<string, true> = {
 	scp: true,
 	rsync: true,
 };
-const SSH_COPY: Record<string, true> = { scp: true, rsync: true, sftp: true };
 const CURL_DATA_OPTIONS: Record<string, true> = {
 	"-d": true,
 	"--data": true,
@@ -313,12 +428,13 @@ function sentFiles(command: ShellCommand): string[] {
 		for (const arg of argv) {
 			if (arg.includes("=@") || arg.startsWith("@")) files.push(arg.slice(arg.indexOf("@") + 1));
 		}
-	} else if (Object.hasOwn(SSH_COPY, name)) {
-		files.push(
-			...shellPositionalArgs(command.argv)
-				.slice(0, -1)
-				.filter(arg => !arg.includes(":")),
-		);
+	} else if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
+		// Only a copy to a remote destination sends anything; a local copy or a download does not.
+		const operands = copyOperands(command);
+		const destination = operands.at(-1);
+		if (operands.length > 1 && destination !== undefined && REMOTE_OPERAND_RE.test(destination)) {
+			files.push(...operands.slice(0, -1).filter(operand => !REMOTE_OPERAND_RE.test(operand)));
+		}
 	}
 	return files;
 }
@@ -333,7 +449,7 @@ function dumpsEnvironment(command: ShellCommand): boolean {
 function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
 	const name = command.argv[0];
-	const words = [...(Object.hasOwn(READERS, name) || name === "source" ? args(command) : []), ...command.reads];
+	const words = [...(name === "source" ? args(command) : readWords(command)), ...command.reads];
 	for (const word of words) {
 		const found = sentSecret(word, command.cwd, scope.home);
 		if (found) return found;
@@ -375,7 +491,7 @@ const PROBE_TIMEOUT_MS = 3_000;
  */
 const PROBE_CACHE_TTL_MS = 1_000;
 const PROBE_CACHE_MAX = 64;
-const probeCache = new Map<string, { at: number; output: string | undefined }>();
+const probeCache = new Map<string, { at: number; answer: string | boolean | undefined }>();
 
 /** Forgets every memoized probe answer; tests that change a repository between calls use it. */
 export function clearGuardProbeCache(): void {
@@ -383,85 +499,27 @@ export function clearGuardProbeCache(): void {
 }
 
 /**
- * The probe environment: every inherited `GIT_*` variable dropped (`GIT_DIR`, `GIT_WORK_TREE`,
- * `GIT_INDEX_FILE`, `GIT_CONFIG*`, `GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, ...), so the probe sees
- * the repository the command names and runs no program an ambient variable points at.
+ * The answer to the probe `key`: reused while fresh, else `run`'s, which is memoized for
+ * {@link PROBE_CACHE_TTL_MS} from when it arrived, so a slow probe is reused like a fast one.
+ * A probe that throws answers `undefined`.
  */
-function probeEnv(): Record<string, string | undefined> {
-	const env: Record<string, string | undefined> = {};
-	for (const [key, value] of Object.entries(Bun.env)) {
-		if (!key.startsWith("GIT_")) env[key] = value;
-	}
-	env.GIT_TERMINAL_PROMPT = "0";
-	env.GIT_OPTIONAL_LOCKS = "0";
-	env.LC_ALL = "C";
-	return env;
-}
-
-/**
- * Runs a read-only probe synchronously (approval resolution is synchronous) and returns its
- * stdout, or `undefined` when it cannot run, fails, or times out. Answers are memoized per
- * argv and cwd for {@link PROBE_CACHE_TTL_MS}.
- */
-function runProbe(argv: string[], cwd?: string): string | undefined {
-	if (argv.some(arg => arg.includes("\0"))) return undefined;
-	const key = [cwd ?? "", ...argv].join("\0");
-	const now = Date.now();
+function cachedProbe(key: string, run: () => string | boolean | undefined): string | boolean | undefined {
 	const cached = probeCache.get(key);
-	if (cached && now - cached.at < PROBE_CACHE_TTL_MS) return cached.output;
-	let output: string | undefined;
+	if (cached && Date.now() - cached.at < PROBE_CACHE_TTL_MS) return cached.answer;
+	let answer: string | boolean | undefined;
 	try {
-		const result = Bun.spawnSync(argv, {
-			cwd,
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "ignore",
-			timeout: PROBE_TIMEOUT_MS,
-			env: probeEnv(),
-		});
-		output = result.success ? result.stdout.toString() : undefined;
+		answer = run();
 	} catch {
-		output = undefined;
+		answer = undefined;
 	}
+	const now = Date.now();
 	probeCache.delete(key);
-	probeCache.set(key, { at: now, output });
+	probeCache.set(key, { at: now, answer });
 	for (const [oldest, entry] of probeCache) {
 		if (probeCache.size <= PROBE_CACHE_MAX && now - entry.at < PROBE_CACHE_TTL_MS) break;
 		probeCache.delete(oldest);
 	}
-	return output;
-}
-
-/** Config pins that keep a git probe from running repository-configured programs. */
-const GIT_PROBE_PINS = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
-const FILTER_DRIVER_KEY_RE = /^filter\.([^=\s]+)\.(?:clean|smudge|process|required)$/i;
-
-/**
- * Runs `git <args>` in `where` without executing anything the repository configures: the
- * `core.fsmonitor` hook and untracked cache are pinned off (as `pi-vcs` pins its write path),
- * every configured filter driver is blanked so `git status` cannot run a clean filter on a
- * stat-dirty file, and submodules are not entered (the caller passes `--ignore-submodules`
- * where the subcommand takes it). Reading the filter list with `git config` runs no program.
- */
-function runGitProbe(where: string, args: readonly string[]): string | undefined {
-	const base = ["git", "--no-optional-locks", ...GIT_PROBE_PINS, "-C", where];
-	const filterKeys = runProbe([...base, "config", "--name-only", "--get-regexp", "^filter\\."], where) ?? "";
-	const drivers = new Set<string>();
-	for (const line of filterKeys.split("\n")) {
-		const name = FILTER_DRIVER_KEY_RE.exec(line.trim())?.[1];
-		if (name) drivers.add(name);
-	}
-	const blanked = [...drivers].flatMap(name => [
-		"-c",
-		`filter.${name}.clean=`,
-		"-c",
-		`filter.${name}.smudge=`,
-		"-c",
-		`filter.${name}.process=`,
-		"-c",
-		`filter.${name}.required=false`,
-	]);
-	return runProbe(["git", "--no-optional-locks", ...GIT_PROBE_PINS, ...blanked, "-C", where, ...args], where);
+	return answer;
 }
 
 // -- discard_changes ---------------------------------------------------------------------------------
@@ -493,45 +551,167 @@ function gitInvocation(command: ShellCommand): { sub: string; rest: string[]; di
 	return i < argv.length ? { sub: argv[i], rest: argv.slice(i + 1), directory } : { sub: "", rest: [], directory };
 }
 
-/** The probe that lists what a discarding git command would destroy, or `undefined` when it discards nothing. */
-function discardProbe(sub: string, rest: readonly string[]): { args: string[]; what: string } | undefined {
-	const flags = rest.filter(arg => arg.startsWith("-"));
-	const short = flags
+/** Whether `arg` is the long option `name` or an abbreviation git expands to it (`--har` for `--hard`). */
+function isLongOption(arg: string, name: string): boolean {
+	const flag = arg.split("=", 1)[0];
+	return flag.length > 2 && name.startsWith(flag);
+}
+
+/**
+ * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run. Without
+ * `-f`, git refuses to clean (by default), so checking it anyway only prompts for a call that fails.
+ * `-q` and `-i` do not change what is deleted.
+ */
+function cleanCheck(rest: readonly string[]): VcsDiscardCheck | undefined {
+	let directories = false;
+	let includeIgnored = false;
+	let ignoredOnly = false;
+	const excludes: string[] = [];
+	const pathspecs: string[] = [];
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i];
+		if (arg === "--") {
+			pathspecs.push(...rest.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--") && arg.length > 2) {
+			if (isLongOption(arg, "--dry-run")) return undefined;
+			if (isLongOption(arg, "--exclude")) {
+				const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i];
+				if (value !== undefined) excludes.push(value);
+			}
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				if (letter === "n") return undefined;
+				if (letter === "d") directories = true;
+				else if (letter === "x") includeIgnored = true;
+				else if (letter === "X") ignoredOnly = true;
+				else if (letter === "e") {
+					// `-e` takes the rest of the bundle, or the next word.
+					const value = k + 1 < arg.length ? arg.slice(k + 1) : rest[++i];
+					if (value !== undefined) excludes.push(value);
+					break;
+				}
+			}
+		} else {
+			pathspecs.push(arg);
+		}
+	}
+	return { clean: true, directories, includeIgnored, ignoredOnly, excludes, pathspecs };
+}
+
+/** The discard check for a git command, with the rule's reason, or `undefined` when it discards nothing. */
+function discardProbe(sub: string, rest: readonly string[]): { check: VcsDiscardCheck; what: string } | undefined {
+	const has = (name: string) => rest.some(arg => arg.startsWith("--") && isLongOption(arg, name));
+	const short = rest
 		.filter(arg => /^-[A-Za-z]+$/.test(arg))
 		.map(arg => arg.slice(1))
 		.join("");
 	const massPath = rest.some(arg => !arg.startsWith("-") && Object.hasOwn(MASS_PATHSPECS, arg));
-	const status = {
-		args: ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"],
-		what: `\`git ${sub}\` would discard uncommitted changes; keep them recoverable instead, e.g. with \`git stash\``,
+	const tracked = {
+		check: {},
+		what: `\`git ${sub}\` would discard uncommitted changes; keep them recoverable first, e.g. \`git stash && git ${sub} ...\``,
 	};
-	if (sub === "reset" && (flags.includes("--hard") || flags.includes("--merge"))) return status;
+	if (sub === "reset" && (has("--hard") || has("--merge"))) return tracked;
 	if (
 		(sub === "checkout" || sub === "switch") &&
-		(flags.includes("--force") || flags.includes("--discard-changes") || short.includes("f") || massPath)
+		(has("--force") || has("--discard-changes") || short.includes("f") || massPath)
 	) {
-		return status;
+		return tracked;
 	}
 	if (sub === "restore" && massPath) {
-		const stagedOnly =
-			(flags.includes("--staged") || short.includes("S")) && !(flags.includes("--worktree") || short.includes("W"));
-		return stagedOnly ? undefined : status;
+		const stagedOnly = (has("--staged") || short.includes("S")) && !(has("--worktree") || short.includes("W"));
+		return stagedOnly ? undefined : tracked;
 	}
-	if (
-		sub === "clean" &&
-		(flags.includes("--force") || short.includes("f")) &&
-		!(flags.includes("--dry-run") || short.includes("n"))
-	) {
-		const dry = rest
-			.filter(arg => arg !== "--force" && arg !== "-i" && arg !== "--interactive")
-			.map(arg => (/^-[A-Za-z]+$/.test(arg) ? `-${arg.slice(1).replaceAll("f", "")}` : arg))
-			.filter(arg => arg !== "-");
-		return {
-			args: ["clean", "-n", ...dry],
-			what: "`git clean` would delete untracked files that exist nowhere else; delete specific files instead",
-		};
+	if (sub === "clean") {
+		const check = cleanCheck(rest);
+		return (
+			check && {
+				check,
+				what: "`git clean` would delete untracked files that exist nowhere else; delete specific files instead",
+			}
+		);
 	}
 	return undefined;
+}
+
+/**
+ * What a `git stash` saves besides every change to tracked files: untracked files (`-u`), and
+ * ignored ones too (`-a`).
+ */
+interface Stashed {
+	untracked: boolean;
+	ignored: boolean;
+}
+
+/**
+ * What `git stash` with these arguments saves, or `undefined` when it saves nothing or only part of
+ * the tracked changes: some paths, some hunks (`-p`), or the index alone (`--staged`).
+ */
+function stashSaves(rest: readonly string[]): Stashed | undefined {
+	const save = rest[0] === "save";
+	const options = rest[0] === "push" || save ? rest.slice(1) : rest;
+	// `list`, `show`, `apply`, `pop`, `drop`, ... save nothing.
+	if (options === rest && rest.length > 0 && !rest[0].startsWith("-")) return undefined;
+	const saved: Stashed = { untracked: false, ignored: false };
+	for (let i = 0; i < options.length; i++) {
+		const arg = options[i];
+		if (arg === "--") {
+			// `push -- <paths>` stashes only those paths; `save -- <message>` everything.
+			if (!save && i + 1 < options.length) return undefined;
+			break;
+		}
+		if (arg.startsWith("--") && arg.length > 2) {
+			if (isLongOption(arg, "--message")) {
+				if (!arg.includes("=")) i++;
+			} else if (["--patch", "--staged", "--pathspec-from-file"].some(name => isLongOption(arg, name))) {
+				return undefined;
+			} else if (isLongOption(arg, "--all")) {
+				saved.untracked = saved.ignored = true;
+			} else if (isLongOption(arg, "--include-untracked")) {
+				saved.untracked = true;
+			}
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				if (letter === "p" || letter === "S") return undefined;
+				if (letter === "a") saved.untracked = saved.ignored = true;
+				else if (letter === "u") saved.untracked = true;
+				else if (letter === "m") {
+					// `-m` takes the rest of the bundle, or the next word.
+					if (k === arg.length - 1) i++;
+					break;
+				}
+			}
+		} else if (!save) {
+			// A pathspec: only those paths are stashed.
+			return undefined;
+		}
+	}
+	return saved;
+}
+
+/**
+ * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its
+ * `&&` chain) saved in the directory `where`, or `undefined` for none.
+ */
+function stashedBefore(command: ShellCommand, where: string, scope: GuardScope): Stashed | undefined {
+	let stashed: Stashed | undefined;
+	for (const earlier of command.succeeded) {
+		if (earlier.argv[0] !== "git") continue;
+		const { sub, rest, directory } = gitInvocation(earlier);
+		if (sub !== "stash") continue;
+		const dir = directory === undefined ? earlier.cwd : resolveShellWordPath(directory, earlier.cwd, scope.home);
+		const saved = dir === where ? stashSaves(rest) : undefined;
+		if (saved) {
+			stashed = {
+				untracked: saved.untracked || (stashed?.untracked ?? false),
+				ignored: saved.ignored || (stashed?.ignored ?? false),
+			};
+		}
+	}
+	return stashed;
 }
 
 function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
@@ -541,8 +721,18 @@ function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | un
 	if (!probe) return undefined;
 	const where = directory === undefined ? command.cwd : resolveShellWordPath(directory, command.cwd, scope.home);
 	if (where === undefined) return undefined;
-	const output = runGitProbe(where, probe.args);
-	return output?.trim() ? hit("discard_changes", probe.what) : undefined;
+	// A stash just before keeps what it saved; only what it left behind can be lost.
+	const stashed = stashedBefore(command, where, scope);
+	let check = probe.check;
+	if (stashed) {
+		if (!check.clean || stashed.ignored) return undefined;
+		if (stashed.untracked) {
+			if (!check.includeIgnored && !check.ignoredOnly) return undefined;
+			check = { ...check, includeIgnored: false, ignoredOnly: true };
+		}
+	}
+	const answer = cachedProbe(`git\0${where}\0${JSON.stringify(check)}`, () => vcs.discardsWorkSync(where, check));
+	return answer === true ? hit("discard_changes", probe.what) : undefined;
 }
 
 // -- kills_harness -----------------------------------------------------------------------------------
@@ -605,8 +795,17 @@ function killsHarness(command: ShellCommand): GuardHit | undefined {
 	if (probes.length === 0) return undefined;
 	const lineage = harnessLineage();
 	for (const probe of probes) {
-		const output = runProbe(probe);
-		if (output === undefined) continue;
+		if (probe.some(arg => arg.includes("\0"))) continue;
+		const output = cachedProbe(probe.join("\0"), () => {
+			const result = Bun.spawnSync(probe, {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+				timeout: PROBE_TIMEOUT_MS,
+			});
+			return result.success ? result.stdout.toString() : undefined;
+		});
+		if (typeof output !== "string") continue;
 		const matched = output
 			.split("\n")
 			.map(line => Number.parseInt(line.trim(), 10))
@@ -645,15 +844,21 @@ export function findShellGuardHit(
 ): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
 	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
-	// The raw line, each nested script, and each simple command in canonical quoting (plain words
-	// bare, others single-quoted), so `bash -c "eval '\"rm\" -rf /'"` matches like `rm -rf /` while
-	// `git commit -m "reboot fix"` stays a quoted argument.
+	// The raw line, each nested script, and each simple command in canonical quoting: the program
+	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
+	// matches like `rm -rf /`, while an argument quoted in the source (`git commit -m "reboot"`)
+	// stays quoted, as it is in the raw line.
 	const canonical = pipelines
 		.flat()
 		.map(c =>
-			[...c.wrappers, ...c.argv]
-				.map(word => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`))
-				.join(" "),
+			[
+				...c.wrappers,
+				...c.argv.map((word, index) =>
+					/^[\w@%+=:,./-]+$/.test(word) && (index === 0 || !c.quoted[index])
+						? word
+						: `'${word.replaceAll("'", "'\\''")}'`,
+				),
+			].join(" "),
 		);
 	const texts = [command, ...scripts, ...canonical];
 	if (CRITICAL_BASH_PATTERNS.some(pattern => texts.some(text => pattern.test(text)))) {
