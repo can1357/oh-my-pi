@@ -17,5 +17,9 @@ dyn-clone = "1.0"
 once_cell = { version = "1.16.0", default-features = false }
 typed-arena = { version = "2.0.2", default-features = false }
 
+[dev-dependencies]
+jaq-json = "2.0.3"
+jaq-std = "3.0.3"
+
 [lints]
 workspace = true

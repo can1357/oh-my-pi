@@ -33,6 +33,16 @@ use jaq_core::native::{bome, run, v, Filter, Fun};
 use jaq_core::{load, DataT, Error, Exn, RunPtr, ValR, ValX};
 
 /// Definitions of the standard library.
+///
+/// This is the full jq prelude, including `halt_error/0` and `debug/1`
+/// wrappers. In addition to the core, standard-library, and JSON natives, the
+/// embedding host must register `halt_error/1` and `debug/0` with its own exit
+/// and diagnostic handling. Neither [`funs`] nor [`base_funs`] provides those
+/// host-specific natives. All prelude definitions are resolved when loading,
+/// even if the main filter does not call them.
+///
+/// Host-neutral embedders can use [`base_funs`] with [`jaq_core::defs`]
+/// without loading this full prelude; see the `jaq_core` crate example.
 pub fn defs() -> impl Iterator<Item = load::parse::Def<&'static str>> {
     load::parse(include_str!("defs.jq"), |p| p.defs())
         .unwrap()
