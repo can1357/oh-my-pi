@@ -193,6 +193,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 	readonly #pasteHandler = new BracketedPasteHandler();
 	#followUpPending = false;
 	#followLatest = false;
+	/** Land the answer pane on the newest turn's first row at the next render (a follow-up open reads from the question). */
+	#anchorLatestTurn = false;
+	/** Row the newest turn starts on in the answer body, measured by the last rebuild. */
+	#latestTurnRow = 0;
 	#turns: RenderedTurn[] = [];
 	#detailRecord: BtwHistoryRecord | undefined;
 	#detailWidth = 0;
@@ -293,6 +297,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		}
 		if (this.#composer && !records.some(record => record.id === this.#composer?.recordId)) {
 			this.#composer = undefined;
+			this.#anchorLatestTurn = false;
 		}
 		if (!records.some(record => record.id === this.#selectedId)) {
 			this.#selectedId = records[0]?.id;
@@ -372,13 +377,18 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	/**
-	 * Jump the answer pane to its bottom once (opening or sending a follow-up):
-	 * text mode keeps following the newest row at render until a scroll key;
-	 * natively the sheet body scrolls to its end. Tern reports no wheel scroll,
-	 * so streamed updates never re-pin it there and a reader is never yanked.
+	 * Follow the newest row once (a sent follow-up): text mode keeps following it
+	 * at render until a scroll key; natively the sheet body scrolls to its end.
+	 * Tern reports no wheel scroll, so streamed updates never re-pin it there and
+	 * a reader is never yanked.
 	 */
 	#jumpToEnd(): void {
 		this.#followLatest = true;
+		this.#scrollSheetToEnd();
+	}
+
+	/** Ask the Tern sheet body to scroll to its end; text mode positions by row offset instead. */
+	#scrollSheetToEnd(): void {
 		this.#scroll = { by: "end", n: (this.#scroll?.n ?? 0) + 1 };
 	}
 
@@ -399,6 +409,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		};
 		input.onEscape = () => {
 			composer.abortController.abort();
+			this.#anchorLatestTurn = false;
 			this.#composer = undefined;
 		};
 		input.onSubmit = value => {
@@ -406,8 +417,13 @@ export class BtwHistoryPanel implements Component, Focusable {
 		};
 		this.#composer = composer;
 		this.#focus = "answer";
-		// Following up reads from the newest turn, right above the composer.
-		this.#jumpToEnd();
+		// A follow-up opens on the newest turn's first row: the reader starts at
+		// the question it extends, not at the tail of the answer. Tern keeps the
+		// composer inside the scrolled thread, so its sheet still has to reach the
+		// end for the input to stay reachable.
+		this.#anchorLatestTurn = true;
+		this.#followLatest = false;
+		this.#scrollSheetToEnd();
 		this.#options.requestRender();
 	}
 
@@ -1059,7 +1075,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		};
 	}
 
-	#renderDetail(width: number, height: number): readonly string[] {
+	#renderDetail(width: number, height: number, anchorLatestTurn = false): readonly string[] {
 		const record = this.#selected();
 		if (record?.id !== this.#detailRecord?.id) this.#turns = [];
 		if (this.#detailDirty || record !== this.#detailRecord || this.#detailWidth !== width) {
@@ -1079,6 +1095,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 					);
 					this.#turns[index] = cached;
 					if (index > 0) lines.push("", theme.fg("dim", theme.boxRound.horizontal.repeat(inner)), "");
+					if (index === turns.length - 1) this.#latestTurnRow = lines.length;
 					lines.push(...cached.lines);
 				}
 				this.#turns.length = turns.length;
@@ -1093,6 +1110,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			this.#detailDirty = false;
 		}
 		this.#detail.setHeight(height);
+		if (anchorLatestTurn) this.#detail.setScrollOffset(this.#latestTurnRow);
 		return this.#detail.render(width);
 	}
 
@@ -1171,7 +1189,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 		let bodyHeight = Math.max(composer ? 0 : 1, height - chrome - composerLines.length);
 		const detailWidth = wide && geometry?.right ? geometry.right.width : inner;
 		const detailScroll = this.#detail.getScrollOffset();
-		let detail = wide || this.#focus === "answer" ? this.#renderDetail(detailWidth, bodyHeight) : undefined;
+		const anchorLatestTurn = this.#anchorLatestTurn;
+		let detail =
+			wide || this.#focus === "answer" ? this.#renderDetail(detailWidth, bodyHeight, anchorLatestTurn) : undefined;
+		if (detail) this.#anchorLatestTurn = false;
 		const showNavigation = framed && !composer && (this.#focus === "list" || this.#detail.getMaxScrollOffset() > 0);
 		if (showNavigation) {
 			bodyHeight = Math.max(1, bodyHeight - 1);
