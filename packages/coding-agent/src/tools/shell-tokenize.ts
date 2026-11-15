@@ -1141,21 +1141,62 @@ const SHELL_KEYWORDS: readonly string[] = [
 	"}",
 	"esac",
 ];
-/** Commands that run the rest of their arguments as a command, with the options that take a value. */
+/**
+ * Commands that run the rest of their arguments as a command, with the options that take a value
+ * as a separate word, long forms included.
+ */
 const SHELL_WRAPPERS: Record<string, readonly string[]> = {
-	sudo: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"],
+	sudo: [
+		"-u",
+		"-g",
+		"-h",
+		"-p",
+		"-C",
+		"-D",
+		"-R",
+		"-r",
+		"-t",
+		"-U",
+		"-T",
+		"--user",
+		"--group",
+		"--host",
+		"--prompt",
+		"--close-from",
+		"--chdir",
+		"--chroot",
+		"--role",
+		"--type",
+		"--other-user",
+		"--command-timeout",
+	],
 	doas: ["-u", "-C"],
-	env: ["-u", "-C", "-S", "--unset", "--chdir"],
+	env: ["-u", "-C", "-S", "-P", "-a", "--unset", "--chdir", "--split-string", "--argv0"],
 	nohup: [],
 	exec: ["-a"],
 	command: [],
 	builtin: [],
-	nice: ["-n"],
-	ionice: ["-c", "-n", "-p"],
-	time: [],
+	nice: ["-n", "--adjustment"],
+	ionice: ["-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"],
+	time: ["-f", "-o", "--format", "--output"],
 	timeout: ["-s", "-k", "--signal", "--kill-after"],
-	stdbuf: ["-i", "-o", "-e"],
-	xargs: ["-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter"],
+	stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
+	xargs: [
+		"-n",
+		"-I",
+		"-P",
+		"-L",
+		"-d",
+		"-E",
+		"-s",
+		"-a",
+		"--max-args",
+		"--max-procs",
+		"--max-chars",
+		"--delimiter",
+		"--arg-file",
+		"--process-slot-var",
+	],
 	caffeinate: ["-t", "-w"],
 	unbuffer: [],
 };
@@ -1357,7 +1398,12 @@ function readAnsiCString(text: string, start: number): { value: string; end: num
 	return { value, end: i };
 }
 
-/** Where the command a wrapper chain runs starts in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`). */
+/**
+ * Where the command a wrapper chain runs starts in `words` (`sudo env X=1 timeout 5 rm ...` runs
+ * `rm ...`). A long option may be abbreviated, as getopt allows (`--us root`); in a bundle of short
+ * options (`-nu root`), the first that takes a value takes the rest of the word, or the next word
+ * when it ends the bundle.
+ */
 function unwrapShellCommand(words: readonly string[], wrappers: string[]): number {
 	let i = 0;
 	while (i < words.length) {
@@ -1380,8 +1426,12 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[]): numbe
 			}
 			if (name === "env" && SHELL_ASSIGNMENT.test(arg)) {
 				i++;
+			} else if (arg.startsWith("--")) {
+				i += !arg.includes("=") && valued.some(option => option.startsWith(arg)) ? 2 : 1;
 			} else if (arg.startsWith("-") && arg.length > 1) {
-				i += valued.includes(arg) ? 2 : 1;
+				let k = 1;
+				while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
+				i += k === arg.length - 1 ? 2 : 1;
 			} else if (positional > 0) {
 				positional--;
 				i++;

@@ -467,4 +467,20 @@ describe("guard rule regressions", () => {
 			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
 		}
 	});
+
+	it("skips the value of a wrapper's long, abbreviated or bundled option", () => {
+		for (const command of [
+			"sudo --user root cat /etc/shadow",
+			"sudo --us root cat /etc/shadow",
+			"sudo -nu root cat /etc/shadow",
+			"sudo -R / cat /etc/shadow",
+			"/usr/bin/time -f %e cat ~/.ssh/id_rsa",
+			"nice --adjustment 5 cat ~/.ssh/id_rsa",
+			"ionice --class 3 cat ~/.ssh/id_rsa",
+			"stdbuf --output L cat ~/.ssh/id_rsa",
+			"xargs --arg-file list.txt cat ~/.ssh/id_rsa",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
 });
