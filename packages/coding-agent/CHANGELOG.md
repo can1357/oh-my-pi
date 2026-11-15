@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
+
+### Changed
+
+- Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
+
+### Fixed
+
+- `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
+- Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))
+- Fixed the TUI freezing when a session was resumed from `/resume` typed into an open tool approval; switching sessions now closes the pending approval instead of waiting on it ([#19239](https://github.com/can1357/oh-my-pi/issues/19239))
+- `take()` and `drop()` now reject a hunk unit that does not exist, such as `1z`, instead of reporting that no lines were selected ([#19310](https://github.com/can1357/oh-my-pi/pull/19310) by [@eggpeat](https://github.com/eggpeat))
+- `/marketplace` with no arguments (and `/marketplace install` or `/marketplace uninstall` with none) now shows `Marketplace error: …` when the plugin picker fails to load, such as when a marketplace's catalog is missing, instead of exiting the session ([#19234](https://github.com/can1357/oh-my-pi/pull/19234) by [@tuschla](https://github.com/tuschla))
+- An `edit` under a tag read before `write conflict://N` (or `conflict://*`) now carries over to the resolved file like after any other `write`, instead of failing with "hash is not from this session" ([#19233](https://github.com/can1357/oh-my-pi/pull/19233) by [@tuschla](https://github.com/tuschla))
+- ACP sessions now honor `mcp.startupTimeoutMs` when connecting the MCP servers a client declares in `session/new` ([#19253](https://github.com/can1357/oh-my-pi/issues/19253)) ([#19286](https://github.com/can1357/oh-my-pi/pull/19286) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed `/commit` and the eval `commit` namespace dropping a file's UTF-8 BOM from the committed blob, which left the committed file showing as modified ([#19327](https://github.com/can1357/oh-my-pi/issues/19327))
+- On Wayland, pasting while the clipboard holds an image or nothing no longer logs a misleading `Executable not found in $PATH: "xsel"` warning ([#19260](https://github.com/can1357/oh-my-pi/pull/19260) by [@tuschla](https://github.com/tuschla))
+- On Linux, JS eval keeps working in a session that outlives an in-place upgrade (pacman, `omp update`) instead of failing prelude calls such as `browser.open` with "`globalThis.__omp_display__` is not a function": its worker now runs the session's own build via `/proc/self/exe` ([#19259](https://github.com/can1357/oh-my-pi/pull/19259) by [@tuschla](https://github.com/tuschla))
+- ACP form elicitations no longer repeat each field's question (section title or caption) in the elicitation message ([#19305](https://github.com/can1357/oh-my-pi/issues/19305))
+- Deleting a session that cannot be removed no longer erases its prompt history and statistics while the session itself remains ([#19271](https://github.com/can1357/oh-my-pi/pull/19271) by [@eggpeat](https://github.com/eggpeat))
+- Fixed quoted and Unicode filenames being omitted from task change tracking or failing selective commits ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
+- Pasting HTML into the composer keeps the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Hello world`) and code indentation inside `<pre>` ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla))
+- `browser.open` with `app: "/usr/bin/chromium"` on Arch now reuses the Chromium already running on that profile instead of failing with "Timed out waiting for CDP endpoint" ([#19235](https://github.com/can1357/oh-my-pi/pull/19235) by [@tuschla](https://github.com/tuschla))
+- Editing a queued follow-up (`/queue`, `=>`, or the follow-up key) with Alt+Up now restores it as `=> <message>`, so Enter queues it again for when the agent yields instead of sending it into the running turn ([#19304](https://github.com/can1357/oh-my-pi/issues/19304))
+- `find` lists unranked literal keyword matches from the files it already read when every judge request fails, instead of returning an empty result ([#19231](https://github.com/can1357/oh-my-pi/pull/19231) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Skill-prompt advisor transcript no longer drops the user's request past a long skill body ([#19164](https://github.com/can1357/oh-my-pi/issues/19164)) ([#19267](https://github.com/can1357/oh-my-pi/pull/19267) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed `task.steps` subagents dropping what they delivered for every step but the last; each earlier step's report now reaches the agent that spawned them as a progress message
+- Bounded WebKit/Tern screenshot preparation and quick reads by one remaining-run deadline; WebKit captures no longer wait on a redundant JavaScript animation frame, and confirmed unresponsive renderers fail fast until explicitly closed and reopened
+- Waited for forced WebKit host termination before completing close, so immediate reopening cannot race the old process's exit
+- Fixed omp's WebKit browser waiting out whole calls on a page whose script keeps it busy: with an engine that watches page responsiveness, `observe()`, `screenshot()` and other quick reads fail after about 3 s with an `unresponsive` error naming the tab, other calls that time out say the page is unresponsive, and `tab.reload()`/`tab.goto()` end the busy web process and load the page in a new one, recovering the tab
+- Fixed eval `wait(1800)` returning at once as if it had slept; a number now throws, pointing to `tab.waitFor*` or a real sleep
+- Fixed browser `tab.setCookies(await other.cookies())` rejecting the array `cookies()` returns; malformed cookies now name the item and field
+- Fixed browser `waitForUrl` timeouts not saying which URL the page was at
+- Fixed browser `tab.route()` with a handler function failing with an unhelpful message; it now explains routes are declarative and how to watch traffic
+- Fixed the busy-tab error telling a subagent to stop running calls together when the tab was busy with another agent's call
+- Fixed `browser.open({ app: "tern", url })` returning at `about:blank` when Tern reported an about:blank load after the goto; the open now waits for the requested page, or fails with a goto timeout that says the page only loaded about:blank
+- Fixed a Tern tab whose browser block was closed outside omp staying registered and failing every call with `no browser block … in this window`; omp now closes the tab and says to reopen it, pointing to `browser.targets({ app: "tern" })`
+- Fixed `emulate({ viewport })` on a docked Tern block failing with Tern's bare `the block is docked` error; it now gives the block's current size and suggests `app: "own"` with a viewport, or floating the block again
+- Fixed `page.on()` and other event-listener methods inside `tab.run` on Tern and WebKit tabs throwing `page.on is not a function`; they now name the backend and the helpers to use instead (`tab.requests()`, `tab.waitForResponse()`, `tab.console()`)
+
+- Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

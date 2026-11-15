@@ -65,12 +65,12 @@ import type {
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
-	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -709,14 +709,16 @@ export class RemoteAgentSession implements AgentViewSession {
 	 * delivering any restorable entry, so a message restored here is never
 	 * delivered too.
 	 */
-	popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	popLastQueuedMessage(): DequeuedMessage | undefined {
 		const queue = this.#view.restorableQueue;
 		const chips = this.#view.queuedMessages;
 		const steering = this.#lastRestorable(queue.steering);
 		const followUp = steering < 0 ? this.#lastRestorable(queue.followUp) : -1;
 		let popped: SessionQueuedEntry;
+		let from: DequeuedMessage["queue"];
 		if (steering >= 0) {
 			popped = queue.steering[steering];
+			from = "steering";
 			// Chips list live-steered messages ahead of the queue: restorable entries align with their tail.
 			const chip = chips.steering.length - (queue.steering.length - steering);
 			this.#view = {
@@ -726,6 +728,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			};
 		} else if (followUp >= 0) {
 			popped = queue.followUp[followUp];
+			from = "followUp";
 			const chip = chips.followUp.length - (queue.followUp.length - followUp);
 			this.#view = {
 				...this.#view,
@@ -736,7 +739,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			return undefined;
 		}
 		this.#withdraw(popped.id);
-		return popped.message;
+		return { ...popped.message, queue: from };
 	}
 
 	/**

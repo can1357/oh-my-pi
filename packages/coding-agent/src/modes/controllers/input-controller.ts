@@ -49,7 +49,7 @@ import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensib
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
-import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
@@ -1852,8 +1852,22 @@ export class InputController {
 		// left in the queue keep theirs so their delivery echo is still recognized
 		// as local and does not blank the editor the dequeue just restored to.
 		this.ctx.locallySubmittedUserSignatures.delete(`${popped.text}\u0000${popped.images?.length ?? 0}`);
-		this.#restoreEntriesToEditor([popped]);
+		this.#restoreEntriesToEditor([popped], { queued: this.#restoresAsQueued(popped) });
 		this.ctx.showStatus("Restored last queued message to editor");
+	}
+
+	/**
+	 * Whether a dequeued entry returns as `=>` queue shorthand, so Enter queues it behind the turn
+	 * again instead of steering it in. Only the main composer parses the shorthand, and it queues
+	 * text verbatim: a skill invocation or builtin command (a queued `/compact`) returns as typed.
+	 */
+	#restoresAsQueued(popped: DequeuedMessage): boolean {
+		return (
+			popped.queue === "followUp" &&
+			!this.ctx.focusedAgentId &&
+			!this.#matchesBuiltinSlashCommand(popped.text) &&
+			!isKnownSkillCommand(this.ctx, popped.text)
+		);
 	}
 
 	/**
@@ -1861,7 +1875,7 @@ export class InputController {
 	 * Only the main session owns the separate compaction queue; focused views
 	 * must not restore its messages into a subagent's composer.
 	 */
-	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	#popLastQueuedMessage(): DequeuedMessage | undefined {
 		const yieldCompaction = this.ctx.focusedAgentId ? undefined : this.ctx.yieldCompaction;
 		// Steering pops first, as in `AgentSession.popLastQueuedMessage`. Behind a yield compaction,
 		// the session's follow-ups are older than it: the follow-ups it holds go next, then the request.
@@ -1875,11 +1889,11 @@ export class InputController {
 		if (compaction.length > 0) {
 			const last = compaction[compaction.length - 1];
 			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
-			return { text: last.text, images: last.images };
+			return { text: last.text, images: last.images, queue: last.mode === "steer" ? "steering" : "followUp" };
 		}
 		if (yieldCompaction) {
 			this.ctx.yieldCompaction = undefined;
-			return { text: yieldCompaction.text };
+			return { text: yieldCompaction.text, queue: "followUp" };
 		}
 		return undefined;
 	}
@@ -2299,7 +2313,7 @@ export class InputController {
 			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
 			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
 		];
-		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
+		const restored = this.#restoreEntriesToEditor(allQueued, { currentText: options?.currentText });
 		if (options?.abort) {
 			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
@@ -2363,9 +2377,14 @@ export class InputController {
 	 * Merge queued entries (oldest→newest) ahead of the current draft, folding
 	 * their images back into the pending-image buffer and refreshing the pending
 	 * bar. Shared by the Alt+Up dequeue (one entry) and the Esc restore-all path.
-	 * Returns the number of entries restored.
+	 * `queued` restores the entries as one `=>` queue message: ahead of an empty
+	 * draft, or as the first item of a draft already in that form; any other draft
+	 * keeps the plain merge. Returns the number of entries restored.
 	 */
-	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
+	#restoreEntriesToEditor(
+		entries: RestoredQueuedMessage[],
+		options?: { currentText?: string; queued?: boolean },
+	): number {
 		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
@@ -2393,8 +2412,12 @@ export class InputController {
 		} else {
 			queuedText = entries.map(e => e.text).join("\n\n");
 		}
-		const current = currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
+		const current = options?.currentText ?? this.ctx.editor.getText();
+		const queuedDraft = options?.queued ? (current.trim() ? parseQueueShorthand(current) : "") : undefined;
+		const combinedText =
+			queuedDraft === undefined
+				? [queuedText, current].filter(t => t.trim()).join("\n\n")
+				: formatQueueShorthand([queuedText, ...splitQueuedMessages(queuedDraft)]);
 		// Hand queued images back to the pending-image buffer first (links are
 		// re-materialized lazily), then set the text: setCollapsedText folds the
 		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
