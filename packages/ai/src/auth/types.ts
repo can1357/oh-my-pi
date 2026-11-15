@@ -573,6 +573,7 @@ export interface OAuthLoginIdentity {
 	type: "oauth" | "api_key";
 	email?: string;
 	accountId?: string;
+	projectId?: string;
 	orgId?: string;
 	orgName?: string;
 }

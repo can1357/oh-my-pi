@@ -15371,12 +15371,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Permit an OAuth identity explicitly added through `/login` for this session scope only. */
 	allowLoggedInOAuthAccount(provider: string, identity: OAuthLoginIdentity | undefined): boolean {
 		if (!this.#accountPoolScope || identity?.type !== "oauth") return false;
-		if (!identity.email && !identity.accountId && !identity.orgId) return false;
+		if (!identity.email && !identity.accountId && !identity.projectId && !identity.orgId) return false;
 		for (const row of this.#modelRegistry.authStorage.credentials.list(provider)) {
 			const credential = row.credential;
 			if (credential.type !== "oauth") continue;
 			if (identity.email !== undefined && credential.email !== identity.email) continue;
 			if (identity.accountId !== undefined && credential.accountId !== identity.accountId) continue;
+			if (identity.projectId !== undefined && credential.projectId !== identity.projectId) continue;
 			if (identity.orgId !== undefined && credential.orgId !== identity.orgId) continue;
 			const identityKey = resolveCredentialIdentityKey(provider, credential);
 			if (identityKey) return this.#accountPoolScope.allow(provider, identityKey, this.sessionId);

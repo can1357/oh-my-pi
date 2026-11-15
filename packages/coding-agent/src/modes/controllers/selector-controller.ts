@@ -2234,6 +2234,7 @@ export class SelectorController {
 		const { getOAuthCredentialProvider, LoginDialogComponent, PASTE_CODE_LOGIN_PROVIDERS } =
 			await loadProviderAuthUi();
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
+		const credentialProvider = getOAuthCredentialProvider(providerId);
 		let restored = false;
 		const restoreEditor = () => {
 			if (restored) return;
@@ -2285,7 +2286,7 @@ export class SelectorController {
 							)
 					: undefined,
 			});
-			this.ctx.session.allowLoggedInOAuthAccount(providerId, identity);
+			this.ctx.session.allowLoggedInOAuthAccount(credentialProvider, identity);
 			// Scope the post-login refresh to the just-authenticated provider with an
 			// `online` strategy: the default all-provider `online-if-uncached` reuses
 			// a fresh authoritative cache row (e.g. an empty result fetched before
@@ -2293,7 +2294,7 @@ export class SelectorController {
 			// models would stay unavailable in-session (#5780). Unrelated providers
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
-			await this.ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(providerId), "online");
+			await this.ctx.session.modelRegistry.refreshProvider(credentialProvider, "online");
 			await this.ctx.session.refreshScopedModels();
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a

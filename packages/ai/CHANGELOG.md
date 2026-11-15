@@ -5,6 +5,7 @@
 ### Added
 
 - Added `setUnpausedProviders()` (`@oh-my-pi/pi-ai/oauth`) to turn providers paused in their auth rules back on; loaded credential pools pick up the change, and an extension login taking a paused id, on their next read
+- OAuth login results now include the credential project ID so project-only accounts can be identified without exposing tokens ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 
 ### Changed
 

@@ -42,7 +42,7 @@ interface CredentialPinIdentity {
  * Returns `undefined` when the identity carries no account key at all.
  */
 export function credentialPinHash(provider: string, identity: CredentialPinIdentity): string | undefined {
-	if (!identity.accountId && !identity.email) return undefined;
+	if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
 	const key = [
 		provider,
 		identity.accountId ?? "",

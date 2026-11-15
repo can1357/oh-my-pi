@@ -292,6 +292,93 @@ describe("AgentSession account pools after a dispose deadline", () => {
 		expect(authStorage.sessions.permits("anthropic", resumedSoft.sessionId, accountC.id)).toBe(false);
 	});
 
+	it("admits a project-only login and restores a configured project-only hard pin", async () => {
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "access-c",
+				refresh: "refresh-c",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "account-c",
+				email: "c@example.com",
+				orgId: "org-c",
+			},
+			{
+				type: "oauth",
+				access: "access-project",
+				refresh: "refresh-project",
+				expires: Date.now() + 60 * 60_000,
+				projectId: "project-login",
+			},
+		]);
+		const rows = authStorage.credentials.list("anthropic");
+		const accountC = rows.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-c");
+		const projectAccount = rows.find(
+			row => row.credential.type === "oauth" && row.credential.projectId === "project-login",
+		);
+		if (
+			!accountC ||
+			accountC.credential.type !== "oauth" ||
+			!projectAccount ||
+			projectAccount.credential.type !== "oauth"
+		) {
+			throw new Error("expected OAuth fixtures");
+		}
+		const { session } = await createPooledSession();
+
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, projectAccount.id)).toBe(false);
+		expect(session.allowLoggedInOAuthAccount("anthropic", { type: "oauth", projectId: "project-login" })).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", session.sessionId, projectAccount.id)).toBe(true);
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled model");
+		const manager = SessionManager.create(tempDir.path(), tempDir.join("project-pin-sessions"));
+		manager.appendMessage({ role: "user", content: "persist project pin", timestamp: Date.now() });
+		const providerSessionId = manager.getSessionId();
+		const pool = {
+			anthropic: ["email:c@example.com|org:org-c", "project:project-login"],
+		};
+		const scope = new SessionAccountPoolScope(authStorage, pool, providerSessionId);
+		const hardSession = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager: manager,
+			settings: Settings.isolated(),
+			modelRegistry: scope.registry(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"))),
+			providerSessionId,
+			accountPoolScope: scope,
+		});
+		sessions.push(hardSession);
+
+		expect(hardSession.pinCurrentProviderOAuthAccount(projectAccount.id)).toBe(true);
+		expect(manager.getCredentialPins().get("anthropic")).toMatchObject({
+			hash: credentialPinHash("anthropic", projectAccount.credential),
+			hard: true,
+		});
+		expect(authStorage.sessions.permits("anthropic", hardSession.sessionId, accountC.id)).toBe(false);
+		expect(authStorage.sessions.permits("anthropic", hardSession.sessionId, projectAccount.id)).toBe(true);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("expected persisted project-pin session");
+		scope.release();
+
+		const resumedManager = await SessionManager.open(sessionFile);
+		const resumedId = resumedManager.getSessionId();
+		const resumedScope = new SessionAccountPoolScope(authStorage, pool, resumedId);
+		const resumed = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [] } }),
+			sessionManager: resumedManager,
+			settings: Settings.isolated(),
+			modelRegistry: resumedScope.registry(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"))),
+			providerSessionId: resumedId,
+			accountPoolScope: resumedScope,
+		});
+		sessions.push(resumed);
+
+		expect(resumedManager.getCredentialPins().get("anthropic")?.hard).toBe(true);
+		expect(authStorage.sessions.permits("anthropic", resumed.sessionId, accountC.id)).toBe(false);
+		expect(authStorage.sessions.permits("anthropic", resumed.sessionId, projectAccount.id)).toBe(true);
+	});
+
 	it("lifts the pool once a run that outlived the deadline settles", async () => {
 		const release = Promise.withResolvers<void>();
 		const { session, released } = await createPooledSession(release.promise);
