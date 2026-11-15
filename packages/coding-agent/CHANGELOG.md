@@ -79,6 +79,7 @@
 - When Spotlight is enabled, commonly reread source and issue or pull-request content is shown more completely before outlining, including support for additional source file types.
 
 ### Fixed
+- A cancelled Bash command or Eval cell kept forwarding async-job progress after the tool call had already thrown, so a `tool_execution_update` could arrive after the matching `tool_execution_end`; both paths now stop forwarding before the terminal frame ([#12875](https://github.com/can1357/oh-my-pi/issues/12875)).
 
 - `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).
 - Resuming a session whose directory was deleted now continues in the current directory with a warning instead of failing.
