@@ -1127,13 +1127,13 @@ function sentFiles(command: ShellCommand): string[] {
 }
 
 /**
- * Whether a command prints the environment: `printenv`, `env` with no command, and the builtins that
- * list exported variables when given no names: `export` (`-p`, `-n`), `declare`/`typeset` (`-p`,
- * `-x`), and a bare `set`.
+ * Whether a command prints the environment: `printenv` with no names, `env` with no command, and the
+ * builtins that list exported variables when given no names: `export` (`-p`, `-n`),
+ * `declare`/`typeset` (`-p`, `-x`), and a bare `set`.
  */
 function dumpsEnvironment(command: ShellCommand): boolean {
 	const [name, ...rest] = command.argv;
-	if (name === "printenv" || (name === "env" && shellPositionalArgs(command.argv).length === 0)) return true;
+	if (name === "printenv" || name === "env") return shellPositionalArgs(command.argv).length === 0;
 	if (name === "export") return rest.every(arg => /^-[pn]+$/.test(arg));
 	if (name === "declare" || name === "typeset") return rest.every(arg => /^-[px]+$/.test(arg));
 	return name === "set" && rest.length === 0;
