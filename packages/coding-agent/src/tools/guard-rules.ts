@@ -196,42 +196,123 @@ function foldsCase(): boolean {
 	return process.platform === "darwin" || process.platform === "win32";
 }
 
+/** A `[:name:]` class in a pathname pattern's bracket expression, read where it starts. */
+const POSIX_CLASS_RE = /\[:\w+:\]/y;
+
+/** A part of a pathname pattern for one file name. */
+interface GlobPart {
+	/** A run of `*`, a `?`, a literal character, or a bracket expression. */
+	kind: "*" | "?" | "char" | "[";
+	/** The pattern text of a `*`, `?` or character; a bracket expression as a regular expression class. */
+	text: string;
+}
+
 /**
- * A pathname pattern for one file name (`*`, `?`, `[...]`) as a regular expression, ignoring case
- * when the file system does. A leading `.` is matched only by a `.`, as bash matches without
- * `dotglob`, so `*` names no dotfile. A pattern that makes no valid expression (`[z-a]`) is taken
- * to match any name.
+ * The parts of a pathname pattern for one file name (`*`, `?`, `[...]`), read in one pass. A `[`
+ * with no closing `]` is a literal character, and so is every `[` after it: a later one could
+ * close only at the `]` ending a `[:name:]` class, and the literal `[` already keeps the pattern
+ * from naming any file the guard looks for.
  */
-function globRegExp(pattern: string): RegExp {
-	let source = pattern.startsWith(".") ? "" : "(?!\\.)";
+function globParts(pattern: string): GlobPart[] {
+	const parts: GlobPart[] = [];
+	let unclosed = false;
 	for (let i = 0; i < pattern.length; i++) {
 		const char = pattern[i];
-		const bracket = char === "[" ? /^\[([!^]?)(\]?(?:\[:\w+:\]|[^\]])*)\]/.exec(pattern.slice(i)) : null;
 		if (char === "*") {
-			source += ".*";
-		} else if (char === "?") {
-			source += ".";
-		} else if (bracket) {
-			const members = bracket[2].replace(/\[:(\w+):\]|[\\\]^[]/g, (member, name: string | undefined) => {
-				if (name === undefined) return `\\${member}`;
-				return Object.hasOwn(POSIX_CLASSES, name) ? POSIX_CLASSES[name] : "\\s\\S";
-			});
-			source += `[${bracket[1] ? "^" : ""}${members}]`;
-			i += bracket[0].length - 1;
+			if (parts.at(-1)?.kind !== "*") parts.push({ kind: "*", text: char });
+			continue;
+		}
+		if (char === "?") {
+			parts.push({ kind: "?", text: char });
+			continue;
+		}
+		if (char === "[" && !unclosed) {
+			let end = i + 1;
+			const negated = pattern[end] === "!" || pattern[end] === "^";
+			if (negated) end++;
+			const start = end;
+			// A `]` right after the `[` (or `[!`) is a member.
+			if (pattern[end] === "]") end++;
+			while (end < pattern.length && pattern[end] !== "]") {
+				POSIX_CLASS_RE.lastIndex = end;
+				end = POSIX_CLASS_RE.test(pattern) ? POSIX_CLASS_RE.lastIndex : end + 1;
+			}
+			if (end < pattern.length) {
+				const members = pattern.slice(start, end).replace(/\[:(\w+):\]|[\\\]^[]/g, (member, name?: string) => {
+					if (name === undefined) return `\\${member}`;
+					return Object.hasOwn(POSIX_CLASSES, name) ? POSIX_CLASSES[name] : "\\s\\S";
+				});
+				parts.push({ kind: "[", text: `[${negated ? "^" : ""}${members}]` });
+				i = end;
+				continue;
+			}
+			unclosed = true;
+		}
+		parts.push({ kind: "char", text: char });
+	}
+	return parts;
+}
+
+/**
+ * Whether a pathname pattern for one file name (`*`, `?`, `[...]`) matches `name`, ignoring case
+ * when the file system does. A leading `.` is matched only by a `.`, as bash matches without
+ * `dotglob`, so `*` names no dotfile. A pattern with a bracket expression that makes no valid class
+ * (`[z-a]`) is taken to match any name it is not too long for. Every part but `*` takes one
+ * character, so `*` only needs the last place it was tried from to go back to: the time is linear
+ * in the pattern's length plus the square of the name's, whatever the pattern holds.
+ */
+function globMatches(pattern: string, name: string): boolean {
+	if (!pattern.startsWith(".") && name.startsWith(".")) return false;
+	const parts = globParts(pattern);
+	if (parts.reduce((count, part) => (part.kind === "*" ? count : count + 1), 0) > name.length) return false;
+	const fold = foldsCase();
+	// Per part, the test of the character it takes, `undefined` for `*`.
+	const tests: (((char: string) => boolean) | undefined)[] = [];
+	for (const { kind, text } of parts) {
+		if (kind === "*") {
+			tests.push(undefined);
+		} else if (kind === "?") {
+			tests.push(() => true);
+		} else if (kind === "char") {
+			const literal = fold ? text.toLowerCase() : text;
+			tests.push(char => (fold ? char.toLowerCase() : char) === literal);
 		} else {
-			source += char.replace(/[$()*+.?[\\\]^{|}]/, "\\$&");
+			let members: RegExp;
+			try {
+				members = new RegExp(text, fold ? "i" : "");
+			} catch {
+				return true;
+			}
+			tests.push(char => members.test(char));
 		}
 	}
-	try {
-		return new RegExp(`^${source}$`, foldsCase() ? "si" : "s");
-	} catch {
-		return /^/;
+	let part = 0;
+	let at = 0;
+	// After the last `*` passed: the part that follows it, and where in `name` it was last tried.
+	let afterStar = -1;
+	let retry = 0;
+	while (at < name.length) {
+		const test = tests[part];
+		if (part < tests.length && test === undefined) {
+			afterStar = ++part;
+			retry = at;
+		} else if (test?.(name[at])) {
+			part++;
+			at++;
+		} else if (afterStar >= 0) {
+			part = afterStar;
+			at = ++retry;
+		} else {
+			return false;
+		}
 	}
+	while (part < tests.length && tests[part] === undefined) part++;
+	return part === tests.length;
 }
 
 /** Whether a path component, or a pathname pattern for one (`.netr[c]`), names the file `name`. */
 function namesFile(component: string, name: string): boolean {
-	if (GLOB_RE.test(component)) return globRegExp(component).test(name);
+	if (GLOB_RE.test(component)) return globMatches(component, name);
 	return foldsCase() ? component.toLowerCase() === name.toLowerCase() : component === name;
 }
 
