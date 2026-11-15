@@ -55,7 +55,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`, and page calls fail naming them until answered.
 - `emulate` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides.
 - `devices()` lists valid device names.
-- Cookie imports accept objects, raw `Cookie:` headers, DevTools cURL dumps, or JSON arrays.
+- Cookie imports accept objects, arrays of them (`setCookies(await other.cookies())` copies a session), raw `Cookie:` headers, DevTools cURL dumps, or JSON array strings.
 - `waitForDownload` holds the tab until a file arrives, so start it and the downloading click in one `tab.run`:
   `const download = tab.waitForDownload(); await tab.click(selector); return await download;`.
 - Recording: `.mp4` is H.264, `.webm` VP9/VP8; optional cursor overlay and changed-frame contact sheet.
