@@ -48,7 +48,6 @@ import {
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
-import { smokeTestTtsrRegexWorker } from "./export/ttsr-regex-sandbox";
 import { runTtsrRegexWorker } from "./export/ttsr-regex-worker";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
 
@@ -166,6 +165,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { smokeTestTtsrRegexWorker } = await import("./export/ttsr-regex-sandbox");
 	await smokeTestSyncWorker();
 	await smokeTestSpotlightWorker();
 	await smokeTestStatsActivityWorker();
