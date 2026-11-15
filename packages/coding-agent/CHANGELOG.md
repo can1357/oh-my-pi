@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The seance prompt and shipped skill prompts no longer cite RFC 2119, a sentence Google Antigravity answered with a bare `429 RESOURCE_EXHAUSTED` ([#19270](https://github.com/can1357/oh-my-pi/pull/19270) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
@@ -43,13 +47,6 @@
 - Language servers now recognize edits made shortly after a file is created, including on macOS.
 - Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
 - Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
-- Resuming a session whose directory no longer exists (e.g. a deleted temp folder) from `/resume` now continues in the current directory with a warning instead of failing with "Cannot resume session".
-- Fixed `^` model mentions and `/switch` argument completions missing discovered models for the rest of a session after provider discovery failed at startup; using those lists now retries the failed discovery, and an open `^` list updates once it recovers models.
-- A background job result that arrives after an ACP prompt ends no longer starts a turn the client cannot see; it is folded into the next prompt
-- A failed OpenAI server compaction now falls back to the next compaction method instead of first retrying server compaction on another model
-- Language servers are now told when a newly created file is edited again soon after; on macOS such edits were previously dropped as repeats of the creation
-- A `bash` command streaming into the Pseudo shell view keeps its rows through heredocs and loops inside `$(`, nested `$(`, unfinished arithmetic, line continuations and a trailing `&`, and is drawn as it will continue only while its arguments still stream: once complete, waiting to run, or running, an unfinished end is shown as written
-- The seance prompt and the two shipped skill prompts no longer cite RFC 2119 or spell out its six-keyword list, the fixed sentence that Google Antigravity answered with a bare `429 RESOURCE_EXHAUSTED`; they state the same thing as a plain "Requirement words" line, and a test now scans every bundled prompt so the wording cannot come back ([#19270](https://github.com/can1357/oh-my-pi/pull/19270) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.0] - 2026-11-12
 
