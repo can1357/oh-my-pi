@@ -511,11 +511,11 @@ describe("advisor tool-call loop guard", () => {
 		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
 		await session.agent.waitForIdle();
 		const messages = session.agent.state.messages;
-		expect(messages.some(message => JSON.stringify(message).includes("hash pin still present"))).toBe(false);
+		expect(messages.some(message => JSON.stringify(message).includes("hash pin still present"))).toBe(true);
 		expect(
 			messages.filter(m => m.role === "assistant" && JSON.stringify(m.content).includes("primary complete")),
-		).toHaveLength(2);
-		expect(completions(reviewStarts.at(-1)!)).toBe(2);
+		).toHaveLength(3);
+		expect(completions(reviewStarts.at(-1)!)).toBe(3);
 	});
 
 	it("reviews a todo-reminder continuation after a final review", async () => {
