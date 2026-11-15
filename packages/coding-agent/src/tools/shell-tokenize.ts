@@ -988,8 +988,6 @@ export interface ShellCommand {
 	wrappers: string[];
 	/** Targets of `<` input redirections. */
 	reads: string[];
-	/** Targets of output redirections (`>`, `>>`, `&>`, ...). */
-	writes: string[];
 	/**
 	 * Commands inside the substitutions (`$( )`, backticks, `<( )`) in this command's words, its
 	 * redirections, and its unquoted heredoc bodies, which the shell expands even when the body is data.
@@ -2082,7 +2080,6 @@ class ShellScriptParser {
 			program,
 			wrappers,
 			reads,
-			writes,
 			subs: used,
 			cwd,
 			upstream,
