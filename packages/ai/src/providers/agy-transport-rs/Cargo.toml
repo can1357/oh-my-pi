@@ -1,0 +1,39 @@
+[package]
+name = "agy-transport"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone workspace keeps the helper's pinned native dependencies isolated.
+[workspace]
+
+[dependencies]
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+base64 = "0.22"
+bytes = "1"
+crc32fast = "1"
+futures-util = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+prost-reflect = { version = "0.16", features = ["serde"] }
+rand = "0.8"
+rustls-native-certs = "0.8"
+ryu = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+subtle = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+url = "2"
+wreq = { version = "0.16.3", default-features = false, features = ["tokio-rt", "stream"] }
+wreq-proto = { version = "0.2.3", default-features = false }
+
+# Pinned BoringSSL and wreq patches live with the helper in the published SDK.
+# They are not replaced by unverified crates.io versions.
+[patch.crates-io]
+wreq = { path = "vendor/wreq" }
+btls = { path = "vendor/btls" }
+btls-sys = { path = "vendor/btls-sys" }
+wreq-proto = { path = "vendor/wreq-proto" }

@@ -1217,11 +1217,19 @@ describes this interaction. Matching these parameters is not evidence about
 Google's client-detection rules.
 
 Default Antigravity chat, image, OAuth, and usage requests use a lazily started
-Go helper. Source checkouts build it with
+Rust/wreq helper. Source checkouts build it with
 `bun run --cwd packages/ai build:agy-transport`; installed SDK packages use
 `bun run --cwd node_modules/@oh-my-pi/pi-ai build:agy-transport`.
-Go must be installed; the module selects its required toolchain. `bun run setup`
-also builds the helper. Compiled CLI builds embed their target's helper.
+Install Rust (the checkout's pinned toolchain, or stable for SDK packages),
+a C++ compiler, CMake, Clang/libclang, and NASM first.
+On Windows x64, the build uses WSL with stable Rust, MinGW-w64 C/C++,
+CMake, Clang/libclang, and NASM, then copies back a standalone `.exe`.
+`bun run setup` also builds the helper. Compiled CLI builds embed their
+target's helper; cross-target builds require that target's Rust and C++ tools.
+The pinned BoringSSL patches and descriptor assets ship with the SDK; do not
+substitute upstream wreq/btls without rechecking the TLS ClientHello and
+authenticated handshakes. The Rust protobuf JSON parser rejects nesting beyond
+100 levels to avoid unbounded recursion.
 
 `PI_AI_AGY_TRANSPORT` selects an explicit executable. Advanced callers can use
 `createAgyFetch()` from `@oh-my-pi/pi-ai/providers/agy-fetch`, pass the returned

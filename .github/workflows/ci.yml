@@ -728,19 +728,146 @@ jobs:
            run: bun scripts/gen-clippy-bazelrc.ts --check
          - run: echo "release validation green"
 
-   # Builds (does not publish) every release binary on one Linux x64 image in
-   # parallel with the test fan-out; the needs are the two native_addons jobs,
-   # whose artifacts supply their addons. bun cross-compiles every target;
-   # macOS binaries are Developer ID signed and notarized here too
-   # (rcodesign). release_smoke then runs each binary on its own platform.
-   # Publishing (npm leaves, GitHub release, build.stencil.so, core npm) is gated on
-   # release_gate downstream.
+   # wreq's patched BoringSSL needs a real target C++ SDK and libclang, not
+   # just a rustup target. Build helpers separately from Bun's Linux bundler:
+   # same-arch Linux containers, native macOS, and Windows MSVC target tools.
+   # Each artifact carries its Rust triple; the bundler rejects a mismatch.
+   release_agy_transport:
+      name: "AGY transport: ${{ matrix.target_id }}"
+      if: github.event_name == 'pull_request' || needs.release_metadata.outputs.is-release == 'true'
+      needs: [release_metadata]
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { os: ubuntu-22.04, target_id: linux-x64, triple: x86_64-unknown-linux-gnu, image: "ubuntu:22.04", filename: agy-transport }
+               - { os: ubuntu-24.04-arm, target_id: linux-arm64, triple: aarch64-unknown-linux-gnu, image: "ubuntu:22.04", filename: agy-transport }
+               - { os: ubuntu-22.04, target_id: linux-musl-x64, triple: x86_64-unknown-linux-musl, image: "alpine:3.22", filename: agy-transport }
+               - { os: ubuntu-24.04-arm, target_id: linux-musl-arm64, triple: aarch64-unknown-linux-musl, image: "alpine:3.22", filename: agy-transport }
+               - { os: macos-15-intel, target_id: darwin-x64, triple: x86_64-apple-darwin, filename: agy-transport }
+               - { os: macos-15, target_id: darwin-arm64, triple: aarch64-apple-darwin, filename: agy-transport }
+               - { os: windows-2025, target_id: win32-x64, triple: x86_64-pc-windows-msvc, msvc_arch: x64, filename: agy-transport.exe }
+               # Windows-host cross-architecture MSVC is supported by btls-sys;
+               # keep x64 rustc/libclang together, then smoke on Windows ARM64.
+               - { os: windows-2025, target_id: win32-arm64, triple: aarch64-pc-windows-msvc, msvc_arch: arm64, filename: agy-transport.exe }
+      runs-on: ${{ matrix.os }}
+      env:
+         CARGO_TARGET_DIR: ${{ github.workspace }}/ci-agy-target
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - name: Build Linux transport with native libc toolchain
+           if: runner.os == 'Linux'
+           env:
+              BUILD_IMAGE: ${{ matrix.image }}
+              RUST_TARGET: ${{ matrix.triple }}
+           run: |
+              set -euo pipefail
+              # Both GNU architectures use Jammy so the ARM runner's newer
+              # glibc does not silently raise the helper's runtime requirement.
+              docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+                -e RUST_TARGET "$BUILD_IMAGE" sh -ec '
+                  case "$RUST_TARGET" in
+                    *-musl)
+                      apk add --no-cache build-base ca-certificates clang20 clang20-libclang cmake curl git linux-headers ninja perl pkgconf
+                      # bindgen dlopens libclang in its host build script.
+                      # A native musl build needs dynamic CRT for that script
+                      # as well as the helper, so do not pass --target here.
+                      export RUSTFLAGS="-C target-feature=-crt-static"
+                      export LIBCLANG_PATH=/usr/lib/llvm20/lib
+                      ;;
+                    *-gnu)
+                      apt-get update
+                      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                        build-essential ca-certificates clang cmake curl git libclang-dev llvm-dev ninja-build perl pkg-config
+                      export LIBCLANG_PATH="$(llvm-config --libdir)"
+                      ;;
+                  esac
+                  toolchain=""
+                  while IFS=\" read -r key value rest; do
+                    if [ "$key" = "channel = " ]; then toolchain="$value"; break; fi
+                  done < rust-toolchain.toml
+                  test -n "$toolchain"
+                  curl --proto "=https" --tlsv1.2 -fsSLo /tmp/rustup-init.sh https://sh.rustup.rs
+                  sh /tmp/rustup-init.sh -y --profile minimal --default-host "$RUST_TARGET" --default-toolchain "$toolchain"
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  export CARGO_TARGET_DIR="/workspace/ci-agy-target/$RUST_TARGET"
+                  export CMAKE_GENERATOR=Ninja
+                  cargo +"$toolchain" build --locked --release \
+                    --manifest-path packages/ai/src/providers/agy-transport-rs/Cargo.toml
+                '
+         - name: Build macOS transport with Xcode SDK
+           if: runner.os == 'macOS'
+           env:
+              MACOSX_DEPLOYMENT_TARGET: "11.0"
+              CMAKE_GENERATOR: Ninja
+           run: |
+              set -euo pipefail
+              export CC="$(xcrun --find clang)"
+              export CXX="$(xcrun --find clang++)"
+              export LIBCLANG_PATH="$(dirname "$CC")/../lib"
+              test -f "$LIBCLANG_PATH/libclang.dylib"
+              rustup target add "${{ matrix.triple }}"
+              cargo build --locked --release --target "${{ matrix.triple }}" \
+                --manifest-path packages/ai/src/providers/agy-transport-rs/Cargo.toml
+         - name: Build Windows transport with MSVC SDK
+           if: runner.os == 'Windows'
+           shell: pwsh
+           env:
+              CMAKE_GENERATOR: Ninja
+              # Keep the helper standalone: btls-sys selects the matching /MT
+              # C++ runtime when Rust enables crt-static.
+              RUSTFLAGS: "-C target-feature=+crt-static"
+           run: |
+              $ErrorActionPreference = "Stop"
+              $env:LIBCLANG_PATH = Split-Path (Get-Command clang.exe -ErrorAction Stop).Source
+              if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
+                throw "The Windows runner must provide x64 LLVM libclang.dll for bindgen"
+              }
+              $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+              $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+              if (-not $vs) { throw "Visual Studio C++ build tools are required" }
+              Import-Module (Join-Path $vs "Common7\Tools\Microsoft.VisualStudio.DevShell.dll")
+              Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=${{ matrix.msvc_arch }} -host_arch=x64"
+              $env:CC = "cl"
+              $env:CXX = "cl"
+              if ("${{ matrix.msvc_arch }}" -eq "x64") {
+                choco install nasm --yes --no-progress
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                $env:PATH = "${env:ProgramFiles}\NASM;$env:PATH"
+                Get-Command nasm.exe -ErrorAction Stop | Out-Null
+              }
+              rustup target add "${{ matrix.triple }}"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              cargo build --locked --release --target "${{ matrix.triple }}" --manifest-path packages/ai/src/providers/agy-transport-rs/Cargo.toml
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+         - name: Stage target transport artifact
+           shell: bash
+           run: |
+              set -euo pipefail
+              mkdir -p ci-agy-transport
+              cp "ci-agy-target/${{ matrix.triple }}/release/${{ matrix.filename }}" "ci-agy-transport/${{ matrix.filename }}"
+              if [ "$RUNNER_OS" = macOS ]; then
+                codesign --force --sign - "ci-agy-transport/${{ matrix.filename }}"
+              fi
+              printf '%s\n' "${{ matrix.triple }}" > ci-agy-transport/target-triple
+         - name: Upload target transport artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: agy-transport-${{ matrix.target_id }}
+              path: ci-agy-transport/
+              if-no-files-found: error
+
+   # Bun cross-compiles every release binary on Linux. The native_addons jobs
+   # supply addons and release_agy_transport supplies target-checked helpers.
+   # macOS binaries are signed/notarized here via rcodesign. release_smoke
+   # runs each binary and helper on its own platform before publication.
    release_binary:
       name: "Release binary: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.native_addons.result == 'success' &&
-         needs.native_addons_cross.result == 'success' }}
-      needs: [release_metadata, native_addons, native_addons_cross]
+         needs.native_addons_cross.result == 'success' &&
+         needs.release_agy_transport.result == 'success' }}
+      needs: [release_metadata, native_addons, native_addons_cross, release_agy_transport]
       strategy:
          fail-fast: false
          matrix:
@@ -818,9 +945,19 @@ jobs:
            uses: ./.github/actions/native-artifacts
            with:
               targets: ${{ matrix.native_targets }}
+         - name: Download target transport helper
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: agy-transport-${{ matrix.target_id }}
+              path: ci-agy-transport
+         - name: Read transport artifact target
+           id: agy-target
+           run: echo "triple=$(cat ci-agy-transport/target-triple)" >> "$GITHUB_OUTPUT"
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}
+              OMS_AGY_TRANSPORT_BINARY: ${{ github.workspace }}/ci-agy-transport/agy-transport${{ matrix.platform == 'win32' && '.exe' || '' }}
+              OMS_AGY_TRANSPORT_TRIPLE: ${{ steps.agy-target.outputs.triple }}
            run: bun run ci:release:build-binaries
          - name: Sign macOS binary
            # Replaces bun's signature with a Developer ID + hardened-runtime one
@@ -865,8 +1002,10 @@ jobs:
    # artifact, then `--version` and `--smoke-test` in a throwaway home. macOS
    # legs first run Apple's own signature check, and launch under the final
    # signature (hardened runtime and entitlements included when signed). These
-   # are the exact bytes release_github and release_build publish, so no job
-   # re-verifies the published assets.
+   # are the exact bytes release_github and release_build publish; no job
+   # re-verifies the published assets. Also exercise the exact helper artifact
+   # embedded by release_binary: protobuf serialization, native TLS startup,
+   # authenticated loopback validation, and shutdown on stdin EOF.
    release_smoke:
       name: "Smoke release binary: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
@@ -934,7 +1073,7 @@ jobs:
               # Bun's musl-target binaries link libstdc++/libgcc dynamically;
               # Alpine users install them alongside the binary (same as bun itself).
               docker run --rm -v "$(realpath "$BINARY"):/usr/local/bin/omp:ro" alpine:3.22 sh -ec '
-                apk add --no-cache libstdc++ libgcc >/dev/null
+                apk add --no-cache ca-certificates libstdc++ libgcc >/dev/null
                 runtime_dir="$(mktemp -d)"
                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --version
                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --smoke-test
@@ -955,6 +1094,82 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               & $env:BINARY --smoke-test
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+         - name: Download target transport helper
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: agy-transport-${{ matrix.target_id }}
+              path: transport
+         - name: Smoke transport helper on target platform
+           shell: bash
+           env:
+              ALPINE: ${{ matrix.alpine == true }}
+           run: |
+              set -euo pipefail
+              helper="transport/agy-transport"
+              if [ "$RUNNER_OS" = Windows ]; then helper="$helper.exe"; fi
+              chmod +x "$helper"
+              if [ "$RUNNER_OS" = macOS ]; then codesign --verify --strict --verbose=2 "$helper"; fi
+              probe="$RUNNER_TEMP/agy-transport-smoke.py"
+              cat > "$probe" <<'PY'
+              import http.client
+              import json
+              import pathlib
+              import queue
+              import subprocess
+              import sys
+              import threading
+
+              helper = str(pathlib.Path(sys.argv[1]).resolve())
+              payload = b'{"model":"release-smoke","project":"release-smoke"}'
+              result = subprocess.run(
+                  [helper, "--serialize"], input=payload, capture_output=True, timeout=30, check=True
+              )
+              if json.loads(result.stdout) != json.loads(payload):
+                  raise RuntimeError(f"transport serializer changed smoke request: {result.stdout!r}")
+
+              child = subprocess.Popen([helper], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+              handshake = queue.Queue()
+              threading.Thread(target=lambda: handshake.put(child.stdout.readline()), daemon=True).start()
+              try:
+                  ready = json.loads(handshake.get(timeout=30))
+                  port, token = ready["port"], ready["token"]
+                  if not isinstance(port, int) or not 0 < port < 65536:
+                      raise RuntimeError(f"invalid bridge port: {port!r}")
+                  if not isinstance(token, str) or len(token) != 64 or any(c not in "0123456789abcdef" for c in token):
+                      raise RuntimeError("invalid bridge authentication token")
+                  for headers, expected in [({}, 401), ({"x-agy-bridge-token": token}, 400)]:
+                      connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                      try:
+                          # Unauthenticated requests must fail; authenticated
+                          # requests without an HTTPS target must fail locally.
+                          connection.request("POST", "/", body=b"{}", headers=headers)
+                          response = connection.getresponse()
+                          body = response.read()
+                          if response.status != expected or response.getheader("x-agy-bridge-error") != "validation":
+                              raise RuntimeError(f"bridge validation: HTTP {response.status}, {body!r}")
+                      finally:
+                          connection.close()
+                  child.stdin.close()
+                  if child.wait(timeout=15) != 0:
+                      raise RuntimeError(f"transport exited with {child.returncode}")
+              finally:
+                  if child.poll() is None:
+                      child.kill()
+                      child.wait(timeout=10)
+              print("transport-smoke: ok")
+              PY
+              if [ "$ALPINE" = true ]; then
+                docker run --rm \
+                  -v "$(realpath "$helper"):/usr/local/bin/agy-transport:ro" \
+                  -v "$probe:/tmp/agy-transport-smoke.py:ro" alpine:3.22 sh -ec '
+                    apk add --no-cache ca-certificates libstdc++ libgcc python3 >/dev/null
+                    python3 /tmp/agy-transport-smoke.py /usr/local/bin/agy-transport
+                  '
+              elif [ "$RUNNER_OS" = Windows ]; then
+                python "$probe" "$helper"
+              else
+                python3 "$probe" "$helper"
+              fi
 
    # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf

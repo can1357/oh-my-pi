@@ -1,0 +1,61 @@
+[package]
+name = "btls"
+version = { workspace = true }
+authors = ["0x676e67 <gngppz@gmail.com>", "Steven Fackler <sfackler@gmail.com>", "Ivan Nikulin <ifaaan@gmail.com>"]
+license = "Apache-2.0"
+description = "BoringSSL bindings"
+repository = { workspace = true }
+documentation = "https://docs.rs/btls"
+readme = "README.md"
+keywords = ["tls", "ssl", "dtls", "post-quantum", "fips"]
+categories = ["cryptography", "api-bindings"]
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[package.metadata.docs.rs]
+features = ["underscore-wildcards"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+
+# Use a FIPS-validated version of BoringSSL.
+fips = ["btls-sys/fips"]
+
+# **DO NOT USE** This will be removed without warning in future releases.
+legacy-compat-deprecated = []
+
+# Interface for ML-KEM (FIPS 203) post-quantum key encapsulation. Does not affect ciphers used in TLS.
+mlkem = []
+
+# Expose internal `tls1_prf`
+prf = []
+
+# SslCredential API
+credential = []
+
+# Applies a patch to enable `ffi::X509_CHECK_FLAG_UNDERSCORE_WILDCARDS`. This
+# feature is necessary in order to compile the bindings for the default branch
+# of boringSSL. Alternatively, a version of boringSSL that implements the same
+# feature set can be provided by setting `BORING_BSSL{,_FIPS}_SOURCE_PATH` and
+# `BORING_BSSL{,_FIPS}_ASSUME_PATCHED`.
+underscore-wildcards = ["btls-sys/underscore-wildcards"]
+
+# Add a prefix to all symbols in libcrypto and libssl to prevent conflicts
+# with OpenSSL versions that might be linked in the same process.
+prefix-symbols = ["btls-sys/prefix-symbols"]
+
+# **DO NOT USE** This will be removed without warning in future releases.
+# Alias for 'fips', only for backwards compatibility.
+fips-precompiled = ["fips"]
+
+[dependencies]
+bitflags = { workspace = true }
+foreign-types = { workspace = true }
+openssl-macros = { workspace = true }
+libc = { workspace = true }
+btls-sys = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+brotli = { workspace = true }

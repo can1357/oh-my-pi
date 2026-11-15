@@ -1,0 +1,90 @@
+[package]
+name = "wreq-proto"
+version = { workspace = true }
+description = "Protocol utilities for wreq"
+keywords = ["http", "client"]
+categories = ["web-programming::http-client"]
+repository = { workspace = true }
+documentation = "https://docs.rs/wreq-proto"
+authors = ["0x676e67 <gngppz@gmail.com>", "Sean McArthur <sean@seanmonstar.com>"]
+readme = { workspace = true }
+license = { workspace = true }
+edition = "2021"
+rust-version = { workspace = true }
+include = ["README.md", "LICENSE", "src/**/*.rs"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[features]
+default = []
+
+full = ["tracing"]
+
+# Enable tracing logging.
+tracing = ["dep:tracing", "http2/tracing", "tracing?/std"]
+
+[dependencies]
+bytes = "1.11.1"
+http = "1.4.0"
+http2 = { version = "0.5.20", features = ["unstable"] }
+httparse = "1.10.1"
+http-body = "1.0.1"
+want = "0.3.1"
+pin-project-lite = "0.2.17"
+futures-channel = "0.3.32"
+futures-util = { version = "0.3.32", default-features = false }
+smallvec = { version = "1.15.1", features = ["const_generics", "const_new"] }
+tokio = { workspace = true, default-features = false }
+tokio-util = { version = "0.7.18", default-features = false }
+
+# Optional deps...
+
+tracing = { version = "0.1", default-features = false, optional = true }
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+pretty_env_logger = "0.5"
+futures-channel = { version = "0.3", features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "sink"] }
+wreq-proto = { path = "." }
+hyper = { version = "1.7.0", default-features = false, features = [
+    "http1",
+    "http2",
+    "server",
+] }
+h2 = "0.4.18"
+spmc = "0.3"
+tokio = { version = "1", features = [
+    "fs",
+    "macros",
+    "net",
+    "io-std",
+    "io-util",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "test-util",
+] }
+tokio-test = "0.4.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[[bench]]
+name = "body"
+path = "bench/body.rs"
+
+[[bench]]
+name = "end_to_end"
+path = "bench/end_to_end.rs"
+
+[[test]]
+name = "client"
+path = "tests/client.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

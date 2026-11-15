@@ -1,0 +1,78 @@
+From 2128aa4382ba668e2c4f77bf18da719b2ad0087e Mon Sep 17 00:00:00 2001
+From: Anthony Ramine <aramine@cloudflare.com>
+Date: Fri, 5 Dec 2025 08:19:56 +0100
+Subject: [PATCH] Introduce X509_CHECK_FLAG_UNDERSCORE_WILDCARDS
+
+---
+ crypto/x509/v3_utl.cc    |  4 +++-
+ crypto/x509/x509_test.cc | 25 +++++++++++++++++++++++++
+ include/openssl/x509.h   |  3 +++
+ 3 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/crypto/x509/v3_utl.cc b/crypto/x509/v3_utl.cc
+index 015bbcad2..2b9b63430 100644
+--- a/crypto/x509/v3_utl.cc
++++ b/crypto/x509/v3_utl.cc
+@@ -740,7 +740,9 @@ static int wildcard_match(const unsigned char *prefix, size_t prefix_len,
+   // Check that the part matched by the wildcard contains only
+   // permitted characters and only matches a single label.
+   for (p = wildcard_start; p != wildcard_end; ++p) {
+-    if (!OPENSSL_isalnum(*p) && *p != '-') {
++    if (!OPENSSL_isalnum(*p) && *p != '-' &&
++        !(*p == '_' &&
++          (flags & X509_CHECK_FLAG_UNDERSCORE_WILDCARDS))) {
+       return 0;
+     }
+   }
+diff --git a/crypto/x509/x509_test.cc b/crypto/x509/x509_test.cc
+index c6ce62dd1..f284f421f 100644
+--- a/crypto/x509/x509_test.cc
++++ b/crypto/x509/x509_test.cc
+@@ -5209,6 +5209,31 @@ TEST(X509Test, Names) {
+           /*invalid_emails=*/{},
+           /*flags=*/0,
+       },
++
++      // Underscores in DNS names are forbidden by default.
++      {
++          /*cert_subject=*/{},
++          /*cert_dns_names=*/{"*.example.com"},
++          /*cert_emails=*/{},
++          /*valid_dns_names=*/{},
++          /*invalid_dns_names=*/{"not_allowed.example.com"},
++          /*valid_emails=*/{},
++          /*invalid_emails=*/{},
++          /*flags=*/0,
++      },
++
++      // Underscores in DNS names can be allowed with the right flag.
++      {
++          /*cert_subject=*/{},
++          /*cert_dns_names=*/{"*.example.com"},
++          /*cert_emails=*/{},
++          /*valid_dns_names=*/{"now_allowed.example.com"},
++          /*invalid_dns_names=*/{},
++          /*valid_emails=*/{},
++          /*invalid_emails=*/{},
++          /*flags=*/X509_CHECK_FLAG_UNDERSCORE_WILDCARDS,
++      },
++
+   };
+ 
+   size_t i = 0;
+diff --git a/include/openssl/x509.h b/include/openssl/x509.h
+index 926f365f4..cc538cceb 100644
+--- a/include/openssl/x509.h
++++ b/include/openssl/x509.h
+@@ -3359,6 +3359,9 @@ OPENSSL_EXPORT int X509_VERIFY_PARAM_add1_host(X509_VERIFY_PARAM *param,
+ // enabled when subjectAltNames is missing.
+ #define X509_CHECK_FLAG_NEVER_CHECK_SUBJECT 0x20
+ 
++// X509_CHECK_FLAG_UNDERSCORE_WILDCARDS allows underscores in DNS wildcard matches.
++#define X509_CHECK_FLAG_UNDERSCORE_WILDCARDS 0x40
++
+ // X509_VERIFY_PARAM_set_hostflags sets the name-checking flags on |param| to
+ // |flags|. |flags| should be a combination of |X509_CHECK_FLAG_*| constants.
+ OPENSSL_EXPORT void X509_VERIFY_PARAM_set_hostflags(X509_VERIFY_PARAM *param,
+-- 
+2.40.0

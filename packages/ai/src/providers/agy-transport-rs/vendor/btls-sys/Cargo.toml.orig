@@ -1,0 +1,81 @@
+[package]
+name = "btls-sys"
+version = { workspace = true }
+authors = ["0x676e67 <gngppz@gmail.com>",
+            "Alex Crichton <alex@alexcrichton.com>",
+            "Steven Fackler <sfackler@gmail.com>",
+            "Ivan Nikulin <ifaaan@gmail.com>"]
+license = "MIT"
+description = "FFI bindings to BoringSSL"
+repository = { workspace = true }
+documentation = "https://docs.rs/btls-sys"
+links = "boringssl"
+build = "build/main.rs"
+readme = "README.md"
+categories = ["cryptography", "external-ffi-bindings"]
+keywords = ["tls", "boringssl", "openssl", "fips", "ml-kem"]
+edition = { workspace = true }
+rust-version = { workspace = true }
+include = [
+    "/*.md",
+    "/*.toml",
+    "/LICENSE-MIT",
+    "/cmake/*.cmake",
+    "/deps/boringssl/**/*.[chS]",
+    "/deps/boringssl/**/*.inc",
+    "/deps/boringssl/**/*.asm",
+    "/deps/boringssl/**/*.pl",
+    "/deps/boringssl/**/*.go",
+    "/deps/boringssl/**/*.cmake",
+    "/deps/boringssl/**/go.mod",
+    "/deps/boringssl/**/go.sum",
+    "/deps/boringssl/crypto/obj/obj_mac.num",
+    "/deps/boringssl/crypto/obj/objects.txt",
+    "/deps/boringssl/crypto/err/*.errordata",
+    "/deps/boringssl/**/*.bzl",
+    "/deps/boringssl/**/*.cc",
+    "/deps/boringssl/**/CMakeLists.txt",
+    "/deps/boringssl/**/sources.cmake",
+    "/deps/boringssl/**/util/go_tests.txt",
+    "/deps/boringssl/LICENSE",
+    "/build/*",
+    "/src",
+    "/patches",
+]
+
+[package.metadata.docs.rs]
+features = ["underscore-wildcards"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# Compile boringssl using the FIPS build flag if building boringssl from
+# scratch.
+#
+# See
+# https://boringssl.googlesource.com/boringssl/+/master/crypto/fipsmodule/FIPS.md
+# for instructions and more details on the boringssl FIPS flag.
+fips = []
+
+# Require mlkem.h
+mlkem = []
+
+# Applies a patch (`patches/underscore-wildcards.patch`) to enable
+# `ffi::X509_CHECK_FLAG_UNDERSCORE_WILDCARDS`. This feature is necessary in
+# order to compile the bindings for the default branch of boringSSL
+# (`deps/boringssl`). Alternatively, a version of boringSSL that implements the
+# same feature set can be provided by setting
+# `BORING_BSSL{,_FIPS}_SOURCE_PATH`.
+underscore-wildcards = []
+
+# Add a prefix to all symbols in libcrypto and libssl to prevent conflicts
+# with OpenSSL versions that might be linked in the same process.
+prefix-symbols = []
+
+[build-dependencies]
+bindgen = { workspace = true }
+cmake = { workspace = true }
+fs_extra = { workspace = true }
+fslock = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(const_fn)'] }

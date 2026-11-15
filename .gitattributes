@@ -67,3 +67,7 @@ crates/pi-ast/src/language/testdata/*.wasm -filter binary
 # Generated tree-sitter parser: regenerate from grammar.js (see its README.md).
 crates/vendor/tree-sitter-go/src/parser.c linguist-generated
 
+# Preserve upstream BoringSSL generators and patch hunks verbatim; their
+# intentional whitespace is not a local edit and GitHub should fold the vendor.
+packages/ai/src/providers/agy-transport-rs/vendor/** linguist-vendored whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+

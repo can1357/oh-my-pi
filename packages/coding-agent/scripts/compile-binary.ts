@@ -48,7 +48,10 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 	}
 	try {
 		const [nativeFiles, agyFiles] = options.native
-			? await Promise.all([embeddedAddonFiles(options.native), embeddedAgyTransportFiles(options.native)])
+			? await Promise.all([
+					embeddedAddonFiles(options.native),
+					embeddedAgyTransportFiles(options.native, options.target),
+				])
 			: [{}, {}];
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],

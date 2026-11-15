@@ -138,12 +138,12 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 }
 /**
  * Smoke-test entry. Spawns bundled workers, serves the stats dashboard once,
- * pings everything, then exits.
+ * pings everything, and starts the embedded Antigravity transport when present,
+ * then exits.
  *
- * Purpose: catch the silent worker-load and bundled-asset regressions that hit
- * compiled binaries and the npm CLI bundle. Version/help paths do not spawn
- * worker modules or serve dashboard assets on a fresh install, so this probe is
- * the minimal end-to-end test that proves those distribution-only paths work.
+ * Purpose: catch the silent worker-load, bundled-asset, and extracted-helper
+ * regressions that hit compiled binaries and the npm CLI bundle. Version/help
+ * paths do not spawn worker modules or serve dashboard assets on a fresh install.
  * Wired into `scripts/install-tests/run-ci.sh` so binary / source-link /
  * tarball installs all exercise it on every CI run.
  */
@@ -193,6 +193,16 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
 	await smokeTestSubagentWorker();
+	// Compiled binaries must prove that the compressed helper is extracted,
+	// executable, and able to initialize native TLS without contacting Google.
+	// Static imports would initialize the provider before profile bootstrap on
+	// every CLI launch; load it only for this distribution smoke.
+	const { embeddedAgyTransport } = await import("@oh-my-pi/pi-ai/providers/agy-embedded");
+	if (embeddedAgyTransport) {
+		const { createAgyFetch } = await import("@oh-my-pi/pi-ai/providers/agy-fetch");
+		const helper = await createAgyFetch();
+		await helper.close();
+	}
 	process.stdout.write("smoke-test: ok\n");
 }
 

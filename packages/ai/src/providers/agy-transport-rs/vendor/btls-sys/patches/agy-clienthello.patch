@@ -1,0 +1,628 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index dd81949..7816f0c 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5300,6 +5300,31 @@ OPENSSL_EXPORT void SSL_CTX_set_record_size_limit(SSL_CTX *ctx, uint16_t limit);
+ OPENSSL_EXPORT void SSL_CTX_set_preserve_tls13_cipher_list(SSL_CTX *ctx,
+                                                   int preserve_tls13_cipher_list);
+ 
++// SSL_CTX_set_tls13_ciphers_last moves TLS 1.3 suites after the legacy suites in
++// ClientHello. It does not change which suites are enabled. Disabled by default.
++OPENSSL_EXPORT void SSL_CTX_set_tls13_ciphers_last(SSL_CTX *ctx, int enabled);
++
++// These ClientHello-only advertisement APIs preserve the supplied wire IDs.
++// The group and handshake-signature setters also configure the implemented
++// subset for negotiation and verification; unknown IDs are never accepted from
++// the peer. Nonempty lists with no implemented entries fail. Empty lists restore
++// defaults. Existing group/signature setters remain strict.
++//
++// Advertising an unimplemented algorithm is NOT support for that algorithm.
++// A server selecting one will fail the handshake. These APIs are intended for
++// structural probes, not as evidence of protocol compatibility.
++OPENSSL_EXPORT int SSL_CTX_set_client_hello_group_ids(
++    SSL_CTX *ctx, const uint16_t *ids, size_t num_ids);
++OPENSSL_EXPORT int SSL_CTX_set_client_hello_sigalgs(
++    SSL_CTX *ctx, const uint16_t *ids, size_t num_ids);
++
++// SSL_CTX_set_client_hello_cert_sigalgs configures signature_algorithms_cert.
++// An empty list omits the extension. Certificate-chain, hostname, and handshake
++// signature verification are unchanged; unknown certificate algorithms remain
++// unsupported regardless of their presence in this advertisement.
++OPENSSL_EXPORT int SSL_CTX_set_client_hello_cert_sigalgs(
++    SSL_CTX *ctx, const uint16_t *ids, size_t num_ids);
++
+ // SSL_set_preserve_tls13_cipher_list configures whether sockets on |ctx| should
+ // preserve the TLS 1.3 cipher list order, retaining the original cipher suite
+ // preferences. When enabled, it may prefer ChaCha20 over AES based on the
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 1240cc6..f0af90e 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -252,6 +252,13 @@ bool tls1_check_group_id(const SSL_HANDSHAKE *hs, uint16_t group_id) {
+     return false;
+   }
+ 
++  const auto &advertised = hs->config->client_hello_group_ids;
++  if (!hs->ssl->server && !advertised.empty() &&
++      std::find(advertised.begin(), advertised.end(), group_id) ==
++          advertised.end()) {
++    return false;
++  }
++
+   for (uint16_t supported : hs->config->supported_group_list) {
+     if (supported == group_id) {
+       return true;
+@@ -327,6 +334,14 @@ bool tls12_check_peer_sigalg(const SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   // The peer must have selected an algorithm that is consistent with its public
+   // key, the TLS version, and what we advertised.
+   Span<const uint16_t> sigalgs = tls12_get_verify_sigalgs(hs);
++  const auto &advertised = hs->config->client_hello_sigalgs;
++  if (!hs->ssl->server && !advertised.empty() &&
++      std::find(advertised.begin(), advertised.end(), sigalg) ==
++          advertised.end()) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_WRONG_SIGNATURE_TYPE);
++    *out_alert = SSL_AD_ILLEGAL_PARAMETER;
++    return false;
++  }
+   if (std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() ||
+       !ssl_pkey_supports_algorithm(hs->ssl, pkey, sigalg, /*is_verify=*/true)) {
+     OPENSSL_PUT_ERROR(SSL, SSL_R_WRONG_SIGNATURE_TYPE);
+@@ -980,6 +995,22 @@ static bool ext_ticket_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
+ //
+ // https://tools.ietf.org/html/rfc5246#section-7.4.1.4.1
+ 
++static bool add_signature_algorithms(CBB *out, uint16_t extension,
++                                     Span<const uint16_t> sigalgs) {
++  CBB contents, sigalgs_cbb;
++  if (!CBB_add_u16(out, extension) ||
++      !CBB_add_u16_length_prefixed(out, &contents) ||
++      !CBB_add_u16_length_prefixed(&contents, &sigalgs_cbb)) {
++    return false;
++  }
++  for (uint16_t sigalg : sigalgs) {
++    if (!CBB_add_u16(&sigalgs_cbb, sigalg)) {
++      return false;
++    }
++  }
++  return CBB_flush(out);
++}
++
+ static bool ext_sigalgs_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+                                         CBB *out_compressible,
+                                         ssl_client_hello_type_t type) {
+@@ -991,16 +1022,12 @@ static bool ext_sigalgs_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+     return true;
+   }
+ 
+-  CBB contents, sigalgs_cbb;
+-  if (!CBB_add_u16(out_compressible, TLSEXT_TYPE_signature_algorithms) ||
+-      !CBB_add_u16_length_prefixed(out_compressible, &contents) ||
+-      !CBB_add_u16_length_prefixed(&contents, &sigalgs_cbb) ||
+-      !tls12_add_verify_sigalgs(hs, &sigalgs_cbb) ||
+-      !CBB_flush(out_compressible)) {
+-    return false;
++  Span<const uint16_t> sigalgs = hs->config->client_hello_sigalgs;
++  if (sigalgs.empty()) {
++    sigalgs = tls12_get_verify_sigalgs(hs);
+   }
+-
+-  return true;
++  return add_signature_algorithms(out_compressible,
++                                  TLSEXT_TYPE_signature_algorithms, sigalgs);
+ }
+ 
+ static bool ext_sigalgs_parse_clienthello(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+@@ -1020,6 +1047,36 @@ static bool ext_sigalgs_parse_clienthello(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   return true;
+ }
+ 
++static bool ext_cert_sigalgs_add_clienthello(
++    const SSL_HANDSHAKE *hs, CBB *out, CBB *out_compressible,
++    ssl_client_hello_type_t type) {
++  if (hs->max_version < TLS1_2_VERSION || hs->pake_prover != nullptr ||
++      hs->config->client_hello_cert_sigalgs.empty()) {
++    return true;
++  }
++  return add_signature_algorithms(
++      out_compressible, TLSEXT_TYPE_signature_algorithms_cert,
++      hs->config->client_hello_cert_sigalgs);
++}
++
++static bool ext_cert_sigalgs_parse_clienthello(SSL_HANDSHAKE *hs,
++                                              uint8_t *out_alert,
++                                              CBS *contents) {
++  if (contents == nullptr) {
++    return true;
++  }
++  // Certificate selection does not use this advisory extension. Still enforce
++  // its vector encoding rather than accepting malformed ClientHellos.
++  CBS sigalgs;
++  if (!CBS_get_u16_length_prefixed(contents, &sigalgs) ||
++      CBS_len(contents) != 0 || CBS_len(&sigalgs) == 0 ||
++      (CBS_len(&sigalgs) & 1) != 0) {
++    *out_alert = SSL_AD_DECODE_ERROR;
++    return false;
++  }
++  return true;
++}
++
+ 
+ // OCSP Stapling.
+ //
+@@ -2545,7 +2602,11 @@ static bool ext_supported_groups_add_clienthello(const SSL_HANDSHAKE *hs,
+     return false;
+   }
+ 
+-  for (uint16_t group : hs->config->supported_group_list) {
++  Span<const uint16_t> groups = hs->config->client_hello_group_ids;
++  if (groups.empty()) {
++    groups = hs->config->supported_group_list;
++  }
++  for (uint16_t group : groups) {
+     if (is_post_quantum_group(group) && hs->max_version < TLS1_3_VERSION) {
+       continue;
+     }
+@@ -3657,6 +3718,13 @@ static const struct tls_extension kExtensions[] = {
+         ext_sigalgs_parse_clienthello,
+         dont_add_serverhello,
+     },
++    {
++        TLSEXT_TYPE_signature_algorithms_cert,
++        ext_cert_sigalgs_add_clienthello,
++        forbid_parse_serverhello,
++        ext_cert_sigalgs_parse_clienthello,
++        dont_add_serverhello,
++    },
+     {
+         TLSEXT_TYPE_next_proto_neg,
+         ext_npn_add_clienthello,
+@@ -3851,23 +3919,17 @@ bool ssl_setup_extension_order(SSL_HANDSHAKE *hs) {
+         permutation[permIndex++] = i;
+     }
+ 
+-    if (rem > 1) {
+-        size_t seeds_num = rem - 1;
+-        uint32_t *seeds = static_cast<uint32_t *>(OPENSSL_malloc(seeds_num * sizeof(uint32_t)));
+-        if (!seeds) {
+-            permutation.Reset();
+-            return false;
+-        }
+-        if (!RAND_bytes(reinterpret_cast<uint8_t *>(seeds), seeds_num * sizeof(uint32_t))) {
+-            permutation.Reset();
+-            OPENSSL_free(seeds);
++    if (rem > 1 && hs->config->permute_extensions) {
++        uint32_t seeds[kNumExtensions - 1];
++        if (!RAND_bytes(reinterpret_cast<uint8_t *>(seeds),
++                        (rem - 1) * sizeof(uint32_t))) {
+             return false;
+         }
+         for (size_t i = kNumExtensions - 1; i > offset; i--) {
+-            size_t swap_idx = offset + (seeds[i - offset] % (i - offset));
++            size_t swap_idx =
++                offset + (seeds[i - offset - 1] % (i - offset + 1));
+             std::swap(permutation[i], permutation[swap_idx]);
+         }
+-        OPENSSL_free(seeds);
+     }
+ 
+     hs->extension_permutation = std::move(permutation);
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index 1380bea..5bb200e 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -92,6 +92,52 @@ static bool ssl_add_tls13_cipher(CBB *cbb, uint16_t cipher_id,
+   return true;
+ }
+ 
++static bool ssl_write_tls13_ciphers(const SSL_HANDSHAKE *hs, CBB *out) {
++  const SSL *const ssl = hs->ssl;
++  if (hs->max_version < TLS1_3_VERSION) {
++    return true;
++  }
++  if (ssl->config->preserve_tls13_cipher_list && ssl->ctx->tls13_cipher_list &&
++      sk_SSL_CIPHER_num(ssl->ctx->tls13_cipher_list->ciphers.get()) >= 1) {
++    for (const SSL_CIPHER *cipher : ssl->ctx->tls13_cipher_list->ciphers.get()) {
++      if (!ssl_add_tls13_cipher(out, SSL_CIPHER_get_protocol_id(cipher),
++                               ssl->config->compliance_policy)) {
++        return false;
++      }
++    }
++    return true;
++  }
++  static const uint16_t kCiphersNoAESHardware[] = {
++      SSL_CIPHER_CHACHA20_POLY1305_SHA256,
++      SSL_CIPHER_AES_128_GCM_SHA256,
++      SSL_CIPHER_AES_256_GCM_SHA384,
++  };
++  static const uint16_t kCiphersAESHardware[] = {
++      SSL_CIPHER_AES_128_GCM_SHA256,
++      SSL_CIPHER_AES_256_GCM_SHA384,
++      SSL_CIPHER_CHACHA20_POLY1305_SHA256,
++  };
++  static const uint16_t kCiphersCNSA[] = {
++      SSL_CIPHER_AES_256_GCM_SHA384,
++      SSL_CIPHER_AES_128_GCM_SHA256,
++      SSL_CIPHER_CHACHA20_POLY1305_SHA256,
++  };
++  const bool has_aes_hw = ssl->config->aes_hw_override
++                             ? ssl->config->aes_hw_override_value
++                             : EVP_has_aes_hardware();
++  const Span<const uint16_t> ciphers =
++      ssl->config->compliance_policy == ssl_compliance_policy_cnsa_202407
++          ? Span<const uint16_t>(kCiphersCNSA)
++          : (has_aes_hw ? Span<const uint16_t>(kCiphersAESHardware)
++                        : Span<const uint16_t>(kCiphersNoAESHardware));
++  for (uint16_t cipher : ciphers) {
++    if (!ssl_add_tls13_cipher(out, cipher, ssl->config->compliance_policy)) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ static bool ssl_write_client_cipher_list(const SSL_HANDSHAKE *hs, CBB *out,
+                                          ssl_client_hello_type_t type) {
+   const SSL *const ssl = hs->ssl;
+@@ -109,53 +155,9 @@ static bool ssl_write_client_cipher_list(const SSL_HANDSHAKE *hs, CBB *out,
+     return false;
+   }
+ 
+-  // Add TLS 1.3 ciphers. Order ChaCha20-Poly1305 relative to AES-GCM based on
+-  // hardware support.
+-  if (hs->max_version >= TLS1_3_VERSION) {
+-    if (ssl->config->preserve_tls13_cipher_list &&
+-        ssl->ctx->tls13_cipher_list &&
+-        sk_SSL_CIPHER_num(ssl->ctx->tls13_cipher_list->ciphers.get()) >= 1) {
+-      for (size_t i = 0; i < sk_SSL_CIPHER_num(ssl->ctx->tls13_cipher_list->ciphers.get()); i++) {
+-        const SSL_CIPHER *cipher = sk_SSL_CIPHER_value(ssl->ctx->tls13_cipher_list->ciphers.get(), i);
+-        uint16_t cipher_id = SSL_CIPHER_get_protocol_id(cipher);
+-        if (!ssl_add_tls13_cipher(&child, cipher_id,
+-                                  ssl->config->compliance_policy)) {
+-          return false;
+-        }
+-      }
+-    } else{
+-      static const uint16_t kCiphersNoAESHardware[] = {
+-          SSL_CIPHER_CHACHA20_POLY1305_SHA256,
+-          SSL_CIPHER_AES_128_GCM_SHA256,
+-          SSL_CIPHER_AES_256_GCM_SHA384,
+-      };
+-      static const uint16_t kCiphersAESHardware[] = {
+-          SSL_CIPHER_AES_128_GCM_SHA256,
+-          SSL_CIPHER_AES_256_GCM_SHA384,
+-          SSL_CIPHER_CHACHA20_POLY1305_SHA256,
+-      };
+-      static const uint16_t kCiphersCNSA[] = {
+-          SSL_CIPHER_AES_256_GCM_SHA384,
+-          SSL_CIPHER_AES_128_GCM_SHA256,
+-          SSL_CIPHER_CHACHA20_POLY1305_SHA256,
+-      };
+-
+-      const bool has_aes_hw = ssl->config->aes_hw_override
+-                                  ? ssl->config->aes_hw_override_value
+-                                  : EVP_has_aes_hardware();
+-      const bssl::Span<const uint16_t> ciphers =
+-          ssl->config->compliance_policy == ssl_compliance_policy_cnsa_202407
+-              ? bssl::Span<const uint16_t>(kCiphersCNSA)
+-              : (has_aes_hw ? bssl::Span<const uint16_t>(kCiphersAESHardware)
+-                            : bssl::Span<const uint16_t>(kCiphersNoAESHardware));
+-
+-      for (auto cipher : ciphers) {
+-        if (!ssl_add_tls13_cipher(&child, cipher,
+-                                  ssl->config->compliance_policy)) {
+-          return false;
+-        }
+-      }
+-    }
++  if (!ssl->config->tls13_ciphers_last &&
++      !ssl_write_tls13_ciphers(hs, &child)) {
++    return false;
+   }
+ 
+   if (hs->min_version < TLS1_3_VERSION && type != ssl_client_hello_inner) {
+@@ -183,6 +185,11 @@ static bool ssl_write_client_cipher_list(const SSL_HANDSHAKE *hs, CBB *out,
+     }
+   }
+ 
++  if (ssl->config->tls13_ciphers_last &&
++      !ssl_write_tls13_ciphers(hs, &child)) {
++    return false;
++  }
++
+   if (ssl->mode & SSL_MODE_SEND_FALLBACK_SCSV) {
+     if (!CBB_add_u16(&child, SSL_CIPHER_FALLBACK_SCSV)) {
+       return false;
+diff --git a/ssl/internal.h b/ssl/internal.h
+index c80e565..672d435 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3309,6 +3309,12 @@ struct SSL_CONFIG {
+   // a valid subsequence of the supported group list.
+   Array<uint16_t> supported_group_list;
+ 
++  // ClientHello-only advertisements. Unsupported IDs never enter the lists
++  // used to negotiate groups or verify handshake signatures.
++  Array<uint16_t> client_hello_group_ids;
++  Array<uint16_t> client_hello_sigalgs;
++  Array<uint16_t> client_hello_cert_sigalgs;
++
+   // For a client, this may contain a subsequence of the group IDs in
+   // |suppported_group_list|, which gives the groups for which key shares should
+   // be sent in the client's key_share extension. This is non-nullopt iff
+@@ -3434,6 +3440,9 @@ struct SSL_CONFIG {
+   // be preserved, potentially preferring ChaCha20-Poly1305 over AES-GCM ciphers.
+   // It is only effective on the client side.
+   bool preserve_tls13_cipher_list : 1;
++
++  // Emit TLS 1.3 ciphers after the legacy cipher list when explicitly enabled.
++  bool tls13_ciphers_last = false;
+ };
+ 
+ // From RFC 8446, used in determining PSK modes.
+@@ -3983,6 +3992,10 @@ struct ssl_ctx_st : public bssl::RefCounted<ssl_ctx_st> {
+   // Supported group values inherited by SSL structure
+   bssl::Array<uint16_t> supported_group_list;
+ 
++  bssl::Array<uint16_t> client_hello_group_ids;
++  bssl::Array<uint16_t> client_hello_sigalgs;
++  bssl::Array<uint16_t> client_hello_cert_sigalgs;
++
+   // channel_id_private is the client's Channel ID private key, or null if
+   // Channel ID should not be offered on this connection.
+   bssl::UniquePtr<EVP_PKEY> channel_id_private;
+@@ -4099,6 +4112,8 @@ struct ssl_ctx_st : public bssl::RefCounted<ssl_ctx_st> {
+   // It is only effective on the client side.
+   bool preserve_tls13_cipher_list : 1;
+ 
++  bool tls13_ciphers_last = false;
++
+   // tls13_cipher_list, if non-null, is the list of ciphers to use in TLS 1.3
+   bssl::UniquePtr<bssl::SSLCipherPreferenceList> tls13_cipher_list;
+ 
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 117b9c9..2cac404 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -538,6 +538,10 @@ SSL *SSL_new(SSL_CTX *ctx) {
+       !ssl->config->alpn_client_proto_list.CopyFrom(
+           ctx->alpn_client_proto_list) ||
+       !ssl->config->verify_sigalgs.CopyFrom(ctx->verify_sigalgs) ||
++      !ssl->config->client_hello_group_ids.CopyFrom(ctx->client_hello_group_ids) ||
++      !ssl->config->client_hello_sigalgs.CopyFrom(ctx->client_hello_sigalgs) ||
++      !ssl->config->client_hello_cert_sigalgs.CopyFrom(
++          ctx->client_hello_cert_sigalgs) ||
+       !ssl->config->delegated_credentials.CopyFrom(ctx->delegated_credentials)) {
+     return nullptr;
+   }
+@@ -570,6 +574,7 @@ SSL *SSL_new(SSL_CTX *ctx) {
+   ssl->quic_method = ctx->quic_method;
+   ssl->config->record_size_limit = ctx->record_size_limit;
+   ssl->config->preserve_tls13_cipher_list = ctx->preserve_tls13_cipher_list;
++  ssl->config->tls13_ciphers_last = ctx->tls13_ciphers_last;
+ 
+   if (!ssl->method->ssl_new(ssl.get()) ||
+       !ssl->ctx->x509_method->ssl_new(ssl->s3->hs.get())) {
+@@ -1892,6 +1897,40 @@ int SSL_CTX_set1_group_ids(SSL_CTX *ctx, const uint16_t *group_ids,
+   return check_group_ids(span) && ctx->supported_group_list.CopyFrom(span);
+ }
+ 
++int SSL_CTX_set_client_hello_group_ids(SSL_CTX *ctx, const uint16_t *ids,
++                                     size_t num_ids) {
++  if (num_ids > 32766) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_UNSUPPORTED_ELLIPTIC_CURVE);
++    return 0;
++  }
++  const auto advertised = Span(ids, num_ids);
++  if (!check_no_duplicates(advertised)) {
++    return 0;
++  }
++  Array<uint16_t> wire, supported;
++  if (!wire.CopyFrom(advertised) || !supported.InitForOverwrite(num_ids)) {
++    return 0;
++  }
++  size_t count = 0;
++  for (uint16_t id : advertised) {
++    if (ssl_group_id_to_nid(id) != NID_undef) {
++      supported[count++] = id;
++    }
++  }
++  supported.Shrink(count);
++  if (advertised.empty()) {
++    if (!supported.CopyFrom(DefaultSupportedGroupIds())) {
++      return 0;
++    }
++  } else if (supported.empty()) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_UNSUPPORTED_ELLIPTIC_CURVE);
++    return 0;
++  }
++  ctx->supported_group_list = std::move(supported);
++  ctx->client_hello_group_ids = std::move(wire);
++  return 1;
++}
++
+ int SSL_set1_group_ids(SSL *ssl, const uint16_t *group_ids,
+                        size_t num_group_ids) {
+   if (!ssl->config) {
+@@ -2224,6 +2263,10 @@ void SSL_set_preserve_tls13_cipher_list(SSL *ssl, int preserve_tls13_cipher_list
+   ssl->config->preserve_tls13_cipher_list = !!preserve_tls13_cipher_list;
+ }
+ 
++void SSL_CTX_set_tls13_ciphers_last(SSL_CTX *ctx, int enabled) {
++  ctx->tls13_ciphers_last = !!enabled;
++}
++
+ void SSL_CTX_set_aes_hw_override(SSL_CTX *ctx, int override_value) {
+   if (!ctx) {
+     return;
+diff --git a/ssl/ssl_privkey.cc b/ssl/ssl_privkey.cc
+index 926d2c0..b060d43 100644
+--- a/ssl/ssl_privkey.cc
++++ b/ssl/ssl_privkey.cc
+@@ -920,6 +920,45 @@ int SSL_set_verify_algorithm_prefs(SSL *ssl, const uint16_t *prefs,
+   return set_sigalg_prefs(&ssl->config->verify_sigalgs, Span(prefs, num_prefs));
+ }
+ 
++int SSL_CTX_set_client_hello_sigalgs(SSL_CTX *ctx, const uint16_t *ids,
++                                   size_t num_ids) {
++  if (num_ids > 32766) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_INVALID_SIGNATURE_ALGORITHM);
++    return 0;
++  }
++  Array<uint16_t> wire, supported;
++  if (!wire.CopyFrom(Span(ids, num_ids)) ||
++      !supported.InitForOverwrite(num_ids)) {
++    return 0;
++  }
++  size_t count = 0;
++  for (uint16_t id : wire) {
++    if (id != SSL_SIGN_RSA_PKCS1_MD5_SHA1 &&
++        get_signature_algorithm(id) != nullptr) {
++      supported[count++] = id;
++    }
++  }
++  supported.Shrink(count);
++  if (num_ids != 0 && supported.empty()) {
++    // An empty verification list means defaults, not "reject everything".
++    OPENSSL_PUT_ERROR(SSL, SSL_R_INVALID_SIGNATURE_ALGORITHM);
++    return 0;
++  }
++  ctx->verify_sigalgs = std::move(supported);
++  ctx->client_hello_sigalgs = std::move(wire);
++  return 1;
++}
++
++int SSL_CTX_set_client_hello_cert_sigalgs(SSL_CTX *ctx, const uint16_t *ids,
++                                        size_t num_ids) {
++  if (num_ids > 32766) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_INVALID_SIGNATURE_ALGORITHM);
++    return 0;
++  }
++  // This is an advertisement, not a replacement certificate verifier.
++  return ctx->client_hello_cert_sigalgs.CopyFrom(Span(ids, num_ids));
++}
++
+ int SSL_CTX_set_delegated_credentials(SSL_CTX *ctx, const char *str) {
+    if (!ctx) {
+     OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+diff --git a/ssl/ssl_test.cc b/ssl/ssl_test.cc
+index 36a0cab..2f5ad4b 100644
+--- a/ssl/ssl_test.cc
++++ b/ssl/ssl_test.cc
+@@ -2567,6 +2567,117 @@ static bool GetECHLength(SSL_CTX *ctx, size_t *out_client_hello_len,
+   return true;
+ }
+ 
++TEST(SSLTest, ClientHelloAdvertisementsPreserveValidation) {
++  bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
++  ASSERT_TRUE(ctx);
++  SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_PEER, nullptr);
++  const uint16_t groups[] = {SSL_GROUP_X25519_MLKEM768, 0x11eb, 0x11ed,
++                            SSL_GROUP_X25519};
++  const uint16_t sigalgs[] = {0x0904, SSL_SIGN_ECDSA_SECP256R1_SHA256};
++  const uint16_t cert_sigalgs[] = {0x0904, SSL_SIGN_ECDSA_SECP256R1_SHA256,
++                                  SSL_SIGN_RSA_PKCS1_SHA1};
++  ASSERT_TRUE(SSL_CTX_set_client_hello_group_ids(ctx.get(), groups,
++                                                std::size(groups)));
++  ASSERT_TRUE(SSL_CTX_set_client_hello_sigalgs(ctx.get(), sigalgs,
++                                              std::size(sigalgs)));
++  ASSERT_TRUE(SSL_CTX_set_client_hello_cert_sigalgs(
++      ctx.get(), cert_sigalgs, std::size(cert_sigalgs)));
++  const uint16_t supported[] = {SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519};
++  const uint16_t verifiable[] = {SSL_SIGN_ECDSA_SECP256R1_SHA256};
++  EXPECT_THAT(ctx->supported_group_list, ElementsAreArray(supported));
++  EXPECT_THAT(ctx->verify_sigalgs, ElementsAreArray(verifiable));
++
++  const uint16_t unknown_group = 0x11eb, unknown_sigalg = 0x0904;
++  EXPECT_FALSE(SSL_CTX_set1_group_ids(ctx.get(), &unknown_group, 1));
++  ERR_clear_error();
++  EXPECT_FALSE(SSL_CTX_set_verify_algorithm_prefs(ctx.get(), &unknown_sigalg, 1));
++  ERR_clear_error();
++  EXPECT_FALSE(SSL_CTX_set_client_hello_group_ids(ctx.get(), &unknown_group, 1));
++  ERR_clear_error();
++  EXPECT_FALSE(SSL_CTX_set_client_hello_sigalgs(ctx.get(), &unknown_sigalg, 1));
++  ERR_clear_error();
++
++  const uint16_t order[] = {TLSEXT_TYPE_signature_algorithms_cert,
++                            TLSEXT_TYPE_signature_algorithms,
++                            TLSEXT_TYPE_supported_groups};
++  ASSERT_TRUE(SSL_CTX_set_extension_order(ctx.get(), order, std::size(order)));
++  SSL_CTX_set_permute_extensions(ctx.get(), 0);
++  bssl::UniquePtr<SSL> ssl(SSL_new(ctx.get()));
++  ASSERT_TRUE(ssl);
++  EXPECT_EQ(SSL_VERIFY_PEER, SSL_get_verify_mode(ssl.get()));
++  EXPECT_THAT(ssl->config->supported_group_list, ElementsAreArray(supported));
++  EXPECT_THAT(ssl->config->verify_sigalgs, ElementsAreArray(verifiable));
++  std::vector<uint8_t> hello;
++  ASSERT_TRUE(GetClientHello(ssl.get(), &hello));
++  SSL_CLIENT_HELLO parsed;
++  auto body = Span(hello).subspan(SSL3_RT_HEADER_LENGTH + SSL3_HM_HEADER_LENGTH);
++  ASSERT_TRUE(SSL_parse_client_hello(ssl.get(), &parsed, body.data(), body.size()));
++  auto expect_vector = [&](uint16_t type, Span<const uint16_t> expected) {
++    const uint8_t *data;
++    size_t len;
++    ASSERT_TRUE(SSL_early_callback_ctx_extension_get(&parsed, type, &data, &len));
++    CBS extension, values;
++    CBS_init(&extension, data, len);
++    ASSERT_TRUE(CBS_get_u16_length_prefixed(&extension, &values));
++    EXPECT_EQ(0u, CBS_len(&extension));
++    for (uint16_t expected_id : expected) {
++      uint16_t id;
++      ASSERT_TRUE(CBS_get_u16(&values, &id));
++      EXPECT_EQ(expected_id, id);
++    }
++    EXPECT_EQ(0u, CBS_len(&values));
++  };
++  expect_vector(TLSEXT_TYPE_supported_groups, groups);
++  expect_vector(TLSEXT_TYPE_signature_algorithms, sigalgs);
++  expect_vector(TLSEXT_TYPE_signature_algorithms_cert, cert_sigalgs);
++
++  CBS extensions;
++  CBS_init(&extensions, parsed.extensions, parsed.extensions_len);
++  for (uint16_t expected_type : order) {
++    uint16_t type;
++    CBS extension;
++    ASSERT_TRUE(CBS_get_u16(&extensions, &type));
++    ASSERT_TRUE(CBS_get_u16_length_prefixed(&extensions, &extension));
++    EXPECT_EQ(expected_type, type);
++  }
++  EXPECT_FALSE(tls1_check_group_id(ssl->s3->hs.get(), unknown_group));
++  bssl::UniquePtr<EVP_PKEY> key(EVP_PKEY_new());
++  ASSERT_TRUE(key);
++  uint8_t alert = 0;
++  EXPECT_FALSE(tls12_check_peer_sigalg(ssl->s3->hs.get(), &alert,
++                                      unknown_sigalg, key.get()));
++  EXPECT_EQ(SSL_AD_ILLEGAL_PARAMETER, alert);
++  ERR_clear_error();
++}
++
++TEST(SSLTest, ClientHelloTLS13CiphersLast) {
++  for (bool last : {false, true}) {
++    SCOPED_TRACE(last);
++    bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
++    ASSERT_TRUE(ctx);
++    SSL_CTX_set_preserve_tls13_cipher_list(ctx.get(), 1);
++    ASSERT_TRUE(SSL_CTX_set_cipher_list(
++        ctx.get(), "ECDHE-RSA-AES128-GCM-SHA256:TLS_AES_128_GCM_SHA256"));
++    SSL_CTX_set_tls13_ciphers_last(ctx.get(), last);
++    bssl::UniquePtr<SSL> ssl(SSL_new(ctx.get()));
++    ASSERT_TRUE(ssl);
++    std::vector<uint8_t> hello;
++    ASSERT_TRUE(GetClientHello(ssl.get(), &hello));
++    SSL_CLIENT_HELLO parsed;
++    auto body = Span(hello).subspan(SSL3_RT_HEADER_LENGTH + SSL3_HM_HEADER_LENGTH);
++    ASSERT_TRUE(
++        SSL_parse_client_hello(ssl.get(), &parsed, body.data(), body.size()));
++    CBS ciphers;
++    CBS_init(&ciphers, parsed.cipher_suites, parsed.cipher_suites_len);
++    uint16_t first, second;
++    ASSERT_TRUE(CBS_get_u16(&ciphers, &first));
++    ASSERT_TRUE(CBS_get_u16(&ciphers, &second));
++    EXPECT_EQ(last ? 0xc02f : 0x1301, first);
++    EXPECT_EQ(last ? 0x1301 : 0xc02f, second);
++    EXPECT_EQ(0u, CBS_len(&ciphers));
++  }
++}
++
+ TEST(SSLTest, ECHPadding) {
+   bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
+   ASSERT_TRUE(ctx);

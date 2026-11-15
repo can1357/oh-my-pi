@@ -7,11 +7,12 @@ import { buildAgyTransport } from "./build-agy-transport";
 /** Deterministic native resource overlays; no source-tree generated manifest. */
 export async function embeddedAgyTransportFiles(
 	target: NativeEmbedTarget,
+	runtimeTarget?: Bun.Build.CompileTarget,
 ): Promise<Record<string, string | Uint8Array>> {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agy-build-"));
 	try {
 		const filename = `agy-transport${target.platform === "win32" || target.platform === "windows" ? ".exe" : ""}`;
-		const executable = await buildAgyTransport({ ...target, out: path.join(directory, filename) });
+		const executable = await buildAgyTransport({ ...target, runtimeTarget, out: path.join(directory, filename) });
 		const bytes = await fs.readFile(executable);
 		const sha256 = Bun.SHA256.hash(bytes, "hex");
 		const frame = await Bun.zstdCompress(bytes, { level: 19 });

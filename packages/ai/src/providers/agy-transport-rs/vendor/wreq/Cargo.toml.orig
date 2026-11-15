@@ -1,0 +1,355 @@
+[package]
+name = "wreq"
+version = "0.16.3"
+description = "An ergonomic, privacy-aware Rust HTTP Client"
+keywords = ["http", "client", "websocket", "ja3", "ja4"]
+categories = ["web-programming::http-client"]
+repository = "https://github.com/0x676e67/wreq"
+documentation = "https://docs.rs/wreq"
+authors = ["0x676e67 <gngppz@gmail.com>"]
+readme = "README.md"
+license = "Apache-2.0"
+edition = "2024"
+rust-version = "1.98"
+include = ["/README.md", "/LICENSE", "/src/**/*.rs"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[features]
+default = ["webpki-roots", "tokio-rt"]
+
+# Enable tokio as the async runtime (default).
+tokio-rt = ["tokio/rt", "tokio/net", "tokio/fs", "wreq-rt/tokio-rt"]
+
+# Enable compio as the async runtime (completion-based, io_uring/IOCP).
+compio-rt = ["dep:compio", "compio?/runtime", "compio?/net", "wreq-rt/compio-rt"]
+
+# Enable support for decoding text.
+charset = ["dep:encoding_rs", "dep:mime"]
+
+# Enable cookies store support.
+cookies = ["dep:cookie"]
+
+# Enable gzip decompression support.
+gzip = ["dep:tower-http", "tower-http?/decompression-gzip"]
+
+# Enable brotli decompression support.
+brotli = ["dep:tower-http", "tower-http?/decompression-br"]
+
+# Enable zstd decompression support.
+zstd = ["dep:tower-http", "tower-http?/decompression-zstd"]
+
+# Enable deflate decompression support.
+deflate = ["dep:tower-http", "tower-http?/decompression-deflate"]
+
+# Enable URL query string serialization support.
+query = ["dep:serde", "dep:serde_html_form"]
+
+# Enable x-www-form-urlencoded form support.
+form = ["dep:serde", "dep:serde_html_form"]
+
+# Enable JSON support.
+json = ["dep:serde", "dep:serde_json"]
+
+# Enable multipart/form-data support.
+multipart = ["dep:mime_guess", "dep:sync_wrapper", "sync_wrapper?/futures"]
+
+# Enable hickory DNS resolver.
+hickory-dns = ["dep:hickory-resolver"]
+
+# Enable streaming support.
+stream = ["dep:tokio-util", "dep:sync_wrapper", "sync_wrapper?/futures"]
+
+# Enable SOCKS/4/5 proxy support.
+socks = ["dep:tokio-socks"]
+
+# Enable WebSocket support.
+ws = ["dep:tokio-tungstenite", "tokio-tungstenite?/handshake"]
+
+# Enable webpki-roots for TLS certificate validation.
+webpki-roots = ["dep:webpki-root-certs"]
+
+# Use the system's proxy configuration.
+system-proxy = ["dep:system-configuration", "dep:windows-registry"]
+
+# Enable tracing logging.
+tracing = ["dep:tracing", "wreq-proto/tracing"]
+
+# Enables the `parking_lot` crate for synchronization primitives.
+parking_lot = ["dep:parking_lot", "http2/parking_lot"]
+
+# Prefix BoringSSL symbols in libcrypto/libssl to avoid linker conflicts
+# when multiple OpenSSL versions coexist in the same process.
+prefix-symbols = ["btls/prefix-symbols"]
+
+[dependencies]
+url = "2.5.8"
+bytes = "1.11.1"
+http = "1.4.0"
+http2 = "0.5.17"
+httparse = "1.10.1"
+http-body = "1.0.1"
+http-body-util = "0.1.4"
+percent-encoding = "2.3.2"
+pin-project-lite = "0.2.17"
+futures-util = { version = "0.3.33", default-features = false }
+socket2 = { version = "0.6.3", features = ["all"] }
+ipnet = "2.12.0"
+lru = "0.19.0"
+btls = "0.5.6"
+btls-sys = "0.5.6"
+tokio-btls = "0.5.6"
+tokio = { version = "1.52.3", default-features = false }
+compio = { version = "0.19.2", features = ["io", "io-compat"], optional = true }
+wreq-rt = { version = "0.2.2-rc.2", default-features = false }
+wreq-proto = { version = "0.2.3", default-features = false }
+tower = { version = "0.5.3", default-features = false, features = [
+    "timeout",
+    "util",
+    "retry",
+] }
+
+# Optional deps...
+
+## serde
+serde = { version = "1.0", optional = true }
+serde_json = { version = "1.0", optional = true }
+serde_html_form = { version = "0.4.0", optional = true }
+
+## multipart
+mime_guess = { version = "2.0", default-features = false, optional = true }
+
+## charset
+encoding_rs = { version = "0.8", optional = true }
+mime = { version = "0.3.17", optional = true }
+
+## sync wrapper
+sync_wrapper = { version = "1.0.2", optional = true }
+
+## webpki root certs
+webpki-root-certs = { version = "1.0.7", optional = true }
+
+## cookies
+cookie = { version = "0.18", optional = true }
+
+## tower http
+tower-http = { version = "0.6.8", default-features = false, optional = true }
+
+## tokio socks
+tokio-socks = { version = "0.5.2", optional = true }
+
+## tokio websocket
+tokio-tungstenite = { version = "0.29.0", default-features = false, optional = true }
+
+## tokio util
+tokio-util = { version = "0.7.18", default-features = false, optional = true }
+
+## hickory-dns
+hickory-resolver = { version = "0.26.0", optional = true }
+
+## parking_lot
+parking_lot = { version = "0.12.5", optional = true }
+
+## tracing
+tracing = { version = "0.1", default-features = false, optional = true }
+
+## windows
+[target.'cfg(windows)'.dependencies]
+windows-registry = { version = "0.6.0", optional = true }
+
+## macOS
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = { version = "0.7.0", optional = true }
+
+## interface binding
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
+
+[dev-dependencies]
+wreq-rt = { version = "0.2.2-rc.1", features = ["tokio-rt", "compio-rt"] }
+tokio = { version = "1.0", default-features = false, features = [
+    "macros",
+    "rt-multi-thread",
+] }
+compio = { version = "0.19.2", features = ["macros", "net", "runtime", "time", "io", "io-compat"] }
+hyper = { version = "1.7.0", default-features = false, features = [
+    "http1",
+    "http2",
+    "server",
+] }
+hyper-util = { version = "0.1.20", features = [
+    "http1",
+    "http2",
+    "server-auto",
+    "server-graceful",
+    "tokio",
+] }
+serde = { version = "1.0", features = ["derive"] }
+futures = { version = "0.3.0", default-features = false, features = ["std"] }
+tower = { version = "0.5.2", default-features = false, features = ["limit"] }
+tokio-test = "0.4.5"
+tracing = "0.1"
+tracing-subscriber = "0.3.20"
+pretty_env_logger = "0.5"
+brotli = "8.0.2"
+flate2 = "1.1.9"
+zstd = "0.13.3"
+
+# for benchmarks
+sysinfo = { version = "0.39.1", default-features = false, features = ["system"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream", "http2"] }
+cyper = { version = "0.9.0",  default-features = false, features = ["rustls", "stream"] }
+
+[profile.release]
+codegen-units = 1
+incremental = false
+
+[profile.bench]
+codegen-units = 1
+incremental = false
+
+[[bench]]
+name = "http1"
+path = "bench/http1.rs"
+harness = false
+required-features = ["stream"]
+
+[[bench]]
+name = "http2"
+path = "bench/http2.rs"
+harness = false
+required-features = ["stream"]
+
+[[bench]]
+name = "http1_over_tls"
+path = "bench/http1_over_tls.rs"
+harness = false
+required-features = ["stream"]
+
+[[bench]]
+name = "http2_over_tls"
+path = "bench/http2_over_tls.rs"
+harness = false
+required-features = ["stream"]
+
+[[test]]
+name = "cookie"
+path = "tests/cookie.rs"
+required-features = ["cookies"]
+
+[[test]]
+name = "gzip"
+path = "tests/gzip.rs"
+required-features = ["gzip", "stream"]
+
+[[test]]
+name = "brotli"
+path = "tests/brotli.rs"
+required-features = ["brotli", "stream"]
+
+[[test]]
+name = "zstd"
+path = "tests/zstd.rs"
+required-features = ["zstd", "stream"]
+
+[[test]]
+name = "deflate"
+path = "tests/deflate.rs"
+required-features = ["deflate", "stream"]
+
+[[test]]
+name = "multipart"
+path = "tests/multipart.rs"
+required-features = ["multipart", "stream"]
+
+[[test]]
+name = "retry"
+path = "tests/retry.rs"
+
+[[test]]
+name = "websocket"
+path = "tests/websocket.rs"
+required-features = ["ws"]
+
+[[example]]
+name = "json_dynamic"
+path = "examples/json_dynamic.rs"
+required-features = ["json"]
+
+[[example]]
+name = "json_typed"
+path = "examples/json_typed.rs"
+required-features = ["json"]
+
+[[example]]
+name = "tor_socks"
+path = "examples/tor_socks.rs"
+required-features = ["socks"]
+
+[[example]]
+name = "form"
+path = "examples/form.rs"
+required-features = ["form"]
+
+[[example]]
+name = "connect_via_lower_priority_tokio_runtime"
+path = "examples/connect_via_lower_priority_tokio_runtime.rs"
+required-features = ["tracing"]
+
+[[example]]
+name = "emulate"
+path = "examples/emulate.rs"
+required-features = ["gzip", "brotli", "zstd", "deflate", "tracing"]
+
+[[example]]
+name = "cert_store"
+path = "examples/cert_store.rs"
+required-features = ["webpki-roots"]
+
+[[example]]
+name = "request_with_redirect"
+path = "examples/request_with_redirect.rs"
+
+[[example]]
+name = "request_with_version"
+path = "examples/request_with_version.rs"
+
+[[example]]
+name = "request_with_proxy"
+path = "examples/request_with_proxy.rs"
+required-features = ["socks"]
+
+[[example]]
+name = "request_with_emulate"
+path = "examples/request_with_emulate.rs"
+required-features = ["gzip", "brotli", "zstd", "deflate", "tracing"]
+
+[[example]]
+name = "request_with_local_address"
+path = "examples/request_with_local_address.rs"
+
+[[example]]
+name = "request_with_interface"
+path = "examples/request_with_interface.rs"
+
+[[example]]
+name = "http1_websocket"
+path = "examples/http1_websocket.rs"
+required-features = ["ws", "futures-util/std"]
+
+[[example]]
+name = "http2_websocket"
+path = "examples/http2_websocket.rs"
+required-features = ["ws", "futures-util/std"]
+
+[[example]]
+name = "keylog"
+path = "examples/keylog.rs"
+
+[[example]]
+name = "unix_socket"
+path = "examples/unix_socket.rs"

@@ -1,0 +1,717 @@
+Subject: [PATCH] Negotiate SecP256r1MLKEM768 and SecP384r1MLKEM1024
+
+Apply after boring-pq.patch, boringssl.patch, boringssl-loongarch.patch,
+boringssl-windows.patch, and agy-clienthello.patch, against BoringSSL
+91a66a59b6c1435120ff83e245d7719411294386. Default group preferences and
+ClientHello byte ordering are unchanged.
+
+Implement RFC 10024 sections 4.1-4.3 using the existing EC and FIPS 203
+ML-KEM primitives, not the draft Kyber construction. Both groups encode
+uncompressed ECDHE || ML-KEM in public shares and ciphertexts, and
+fixed-width ECDH x-coordinate || ML-KEM shared secret in the TLS key
+schedule. Register them as TLS-1.3-only groups so the existing generic
+HelloRetryRequest path generates fresh, real key shares. Wrong sizes,
+invalid EC points, and noncanonical ML-KEM public keys are rejected.
+Correct-length invalid ML-KEM ciphertexts retain constant-time implicit
+rejection and cannot complete TLS record authentication.
+
+The EC helper writes into the final hybrid secret allocation; the ML-KEM
+output goes directly into CBB storage. No extra per-component secret
+allocation, cryptographic implementation, or production RNG override.
+NIDs 972/973 remain reserved by the existing fork's FFDHE definitions;
+the object table preserves their previous unregistered status.
+
+Native SSL tests pin each server's only group, force both initial-share
+and HRR handshakes, exchange application data, compare both directions
+against primitive-level fixed-seed/scalar-one peers, reject malformed
+shares, and exercise implicit rejection plus tampered TLS ciphertext.
+The normal cryptographic RNG remains active in production code. These
+are deterministic test scenarios, not deterministic production keypairs.
+
+References:
+https://www.rfc-editor.org/rfc/rfc10024#section-4
+https://go.dev/src/crypto/tls/key_schedule.go (hybridKeyExchange)
+
+Parent verification (not executed by this patch author):
+  cmake --build <native-build> --target ssl_test crypto_test
+  <native-build>/ssl_test --gtest_filter='NISTCurves/SSLHybridGroupTest.*:SSLTest.CurveRules:SSLTest.DefaultCurves:SSLTest.ClientHelloAdvertisementsPreserveValidation'
+  <native-build>/ssl_test
+  <native-build>/crypto_test --gtest_filter='ObjTest.*:MLKEMTest.*'
+Then run the Go group-only interop matrix, including HRR, against the
+Rust transport before any production cutover.
+
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2585,3 +2585,7 @@
+ #define SSL_GROUP_X25519 29
++// RFC 10024 hybrid groups (TLS 1.3 only). The NIST-curve groups encode
++// uncompressed ECDHE first, then ML-KEM, in both shares and shared secrets.
++#define SSL_GROUP_SECP256R1_MLKEM768 0x11eb
+ #define SSL_GROUP_X25519_MLKEM768 0x11ec
++#define SSL_GROUP_SECP384R1_MLKEM1024 0x11ed
+ #define SSL_GROUP_X25519_KYBER768_DRAFT00 0x6399
+diff --git a/include/openssl/nid.h b/include/openssl/nid.h
+--- a/include/openssl/nid.h
++++ b/include/openssl/nid.h
+@@ -5519,2 +5519,8 @@
+ 
++#define SN_SecP256r1MLKEM768 "SecP256r1MLKEM768"
++#define NID_SecP256r1MLKEM768 974
++
++#define SN_SecP384r1MLKEM1024 "SecP384r1MLKEM1024"
++#define NID_SecP384r1MLKEM1024 975
++
+ #if defined(__cplusplus)
+diff --git a/crypto/obj/obj_dat.h b/crypto/obj/obj_dat.h
+--- a/crypto/obj/obj_dat.h
++++ b/crypto/obj/obj_dat.h
+@@ -17,3 +17,3 @@
+ 
+-#define NUM_NID 972
++#define NUM_NID 976
+ 
+@@ -8803,2 +8803,8 @@
+      NULL, 0},
++    {NULL, NULL, NID_undef, 0, NULL, 0},
++    {NULL, NULL, NID_undef, 0, NULL, 0},
++    {"SecP256r1MLKEM768", "SecP256r1MLKEM768", NID_SecP256r1MLKEM768, 0, NULL,
++     0},
++    {"SecP384r1MLKEM1024", "SecP384r1MLKEM1024", NID_SecP384r1MLKEM1024, 0,
++     NULL, 0},
+ };
+@@ -8999,2 +9005,4 @@
+     143 /* SXNetID */,
++    974 /* SecP256r1MLKEM768 */,
++    975 /* SecP384r1MLKEM1024 */,
+     458 /* UID */,
+@@ -9874,2 +9882,4 @@
+     387 /* SNMPv2 */,
++    974 /* SecP256r1MLKEM768 */,
++    975 /* SecP384r1MLKEM1024 */,
+     512 /* Secure Electronic Transactions */,
+diff --git a/crypto/obj/obj_mac.num b/crypto/obj/obj_mac.num
+--- a/crypto/obj/obj_mac.num
++++ b/crypto/obj/obj_mac.num
+@@ -961 +961,3 @@
+ P256Kyber768Draft00		971
++SecP256r1MLKEM768		974
++SecP384r1MLKEM1024		975
+diff --git a/crypto/obj/objects.txt b/crypto/obj/objects.txt
+--- a/crypto/obj/objects.txt
++++ b/crypto/obj/objects.txt
+@@ -1344,2 +1344,4 @@
+  : X25519MLKEM768
++ : SecP256r1MLKEM768
++ : SecP384r1MLKEM1024
+ 
+diff --git a/ssl/internal.h b/ssl/internal.h
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -965,3 +965,3 @@
+ // kNumNamedGroups is the number of supported groups.
+-constexpr size_t kNumNamedGroups = 10u;
++constexpr size_t kNumNamedGroups = 12u;
+ 
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -105,2 +105,4 @@
+     case SSL_GROUP_X25519_MLKEM768:
++    case SSL_GROUP_SECP256R1_MLKEM768:
++    case SSL_GROUP_SECP384R1_MLKEM1024:
+     case SSL_GROUP_MLKEM1024:
+diff --git a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -20,2 +20,3 @@
+ #include <iterator>
++#include <type_traits>
+ #include <utility>
+@@ -81,4 +82,19 @@
+              Span<const uint8_t> ciphertext) override {
++    *out_alert = SSL_AD_INTERNAL_ERROR;
++    Array<uint8_t> secret;
++    if (!secret.InitForOverwrite((EC_GROUP_get_degree(group_) + 7) / 8) ||
++        !DecapTo(MakeSpan(secret), out_alert, ciphertext)) {
++      return false;
++    }
++    *out_secret = std::move(secret);
++    return true;
++  }
++
++  // Write directly into the classical part of a hybrid secret, without an
++  // intermediate allocation or copy. The caller supplies one field element.
++  bool DecapTo(Span<uint8_t> secret, uint8_t *out_alert,
++               Span<const uint8_t> ciphertext) {
+     assert(group_);
+     assert(private_key_);
++    assert(secret.size() == size_t((EC_GROUP_get_degree(group_) + 7) / 8));
+     *out_alert = SSL_AD_INTERNAL_ERROR;
+@@ -109,10 +125,3 @@
+     // Encode the x-coordinate left-padded with zeros.
+-    Array<uint8_t> secret;
+-    if (!secret.InitForOverwrite((EC_GROUP_get_degree(group_) + 7) / 8) ||
+-        !BN_bn2bin_padded(secret.data(), secret.size(), x.get())) {
+-      return false;
+-    }
+-
+-    *out_secret = std::move(secret);
+-    return true;
++    return BN_bn2bin_padded(secret.data(), secret.size(), x.get());
+   }
+@@ -540,2 +549,131 @@
+ 
++// RFC 10024, sections 4.1-4.3. Unlike X25519MLKEM768, these two
++// groups put ECDHE first in the client share, server share, and shared secret.
++// P-256: 65 + 1184 byte client, 65 + 1088 byte server, 32 + 32 byte secret.
++// P-384: 97 + 1568 byte client, 97 + 1568 byte server, 48 + 32 byte secret.
++// The existing TLS 1.3 key schedule consumes the concatenated secret unchanged.
++template <uint16_t kGroupID>
++class ECMLKEMKeyShare : public SSLKeyShare {
++  static_assert(kGroupID == SSL_GROUP_SECP256R1_MLKEM768 ||
++                kGroupID == SSL_GROUP_SECP384R1_MLKEM1024);
++  static constexpr bool kIsP384 = kGroupID == SSL_GROUP_SECP384R1_MLKEM1024;
++  static constexpr size_t kECSecretBytes = kIsP384 ? 48 : 32;
++  static constexpr size_t kECShareBytes = 1 + 2 * kECSecretBytes;
++  static constexpr size_t kPublicKeyBytes =
++      kIsP384 ? MLKEM1024_PUBLIC_KEY_BYTES : MLKEM768_PUBLIC_KEY_BYTES;
++  static constexpr size_t kCiphertextBytes =
++      kIsP384 ? MLKEM1024_CIPHERTEXT_BYTES : MLKEM768_CIPHERTEXT_BYTES;
++  using PublicKey =
++      std::conditional_t<kIsP384, MLKEM1024_public_key, MLKEM768_public_key>;
++  using PrivateKey =
++      std::conditional_t<kIsP384, MLKEM1024_private_key, MLKEM768_private_key>;
++
++ public:
++  ECMLKEMKeyShare()
++      : ecdh_(kIsP384 ? EC_group_p384() : EC_group_p256(),
++              kIsP384 ? SSL_GROUP_SECP384R1 : SSL_GROUP_SECP256R1) {}
++
++  uint16_t GroupID() const override { return kGroupID; }
++
++  bool Generate(CBB *out) override {
++    uint8_t *public_key;
++    if (!ecdh_.Generate(out) ||
++        !CBB_add_space(out, &public_key, kPublicKeyBytes)) {
++      return false;
++    }
++    if constexpr (kIsP384) {
++      MLKEM1024_generate_key(public_key, /*optional_out_seed=*/nullptr,
++                             &private_key_);
++    } else {
++      MLKEM768_generate_key(public_key, /*optional_out_seed=*/nullptr,
++                            &private_key_);
++    }
++    return true;
++  }
++
++  bool Encap(CBB *out_ciphertext, Array<uint8_t> *out_secret,
++             uint8_t *out_alert, Span<const uint8_t> peer_key) override {
++    *out_alert = SSL_AD_INTERNAL_ERROR;
++    if (peer_key.size() != kECShareBytes + kPublicKeyBytes) {
++      *out_alert = SSL_AD_ILLEGAL_PARAMETER;
++      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
++      return false;
++    }
++
++    PublicKey public_key;
++    CBS public_key_cbs;
++    CBS_init(&public_key_cbs, peer_key.data() + kECShareBytes, kPublicKeyBytes);
++    int ok;
++    if constexpr (kIsP384) {
++      ok = MLKEM1024_parse_public_key(&public_key, &public_key_cbs);
++    } else {
++      ok = MLKEM768_parse_public_key(&public_key, &public_key_cbs);
++    }
++    // Parsing includes the FIPS 203 encapsulation-key modulus check.
++    if (!ok) {
++      *out_alert = SSL_AD_ILLEGAL_PARAMETER;
++      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
++      return false;
++    }
++
++    Array<uint8_t> secret;
++    uint8_t *ciphertext;
++    if (!secret.InitForOverwrite(kECSecretBytes + MLKEM_SHARED_SECRET_BYTES) ||
++        !ecdh_.Generate(out_ciphertext) ||
++        !ecdh_.DecapTo(MakeSpan(secret).first(kECSecretBytes), out_alert,
++                      peer_key.first(kECShareBytes)) ||
++        !CBB_add_space(out_ciphertext, &ciphertext, kCiphertextBytes)) {
++      return false;
++    }
++    if constexpr (kIsP384) {
++      MLKEM1024_encap(ciphertext, secret.data() + kECSecretBytes, &public_key);
++    } else {
++      MLKEM768_encap(ciphertext, secret.data() + kECSecretBytes, &public_key);
++    }
++    *out_secret = std::move(secret);
++    return true;
++  }
++
++  bool Decap(Array<uint8_t> *out_secret, uint8_t *out_alert,
++             Span<const uint8_t> ciphertext) override {
++    *out_alert = SSL_AD_INTERNAL_ERROR;
++    if (ciphertext.size() != kECShareBytes + kCiphertextBytes) {
++      *out_alert = SSL_AD_ILLEGAL_PARAMETER;
++      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
++      return false;
++    }
++
++    Array<uint8_t> secret;
++    if (!secret.InitForOverwrite(kECSecretBytes + MLKEM_SHARED_SECRET_BYTES) ||
++        !ecdh_.DecapTo(MakeSpan(secret).first(kECSecretBytes), out_alert,
++                      ciphertext.first(kECShareBytes))) {
++      return false;
++    }
++    int ok;
++    if constexpr (kIsP384) {
++      ok = MLKEM1024_decap(secret.data() + kECSecretBytes,
++                           ciphertext.data() + kECShareBytes, kCiphertextBytes,
++                           &private_key_);
++    } else {
++      ok = MLKEM768_decap(secret.data() + kECSecretBytes,
++                          ciphertext.data() + kECShareBytes, kCiphertextBytes,
++                          &private_key_);
++    }
++    // ML-KEM implicitly rejects invalid, correctly-sized ciphertexts with an
++    // unrelated secret. TLS's authenticated records detect this; do not add a
++    // decapsulation oracle. Lengths were checked above, so other failures are
++    // internal errors, as required by RFC 10024 section 4.2.
++    if (!ok) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++      return false;
++    }
++    *out_secret = std::move(secret);
++    return true;
++  }
++
++ private:
++  ECKeyShare ecdh_;
++  PrivateKey private_key_;
++};
++
+ constexpr NamedGroup kNamedGroups[] = {
+@@ -548,2 +686,6 @@
+     {NID_X25519MLKEM768, SSL_GROUP_X25519_MLKEM768, "X25519MLKEM768", ""},
++    {NID_SecP256r1MLKEM768, SSL_GROUP_SECP256R1_MLKEM768,
++     "SecP256r1MLKEM768", ""},
++    {NID_SecP384r1MLKEM1024, SSL_GROUP_SECP384R1_MLKEM1024,
++     "SecP384r1MLKEM1024", ""},
+     {NID_ML_KEM_1024, SSL_GROUP_MLKEM1024, "MLKEM1024", ""},
+@@ -587,2 +729,6 @@
+       return MakeUnique<X25519MLKEM768KeyShare>();
++    case SSL_GROUP_SECP256R1_MLKEM768:
++      return MakeUnique<ECMLKEMKeyShare<SSL_GROUP_SECP256R1_MLKEM768>>();
++    case SSL_GROUP_SECP384R1_MLKEM1024:
++      return MakeUnique<ECMLKEMKeyShare<SSL_GROUP_SECP384R1_MLKEM1024>>();
+     case SSL_GROUP_MLKEM1024:
+diff --git a/ssl/ssl_test.cc b/ssl/ssl_test.cc
+--- a/ssl/ssl_test.cc
++++ b/ssl/ssl_test.cc
+@@ -32,2 +32,3 @@
+ #include <openssl/bio.h>
++#include <openssl/bn.h>
+ #include <openssl/bytestring.h>
+@@ -36,2 +37,3 @@
+ #include <openssl/curve25519.h>
++#include <openssl/ec.h>
+ #include <openssl/err.h>
+@@ -40,1 +42,3 @@
++#include <openssl/mlkem.h>
++#include <openssl/obj.h>
+ #include <openssl/pem.h>
+@@ -45,2 +49,3 @@
+ 
++#include "../crypto/fipsmodule/bcm_interface.h"
+ #include "../crypto/internal.h"
+@@ -509,2 +514,6 @@
+     {
++        "SecP256r1MLKEM768:SecP384r1MLKEM1024",
++        {SSL_GROUP_SECP256R1_MLKEM768, SSL_GROUP_SECP384R1_MLKEM1024},
++    },
++    {
+         "P256Kyber768Draft00",
+@@ -2026,2 +2035,382 @@
+ 
++// The server accepts exactly one hybrid group. All I/O stays in memory, and
++// initial shares are explicit, so the selected group and HRR expectations do
++// not depend on defaults, scheduling, or external servers. Production key
++// generation still uses the normal cryptographic RNG.
++class SSLHybridGroupTest : public ::testing::TestWithParam<uint16_t> {
++ protected:
++  bool IsP384() const { return GetParam() == SSL_GROUP_SECP384R1_MLKEM1024; }
++  const EC_GROUP *Curve() const {
++    return IsP384() ? EC_group_p384() : EC_group_p256();
++  }
++  size_t ECSecretBytes() const { return IsP384() ? 48 : 32; }
++  size_t ECShareBytes() const { return 1 + 2 * ECSecretBytes(); }
++  size_t PublicKeyBytes() const {
++    return ECShareBytes() +
++           (IsP384() ? MLKEM1024_PUBLIC_KEY_BYTES : MLKEM768_PUBLIC_KEY_BYTES);
++  }
++  size_t CiphertextBytes() const {
++    return ECShareBytes() +
++           (IsP384() ? MLKEM1024_CIPHERTEXT_BYTES : MLKEM768_CIPHERTEXT_BYTES);
++  }
++
++  void SetUp() override {
++    client_ctx_.reset(SSL_CTX_new(TLS_method()));
++    server_ctx_.reset(SSL_CTX_new(TLS_method()));
++    ASSERT_TRUE(client_ctx_);
++    ASSERT_TRUE(server_ctx_);
++    for (SSL_CTX *ctx : {client_ctx_.get(), server_ctx_.get()}) {
++      ASSERT_TRUE(SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION));
++      ASSERT_TRUE(SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION));
++    }
++    auto cert = GetTestCertificate();
++    auto key = GetTestKey();
++    ASSERT_TRUE(cert);
++    ASSERT_TRUE(key);
++    ASSERT_TRUE(SSL_CTX_use_certificate(server_ctx_.get(), cert.get()));
++    ASSERT_TRUE(SSL_CTX_use_PrivateKey(server_ctx_.get(), key.get()));
++    const uint16_t group = GetParam();
++    ASSERT_TRUE(SSL_CTX_set1_group_ids(server_ctx_.get(), &group, 1));
++    const uint16_t groups[] = {
++        SSL_GROUP_X25519_MLKEM768, SSL_GROUP_SECP256R1_MLKEM768,
++        SSL_GROUP_SECP384R1_MLKEM1024, SSL_GROUP_X25519, SSL_GROUP_SECP256R1,
++        SSL_GROUP_SECP384R1, SSL_GROUP_SECP521R1};
++    ASSERT_TRUE(SSL_CTX_set_client_hello_group_ids(client_ctx_.get(), groups,
++                                                  std::size(groups)));
++  }
++
++  UniquePtr<SSL_CTX> client_ctx_, server_ctx_;
++};
++
++INSTANTIATE_TEST_SUITE_P(
++    NISTCurves, SSLHybridGroupTest,
++    ::testing::Values(SSL_GROUP_SECP256R1_MLKEM768,
++                      SSL_GROUP_SECP384R1_MLKEM1024));
++
++TEST_P(SSLHybridGroupTest, NegotiatesSelectedGroupAndHelloRetryRequest) {
++  for (bool retry : {false, true}) {
++    SCOPED_TRACE(retry);
++    UniquePtr<SSL> client, server;
++    ASSERT_TRUE(CreateClientAndServer(&client, &server, client_ctx_.get(),
++                                      server_ctx_.get()));
++    const uint16_t group = GetParam();
++    const uint16_t initial[] = {SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519};
++    ASSERT_TRUE(SSL_set1_client_key_shares(
++        client.get(), retry ? initial : &group, retry ? std::size(initial) : 1));
++    ASSERT_TRUE(CompleteHandshakes(client.get(), server.get()));
++    EXPECT_EQ(SSL_get_group_id(client.get()), group);
++    EXPECT_EQ(SSL_get_group_id(server.get()), group);
++    EXPECT_EQ(client->s3->used_hello_retry_request, retry);
++    EXPECT_EQ(server->s3->used_hello_retry_request, retry);
++    EXPECT_EQ(SSL_get_negotiated_group(client.get()),
++              IsP384() ? NID_SecP384r1MLKEM1024 : NID_SecP256r1MLKEM768);
++
++    static const uint8_t message[] = {1, 2, 3, 4};
++    uint8_t received[sizeof(message)];
++    ASSERT_EQ(SSL_write(client.get(), message, sizeof(message)),
++              int(sizeof(message)));
++    ASSERT_EQ(SSL_read(server.get(), received, sizeof(received)),
++              int(sizeof(received)));
++    EXPECT_EQ(Bytes(received), Bytes(message));
++    ASSERT_EQ(SSL_write(server.get(), message, sizeof(message)),
++              int(sizeof(message)));
++    ASSERT_EQ(SSL_read(client.get(), received, sizeof(received)),
++              int(sizeof(received)));
++    EXPECT_EQ(Bytes(received), Bytes(message));
++  }
++}
++
++TEST_P(SSLHybridGroupTest, TLS12RejectsHybridGroups) {
++  for (SSL_CTX *ctx : {client_ctx_.get(), server_ctx_.get()}) {
++    ASSERT_TRUE(SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION));
++    ASSERT_TRUE(SSL_CTX_set_max_proto_version(ctx, TLS1_2_VERSION));
++    // A static-RSA fallback would not exercise group selection at all.
++    ASSERT_TRUE(SSL_CTX_set_strict_cipher_list(
++        ctx, "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256"));
++  }
++  UniquePtr<SSL> client, server;
++  ASSERT_TRUE(CreateClientAndServer(&client, &server, client_ctx_.get(),
++                                    server_ctx_.get()));
++  EXPECT_FALSE(CompleteHandshakes(client.get(), server.get()));
++  EXPECT_FALSE(SSL_is_init_finished(client.get()));
++  EXPECT_FALSE(SSL_is_init_finished(server.get()));
++  ERR_clear_error();
++}
++
++TEST_P(SSLHybridGroupTest, WireAndSecretEncoding) {
++  // Independent primitive-level peers use the fixed EC scalar one and fixed
++  // ML-KEM seed/encapsulation entropy. In particular, two implementations with
++  // the same accidental concatenation reversal cannot make this test pass.
++  const char *name = IsP384() ? "SecP384r1MLKEM1024" : "SecP256r1MLKEM768";
++  const int nid = IsP384() ? NID_SecP384r1MLKEM1024 : NID_SecP256r1MLKEM768;
++  EXPECT_STREQ(SSL_get_group_name(GetParam()), name);
++  EXPECT_EQ(OBJ_sn2nid(name), nid);
++  EXPECT_EQ(OBJ_ln2nid(name), nid);
++  EXPECT_STREQ(OBJ_nid2sn(nid), name);
++
++  uint8_t seed[MLKEM_SEED_BYTES], entropy[BCM_MLKEM_ENCAP_ENTROPY];
++  for (size_t i = 0; i < sizeof(seed); i++) {
++    seed[i] = static_cast<uint8_t>(i);
++  }
++  for (size_t i = 0; i < sizeof(entropy); i++) {
++    entropy[i] = static_cast<uint8_t>(0xa0 + i);
++  }
++  union {
++    MLKEM768_private_key p768;
++    MLKEM1024_private_key p1024;
++  } peer_private;
++  ScopedCBB peer_public;
++  ASSERT_TRUE(CBB_init(peer_public.get(), PublicKeyBytes()));
++  ASSERT_TRUE(EC_POINT_point2cbb(peer_public.get(), Curve(),
++                                EC_GROUP_get0_generator(Curve()),
++                                POINT_CONVERSION_UNCOMPRESSED, nullptr));
++  uint8_t *encoded_public;
++  ASSERT_TRUE(CBB_add_space(peer_public.get(), &encoded_public,
++                            PublicKeyBytes() - ECShareBytes()));
++  if (IsP384()) {
++    BCM_mlkem1024_generate_key_external_seed(encoded_public,
++                                             &peer_private.p1024, seed);
++  } else {
++    BCM_mlkem768_generate_key_external_seed(encoded_public,
++                                            &peer_private.p768, seed);
++  }
++
++  auto server = SSLKeyShare::Create(GetParam());
++  ASSERT_TRUE(server);
++  EXPECT_EQ(server->GroupID(), GetParam());
++  ScopedCBB server_ciphertext;
++  ASSERT_TRUE(CBB_init(server_ciphertext.get(), CiphertextBytes()));
++  Array<uint8_t> server_secret;
++  uint8_t alert = 0;
++  ASSERT_TRUE(server->Encap(server_ciphertext.get(), &server_secret, &alert,
++                           Span(CBB_data(peer_public.get()),
++                                CBB_len(peer_public.get()))));
++  const auto ciphertext = Span(CBB_data(server_ciphertext.get()),
++                               CBB_len(server_ciphertext.get()));
++  ASSERT_EQ(ciphertext.size(), CiphertextBytes());
++  ASSERT_EQ(server_secret.size(), ECSecretBytes() + MLKEM_SHARED_SECRET_BYTES);
++  ASSERT_EQ(ciphertext[0], POINT_CONVERSION_UNCOMPRESSED);
++  // With scalar one, ECDH is exactly the peer public point's x-coordinate.
++  EXPECT_EQ(Bytes(MakeConstSpan(server_secret).first(ECSecretBytes())),
++            Bytes(ciphertext.subspan(1, ECSecretBytes())));
++  uint8_t mlkem_secret[MLKEM_SHARED_SECRET_BYTES];
++  if (IsP384()) {
++    ASSERT_TRUE(MLKEM1024_decap(mlkem_secret,
++                              ciphertext.data() + ECShareBytes(),
++                              MLKEM1024_CIPHERTEXT_BYTES,
++                              &peer_private.p1024));
++  } else {
++    ASSERT_TRUE(MLKEM768_decap(mlkem_secret,
++                             ciphertext.data() + ECShareBytes(),
++                             MLKEM768_CIPHERTEXT_BYTES, &peer_private.p768));
++  }
++  EXPECT_EQ(Bytes(MakeConstSpan(server_secret).subspan(ECSecretBytes())),
++            Bytes(mlkem_secret));
++
++  auto client = SSLKeyShare::Create(GetParam());
++  ASSERT_TRUE(client);
++  ScopedCBB client_public, peer_ciphertext;
++  ASSERT_TRUE(CBB_init(client_public.get(), PublicKeyBytes()));
++  ASSERT_TRUE(client->Generate(client_public.get()));
++  const auto public_key = Span(CBB_data(client_public.get()),
++                               CBB_len(client_public.get()));
++  ASSERT_EQ(public_key.size(), PublicKeyBytes());
++  ASSERT_EQ(public_key[0], POINT_CONVERSION_UNCOMPRESSED);
++  ASSERT_TRUE(CBB_init(peer_ciphertext.get(), CiphertextBytes()));
++  ASSERT_TRUE(EC_POINT_point2cbb(peer_ciphertext.get(), Curve(),
++                                EC_GROUP_get0_generator(Curve()),
++                                POINT_CONVERSION_UNCOMPRESSED, nullptr));
++  uint8_t *encoded_ciphertext;
++  ASSERT_TRUE(CBB_add_space(peer_ciphertext.get(), &encoded_ciphertext,
++                            CiphertextBytes() - ECShareBytes()));
++  CBS mlkem_public;
++  CBS_init(&mlkem_public, public_key.data() + ECShareBytes(),
++           public_key.size() - ECShareBytes());
++  if (IsP384()) {
++    MLKEM1024_public_key peer_key;
++    ASSERT_TRUE(MLKEM1024_parse_public_key(&peer_key, &mlkem_public));
++    BCM_mlkem1024_encap_external_entropy(encoded_ciphertext, mlkem_secret,
++                                         &peer_key, entropy);
++  } else {
++    MLKEM768_public_key peer_key;
++    ASSERT_TRUE(MLKEM768_parse_public_key(&peer_key, &mlkem_public));
++    BCM_mlkem768_encap_external_entropy(encoded_ciphertext, mlkem_secret,
++                                        &peer_key, entropy);
++  }
++  Array<uint8_t> client_secret;
++  ASSERT_TRUE(client->Decap(&client_secret, &alert,
++                           Span(CBB_data(peer_ciphertext.get()),
++                                CBB_len(peer_ciphertext.get()))));
++  ASSERT_EQ(client_secret.size(), ECSecretBytes() + MLKEM_SHARED_SECRET_BYTES);
++  EXPECT_EQ(Bytes(MakeConstSpan(client_secret).first(ECSecretBytes())),
++            Bytes(public_key.subspan(1, ECSecretBytes())));
++  EXPECT_EQ(Bytes(MakeConstSpan(client_secret).subspan(ECSecretBytes())),
++            Bytes(mlkem_secret));
++}
++
++TEST_P(SSLHybridGroupTest, RejectsMalformedShares) {
++  auto client = SSLKeyShare::Create(GetParam());
++  auto server = SSLKeyShare::Create(GetParam());
++  ASSERT_TRUE(client);
++  ASSERT_TRUE(server);
++  ScopedCBB public_key, ciphertext;
++  ASSERT_TRUE(CBB_init(public_key.get(), PublicKeyBytes()));
++  ASSERT_TRUE(CBB_init(ciphertext.get(), CiphertextBytes()));
++  ASSERT_TRUE(client->Generate(public_key.get()));
++  const auto public_bytes = Span(CBB_data(public_key.get()),
++                                 CBB_len(public_key.get()));
++  Array<uint8_t> server_secret;
++  uint8_t alert = 0;
++  ASSERT_TRUE(server->Encap(ciphertext.get(), &server_secret, &alert,
++                           public_bytes));
++  const auto ciphertext_bytes = Span(CBB_data(ciphertext.get()),
++                                     CBB_len(ciphertext.get()));
++  ASSERT_EQ(public_bytes.size(), PublicKeyBytes());
++  ASSERT_EQ(ciphertext_bytes.size(), CiphertextBytes());
++
++  for (int mutation = 0; mutation < 7; mutation++) {
++    SCOPED_TRACE(mutation);
++    std::vector<uint8_t> bad(public_bytes.begin(), public_bytes.end());
++    switch (mutation) {
++      case 0: bad.clear(); break;
++      case 1: bad.pop_back(); break;
++      case 2: bad.push_back(0); break;
++      case 3: bad[0] = 0; break;  // Infinity is not a valid TLS EC point.
++      case 4: bad[0] = 2; break;  // Compressed points are not allowed.
++      case 5:
++        // The all-zero affine point is off-curve for both NIST curves.
++        std::fill(bad.begin() + 1, bad.begin() + ECShareBytes(), 0);
++        break;
++      case 6:
++        // An encoded ML-KEM coefficient of 4095 fails the modulus check.
++        bad[ECShareBytes()] = 0xff;
++        bad[ECShareBytes() + 1] |= 0x0f;
++        break;
++    }
++    auto rejecting_server = SSLKeyShare::Create(GetParam());
++    ASSERT_TRUE(rejecting_server);
++    ScopedCBB ignored_ciphertext;
++    ASSERT_TRUE(CBB_init(ignored_ciphertext.get(), 0));
++    Array<uint8_t> ignored_secret;
++    alert = 0;
++    EXPECT_FALSE(rejecting_server->Encap(ignored_ciphertext.get(),
++                                         &ignored_secret, &alert, bad));
++    EXPECT_EQ(alert, SSL_AD_ILLEGAL_PARAMETER);
++    ERR_clear_error();
++  }
++
++  for (int mutation = 0; mutation < 6; mutation++) {
++    SCOPED_TRACE(mutation);
++    std::vector<uint8_t> bad(ciphertext_bytes.begin(), ciphertext_bytes.end());
++    switch (mutation) {
++      case 0: bad.clear(); break;
++      case 1: bad.pop_back(); break;
++      case 2: bad.push_back(0); break;
++      case 3: bad[0] = 0; break;
++      case 4: bad[0] = 2; break;
++      case 5:
++        std::fill(bad.begin() + 1, bad.begin() + ECShareBytes(), 0);
++        break;
++    }
++    Array<uint8_t> ignored_secret;
++    alert = 0;
++    EXPECT_FALSE(client->Decap(&ignored_secret, &alert, bad));
++    EXPECT_EQ(alert, SSL_AD_ILLEGAL_PARAMETER);
++    ERR_clear_error();
++  }
++
++  // Correct-length invalid ML-KEM ciphertexts must NOT expose a failure oracle.
++  // They implicitly reject to a deterministic, unrelated KEM secret instead.
++  std::vector<uint8_t> bad(ciphertext_bytes.begin(), ciphertext_bytes.end());
++  bad[ECShareBytes()] ^= 0x80;
++  Array<uint8_t> rejected, repeated;
++  ASSERT_TRUE(client->Decap(&rejected, &alert, bad));
++  ASSERT_TRUE(client->Decap(&repeated, &alert, bad));
++  ASSERT_EQ(rejected.size(), server_secret.size());
++  EXPECT_EQ(Bytes(rejected), Bytes(repeated));
++  EXPECT_EQ(Bytes(MakeConstSpan(rejected).first(ECSecretBytes())),
++            Bytes(MakeConstSpan(server_secret).first(ECSecretBytes())));
++  EXPECT_NE(Bytes(MakeConstSpan(rejected).subspan(ECSecretBytes())),
++            Bytes(MakeConstSpan(server_secret).subspan(ECSecretBytes())));
++}
++
++// Locate the server's key_share in an unencrypted ServerHello and change only
++// its ML-KEM ciphertext. All TLS lengths, group IDs, and EC points stay valid.
++static bool CorruptHybridServerCiphertext(Span<uint8_t> flight, uint16_t group,
++                                         size_t ec_share_bytes) {
++  CBS records;
++  CBS_init(&records, flight.data(), flight.size());
++  while (CBS_len(&records) != 0) {
++    uint8_t type;
++    uint16_t version;
++    CBS record;
++    if (!CBS_get_u8(&records, &type) || !CBS_get_u16(&records, &version) ||
++        !CBS_get_u16_length_prefixed(&records, &record)) {
++      return false;
++    }
++    if (type != SSL3_RT_HANDSHAKE) {
++      continue;
++    }
++    CBS hello, session_id, extensions;
++    if (!CBS_get_u8(&record, &type) || type != SSL3_MT_SERVER_HELLO ||
++        !CBS_get_u24_length_prefixed(&record, &hello) ||
++        !CBS_skip(&hello, 2 + SSL3_RANDOM_SIZE) ||
++        !CBS_get_u8_length_prefixed(&hello, &session_id) ||
++        !CBS_skip(&hello, 3) ||
++        !CBS_get_u16_length_prefixed(&hello, &extensions) || CBS_len(&hello)) {
++      return false;
++    }
++    while (CBS_len(&extensions) != 0) {
++      uint16_t extension;
++      CBS contents;
++      if (!CBS_get_u16(&extensions, &extension) ||
++          !CBS_get_u16_length_prefixed(&extensions, &contents)) {
++        return false;
++      }
++      if (extension == TLSEXT_TYPE_key_share) {
++        uint16_t selected_group;
++        CBS share;
++        if (!CBS_get_u16(&contents, &selected_group) ||
++            selected_group != group ||
++            !CBS_get_u16_length_prefixed(&contents, &share) ||
++            CBS_len(&contents) != 0 || CBS_len(&share) <= ec_share_bytes) {
++          return false;
++        }
++        const size_t offset = CBS_data(&share) - flight.data() + ec_share_bytes;
++        flight[offset] ^= 0x80;
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++TEST_P(SSLHybridGroupTest, CorruptedCiphertextFailsTLSAuthentication) {
++  UniquePtr<SSL> client, server;
++  ASSERT_TRUE(CreateClientAndServer(&client, &server, client_ctx_.get(),
++                                    server_ctx_.get()));
++  const uint16_t group = GetParam();
++  ASSERT_TRUE(SSL_set1_client_key_shares(client.get(), &group, 1));
++  int ret = SSL_do_handshake(client.get());
++  ASSERT_EQ(SSL_get_error(client.get(), ret), SSL_ERROR_WANT_READ);
++  ret = SSL_do_handshake(server.get());
++  ASSERT_EQ(SSL_get_error(server.get(), ret), SSL_ERROR_WANT_READ);
++
++  std::vector<uint8_t> flight(BIO_ctrl_pending(SSL_get_rbio(client.get())));
++  ASSERT_FALSE(flight.empty());
++  ASSERT_EQ(BIO_read(SSL_get_rbio(client.get()), flight.data(), flight.size()),
++            int(flight.size()));
++  ASSERT_TRUE(CorruptHybridServerCiphertext(MakeSpan(flight), group,
++                                           ECShareBytes()));
++  ASSERT_EQ(BIO_write(SSL_get_wbio(server.get()), flight.data(), flight.size()),
++            int(flight.size()));
++  ret = SSL_do_handshake(client.get());
++  ASSERT_EQ(SSL_get_error(client.get(), ret), SSL_ERROR_SSL);
++  EXPECT_TRUE(ErrorEquals(ERR_peek_last_error(), ERR_LIB_SSL,
++                         SSL_R_DECRYPTION_FAILED_OR_BAD_RECORD_MAC));
++  EXPECT_FALSE(SSL_is_init_finished(client.get()));
++  EXPECT_FALSE(SSL_is_init_finished(server.get()));
++  ERR_clear_error();
++}
++
+ static bssl::UniquePtr<SSL_SESSION> g_last_session;

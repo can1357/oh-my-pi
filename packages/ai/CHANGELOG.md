@@ -17,6 +17,24 @@
 - Antigravity image streams surface provider errors, tool results use the serving model's role, and logical execution identity stays stable through tool turns. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 - Transport helpers support bodyless responses and stop without keeping idle hosts alive. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 - Antigravity tool schemas encode protobuf type enums correctly without mutating caller schemas or property names. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Default Antigravity requests require the Rust/wreq transport helper; source/package installs must run `build:agy-transport` with Rust and native C++ build tools, while compiled CLI builds embed it. Explicit fetch overrides remain supported.
+
+### Added
+
+- Added an observational AGY capture/comparison harness that retains raw byte differences, requires transport evidence for all-layer reports, and does not claim attestation.
+- Replaced the Go transport implementation with a pinned Rust/wreq build and vendored BoringSSL patches for the measured TLS ClientHello, ML-DSA certificate verification, and hybrid ML-KEM key exchange. The helper preserves the bridge's protobuf JSON and streaming continuation behavior.
+
+### Fixed
+
+- Antigravity OAuth project discovery now honors the login controller's explicit fetch implementation.
+- Antigravity image streams now surface in-band provider errors instead of returning successful empty results.
+- Antigravity tool results use the serving model's conversation role, and request attempts no longer invent extra logical steps.
+- Antigravity continuations preserve cumulative usage, reject unsafe checkpoint replay, and surface next-leg HTTP failures without retrying permission denials.
+- Transport helpers no longer keep idle hosts alive, and HEAD/204/205/304 responses no longer fail during gzip or Response handling.
+- The Rust transport now writes HTTP/1.1 request headers with Go-compatible casing/order and lowercase chunk lengths; local TLS fixtures confirmed identical request bytes after removing the ephemeral server port.
+- Antigravity login uses the official CLI's hosted copy-code page, preserving S256 PKCE and a focused input instead of redirecting to localhost.
+- Standard Antigravity requests now select the registered transport before generic fetch wrapping, so the CLI no longer bypasses its helper.
+- Antigravity tool schemas now encode protobuf type enums correctly without mutating caller schemas or property names.
 
 ## [18.20.2] - 2026-11-14
 

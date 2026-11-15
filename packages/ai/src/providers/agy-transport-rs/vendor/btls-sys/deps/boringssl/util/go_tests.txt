@@ -1,0 +1,4 @@
+./ssl/test/runner/hpke
+./util/ar
+./util/fipstools/acvp/acvptool/testmodulewrapper
+./util/fipstools/delocate

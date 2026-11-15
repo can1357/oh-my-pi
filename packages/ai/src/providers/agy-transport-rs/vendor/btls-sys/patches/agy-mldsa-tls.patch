@@ -1,0 +1,692 @@
+Subject: [PATCH] Enable genuine ML-DSA TLS 1.3 and X.509 verification
+
+Base: BoringSSL 91a66a59b6c1435120ff83e245d7719411294386 after boring-pq.patch,
+boringssl.patch, boringssl-loongarch.patch, boringssl-windows.patch, and
+agy-clienthello.patch. This patch does not change the cryptographic primitives.
+
+Backport the upstream ML-DSA integration shape: distinct EVP key types for
+mldsa44/65/87, TLS 1.3-only CertificateVerify, pure ML-DSA with an empty context,
+and RFC 9881 certificate AlgorithmIdentifiers with absent parameters. Enable
+ML-DSA in the default EVP decoder set so parsed X.509 issuer keys can actually
+verify chains, and retain exact issuer-key/algorithm binding. Default TLS
+verification preferences remain unchanged; explicit signature preferences and
+the existing ClientHello wire-list API enable the supported schemes.
+
+References:
+  https://www.iana.org/assignments/tls-parameters/tls-signaturescheme.csv
+  https://www.ietf.org/archive/id/draft-ietf-tls-mldsa-06.html
+  https://www.rfc-editor.org/rfc/rfc9881.html
+  https://github.com/google/boringssl/blob/8f2554dc344d403fd6d628773d39637c323eb801/ssl/ssl_privkey.cc
+  https://github.com/google/boringssl/blob/8f2554dc344d403fd6d628773d39637c323eb801/crypto/x509/algorithm.cc
+  https://github.com/golang/go/blob/master/src/crypto/tls/auth.go
+
+Native regression coverage: all three parameter sets, mutual TLS 1.3 with
+verified ML-DSA certificate chains, corrupted server/client CertificateVerify,
+corrupted/truncated/overlong leaf and intermediate certificate signatures,
+cryptographically valid signatures under invalid AlgorithmIdentifiers, SPKI
+parameter rejection, exact key/scheme binding, and TLS 1.0-1.2 rejection.
+The existing wire-only test uses truly unknown groups and signature IDs rather
+than IDs now implemented by this patch or the separate hybrid-group patch.
+
+Integration checks (not run by the patch author): native ssl_test filters
+SSLTest.MLDSA*:SSLTest.ClientHelloAdvertisementsPreserveValidation; native
+crypto_test filters X509Test.MLDSA*:EVPTest.MLDSATestVectors:EVPTest.WycheproofMLDSA*;
+then the parent's full native suite and Go/Rust interoperability signature cases.
+
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 7816f0c15a2a..40ede7c99b0c 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -1146,6 +1146,15 @@
+ #define SSL_SIGN_RSA_PSS_RSAE_SHA512 0x0806
+ #define SSL_SIGN_ED25519 0x0807
+ 
++// ML-DSA is supported only in TLS 1.3. These IANA SignatureScheme values use
++// pure ML-DSA with an empty FIPS 204 context, not HashML-DSA. Each scheme
++// requires the corresponding ML-DSA parameter set in the certificate's SPKI.
++// Verification must be enabled with the signature preference APIs; the default
++// verification preferences and configured ClientHello wire order are unchanged.
++#define SSL_SIGN_ML_DSA_44 0x0904
++#define SSL_SIGN_ML_DSA_65 0x0905
++#define SSL_SIGN_ML_DSA_87 0x0906
++
+ // SSL_SIGN_RSA_PKCS1_SHA256_LEGACY is a backport of RSASSA-PKCS1-v1_5 with
+ // SHA-256 to TLS 1.3. It is disabled by default and only defined for client
+ // certificates.
+@@ -1182,7 +1191,8 @@
+ OPENSSL_EXPORT int SSL_get_signature_algorithm_key_type(uint16_t sigalg);
+ 
+ // SSL_get_signature_algorithm_digest returns the digest function associated
+-// with |sigalg| or |NULL| if |sigalg| has no prehash (Ed25519) or is unknown.
++// with |sigalg| or |NULL| if |sigalg| has no prehash (Ed25519 or ML-DSA) or is
++// unknown.
+ OPENSSL_EXPORT const EVP_MD *SSL_get_signature_algorithm_digest(
+     uint16_t sigalg);
+ 
+diff --git a/ssl/ssl_privkey.cc b/ssl/ssl_privkey.cc
+index b060d4302d08..6a57cefd3ece 100644
+--- a/ssl/ssl_privkey.cc
++++ b/ssl/ssl_privkey.cc
+@@ -33,8 +33,16 @@
+ BSSL_NAMESPACE_BEGIN
+ 
+ bool ssl_is_key_type_supported(int key_type) {
+-  return key_type == EVP_PKEY_RSA || key_type == EVP_PKEY_EC ||
+-         key_type == EVP_PKEY_ED25519;
++  switch (key_type) {
++    case EVP_PKEY_RSA:
++    case EVP_PKEY_EC:
++    case EVP_PKEY_ED25519:
++    case EVP_PKEY_ML_DSA_44:
++    case EVP_PKEY_ML_DSA_65:
++    case EVP_PKEY_ML_DSA_87:
++      return true;
++  }
++  return false;
+ }
+ 
+ typedef struct {
+@@ -98,6 +106,16 @@
+     {SSL_SIGN_ED25519, EVP_PKEY_ED25519, NID_undef, nullptr,
+      /*is_rsa_pss=*/false, /*tls12_ok=*/true, /*tls13_ok=*/true,
+      /*client_only=*/false},
++
++    {SSL_SIGN_ML_DSA_44, EVP_PKEY_ML_DSA_44, NID_undef, nullptr,
++     /*is_rsa_pss=*/false, /*tls12_ok=*/false, /*tls13_ok=*/true,
++     /*client_only=*/false},
++    {SSL_SIGN_ML_DSA_65, EVP_PKEY_ML_DSA_65, NID_undef, nullptr,
++     /*is_rsa_pss=*/false, /*tls12_ok=*/false, /*tls13_ok=*/true,
++     /*client_only=*/false},
++    {SSL_SIGN_ML_DSA_87, EVP_PKEY_ML_DSA_87, NID_undef, nullptr,
++     /*is_rsa_pss=*/false, /*tls12_ok=*/false, /*tls13_ok=*/true,
++     /*client_only=*/false},
+ };
+ 
+ static const SSL_SIGNATURE_ALGORITHM *get_signature_algorithm(uint16_t sigalg) {
+@@ -115,8 +133,9 @@
+   // code elimination, but for now we just specify every algorithm that might be
+   // reachable from libssl.
+   const EVP_PKEY_ALG *const algs[] = {
+-      EVP_pkey_rsa(),     EVP_pkey_ec_p256(), EVP_pkey_ec_p384(),
+-      EVP_pkey_ec_p521(), EVP_pkey_ed25519(),
++      EVP_pkey_rsa(),       EVP_pkey_ec_p256(),   EVP_pkey_ec_p384(),
++      EVP_pkey_ec_p521(),   EVP_pkey_ed25519(),   EVP_pkey_ml_dsa_44(),
++      EVP_pkey_ml_dsa_65(), EVP_pkey_ml_dsa_87(),
+   };
+   return bssl::UniquePtr<EVP_PKEY>(EVP_PKEY_from_subject_public_key_info(
+       spki.data(), spki.size(), algs, std::size(algs)));
+@@ -480,6 +499,9 @@
+     {SSL_SIGN_RSA_PSS_RSAE_SHA384, "rsa_pss_rsae_sha384"},
+     {SSL_SIGN_RSA_PSS_RSAE_SHA512, "rsa_pss_rsae_sha512"},
+     {SSL_SIGN_ED25519, "ed25519"},
++    {SSL_SIGN_ML_DSA_44, "mldsa44"},
++    {SSL_SIGN_ML_DSA_65, "mldsa65"},
++    {SSL_SIGN_ML_DSA_87, "mldsa87"},
+ };
+ 
+ const char *SSL_get_signature_algorithm_name(uint16_t sigalg,
+@@ -646,6 +668,9 @@
+     {EVP_PKEY_EC, NID_sha384, SSL_SIGN_ECDSA_SECP384R1_SHA384},
+     {EVP_PKEY_EC, NID_sha512, SSL_SIGN_ECDSA_SECP521R1_SHA512},
+     {EVP_PKEY_ED25519, NID_undef, SSL_SIGN_ED25519},
++    {EVP_PKEY_ML_DSA_44, NID_undef, SSL_SIGN_ML_DSA_44},
++    {EVP_PKEY_ML_DSA_65, NID_undef, SSL_SIGN_ML_DSA_65},
++    {EVP_PKEY_ML_DSA_87, NID_undef, SSL_SIGN_ML_DSA_87},
+ };
+ 
+ static bool parse_sigalg_pairs(Array<uint16_t> *out, const int *values,
+diff --git a/ssl/ssl_test.cc b/ssl/ssl_test.cc
+index 2f5ad4b993fc..57dc36e9b9d2 100644
+--- a/ssl/ssl_test.cc
++++ b/ssl/ssl_test.cc
+@@ -35,8 +35,10 @@
+ #include <openssl/crypto.h>
+ #include <openssl/curve25519.h>
+ #include <openssl/err.h>
++#include <openssl/evp.h>
+ #include <openssl/hmac.h>
+ #include <openssl/hpke.h>
++#include <openssl/mldsa.h>
+ #include <openssl/pem.h>
+ #include <openssl/rand.h>
+ #include <openssl/sha.h>
+@@ -2571,7 +2573,7 @@
+   bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
+   ASSERT_TRUE(ctx);
+   SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_PEER, nullptr);
+-  const uint16_t groups[] = {SSL_GROUP_X25519_MLKEM768, 0x11eb, 0x11ed,
++  const uint16_t groups[] = {SSL_GROUP_X25519_MLKEM768, 0x1234, 0x5678,
+                             SSL_GROUP_X25519};
+   const uint16_t sigalgs[] = {0x0904, SSL_SIGN_ECDSA_SECP256R1_SHA256};
+   const uint16_t cert_sigalgs[] = {0x0904, SSL_SIGN_ECDSA_SECP256R1_SHA256,
+@@ -2583,11 +2585,12 @@
+   ASSERT_TRUE(SSL_CTX_set_client_hello_cert_sigalgs(
+       ctx.get(), cert_sigalgs, std::size(cert_sigalgs)));
+   const uint16_t supported[] = {SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519};
+-  const uint16_t verifiable[] = {SSL_SIGN_ECDSA_SECP256R1_SHA256};
++  const uint16_t verifiable[] = {SSL_SIGN_ML_DSA_44,
++                                 SSL_SIGN_ECDSA_SECP256R1_SHA256};
+   EXPECT_THAT(ctx->supported_group_list, ElementsAreArray(supported));
+   EXPECT_THAT(ctx->verify_sigalgs, ElementsAreArray(verifiable));
+ 
+-  const uint16_t unknown_group = 0x11eb, unknown_sigalg = 0x0904;
++  const uint16_t unknown_group = 0x1234, unknown_sigalg = 0x1234;
+   EXPECT_FALSE(SSL_CTX_set1_group_ids(ctx.get(), &unknown_group, 1));
+   ERR_clear_error();
+   EXPECT_FALSE(SSL_CTX_set_verify_algorithm_prefs(ctx.get(), &unknown_sigalg, 1));
+@@ -6434,6 +6437,238 @@
+   // Receive close_notify.
+   EXPECT_EQ(1, SSL_shutdown(server.get()));
+   EXPECT_EQ(1, SSL_shutdown(client.get()));
++}
++
++struct MLDSATestParam {
++  uint16_t sigalg;
++  const EVP_PKEY_ALG *(*algorithm)();
++  int key_type;
++  size_t signature_len;
++  const char *name;
++};
++
++static const MLDSATestParam kMLDSATestParams[] = {
++    {SSL_SIGN_ML_DSA_44, EVP_pkey_ml_dsa_44, EVP_PKEY_ML_DSA_44,
++     MLDSA44_SIGNATURE_BYTES, "mldsa44"},
++    {SSL_SIGN_ML_DSA_65, EVP_pkey_ml_dsa_65, EVP_PKEY_ML_DSA_65,
++     MLDSA65_SIGNATURE_BYTES, "mldsa65"},
++    {SSL_SIGN_ML_DSA_87, EVP_pkey_ml_dsa_87, EVP_PKEY_ML_DSA_87,
++     MLDSA87_SIGNATURE_BYTES, "mldsa87"},
++};
++
++static UniquePtr<EVP_PKEY> MakeMLDSATestKey(const EVP_PKEY_ALG *alg,
++                                           uint8_t seed_byte) {
++  uint8_t seed[MLDSA_SEED_BYTES] = {seed_byte};
++  return UniquePtr<EVP_PKEY>(EVP_PKEY_from_private_seed(alg, seed, sizeof(seed)));
++}
++
++static constexpr time_t kMLDSATestTime = 1700000000;
++
++static UniquePtr<X509> MakeMLDSATestCertificate(EVP_PKEY *key, X509 *issuer,
++                                                EVP_PKEY *issuer_key) {
++  const bool is_ca = issuer == nullptr;
++  const char *common_name = is_ca ? "ML-DSA test CA" : "mldsa.example";
++  UniquePtr<X509> cert(X509_new());
++  UniquePtr<X509_NAME> name(X509_NAME_new());
++  UniquePtr<BASIC_CONSTRAINTS> bc(BASIC_CONSTRAINTS_new());
++  UniquePtr<ASN1_BIT_STRING> usage(ASN1_BIT_STRING_new());
++  if (!cert || !name || !bc || !usage ||
++      !X509_NAME_add_entry_by_txt(
++          name.get(), "CN", MBSTRING_ASC,
++          reinterpret_cast<const uint8_t *>(common_name), -1, -1, 0) ||
++      !X509_set_version(cert.get(), X509_VERSION_3) ||
++      !ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), is_ca ? 1 : 2) ||
++      !X509_set_subject_name(cert.get(), name.get()) ||
++      !X509_set_issuer_name(cert.get(),
++                            is_ca ? name.get() : X509_get_subject_name(issuer)) ||
++      !X509_set_pubkey(cert.get(), key) ||
++      !ASN1_TIME_adj(X509_getm_notBefore(cert.get()), kMLDSATestTime, -1, 0) ||
++      !ASN1_TIME_adj(X509_getm_notAfter(cert.get()), kMLDSATestTime, 1, 0) ||
++      !ASN1_BIT_STRING_set_bit(usage.get(), is_ca ? 5 : 0, 1)) {
++    return nullptr;
++  }
++  bc->ca = is_ca ? ASN1_BOOLEAN_TRUE : ASN1_BOOLEAN_FALSE;
++  if (X509_add1_ext_i2d(cert.get(), NID_basic_constraints, bc.get(),
++                        /*crit=*/1, /*flags=*/0) != 1 ||
++      X509_add1_ext_i2d(cert.get(), NID_key_usage, usage.get(),
++                        /*crit=*/1, /*flags=*/0) != 1) {
++    return nullptr;
++  }
++  if (!is_ca) {
++    UniquePtr<X509_EXTENSION> san(X509V3_EXT_nconf_nid(
++        nullptr, nullptr, NID_subject_alt_name, "DNS:mldsa.example"));
++    UniquePtr<X509_EXTENSION> eku(X509V3_EXT_nconf_nid(
++        nullptr, nullptr, NID_ext_key_usage, "serverAuth,clientAuth"));
++    if (!san || !eku || !X509_add_ext(cert.get(), san.get(), -1) ||
++        !X509_add_ext(cert.get(), eku.get(), -1)) {
++      return nullptr;
++    }
++  }
++  if (!X509_sign(cert.get(), issuer_key, nullptr)) {
++    return nullptr;
++  }
++  return cert;
++}
++
++TEST(SSLTest, MLDSAKeyBinding) {
++  static_assert(SSL_SIGN_ML_DSA_44 == 0x0904, "IANA mldsa44");
++  static_assert(SSL_SIGN_ML_DSA_65 == 0x0905, "IANA mldsa65");
++  static_assert(SSL_SIGN_ML_DSA_87 == 0x0906, "IANA mldsa87");
++  UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
++  ASSERT_TRUE(ctx);
++  UniquePtr<SSL> ssl(SSL_new(ctx.get()));
++  ASSERT_TRUE(ssl);
++  SSL_set_connect_state(ssl.get());
++  for (const auto &t : kMLDSATestParams) {
++    SCOPED_TRACE(t.name);
++    EXPECT_EQ(t.key_type, SSL_get_signature_algorithm_key_type(t.sigalg));
++    EXPECT_EQ(nullptr, SSL_get_signature_algorithm_digest(t.sigalg));
++    EXPECT_FALSE(SSL_is_signature_algorithm_rsa_pss(t.sigalg));
++    EXPECT_STREQ(t.name, SSL_get_signature_algorithm_name(t.sigalg, 1));
++    ASSERT_TRUE(SSL_CTX_set1_sigalgs_list(ctx.get(), t.name));
++    const int pair[] = {NID_undef, t.key_type};
++    ASSERT_TRUE(SSL_CTX_set1_sigalgs(ctx.get(), pair, std::size(pair)));
++    EXPECT_THAT(ctx->verify_sigalgs, ElementsAre(t.sigalg));
++
++    auto key = MakeMLDSATestKey(t.algorithm(), 1);
++    ASSERT_TRUE(key);
++    ScopedCBB spki;
++    ASSERT_TRUE(CBB_init(spki.get(), 0));
++    ASSERT_TRUE(EVP_marshal_public_key(spki.get(), key.get()));
++    auto pub = ssl_parse_peer_subject_public_key_info(
++        Span(CBB_data(spki.get()), CBB_len(spki.get())));
++    ASSERT_TRUE(pub);
++    EXPECT_EQ(t.key_type, EVP_PKEY_id(pub.get()));
++    for (uint16_t version : {TLS1_VERSION, TLS1_1_VERSION, TLS1_2_VERSION,
++                             TLS1_3_VERSION}) {
++      ssl->s3->version = version;
++      for (const auto &candidate : kMLDSATestParams) {
++        for (bool verify : {false, true}) {
++          EXPECT_EQ(version == TLS1_3_VERSION && candidate.sigalg == t.sigalg,
++                    ssl_pkey_supports_algorithm(ssl.get(), pub.get(),
++                                                 candidate.sigalg, verify));
++        }
++      }
++    }
++  }
++}
++
++struct MLDSATamperData {
++  EVP_PKEY *key;
++  uint16_t sigalg;
++  bool called = false;
++};
++
++// Sign the actual CertificateVerify input with the real key, then change one
++// signature byte. The negative handshake must reach cryptographic verification.
++static const SSL_PRIVATE_KEY_METHOD kMLDSATamperMethod = {
++    [](SSL *ssl, uint8_t *out, size_t *out_len, size_t max_out,
++       uint16_t sigalg, const uint8_t *in,
++       size_t in_len) -> ssl_private_key_result_t {
++      auto *data = static_cast<MLDSATamperData *>(
++          SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl)));
++      ScopedEVP_MD_CTX ctx;
++      *out_len = max_out;
++      if (data == nullptr || sigalg != data->sigalg ||
++          !EVP_DigestSignInit(ctx.get(), nullptr, nullptr, nullptr, data->key) ||
++          !EVP_DigestSign(ctx.get(), out, out_len, in, in_len) || *out_len == 0) {
++        return ssl_private_key_failure;
++      }
++      out[0] ^= 1;
++      data->called = true;
++      return ssl_private_key_success;
++    },
++    nullptr,
++    nullptr,
++};
++
++TEST(SSLTest, MLDSACertificateVerifyAndChain) {
++  for (const auto &t : kMLDSATestParams) {
++    SCOPED_TRACE(t.name);
++    auto root_key = MakeMLDSATestKey(t.algorithm(), 1);
++    auto leaf_key = MakeMLDSATestKey(t.algorithm(), 2);
++    ASSERT_TRUE(root_key);
++    ASSERT_TRUE(leaf_key);
++    auto root = MakeMLDSATestCertificate(root_key.get(), nullptr, root_key.get());
++    ASSERT_TRUE(root);
++    auto leaf =
++        MakeMLDSATestCertificate(leaf_key.get(), root.get(), root_key.get());
++    ASSERT_TRUE(leaf);
++    ASSERT_TRUE(X509_verify(leaf.get(), root_key.get()));
++    EXPECT_EQ(t.key_type, X509_get_signature_nid(leaf.get()));
++
++    UniquePtr<SSL_CTX> client_ctx(SSL_CTX_new(TLS_method()));
++    UniquePtr<SSL_CTX> server_ctx(SSL_CTX_new(TLS_method()));
++    ASSERT_TRUE(client_ctx);
++    ASSERT_TRUE(server_ctx);
++    for (SSL_CTX *ctx : {client_ctx.get(), server_ctx.get()}) {
++      ASSERT_TRUE(SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION));
++      ASSERT_TRUE(SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION));
++      SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
++                         nullptr);
++      X509_VERIFY_PARAM_set_time_posix(SSL_CTX_get0_param(ctx), kMLDSATestTime);
++      ASSERT_TRUE(X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx), root.get()));
++      ASSERT_TRUE(SSL_CTX_set_signing_algorithm_prefs(ctx, &t.sigalg, 1) && SSL_CTX_set_verify_algorithm_prefs(ctx, &t.sigalg, 1));
++      ASSERT_TRUE(SSL_CTX_use_certificate(ctx, leaf.get()));
++      ASSERT_TRUE(SSL_CTX_use_PrivateKey(ctx, leaf_key.get()));
++    }
++    // Exercise the production wire-list API, not just explicit verifier prefs.
++    ASSERT_TRUE(SSL_CTX_set_client_hello_sigalgs(client_ctx.get(), &t.sigalg, 1));
++    ClientConfig config;
++    config.verify_hostname = "mldsa.example";
++    UniquePtr<SSL> client, server;
++    ASSERT_TRUE(ConnectClientAndServer(&client, &server, client_ctx.get(),
++                                       server_ctx.get(), config));
++    EXPECT_EQ(TLS1_3_VERSION, SSL_version(client.get()));
++    EXPECT_EQ(t.sigalg, SSL_get_peer_signature_algorithm(client.get()));
++    EXPECT_EQ(t.sigalg, SSL_get_peer_signature_algorithm(server.get()));
++    EXPECT_EQ(X509_V_OK, SSL_get_verify_result(client.get()));
++    EXPECT_EQ(X509_V_OK, SSL_get_verify_result(server.get()));
++    UniquePtr<X509> peer(SSL_get_peer_certificate(client.get()));
++    ASSERT_TRUE(peer);
++    ASSERT_NE(nullptr, X509_get0_pubkey(peer.get()));
++    EXPECT_EQ(t.key_type, EVP_PKEY_id(X509_get0_pubkey(peer.get())));
++
++    // Both server and client CertificateVerify signatures must fail closed.
++    for (bool tamper_server : {true, false}) {
++      SCOPED_TRACE(tamper_server);
++      SSL_CTX *signer = tamper_server ? server_ctx.get() : client_ctx.get();
++      MLDSATamperData tamper{leaf_key.get(), t.sigalg};
++      SSL_CTX_set_app_data(signer, &tamper);
++      SSL_CTX_set_private_key_method(signer, &kMLDSATamperMethod);
++      ASSERT_TRUE(CreateClientAndServer(&client, &server, client_ctx.get(),
++                                        server_ctx.get()));
++      ASSERT_TRUE(SSL_set1_host(client.get(), "mldsa.example"));
++      EXPECT_FALSE(CompleteHandshakes(client.get(), server.get()));
++      EXPECT_TRUE(tamper.called);
++      SSL *verifier = tamper_server ? client.get() : server.get();
++      EXPECT_EQ(X509_V_OK, SSL_get_verify_result(verifier));
++      EXPECT_TRUE(ErrorEquals(ERR_peek_last_error(), ERR_LIB_SSL,
++                               SSL_R_BAD_SIGNATURE));
++      ERR_clear_error();
++      ASSERT_TRUE(SSL_CTX_use_PrivateKey(signer, leaf_key.get()));
++      SSL_CTX_set_app_data(signer, nullptr);
++    }
++
++    // A valid CertificateVerify key must not rescue an invalid issuer signature.
++    UniquePtr<X509> bad_leaf(X509_dup(leaf.get()));
++    ASSERT_TRUE(bad_leaf);
++    const ASN1_BIT_STRING *signature;
++    X509_get0_signature(&signature, nullptr, bad_leaf.get());
++    const uint8_t *bytes = ASN1_STRING_get0_data(signature);
++    ASSERT_EQ(t.signature_len, static_cast<size_t>(ASN1_STRING_length(signature)));
++    std::vector<uint8_t> tampered(bytes, bytes + t.signature_len);
++    tampered[0] ^= 1;
++    ASSERT_TRUE(X509_set1_signature_value(bad_leaf.get(), tampered.data(),
++                                          tampered.size()));
++    ASSERT_TRUE(SSL_CTX_use_certificate(server_ctx.get(), bad_leaf.get()));
++    ASSERT_TRUE(CreateClientAndServer(&client, &server, client_ctx.get(),
++                                      server_ctx.get()));
++    EXPECT_FALSE(CompleteHandshakes(client.get(), server.get()));
++    EXPECT_EQ(X509_V_ERR_CERT_SIGNATURE_FAILURE,
++              SSL_get_verify_result(client.get()));
++    ERR_clear_error();
++  }
+ }
+ 
+ TEST(SSLTest, SignatureAlgorithmProperties) {
+diff --git a/crypto/evp/internal.h b/crypto/evp/internal.h
+index f22aa4b34197..645aa980081f 100644
+--- a/crypto/evp/internal.h
++++ b/crypto/evp/internal.h
+@@ -286,6 +286,9 @@
+       EVP_pkey_ed25519(),
+       EVP_pkey_rsa(),
+       EVP_pkey_x25519(),
++      EVP_pkey_ml_dsa_44(),
++      EVP_pkey_ml_dsa_65(),
++      EVP_pkey_ml_dsa_87(),
+       // TODO(crbug.com/438761503): Remove DSA from this set, after callers that
+       // need DSA pass in |EVP_pkey_dsa| explicitly.
+       EVP_pkey_dsa(),
+diff --git a/crypto/evp/evp_test.cc b/crypto/evp/evp_test.cc
+index 04a4dff63d52..daf6518d5248 100644
+--- a/crypto/evp/evp_test.cc
++++ b/crypto/evp/evp_test.cc
+@@ -104,9 +104,9 @@
+     {"X25519", {EVP_pkey_x25519(), EVP_PKEY_X25519, true}},
+     {"Ed25519", {EVP_pkey_ed25519(), EVP_PKEY_ED25519, true}},
+     {"DSA", {EVP_pkey_dsa(), EVP_PKEY_DSA, true}},
+-    {"ML-DSA-44", {EVP_pkey_ml_dsa_44(), EVP_PKEY_ML_DSA_44, false}},
+-    {"ML-DSA-65", {EVP_pkey_ml_dsa_65(), EVP_PKEY_ML_DSA_65, false}},
+-    {"ML-DSA-87", {EVP_pkey_ml_dsa_87(), EVP_PKEY_ML_DSA_87, false}},
++    {"ML-DSA-44", {EVP_pkey_ml_dsa_44(), EVP_PKEY_ML_DSA_44, true}},
++    {"ML-DSA-65", {EVP_pkey_ml_dsa_65(), EVP_PKEY_ML_DSA_65, true}},
++    {"ML-DSA-87", {EVP_pkey_ml_dsa_87(), EVP_PKEY_ML_DSA_87, true}},
+ };
+ 
+ using KeyMap = std::map<std::string, bssl::UniquePtr<EVP_PKEY>>;
+diff --git a/crypto/obj/obj_xref.cc b/crypto/obj/obj_xref.cc
+index a322a3f41d90..52120f68ba9d 100644
+--- a/crypto/obj/obj_xref.cc
++++ b/crypto/obj/obj_xref.cc
+@@ -47,6 +47,9 @@
+     // digest "undef" indicates the caller should handle this explicitly.
+     {NID_rsassaPss, NID_undef, NID_rsaEncryption},
+     {NID_ED25519, NID_undef, NID_ED25519},
++    {NID_ML_DSA_44, NID_undef, NID_ML_DSA_44},
++    {NID_ML_DSA_65, NID_undef, NID_ML_DSA_65},
++    {NID_ML_DSA_87, NID_undef, NID_ML_DSA_87},
+ };
+ 
+ int OBJ_find_sigid_algs(int sign_nid, int *out_digest_nid, int *out_pkey_nid) {
+diff --git a/crypto/x509/algorithm.cc b/crypto/x509/algorithm.cc
+index f6b3da7256b9..fb7e2b41664e 100644
+--- a/crypto/x509/algorithm.cc
++++ b/crypto/x509/algorithm.cc
+@@ -57,9 +57,24 @@
+     }
+   }
+ 
+-  if (EVP_PKEY_id(pkey) == EVP_PKEY_ED25519) {
+-    return X509_ALGOR_set0(algor, OBJ_nid2obj(NID_ED25519), V_ASN1_UNDEF,
+-                           nullptr);
++  // Check for signing algorithms with an internal hash.
++  ASN1_OBJECT *algo_obj = nullptr;
++  switch (EVP_PKEY_id(pkey)) {
++    case EVP_PKEY_ED25519:
++      algo_obj = OBJ_nid2obj(NID_ED25519);
++      break;
++    case EVP_PKEY_ML_DSA_44:
++      algo_obj = OBJ_nid2obj(NID_ML_DSA_44);
++      break;
++    case EVP_PKEY_ML_DSA_65:
++      algo_obj = OBJ_nid2obj(NID_ML_DSA_65);
++      break;
++    case EVP_PKEY_ML_DSA_87:
++      algo_obj = OBJ_nid2obj(NID_ML_DSA_87);
++      break;
++  }
++  if (algo_obj != nullptr) {
++    return X509_ALGOR_set0(algor, algo_obj, V_ASN1_UNDEF, nullptr);
+   }
+ 
+   // Default behavior: look up the OID for the algorithm/hash pair and encode
+@@ -115,7 +130,10 @@
+     if (sigalg_nid == NID_rsassaPss) {
+       return x509_rsa_pss_to_ctx(ctx, sigalg, pkey);
+     }
+-    if (sigalg_nid == NID_ED25519) {
++    if (sigalg_nid == NID_ED25519 || sigalg_nid == NID_ML_DSA_44 ||
++        sigalg_nid == NID_ML_DSA_65 || sigalg_nid == NID_ML_DSA_87) {
++      // Parameters must be absent (Ed25519: RFC 8410 section 3,
++      // ML-DSA: RFC 9881 section 2). Even an explicit NULL is invalid.
+       if (sigalg->parameter != nullptr) {
+         OPENSSL_PUT_ERROR(X509, X509_R_INVALID_PARAMETER);
+         return 0;
+diff --git a/crypto/x509/x509_test.cc b/crypto/x509/x509_test.cc
+index c6ce62dd1fed..6e5c8533d335 100644
+--- a/crypto/x509/x509_test.cc
++++ b/crypto/x509/x509_test.cc
+@@ -32,6 +32,7 @@
+ #include <openssl/digest.h>
+ #include <openssl/err.h>
+ #include <openssl/evp.h>
++#include <openssl/mldsa.h>
+ #include <openssl/nid.h>
+ #include <openssl/pem.h>
+ #include <openssl/pool.h>
+@@ -2725,6 +2726,175 @@
+   ASSERT_TRUE(
+       EVP_DigestSignInit(md_ctx.get(), nullptr, nullptr, nullptr, priv.get()));
+   ASSERT_TRUE(SignatureRoundTrips(md_ctx.get(), pub.get()));
++}
++
++struct MLDSAX509TestParam {
++  const EVP_PKEY_ALG *(*algorithm)();
++  int nid;
++  size_t signature_len;
++};
++
++static const MLDSAX509TestParam kMLDSAX509TestParams[] = {
++    {EVP_pkey_ml_dsa_44, NID_ML_DSA_44, MLDSA44_SIGNATURE_BYTES},
++    {EVP_pkey_ml_dsa_65, NID_ML_DSA_65, MLDSA65_SIGNATURE_BYTES},
++    {EVP_pkey_ml_dsa_87, NID_ML_DSA_87, MLDSA87_SIGNATURE_BYTES},
++};
++
++static bssl::UniquePtr<EVP_PKEY> MakeMLDSAX509TestKey(const EVP_PKEY_ALG *alg,
++                                                     uint8_t seed_byte) {
++  uint8_t seed[MLDSA_SEED_BYTES] = {seed_byte};
++  return bssl::UniquePtr<EVP_PKEY>(
++      EVP_PKEY_from_private_seed(alg, seed, sizeof(seed)));
++}
++
++TEST(X509Test, MLDSAChainVerification) {
++  for (const auto &t : kMLDSAX509TestParams) {
++    SCOPED_TRACE(t.nid);
++    auto root_key = MakeMLDSAX509TestKey(t.algorithm(), 1);
++    auto intermediate_key = MakeMLDSAX509TestKey(t.algorithm(), 2);
++    auto leaf_key = MakeMLDSAX509TestKey(t.algorithm(), 3);
++    ASSERT_TRUE(root_key);
++    ASSERT_TRUE(intermediate_key);
++    ASSERT_TRUE(leaf_key);
++    auto root = MakeTestCert("Root", "Root", root_key.get(), /*is_ca=*/true);
++    auto intermediate = MakeTestCert("Root", "Intermediate",
++                                     intermediate_key.get(), /*is_ca=*/true);
++    auto leaf = MakeTestCert("Intermediate", "Leaf", leaf_key.get(),
++                             /*is_ca=*/false);
++    ASSERT_TRUE(root);
++    ASSERT_TRUE(intermediate);
++    ASSERT_TRUE(leaf);
++    ASSERT_TRUE(AddKeyUsage(root.get(), {KeyUsage::kKeyCertSign}));
++    ASSERT_TRUE(AddKeyUsage(intermediate.get(), {KeyUsage::kKeyCertSign}));
++    ASSERT_TRUE(AddKeyUsage(leaf.get(), {KeyUsage::kDigitalSignature}));
++    ASSERT_TRUE(AddExtendedKeyUsage(leaf.get(), {NID_server_auth}));
++    ASSERT_TRUE(X509_sign(root.get(), root_key.get(), nullptr));
++    ASSERT_TRUE(X509_sign(intermediate.get(), root_key.get(), nullptr));
++    ASSERT_TRUE(X509_sign(leaf.get(), intermediate_key.get(), nullptr));
++
++    // Force DER decoding, including each issuer's SubjectPublicKeyInfo. Merely
++    // verifying an in-memory EVP_PKEY would miss the default decoder allow-list.
++    root = ReencodeCertificate(root.get());
++    intermediate = ReencodeCertificate(intermediate.get());
++    leaf = ReencodeCertificate(leaf.get());
++    ASSERT_TRUE(root);
++    ASSERT_TRUE(intermediate);
++    ASSERT_TRUE(leaf);
++    for (X509 *cert : {root.get(), intermediate.get(), leaf.get()}) {
++      ASSERT_NE(nullptr, X509_get0_pubkey(cert));
++      EXPECT_EQ(t.nid, EVP_PKEY_id(X509_get0_pubkey(cert)));
++      EXPECT_EQ(t.nid, X509_get_signature_nid(cert));
++      const ASN1_BIT_STRING *sig;
++      const X509_ALGOR *alg;
++      X509_get0_signature(&sig, &alg, cert);
++      EXPECT_EQ(t.signature_len, static_cast<size_t>(ASN1_STRING_length(sig)));
++      EXPECT_EQ(nullptr, alg->parameter);
++      EXPECT_EQ(nullptr, X509_get0_tbs_sigalg(cert)->parameter);
++    }
++    EXPECT_EQ(X509_V_OK, Verify(leaf.get(), {root.get()}, {intermediate.get()},
++                                {}, X509_V_FLAG_CHECK_SS_SIGNATURE));
++
++    // A one-byte corruption, a truncation, and an overlong signature must each
++    // fail for both the leaf and intermediate, not merely fail DER parsing.
++    for (bool tamper_leaf : {true, false}) {
++      X509 *original = tamper_leaf ? leaf.get() : intermediate.get();
++      const ASN1_BIT_STRING *sig;
++      X509_get0_signature(&sig, nullptr, original);
++      const uint8_t *bytes = ASN1_STRING_get0_data(sig);
++      for (int mutation = 0; mutation < 3; mutation++) {
++        SCOPED_TRACE(tamper_leaf);
++        SCOPED_TRACE(mutation);
++        std::vector<uint8_t> bad_sig(bytes, bytes + t.signature_len);
++        if (mutation == 0) {
++          bad_sig[0] ^= 1;
++        } else if (mutation == 1) {
++          bad_sig.pop_back();
++        } else {
++          bad_sig.push_back(0);
++        }
++        bssl::UniquePtr<X509> bad(X509_dup(original));
++        ASSERT_TRUE(bad);
++        ASSERT_TRUE(X509_set1_signature_value(bad.get(), bad_sig.data(),
++                                              bad_sig.size()));
++        bad = ReencodeCertificate(bad.get());
++        ASSERT_TRUE(bad);
++        EXPECT_EQ(X509_V_ERR_CERT_SIGNATURE_FAILURE,
++                  Verify(tamper_leaf ? bad.get() : leaf.get(), {root.get()},
++                         {tamper_leaf ? intermediate.get() : bad.get()}, {}));
++        ERR_clear_error();
++      }
++    }
++  }
++}
++
++TEST(X509Test, MLDSAAlgorithmIdentifiers) {
++  for (const auto &t : kMLDSAX509TestParams) {
++    SCOPED_TRACE(t.nid);
++    auto key = MakeMLDSAX509TestKey(t.algorithm(), 1);
++    ASSERT_TRUE(key);
++    auto cert = MakeTestCert("Root", "Leaf", key.get(), /*is_ca=*/false);
++    ASSERT_TRUE(cert);
++    ASSERT_TRUE(X509_sign(cert.get(), key.get(), nullptr));
++
++    // Sign an otherwise valid TBSCertificate under deliberately invalid
++    // identifiers. Re-signing matters: a parameter-validation regression must
++    // not pass this test just because changing the identifier broke the signature.
++    const int wrong_nid = t.nid == NID_ML_DSA_44 ? NID_ML_DSA_65 : NID_ML_DSA_44;
++    for (bool null_parameters : {true, false}) {
++      bssl::UniquePtr<X509_ALGOR> alg(X509_ALGOR_new());
++      ASSERT_TRUE(alg);
++      ASSERT_TRUE(X509_ALGOR_set0(
++          alg.get(), OBJ_nid2obj(null_parameters ? t.nid : wrong_nid),
++          null_parameters ? V_ASN1_NULL : V_ASN1_UNDEF, nullptr));
++      ASSERT_TRUE(X509_set1_signature_algo(cert.get(), alg.get()));
++      uint8_t *tbs_bytes = nullptr;
++      int tbs_len = i2d_re_X509_tbs(cert.get(), &tbs_bytes);
++      bssl::UniquePtr<uint8_t> tbs(tbs_bytes);
++      ASSERT_GT(tbs_len, 0);
++      bssl::ScopedEVP_MD_CTX ctx;
++      ASSERT_TRUE(
++          EVP_DigestSignInit(ctx.get(), nullptr, nullptr, nullptr, key.get()));
++      std::vector<uint8_t> signature(t.signature_len);
++      size_t sig_len = signature.size();
++      ASSERT_TRUE(EVP_DigestSign(ctx.get(), signature.data(), &sig_len,
++                                 tbs.get(), tbs_len));
++      ASSERT_EQ(t.signature_len, sig_len);
++      ASSERT_TRUE(
++          X509_set1_signature_value(cert.get(), signature.data(), sig_len));
++      ctx.Reset();
++      ASSERT_TRUE(
++          EVP_DigestVerifyInit(ctx.get(), nullptr, nullptr, nullptr, key.get()));
++      ASSERT_TRUE(EVP_DigestVerify(ctx.get(), signature.data(), sig_len,
++                                   tbs.get(), tbs_len));
++      cert = ReencodeCertificate(cert.get());
++      ASSERT_TRUE(cert);
++      EXPECT_FALSE(X509_verify(cert.get(), key.get()));
++      EXPECT_TRUE(ErrorEquals(ERR_get_error(),
++                               null_parameters ? ERR_LIB_X509 : ERR_LIB_ASN1,
++                               null_parameters ? X509_R_INVALID_PARAMETER
++                                               : ASN1_R_WRONG_PUBLIC_KEY_TYPE));
++      ERR_clear_error();
++    }
++
++    // The same absent-parameters rule also applies to SubjectPublicKeyInfo.
++    // Preserve valid public-key bytes so that rejection cannot be attributed to
++    // an invalid lattice key encoding.
++    cert = MakeTestCert("Root", "Leaf", key.get(), /*is_ca=*/false);
++    ASSERT_TRUE(cert);
++    const ASN1_BIT_STRING *public_key = X509_get0_pubkey_bitstr(cert.get());
++    const int public_key_len = ASN1_STRING_length(public_key);
++    bssl::UniquePtr<uint8_t> public_key_copy(static_cast<uint8_t *>(OPENSSL_memdup(
++        ASN1_STRING_get0_data(public_key), public_key_len)));
++    ASSERT_TRUE(public_key_copy);
++    ASSERT_TRUE(X509_PUBKEY_set0_param(
++        X509_get_X509_PUBKEY(cert.get()), OBJ_nid2obj(t.nid), V_ASN1_NULL,
++        nullptr, public_key_copy.release(), public_key_len));
++    ASSERT_TRUE(X509_sign(cert.get(), key.get(), nullptr));
++    cert = ReencodeCertificate(cert.get());
++    ASSERT_TRUE(cert);
++    EXPECT_EQ(nullptr, X509_get0_pubkey(cert.get()));
++    ERR_clear_error();
++  }
+ }
+ 
+ static bool PEMToDER(bssl::UniquePtr<uint8_t> *out, size_t *out_len,
