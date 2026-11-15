@@ -630,7 +630,8 @@ const MASS_PATHSPECS: Record<string, true> = { ".": true, ":/": true, "*": true,
 
 /**
  * Where a git command works: the directory it runs in after its `-C`s, and the repository and work
- * tree it names with `--git-dir` and `--work-tree`, resolved against that directory as git does.
+ * tree it names with `--git-dir` and `--work-tree` (or `GIT_DIR=` and `GIT_WORK_TREE=` it runs
+ * with), resolved against that directory as git does.
  */
 interface GitTarget {
 	where: string;
@@ -646,6 +647,12 @@ function gitInvocation(command: ShellCommand, home: string): { sub: string; rest
 	const argv = args(command);
 	let where: string | undefined = command.cwd;
 	const named: { gitDir?: string; workTree?: string } = {};
+	for (const assignment of command.assignments) {
+		const eq = assignment.indexOf("=");
+		const name = assignment.slice(0, eq);
+		if (name === "GIT_DIR") named.gitDir = assignment.slice(eq + 1);
+		else if (name === "GIT_WORK_TREE") named.workTree = assignment.slice(eq + 1);
+	}
 	let i = 0;
 	while (i < argv.length && argv[i].startsWith("-")) {
 		const arg = argv[i];

@@ -381,7 +381,7 @@ describe("guard rule regressions", () => {
 		}
 	});
 
-	it("checks the repository a command names with `--git-dir` and `--work-tree`", async () => {
+	it("checks the repository a command names with `--git-dir`, `--work-tree` or their environment variables", async () => {
 		const app = path.join(cwd, "app");
 		const home = path.join(cwd, "home");
 		const dot = path.join(cwd, "dot.git");
@@ -402,6 +402,10 @@ describe("guard rule regressions", () => {
 		for (const command of [
 			`git --git-dir=${dot} --work-tree=${home} checkout -f`,
 			"git --git-dir ../dot.git --work-tree ../home reset --hard",
+			`GIT_DIR=${dot} GIT_WORK_TREE=${home} git checkout -- .`,
+			"env GIT_DIR=../dot.git GIT_WORK_TREE=../home git reset --hard",
+			// An option wins over the variable.
+			`GIT_DIR=.git git --git-dir=${dot} --work-tree=${home} checkout -f`,
 			// A stash in the directory's own repository keeps nothing of the named one.
 			`git stash && git --git-dir=${dot} --work-tree=${home} reset --hard`,
 		]) {

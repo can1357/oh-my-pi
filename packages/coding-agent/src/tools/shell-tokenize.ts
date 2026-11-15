@@ -978,6 +978,8 @@ export interface ShellCommand {
 	program: string;
 	/** Wrappers that ran the command, outermost first (`sudo`, `env`, `timeout`, `xargs`, ...). */
 	wrappers: string[];
+	/** Variable assignments the command runs with: its `NAME=value` prefixes and `env`'s, in order. */
+	assignments: string[];
 	/** Targets of `<` input redirections. */
 	reads: string[];
 	/** Targets of output redirections (`>`, `>>`, `&>`, ...). */
@@ -2042,7 +2044,8 @@ class ShellScriptParser {
 		}
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
 		if (script !== undefined) nested.push(...this.parse(script, cwd, depth + 1, succeeded));
-		return { argv, quoted, program, wrappers, reads, writes, subs: used, cwd, succeeded, upstream };
+		const assignments = words.slice(0, start).filter(word => SHELL_ASSIGNMENT.test(word));
+		return { argv, quoted, program, wrappers, assignments, reads, writes, subs: used, cwd, succeeded, upstream };
 	}
 }
 
