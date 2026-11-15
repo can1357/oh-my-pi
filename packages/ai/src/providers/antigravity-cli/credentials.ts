@@ -6,6 +6,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { withFileLock } from "@oh-my-pi/pi-utils";
 import { REMOTE_REFRESH_SENTINEL } from "../../auth/types";
 import * as AIError from "../../error";
 import type { OAuthCredentials } from "../../registry/oauth/types";
@@ -154,6 +155,8 @@ export function agyCredentialEnv(): Record<string, string> {
 
 /**
  * Atomically import a resolved grant into the account's private --gemini-dir.
+ * Replacement and readback hold one lock for that directory, so a concurrent
+ * stage cannot swap the shared token file between the rename and the check.
  * The caller must use agyCredentialEnv and agyCredentialKey-isolated directories.
  * Broker refresh sentinels are NEVER sent to Google: the host must reload its
  * persisted conversation when agyCredentialVersion changes after broker refresh.
@@ -171,30 +174,34 @@ export async function stageAgyCredentials(apiKey: string, geminiDir: string): Pr
 	const file = path.join(geminiDir, TOKEN_FILE);
 	const temporary = `${file}.${randomUUID()}.tmp`;
 	try {
+		// Non-Linux locks create `${geminiDir}.lock` beside this directory.
 		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-		await fs.chmod(geminiDir, 0o700);
-		await fs.chmod(path.dirname(file), 0o700);
-		await fs.writeFile(
-			temporary,
-			JSON.stringify({ token, auth_method: "consumer", id_token_email: credentials.email }),
-			{
-				mode: 0o600,
-				flag: "wx",
-			},
-		);
-		await fs.rename(temporary, file);
-		// Check only local bytes; never send an identity-probing inference request.
-		const staged = record(json(await fs.readFile(file, "utf8")));
-		const stagedToken = record(staged?.token);
-		if (
-			staged?.auth_method !== "consumer" ||
-			stagedToken?.access_token !== token.access_token ||
-			stagedToken.refresh_token !== token.refresh_token ||
-			stagedToken.expiry !== token.expiry ||
-			staged.id_token_email !== credentials.email
-		) {
-			throw new Error();
-		}
+		await withFileLock(geminiDir, async () => {
+			await fs.chmod(geminiDir, 0o700);
+			await fs.chmod(path.dirname(file), 0o700);
+			await fs.writeFile(
+				temporary,
+				JSON.stringify({ token, auth_method: "consumer", id_token_email: credentials.email }),
+				{
+					mode: 0o600,
+					flag: "wx",
+				},
+			);
+			await fs.rename(temporary, file);
+			// Check only local bytes; never send an identity-probing inference request.
+			// The directory lock is still held, so these bytes are this caller's grant.
+			const staged = record(json(await fs.readFile(file, "utf8")));
+			const stagedToken = record(staged?.token);
+			if (
+				staged?.auth_method !== "consumer" ||
+				stagedToken?.access_token !== token.access_token ||
+				stagedToken.refresh_token !== token.refresh_token ||
+				stagedToken.expiry !== token.expiry ||
+				staged.id_token_email !== credentials.email
+			) {
+				throw new Error();
+			}
+		});
 	} catch {
 		throw invalid("Could not stage the isolated Antigravity CLI account credentials");
 	} finally {

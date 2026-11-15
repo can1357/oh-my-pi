@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isFileLockHeld } from "@oh-my-pi/pi-utils";
 import { isDefinitiveOAuthFailure } from "../src/error";
 import {
 	AGY_OAUTH_CLIENT_ID,
@@ -138,6 +139,59 @@ describe("Antigravity CLI credential ownership", () => {
 		await stageAgyCredentials(otherKey, otherAccount);
 		expect((await exportAgyCredentials(account)).access).toBe("new-access");
 		expect((await exportAgyCredentials(otherAccount)).access).toBe("second-access");
+	});
+
+	it("verifies its own grant when another stage for the same account replaces the shared token file", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agy-credentials-"));
+		directories.push(directory);
+		const account = path.join(directory, agyCredentialKey(apiKey));
+		const rotated = JSON.stringify({ ...JSON.parse(apiKey), token: "rotated-access" });
+		const release = Promise.withResolvers<void>();
+		const parked = Promise.withResolvers<void>();
+		let parkedOnce = false;
+		let sawOwnGrantUnderLock = false;
+		const realRename = fs.rename.bind(fs);
+		const realReadFile = fs.readFile.bind(fs);
+		vi.spyOn(fs, "rename").mockImplementation(async (source, dest) => {
+			await realRename(source, dest);
+			if (!parkedOnce && String(dest).endsWith("antigravity-oauth-token")) {
+				parkedOnce = true;
+				parked.resolve();
+				await release.promise;
+			}
+		});
+		vi.spyOn(fs, "readFile").mockImplementation((async (file: string, encoding?: BufferEncoding) => {
+			const text = await realReadFile(file, encoding ?? "utf8");
+			if (
+				String(file).endsWith("antigravity-oauth-token") &&
+				text.includes("fixture-access") &&
+				!text.includes("rotated-access")
+			) {
+				sawOwnGrantUnderLock = isFileLockHeld(account);
+			}
+			return text;
+		}) as typeof fs.readFile);
+		let overlapping: Promise<void> | undefined;
+		try {
+			const first = stageAgyCredentials(apiKey, account);
+			const observed = await Promise.race([
+				parked.promise.then(() => "parked" as const),
+				first.then(() => "finished" as const),
+			]);
+			expect(observed).toBe("parked");
+			const held = isFileLockHeld(account);
+			overlapping = stageAgyCredentials(rotated, account);
+			if (!held) await overlapping;
+			release.resolve();
+			await first;
+			expect(sawOwnGrantUnderLock).toBe(true);
+			await overlapping;
+			expect((await exportAgyCredentials(account)).access).toBe("rotated-access");
+		} finally {
+			release.resolve();
+			await overlapping?.catch(() => {});
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("renders broker credentials with the local structured policy before staging", async () => {
