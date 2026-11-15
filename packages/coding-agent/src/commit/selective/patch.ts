@@ -41,14 +41,17 @@ export function formatTextPatch(path: string, before: FileState | null, after: F
 	if (before?.text === after?.text && before?.mode === after?.mode) return "";
 	const oldLines = patchLines(before?.text ?? null);
 	const newLines = patchLines(after?.text ?? null);
-	let out = `diff --git a/${path} b/${path}\n`;
+	// Git C-quotes names holding quotes, backslashes, or control bytes (a newline included).
+	const oldPath = encodeGitDiffPath(`a/${path}`);
+	const newPath = encodeGitDiffPath(`b/${path}`);
+	let out = `diff --git ${oldPath} ${newPath}\n`;
 	if (!before && after) out += `new file mode ${after.mode}\n`;
 	else if (before && !after) out += `deleted file mode ${before.mode}\n`;
 	else if (before && after && before.mode !== after.mode) out += `old mode ${before.mode}\nnew mode ${after.mode}\n`;
 	const regions = changedRegions(oldLines, newLines);
-	if (regions.length === 0) return quoteSelectivePatchPaths(path, out);
-	out += `--- ${before === null ? "/dev/null" : `a/${path}`}\n`;
-	out += `+++ ${after === null ? "/dev/null" : `b/${path}`}\n`;
+	if (regions.length === 0) return out;
+	out += `--- ${before === null ? "/dev/null" : oldPath}\n`;
+	out += `+++ ${after === null ? "/dev/null" : newPath}\n`;
 	let first = 0;
 	while (first < regions.length) {
 		let last = first;
@@ -69,24 +72,5 @@ export function formatTextPatch(path: string, before: FileState | null, after: F
 		for (; cursor < oldEnd; cursor++) out += renderLine(" ", oldLines[cursor]);
 		first = last + 1;
 	}
-	return quoteSelectivePatchPaths(path, out);
-}
-
-/**
- * Quote `diff --git` and `---`/`+++` paths after the patch is rendered.
- * Encoding first would split a name that contains a newline across records;
- * matching the exact emitted strings keeps those names one token.
- */
-function quoteSelectivePatchPaths(path: string, patch: string): string {
-	const oldRaw = `a/${path}`;
-	const newRaw = `b/${path}`;
-	const oldPath = encodeGitDiffPath(oldRaw);
-	const newPath = encodeGitDiffPath(newRaw);
-	if (oldPath === oldRaw && newPath === newRaw) return patch;
-	const header = `diff --git ${oldRaw} ${newRaw}\n`;
-	if (!patch.startsWith(header)) return patch;
-	let rest = patch.slice(header.length);
-	rest = rest.replace(`--- ${oldRaw}\n`, `--- ${oldPath}\n`);
-	rest = rest.replace(`+++ ${newRaw}\n`, `+++ ${newPath}\n`);
-	return `diff --git ${oldPath} ${newPath}\n${rest}`;
+	return out;
 }
