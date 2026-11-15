@@ -1227,6 +1227,21 @@ export const cfgPowerShellEnabled = register({
 	},
 });
 
+export const cfgPowerShellDefaultEdition = register({
+	id: "powershell.defaultEdition",
+	type: "enum",
+	values: ["pwsh", "powershell"] as const,
+	default: "pwsh" as const,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Default PowerShell Edition",
+		description:
+			"Which PowerShell backend a powershell tool call uses when it doesn't request one explicitly: pwsh (PowerShell 7+) or powershell (Windows PowerShell 5.1, powershell.exe). Each edition gets its own pooled host per session, so both can run side by side",
+	},
+});
+
+/** Override for the `pwsh` edition's executable; defaults to `pwsh` on PATH. The `powershell` edition always resolves `powershell.exe` and has no separate override. */
 export const cfgPowerShellShellPath = register({ id: "powershell.shellPath", type: "string", default: undefined });
 export const cfgPowerShellOutputWidth = register({ id: "powershell.outputWidth", type: "number", default: 120 });
 export const cfgPowerShellHistoryDepth = register({ id: "powershell.historyDepth", type: "number", default: 20 });

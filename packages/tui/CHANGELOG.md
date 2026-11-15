@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- The `powershell` tool's success-header icon now distinguishes which PowerShell edition ran the command: `pwsh` gets its own icon, Windows PowerShell (`powershell.exe`) gets a different one
 
 ### Fixed
 

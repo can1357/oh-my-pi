@@ -17,4 +17,10 @@ export const powershellToolRenderer = createShellRenderer<PowerShellRenderArgs>(
 	resolveCommand: args => args?.command,
 	commandLanguage: "powershell",
 	commandPrefix: "PS>",
+	// `pwsh` (nf-dev-powershell) vs Windows PowerShell (nf-seti-powershell):
+	// the two editions run in independent pooled hosts and can be used side
+	// by side in one session, so the icon is the call's visual distinguisher.
+	// Missing `edition` (older transcripts, or a result still in flight) is
+	// treated as `pwsh`, the configured default.
+	resolveIcon: details => (details?.edition === "powershell" ? "tool.powershell" : "tool.pwsh"),
 });

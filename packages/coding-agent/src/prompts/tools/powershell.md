@@ -1,4 +1,4 @@
-Execute PowerShell in a persistent `pwsh` host whose session state is retained across calls.
+Execute PowerShell in a persistent host whose session state is retained across calls. Runs either `pwsh` (PowerShell 7+) or Windows PowerShell (`powershell.exe`) — see `edition` below.
 
 Unlike one-shot shells, every call runs in the **same runspace**: variables, imported modules, functions, the current location, `$LASTEXITCODE`, and the **live result objects** from previous commands all persist. This makes PowerShell's object pipeline first-class — you can run an expensive command once, then inspect or post-process its results in later calls without re-running it.
 
@@ -23,6 +23,7 @@ Variables you set persist too: `$data = Get-Process` in one call, then `$data | 
 - `command` (required): PowerShell to execute in the shared runspace.
 - `cwd` (optional): working directory for this command; the location persists into the runspace afterward.
 - `timeout` (optional): seconds before the in-flight pipeline is stopped. The runspace and all retained state survive a timeout — only the running pipeline is cancelled. (Exception: if the pipeline cannot be stopped because it is blocked in a native call, the host is terminated and the next call starts a fresh session host.)
+- `edition` (optional): `"pwsh"` or `"powershell"`. Defaults to the configured default edition (normally `pwsh`). Each edition keeps its own independent session host, runspace, and `$__omp` history — switching `edition` does not discard the other edition's state, so you can run `pwsh`-only and Windows-PowerShell-only code side by side in the same conversation without one evicting the other. `host` modes (`ephemeral`/`new-session`) apply only to the selected edition's host.
 - `host` (optional): which host runs the command.
   - `session` (default): the persistent session host described above.
   - `ephemeral`: a throwaway host spawned for this call only. Nothing from the session carries in, nothing carries out, and the process is fully terminated before the result returns — so any file locks or loaded assemblies are released by the time you see the output. Use it when loading assemblies or `Add-Type` classes that cannot be unloaded (e.g. importing a DLL you are about to rebuild). Costs a fresh process spawn (~1s) per call.

@@ -7,6 +7,7 @@
 - Added `pi.registerTodoBackend()` and the `todo.backend` setting: an extension can mirror the main session's todo list into an external store, which gets the whole list after every change ([#19890](https://github.com/can1357/oh-my-pi/pull/19890) by [@Dangerboi](https://github.com/Dangerboi))
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - The bash interceptor (`bashInterceptor.enabled`) redirects a bare `pwsh`/`powershell.exe` invocation to the `powershell` tool when it is available, so PowerShell runs in the persistent host with a correctly reset `$env:PSModulePath` instead of whatever bash's own environment carries
+- The `powershell` tool takes an `edition` argument (`pwsh` or `powershell`/Windows PowerShell) so a conversation can run both in the same session — each edition keeps its own independent session host, so switching never discards the other's state. New `powershell.defaultEdition` setting (default `pwsh`) picks which one a call uses when it doesn't specify
 
 ### Changed
 

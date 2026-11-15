@@ -279,7 +279,7 @@ import {
 	revokeComputerControlForOwner,
 } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
-import { disposePsHostSession } from "../tools/pshost-manager";
+import { disposePsHostSession, POWERSHELL_EDITIONS, psHostEditionKey } from "../tools/pshost-manager";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -7141,9 +7141,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	async #disposePsHost(sessionId: string | undefined): Promise<void> {
 		if (!sessionId) return;
+		// Each PowerShell edition ("pwsh", "powershell") gets its own pooled
+		// host per base key (see psHostEditionKey) so both can run
+		// concurrently; teardown must reap every edition, not just whichever
+		// one happened to be used.
+		const keys = [sessionId, `${sessionId}-advisor`].flatMap(base =>
+			POWERSHELL_EDITIONS.map(edition => psHostEditionKey(base, edition)),
+		);
 		try {
 			await withTimeout(
-				Promise.all([disposePsHostSession(sessionId), disposePsHostSession(`${sessionId}-advisor`)]),
+				Promise.all(keys.map(key => disposePsHostSession(key))),
 				3_000,
 				"Timed out disposing PowerShell hosts during dispose",
 			);
