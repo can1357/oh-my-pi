@@ -5913,7 +5913,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
+			// While vibe is enabled the pre-goal snapshot may predate the director
+			// toolset; restoring it would hand the director edit/exec tools. Keep
+			// the live set and drop only the goal tool.
+			if (this.vibeModeEnabled) {
+				await this.session.setActiveToolsByName(
+					this.session.getEnabledToolNames().filter(name => name !== "goal"),
+				);
+			} else if (this.#goalModePreviousTools !== undefined) {
 				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
 			}
 			this.session.setGoalModeState(undefined);
