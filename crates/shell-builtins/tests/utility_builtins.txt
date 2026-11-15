@@ -1,0 +1,68 @@
+# Names registered by `omp_shell_builtins::utility_builtins()`, one per line.
+#
+# Checked in so that adding or dropping a registration fails
+# `tests/factory.rs::utility_builtins_register_exactly_the_checked_in_names`
+# and has to be a reviewed edit of this file (ADR 0054 slice 1). Registering a
+# new shadowing command by default changes what existing commands do; new names
+# belong behind `sv_shell_builtins_extra` (`extra_builtins`) instead.
+#
+# A trailing `unix` marks a name registered only on unix hosts.
+b2sum
+base32
+base64
+basename
+cat
+cksum
+cmp
+combine
+comm
+cut
+date
+diff
+dirname
+errno unix
+fd
+find
+grep
+head
+hostname
+ifne
+isutf8
+jq
+ln
+ls
+md5sum
+mkdir
+mktemp
+mv
+nproc
+paste
+printenv
+readlink
+realpath
+rg
+rm
+sed
+seq
+sha1sum
+sha224sum
+sha256sum
+sha384sum
+sha512sum
+sort
+sponge
+stat
+tac
+tail
+tee
+touch
+tr
+truncate
+ts
+uname
+uniq
+wc
+which
+whoami
+xargs
+yes

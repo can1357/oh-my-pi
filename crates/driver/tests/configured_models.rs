@@ -162,6 +162,59 @@ fn configured_models_resolve_by_scoped_key_and_by_bare_id() {
 	);
 }
 
+/// ADR 0059 D1: a self-hosted Otari gateway is a `baseUrl` on the bundled
+/// `otari` provider id, not a catalog schema change. The overlay redirects the
+/// catalog's own route (no `otari-configured` copy), keeps its wire and
+/// credential contract, and touches no other provider.
+#[test]
+fn a_base_url_on_a_catalog_provider_id_redirects_its_catalog_route() {
+	const HOSTED: &str = "https://api.otari.ai/api/v1";
+	const SELF_HOSTED: &str = "https://otari.internal.example/api/v1";
+	let bundled = Catalog::embedded();
+	let otari = ProviderId::from_ref("otari");
+	let bundled_provider = bundled
+		.provider(otari)
+		.expect("otari is a catalog provider");
+	let [route_id] = bundled_provider.routes.as_ref() else {
+		panic!("otari has one catalog route");
+	};
+	let bundled_route = bundled.route(route_id).expect("otari route");
+	assert_eq!(bundled_route.endpoint.base_url.as_str(), HOSTED);
+
+	let catalog = configured(&format!("[providers.otari]\nbaseUrl='{SELF_HOSTED}'\n"));
+	let provider = catalog.provider(otari).expect("otari survives the overlay");
+	assert_eq!(
+		provider.routes, bundled_provider.routes,
+		"the overlay patches the catalog route instead of adding a configured one"
+	);
+	assert!(
+		catalog
+			.route(RouteId::from_ref("otari-configured"))
+			.is_none(),
+		"a catalog provider id never takes the user-added provider path"
+	);
+	let route = catalog.route(route_id).expect("patched otari route");
+	assert_eq!(route.endpoint.base_url.as_str(), SELF_HOSTED);
+	assert_eq!(route.codec, bundled_route.codec, "the wire protocol is unchanged");
+	assert_eq!(route.auth, bundled_route.auth, "the credential contract is unchanged");
+	assert_eq!(route.discovery, bundled_route.discovery, "discovery is unchanged");
+	assert_eq!(provider.auth, bundled_provider.auth, "the provider still takes its bundled key");
+
+	for other in ["sambanova", "coralbricks", "helmcode", "modular"] {
+		let id = ProviderId::from_ref(other);
+		let routes = |catalog: &Catalog| {
+			catalog
+				.provider(id)
+				.expect("bundled provider")
+				.routes
+				.iter()
+				.map(|route| catalog.route(route).expect("route").endpoint.clone())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(routes(&catalog), routes(&bundled), "{other} keeps its hosted endpoint");
+	}
+}
+
 fn now_ms() -> u64 {
 	SystemTime::now()
 		.duration_since(UNIX_EPOCH)

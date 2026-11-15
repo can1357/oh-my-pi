@@ -31,7 +31,7 @@ use omp_core::Str;
 use omp_tui::tsp::{
 	doc::{Document, Rejected},
 	frame::{self, Incoming},
-	wire::{Close, Event, Frame, Hello, Kind, Mode, Open, Query, Reply},
+	wire::{Close, Event, Frame, Hello, Kind, Mode, Node, Open, Query, Reply},
 };
 use serde_json::Value;
 
@@ -605,8 +605,14 @@ impl FakeTern {
 	}
 
 	/// Quits the chat with the two-press `C-c` and returns the exit evidence.
-	fn quit(mut self) -> Quit {
+	fn quit(self) -> Quit {
 		self.write(b"\x03\x03");
+		self.exit()
+	}
+
+	/// Waits for the chat to exit and returns the exit evidence: a clean
+	/// status and a restored terminal.
+	fn exit(mut self) -> Quit {
 		let deadline = Instant::now() + CHECKPOINT;
 		let status = loop {
 			self.pump();
@@ -768,6 +774,43 @@ fn edit(from: u32, to: u32, text: &str, cursor: u32, len: u32) -> Event {
 		cursor,
 		len,
 	}
+}
+
+/// A `send` event addressed to surface `sf` and node `id`.
+fn send_to(sf: &str, id: &str, text: &str) -> Event {
+	Event::Send { sf: Str::new(sf), id: Str::new(id), text: Str::new(text) }
+}
+
+/// A `send` event over the live composer.
+fn send(text: &str) -> Event {
+	send_to(SURFACE, "composer", text)
+}
+
+/// Every `text` prop under `id` in the oracle document, in document order.
+fn texts_under(doc: &Document, id: &str) -> Vec<String> {
+	fn walk(node: &Node, out: &mut Vec<String>) {
+		if let Some(text) = node.p.get("text").and_then(Value::as_str) {
+			out.push(text.to_owned());
+		}
+		node.c.iter().for_each(|child| walk(child, out));
+	}
+	let mut out = Vec::new();
+	if let Some(node) = doc.get(id) {
+		walk(&node, &mut out);
+	}
+	out
+}
+
+/// Whether the transcript region holds `text` in some node.
+fn transcript_has(tern: &FakeTern, text: &str) -> bool {
+	texts_under(&tern.doc, "main")
+		.iter()
+		.any(|held| held.contains(text))
+}
+
+/// The composer's `sendable` prop in the oracle document.
+fn sendable(tern: &FakeTern) -> Option<bool> {
+	prop(&tern.doc, "composer", "sendable").and_then(|value| value.as_bool())
 }
 
 /// The handshake, regions, composer, status band, acks and clean close of a
@@ -1068,8 +1111,8 @@ fn tsp_native_edits_round_trip_through_utf16_offsets() {
 	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
 	assert_eq!(
 		tern.program_features,
-		["edit", "undo"],
-		"the hello query announces native editing:\n{}",
+		["edit", "undo", "send"],
+		"the hello query announces native editing and sends:\n{}",
 		tern.report()
 	);
 
@@ -1093,6 +1136,98 @@ fn tsp_native_edits_round_trip_through_utf16_offsets() {
 	});
 	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
 	tern.quit();
+}
+
+/// Native sends (ADR 0041 phase 3): a live composer advertises `sendable`; a
+/// `send` for it takes the path Enter takes, so a prompt lands in the
+/// transcript like a typed one, and a slash command runs. The draft it
+/// displaces leaves the editor and comes back through Up. A `send` for a stale
+/// surface, an invented node or blank text is ignored, and a modal overlay
+/// withdraws `sendable` and swallows the send.
+#[test]
+fn tsp_native_sends_take_the_path_enter_takes() {
+	let sandbox = Sandbox::new();
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern());
+	tern.until("composer mounted and ready for a send", |tern| sendable(tern) == Some(true));
+
+	// The reference: a prompt typed and submitted with Enter.
+	tern.write(b"typed prompt\r");
+	tern.until("the typed prompt reaches the transcript", |tern| {
+		transcript_has(tern, "typed prompt")
+	});
+	tern.until("the submitted draft left the composer", |tern| composer(tern).0.is_empty());
+
+	// Sends that must be ignored, ahead of the one that is not: each is
+	// processed in order, so the last send's effect proves the others had
+	// their chance.
+	tern.write(b"draft in progress");
+	tern.until("draft typed", |tern| composer(tern).0 == "draft in progress");
+	tern.event(&send_to("omp-elsewhere", "composer", "stale surface"));
+	tern.event(&send_to(SURFACE, "status", "wrong node"));
+	tern.event(&send_to(SURFACE, "composer-2", "invented node"));
+	tern.event(&send("  \r\n\t "));
+	tern.event(&send("sent prompt"));
+	tern.until("the sent prompt reaches the transcript like the typed one", |tern| {
+		transcript_has(tern, "sent prompt")
+	});
+	tern.until("the displaced draft left the composer", |tern| composer(tern).0.is_empty());
+	for ignored in ["stale surface", "wrong node", "invented node"] {
+		assert!(
+			!transcript_has(&tern, ignored),
+			"a send for {ignored:?} was submitted:\n{}",
+			tern.report()
+		);
+	}
+	let main = texts_under(&tern.doc, "main");
+	let typed = main.iter().position(|text| text.contains("typed prompt"));
+	let sent = main.iter().position(|text| text.contains("sent prompt"));
+	assert!(typed < sent, "the sent prompt follows the typed one: {main:?}");
+
+	// Up recalls what was sent, then the draft the send displaced.
+	tern.write(b"\x1b[A");
+	tern.until("the sent prompt is the newest recall", |tern| composer(tern).0 == "sent prompt");
+	tern.write(b"\x1b[A");
+	tern.until("the displaced draft is recalled next", |tern| {
+		composer(tern).0 == "draft in progress"
+	});
+
+	// A slash command runs through the same classification as Enter: the
+	// settings panel covers the pane. While it is open the composer is no
+	// longer sendable, and a send is swallowed.
+	tern.event(&send("/settings"));
+	tern.until("the sent command opened the settings cover", |tern| {
+		tern
+			.screen
+			.as_ref()
+			.is_some_and(|screen| screen.contains("settings"))
+	});
+	tern.until("the composer withdraws `sendable` under a modal overlay", |tern| {
+		sendable(tern) == Some(false)
+	});
+	tern.event(&send("typed under a modal"));
+	tern.settle(Duration::from_millis(700));
+	tern.write(b"\x1b");
+	tern.until("the cover closed with the panel", |tern| tern.screen.is_none());
+	tern.until("the composer is sendable again", |tern| sendable(tern) == Some(true));
+	assert!(
+		!transcript_has(&tern, "typed under a modal"),
+		"a modal overlay took the send:\n{}",
+		tern.report()
+	);
+
+	// A sent `/exit` quits like a typed one.
+	tern.event(&send("/exit"));
+	let quit = tern.exit();
+	let session: Vec<_> = quit
+		.closes
+		.iter()
+		.filter(|close| close.id.as_str() == SURFACE)
+		.collect();
+	assert!(
+		matches!(session.as_slice(), [close] if close.keep),
+		"the session surface closes once, kept: {:?}",
+		quit.closes
+	);
 }
 
 /// Re-entering a terminal epoch adopts the kept surface; a `gone` event makes

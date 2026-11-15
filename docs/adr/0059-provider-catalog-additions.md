@@ -138,7 +138,17 @@ Licences. The root `LICENSE` is MIT, "Copyright (c) 2025 Mario Zechner" and "Cop
 
 ## Status in omp
 
-**Status: Not started.** The catalog rows, the `oauth.toml` kinds, the custom OAuth modules, the Azure env-var pattern and the user overlay exist in part. None of S1 to S7 is implemented.
+**Status: In progress. S1 landed; S2 to S7 are not started.** The `oauth.toml` kinds, the custom OAuth modules and the Azure env-var pattern exist in part.
+
+**S1 (D1, data rows).**
+- `fixtures/llm-oracle/catalog/providers.toml` has `sambanova`, `coralbricks`, `helmcode`, `modular` and `otari`, all `open-ai-chat` bearer routes, each unselectable until its key is set. Env names are `OMP_<ID>_API_KEY` then the vendor's own name (`SAMBANOVA_API_KEY`, `CORAL_API_KEY`, `HELMCODE_API_KEY`, `MODULAR_API_KEY`, `OTARI_API_KEY`). `CORALBRICKS_API_KEY` is not carried: upstream's own comment says the Coral pi extension introduced it.
+- `crates/catalog/compat/providers/{sambanova,coralbricks,helmcode,modular}.kdl` carry the upstream cascade rules the omp axis table can express, and are listed in `BUNDLED_COMPAT` (`crates/catalog/src/cascade.rs`). Provider-wide dialects that rows found by runtime discovery need (Coral's `max_tokens`, no `developer` role, no `store`; Otari's no `developer` role) are in the `providers.toml` `compat` table, because a discovered row carries only the provider's own wire policy. `otari` has no KDL: it bundles no rows.
+- The roster has rows for `sambanova` (1), `coralbricks` (2), `helmcode` (4), `modular` (5) and `scaleway` (12, previously empty). It was refreshed with `just catalog-import-v1 <models.json> sambanova,coralbricks,helmcode,modular,scaleway`. `scripts/import_v1_models.py` now also decodes pi's compact `version: 1` `models.json` (pi v18.20 no longer ships the provider-keyed map) and takes `--only` so a provider addition does not rewrite the other 5,300 rows. A whole-roster import at the pin changes rows in 70 providers and was not taken.
+- `otari` declares no `default_model`: a default must name a bundled row (`snapshot.rs` invariant) and upstream bundles none (its default is a placeholder).
+- `crates/catalog/NOTICE` and the root `THIRD-PARTY-NOTICES.txt` carry the upstream catalog licence notice.
+- Tests: `adr_0059_*` in `crates/catalog/tests/catalog_conformance.rs` (env names, host, codec, default model, key gating, dialect), the roster check in `crates/catalog/tests/compat_cascade.rs`, and `a_base_url_on_a_catalog_provider_id_redirects_its_catalog_route` in `crates/driver/tests/configured_models.rs` (the `models.toml` `baseUrl` overlay on the `otari` catalog id).
+- Not expressible as data, left for a codec change: upstream sends `reasoning.enabled = true` for Modular's two single-rung models (`minimax/minimax-m3`, `google/gemma-4-31b-it`) through `when-thinking extra-body`. omp's typed `ReasoningBodyOverride` has no `reasoning` field, so the importer drops that key (`DROPPED_EXTRA_BODY_KEYS`). Also, the OpenAI chat codec reads `thinking_format` only for `chat-template`, so Modular rows carry `thinking_format = openrouter` as a fact but send `reasoning_effort`, not OpenRouter's `reasoning` object, until a codec reads it. This is an open question for a later slice, not a regression: the provider is unselectable without a key.
+- A catalog-id overlay patches the route's `endpoint` only; the route's `trust_domain.origin` stays the hosted origin (the user-added path rewrites it, `discovery/models.rs`). Nothing in the request path was found to gate credentials on that origin besides server-session binding, but the test does not pin it.
 
 ## References
 
