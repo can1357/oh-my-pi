@@ -56,7 +56,6 @@ describe("advisor auto thinking level", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn,
 		});
 		return session;

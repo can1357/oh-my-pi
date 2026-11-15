@@ -11,6 +11,7 @@ import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
@@ -112,16 +113,19 @@ export class SessionProviderBoundary {
 	}
 
 	/**
-	 * Builds the stored context the agent replays as `model` reads it: sized for its frame budget, standing on
-	 * the newest compaction it can replay (the active model unless a caller is about to adopt another). What the
-	 * model wrote stays in placeholder form; display restores it via {@link buildTranscriptSessionContext}.
+	 * Builds the current deobfuscated context for agent display and replay as `model` reads it: sized for its
+	 * frame budget, standing on the newest compaction it can replay (the active model unless a caller is about
+	 * to adopt another).
 	 */
 	buildDisplaySessionContext(model = this.#host.model()): SessionContext {
-		return this.#host.sessionManager.buildSessionContext({
-			inFlightToolCallIds: this.#inFlightToolCallIds(),
-			maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
-			model,
-		});
+		return deobfuscateSessionContext(
+			this.#host.sessionManager.buildSessionContext({
+				inFlightToolCallIds: this.#inFlightToolCallIds(),
+				maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
+				model,
+			}),
+			this.#host.obfuscator(),
+		);
 	}
 
 	/**
@@ -201,14 +205,11 @@ export class SessionProviderBoundary {
 		return obfuscator.deobfuscate(text);
 	}
 
-	/**
-	 * Deobfuscates streamed provider text up to a trailing run that could still
-	 * become a placeholder; that run waits for more text (or the final flush).
-	 */
+	/** Deobfuscates a streamed delta and removes an incomplete secret placeholder suffix. */
 	deobfuscateDelta(text: string): string {
-		const obfuscator = this.#host.obfuscator();
-		if (!obfuscator?.hasSecrets()) return text;
-		return obfuscator.deobfuscate(text.slice(0, obfuscator.pendingPlaceholderStart(text)));
+		const deobfuscated = this.deobfuscateText(text);
+		if (!this.#host.obfuscator()?.hasSecrets()) return deobfuscated;
+		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
 	/** Converts side-request messages through the session's secret boundary. */

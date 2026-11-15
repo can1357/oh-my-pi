@@ -91,7 +91,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -204,7 +203,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -437,7 +435,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -1027,7 +1024,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);

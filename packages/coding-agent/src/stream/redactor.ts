@@ -1,7 +1,6 @@
 import { getAgentDir, getDotenvEnvValues, logger } from "@oh-my-pi/pi-utils";
-import { collectEnvSecrets, loadSecrets } from "../secrets";
-import { CREDENTIAL_PREFIX_RULES, compiledCredentialPatterns } from "../secrets/patterns";
-import type { SecretMatch, SpanPattern } from "../secrets/regex";
+import { builtinCredentialSecretEntries, collectEnvSecrets, loadSecrets } from "../secrets";
+import { CREDENTIAL_PREFIX_RULES } from "../secrets/patterns";
 
 const REDACTION = "••••••";
 const MIN_PLAIN_SECRET_LENGTH = 8;
@@ -17,17 +16,20 @@ interface PlainSecret {
 
 /** Irreversible, deliberately conservative terminal-row redaction for public streams. */
 export class StreamRedactor {
-	#patterns: readonly SpanPattern[];
+	#patterns: readonly RegExp[];
 	#plainSecrets: readonly PlainSecret[];
 
-	constructor(patterns: readonly SpanPattern[], plainSecrets: readonly PlainSecret[]) {
+	constructor(patterns: readonly RegExp[], plainSecrets: readonly PlainSecret[]) {
 		this.#patterns = patterns;
 		this.#plainSecrets = plainSecrets;
 	}
 
 	/** Build a redactor from configured secrets, the environment, and user regex sources. */
 	static async load(cwd: string, extraPatterns: readonly string[]): Promise<StreamRedactor> {
-		const patterns: SpanPattern[] = compiledCredentialPatterns().map(pattern => pattern.regex);
+		const patterns: RegExp[] = builtinCredentialSecretEntries().map(entry => {
+			const flags = entry.flags?.includes("g") ? entry.flags : `${entry.flags ?? ""}g`;
+			return new RegExp(entry.content, flags);
+		});
 
 		const tokenPrefixSources = CREDENTIAL_PREFIX_RULES.filter(rule => rule.mode === "token").map(rule => rule.source);
 		const linePrefixSources = CREDENTIAL_PREFIX_RULES.filter(rule => rule.mode === "line").map(rule => rule.source);
@@ -70,7 +72,7 @@ export class StreamRedactor {
 
 		for (const pattern of this.#patterns) {
 			pattern.lastIndex = 0;
-			let match: SecretMatch | null;
+			let match: RegExpExecArray | null;
 			while ((match = pattern.exec(plain)) !== null) {
 				if (match[0].length > 0) {
 					spans.push(match.index, match.index + match[0].length);

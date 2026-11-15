@@ -18,13 +18,14 @@ use bstr::{BString, ByteSlice};
 use super::{
 	Chunk, Ctx, Need, R, done,
 	zsh_args::Ops,
+	zsh_dir::root_len,
 	zsh_mod_util::zsh_errmsg,
 	zsh_print::charset,
 	zsh_quote::{Charset, niceformat},
 };
 use crate::bash::{
 	fs::{PwEntry, PwQuery, Stat, StatKind},
-	ids::IntrinsicId,
+	ids::{IntrinsicId, Platform},
 	vm::{
 		fsprobe::{FsAns, FsErr, FsReq, FsResult},
 		probe::absolute,
@@ -184,8 +185,30 @@ pub(super) fn host_path(ctx: &Ctx<'_, '_>, name: &[u8]) -> BString {
 	if crate::bash::fs::url_root_len(&abs).is_some() {
 		return abs;
 	}
-	let mut out = BString::from("/");
-	for part in abs.split(|&c| c == b'/') {
+	normalize_on(
+		&abs,
+		if cfg!(windows) {
+			Platform::Windows
+		} else {
+			Platform::Linux
+		},
+	)
+}
+
+/// [`host_path`]'s cleanup of an absolute name for `platform`. The root is
+/// `/`, or on Windows a drive (`C:/`) or UNC (`//`) root; either slash
+/// separates there.
+fn normalize_on(abs: &[u8], platform: Platform) -> BString {
+	let windows = platform == Platform::Windows;
+	let is_sep = |c: &u8| *c == b'/' || (windows && *c == b'\\');
+	let (mut out, rest) = match abs {
+		[drive, b':', sep, rest @ ..] if windows && drive.is_ascii_alphabetic() && is_sep(sep) => {
+			(BString::from([*drive, b':', b'/'].as_slice()), rest)
+		},
+		[a, b, rest @ ..] if windows && is_sep(a) && is_sep(b) => (BString::from("//"), rest),
+		_ => (BString::from("/"), abs),
+	};
+	for part in rest.split(is_sep) {
 		if part.is_empty() || part == b"." {
 			continue;
 		}
@@ -194,7 +217,7 @@ pub(super) fn host_path(ctx: &Ctx<'_, '_>, name: &[u8]) -> BString {
 		}
 		out.extend_from_slice(part);
 	}
-	if abs.ends_with(b"/") && !out.ends_with(b"/") {
+	if abs.last().is_some_and(is_sep) && !out.ends_with(b"/") {
 		out.push(b'/');
 	}
 	out
@@ -286,15 +309,19 @@ fn mkdir(
 	}
 	let mut err = 0;
 	for arg in args {
-		// Trailing slashes go (a lone leading one stays).
-		let floor = usize::from(arg.first() == Some(&b'/'));
-		let mut end = arg.len();
-		while end > floor && arg[end - 1] == b'/' {
-			end -= 1;
-		}
-		let path: &[u8] = &arg[..end];
+		let (path, root) = trim_to_root(arg, cfg!(windows));
 		if ops.isset(b'p') {
-			let mut i = 0;
+			// A Windows root (`C:/`, `//server/share/`) cannot be made even when
+			// it exists, so a bare root that is a directory is done; a missing
+			// one goes to `domkdir` for the error. Otherwise the walk starts past
+			// the root.
+			if root > 0 && root == path.len() {
+				if !matches!(q.stat(&host_path(ctx, path), true)?, Ok(st) if st.kind == StatKind::Dir) {
+					err |= domkdir(ctx, q, cs, path, mode, true)?;
+				}
+				continue;
+			}
+			let mut i = root;
 			loop {
 				while path.get(i) == Some(&b'/') {
 					i += 1;
@@ -316,6 +343,17 @@ fn mkdir(
 		}
 	}
 	Ok(err)
+}
+
+/// `arg` with its trailing slashes gone (a root stays whole), and the length
+/// of that root: `/`, or on Windows `C:/` or `//server/share/`.
+fn trim_to_root(arg: &[u8], windows: bool) -> (&[u8], usize) {
+	let root = root_len(arg, windows);
+	let mut end = arg.len();
+	while end > root && arg[end - 1] == b'/' {
+		end -= 1;
+	}
+	(&arg[..end], root)
 }
 
 /// zsh `domkdir`: make `path` with exactly `mode`; with `p` an existing
@@ -357,12 +395,12 @@ fn domkdir(
 	Ok(1)
 }
 
-/// `EEXIST` (0 off Unix, where errors carry no errno).
+/// `EEXIST`.
 const fn eexist() -> i32 {
 	#[cfg(unix)]
 	return libc::EEXIST;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::EEXIST;
 }
 
 /// `ENOENT` (as [`eexist`]).
@@ -370,7 +408,7 @@ const fn enoent() -> i32 {
 	#[cfg(unix)]
 	return libc::ENOENT;
 	#[cfg(not(unix))]
-	return -1;
+	return crate::bash::vm::fsprobe::posix::ENOENT;
 }
 
 /// zsh `bin_rmdir`.
@@ -1012,5 +1050,24 @@ mod tests {
 		assert_eq!(safe_split(b"d/x"), Some(("d".into(), "x".into())));
 		assert_eq!(safe_split(b"/x"), Some(("/".into(), "x".into())));
 		assert_eq!(safe_split(b"dir/"), Some(("/".into(), "ir".into())));
+	}
+
+	#[test]
+	fn host_paths_keep_windows_roots() {
+		let win = |p: &str| normalize_on(p.as_bytes(), Platform::Windows);
+		assert_eq!(win("C:/Users/me/./a//b/"), "C:/Users/me/a/b/");
+		assert_eq!(win("C:\\Users\\me\\a"), "C:/Users/me/a");
+		assert_eq!(win("//srv/share/./x"), "//srv/share/x");
+		assert_eq!(win("/tmp//x"), "/tmp/x");
+		assert_eq!(normalize_on(b"/tmp/./a//b/", Platform::Linux), "/tmp/a/b/");
+	}
+
+	#[test]
+	fn mkdir_trims_trailing_slashes_down_to_the_root() {
+		assert_eq!(trim_to_root(b"C:///", true), (b"C:/".as_slice(), 3));
+		assert_eq!(trim_to_root(b"C:/x/y//", true), (b"C:/x/y".as_slice(), 3));
+		assert_eq!(trim_to_root(b"//srv/share/", true), (b"//srv/share/".as_slice(), 12));
+		assert_eq!(trim_to_root(b"//", false), (b"/".as_slice(), 1));
+		assert_eq!(trim_to_root(b"x/y/", false), (b"x/y".as_slice(), 0));
 	}
 }

@@ -736,21 +736,25 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		let mode = run.mode;
 		super::mode::set_mode(&mut k.root, cx.store, vp, mode);
 	}
+	if vp.parent.is_none() {
+		k.note_prior_jobs(vp);
+	}
 	let run = vp.runs.front_mut().expect("present");
-	if vp.overlay.is_none() {
+	if vp.image.is_none() {
 		if let Some(args) = run.args.take() {
 			k.root.set_positional(cx.store, args);
 		}
 		if let Some(cwd) = run.cwd.take() {
-			k.root.set_misc(cx.store, MiscKey::Cwd, cwd.clone());
-			k.root
-				.set_var(cx.store, b"PWD", Some(Var::scalar(cwd.clone(), Attrs::EXPORT)));
+			if !matches!(state::root_misc(cx.store, MiscKey::Cwd), Ok(Some(v)) if v == cwd.as_slice())
+			{
+				k.root.set_misc(cx.store, MiscKey::Cwd, cwd.clone());
+			}
+			set_root_global(k, cx.store, b"PWD", Var::scalar(cwd.clone(), Attrs::EXPORT));
 			vp.cwd = cwd;
 		}
 		for (name, value) in std::mem::take(&mut run.env) {
 			if is_ident(&name) {
-				k.root
-					.set_var(cx.store, &name, Some(Var::scalar(value, Attrs::EXPORT)));
+				set_root_global(k, cx.store, &name, Var::scalar(value, Attrs::EXPORT));
 			}
 		}
 		// `$-` shows `c` for a `-c` string, `s` for a script on stdin.
@@ -759,7 +763,12 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			Origin::Stdin => "s",
 			_ => "",
 		};
-		k.root.set_misc(cx.store, MiscKey::RunOrigin, flag);
+		// Unchanged (the common case): no write, so the forks that share the
+		// root's records keep sharing them.
+		if !matches!(state::root_misc(cx.store, MiscKey::RunOrigin), Ok(Some(v)) if v == flag.as_bytes())
+		{
+			k.root.set_misc(cx.store, MiscKey::RunOrigin, flag);
+		}
 	}
 	let from_stdin = matches!(run.chain.links[0].origin, Origin::Stdin);
 	let mut kind = FrameKind::script(&run.src, Pos::START, ScriptKind::Run);
@@ -769,7 +778,7 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	vp.frames.push(Frame::new(None, 0, kind));
 	// zsh `parseargs`: commands read from standard input set `shinstdin`.
 	if from_stdin
-		&& vp.overlay.is_none()
+		&& vp.image.is_none()
 		&& vp.mode.dialect() == Dialect::Zsh
 		&& let Err(err) = state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Shinstdin, true)
 	{
@@ -4266,6 +4275,15 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	!vp.jobs.subshell && state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false)
 }
 
+/// Set root global `name` to `var` unless it already holds it: the forks
+/// sharing the root's records keep sharing them, and a saved state stays
+/// unchanged.
+fn set_root_global(k: &mut Kernel, store: &mut dyn StateStore, name: &[u8], var: Var) {
+	if !matches!(state::global(store, name), Ok(Some(v)) if *v == var) {
+		k.root.set_var(store, name, Some(var));
+	}
+}
+
 /// On Windows, an asynchronous command without job control ignores
 /// `SIGINT` (and in zsh `SIGQUIT`), as zsh (`entersubsh` with
 /// `ESUB_ASYNC`) and bash (`setup_async_signals`) have it: the keyboard's
@@ -4276,6 +4294,11 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// `SIGQUIT`, which it does not list, is not modelled. A bash subshell cannot
 /// trap the ignore away (it was ignored on entry, [`MiscKey::HardIgnored`]);
 /// zsh's can. Elsewhere the dispositions are left as they are.
+///
+/// Every asynchronous command forked from the same records gets the same
+/// ones back: the first one's are kept ([`Kernel::async_ignored`]) and
+/// shared by the next while one of them lives, rather than each copying its
+/// parent's.
 fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 	use crate::bash::Signal;
 	if k.engine.config().platform != crate::bash::ids::Platform::Windows {
@@ -4287,8 +4310,21 @@ fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 		&[Signal::Int]
 	};
 	for &sig in sigs {
+		child.own_traps = child.own_traps.with(TrapKey::Signal(sig));
+	}
+	let Some(image) = child.image.as_mut() else {
+		return;
+	};
+	if let Some((mode, from, to)) = &k.async_ignored
+		&& *mode == child.mode
+		&& image.shares_records(from)
+		&& image.set_records(to)
+	{
+		return;
+	}
+	let from = image.records();
+	for &sig in sigs {
 		let key = TrapKey::Signal(sig);
-		child.own_traps = child.own_traps.with(key);
 		let record = Record::Trap { mode: child.mode, action: BString::default() };
 		state::store_record(&mut k.root, cx.store, child, KeyBuf::Trap(key), Some(record));
 	}
@@ -4309,6 +4345,9 @@ fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 			KeyBuf::Misc(MiscKey::HardIgnored),
 			Some(record),
 		);
+	}
+	if let Some(image) = &child.image {
+		k.async_ignored = Some((child.mode, from, image.records()));
 	}
 }
 
@@ -4783,11 +4822,11 @@ fn push_trap(
 }
 
 /// Which of the DEBUG, ERR and RETURN traps may have an action somewhere
-/// (the store or a vproc's overlay). [`start_trap`] asks
+/// (the store or a vproc's image). [`start_trap`] asks
 /// before each command and each function return; with no such trap set
 /// (the common case) it answers without frame scans, option reads or
 /// store lookups. Bits are only ever set: `trap` sets the key's bit when
-/// it installs an action, a restore sets all (restored overlays), and the
+/// it installs an action, a restore sets all (restored images), and the
 /// store's own records are read once per store epoch. A trap reset
 /// later keeps its bit; the full check then decides, as before.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4809,12 +4848,12 @@ impl PseudoTraps {
 		}
 	}
 
-	/// `trap` installed an action for `key` (in the root or an overlay).
+	/// `trap` installed an action for `key` (in the root or an image).
 	pub const fn note(&mut self, key: TrapKey) {
 		self.bits |= Self::bit(key);
 	}
 
-	/// Any pseudo-trap may be set (restored overlays are not inspected).
+	/// Any pseudo-trap may be set (restored images are not inspected).
 	pub const fn note_all(&mut self) {
 		self.bits = 7;
 	}

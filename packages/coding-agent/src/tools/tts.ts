@@ -8,6 +8,7 @@ import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -212,6 +213,10 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 
 		const failures: string[] = [];
 		for (const { model } of candidates) {
+			if (cfgOffline.get(settingsInstance) && model.provider !== ctx.model?.provider) {
+				failures.push(`${model.provider}/${model.id}: not the active session provider in offline mode`);
+				continue;
+			}
 			try {
 				if (model.api === "local-inference") {
 					return await synthesizeLocal(model, params, settingsInstance, cwd, outputPath, signal);

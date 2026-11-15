@@ -169,7 +169,7 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 						ctx.set_var(name, Some(Var::scalar(value, attrs)), Level::Dynamic);
 					}
 				}
-				if ctx.vp.overlay.is_none() {
+				if ctx.vp.image.is_none() {
 					ctx.k.root.set_misc(ctx.cx.store, MiscKey::Cwd, dir.clone());
 				}
 				ctx.vp.cwd = dir;

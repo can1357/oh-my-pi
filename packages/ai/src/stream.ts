@@ -4,7 +4,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	isVertexAnthropicRawPredictUrl,
+	isVertexExpressOpenAIUrl,
+	isVertexRawPredictUrl,
+	resolveVertexEndpointHost,
+} from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
@@ -31,6 +36,7 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import { reachesOfficialEndpoint } from "./providers/anthropic-state";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -48,6 +54,7 @@ import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
+	streamAntigravityCli,
 	streamAppleFoundationModels,
 	streamAzureOpenAIResponses,
 	streamBedrock,
@@ -85,7 +92,8 @@ import { withTransportFetch } from "./utils/transport-fetch";
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
 		model.provider === "google-vertex" &&
-		((model.api === "openai-completions" && isVertexExpressOpenAIUrl(model.baseUrl)) ||
+		((model.api === "openai-completions" &&
+			(isVertexExpressOpenAIUrl(model.baseUrl) || isVertexRawPredictUrl(model.baseUrl))) ||
 			(model.api === "anthropic-messages" && isVertexRawPredictUrl(model.baseUrl)))
 	);
 }
@@ -751,7 +759,9 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		if (isVertexRawPredictUrl(url)) {
+		// Partner publishers other than Anthropic (e.g. Mistral) take OpenAI-shaped
+		// bodies, where `model` is required and `anthropic_version` is rejected.
+		if (isVertexAnthropicRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
 			return baseFetch(url, {
@@ -811,7 +821,9 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 					.replaceAll("{location}", encodeURIComponent(location))
 					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
 			: url;
-		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
+		return rewritten
+			.replace(":streamRawPredict/v1/messages", ":streamRawPredict")
+			.replace(":streamRawPredict/chat/completions", ":streamRawPredict");
 	};
 
 	if (input instanceof Request) {
@@ -1013,6 +1025,13 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "antigravity-acp":
+			return streamAntigravityCli(
+				providerModel as Model<"antigravity-acp">,
+				context,
+				providerOptions as AntigravityCliOptions,
+			);
 
 		case "apple-foundation-models":
 			return streamAppleFoundationModels(
@@ -1823,6 +1842,8 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
+		stopSequences: options?.stopSequences,
+		frequencyPenalty: options?.frequencyPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,
 		maxHttpAttempts: options?.maxHttpAttempts,
@@ -2394,6 +2415,14 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
+		}
+		case "antigravity-acp": {
+			const agyModel = model as Model<"antigravity-acp">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && agyModel.reasoning
+					? requireSupportedEffort(agyModel, options.reasoning)
+					: undefined;
+			return castApi<"antigravity-acp">({ ...base, cwd: options?.cwd, reasoning });
 		}
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);

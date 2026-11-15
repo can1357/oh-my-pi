@@ -160,6 +160,15 @@ pub struct CommitDetails {
 	pub message: String,
 }
 
+/// One blob or symlink of a tree listing ([`crate::git::GitRepo::ls_tree`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+	/// Repository-relative path.
+	pub path: String,
+	/// Git file mode: `0o100644`, `0o100755`, or `0o120000`.
+	pub mode: u32,
+}
+
 /// Per-file added/removed line counts (`diff --numstat`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumstatEntry {
@@ -190,7 +199,9 @@ pub struct DiffOptions {
 	/// Unified context lines (default 3).
 	pub context:   Option<u32>,
 	/// Include binary patch blocks (`GIT binary patch`) instead of the
-	/// "Binary files differ" placeholder.
+	/// "Binary files differ" placeholder, and carry text that is not UTF-8 in
+	/// such a block too: a text hunk of it would not survive the `String`
+	/// patch, so only the block applies byte-exact.
 	pub binary:    bool,
 	/// Refuse with [`crate::Error::OutputTooLarge`] once the rendered patch
 	/// exceeds this many bytes. Rendering stops at the first change that
@@ -230,13 +241,23 @@ pub struct StatusOptions {
 #[derive(Debug, Clone, Default)]
 pub struct CommitOptions {
 	/// Author override; committer stays the repo identity.
-	pub author:      Option<CommitAuthor>,
+	pub author:        Option<CommitAuthor>,
 	/// Permit an empty commit.
-	pub allow_empty: bool,
+	pub allow_empty:   bool,
 	/// Amend HEAD instead of appending.
-	pub amend:       bool,
+	pub amend:         bool,
 	/// Commit only these paths (pathspec commit).
-	pub files:       Vec<String>,
+	pub files:         Vec<String>,
+	/// Build the commit from this index file instead of the repository's
+	/// index. The file must exist; the repository's index is neither read nor
+	/// written, and hooks run with `GIT_INDEX_FILE` pointing here.
+	pub index_path:    Option<PathBuf>,
+	/// Compare-and-swap guard: fail with [`crate::Error::HeadMoved`]
+	/// unless HEAD (the commit being amended, for `amend`) resolves to this
+	/// revision.
+	pub expected_head: Option<String>,
+	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
+	pub no_verify:     bool,
 }
 
 /// Which hunks of a file a selection covers.

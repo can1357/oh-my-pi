@@ -43,7 +43,9 @@
 //! The cancel request reaches the engine only from the driver, while the run
 //! it targets is still in flight, so a late cancel never leaks into the next
 //! command. What `nohup` started ([`crate::tools`]) is detached: neither a
-//! cancel nor closing the session ends it.
+//! cancel nor closing the session ends it. Background jobs an earlier command
+//! left running are not part of the cancelled one: a cancel spares them, but
+//! closing the session ends them.
 //!
 //! **Subshell jobs.** Unlike bash, a subshell's background jobs that run
 //! in-engine work (builtins, loops) end when the subshell exits
@@ -733,8 +735,8 @@ impl Driver {
 		};
 		if applied > 0 {
 			// A cancel that raced the run's natural end is still pending:
-			// apply it now (it ends background work too, as pi's cancel
-			// does), not at the start of the next command.
+			// apply it now (it ends the background jobs this run started
+			// too), not at the start of the next command.
 			match self.step(Budget { max_ops: 1, max_ns: u64::MAX }) {
 				Step::Done { run, status } => self.on_done(run, status),
 				Step::Call { id, call } => self.on_call(id, call),

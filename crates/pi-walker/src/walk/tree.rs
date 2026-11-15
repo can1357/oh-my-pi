@@ -2,10 +2,19 @@
 //!
 //! [`Tree`] is for tools whose output order and pruning are sequential:
 //! `find` (pre-order or `-depth` contents-first, `-prune`, `-quit`, `-xdev`,
-//! `-L`/`-H`), `fd`, and workspace listing. It shares the filesystem layer,
+//! `-L`/`-H`) and workspace listing. It shares the filesystem layer,
 //! ignore chain, and pruning rules of [`super::walk`], but the caller drives
 //! it one event at a time, deciding each entry (and, with
 //! [`Tree::skip_dir`], pruning each directory) before its subtree is read.
+//!
+//! Native walks read ahead while listings are slow (a network filesystem, a
+//! cold cache): the subdirectories the traversal will descend into next (in
+//! its order: the current directory's, then its ancestors' remaining ones)
+//! are opened and listed on the blocking pool, several at a time, so their
+//! latencies overlap. Fast listings stay on the traversal, where a hand-off
+//! would cost more than the listing. Reports and pruning are unaffected; a
+//! pruned directory's listing is dropped. Network mounts met below a local
+//! root are reported but not descended into ([`crate::fs::mounts`]).
 //!
 //! ```ignore
 //! let opts = TreeOptions { emit_root: true, ..Default::default() };
@@ -19,21 +28,32 @@
 //! ```
 
 use std::{
+	collections::VecDeque,
 	ffi::OsStr,
 	io,
 	mem::ManuallyDrop,
 	path::{Path, PathBuf},
-	sync::Arc,
+	pin::pin,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
+	task::{Context, Poll, Waker},
+	time::{Duration, Instant},
 };
 
-use tokio::task::coop::consume_budget;
+use tokio::{
+	runtime::Handle,
+	task::{JoinHandle, coop::consume_budget},
+};
 
 use super::{
-	DirError, SEP, WalkError, absolute_root, give_session, is_separator, pruned, take_session,
+	DirError, Options, SEP, WalkError, absolute_root, give_session, is_separator, pruned,
+	take_session,
 };
 use crate::{
-	fs::{Detail, Dir, FileId, FileType, Fs, Listing, Record, Session},
-	ignore::{DirIgnores, Frame as IgnoreFrame, Ignorer, Names},
+	fs::{Detail, Dir, FileId, FileType, Fs, Listing, Record, Session, mounts::Fences},
+	ignore::{DirIgnores, Frame as IgnoreFrame, Ignorer, Names, Sources},
 };
 
 /// Which symlinks a [`Tree`] follows.
@@ -41,7 +61,7 @@ use crate::{
 pub enum Follow {
 	/// None, not even a root that is a symlink (it is reported as one).
 	Never,
-	/// Only the root (`find -H`, `grep -r`, `fd` without `-L`).
+	/// Only the root (`find -H`, `grep -r`).
 	#[default]
 	Roots,
 	/// Every link, with loop detection (`find -L`, `fd -L`).
@@ -53,7 +73,7 @@ pub enum Follow {
 pub enum Order {
 	/// As the directory listing returns them.
 	Listing,
-	/// Byte order of their names (`find`, `fd`).
+	/// Byte order of their names (`find`).
 	#[default]
 	Names,
 	/// Byte order of the paths of the files below: a listed directory sorts
@@ -98,6 +118,9 @@ pub struct TreeOptions {
 	/// A file name exempt from ignore rules (workspace listing's
 	/// `AGENTS.md`); ignored directories are still pruned.
 	pub unignored_name:    Option<&'static str>,
+	/// Directories listed ahead at once, as [`Options::workers`]; 1 reads
+	/// none ahead.
+	pub workers:           Option<usize>,
 }
 
 impl Default for TreeOptions {
@@ -117,6 +140,7 @@ impl Default for TreeOptions {
 			contents_first:    false,
 			same_file_system:  false,
 			unignored_name:    None,
+			workers:           None,
 		}
 	}
 }
@@ -180,18 +204,199 @@ struct Frame {
 	listing:  Listing,
 	/// Next record of `listing` to visit.
 	next:     usize,
+	/// Next record to consider for reading ahead.
+	scan:     usize,
+	/// Subdirectories being read ahead, in record order.
+	ahead:    VecDeque<Ahead>,
 	/// Depth of this directory; its entries sit one level deeper.
 	depth:    usize,
 	ignore:   Option<Arc<IgnoreFrame>>,
 	/// The open directory, for relative child opens (`None` past
 	/// [`MAX_OPEN_DIRS`]).
-	dir:      Option<Dir>,
+	dir:      Option<Arc<Dir>>,
+	/// Lengths of this directory's own paths in [`Cx::rel`] and [`Cx::abs`].
+	own_rel:  usize,
+	own_abs:  usize,
 	/// Path lengths to restore once the directory is done.
 	rel_len:  usize,
 	abs_len:  usize,
 	post:     Option<Post>,
 	/// Opening this directory pushed an ancestor identity.
 	ancestor: bool,
+}
+
+/// A subdirectory being opened and listed ahead of the traversal.
+struct Ahead {
+	/// Record of the subdirectory in its parent's listing.
+	index: usize,
+	task:  JoinHandle<io::Result<Option<Listed>>>,
+}
+
+impl Drop for Ahead {
+	/// A listing no longer wanted is not started; one already running
+	/// finishes and is dropped.
+	fn drop(&mut self) {
+		self.task.abort();
+	}
+}
+
+/// An opened and listed directory, before it becomes a [`Frame`].
+struct Listed {
+	dir:     Dir,
+	/// In [`TreeOptions::order`].
+	listing: Listing,
+	names:   Names,
+	/// Its ignore files, when the walk honours them.
+	ignores: DirIgnores,
+	/// Its identity, under [`Follow::Always`].
+	id:      Option<FileId>,
+	/// How long opening and listing it took.
+	took:    Duration,
+}
+
+/// How [`list`] reaches a directory.
+enum Open<'a> {
+	/// Already open (the root).
+	Opened(Dir),
+	/// The subdirectory `name` of an open parent, refusing a symlink that
+	/// replaced it.
+	Child(&'a Dir, &'a [u8]),
+	/// By absolute path, following symlinks.
+	Path(&'a Path),
+}
+
+/// An owned [`Open`], for a listing read ahead.
+enum Target {
+	Child(Arc<Dir>, Box<[u8]>),
+	Path(PathBuf),
+}
+
+/// The native path of the child `name` of the directory at `parent`
+/// (encoded `OsStr` bytes).
+fn child_path(parent: &[u8], name: &[u8]) -> PathBuf {
+	let mut path = Vec::with_capacity(parent.len() + 1 + name.len());
+	path.extend_from_slice(parent);
+	if !path.last().is_some_and(|&byte| is_separator(byte)) {
+		path.push(SEP);
+	}
+	path.extend_from_slice(name);
+	// SAFETY: an encoded `OsStr`, an ASCII separator, and a listed name.
+	PathBuf::from(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(path) })
+}
+
+/// What [`list`] needs besides the directory.
+struct ListSpec {
+	detail:   Detail,
+	children: u32,
+	order:    Order,
+	/// The ignore files to load from the directory.
+	ignores:  Option<Sources>,
+	/// Leave the directory unlisted unless it is on this device.
+	device:   Option<FileId>,
+	/// Identify the directory, for loop detection.
+	identify: bool,
+}
+
+/// Opens and lists one directory into `listing` (recycled), on the
+/// traversal or ahead of it: `None` when it lies on another device than
+/// `spec.device`.
+async fn list(
+	session: &mut Session,
+	open: Open<'_>,
+	spec: &ListSpec,
+	mut listing: Listing,
+) -> io::Result<Option<Listed>> {
+	let started = Instant::now();
+	let dir = match open {
+		Open::Opened(dir) => dir,
+		Open::Child(parent, name) => session.open_child(parent, name).await?,
+		Open::Path(path) => session.open_dir(path).await?,
+	};
+	if let Some(device) = spec.device {
+		let id = session.identify_dir(&dir).await.ok();
+		if !id.is_some_and(|id| id.dev == device.dev && id.native == device.native) {
+			return Ok(None);
+		}
+	}
+	session
+		.list_into(&dir, spec.detail, spec.children, &mut listing)
+		.await?;
+	sort(&mut listing, spec.order);
+	let mut names = Names::default();
+	let mut ignores = DirIgnores::default();
+	if let Some(sources) = spec.ignores {
+		for record in listing.records() {
+			names.record(listing.name(record), record.file_type, sources.custom);
+		}
+		if !names.is_empty() {
+			ignores = DirIgnores::load(session, &dir, names, sources, false).await;
+		}
+	}
+	let id = if spec.identify {
+		session.identify_dir(&dir).await.ok()
+	} else {
+		None
+	};
+	Ok(Some(Listed { dir, listing, names, ignores, id, took: started.elapsed() }))
+}
+
+/// Puts `listing` in `order`.
+fn sort(listing: &mut Listing, order: Order) {
+	let Listing { records, names } = listing;
+	let names = names.as_slice();
+	match order {
+		Order::Listing => {},
+		Order::Names => {
+			records.sort_unstable_by(|a, b| record_name(names, a).cmp(record_name(names, b)));
+		},
+		Order::Paths => {
+			let key = |record: &Record| {
+				let slash = (record.file_type == FileType::Dir).then_some(&b'/');
+				record_name(names, record).iter().chain(slash)
+			};
+			records.sort_unstable_by(|a, b| key(a).cmp(key(b)));
+		},
+	}
+}
+
+/// Listings a walk rooted on a network filesystem keeps in flight: each one
+/// is mostly a round trip, not disk or CPU work.
+const REMOTE_WINDOW: usize = 32;
+
+/// Listing time past which reading ahead pays for its hand-offs. Warm local
+/// listings take a few microseconds; a cold disk or a network round trip,
+/// milliseconds.
+const SLOW_LISTING: Duration = Duration::from_micros(100);
+
+/// Listings read ahead and not yet walked, per listing in flight: finished
+/// ones wait for the traversal holding a descriptor and a listing each.
+const HELD_PER_ACTIVE: usize = 8;
+
+/// Counts a read-ahead listing as running until it finishes or is
+/// dropped unstarted.
+struct Active(Arc<AtomicUsize>);
+
+impl Active {
+	fn start(count: &Arc<AtomicUsize>) -> Self {
+		count.fetch_add(1, Ordering::Relaxed);
+		Self(Arc::clone(count))
+	}
+}
+
+impl Drop for Active {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, Ordering::Relaxed);
+	}
+}
+
+/// Runs `fut`, a native filesystem call that never suspends, without a
+/// scheduler round trip; `runtime` drives it should it suspend after all.
+fn now<F: Future>(runtime: &Handle, fut: F) -> F::Output {
+	let mut fut = pin!(fut);
+	match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+		Poll::Ready(out) => out,
+		Poll::Pending => runtime.block_on(fut),
+	}
 }
 
 /// The directories being listed, deepest last. Dropped deepest first, so
@@ -319,6 +524,21 @@ impl Tree {
 			Phase::Root
 		};
 		let file_type = file_type.unwrap_or(FileType::File);
+		let fences = Fences::of(fs, &abs_root);
+		let runtime = Handle::try_current().ok().filter(|_| fs.is_native());
+		let workers = Options { workers: opts.workers, ..Options::default() }.parallelism(fs);
+		let window = match runtime {
+			Some(_) if workers > 1 && fences.remote_root() => REMOTE_WINDOW,
+			Some(_) if workers > 1 => workers,
+			_ => 0,
+		};
+		let held_cap = window * HELD_PER_ACTIVE;
+		// Network listings are presumed slow until measured.
+		let latency = if fences.remote_root() {
+			SLOW_LISTING * 2
+		} else {
+			Duration::ZERO
+		};
 		Ok(Self {
 			stack: Stack(Vec::new()),
 			phase,
@@ -329,20 +549,30 @@ impl Tree {
 				mtime: full.then_some(info.stamp.mtime),
 			},
 			cx: Cx {
-				abs:       abs_root.as_os_str().as_encoded_bytes().to_vec(),
-				fs:        fs.clone(),
-				opts:      opts.clone(),
-				session:   ManuallyDrop::new(session),
-				root:      abs_root,
-				ignorer:   None,
-				root_dev:  None,
+				abs: abs_root.as_os_str().as_encoded_bytes().to_vec(),
+				fs: fs.clone(),
+				opts: opts.clone(),
+				session: ManuallyDrop::new(session),
+				root: abs_root,
+				ignorer: None,
+				root_dev: None,
 				ancestors: Vec::new(),
-				pool:      Vec::new(),
-				ign:       Vec::new(),
-				rel:       Vec::new(),
+				pool: Vec::new(),
+				ign: Vec::new(),
+				rel: Vec::new(),
 				open_dirs: 0,
-				error:     None,
-				after:     After::Nothing,
+				error: None,
+				after: After::Nothing,
+				fences,
+				runtime,
+				window,
+				held_cap,
+				active: Arc::default(),
+				held: 0,
+				exhausted: false,
+				latency,
+				slow: SLOW_LISTING,
+				scratch: Vec::new(),
 			},
 		})
 	}
@@ -354,6 +584,12 @@ impl Tree {
 			Emit::Entry(post) => Event::Entry(self.cx.entry(post)),
 			Emit::Error => Event::Error(self.cx.error.as_ref().expect("an error was just recorded")),
 		})
+	}
+
+	/// Reads ahead whatever listings cost.
+	#[cfg(test)]
+	pub(crate) const fn read_ahead_always(&mut self) {
+		self.cx.slow = Duration::ZERO;
 	}
 
 	/// Do not descend into the directory [`Tree::next`] just reported (no
@@ -383,14 +619,17 @@ impl Tree {
 					let parent = self
 						.stack
 						.0
-						.last()
+						.last_mut()
 						.expect("a reported directory has a parent");
+					let ahead = self.cx.take_ahead(parent, descent.index);
+					let parent = &*parent;
 					let record = parent.listing.records()[descent.index];
 					let name = parent.listing.name(&record);
 					let listed = self
 						.cx
 						.list_child(
 							parent,
+							ahead,
 							descent.followed,
 							name,
 							descent.target,
@@ -435,6 +674,9 @@ impl Tree {
 					}
 				},
 				Phase::Walk => {
+					if !self.cx.exhausted && self.cx.room() {
+						self.cx.read_ahead(&mut self.stack.0);
+					}
 					let Some(frame) = self.stack.0.last_mut() else {
 						self.phase = Phase::Tail;
 						continue;
@@ -452,7 +694,7 @@ impl Tree {
 					// so a racing cancellation (`select!`, timeout, abort) and
 					// other tasks still get the worker.
 					consume_budget().await;
-					let parent = self.stack.0.last().expect("the loop holds a frame");
+					let parent = self.stack.0.last_mut().expect("the loop holds a frame");
 					match self.cx.enter(parent, index).await {
 						Entered::Next => {},
 						Entered::Emit(emit) => return Some(emit),
@@ -503,6 +745,28 @@ struct Cx {
 	/// The failure [`Emit::Error`] reports.
 	error:     Option<DirError>,
 	after:     After,
+	/// Network mounts not descended into.
+	fences:    Fences,
+	/// Runs read-ahead listings; `None` for providers and outside tokio.
+	runtime:   Option<Handle>,
+	/// Most listings running ahead of the traversal; 0 reads none ahead.
+	window:    usize,
+	/// Most [`Ahead`]s held, running or finished.
+	held_cap:  usize,
+	/// Read-ahead listings running.
+	active:    Arc<AtomicUsize>,
+	/// [`Ahead`]s held by the stack's frames.
+	held:      usize,
+	/// Every subdirectory of the stack's frames was considered for reading
+	/// ahead; a new frame brings more.
+	exhausted: bool,
+	/// Moving average of how long a listing takes; reading ahead runs while
+	/// it exceeds `slow`.
+	latency:   Duration,
+	/// [`SLOW_LISTING`]; tests lower it to read ahead on fast disks.
+	slow:      Duration,
+	/// Walk-relative path of a subdirectory considered for reading ahead.
+	scratch:   Vec<u8>,
 }
 
 /// `bytes` (built from encoded `OsStr` pieces) as a path.
@@ -559,7 +823,9 @@ impl Cx {
 			self.root_dev = self.session.identify(&self.root).await.ok();
 		}
 		let inherited = if self.opts.gitignore {
-			let (ignorer, frame) = Ignorer::new(&mut self.session, &self.fs, &self.root).await;
+			let sources = Sources { vcs: true, custom: None, parents: true };
+			let (ignorer, frame) =
+				Ignorer::new(&mut self.session, &self.fs, &self.root, sources).await;
 			self.ignorer = Some(ignorer);
 			frame
 		} else {
@@ -567,14 +833,19 @@ impl Cx {
 		};
 		let saved = (0, self.abs.len());
 		let dir = self.session.open_dir(&self.root).await?;
-		self
-			.open_frame(dir, 0, inherited.as_ref(), 0, None, saved)
-			.await
+		let spec = self.spec(0, 0, None);
+		let listing = self.pool.pop().unwrap_or_default();
+		let listed = list(&mut self.session, Open::Opened(dir), &spec, listing)
+			.await?
+			.expect("a listing without a device check is never skipped");
+		Ok(self.frame(listed, 0, inherited.as_ref(), None, saved))
 	}
 
 	/// Finishes a fully walked directory: its contents-first report, if any.
 	fn close(&mut self, frame: Frame) -> Option<Emit> {
-		let Frame { listing, dir, post, ancestor, rel_len, abs_len, .. } = frame;
+		let Frame { listing, ahead, dir, post, ancestor, rel_len, abs_len, .. } = frame;
+		self.release(ahead.len());
+		drop(ahead);
 		self.pool.push(listing);
 		if dir.is_some() {
 			self.open_dirs -= 1;
@@ -591,8 +862,171 @@ impl Cx {
 		None
 	}
 
+	/// Accounts for `count` [`Ahead`]s leaving the stack.
+	const fn release(&mut self, count: usize) {
+		self.held -= count;
+	}
+
+	/// Whether another listing may start ahead of the traversal.
+	fn room(&self) -> bool {
+		self.latency > self.slow
+			&& self.held < self.held_cap
+			&& self.active.load(Ordering::Relaxed) < self.window
+	}
+
+	/// The read-ahead of `parent`'s `index`th record, if any; earlier ones
+	/// are dropped, as the traversal has passed them.
+	fn take_ahead(&mut self, parent: &mut Frame, index: usize) -> Option<Ahead> {
+		let mut released = 0;
+		let mut taken = None;
+		while let Some(ahead) = parent.ahead.pop_front_if(|ahead| ahead.index <= index) {
+			released += 1;
+			if ahead.index == index {
+				taken = Some(ahead);
+				break;
+			}
+		}
+		self.release(released);
+		taken
+	}
+
+	/// Starts listing the subdirectories the traversal will descend into
+	/// next while there is [`Cx::room`]: the deepest directory's first, each
+	/// directory's in record order.
+	fn read_ahead(&mut self, stack: &mut [Frame]) {
+		for frame in stack.iter_mut().rev() {
+			let depth = frame.depth + 1;
+			let mut index = if self.opts.max_depth.is_some_and(|max| depth >= max) {
+				frame.listing.len()
+			} else {
+				frame.scan.max(frame.next)
+			};
+			while index < frame.listing.len() {
+				if !self.room() {
+					frame.scan = index;
+					return;
+				}
+				let record = frame.listing.records()[index];
+				index += 1;
+				let name = frame.listing.name(&record);
+				if record.file_type != FileType::Dir || !self.descends(frame, name) {
+					continue;
+				}
+				let task = self.spawn(frame.dir.clone(), frame.own_abs, name, depth, record.children);
+				frame.ahead.push_back(Ahead { index: index - 1, task });
+				self.held += 1;
+			}
+			frame.scan = index;
+		}
+		self.exhausted = true;
+	}
+
+	/// Whether the traversal descends into `frame`'s listed subdirectory
+	/// `name`, as far as names, fences, and ignore files tell.
+	fn descends(&mut self, frame: &Frame, name: &[u8]) -> bool {
+		if pruned(name, self.opts.hidden, self.opts.skip_git, self.opts.skip_node_modules) {
+			return false;
+		}
+		self.scratch.clear();
+		self.scratch.extend_from_slice(&self.rel[..frame.own_rel]);
+		if !self.scratch.is_empty() {
+			self.scratch.push(b'/');
+		}
+		self.scratch.extend_from_slice(name);
+		!self.fences.contains(&self.scratch)
+			&& !self.ignorer.as_ref().is_some_and(|ignorer| {
+				ignorer.ignored(frame.ignore.as_deref(), &self.scratch, true, &mut self.ign)
+			})
+	}
+
+	/// Lists the subdirectory `name` at `depth` of `parent` (open, else by
+	/// path from its absolute path, the first `own_abs` bytes of
+	/// [`Cx::abs`]) on the blocking pool.
+	fn spawn(
+		&mut self,
+		parent: Option<Arc<Dir>>,
+		own_abs: usize,
+		name: &[u8],
+		depth: usize,
+		children: u32,
+	) -> JoinHandle<io::Result<Option<Listed>>> {
+		let spec = self.spec(depth, children, self.root_dev);
+		let listing = self.pool.pop().unwrap_or_default();
+		let target = match parent {
+			Some(parent) => Target::Child(parent, name.into()),
+			None => Target::Path(child_path(&self.abs[..own_abs], name)),
+		};
+		let runtime = self.runtime.clone().expect("read-ahead runs on a runtime");
+		let active = Active::start(&self.active);
+		let pool = runtime.clone();
+		pool.spawn_blocking(move || {
+			let _active = active;
+			let open = match &target {
+				Target::Child(parent, name) => Open::Child(parent, name),
+				Target::Path(path) => Open::Path(path),
+			};
+			let fs = Fs::native();
+			let mut session = take_session(&fs);
+			let listed = now(&runtime, list(&mut session, open, &spec, listing));
+			give_session(&fs, session);
+			listed
+		})
+	}
+
+	/// How to list a directory at `depth` with `children` entries (0 when
+	/// unknown), unless it lies off `device`.
+	fn spec(&self, depth: usize, children: u32, device: Option<FileId>) -> ListSpec {
+		ListSpec {
+			detail: self.detail(depth),
+			children,
+			order: self.opts.order,
+			ignores: self.ignorer.as_ref().map(Ignorer::sources),
+			device,
+			identify: self.opts.follow == Follow::Always,
+		}
+	}
+
+	/// The frame of a directory listed at `depth`, at the current paths.
+	fn frame(
+		&mut self,
+		listed: Listed,
+		depth: usize,
+		parent_ignore: Option<&Arc<IgnoreFrame>>,
+		post: Option<Post>,
+		saved: (usize, usize),
+	) -> Frame {
+		let Listed { dir, listing, names, ignores, id, took } = listed;
+		self.latency = (self.latency * 7 + took) / 8;
+		let ignore = if self.ignorer.is_some() {
+			ignores.frame(parent_ignore, names, &self.rel)
+		} else {
+			None
+		};
+		if let Some(id) = id {
+			self.ancestors.push(id);
+		}
+		let dir = (self.open_dirs < MAX_OPEN_DIRS).then(|| Arc::new(dir));
+		self.open_dirs += usize::from(dir.is_some());
+		self.exhausted = false;
+		Frame {
+			listing,
+			next: 0,
+			scan: 0,
+			ahead: VecDeque::new(),
+			depth,
+			ignore,
+			dir,
+			own_rel: self.rel.len(),
+			own_abs: self.abs.len(),
+			rel_len: saved.0,
+			abs_len: saved.1,
+			post,
+			ancestor: id.is_some(),
+		}
+	}
+
 	/// Visits the `index`th entry of `parent`.
-	async fn enter(&mut self, parent: &Frame, index: usize) -> Entered {
+	async fn enter(&mut self, parent: &mut Frame, index: usize) -> Entered {
 		let record = parent.listing.records()[index];
 		let name = parent.listing.name(&record);
 		if pruned(name, self.opts.hidden, self.opts.skip_git, self.opts.skip_node_modules) {
@@ -600,15 +1034,14 @@ impl Cx {
 		}
 		let saved = (self.rel.len(), self.abs.len());
 		self.push_name(name);
-		self.enter_pushed(parent, index, record, name, saved).await
+		self.enter_pushed(parent, index, record, saved).await
 	}
 
 	async fn enter_pushed(
 		&mut self,
-		parent: &Frame,
+		parent: &mut Frame,
 		index: usize,
 		record: Record,
-		name: &[u8],
 		saved: (usize, usize),
 	) -> Entered {
 		let depth = parent.depth + 1;
@@ -635,7 +1068,7 @@ impl Cx {
 				&& self
 					.opts
 					.unignored_name
-					.is_some_and(|unignored| unignored.as_bytes() == name);
+					.is_some_and(|unignored| unignored.as_bytes() == parent.listing.name(&record));
 			if !exempt && ignorer.ignored(parent.ignore.as_deref(), &self.rel, is_dir, &mut self.ign) {
 				return self.finish(saved);
 			}
@@ -653,7 +1086,9 @@ impl Cx {
 		}
 		let reported = depth >= self.opts.min_depth;
 		let report = Post { file_type, depth, size, mtime };
-		let descend = is_dir && self.opts.max_depth.is_none_or(|max| depth < max);
+		let descend = is_dir
+			&& self.opts.max_depth.is_none_or(|max| depth < max)
+			&& !self.fences.contains(&self.rel);
 		if reported && !self.opts.contents_first {
 			self.after = if descend {
 				After::Descend(Descent { index, followed, target, depth, saved })
@@ -664,8 +1099,11 @@ impl Cx {
 		}
 		let post = (reported && self.opts.contents_first).then_some(report);
 		if descend {
+			let ahead = self.take_ahead(parent, index);
+			let parent = &*parent;
+			let name = parent.listing.name(&record);
 			let listed = self
-				.list_child(parent, followed, name, target, depth, record.children, post, saved)
+				.list_child(parent, ahead, followed, name, target, depth, record.children, post, saved)
 				.await;
 			match listed {
 				Ok(Some(frame)) => return Entered::Push(frame),
@@ -683,11 +1121,13 @@ impl Cx {
 	}
 
 	/// Opens and lists the directory `name` of `parent` (by path when
-	/// `followed`); `None` when it lies on another filesystem than the root.
+	/// `followed`), or takes its read-ahead; `None` when it lies on another
+	/// filesystem than the root.
 	#[expect(clippy::too_many_arguments, reason = "everything one entry decided")]
 	async fn list_child(
 		&mut self,
 		parent: &Frame,
+		ahead: Option<Ahead>,
 		followed: bool,
 		name: &[u8],
 		target: Option<FileId>,
@@ -696,96 +1136,30 @@ impl Cx {
 		post: Option<Post>,
 		saved: (usize, usize),
 	) -> io::Result<Option<Frame>> {
-		let dir = match (&parent.dir, followed) {
-			(Some(dir), false) => self.session.open_child(dir, name).await?,
-			_ => self.session.open_dir(as_path(&self.abs)).await?,
-		};
-		if let Some(root) = self.root_dev {
-			let id = match target {
-				Some(id) => Some(id),
-				None => self.session.identify_dir(&dir).await.ok(),
+		let listed = if let Some(mut ahead) = ahead {
+			match (&mut ahead.task).await {
+				Ok(listed) => listed?,
+				Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+				Err(join) => return Err(io::Error::other(join)),
+			}
+		} else {
+			// A followed link's target is identified already.
+			let device = match (self.root_dev, target) {
+				(Some(root), Some(id)) if id.dev != root.dev || id.native != root.native => {
+					return Ok(None);
+				},
+				(root, None) => root,
+				(_, Some(_)) => None,
 			};
-			if !id.is_some_and(|id| id.dev == root.dev && id.native == root.native) {
-				return Ok(None);
-			}
-		}
-		self
-			.open_frame(dir, depth, parent.ignore.as_ref(), children, post, saved)
-			.await
-			.map(Some)
-	}
-
-	/// Lists the open `dir` at `depth` into a new frame.
-	async fn open_frame(
-		&mut self,
-		dir: Dir,
-		depth: usize,
-		parent_ignore: Option<&Arc<IgnoreFrame>>,
-		children: u32,
-		post: Option<Post>,
-		saved: (usize, usize),
-	) -> io::Result<Frame> {
-		let mut listing = self.pool.pop().unwrap_or_default();
-		let detail = self.detail(depth);
-		if let Err(error) = self
-			.session
-			.list_into(&dir, detail, children, &mut listing)
-			.await
-		{
-			self.pool.push(listing);
-			return Err(error);
-		}
-		let Listing { records, names } = &mut listing;
-		let names = names.as_slice();
-		match self.opts.order {
-			Order::Listing => {},
-			Order::Names => {
-				records.sort_unstable_by(|a, b| record_name(names, a).cmp(record_name(names, b)));
-			},
-			Order::Paths => {
-				let key = |record: &Record| {
-					let slash = (record.file_type == FileType::Dir).then_some(&b'/');
-					record_name(names, record).iter().chain(slash)
-				};
-				records.sort_unstable_by(|a, b| key(a).cmp(key(b)));
-			},
-		}
-		let ignore = if self.ignorer.is_some() {
-			let mut names = Names::default();
-			for record in listing.records() {
-				names.record(listing.name(record), record.file_type);
-			}
-			if names.is_empty() {
-				parent_ignore.cloned()
-			} else {
-				DirIgnores::load(&mut self.session, &dir, names, false)
-					.await
-					.frame(parent_ignore, names, &self.rel)
-			}
-		} else {
-			None
+			let spec = self.spec(depth, children, device);
+			let listing = self.pool.pop().unwrap_or_default();
+			let open = match (&parent.dir, followed) {
+				(Some(dir), false) => Open::Child(dir, name),
+				_ => Open::Path(as_path(&self.abs)),
+			};
+			list(&mut self.session, open, &spec, listing).await?
 		};
-		let ancestor = if self.opts.follow == Follow::Always
-			&& let Ok(id) = self.session.identify_dir(&dir).await
-		{
-			self.ancestors.push(id);
-			true
-		} else {
-			false
-		};
-		let dir = (self.open_dirs < MAX_OPEN_DIRS).then_some(dir);
-		self.open_dirs += usize::from(dir.is_some());
-		Ok(Frame {
-			listing,
-			next: 0,
-			depth,
-			ignore,
-			dir,
-			rel_len: saved.0,
-			abs_len: saved.1,
-			post,
-			ancestor,
-		})
+		Ok(listed.map(|listed| self.frame(listed, depth, parent.ignore.as_ref(), post, saved)))
 	}
 
 	/// Listing detail for a directory at `depth`.

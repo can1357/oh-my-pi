@@ -30,10 +30,20 @@ export class AwsCredentialsError extends Error {
 	}
 }
 
-/** A malformed AWS event-stream frame (bad length, CRC mismatch, unknown header type). */
+/**
+ * Why an AWS event-stream frame was rejected:
+ * - `malformed`: bad length, CRC mismatch, header overrun, unknown header type.
+ * - `truncated`: the body ended inside a frame (connection cut mid-message).
+ */
+export type EventStreamFrameErrorKind = "malformed" | "truncated";
+
+/** A malformed or truncated AWS event-stream frame. */
 export class EventStreamFrameError extends Error {
-	constructor(detail: string) {
+	readonly kind: EventStreamFrameErrorKind;
+
+	constructor(detail: string, kind: EventStreamFrameErrorKind = "malformed") {
 		super(`eventstream: ${detail}`);
 		this.name = "EventStreamFrameError";
+		this.kind = kind;
 	}
 }

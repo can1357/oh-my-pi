@@ -51,6 +51,9 @@ pub struct ShellVizOptions {
 	pub speed:          f64,
 	pub selected_node:  Option<String>,
 	pub expanded_nodes: Vec<String>,
+	/// The script is a command still streaming in, not yet run: its
+	/// unfinished end is drawn as it will most likely continue.
+	pub streaming:      Option<bool>,
 }
 
 impl TryFrom<ShellVizOptions> for model::Options {
@@ -94,6 +97,7 @@ impl TryFrom<ShellVizOptions> for model::Options {
 				.into_iter()
 				.map(node)
 				.collect::<Result<_>>()?,
+			streaming: value.streaming.unwrap_or(false),
 		})
 	}
 }

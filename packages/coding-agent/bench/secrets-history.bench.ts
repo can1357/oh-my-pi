@@ -27,6 +27,7 @@ function buildEntries(): SecretEntry[] {
 			type: "regex",
 			content: `synthetic_token_${index}_[a-f0-9]{12}`,
 			friendlyName: index % 2 === 0 ? `SyntheticToken${index}` : undefined,
+			literalPrefixes: index < 16 ? [`synthetic_token_${index}_`] : undefined,
 		})),
 	];
 }

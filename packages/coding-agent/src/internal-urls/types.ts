@@ -95,8 +95,6 @@ export interface SchemeWritePolicy {
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
 	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
 	maxBytes?: number;
-	/** True when `write` may omit `content` for this URL (`proc://<id>/kill`). */
-	contentOptional?(url: InternalUrl): boolean;
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
 	 * passes the plan-mode and device-only gates like a `coordination`-scoped write. Approval
@@ -197,6 +195,13 @@ export interface InternalResource {
 	 * Default `document`.
 	 */
 	shape?: "document" | "value";
+	/**
+	 * The JSON path named no stored value (`agent://id/missing`). `content` stays
+	 * the read sentinel `"null"`, and readers still see that sentinel. Only the
+	 * search-list split probe treats this as not found, so a `;` list is not
+	 * kept whole on it.
+	 */
+	absent?: boolean;
 	/**
 	 * True when the resolved content cannot be edited by the agent (e.g. sealed
 	 * artifacts, harness docs, machine-generated memory summaries). Hashline

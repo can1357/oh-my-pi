@@ -402,7 +402,10 @@ async function actionableClickPoint(
  * delivered the click to it: the target got the `mousedown` or `click` (a label's forwarded `click` counts
  * for its control), or the page consumed its `pointerdown` with `preventDefault()`, which suppresses the
  * mouse events after it. A disabled control gets only an unconsumed `pointerdown` and an inert subtree
- * nothing, so a click the page never saw fails instead of reporting success.
+ * nothing, so a click the page never saw fails instead of reporting success. When the page took the record
+ * with it, a navigation or a frame removed after the release counts as delivered. A child frame the page
+ * removed while the first press was down took the element before any click, so that click fails as
+ * unconfirmed even when the element saw the `mousedown`.
  */
 export async function clickElement(
 	handle: ElementHandle,
@@ -455,11 +458,27 @@ export async function clickElement(
 			return state;
 		}),
 	);
+	const frame = handle.frame;
+	// The main frame outlives any press; a child frame's record is read once while the first press is down, since
+	// the browser reports a removed frame only after it acknowledges the press.
+	const checkWhileDown =
+		frame === frame.page().mainFrame()
+			? undefined
+			: async () => {
+					await untilAborted(signal, () => watch.evaluate(() => false)).catch((error: unknown) => {
+						if (signal?.aborted) throw error;
+						if (frame.detached) {
+							throw new ToolError(
+								`${label}: could not confirm the click: the press reached the page, which removed the element's frame before the button came up, so no click followed; check the page before clicking again`,
+							);
+						}
+					});
+				};
 	try {
 		if (await untilAborted(signal, () => watch.evaluate(state => state.detached))) {
 			throw new ElementDetachedError(label);
 		}
-		await clickPoint(handle.frame.page(), point.x, point.y, options, signal);
+		await clickPoint(frame.page(), point.x, point.y, options, signal, checkWhileDown);
 	} catch (error) {
 		// The page may be stuck; tidy up without waiting on it.
 		void watch
@@ -468,8 +487,8 @@ export async function clickElement(
 			.finally(() => watch.dispose().catch(() => undefined));
 		throw error;
 	}
-	// A click that navigated away took the page's record with it; it reached the page. A cancelled call
-	// still fails as cancelled.
+	// A click that navigated away, or whose frame the page removed after the release, took the page's record
+	// with it; it reached the page. A cancelled call still fails as cancelled.
 	const delivered = await untilAborted(signal, () =>
 		watch.evaluate(state => {
 			state.stop();
@@ -1974,7 +1993,8 @@ export async function clickAt(
 /**
  * Click at viewport coordinates, one press and release per click. puppeteer's `mouse.click` keeps sending its
  * steps after the call gave up, so a click on a page that answers late landed after omp reported it failed;
- * here an aborted click sends no further press.
+ * here an aborted click sends no further press. `firstDown` runs once the first press is acknowledged, and its
+ * release waits for it.
  */
 async function clickPoint(
 	page: Page,
@@ -1982,6 +2002,7 @@ async function clickPoint(
 	y: number,
 	options: ClickAtOptions,
 	signal?: AbortSignal,
+	firstDown?: () => Promise<unknown>,
 ): Promise<void> {
 	const count = options.clickCount ?? 1;
 	if (count < 1) throw new ToolError("Click must occur a positive number of times.");
@@ -1991,10 +2012,14 @@ async function clickPoint(
 	const moved = page.mouse.move(x, y);
 	moved.catch(() => {});
 	// As puppeteer's `mouse.click`: one press per click, numbered, the last carrying `count`.
-	for (let clickCount = 1; clickCount < count; clickCount++) {
-		await withButtonDown(page, { button: options.button, clickCount }, signal);
+	for (let clickCount = 1; clickCount <= count; clickCount++) {
+		await withButtonDown(
+			page,
+			{ button: options.button, clickCount },
+			signal,
+			clickCount === 1 ? firstDown : undefined,
+		);
 	}
-	await withButtonDown(page, { button: options.button, clickCount: count }, signal);
 	await untilAborted(signal, () => moved);
 }
 

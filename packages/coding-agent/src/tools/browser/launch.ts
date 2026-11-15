@@ -305,6 +305,12 @@ function isCdpConnection(value: unknown): value is Connection {
 	return isRecord(value) && typeof value.send === "function" && typeof value.createSession === "function";
 }
 
+/** CDP target id; puppeteer keeps it private (`_targetId`). */
+export function privateTargetId(target: Target): string | undefined {
+	const raw = target as unknown as { _targetId?: unknown };
+	return typeof raw._targetId === "string" ? raw._targetId : undefined;
+}
+
 /** Return device descriptors from the already-loaded Puppeteer module. */
 export function loadedKnownDevices(): Readonly<Record<string, Device>> {
 	if (!knownDevices) throw new ToolError("Puppeteer device descriptors are not loaded");
@@ -655,7 +661,8 @@ export function buildHeadlessLaunchArgs(
 		DISABLE_AUTOMATION_CONTROLLED_ARG,
 		"--allow-file-access-from-files",
 		"--hide-scrollbars",
-		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
+		// Chromium 157 removed `WebMCPTesting`, which used to imply `WebMCP`.
+		"--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
 		...RENDERER_PRIORITY_ARGS,
 	];

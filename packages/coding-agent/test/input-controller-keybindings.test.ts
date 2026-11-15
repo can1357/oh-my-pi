@@ -810,7 +810,8 @@ describe("InputController keybinding setup", () => {
 		// A steer sent after the compaction lands before the yield.
 		steering.push("steer mid-run");
 
-		// Dequeue: the steer, then the held follow-up, then the request, then what was queued before it.
+		// Dequeue: the steer, then the held follow-up (as queue shorthand, so Enter holds it again), then the
+		// request (as typed: Enter compacts now), then what was queued before it.
 		const restored: string[] = [];
 		for (let i = 0; i < 4; i++) {
 			editor.setText("");
@@ -819,7 +820,7 @@ describe("InputController keybinding setup", () => {
 		}
 		expect(restored).toEqual([
 			"steer mid-run",
-			"now continue",
+			"=> now continue",
 			"/compact keep the API notes",
 			"sent before the compaction",
 		]);

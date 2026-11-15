@@ -33,12 +33,12 @@ import type {
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
-	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -371,8 +371,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	hasBuiltInTool(name: string): boolean;
 	/** Queued steering and follow-up messages. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
-	/** Remove and return the newest queued message. */
-	popLastQueuedMessage(): RestoredQueuedMessage | undefined;
+	/** Remove and return the newest queued message with the queue it came from. */
+	popLastQueuedMessage(): DequeuedMessage | undefined;
 	/** Resume an interrupted turn. */
 	resume(): Promise<void>;
 	/** Retry the last failed turn. */

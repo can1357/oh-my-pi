@@ -2,7 +2,9 @@
  * Tiny-model UI labels for spawned subagents.
  */
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveModelOverride } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import taskLabelSystemPrompt from "../prompts/system/task-label.md" with { type: "text" };
 import { generateSessionTitle } from "../utils/title-generator";
@@ -27,16 +29,26 @@ export async function generateTaskLabel(
 	settings: Settings,
 	sessionId?: string,
 	signal?: AbortSignal,
+	parentActiveModelPattern?: string,
+	parentActiveProvider?: string,
 ): Promise<string | null> {
 	const text = assignment.trim();
 	if (!text) return null;
 	try {
+		const resolvedModel =
+			cfgOffline.get(settings) && parentActiveModelPattern
+				? resolveModelOverride([parentActiveModelPattern], registry, settings, { exactOnly: true }).model
+				: undefined;
+		const currentModel =
+			resolvedModel && (!parentActiveProvider || resolvedModel.provider === parentActiveProvider)
+				? resolvedModel
+				: undefined;
 		const label = await generateSessionTitle(
 			text,
 			registry,
 			settings,
 			sessionId,
-			undefined,
+			currentModel,
 			undefined,
 			TASK_LABEL_SYSTEM_PROMPT,
 			signal,

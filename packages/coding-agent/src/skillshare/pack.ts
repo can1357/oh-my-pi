@@ -12,8 +12,7 @@ import * as path from "node:path";
 import { isEnoent, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { SKILL_DEFAULT_IGNORES, SKILL_LIMITS, SKILL_NAME_MAX, SKILL_NAME_RE } from "@oh-my-pi/pi-wire/skillshare";
 import { validateAgentSkillFrontmatter } from "../discovery/agent-plugin-format";
-import { compiledCredentialPatterns } from "../secrets/patterns";
-import type { SecretMatch } from "../secrets/regex";
+import { CREDENTIAL_PATTERNS } from "../secrets/patterns";
 import { type TarEntry, writeTar } from "./tar";
 
 export interface PackedFile {
@@ -297,14 +296,19 @@ async function walk(state: WalkState, relDir: string): Promise<void> {
 // Secret scan
 // ---------------------------------------------------------------------------
 
+const SECRET_PATTERNS = CREDENTIAL_PATTERNS.map(pattern => ({
+	kind: pattern.name,
+	regex: new RegExp(pattern.source, pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`),
+}));
+
 /** Report credential-shaped strings (vendor tokens, JWTs, private keys) in a text file. */
 function scanSecrets(filePath: string, content: Uint8Array, findings: SecretFinding[]): void {
 	if (content.subarray(0, 8000).includes(0)) return;
 	const text = new TextDecoder().decode(content);
 	const seen = new Set<string>();
-	for (const { name: kind, regex } of compiledCredentialPatterns()) {
+	for (const { kind, regex } of SECRET_PATTERNS) {
 		regex.lastIndex = 0;
-		let match: SecretMatch | null;
+		let match: RegExpExecArray | null;
 		while ((match = regex.exec(text)) !== null) {
 			if (match[0].length === 0) {
 				regex.lastIndex++;

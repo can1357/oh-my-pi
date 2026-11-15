@@ -174,3 +174,26 @@ fn open_options() -> Options {
 		})
 		.with(Trust::Full)
 }
+
+/// The index at `index_path`, or the repository's when `None`; `None` when an
+/// alternate index does not exist yet.
+pub(crate) fn load_index_at(
+	repo: &gix::Repository,
+	index_path: Option<&std::path::Path>,
+) -> Result<Option<gix::index::File>> {
+	let Some(path) = index_path else {
+		return load_index_or_head(repo, "git read index").map(Some);
+	};
+	match std::fs::metadata(path) {
+		Ok(_) => gix::index::File::at(
+			path,
+			repo.object_hash(),
+			false,
+			gix::index::decode::Options::default(),
+		)
+		.map(Some)
+		.map_err(|err| Error::backend("git read alternate index", err)),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+		Err(err) => Err(err.into()),
+	}
+}

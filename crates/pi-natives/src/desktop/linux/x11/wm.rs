@@ -524,20 +524,59 @@ impl Wm<'_> {
 	/// A mapped popup is evidence that input may be grabbed, not proof of
 	/// who owns the grab. Never use this heuristic to authorize core input.
 	pub(super) fn grab_popup_of(&self, pid: u32) -> Option<Window> {
-		self.children(self.root).into_iter().rev().find(|&child| {
-			let Some(attributes) = self
-				.conn
-				.get_window_attributes(child)
-				.ok()
-				.and_then(|cookie| cookie.reply().ok())
-			else {
-				return false;
-			};
-			attributes.override_redirect
-				&& attributes.map_state == MapState::VIEWABLE
-				&& self.root_child_pid(child) == Some(pid)
-				&& !self.is_passive_popup(child)
-		})
+		self
+			.children(self.root)
+			.into_iter()
+			.rev()
+			.find(|&child| self.is_grab_popup_of(child, pid))
+	}
+
+	/// Every popup [`Self::grab_popup_of`] would consider, topmost first: a
+	/// submenu and the menu it opened from are one grab.
+	pub(super) fn grab_popups_of(&self, pid: u32) -> Vec<Window> {
+		let mut children = self.children(self.root);
+		children.retain(|&child| self.is_grab_popup_of(child, pid));
+		children.reverse();
+		children
+	}
+
+	fn is_grab_popup_of(&self, child: Window, pid: u32) -> bool {
+		let Some(attributes) = self
+			.conn
+			.get_window_attributes(child)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+		else {
+			return false;
+		};
+		attributes.override_redirect
+			&& attributes.map_state == MapState::VIEWABLE
+			&& self.root_child_pid(child) == Some(pid)
+			&& !self.is_passive_popup(child)
+	}
+
+	/// Whether screen point (`x`, `y`) lies inside `window`; `false` when its
+	/// geometry cannot be read.
+	pub(super) fn contains_point(&self, window: Window, x: i16, y: i16) -> bool {
+		let geometry = self
+			.conn
+			.get_geometry(window)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok());
+		let origin = self
+			.conn
+			.translate_coordinates(window, self.root, 0, 0)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok());
+		let (Some(geometry), Some(origin)) = (geometry, origin) else {
+			return false;
+		};
+		let (left, top) = (i32::from(origin.dst_x), i32::from(origin.dst_y));
+		let (px, py) = (i32::from(x), i32::from(y));
+		px >= left
+			&& py >= top
+			&& px < left + i32::from(geometry.width)
+			&& py < top + i32::from(geometry.height)
 	}
 
 	fn is_passive_popup(&self, window: Window) -> bool {

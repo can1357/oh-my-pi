@@ -29,7 +29,7 @@ pub(super) use selection::select_dragged;
 use super::{
 	super::{
 		ax::{
-			AxBounds, AxHandle, AxProps, WalkBounds, confirm_read_as, normalize_role_macos,
+			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
 			require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
@@ -751,8 +751,15 @@ pub(in crate::desktop) fn ax_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
 }
 
 /// Hit-tests the global point `(x, y)` the way the pointer would, returning
-/// the process and window that own the frontmost surface there.
-pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
+/// the surface and its owner together so refusal lookups use the same hit.
+pub(super) fn point_owner(x: f64, y: f64) -> Option<(PointOwner, CFRetained<AXUIElement>)> {
+	let (pid, element) = element_at_point(x, y)?;
+	let window = element_window(&element);
+	Some((PointOwner { pid, window: window.as_deref().and_then(window_id) }, element))
+}
+
+/// The frontmost element at the global point `(x, y)`, and its process.
+fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIElement>)> {
 	if !x.is_finite() || !y.is_finite() {
 		return None;
 	}
@@ -772,8 +779,7 @@ pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
 	if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success {
 		return None;
 	}
-	let window = element_window(&element);
-	Some(PointOwner { pid, window: window.as_deref().and_then(window_id) })
+	Some((pid, element))
 }
 
 /// Raises a known window for explicit takeover or restoration.
@@ -831,7 +837,7 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 /// `AXWindow` and sit below that element. [`find_window`] resolves the same
 /// window id to the same listed element, so an element is owned by the window
 /// whose `ax()` shows it.
-fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
+pub(super) fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
 	let app = probe_application(pid)?;
 	let windows = copy_elements(&app, "AXWindows").ok()?;
 	let listed = nearest_matching(
@@ -1306,27 +1312,27 @@ impl AxBackend for MacAx {
 	}
 }
 
-fn element_props(
-	values: &NodeValues,
-	child_count: usize,
-	read_bounds: WalkBounds,
-) -> CoreResult<AxProps> {
+struct ElementLabels {
+	native_role: String,
+	title:       Option<String>,
+	description: Option<String>,
+	role_name:   Option<String>,
+	complete:    bool,
+}
+
+/// Decodes only labels already in the batch. In particular, an `AXValue` can
+/// itself be an AX element whose display value needs more synchronous reads.
+fn element_labels(values: &NodeValues) -> CoreResult<ElementLabels> {
 	let native_role = required_string(values.get(ROLE), "AXRole")?;
-	let read = |index| values.get(index).ok().flatten();
 	let string = |index| {
-		read(index)
+		values
+			.get(index)
+			.ok()
+			.flatten()
 			.and_then(|value| value.downcast::<CFString>().ok())
 			.map(|value| value.to_string())
 	};
-	let boolean = |index| {
-		read(index)
-			.and_then(|value| value.downcast::<CFBoolean>().ok())
-			.map(|value| value.as_bool())
-	};
 	let title = nonempty(string(TITLE));
-	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
-	// A field with no label of its own is named by its placeholder ("Add
-	// Date"), as an accessible name falls back to it.
 	let description = nonempty(string(DESCRIPTION));
 	let uses_placeholder = title.is_none() && description.is_none();
 	let description = description.or_else(|| {
@@ -1336,15 +1342,33 @@ fn element_props(
 			None
 		}
 	});
-	let label_complete = label_answered(values, TITLE)
+	let complete = label_answered(values, TITLE)
 		&& (title.is_some()
 			|| (label_answered(values, DESCRIPTION)
 				&& (!uses_placeholder || label_answered(values, PLACEHOLDER))
 				&& (description.is_some()
 					|| native_role != "AXButton"
 					|| label_answered(values, SUBROLE))));
+	let role_name =
+		window_control_name(&native_role, [&title, &description], string(SUBROLE)).map(str::to_owned);
+	Ok(ElementLabels { native_role, title, description, role_name, complete })
+}
+
+fn element_props(
+	values: &NodeValues,
+	child_count: usize,
+	read_bounds: WalkBounds,
+) -> CoreResult<AxProps> {
+	let ElementLabels { native_role, title, description, role_name, complete: label_complete } =
+		element_labels(values)?;
+	let read = |index| values.get(index).ok().flatten();
+	let boolean = |index| {
+		read(index)
+			.and_then(|value| value.downcast::<CFBoolean>().ok())
+			.map(|value| value.as_bool())
+	};
+	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
-	let role_name = window_control_name(&native_role, [&title, &description], string(SUBROLE));
 	let selected = selected(values, &native_role);
 	Ok(AxProps {
 		role: normalize_role_macos(&native_role),
@@ -1366,7 +1390,7 @@ fn element_props(
 		label_complete,
 		identity,
 		selected,
-		role_name: role_name.map(str::to_owned),
+		role_name,
 	})
 }
 
@@ -1804,8 +1828,8 @@ pub(super) fn require_element_read_as(element: &AXUIElement) -> CoreResult<()> {
 
 fn checked_ref_read(
 	front: impl Fn() -> Option<libc::pid_t>,
-	probe: impl FnOnce() -> CoreResult<(libc::pid_t, Option<AxProps>)>,
-) -> CoreResult<Option<AxProps>> {
+	probe: impl FnOnce() -> CoreResult<(libc::pid_t, Option<AxReadAs>)>,
+) -> CoreResult<Option<AxReadAs>> {
 	let (entry, (pid, props)) = input::EntryFront::before(&front, probe)?;
 	if entry.behind(pid) && front() == Some(pid) {
 		return Err(DesktopError::user_intervened(
@@ -1821,7 +1845,7 @@ fn checked_ref_read(
 /// the role, as when it is too busy: that cannot tell, and it costs none of
 /// the lone reads a walk falls back on, each with its own timeout. A
 /// destroyed element is `StaleRef`, as from the action itself.
-pub(super) fn read_as(element: &AXUIElement) -> CoreResult<Option<AxProps>> {
+pub(super) fn read_as(element: &AXUIElement) -> CoreResult<Option<AxReadAs>> {
 	let read = NodeRead::Props;
 	let batch = NodeValues::batch(element, read);
 	if batch
@@ -1831,8 +1855,18 @@ pub(super) fn read_as(element: &AXUIElement) -> CoreResult<Option<AxProps>> {
 		return Ok(None);
 	}
 	let values = NodeValues::from_batch(batch, read.attributes(), |_| Err(AXError::CannotComplete));
-	match element_props(&values, 0, WalkBounds::Skip) {
-		Ok(props) => Ok(Some(props)),
+	read_as_values(&values)
+}
+
+fn read_as_values(values: &NodeValues) -> CoreResult<Option<AxReadAs>> {
+	match element_labels(values) {
+		Ok(labels) => Ok(labels.complete.then(|| {
+			AxReadAs::from_labels(normalize_role_macos(&labels.native_role), [
+				labels.title,
+				labels.description,
+				labels.role_name,
+			])
+		})),
 		Err(error) if error.code == ErrorCode::StaleRef => Err(error),
 		Err(_) => Ok(None),
 	}
@@ -2360,10 +2394,19 @@ fn set_timeout(element: &AXUIElement) -> CoreResult<()> {
 	ax_result(error, "AXUIElementSetMessagingTimeout(2.0) failed")
 }
 
+#[cfg(test)]
+thread_local! {
+	// Includes failed lone AX calls, so the projection regression does not
+	// depend on the test process having Accessibility permission.
+	static SINGLE_ATTRIBUTE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn copy_attribute_result(
 	element: &AXUIElement,
 	attribute: &str,
 ) -> Result<Option<CFRetained<CFType>>, AXError> {
+	#[cfg(test)]
+	SINGLE_ATTRIBUTE_READS.with(|reads| reads.set(reads.get() + 1));
 	let attribute = CFString::from_str(attribute);
 	let mut output: *const CFType = ptr::null();
 	let slot = NonNull::from(&mut output);
@@ -2780,9 +2823,39 @@ mod tests {
 	}
 
 	#[test]
+	fn fingerprint_decoding_does_not_query_an_ax_element_value() {
+		use super::{SINGLE_ATTRIBUTE_READS, read_as_values};
+		let role = CFString::from_static_str("AXRadioGroup");
+		let title = CFString::from_static_str("Choice");
+		let child = create_system_wide();
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null = unsafe { kCFNull }.unwrap();
+		let entries: Vec<&CFType> = NodeRead::Props
+			.attributes()
+			.map(|index| -> &CFType {
+				match index {
+					ROLE => &role,
+					TITLE => &title,
+					VALUE => &child,
+					_ => null,
+				}
+			})
+			.collect();
+		let values = NodeValues::from_batch(
+			Ok(CFArray::from_objects(&entries)),
+			NodeRead::Props.attributes(),
+			|_| unreachable!("an answered batch needs no lone reads"),
+		);
+		SINGLE_ATTRIBUTE_READS.with(|reads| reads.set(0));
+		assert!(read_as_values(&values).unwrap().is_some());
+		assert_eq!(SINGLE_ATTRIBUTE_READS.with(|reads| reads.get()), 0);
+	}
+
+	#[test]
 	fn only_an_element_whose_app_answered_every_identifying_attribute_has_an_identity() {
 		use super::{
-			HELP, MacAx, WalkBounds, answered, element_props, read_identity, require_read_as,
+			HELP, MacAx, WalkBounds, answered, element_props, read_as_values, read_identity,
+			require_read_as,
 		};
 		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
 
@@ -2846,7 +2919,8 @@ mod tests {
 		for help in [&no_value, &busy] {
 			let registered = element_props(&walk(help), 0, WalkBounds::Skip).unwrap();
 			assert!(registered.label_complete);
-			let changed = element_props(&walk_as(&stop, &busy), 0, WalkBounds::Skip).unwrap();
+			let changed_values = walk_as(&stop, &busy);
+			let changed = element_props(&changed_values, 0, WalkBounds::Skip).unwrap();
 			assert!(changed.partial);
 			assert!(changed.label_complete);
 			let mut registry = AxRegistry::default();
@@ -2859,7 +2933,7 @@ mod tests {
 				Uniqueness::Unknown,
 			);
 			let scope = registry.expect_read_as(&reference).unwrap();
-			let error = require_read_as(|| Ok(Some(changed))).unwrap_err();
+			let error = require_read_as(|| read_as_values(&changed_values)).unwrap_err();
 			assert_eq!(error.code, crate::desktop::error::ErrorCode::StaleRef);
 			assert!(scope.finish());
 		}

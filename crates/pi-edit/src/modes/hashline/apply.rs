@@ -395,14 +395,26 @@ impl Ambiguity {
 	}
 }
 
+/// Dropping `drop_l`/`drop_t` echo rows would leave the range as it already
+/// is. The drop then turns the edit into a no-op, so the only edit the body can
+/// mean is the literal one: a new copy of the neighbouring line.
+fn drop_is_noop(group: &ReplacementGroup, lines: &[&str], drop_l: usize, drop_t: usize) -> bool {
+	let kept = &group.payload[drop_l..group.payload.len() - drop_t];
+	let range = &lines[(group.start - 1) as usize..group.end as usize];
+	kept.len() == range.len() && kept.iter().zip(range).all(|(row, line)| row == line)
+}
+
+/// Drops boundary echoes from replacement bodies. Also returns the start lines
+/// of groups kept as written because dropping their echo would be a no-op.
 fn normalize_echoes(
 	edits: &[Edit],
 	lines: &[&str],
 	path: Option<&str>,
-) -> (Vec<Edit>, Vec<String>, Vec<Ambiguity>) {
+) -> (Vec<Edit>, Vec<String>, Vec<Ambiguity>, Vec<u32>) {
 	let mut out = Vec::new();
 	let mut warnings = Vec::new();
 	let mut ambiguities = Vec::new();
+	let mut literal = Vec::new();
 	let mut i = 0;
 	while i < edits.len() {
 		let Some(group) = replacement_group(edits, i) else {
@@ -446,6 +458,10 @@ fn normalize_echoes(
 				ambiguities.extend(short_echo(&group, 0, trailing));
 			}
 		}
+		if (drop_l > 0 || drop_t > 0) && drop_is_noop(&group, lines, drop_l, drop_t) {
+			literal.push(group.start);
+			(drop_l, drop_t) = (0, 0);
+		}
 		if drop_l > 0 || drop_t > 0 {
 			// A body that restates the neighbour more than once keeps a copy
 			// after this drop; record the too-short shape that copy exposes.
@@ -474,7 +490,7 @@ fn normalize_echoes(
 		}
 		i = group.delete_indices.last().copied().unwrap() + 1;
 	}
-	(out, warnings, ambiguities)
+	(out, warnings, ambiguities, literal)
 }
 
 fn indent_columns(line: &str) -> usize {
@@ -781,6 +797,7 @@ fn repair_boundaries(
 	path: Option<&str>,
 	baseline: bool,
 	recorded: &[u32],
+	literal: &[u32],
 ) -> Result<Option<RepairedEdits>, EditError> {
 	let Some(path) = path else { return Ok(None) };
 	let mut groups = Vec::new();
@@ -788,6 +805,12 @@ fn repair_boundaries(
 	let mut i = 0;
 	while i < edits.len() {
 		if let Some(group) = replacement_group(edits, i) {
+			i = group.delete_indices.last().copied().unwrap() + 1;
+			// Dropping this group's echo would be a no-op, so the body means the
+			// edit as written; a repair would only turn it back into that no-op.
+			if literal.contains(&group.start) {
+				continue;
+			}
 			let (variants, group_ambiguity) = group_variants(&group, edits, lines, path, baseline);
 			if let Some(kind) = group_ambiguity
 				&& ambiguous.is_none()
@@ -795,9 +818,8 @@ fn repair_boundaries(
 				ambiguous = Some((group.start, group.end, kind));
 			}
 			if !variants.is_empty() {
-				groups.push((group.clone(), variants));
+				groups.push((group, variants));
 			}
-			i = group.delete_indices.last().copied().unwrap() + 1;
 		} else {
 			i += 1;
 		}
@@ -1294,7 +1316,8 @@ pub fn apply_edits(
 	validate_bounds(&target, &lines)?;
 	let indentation_warnings = repair_indentation(&mut target, &lines);
 	let (landed, landing_warnings) = repair_landings(&target, &lines, options.path);
-	let (normalized, echo_warnings, ambiguities) = normalize_echoes(&landed, &lines, options.path);
+	let (normalized, echo_warnings, ambiguities, literal) =
+		normalize_echoes(&landed, &lines, options.path);
 	let mut leading = clipboard_warnings;
 	leading.extend(indentation_warnings);
 	leading.extend(landing_warnings);
@@ -1327,7 +1350,7 @@ pub fn apply_edits(
 			.iter()
 			.map(|ambiguity| ambiguity.start)
 			.collect::<Vec<_>>();
-		repair_boundaries(&normalized, &lines, options.path, baseline, &recorded)?.and_then(
+		repair_boundaries(&normalized, &lines, options.path, baseline, &recorded, &literal)?.and_then(
 			|(repaired, warnings)| {
 				let result = materialize(&lines, &repaired);
 				parses_cleanly(options.path, &result.0).then_some((repaired, warnings, result))
@@ -1343,7 +1366,8 @@ pub fn apply_edits(
 		}
 		(normalized, authored)
 	};
-	if let Some(error) = lossy_echo_outcome(&landed, &committed, &lines, options.path, &ambiguities)
+	if let Some(error) =
+		lossy_echo_outcome(&landed, &committed, &lines, options.path, &ambiguities, &literal)
 	{
 		return Err(error);
 	}
@@ -1358,13 +1382,16 @@ pub fn apply_edits(
 /// line, or if they are fewer than the range once such copies are set aside:
 /// either way the patch loses or duplicates lines that no reading of the body
 /// asks for. The echo passes refuse the shapes they recognise with a more
-/// specific message; this keeps one they do not recognise from applying.
+/// specific message; this keeps one they do not recognise from applying. A
+/// group in `literal` whose body was committed as written is the range's final
+/// content: its neighbour copy is a line the body adds.
 fn lossy_echo_outcome(
 	authored: &[Edit],
 	committed: &[Edit],
 	lines: &[&str],
 	path: Option<&str>,
 	recorded: &[Ambiguity],
+	literal: &[u32],
 ) -> Option<EditError> {
 	let deleted = |line: u32| {
 		committed
@@ -1397,6 +1424,9 @@ fn lossy_echo_outcome(
 			continue;
 		}
 		let rows = committed_rows(&group, authored, committed, lines);
+		if literal.contains(&group.start) && rows == group.payload {
+			continue;
+		}
 		let (mut above, mut below) = restated_edges(&rows, lines, group.start, group.end);
 		if deleted(group.start - 1) {
 			above = 0;

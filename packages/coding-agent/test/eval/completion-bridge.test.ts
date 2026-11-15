@@ -198,6 +198,7 @@ const session = {
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
+		find: (provider, id) => (provider === SMOL.provider && id === SMOL.id ? SMOL : undefined),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	},

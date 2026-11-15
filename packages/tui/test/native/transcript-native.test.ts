@@ -535,10 +535,10 @@ describe("native transcript", () => {
 		expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.shell")).toBeUndefined();
 		const card = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.bash");
 		expect(card?.p).toMatchObject({ name: "bash", status: "done" });
-		// The canonical bash renderer described the call; the generic fallback would not.
-		expect(h.find(node => node.k === "code" && node.p?.role === "omp.tool.bash.command")?.p).toMatchObject({
-			text: "ls -la",
-		});
+		// The canonical bash renderer described the call as an interpreted shell input; the generic fallback would not.
+		const input = h.find(node => node.k === "shell" && node.p?.role === "omp.tool.bash.command");
+		const rows = input?.k === "shell" ? input.p?.presentation.rows : undefined;
+		expect(rows?.map(row => row.segments.map(segment => segment.text).join(""))).toEqual(["ls -la"]);
 		expect(h.errors).toEqual([]);
 	});
 

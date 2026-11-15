@@ -115,7 +115,8 @@ export async function classifyAutoPrewalk(
 	input: AutoPrewalkInput,
 	deps: NativeJudgmentDeps,
 ): Promise<AutoPrewalkDecision | undefined> {
-	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry)) return undefined;
+	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry, deps.sessionModel))
+		return undefined;
 	const { answers } = await judgeNatively(
 		"auto-prewalk",
 		{ state: buildState(input), questions: QUESTIONS },

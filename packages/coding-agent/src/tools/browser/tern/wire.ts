@@ -262,6 +262,11 @@ export interface TernTransport {
 	readonly product: string;
 	/** The peer as errors name it, after "the": `Tern daemon at /run/tern.sock`. */
 	readonly peer: string;
+	/**
+	 * Whether the peer holds an `events` call with `wait: true` until the block has an event after `after` (omp's
+	 * WebKit host does; the Tern daemon answers it at once, like any `events` call).
+	 */
+	readonly waitsForEvents: boolean;
 	/** Why a peer may hang up before greeting, appended to that error. */
 	readonly greetingHint?: string;
 	/** Open the stream. Called once; a throw is a failed connection. */
@@ -275,6 +280,7 @@ export interface TernTransport {
 /** The Tern daemon's Unix socket. */
 class TernSocketTransport implements TernTransport {
 	readonly product = "Tern";
+	readonly waitsForEvents = false;
 	readonly peer: string;
 	readonly greetingHint = "a Tern without omp's JSON protocol cannot read its hello (update Tern)";
 	readonly #socketPath: string;
@@ -366,6 +372,11 @@ export class TernSocketClient {
 	/** The backend's display name ({@link TernTransport.product}). */
 	get product(): string {
 		return this.#transport.product;
+	}
+
+	/** Whether the peer holds an `events` call with `wait: true` until there is an event ({@link TernTransport.waitsForEvents}). */
+	get waitsForEvents(): boolean {
+		return this.#transport.waitsForEvents;
 	}
 
 	/** Whether the connection is up and welcomed. */

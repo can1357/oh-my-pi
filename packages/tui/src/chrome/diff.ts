@@ -8,6 +8,11 @@ import type { NativeNode } from "../native/node";
 /** SGR dim on / normal intensity — additive, preserves fg/bg colors. */
 const DIM = "\x1b[2m";
 const DIM_OFF = "\x1b[22m";
+// Hoisted: a regex literal allocates a new RegExp object on every evaluation.
+const LEADING_INDENT = /^([ \t]+)/;
+const LEADING_WHITESPACE = /^(\s*)/;
+const CANONICAL_DIFF_LINE = /^([+-\s])(\s*\d+)\|(.*)$/;
+const LEGACY_DIFF_LINE = /^([+-\s])(?:(\s*\d+)\s)?(.*)$/;
 
 /**
  * Visualize leading whitespace (indentation) with dim glyphs.
@@ -16,7 +21,7 @@ const DIM_OFF = "\x1b[22m";
  * content are replaced with spaces (like replaceTabs).
  */
 function visualizeIndent(text: string): string {
-	const match = text.match(/^([ \t]+)/);
+	const match = text.match(LEADING_INDENT);
 	if (!match) return replaceTabs(text);
 	const indent = match[1];
 	const rest = text.slice(indent.length);
@@ -40,11 +45,11 @@ function visualizeIndent(text: string): string {
  * Supported formats: "+123|content" (canonical) and "+123 content" (legacy).
  */
 function parseDiffLine(line: string): { prefix: CodeFrameMarker; lineNum: string; content: string } | null {
-	const canonical = line.match(/^([+-\s])(\s*\d+)\|(.*)$/);
+	const canonical = line.match(CANONICAL_DIFF_LINE);
 	if (canonical) {
 		return { prefix: canonical[1] as CodeFrameMarker, lineNum: canonical[2] ?? "", content: canonical[3] ?? "" };
 	}
-	const legacy = line.match(/^([+-\s])(?:(\s*\d+)\s)?(.*)$/);
+	const legacy = line.match(LEGACY_DIFF_LINE);
 	if (!legacy) return null;
 	return { prefix: legacy[1] as CodeFrameMarker, lineNum: legacy[2] ?? "", content: legacy[3] ?? "" };
 }
@@ -71,7 +76,7 @@ function renderIntraLineDiff(
 			let value = part.value;
 			// Strip leading whitespace from the first removed part
 			if (isFirstRemoved) {
-				const leadingWs = value.match(/^(\s*)/)?.[1] || "";
+				const leadingWs = value.match(LEADING_WHITESPACE)?.[1] || "";
 				value = value.slice(leadingWs.length);
 				removedLine += leadingWs;
 				isFirstRemoved = false;
@@ -83,7 +88,7 @@ function renderIntraLineDiff(
 			let value = part.value;
 			// Strip leading whitespace from the first added part
 			if (isFirstAdded) {
-				const leadingWs = value.match(/^(\s*)/)?.[1] || "";
+				const leadingWs = value.match(LEADING_WHITESPACE)?.[1] || "";
 				value = value.slice(leadingWs.length);
 				addedLine += leadingWs;
 				isFirstAdded = false;
@@ -209,7 +214,7 @@ export function renderDiff(diffText: string, options: RenderDiffOptions = {}): s
 	let i = 0;
 	while (i < lines.length) {
 		const line = lines[i];
-		const parsed = parseDiffLine(line);
+		const parsed = parsedLines[i];
 
 		if (!parsed) {
 			prevLineNum = "";
@@ -226,17 +231,17 @@ export function renderDiff(diffText: string, options: RenderDiffOptions = {}): s
 		if (parsed.prefix === "-") {
 			const removedLines: { lineNum: string; content: string }[] = [];
 			while (i < lines.length) {
-				const p = parseDiffLine(lines[i]);
+				const p = parsedLines[i];
 				if (p?.prefix !== "-") break;
-				removedLines.push({ lineNum: p.lineNum, content: p.content });
+				removedLines.push(p);
 				i++;
 			}
 
 			const addedLines: { lineNum: string; content: string }[] = [];
 			while (i < lines.length) {
-				const p = parseDiffLine(lines[i]);
+				const p = parsedLines[i];
 				if (p?.prefix !== "+") break;
-				addedLines.push({ lineNum: p.lineNum, content: p.content });
+				addedLines.push(p);
 				i++;
 			}
 

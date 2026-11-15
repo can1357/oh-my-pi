@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed HTML-to-Markdown conversion (web fetch, pasted HTML) dropping the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Helloworld`) and code indentation inside `<pre>` (Sphinx/Pygments blocks) ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla)).
+- Fixed HTML-to-Markdown conversion leaving a lone-space line between block elements ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla)).
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added a profile-aware data directory for managed Antigravity CLI installations and isolated account state.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved extraction of Cloud Code Assist quota reset information, including compound durations and reset timestamps, to provide more accurate retry guidance.
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

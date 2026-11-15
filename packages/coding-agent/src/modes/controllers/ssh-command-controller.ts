@@ -300,7 +300,7 @@ export class SSHCommandController {
 				lines.push("");
 			}
 
-			// Show discovered hosts (from ssh.json, .ssh.json in project root, etc.)
+			// Show discovered hosts (ssh.json/.ssh.json in project root, ~/.ssh/config aliases, etc.)
 			if (discoveredHosts.length > 0) {
 				for (const { providerName, shortPath, items: hosts } of groupBySource(discoveredHosts, h => h._source)) {
 					lines.push(

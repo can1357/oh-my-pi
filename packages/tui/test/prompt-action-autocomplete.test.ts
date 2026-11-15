@@ -33,11 +33,14 @@ function modelMentionItem(provider: string, id: string, name: string, efforts?: 
 
 const FIVE_LEVELS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
-function mentionProvider(candidates: readonly ModelBrowserItem[]) {
+function mentionProvider(candidates: readonly ModelBrowserItem[], retryDiscovery?: () => Promise<void> | undefined) {
 	return createPromptActionAutocompleteProvider({
 		commands: [{ name: "btw", description: "By the way", allowArgs: true }],
 		basePath: "/tmp",
-		modelMentions: query => candidates.filter(candidate => candidate.selector.includes(query)),
+		modelMentions: Object.assign(
+			(query: string) => candidates.filter(candidate => candidate.selector.includes(query)),
+			{ retryDiscovery },
+		),
 		keybindings: AppKeybindingsManager.inMemory(),
 		copyCurrentLine: () => {},
 		copyPrompt: () => {},
@@ -395,6 +398,24 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions?.items[19]?.value).toBe("demo/model-20");
 	});
 
+	it("re-lists model mentions once a discovery retry recovers models", async () => {
+		const candidates = [modelMentionItem("a", "x", "X One")];
+		const retry = Promise.withResolvers<void>();
+		let pending: Promise<void> | undefined = retry.promise;
+		const provider = mentionProvider(candidates, () => pending);
+		const partials: string[][] = [];
+
+		const suggestions = provider.getSuggestions(["^x"], 0, 2, undefined, partial =>
+			partials.push(partial.items.map(item => item.value)),
+		);
+		candidates.unshift(modelMentionItem("b", "xx", "Recovered"));
+		pending = undefined;
+		retry.resolve();
+
+		expect((await suggestions)?.items.map(item => item.value)).toEqual(["b/xx", "a/x"]);
+		expect(partials).toEqual([["a/x"]]);
+	});
+
 	it("does not suggest a model mention without a left token boundary", async () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
@@ -515,6 +536,32 @@ describe("model mention effort rows in the editor", () => {
 		editor.handleInput("\t");
 
 		expect(editor.getText()).toBe("/btw ^a/x:high ");
+	});
+
+	it("rebuilds an open mention popup when a discovery retry recovers models", async () => {
+		const candidates = [modelMentionItem("a", "x", "X One")];
+		const retry = Promise.withResolvers<void>();
+		let pending: Promise<void> | undefined = retry.promise;
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(mentionProvider(candidates, () => pending));
+		const nextUpdate = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			editor.onAutocompleteUpdate = resolve;
+			return promise;
+		};
+		editor.handleInput("^");
+		while (!editor.isShowingAutocomplete()) await nextUpdate();
+		// Refreshes synchronously while the retry is still running.
+		editor.handleInput("x");
+
+		const rebuilt = nextUpdate();
+		candidates.unshift(modelMentionItem("b", "xx", "Recovered"));
+		pending = undefined;
+		retry.resolve();
+		await rebuilt;
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("^b/xx ");
 	});
 
 	it("leaves `#` tokens inside a mention to their own completions", async () => {

@@ -63,7 +63,6 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: new ModelRegistry(authStorage),
-			advisorTools: [],
 		});
 	}
 
@@ -264,7 +263,6 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 			sessionManager: await SessionManager.open(file, tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
-			advisorTools: [],
 		});
 		try {
 			const archive = await reopened.dumpAnonymizedArchiveToTmpDir();

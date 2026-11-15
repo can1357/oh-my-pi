@@ -108,7 +108,7 @@ export declare class DesktopSession {
    */
   drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopDragResult>
   scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
-  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
   keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
@@ -140,7 +140,7 @@ export declare class DesktopSession {
    * Types `text` into the element: native text fields take it by AX
    * insertion, other elements as keystrokes once they hold keyboard focus.
    */
-  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
   /** Presses a key chord in the element once it holds keyboard focus. */
   axKeyChord(reference: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   /**
@@ -632,57 +632,6 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
-/** One secret rule; see the module docs. */
-export declare class SecretRegex {
-  /**
-   * # Errors
-   * Returns the compile error when `pattern` or `flags` is not a valid rule.
-   */
-  constructor(pattern: string, flags?: string | undefined | null)
-  /**
-   * The first match starting at or after UTF-16 offset `from`, as UTF-16
-   * offsets `[start, end, matchStart]`: the range it redacts (the `secret`
-   * group when that participates, else the whole match) and where the whole
-   * match, context included, begins. `null` when there is none.
-   */
-  exec(text: SecretText, from: number): Array<number> | null
-}
-
-/**
- * Which rules match a text and whether a configured literal occurs; see the
- * module docs.
- */
-export declare class SecretScanner {
-  /**
-   * # Errors
-   * Names the first rule that does not compile, or reports an automaton
-   * build failure.
-   */
-  constructor(rules: Array<SecretScanRule>, literals: Array<string>)
-  /**
-   * Replaces the configured literals (plain secrets, the placeholder key,
-   * `$$`).
-   *
-   * # Errors
-   * Returns an error when the literal automaton cannot be built.
-   */
-  setLiterals(literals: Array<string>): void
-  /** Literal hit and matching rules of one text; `null` when neither. */
-  scan(text: string): SecretScanHits | null
-  /** [`Self::scan`] over many texts in parallel, in input order. */
-  scanMany(texts: Array<string>): Array<SecretScanHits | undefined | null>
-}
-
-/**
- * A text converted once for every [`SecretRegex`] that runs over it.
- *
- * It maps its UTF-8 bytes to the caller's UTF-16 offsets. Lone surrogates
- * arrive as U+FFFD, one unit like the surrogate they replace.
- */
-export declare class SecretText {
-  constructor(text: string)
-}
-
 /** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
@@ -902,8 +851,8 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** List tree paths. */
-  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List a tree's blobs and symlinks recursively with their modes. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsTreeEntry>>
   /** List submodule paths. */
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
@@ -1766,6 +1715,21 @@ export interface DesktopSessionOptions {
    * count, which `desktopEscapeStops` reads after they close.
    */
   escapeStopKey?: string
+}
+
+/** What a typing call did. */
+export interface DesktopTypeResult {
+  /**
+   * Why the text was sent but the target was not seen reading it before
+   * focus went back; absent when it was, or the backend does not wait for
+   * it (only Windows takeover typing does).
+   */
+  unconfirmed?: string
+  /**
+   * Where focus ended when typing ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -3622,20 +3586,6 @@ export interface SearchResult {
   error?: string
 }
 
-/** What [`SecretScanner::scan`] found in a text. */
-export interface SecretScanHits {
-  /** A configured literal (or `$$`) occurs. */
-  literal: boolean
-  /** Indices of the rules that match. */
-  rules: Array<number>
-}
-
-/** One rule for [`SecretScanner`]: its pattern and flags (see the module docs). */
-export interface SecretScanRule {
-  pattern: string
-  flags?: string
-}
-
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
 /**
@@ -4063,6 +4013,11 @@ export interface ShellVizOptions {
   speed: number
   selectedNode?: string
   expandedNodes: Array<string>
+  /**
+   * The script is a command still streaming in, not yet run: its
+   * unfinished end is drawn as it will most likely continue.
+   */
+  streaming?: boolean
 }
 
 /**
@@ -4293,6 +4248,12 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
+  /** Build the commit from this index file instead of the repository's. */
+  indexPath?: string
+  /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
+  expectedHead?: string
+  /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
+  noVerify?: boolean
 }
 
 /** Detach copied Git metadata. */
@@ -4421,6 +4382,13 @@ export interface VcsStatusSummary {
   staged: number
   unstaged: number
   untracked: number
+}
+
+/** One blob or symlink of a tree listing. */
+export interface VcsTreeEntry {
+  path: string
+  /** Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or `120000`. */
+  mode: string
 }
 
 /** Validate hunk selections. */

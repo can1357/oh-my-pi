@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { adjustHsv } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
-import { detectColorMode, resolveThemeColors, resolveVarRefs } from "./color";
+import { detectColorMode, isLightSurface, mixThemeColors, resolveThemeColors, resolveVarRefs } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
 import defaultThemes from "./defaults.json" with { type: "json" };
 import lightThemeJson from "./light.json" with { type: "json" };
@@ -145,6 +145,25 @@ export interface CreateThemeOptions {
 /** HSV adjustment to shift green toward blue for colorblind mode (red-green colorblindness) */
 const COLORBLIND_ADJUSTMENT = { h: 60, s: 0.71 };
 
+/** Share of `mdLink` in the derived `mdExtensionLink`; the rest is `text`, which mutes the link hue. */
+const EXTENSION_LINK_TINT = 0.45;
+
+/**
+ * A blend input as the theme intends it: `""` becomes the theme's
+ * `terminal.foreground` and an index 0–15 its `terminal.ansi` slot, when the
+ * theme declares them. Otherwise the value stays and {@link mixThemeColors}
+ * approximates it.
+ */
+function intendedColor(
+	value: string | number,
+	terminalForeground: string | number | undefined,
+	ansiPalette: ReadonlyArray<string | number> | undefined,
+): string | number {
+	const color = value === "" ? (terminalForeground ?? value) : value;
+	if (typeof color === "number" && color < 16) return ansiPalette?.[color] ?? color;
+	return color;
+}
+
 export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Theme {
 	const { mode, symbolPresetOverride, colorBlindMode } = options;
 	const colorMode = mode ?? detectColorMode();
@@ -155,6 +174,20 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 		if (typeof added === "string" && added.startsWith("#")) {
 			resolvedColors.toolDiffAdded = adjustHsv(added, COLORBLIND_ADJUSTMENT);
 		}
+	}
+	const vars = themeJson.vars ?? {};
+	const ansiPalette = themeJson.terminal?.ansi?.map(color => resolveVarRefs(color, vars));
+	// A theme without `mdExtensionLink` gets a muted link tint, so links an
+	// extension handles in place stay distinct from links that open a URL.
+	if (resolvedColors.mdExtensionLink === undefined) {
+		const foreground = themeJson.terminal?.foreground;
+		const terminalForeground = foreground === undefined ? undefined : resolveVarRefs(foreground, vars);
+		resolvedColors.mdExtensionLink = mixThemeColors(
+			intendedColor(resolvedColors.text, terminalForeground, ansiPalette),
+			intendedColor(resolvedColors.mdLink, terminalForeground, ansiPalette),
+			EXTENSION_LINK_TINT,
+			isLightSurface(resolvedColors.statusLineBg),
+		);
 	}
 
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
@@ -179,7 +212,6 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 	const symbolPreset: SymbolPreset = symbolPresetOverride ?? themeJson.symbols?.preset ?? "unicode";
 	const symbolOverrides = themeJson.symbols?.overrides ?? {};
 	const spinnerFramesOverrides = normalizeSpinnerFramesOverride(themeJson.symbols?.spinnerFrames);
-	const ansiPalette = themeJson.terminal?.ansi?.map(color => resolveVarRefs(color, themeJson.vars ?? {}));
 	return new Theme(fgColors, bgColors, colorMode, symbolPreset, symbolOverrides, spinnerFramesOverrides, ansiPalette);
 }
 

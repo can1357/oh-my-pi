@@ -24,8 +24,9 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
-import { type JsonValue, mapJsonStrings } from "../secrets/json-strings";
+import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { SecretValueSet } from "../secrets/placeholder";
 import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -96,16 +97,6 @@ export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOpt
 	return options?.obfuscator?.hasSecrets() ? redactSessionDataForShare(options.obfuscator, data) : data;
 }
 
-function redactShareHeader(o: SecretObfuscator, header: SessionHeader | null): SessionHeader | null {
-	if (!header) return header;
-	return {
-		...header,
-		title: header.title === undefined ? undefined : o.obfuscate(header.title),
-		cwd: o.obfuscate(header.cwd),
-		previousSessionFiles: header.previousSessionFiles?.map(previousSessionFile => o.obfuscate(previousSessionFile)),
-	};
-}
-
 /**
  * Redact secrets from a share snapshot. A share blob leaves the machine, so
  * every text-bearing field is rewritten through the obfuscator. The walk is
@@ -115,54 +106,219 @@ function redactShareHeader(o: SecretObfuscator, header: SessionHeader | null): S
  * extension `details`/`data`, `mode_change.data`, structured output schemas)
  * are dropped so they cannot leak.
  */
+function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): SecretValueSet {
+	const values = new SecretValueSet();
+	const add = (value: string | undefined): void => {
+		if (value === undefined) return;
+		for (const secretValue of o.collectRegexSecretValuesForObfuscation(value)) {
+			values.add(secretValue);
+		}
+	};
+	const addJsonStrings = (value: unknown): void => {
+		if (typeof value === "string") {
+			add(value);
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (const item of value) addJsonStrings(item);
+			return;
+		}
+		if (!isRecord(value)) return;
+		for (const item of Object.values(value)) addJsonStrings(item);
+	};
+	const addContent = (content: string | (TextContent | ImageContent)[]): void => {
+		if (typeof content === "string") {
+			add(content);
+			return;
+		}
+		for (const block of content) {
+			if (block.type === "text") add(block.text);
+		}
+	};
+	const addOutputMeta = (meta: OutputMeta | undefined): void => {
+		if (!meta) return;
+		add(meta.source?.value);
+		add(meta.minimized?.filter);
+		if (!meta.diagnostics) return;
+		add(meta.diagnostics.summary);
+		for (const message of meta.diagnostics.messages) add(message);
+	};
+	const addMessage = (message: AgentMessage): void => {
+		switch (message.role) {
+			case "user":
+			case "developer":
+			case "custom":
+			case "hookMessage":
+			case "toolResult":
+				addContent(message.content as string | (TextContent | ImageContent)[]);
+				return;
+			case "assistant":
+				add(message.errorMessage);
+				for (const block of message.content) {
+					if (block.type === "text") add(block.text);
+					else if (block.type === "thinking") add(block.thinking);
+					else if (block.type === "toolCall") {
+						addJsonStrings(block.arguments);
+						add(block.intent);
+						add(block.rawBlock);
+					}
+				}
+				return;
+			case "bashExecution":
+				add(message.command);
+				add(message.output);
+				addOutputMeta(message.meta);
+				return;
+			case "pythonExecution":
+				add(message.code);
+				add(message.output);
+				addOutputMeta(message.meta);
+				return;
+			case "branchSummary":
+				add(message.summary);
+				return;
+			case "compactionSummary":
+				add(message.summary);
+				add(message.shortSummary);
+				if (message.blocks) addContent(message.blocks);
+				return;
+			case "fileMention":
+				for (const file of message.files) {
+					add(file.path);
+					add(file.content);
+				}
+				return;
+			default:
+				return;
+		}
+	};
+	const addEntry = (entry: SessionEntry): void => {
+		switch (entry.type) {
+			case "message":
+				addMessage(entry.message);
+				return;
+			case "compaction":
+				add(entry.summary);
+				add(entry.shortSummary);
+				return;
+			case "branch_summary":
+				add(entry.summary);
+				return;
+			case "custom_message":
+				addContent(entry.content);
+				return;
+			case "session_init":
+				for (const block of [entry.systemPrompt].flat()) add(block);
+				add(entry.task);
+				return;
+			case "label":
+				add(entry.label);
+				return;
+			case TITLE_CHANGE_ENTRY_TYPE:
+				add(entry.title);
+				add(entry.previousTitle);
+				add(entry.trigger);
+				return;
+			default:
+				return;
+		}
+	};
+	const addHeader = (header: SessionHeader | null): void => {
+		if (!header) return;
+		add(header.title);
+		add(header.cwd);
+		for (const previousSessionFile of header.previousSessionFiles ?? []) add(previousSessionFile);
+	};
+
+	addHeader(data.header);
+	add(data.systemPrompt);
+	for (const tool of data.tools ?? []) add(tool.description);
+	for (const entry of data.entries) addEntry(entry);
+	for (const sub of Object.values(data.subSessions ?? {})) {
+		addHeader(sub.header);
+		for (const entry of sub.entries) addEntry(entry);
+	}
+	return values;
+}
+
+function redactShareHeader(
+	o: SecretObfuscator,
+	header: SessionHeader | null,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): SessionHeader | null {
+	if (!header) return header;
+	return {
+		...header,
+		title: header.title === undefined ? undefined : o.obfuscate(header.title, sharedRegexSecretValues),
+		cwd: o.obfuscate(header.cwd, sharedRegexSecretValues),
+		previousSessionFiles: header.previousSessionFiles?.map(previousSessionFile =>
+			o.obfuscate(previousSessionFile, sharedRegexSecretValues),
+		),
+	};
+}
+
 function redactSessionDataForShare(o: SecretObfuscator, data: SessionData): SessionData {
 	return o.batch(() => redactSessionDataBatch(o, data));
 }
 
 function redactSessionDataBatch(o: SecretObfuscator, data: SessionData): SessionData {
+	const sharedRegexSecretValues = collectShareRegexSecretValues(o, data);
 	return {
 		...data,
-		header: redactShareHeader(o, data.header),
-		systemPrompt: data.systemPrompt === undefined ? undefined : o.obfuscate(data.systemPrompt),
+		header: redactShareHeader(o, data.header, sharedRegexSecretValues),
+		systemPrompt:
+			data.systemPrompt === undefined ? undefined : o.obfuscate(data.systemPrompt, sharedRegexSecretValues),
 		tools: data.tools?.map(tool => ({
 			...tool,
-			description: o.obfuscate(tool.description),
+			description: o.obfuscate(tool.description, sharedRegexSecretValues),
 		})),
-		entries: data.entries.map(entry => redactShareEntry(o, entry)),
+		entries: data.entries.map(entry => redactShareEntry(o, entry, sharedRegexSecretValues)),
 		subSessions: data.subSessions
 			? Object.fromEntries(
-					Object.entries(data.subSessions).map(([key, sub]) => [key, redactShareSubSession(o, sub)]),
+					Object.entries(data.subSessions).map(([key, sub]) => [
+						key,
+						redactShareSubSession(o, sub, sharedRegexSecretValues),
+					]),
 				)
 			: data.subSessions,
 	};
 }
 
-function redactShareSubSession(o: SecretObfuscator, sub: SubSession): SubSession {
+function redactShareSubSession(
+	o: SecretObfuscator,
+	sub: SubSession,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): SubSession {
 	return {
 		...sub,
-		header: redactShareHeader(o, sub.header),
-		entries: sub.entries.map(entry => redactShareEntry(o, entry)),
+		header: redactShareHeader(o, sub.header, sharedRegexSecretValues),
+		entries: sub.entries.map(entry => redactShareEntry(o, entry, sharedRegexSecretValues)),
 	};
 }
 
-function redactShareEntry(o: SecretObfuscator, entry: SessionEntry): SessionEntry {
+function redactShareEntry(
+	o: SecretObfuscator,
+	entry: SessionEntry,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): SessionEntry {
 	switch (entry.type) {
 		case "message":
-			return { ...entry, message: redactShareMessage(o, entry.message) };
+			return { ...entry, message: redactShareMessage(o, entry.message, sharedRegexSecretValues) };
 		case "compaction":
 			return {
 				...entry,
-				summary: o.obfuscate(entry.summary),
-				shortSummary: entry.shortSummary === undefined ? undefined : o.obfuscate(entry.shortSummary),
+				summary: o.obfuscate(entry.summary, sharedRegexSecretValues),
+				shortSummary:
+					entry.shortSummary === undefined ? undefined : o.obfuscate(entry.shortSummary, sharedRegexSecretValues),
 				details: undefined,
 				preserveData: undefined,
 			};
 		case "branch_summary":
-			return { ...entry, summary: o.obfuscate(entry.summary), details: undefined };
+			return { ...entry, summary: o.obfuscate(entry.summary, sharedRegexSecretValues), details: undefined };
 		case "custom_message":
 			return {
 				...entry,
-				content: redactShareContent(o, entry.content),
+				content: redactShareContent(o, entry.content, sharedRegexSecretValues),
 				details: undefined,
 			};
 		case "custom":
@@ -174,9 +330,9 @@ function redactShareEntry(o: SecretObfuscator, entry: SessionEntry): SessionEntr
 				...entry,
 				systemPrompt:
 					typeof entry.systemPrompt === "string"
-						? o.obfuscate(entry.systemPrompt)
-						: entry.systemPrompt.map(block => o.obfuscate(block)),
-				task: o.obfuscate(entry.task),
+						? o.obfuscate(entry.systemPrompt, sharedRegexSecretValues)
+						: entry.systemPrompt.map(block => o.obfuscate(block, sharedRegexSecretValues)),
+				task: o.obfuscate(entry.task, sharedRegexSecretValues),
 				outputSchema: undefined,
 				// Revival-only state; its item ids can carry user text.
 				workPoolYieldItems: undefined,
@@ -184,14 +340,17 @@ function redactShareEntry(o: SecretObfuscator, entry: SessionEntry): SessionEntr
 		case "label":
 			return {
 				...entry,
-				label: entry.label === undefined ? undefined : o.obfuscate(entry.label),
+				label: entry.label === undefined ? undefined : o.obfuscate(entry.label, sharedRegexSecretValues),
 			};
 		case TITLE_CHANGE_ENTRY_TYPE:
 			return {
 				...entry,
-				title: o.obfuscate(entry.title),
-				previousTitle: entry.previousTitle === undefined ? undefined : o.obfuscate(entry.previousTitle),
-				trigger: entry.trigger === undefined ? undefined : o.obfuscate(entry.trigger),
+				title: o.obfuscate(entry.title, sharedRegexSecretValues),
+				previousTitle:
+					entry.previousTitle === undefined
+						? undefined
+						: o.obfuscate(entry.previousTitle, sharedRegexSecretValues),
+				trigger: entry.trigger === undefined ? undefined : o.obfuscate(entry.trigger, sharedRegexSecretValues),
 			};
 		default:
 			return entry;
@@ -201,48 +360,63 @@ function redactShareEntry(o: SecretObfuscator, entry: SessionEntry): SessionEntr
 function redactShareContent(
 	o: SecretObfuscator,
 	content: string | (TextContent | ImageContent)[],
+	sharedRegexSecretValues: ReadonlySet<string>,
 ): string | (TextContent | ImageContent)[] {
-	if (typeof content === "string") return o.obfuscate(content);
-	return content.map(block => (block.type === "text" ? { ...block, text: o.obfuscate(block.text) } : block));
+	if (typeof content === "string") return o.obfuscate(content, sharedRegexSecretValues);
+	return content.map(block =>
+		block.type === "text" ? { ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) } : block,
+	);
 }
 
 /** Redact freeform strings in tool output metadata (source path/URL, diagnostics, minimizer filter); numeric truncation info is preserved. */
-function redactShareOutputMeta(o: SecretObfuscator, meta: OutputMeta | undefined): OutputMeta | undefined {
+function redactShareOutputMeta(
+	o: SecretObfuscator,
+	meta: OutputMeta | undefined,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): OutputMeta | undefined {
 	if (!meta) return meta;
 	return {
 		...meta,
-		source: meta.source ? { ...meta.source, value: o.obfuscate(meta.source.value) } : meta.source,
+		source: meta.source
+			? { ...meta.source, value: o.obfuscate(meta.source.value, sharedRegexSecretValues) }
+			: meta.source,
 		diagnostics: meta.diagnostics
 			? {
-					summary: o.obfuscate(meta.diagnostics.summary),
-					messages: meta.diagnostics.messages.map(message => o.obfuscate(message)),
+					summary: o.obfuscate(meta.diagnostics.summary, sharedRegexSecretValues),
+					messages: meta.diagnostics.messages.map(message => o.obfuscate(message, sharedRegexSecretValues)),
 				}
 			: meta.diagnostics,
-		minimized: meta.minimized ? { ...meta.minimized, filter: o.obfuscate(meta.minimized.filter) } : meta.minimized,
+		minimized: meta.minimized
+			? { ...meta.minimized, filter: o.obfuscate(meta.minimized.filter, sharedRegexSecretValues) }
+			: meta.minimized,
 	};
 }
 
-function redactShareMessage(o: SecretObfuscator, message: AgentMessage): AgentMessage {
+function redactShareMessage(
+	o: SecretObfuscator,
+	message: AgentMessage,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): AgentMessage {
 	switch (message.role) {
 		case "user":
 		case "developer":
 			return {
 				...message,
 				providerPayload: undefined,
-				content: redactShareContent(o, message.content),
+				content: redactShareContent(o, message.content, sharedRegexSecretValues),
 			} as AgentMessage;
 		case "custom":
 		case "hookMessage":
 			return {
 				...message,
 				details: undefined,
-				content: redactShareContent(o, message.content),
+				content: redactShareContent(o, message.content, sharedRegexSecretValues),
 			} as AgentMessage;
 		case "toolResult":
 			return {
 				...message,
 				details: undefined,
-				content: redactShareContent(o, message.content) as (TextContent | ImageContent)[],
+				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | ImageContent)[],
 			};
 		case "assistant":
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer
@@ -252,23 +426,27 @@ function redactShareMessage(o: SecretObfuscator, message: AgentMessage): AgentMe
 			return {
 				...message,
 				providerPayload: undefined,
-				errorMessage: message.errorMessage === undefined ? undefined : o.obfuscate(message.errorMessage),
+				errorMessage:
+					message.errorMessage === undefined
+						? undefined
+						: o.obfuscate(message.errorMessage, sharedRegexSecretValues),
 				content: message.content.flatMap((block): AssistantMessage["content"] => {
 					if (block.type === "redactedThinking" || block.type === "anthropicServerTool") return [];
-					if (block.type === "text") return [{ ...block, text: o.obfuscate(block.text) }];
+					if (block.type === "text") return [{ ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) }];
 					if (block.type === "thinking") {
-						return [{ ...block, thinking: o.obfuscate(block.thinking) }];
+						return [{ ...block, thinking: o.obfuscate(block.thinking, sharedRegexSecretValues) }];
 					}
 					if (block.type === "toolCall") {
 						return [
 							{
 								...block,
-								arguments: mapJsonStrings(block.arguments as JsonValue, text => o.obfuscate(text)) as Record<
-									string,
-									unknown
-								>,
-								intent: block.intent === undefined ? undefined : o.obfuscate(block.intent),
-								rawBlock: block.rawBlock === undefined ? undefined : o.obfuscate(block.rawBlock),
+								arguments: obfuscateToolArguments(o, block.arguments, sharedRegexSecretValues),
+								intent:
+									block.intent === undefined ? undefined : o.obfuscate(block.intent, sharedRegexSecretValues),
+								rawBlock:
+									block.rawBlock === undefined
+										? undefined
+										: o.obfuscate(block.rawBlock, sharedRegexSecretValues),
 							},
 						];
 					}
@@ -278,37 +456,40 @@ function redactShareMessage(o: SecretObfuscator, message: AgentMessage): AgentMe
 		case "bashExecution":
 			return {
 				...message,
-				command: o.obfuscate(message.command),
-				output: o.obfuscate(message.output),
-				meta: redactShareOutputMeta(o, message.meta),
+				command: o.obfuscate(message.command, sharedRegexSecretValues),
+				output: o.obfuscate(message.output, sharedRegexSecretValues),
+				meta: redactShareOutputMeta(o, message.meta, sharedRegexSecretValues),
 			};
 		case "pythonExecution":
 			return {
 				...message,
-				code: o.obfuscate(message.code),
-				output: o.obfuscate(message.output),
-				meta: redactShareOutputMeta(o, message.meta),
+				code: o.obfuscate(message.code, sharedRegexSecretValues),
+				output: o.obfuscate(message.output, sharedRegexSecretValues),
+				meta: redactShareOutputMeta(o, message.meta, sharedRegexSecretValues),
 			};
 		case "branchSummary":
-			return { ...message, summary: o.obfuscate(message.summary) };
+			return { ...message, summary: o.obfuscate(message.summary, sharedRegexSecretValues) };
 		case "compactionSummary":
 			return {
 				...message,
 				providerPayload: undefined,
-				summary: o.obfuscate(message.summary),
-				shortSummary: message.shortSummary === undefined ? undefined : o.obfuscate(message.shortSummary),
+				summary: o.obfuscate(message.summary, sharedRegexSecretValues),
+				shortSummary:
+					message.shortSummary === undefined
+						? undefined
+						: o.obfuscate(message.shortSummary, sharedRegexSecretValues),
 				blocks:
 					message.blocks === undefined
 						? undefined
-						: (redactShareContent(o, message.blocks) as (TextContent | ImageContent)[]),
+						: (redactShareContent(o, message.blocks, sharedRegexSecretValues) as (TextContent | ImageContent)[]),
 			};
 		case "fileMention":
 			return {
 				...message,
 				files: message.files.map(file => ({
 					...file,
-					path: o.obfuscate(file.path),
-					content: o.obfuscate(file.content),
+					path: o.obfuscate(file.path, sharedRegexSecretValues),
+					content: o.obfuscate(file.content, sharedRegexSecretValues),
 				})),
 			};
 		default:

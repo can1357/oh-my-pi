@@ -1787,6 +1787,68 @@ document.getElementById("menu-item").addEventListener("pointerdown", event => {
 		}
 	}, 30_000);
 
+	test("fails a click whose frame the page removes while the first press is down, and keeps one it removes on a click", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		// Each frame counts its button's clicks on the top document, and removes itself on the `removeOn` event.
+		const frameClick = async (removeOn: string, clickCount = 1): Promise<{ outcome: string; clicks: string }> => {
+			const script = `const button = document.querySelector("button");
+button.addEventListener("click", () => { top.document.body.dataset.clicks = String(Number(top.document.body.dataset.clicks || 0) + 1); });
+button.addEventListener("${removeOn}", () => frameElement.remove());`;
+			const srcdoc = `<button>Bump</button><script>${script}</script>`
+				.replaceAll("&", "&amp;")
+				.replaceAll('"', "&quot;");
+			await page.setContent(
+				`<button style="position:absolute;inset:0;width:100%;height:100%" onclick="document.body.dataset.stray='1'">Behind</button><iframe style="position:relative" name="inner" srcdoc="${srcdoc}"></iframe>`,
+			);
+			const frame = await page.waitForFrame(candidate => candidate.name() === "inner");
+			const handle = await frame.waitForSelector("button");
+			if (!handle) throw new Error("Expected the frame's button");
+			const outcome = await clickElement(handle, "click bump", undefined, { clickCount }).then(
+				() => "clicked",
+				error => (String(error).includes("could not confirm the click") ? "unconfirmed" : String(error)),
+			);
+			await handle.dispose().catch(() => undefined);
+			if (removeOn !== "click") expect(await page.evaluate("document.body.dataset.stray || '0'")).toBe("0");
+			return { outcome, clicks: String(await page.evaluate("document.body.dataset.clicks || '0'")) };
+		};
+		try {
+			expect(await frameClick("pointerdown")).toEqual({ outcome: "unconfirmed", clicks: "0" });
+			expect(await frameClick("mousedown")).toEqual({ outcome: "unconfirmed", clicks: "0" });
+			expect(await frameClick("pointerdown", 2)).toEqual({ outcome: "unconfirmed", clicks: "0" });
+			// The page acts on the click and removes the frame after it, as a consent or sign-in frame closing does.
+			expect(await frameClick("click")).toEqual({ outcome: "clicked", clicks: "1" });
+			expect(await frameClick("click", 2)).toEqual({ outcome: "clicked", clicks: "1" });
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	}, 30_000);
+
+	test("keeps a child-frame click delivered when the first press navigates its frame", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent(
+				`<iframe name="inner" srcdoc="<button onpointerdown='location.replace(&quot;about:blank&quot;)'>Go</button>"></iframe>`,
+			);
+			const frame = await page.waitForFrame(candidate => candidate.name() === "inner");
+			const handle = await frame.waitForSelector("button");
+			if (!handle) throw new Error("Expected the frame's button");
+			const navigated = frame.waitForNavigation();
+			expect(await clickElement(handle, "click go").then(() => "clicked")).toBe("clicked");
+			await navigated;
+			expect(frame.detached).toBe(false);
+			expect(frame.url()).toBe("about:blank");
+			await handle.dispose().catch(() => undefined);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
+
 	test("skips an off-screen text match that stays clipped once scrolled to", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");

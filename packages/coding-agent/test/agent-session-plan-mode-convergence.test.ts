@@ -215,7 +215,6 @@ describe("AgentSession plan-mode convergence", () => {
 			setPendingFullWriteDescription: enabled => {
 				pendingFullWriteDescription = enabled;
 			},
-			advisorTools: [],
 			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,

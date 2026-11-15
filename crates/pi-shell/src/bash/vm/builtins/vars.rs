@@ -86,7 +86,7 @@ pub fn emit_assignment_at(
 			} else {
 				AssignScope::Env
 			}
-		} else if vp.overlay.is_some() {
+		} else if vp.image.is_some() {
 			AssignScope::Subshell
 		} else {
 			AssignScope::Global
