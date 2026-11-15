@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `powershell` tool's success-header icon now distinguishes which PowerShell edition ran the command: `pwsh` gets its own icon, Windows PowerShell (`powershell.exe`) gets a different one
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

@@ -38,6 +38,7 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(first).trim()).toBe("42");
 		expect(first.isError ?? false).toBe(false);
 		expect(first.details?.pid).toBeGreaterThan(0);
+		expect(first.details?.edition).toBe("pwsh");
 
 		// Same runspace: $x set above must survive into the next tool call.
 		const second = await tool.execute("c2", { command: "$x + 1" });
@@ -113,6 +114,32 @@ suite("PowerShellTool (persistent host)", () => {
 		const persisted = await tool.execute("m5", { command: "$z = 1; $z" });
 		expect(textOf(persisted).trim()).toBe("1");
 		expect(persisted.details?.pid).toBe(freshPid);
+	});
+
+	test("edition selects an independent session host and state never crosses editions", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-edition-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Default (no edition given) and an explicit "pwsh" request must land
+		// on the SAME pooled host: same pid, shared runspace state.
+		const implicit = await tool.execute("e1", { command: "$edTag = 'implicit-pwsh'; $edTag" });
+		expect(implicit.details?.edition).toBe("pwsh");
+		const explicitPwsh = await tool.execute("e2", { command: "$edTag", edition: "pwsh" });
+		expect(textOf(explicitPwsh).trim()).toBe("implicit-pwsh");
+		expect(explicitPwsh.details?.pid).toBe(implicit.details?.pid);
+
+		// Requesting the "powershell" edition must resolve a DIFFERENT shellPath
+		// ("powershell.exe") rather than silently reusing the pwsh host. There is
+		// no real powershell.exe on this platform, so the spawn itself fails —
+		// which is the proof: if the edition→shellPath mapping were broken (e.g.
+		// always "pwsh"), this call would succeed instead.
+		await expect(tool.execute("e3", { command: "'unreachable'", edition: "powershell" })).rejects.toThrow();
+
+		// The pwsh session host's state must be untouched by that failed attempt.
+		const stillPwsh = await tool.execute("e4", { command: "$edTag" });
+		expect(textOf(stillPwsh).trim()).toBe("implicit-pwsh");
+		expect(stillPwsh.details?.edition).toBe("pwsh");
 	});
 
 	test("a session host that dies mid-run is dropped and respawned", async () => {
@@ -588,9 +615,12 @@ suite("PowerShellTool (persistent host)", () => {
 
 // Ungated: these need neither pwsh nor a live host.
 
-test("loadPowerShellTool returns null when no shell resolves", async () => {
-	// A real Settings instance pointed at a nonexistent shell path, so
-	// $which cannot resolve it and the tool must stay unregistered.
+test("loadPowerShellTool returns null when neither edition resolves", async () => {
+	// A real Settings instance pointed at a nonexistent pwsh path. On win32 a
+	// real powershell.exe is virtually always present, so the tool would stay
+	// available via that edition instead — this assertion only holds where
+	// Windows PowerShell isn't expected on PATH.
+	if (process.platform === "win32") return;
 	const stubSettings = Settings.isolated({ "powershell.shellPath": "omp-no-such-shell-zzz-12345" });
 	const session = { cwd: process.cwd(), settings: stubSettings } as unknown as ToolSession;
 	expect(await loadPowerShellTool(session)).toBeNull();
@@ -626,6 +656,39 @@ test("renderer tags non-default host modes and renders the output", async () => 
 	const sessionPlain = stripAnsi(sessionComponent.render(80).join("\n"));
 	expect(sessionPlain).toContain("PowerShell");
 	expect(sessionPlain).not.toContain("PowerShell ·");
+});
+
+test("renderer shows a distinct icon for the pwsh and powershell editions", async () => {
+	const theme = await getThemeByName("dark");
+	expect(theme).toBeDefined();
+	if (!theme) return;
+
+	const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+	const renderWithEdition = (edition: "pwsh" | "powershell" | undefined) =>
+		stripAnsi(
+			powershellToolRenderer
+				.renderResult(
+					{
+						content: [{ type: "text", text: "ok" }],
+						details: { host: "session", edition } as PowerShellToolDetails,
+					},
+					{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
+					theme,
+					{ command: "'ok'" },
+				)
+				.render(80)
+				.join("\n"),
+		);
+
+	// Unicode preset (getThemeByName's default) glyphs: nf-dev-powershell's
+	// stand-in is "⚡", nf-seti-powershell's is "⊞" — see symbols.ts.
+	expect(renderWithEdition("pwsh")).toContain("⚡");
+	expect(renderWithEdition("pwsh")).not.toContain("⊞");
+	expect(renderWithEdition("powershell")).toContain("⊞");
+	expect(renderWithEdition("powershell")).not.toContain("⚡");
+	// Missing edition (older transcript, or a result still in flight) falls
+	// back to pwsh, the configured default.
+	expect(renderWithEdition(undefined)).toContain("⚡");
 });
 
 test("collapsed preview shows the output TAIL, not the first lines", async () => {

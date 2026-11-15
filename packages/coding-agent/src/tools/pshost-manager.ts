@@ -38,6 +38,26 @@ const EPHEMERAL_HOSTS = new Set<PsHost>();
 /** In-flight ephemeral spawns, so shutdown can wait for hosts not yet in the set. */
 const EPHEMERAL_SPAWNING = new Set<Promise<PsHost>>();
 
+/**
+ * The two PowerShell backends the `powershell` tool can target. Each gets its
+ * own pooled host per session (see {@link psHostEditionKey}), so a model that
+ * needs both `pwsh`-only and Windows-PowerShell-only behavior in the same
+ * conversation can run both without one evicting the other's runspace state.
+ */
+export const POWERSHELL_EDITIONS = ["pwsh", "powershell"] as const;
+export type PowerShellEdition = (typeof POWERSHELL_EDITIONS)[number];
+
+/**
+ * Derives one edition's pool key from a session's base key. The pool itself
+ * stays opaque to editions — any caller that wants distinct, independently
+ * pooled hosts for the same base key just needs distinct derived keys, and
+ * this is the one place that format is defined so acquire (`powershell.ts`)
+ * and bulk teardown (`agent-session.ts`) never drift apart.
+ */
+export function psHostEditionKey(baseKey: string, edition: PowerShellEdition): string {
+	return `${baseKey}::${edition}`;
+}
+
 export interface SpawnPsHostOptions {
 	/** Initial working directory for the spawned host. */
 	cwd: string;
