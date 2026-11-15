@@ -221,7 +221,6 @@ const READERS: Record<string, true> = {
 	nl: true,
 	sort: true,
 	uniq: true,
-	tee: true,
 	openssl: true,
 	gpg: true,
 	curl: true,
@@ -539,8 +538,93 @@ function patternReaderWords(command: ShellCommand): string[] {
 }
 
 /**
+ * curl's one-letter options that take a value. In a bundle (`-sd @file`), the first of them takes
+ * the rest of the word, or the next word when it ends the bundle.
+ */
+const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
+/**
+ * Readers that also write files: their one-letter options that take a value (in a bundle, the
+ * first of them takes the rest of the word, or the next word when it ends the bundle), the options
+ * whose value they write to rather than read, and, for a copy, whether a last operand without
+ * `-t` is the destination.
+ */
+const WRITING_READERS: Record<string, { letters: string; writes: readonly string[]; destination?: true }> = {
+	curl: {
+		letters: CURL_VALUE_LETTERS,
+		writes: [
+			"-c",
+			"-D",
+			"-o",
+			"--cookie-jar",
+			"--dump-header",
+			"--etag-save",
+			"--libcurl",
+			"--output",
+			"--output-dir",
+			"--stderr",
+			"--trace",
+			"--trace-ascii",
+		],
+	},
+	wget: {
+		letters: "aABDeiIlnoOPQRtTUwX",
+		writes: [
+			"-a",
+			"-o",
+			"-O",
+			"-P",
+			"--append-output",
+			"--directory-prefix",
+			"--output-document",
+			"--output-file",
+			"--save-cookies",
+		],
+	},
+	cp: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
+	mv: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
+};
+
+/** The words a {@link WRITING_READERS} command reads: its arguments, without what it writes to. */
+function writingReaderWords(command: ShellCommand): string[] {
+	const { letters, writes, destination } = WRITING_READERS[command.argv[0]];
+	const argv = args(command);
+	const words: string[] = [];
+	const operands: string[] = [];
+	let targeted = false;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			operands.push(...argv.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			if (writes.includes(eq > 0 ? arg.slice(0, eq) : arg)) {
+				targeted = true;
+				if (eq < 0) i++;
+			} else {
+				words.push(arg);
+			}
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			let k = 1;
+			while (k < arg.length && !letters.includes(arg[k])) k++;
+			if (k < arg.length && writes.includes(`-${arg[k]}`)) {
+				targeted = true;
+				if (k === arg.length - 1) i++;
+			} else {
+				words.push(arg);
+			}
+		} else {
+			operands.push(arg);
+		}
+	}
+	if (destination && !targeted) operands.pop();
+	return [...words, ...operands];
+}
+
+/**
  * The words a reading command reads files from: a copy's local sources, a search's operands after
- * its pattern, any other reader's arguments.
+ * its pattern, a download's arguments other than where it saves, any other reader's arguments.
  */
 function readWords(command: ShellCommand, home: string): string[] {
 	const name = command.argv[0];
@@ -551,6 +635,7 @@ function readWords(command: ShellCommand, home: string): string[] {
 			.filter(operand => !REMOTE_OPERAND_RE.test(operand));
 	}
 	if (Object.hasOwn(PATTERN_READERS, name)) return patternReaderWords(command);
+	if (Object.hasOwn(WRITING_READERS, name)) return writingReaderWords(command);
 	return Object.hasOwn(READERS, name) ? args(command) : [];
 }
 
@@ -611,11 +696,6 @@ const CURL_DATA_OPTIONS: Record<string, true> = {
 	"-T": true,
 	"--upload-file": true,
 };
-/**
- * curl's one-letter options that take a value. In a bundle (`-sd @file`), the first of them takes
- * the rest of the word, or the next word when it ends the bundle.
- */
-const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
 /** wget's options that send a file, as `--post-file=file` or `--post-file file`. */
 const WGET_FILE_OPTIONS: Record<string, true> = { "--post-file": true, "--body-file": true };
 

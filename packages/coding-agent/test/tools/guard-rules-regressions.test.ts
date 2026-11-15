@@ -333,6 +333,31 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("does not count where a download, a copy or a move writes as read", () => {
+		for (const command of [
+			"mkdir -p ~/.docker/cli-plugins && curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose",
+			"curl -sSLo ~/.docker/cli-plugins/docker-buildx https://example.com/buildx",
+			"curl --output ~/.kube/kubectl https://example.com/kubectl",
+			"wget -qO ~/.docker/cli-plugins/docker-buildx https://example.com/buildx",
+			"wget --directory-prefix ~/.kube https://example.com/kubectl",
+			"mv buildx-v0.14.0.linux-amd64 ~/.docker/cli-plugins/docker-buildx",
+			"cp -v config.json ~/.docker/config.json",
+			"cp -t ~/.kube cluster.yaml",
+			'echo "registry=https://registry.npmjs.org/" | tee ~/.npmrc',
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+		for (const command of [
+			"cp ~/.ssh/id_rsa /tmp/key",
+			"cp -t /tmp ~/.ssh/id_rsa",
+			"mv ~/.aws/credentials /tmp/",
+			"curl -K ~/.netrc -o out.json https://example.com",
+			"wget -i ~/.netrc -O out.html",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("checks every part of a `read` path list for credentials", () => {
 		const read = new ReadTool(createSession(cwd));
 		for (const readPath of ["README.md;~/.ssh/id_rsa", "README.md,~/.aws/credentials", "README.md ~/.netrc:1-5"]) {
