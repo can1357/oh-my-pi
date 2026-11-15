@@ -19,7 +19,6 @@ use crate::{
 		SequenceSearchResult, find_closest_sequence_match, find_context_line, find_match,
 		seek_sequence,
 	},
-	notebook::is_notebook_path,
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{
@@ -1457,10 +1456,10 @@ fn validate_rename(
 		return Ok(None);
 	};
 	let destination = files.resolve(rename, false)?;
-	if destination.absolute == source.absolute {
+	if destination.location == source.location {
 		return Err(EditError::apply("rename path is the same as source path"));
 	}
-	if files.exists(&destination.absolute) {
+	if files.exists(&destination.location) {
 		return Err(EditError::apply(format!(
 			"Cannot rename {} to {rename}: destination already exists.",
 			input.path
@@ -1506,7 +1505,7 @@ fn stage_from_parts(
 		Some(text) => Some(read.as_ref().unwrap().persist(text)?),
 		None => None,
 	};
-	let mut staged = StagedFile::new(resolved.display.clone(), resolved.absolute, op);
+	let mut staged = StagedFile::new(resolved.display.clone(), resolved.location, op);
 	staged.move_to = move_to;
 	staged.existed = read.is_some();
 	staged.before_raw = read.as_ref().map(|value| value.raw.clone());
@@ -1691,8 +1690,12 @@ pub fn preview_patch(
 		.and_then(|entry| preview_entry(&input, entry, streaming))
 	{
 		Ok(preview) => preview,
-		Err(error) => {
-			PreviewFile { display, error: Some(error.to_string()), rename, ..PreviewFile::default() }
+		Err(error) => PreviewFile {
+			display,
+			error: Some(error.to_string()),
+			deferred: error.is_deferred(),
+			rename,
+			..PreviewFile::default()
 		},
 	}
 }
@@ -1712,7 +1715,7 @@ fn preview_entry(
 				}
 			},
 			_ => {
-				if is_notebook_path(&entry.resolved.absolute) {
+				if entry.resolved.location.is_notebook() {
 					persist_new(&entry.resolved, text)?;
 				}
 			},
@@ -1734,6 +1737,7 @@ fn preview_entry(
 		diff:               Some(diff.diff),
 		first_changed_line: diff.first_changed_line,
 		error:              None,
+		deferred:           false,
 		op:                 Some(engine_op(input.op)),
 		rename:             entry.move_to.map(|value| value.display),
 	})
@@ -1842,10 +1846,10 @@ impl ModeEngine for PatchEngine {
 			let input = entry_input(path, entry, self.first_match)?;
 			if let Some(rename) = input.rename {
 				let destination = files.resolve(rename, false)?;
-				if destination.absolute == initial_resolved.absolute {
+				if destination.location == initial_resolved.location {
 					return Err(EditError::apply("rename path is the same as source path"));
 				}
-				if files.exists(&destination.absolute) {
+				if files.exists(&destination.location) {
 					return Err(EditError::apply(format!(
 						"Cannot rename {path} to {rename}: destination already exists."
 					)));
@@ -1966,6 +1970,9 @@ impl ModeEngine for PatchEngine {
 					},
 					None => digest = Some(added),
 				}
+			}
+			if entry.op.as_deref() == Some("create") {
+				file_ops.push(FileOpIntent::Create { path: path.clone() });
 			}
 			if entry.op.as_deref() == Some("delete") {
 				file_ops.push(FileOpIntent::Delete { path: path.clone() });

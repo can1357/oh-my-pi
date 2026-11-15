@@ -24,14 +24,14 @@ use std::{
 };
 
 use crate::{
-	engine::{FileOp, Resolved},
+	engine::{FileOp, Location, Resolved},
 	error::{EditError, EditResult, Rejection},
 	notebook,
-	path_policy::{PathPolicy, RecoveryGlob, UrlResolution, canonical_key},
+	path_policy::{Operation, PathPolicy, RecoveryGlob, UrlAnswer},
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 
-/// One target file as read from disk plus its normalized editable form.
+/// One target file from disk or the host plus its normalized editable form.
 #[derive(Debug)]
 pub struct FileRead {
 	pub resolved:    Resolved,
@@ -67,7 +67,7 @@ impl FileRead {
 
 /// Persist text for a file that did not exist before the edit.
 pub fn persist_new(resolved: &Resolved, after_lf: &str) -> EditResult<String> {
-	if notebook::is_notebook_path(&resolved.absolute) {
+	if resolved.location.is_notebook() {
 		return notebook::serialize_edited_notebook_text(None, after_lf, &resolved.display)
 			.map_err(|err| EditError::apply(err.to_string()));
 	}
@@ -86,7 +86,7 @@ pub trait FileSource {
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> EditResult<Resolved>;
 
 	/// Whether `absolute` currently exists (file or directory).
-	fn exists(&mut self, absolute: &Path) -> bool;
+	fn exists(&mut self, location: &Location) -> bool;
 
 	/// Read a target that must exist. Fails with `File not found: <display>`
 	/// after recovery, or with the auto-generated guard message.
@@ -141,14 +141,16 @@ fn stamp(absolute: &Path) -> Option<Stamp> {
 	})
 }
 
-/// Default [`FileSource`] backed by `std::fs`.
+/// Default [`FileSource`] backed by `std::fs` or host-supplied remote text.
 pub struct FileCache {
 	policy:          PathPolicy,
 	reads:           HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
+	hosted_reads:    HashMap<PathBuf, Arc<FileRead>>,
+	hosted:          HashMap<PathBuf, Option<String>>,
 	/// Authored path → resolution (so paired hunks share one recovery).
 	resolutions:     HashMap<(String, bool), Resolved>,
 	/// Host answers keyed by [`PathPolicy::url_target`].
-	urls:            HashMap<String, UrlResolution>,
+	urls:            HashMap<String, UrlAnswer>,
 	/// URLs that missed `urls`, deduped in first-seen order.
 	unresolved:      Vec<String>,
 	/// Host recovery answers keyed by authored path; `None` is "no unique
@@ -164,6 +166,8 @@ impl FileCache {
 		Self {
 			policy,
 			reads: HashMap::new(),
+			hosted_reads: HashMap::new(),
+			hosted: HashMap::new(),
 			resolutions: HashMap::new(),
 			urls: HashMap::new(),
 			unresolved: Vec::new(),
@@ -174,15 +178,14 @@ impl FileCache {
 
 	/// Record the host answer for `url`, dropping cached resolutions and
 	/// reads made for it.
-	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
-		let policy = &self.policy;
-		let names_url = |authored: &str| policy.url_target(authored).as_deref() == Some(url.as_str());
-		self
-			.resolutions
-			.retain(|(authored, _), _| !names_url(authored));
-		self
-			.reads
-			.retain(|_, (_, read)| !names_url(&read.resolved.display));
+	pub fn provide(&mut self, url: String, resolution: UrlAnswer) {
+		// A new checkout replaces every alias of the same host-owned identity.
+		self.resolutions.clear();
+		self.reads.clear();
+		self.hosted_reads.clear();
+		if let UrlAnswer::Hosted { key, content, .. } = &resolution {
+			self.hosted.insert(key.clone(), content.clone());
+		}
 		self.unresolved.retain(|missed| *missed != url);
 		self.urls.insert(url, resolution);
 	}
@@ -216,39 +219,96 @@ impl FileCache {
 	pub fn forget_answers(&mut self) {
 		self.clear();
 		self.urls.clear();
+		self.hosted.clear();
 		self.unresolved.clear();
 		self.recovered.clear();
 		self.recovery_misses.clear();
 	}
 
-	/// Plan-mode write guard, judging URL targets by their host answers.
+	/// Write guard, judging URL targets by their host answers.
 	///
 	/// # Errors
+	/// [`EditError::Apply`] for unsupported remote file operations;
 	/// [`EditError::Plan`] when plan mode refuses the write.
 	pub fn enforce_write(&self, display: &str, op: FileOp, move_to: Option<&str>) -> EditResult<()> {
+		self.enforce_operations(display, op, move_to)?;
 		self.policy.enforce_write(display, op, move_to, &self.urls)
 	}
 
-	fn read_resolved(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {
-		let Some(current) = stamp(&resolved.absolute) else {
-			return Ok(None);
+	/// Reject operations the handler has not granted, before generating a diff.
+	pub fn enforce_operations(
+		&self,
+		display: &str,
+		op: FileOp,
+		move_to: Option<&str>,
+	) -> EditResult<()> {
+		let operation = if move_to.is_some() {
+			Operation::Move
+		} else {
+			match op {
+				FileOp::Create => Operation::Create,
+				FileOp::Update | FileOp::Noop => Operation::Update,
+				FileOp::Delete => Operation::Delete,
+			}
 		};
-		if let Some(kind) = current.special_kind {
-			return Err(EditError::apply(format!(
-				"Cannot edit '{}': it is a {kind}, not a regular file or directory.",
-				resolved.display
-			)));
+		for target in std::iter::once(display).chain(move_to) {
+			if let Some(url) = self.policy.url_target(target)
+				&& let Some(UrlAnswer::Hosted { operations, .. }) = self.urls.get(url.as_ref())
+				&& !operations.contains(&operation)
+			{
+				let scheme = url
+					.split_once("://")
+					.map_or_else(|| url.as_ref(), |(scheme, _)| scheme);
+				let operation = match operation {
+					Operation::Create => "create",
+					Operation::Update => "update",
+					Operation::Delete => "delete",
+					Operation::Move => "move",
+				};
+				return Err(EditError::apply(format!(
+					"{scheme}:// does not support {operation} operations"
+				)));
+			}
 		}
-		if let Some((cached_stamp, read)) = self.reads.get(&resolved.absolute)
-			&& *cached_stamp == current
-			&& read.resolved.display == resolved.display
-		{
-			return Ok(Some(Arc::clone(read)));
-		}
-		let bytes = match std::fs::read(&resolved.absolute) {
-			Ok(bytes) => bytes,
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-			Err(source) => return Err(EditError::Io { path: resolved.absolute.clone(), source }),
+		Ok(())
+	}
+
+	fn read_resolved(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {
+		let (current, bytes) = match &resolved.location {
+			Location::Hosted(key) => {
+				if let Some(read) = self.hosted_reads.get(key)
+					&& read.resolved.display == resolved.display
+				{
+					return Ok(Some(Arc::clone(read)));
+				}
+				let Some(Some(content)) = self.hosted.get(key) else {
+					return Ok(None);
+				};
+				(None, content.as_bytes().to_vec())
+			},
+			Location::Disk(path) => {
+				let Some(current) = stamp(path) else {
+					return Ok(None);
+				};
+				if let Some(kind) = current.special_kind {
+					return Err(EditError::apply(format!(
+						"Cannot edit '{}': it is a {kind}, not a regular file or directory.",
+						resolved.display
+					)));
+				}
+				if let Some((cached, read)) = self.reads.get(path)
+					&& *cached == current
+					&& read.resolved.display == resolved.display
+				{
+					return Ok(Some(Arc::clone(read)));
+				}
+				let bytes = match std::fs::read(path) {
+					Ok(bytes) => bytes,
+					Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+					Err(source) => return Err(EditError::Io { path: path.clone(), source }),
+				};
+				(Some(current), bytes)
+			},
 		};
 		if let Some(message) = self
 			.policy
@@ -260,7 +320,9 @@ impl FileCache {
 			display:     resolved.display.clone(),
 			valid_up_to: err.utf8_error().valid_up_to(),
 		})?;
-		let is_notebook = notebook::is_notebook_path(&resolved.absolute);
+		// Remote handlers expose UTF-8 text, including the raw JSON of notebooks.
+		// Keep the editable view identical to the view `read` snapshots.
+		let is_notebook = resolved.location.is_notebook();
 		let (bom, text) = if is_notebook {
 			let editable = notebook::notebook_to_editable_text(&raw, &resolved.display)
 				.map_err(|err| EditError::apply(err.to_string()))?;
@@ -275,7 +337,7 @@ impl FileCache {
 			detect_line_ending(strip_bom(&raw).1)
 		};
 		let read = Arc::new(FileRead {
-			canonical: canonical_key(&resolved.absolute),
+			canonical: resolved.location.canonical_key(),
 			resolved: resolved.clone(),
 			raw,
 			bom,
@@ -283,9 +345,16 @@ impl FileCache {
 			text,
 			is_notebook,
 		});
-		self
-			.reads
-			.insert(resolved.absolute.clone(), (current, Arc::clone(&read)));
+		match &resolved.location {
+			Location::Disk(path) => {
+				if let Some(stamp) = current {
+					self.reads.insert(path.clone(), (stamp, Arc::clone(&read)));
+				}
+			},
+			Location::Hosted(key) => {
+				self.hosted_reads.insert(key.clone(), Arc::clone(&read));
+			},
+		}
 		Ok(Some(read))
 	}
 }
@@ -307,7 +376,9 @@ impl FileSource for FileCache {
 			self.unresolved.push(url.clone());
 		}
 		let mut resolved = resolved?;
-		if must_exist && !self.policy.is_internal_url(authored) && stamp(&resolved.absolute).is_none()
+		if must_exist
+			&& !self.policy.is_internal_url(authored)
+			&& matches!(&resolved.location, Location::Disk(path) if stamp(path).is_none())
 		{
 			match self.recovered.get(authored) {
 				Some(Some(recovered)) => resolved = recovered.clone(),
@@ -328,8 +399,11 @@ impl FileSource for FileCache {
 		Ok(resolved)
 	}
 
-	fn exists(&mut self, absolute: &Path) -> bool {
-		stamp(absolute).is_some()
+	fn exists(&mut self, location: &Location) -> bool {
+		match location {
+			Location::Disk(path) => stamp(path).is_some(),
+			Location::Hosted(key) => self.hosted.get(key).is_some_and(Option::is_some),
+		}
 	}
 
 	fn read(&mut self, authored: &str) -> EditResult<Arc<FileRead>> {
@@ -348,6 +422,7 @@ impl FileSource for FileCache {
 
 	fn clear(&mut self) {
 		self.reads.clear();
+		self.hosted_reads.clear();
 		self.resolutions.clear();
 	}
 }
@@ -374,7 +449,7 @@ mod tests {
 		let mut files = cache(tmp.path());
 		let unrecovered = files.resolve("src/a.ts", true).unwrap();
 		assert_eq!(unrecovered.display, "src/a.ts");
-		assert_eq!(unrecovered.absolute, tmp.path().join("src/a.ts"));
+		assert_eq!(unrecovered.location.key(), tmp.path().join("src/a.ts"));
 		files.resolve("src/a.ts", true).unwrap();
 		assert_eq!(files.take_recovery_misses(), ["src/a.ts"]);
 		assert!(files.take_recovery_misses().is_empty());
@@ -397,7 +472,7 @@ mod tests {
 		let mut files = cache(tmp.path());
 		files.resolve("src/a.ts", true).unwrap();
 		let recovered = Resolved {
-			absolute: tmp.path().join("deep/src/a.ts"),
+			location: tmp.path().join("deep/src/a.ts").into(),
 			display:  "deep/src/a.ts".to_owned(),
 		};
 		files.provide_recovery("src/a.ts".to_owned(), Some(recovered.clone()));

@@ -4,7 +4,7 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	path::{Path, PathBuf},
+	path::PathBuf,
 	sync::{Arc, LazyLock},
 };
 
@@ -17,8 +17,8 @@ use crate::{
 	},
 	error::{EditError, Rejection},
 	files::{FileRead, FileSource},
-	notebook::{is_notebook_path, notebook_to_editable_text},
-	path_policy::{PathPolicy, canonical_key},
+	notebook::notebook_to_editable_text,
+	path_policy::PathPolicy,
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{LineEnding, detect_line_ending, js_trim, normalize_to_lf, strip_bom},
@@ -267,8 +267,17 @@ fn wrap_file_error(path: &str, error: EditError, multiple_files: bool) -> EditEr
 }
 
 enum VirtualFile {
-	Raw(String),
+	Raw { raw: String, is_notebook: bool },
 	Read(Arc<FileRead>),
+}
+
+impl VirtualFile {
+	fn is_notebook(&self) -> bool {
+		match self {
+			Self::Raw { is_notebook, .. } => *is_notebook,
+			Self::Read(read) => read.is_notebook,
+		}
+	}
 }
 
 /// The ordered envelope's read-through namespace. Disk remains untouched until
@@ -282,16 +291,24 @@ struct VirtualFiles<'a> {
 impl VirtualFiles<'_> {
 	fn record(&mut self, file: &StagedFile) {
 		if file.op == FileOp::Delete || file.move_to.is_some() {
-			self.state.insert(canonical_key(&file.absolute), None);
+			self.state.insert(file.location.canonical_key(), None);
 		}
 		if let Some(raw) = &file.persisted {
 			let target = file
 				.move_to
 				.as_ref()
-				.map_or(&file.absolute, |to| &to.absolute);
+				.map_or(&file.location, |to| &to.location);
+			let key = target.canonical_key();
+			// Retain the read's editable view: remote notebooks use raw JSON.
+			// New targets have no prior view and use the destination's format.
+			let is_notebook = self
+				.state
+				.get(&key)
+				.and_then(Option::as_ref)
+				.map_or_else(|| target.is_notebook(), VirtualFile::is_notebook);
 			self
 				.state
-				.insert(canonical_key(target), Some(VirtualFile::Raw(raw.clone())));
+				.insert(key, Some(VirtualFile::Raw { raw: raw.clone(), is_notebook }));
 		}
 	}
 }
@@ -303,16 +320,16 @@ impl FileSource for VirtualFiles<'_> {
 
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
 		let resolved = self.source.resolve(authored, false)?;
-		if self.state.contains_key(&canonical_key(&resolved.absolute)) || !must_exist {
+		if self.state.contains_key(&resolved.location.canonical_key()) || !must_exist {
 			return Ok(resolved);
 		}
 		self.source.resolve(authored, true)
 	}
 
-	fn exists(&mut self, absolute: &Path) -> bool {
+	fn exists(&mut self, absolute: &crate::engine::Location) -> bool {
 		self
 			.state
-			.get(&canonical_key(absolute))
+			.get(&absolute.canonical_key())
 			.map_or_else(|| self.source.exists(absolute), Option::is_some)
 	}
 
@@ -327,9 +344,15 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
-		let key = canonical_key(&resolved.absolute);
-		let Some(state) = self.state.remove(&key) else {
-			return self.source.try_read(resolved);
+		let key = resolved.location.canonical_key();
+		let state = match self.state.remove(&key) {
+			Some(state) => state,
+			None => match self.source.try_read(resolved)? {
+				Some(read) => Some(VirtualFile::Read(read)),
+				// Only staged deletions are tombstones. A missing disk probe
+				// must still allow a later must-exist lookup to recover a suffix.
+				None => return Ok(None),
+			},
 		};
 		let read = match state {
 			None => {
@@ -337,14 +360,13 @@ impl FileSource for VirtualFiles<'_> {
 				return Ok(None);
 			},
 			Some(VirtualFile::Read(read)) => read,
-			Some(VirtualFile::Raw(raw)) => {
+			Some(VirtualFile::Raw { raw, is_notebook }) => {
 				if let Some(message) = self
 					.policy()
 					.auto_generated_message(&resolved.display, &raw.as_bytes()[..raw.len().min(1024)])
 				{
 					return Err(EditError::apply(message));
 				}
-				let is_notebook = is_notebook_path(&resolved.absolute);
 				let (bom, body) = strip_bom(&raw);
 				let ending = if is_notebook {
 					LineEnding::Lf
@@ -386,6 +408,7 @@ fn stage_entries(
 	files: &mut dyn FileSource,
 	allow_fuzzy: bool,
 	threshold: f64,
+	preview: bool,
 ) -> Result<Vec<StagedFile>, EditError> {
 	if entries.is_empty() {
 		return Err(EditError::apply("No files were modified."));
@@ -419,7 +442,7 @@ fn stage_entries(
 			let resolved = files
 				.resolve(path, group[0].op != Operation::Create)
 				.map_err(|error| wrap_file_error(path, error, multiple_files))?;
-			let mut exists = files.exists(&resolved.absolute);
+			let mut exists = files.exists(&resolved.location);
 			for entry in group {
 				match entry.op {
 					Operation::Create if exists => {
@@ -455,6 +478,9 @@ fn stage_entries(
 				}
 				staged.append(&mut next);
 			},
+			// An unapproved remote target must not hide independent local
+			// previews. Apply still requires every section to stage atomically.
+			Err(error) if preview && error.is_deferred() => {},
 			Err(error) => return Err(wrap_file_error(path, error, multiple_files)),
 		}
 	}
@@ -533,6 +559,9 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 					.or_insert(added);
 			}
 		}
+		if entry.op == Operation::Create {
+			file_ops.push(FileOpIntent::Create { path: entry.path.clone() });
+		}
 		if entry.op == Operation::Delete {
 			file_ops.push(FileOpIntent::Delete { path: entry.path.clone() });
 		}
@@ -591,7 +620,7 @@ impl ModeEngine for ApplyPatchEngine {
 		if entries.is_empty() {
 			return Vec::new();
 		}
-		match stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold) {
+		match stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold, true) {
 			Ok(staged) => staged
 				.into_iter()
 				.map(|file| PreviewFile {
@@ -599,12 +628,17 @@ impl ModeEngine for ApplyPatchEngine {
 					diff:               file.preview_diff.or(Some(file.diff)),
 					first_changed_line: file.first_changed_line,
 					error:              None,
+					deferred:           false,
 					op:                 Some(file.op),
 					rename:             file.move_to.map(|destination| destination.display),
 				})
 				.collect(),
 			Err(error) => {
-				vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }]
+				vec![PreviewFile {
+					error: Some(error.to_string()),
+					deferred: error.is_deferred(),
+					..PreviewFile::default()
+				}]
 			},
 		}
 	}
@@ -619,7 +653,7 @@ impl ModeEngine for ApplyPatchEngine {
 			EditError::parse("The first line of the patch must be '*** Begin Patch'")
 		})?;
 		let entries = parse_apply_patch(input)?;
-		stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold)
+		stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold, false)
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
@@ -634,6 +668,36 @@ impl ModeEngine for ApplyPatchEngine {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::files::FileCache;
+
+	#[test]
+	fn missing_probe_does_not_block_suffix_recovery() {
+		let dir = tempfile::tempdir().unwrap();
+		let cwd = dir.path().canonicalize().unwrap();
+		std::fs::create_dir(cwd.join("nested")).unwrap();
+		let target = cwd.join("nested/a.txt");
+		std::fs::write(&target, "recoverable\n").unwrap();
+		let mut source = FileCache::new(PathPolicy {
+			cwd:                  cwd.clone(),
+			home_dir:             cwd,
+			url_schemes:          Vec::new(),
+			url_alias_schemes:    Vec::new(),
+			plan_writable_roots:  Vec::new(),
+			plan_active:          false,
+			block_auto_generated: false,
+		});
+		source.provide_recovery(
+			"a.txt".into(),
+			Some(Resolved { location: target.into(), display: "nested/a.txt".into() }),
+		);
+		let mut files = VirtualFiles { source: &mut source, state: HashMap::new() };
+		let missing = files.resolve("a.txt", false).unwrap();
+		assert!(files.try_read(&missing).unwrap().is_none());
+		let recovered = files
+			.read("a.txt")
+			.expect("a missing probe must still allow suffix recovery");
+		assert_eq!(recovered.text, "recoverable\n");
+	}
 
 	#[test]
 	fn parses_heredoc_wrapper() {

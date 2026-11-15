@@ -736,15 +736,15 @@ pub(crate) fn recover_target(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Option<(PatchSection, Resolved)> {
-	if files.exists(&initial.absolute) {
+	if files.exists(&initial.location) {
 		return None;
 	}
 	let tag = section.file_hash.as_deref()?;
-	let authored_name = initial.absolute.file_name();
+	let authored_name = initial.location.key().file_name();
 	let mut candidates = store
 		.paths_with_hash(tag)
 		.into_iter()
-		.filter(|path| path.file_name() == authored_name && *path != initial.absolute)
+		.filter(|path| path.file_name() == authored_name && path.as_path() != initial.location.key())
 		.collect::<Vec<_>>();
 	candidates.sort();
 	candidates.dedup();
@@ -757,7 +757,7 @@ pub(crate) fn recover_target(
 	}
 	let path = candidates.remove(0);
 	let display = path.to_string_lossy().into_owned();
-	Some((section.with_path(&display), Resolved { absolute: path, display }))
+	Some((section.with_path(&display), Resolved { location: path.into(), display }))
 }
 /// Stage a whole-file delete for a target whose bytes cannot be decoded:
 /// existence is proven, but there is no content to diff or snapshot.
@@ -777,8 +777,8 @@ fn undecodable_delete_staged(
 	if section.path != original_path {
 		warnings.push(path_recovered_from_tag_message(original_path, &section.path, tag));
 	}
-	if let Some(previous) = canonical_paths
-		.insert(crate::path_policy::canonical_key(&resolved.absolute), original_path.to_owned())
+	if let Some(previous) =
+		canonical_paths.insert(resolved.location.canonical_key(), original_path.to_owned())
 	{
 		return Err(EditError::apply(format!(
 			"Multiple hashline sections resolve to the same file ({previous} and {original_path}). \
@@ -786,7 +786,7 @@ fn undecodable_delete_staged(
 		)));
 	}
 	let mut item =
-		StagedFile::new(section.path.clone(), resolved.absolute.clone(), EngineFileOp::Delete);
+		StagedFile::new(section.path.clone(), resolved.location.clone(), EngineFileOp::Delete);
 	item.header = HeaderKind::HashlineTag;
 	item.warnings = warnings;
 	item.record_snapshot = true;
@@ -842,7 +842,7 @@ pub fn stage_patch(
 		return Err(EditError::rejected(Rejection::UnseenLines, replies.join("\n\n")));
 	}
 	if let Some(item) = staged.iter_mut().find(|item| item.op == EngineFileOp::Noop) {
-		let canonical = crate::path_policy::canonical_key(&item.absolute);
+		let canonical = item.location.canonical_key();
 		let (count, escalate) = store.record_noop(&canonical, payload_hash(raw_input));
 		let [only] = patch.sections.as_slice() else {
 			return Err(EditError::rejected(
@@ -891,7 +891,7 @@ fn stage_section(
 	};
 	let Some(read) = read else {
 		if let Some(tag) = undecodable_delete
-			&& files.exists(&resolved.absolute)
+			&& files.exists(&resolved.location)
 		{
 			return undecodable_delete_staged(
 				section,
@@ -922,7 +922,7 @@ fn stage_section(
 	}
 	if let Some(FileOp::Move { dest }) = &parsed.file_op {
 		let destination = files.resolve(dest, false)?;
-		if crate::path_policy::canonical_key(&destination.absolute) == read.canonical {
+		if destination.location.canonical_key() == read.canonical {
 			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
 		}
 	}
@@ -965,7 +965,7 @@ fn stage_section(
 	} else {
 		Some(read.persist(&apply.text)?)
 	};
-	let mut item = StagedFile::new(section.path.clone(), read.resolved.absolute.clone(), engine_op);
+	let mut item = StagedFile::new(section.path.clone(), read.resolved.location.clone(), engine_op);
 	item.move_to = move_to;
 	item.before_raw = Some(read.raw.clone());
 	item.before.clone_from(&read.text);

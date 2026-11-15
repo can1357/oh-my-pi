@@ -5,7 +5,237 @@
 mod common;
 
 use common::{DiskWriter, Workspace};
-use pi_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlResolution, session::PreviewBatch};
+use pi_edit::{
+	ApplyRequest, EditError, EditMode, FileOp, Operation, UrlAnswer, session::PreviewBatch,
+};
+
+#[derive(Default)]
+struct RemoteWriter {
+	requests: parking_lot::Mutex<Vec<pi_edit::WriteRequest>>,
+}
+
+#[async_trait::async_trait]
+impl pi_edit::EditWriter for RemoteWriter {
+	async fn write(
+		&self,
+		request: pi_edit::WriteRequest,
+	) -> pi_edit::EditResult<pi_edit::WriteResponse> {
+		let written = request.content.clone().expect("remote update content");
+		self.requests.lock().push(request);
+		Ok(pi_edit::WriteResponse { written, diagnostics_json: None })
+	}
+}
+
+fn remote_answer(url: &str, content: &str) -> UrlAnswer {
+	UrlAnswer::Hosted {
+		key:           url.into(),
+		content:       Some(content.into()),
+		operations:    vec![Operation::Update],
+		plan_writable: false,
+	}
+}
+
+#[test]
+fn hosted_tagged_preview_uses_the_read_version_instead_of_the_latest_head() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let url = "ssh://host/notes.txt";
+	let key = std::path::Path::new(url);
+	let tag = ws.store.record(key, "alpha\nbeta\n", None);
+	for head in ["different head\nbeta\n", "ALPHA\nbeta\n"] {
+		ws.store.record(key, head, None);
+		for streaming in [true, false] {
+			let mut session = ws.session();
+			session.set_args_json(
+				&serde_json::json!({ "input": format!("[{url}#{tag}]\nPUT 1.=1:\n+ALPHA") })
+					.to_string(),
+			);
+			if !streaming {
+				session.finish();
+			}
+			session.provide(url.into(), remote_answer(url, head));
+			let preview = session.preview();
+			let diff = preview.files[0].diff.as_deref().expect("historical diff");
+			assert!(diff.contains("alpha") && diff.contains("ALPHA"), "{diff}");
+			assert!(!diff.contains("different head"), "{diff}");
+		}
+	}
+}
+
+#[test]
+fn unsupported_hosted_operations_are_errors_before_previewing_content() {
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let url = "ssh://host/notes.txt";
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": format!("*** Begin Patch\n*** Delete File: {url}\n*** End Patch") }).to_string());
+	session.finish();
+	session.provide(url.into(), remote_answer(url, "do not preview me"));
+	let preview = session.preview();
+	assert_eq!(preview.files[0].error.as_deref(), Some("ssh:// does not support delete operations"));
+	assert!(preview.files[0].diff.is_none());
+	assert!(!session.preview_pending(), "a refused preview must finish its pass");
+}
+
+#[tokio::test]
+async fn hosted_create_uses_declared_operations_and_keeps_notebooks_as_raw_json() {
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["hosted".into()];
+	let mut session = ws.session();
+	session.set_args_json(r#"{"input":"*** Begin Patch\n*** Add File: hosted://account/new.ipynb\n+{\"cells\":[]}\n*** End Patch"}"#);
+	session.finish();
+	session.begin_apply_url_targets();
+	session.provide("hosted://account/new.ipynb".into(), UrlAnswer::Hosted {
+		key:           "opaque-notebook-key".into(),
+		content:       None,
+		operations:    vec![Operation::Create],
+		plan_writable: false,
+	});
+	let writer = RemoteWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("declared create");
+	let requests = writer.requests.lock();
+	assert_eq!(requests[0].absolute.to_str(), Some("opaque-notebook-key"));
+	assert_eq!(requests[0].content.as_deref(), Some("{\"cells\":[]}\n"));
+}
+
+#[test]
+fn hosted_aliases_share_the_latest_checkout_without_using_a_disk_path() {
+	use pi_edit::files::{FileCache, FileSource};
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["hosted".into()];
+	ws.write("notes.ipynb", "disk sentinel");
+	let key = ws.cwd().join("notes.ipynb");
+	let answer = |text: &str| UrlAnswer::Hosted {
+		key:           key.clone(),
+		content:       Some(text.into()),
+		operations:    vec![Operation::Update],
+		plan_writable: false,
+	};
+	let mut files = FileCache::new(ws.config.policy.clone());
+	files.provide("hosted://alias/a".into(), answer("{\"version\":1}"));
+	let first = files.read("hosted://alias/a").unwrap();
+	assert_eq!(first.canonical, key);
+	assert!(!first.is_notebook);
+	files.provide("hosted://alias/b".into(), answer("{\"version\":2}"));
+	assert_eq!(files.read("hosted://alias/a").unwrap().text, "{\"version\":2}");
+	assert_eq!(files.read("hosted://alias/b").unwrap().canonical, first.canonical);
+	assert_eq!(ws.read("notes.ipynb").as_deref(), Some("disk sentinel"));
+}
+
+#[tokio::test]
+async fn deferred_remote_preview_keeps_local_diff_and_apply_stays_atomic() {
+	let url = "ssh://oracle/tmp/edit-repro.txt";
+	for remote_first in [true, false] {
+		let mut ws = Workspace::new(EditMode::ApplyPatch);
+		ws.config.policy.url_schemes = vec!["ssh".into()];
+		ws.write("local.txt", "before\n");
+		let remote = format!("*** Update File: {url}\n@@\n-old\n+new\n");
+		let local = "*** Update File: local.txt\n@@\n-before\n+after\n";
+		let sections = if remote_first {
+			format!("{remote}{local}")
+		} else {
+			format!("{local}{remote}")
+		};
+		let mut session = ws.session();
+		session.set_args_json(
+			&serde_json::json!({ "input": format!("*** Begin Patch\n{sections}*** End Patch") })
+				.to_string(),
+		);
+		session.finish();
+		let pending = UrlAnswer::Pending;
+		session.provide(url.into(), pending.clone());
+		let preview = session.preview();
+		assert_eq!(
+			preview.files.len(),
+			1,
+			"local preview must survive either target order: {preview:?}"
+		);
+		assert_eq!(preview.files[0].display, "local.txt");
+		assert!(preview.files[0].error.is_none());
+		let diff = preview.files[0].diff.as_deref().expect("local diff");
+		assert!(diff.contains("before") && diff.contains("after"), "{diff}");
+		assert_eq!(ws.read("local.txt").as_deref(), Some("before\n"));
+		session.begin_apply_url_targets();
+		session.provide(url.into(), pending);
+		let writer = DiskWriter::default();
+		let error = session
+			.apply(ApplyRequest::default(), &writer)
+			.await
+			.expect_err("apply cannot skip pending targets");
+		assert!(error.is_deferred(), "{error}");
+		assert!(writer.requests.lock().is_empty());
+	}
+}
+
+#[tokio::test]
+async fn apply_patch_deleted_target_is_not_revived_by_a_later_section() {
+	let ws = Workspace::new(EditMode::ApplyPatch);
+	ws.write("a.txt", "old\n");
+	ws.write("b.txt", "before\n");
+	let writer = DiskWriter::default();
+	let error = ws
+		.apply_raw(
+			"*** Begin Patch\n*** Delete File: a.txt\n*** Update File: \
+			 b.txt\n@@\n-before\n+after\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch",
+			&writer,
+		)
+		.await
+		.expect_err("a staged deletion must remain a tombstone");
+	assert!(error.to_string().contains("File not found"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(ws.read("a.txt").as_deref(), Some("old\n"));
+	assert_eq!(ws.read("b.txt").as_deref(), Some("before\n"));
+}
+
+#[tokio::test]
+async fn remote_apply_uses_fresh_host_text_even_when_its_length_is_unchanged() {
+	let url = "ssh://oracle/tmp/edit-repro.txt";
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({ "path": url, "old_string": "beta", "new_string": "BETA" }).to_string(),
+	);
+	session.finish();
+	session.provide(url.into(), remote_answer(url, "alpha\nbeta\n"));
+	assert!(session.preview().files[0].diff.is_some());
+	assert_eq!(session.begin_apply_url_targets(), [url]);
+	session.provide(url.into(), remote_answer(url, "delta\nbeta\n"));
+	let writer = RemoteWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("remote update");
+	let requests = writer.requests.lock();
+	assert_eq!(requests[0].absolute.to_str(), Some(url));
+	assert_eq!(requests[0].content.as_deref(), Some("delta\nBETA\n"));
+}
+
+#[tokio::test]
+async fn unsupported_remote_delete_prevents_earlier_local_writes_in_a_batch() {
+	let url = "ssh://oracle/tmp/edit-repro.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	ws.write("local.txt", "old\n");
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": format!(
+		"*** Begin Patch\n*** Update File: local.txt\n@@\n-old\n+new\n*** Delete File: {url}\n*** End Patch"
+	) }).to_string());
+	session.finish();
+	session.begin_apply_url_targets();
+	session.provide(url.into(), remote_answer(url, "remote\n"));
+	let writer = DiskWriter::default();
+	let error = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("unsupported remote delete");
+	assert!(error.to_string().contains("ssh:// does not support delete"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(ws.read("local.txt").as_deref(), Some("old\n"));
+}
 
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 
@@ -595,9 +825,8 @@ async fn internal_url_targets_wait_for_host_answers() {
 	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
 	assert!(!session.preview_pending());
 
-	session.provide("local://plan.md".into(), UrlResolution {
-		absolute:      Some(backing.clone()),
-		error:         None,
+	session.provide("local://plan.md".into(), UrlAnswer::Backed {
+		path:          backing.clone(),
 		plan_writable: true,
 	});
 	assert!(session.preview_pending());
@@ -613,9 +842,8 @@ async fn internal_url_targets_wait_for_host_answers() {
 
 	session.finish();
 	assert_eq!(session.begin_apply_url_targets(), ["local://plan.md"]);
-	session.provide("local://plan.md".into(), UrlResolution {
-		absolute:      Some(backing.clone()),
-		error:         None,
+	session.provide("local://plan.md".into(), UrlAnswer::Backed {
+		path:          backing.clone(),
 		plan_writable: true,
 	});
 	session
@@ -636,9 +864,8 @@ async fn apply_never_reuses_url_answers_given_to_previews() {
 	let fresh = sandbox.path().join("fresh.md");
 	std::fs::write(&stale, "one\n").unwrap();
 	std::fs::write(&fresh, "one\n").unwrap();
-	let answer = |absolute: &std::path::Path| UrlResolution {
-		absolute:      Some(absolute.to_owned()),
-		error:         None,
+	let answer = |absolute: &std::path::Path| UrlAnswer::Backed {
+		path:          absolute.to_owned(),
 		plan_writable: false,
 	};
 	let writer = DiskWriter::default();
@@ -724,9 +951,8 @@ async fn begin_apply_url_targets_cover_every_url_before_the_first_stage() {
 		assert_eq!(targets, expected, "{mode:?}");
 		for url in targets {
 			let name = url.trim_start_matches("local://");
-			session.provide(url.clone(), UrlResolution {
-				absolute:      Some(sandbox.path().join(name)),
-				error:         None,
+			session.provide(url.clone(), UrlAnswer::Backed {
+				path:          sandbox.path().join(name),
 				plan_writable: false,
 			});
 		}

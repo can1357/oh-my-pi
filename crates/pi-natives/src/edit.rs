@@ -41,10 +41,10 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_edit::{
-	EditError, EditMode, EditResult, PathPolicy, Resolved, Session, UrlResolution,
+	EditError, EditMode, EditResult, Location, Operation, PathPolicy, Resolved, Session, UrlAnswer,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
-	path_policy::{RecoveryGlob, canonical_key},
+	path_policy::RecoveryGlob,
 	session::{ApplyRequest, EditWriter, PreviewBatch, SessionConfig, WriteRequest, WriteResponse},
 	store,
 	stream_json::snapshot_from_text,
@@ -126,8 +126,12 @@ impl EditPolicy {
 /// Host answer for one internal URL (`resolveUrl`).
 #[napi(object)]
 pub struct EditUrlResolution {
-	/// Absolute backing file; null when no local file backs the URL.
+	/// Absolute backing file, or opaque URL key when `content` is supplied.
 	pub path:          Option<String>,
+	/// Full remote file text; `path` is then its opaque URL key.
+	pub content:       Option<String>,
+	/// Resolve only after execution approval; omit previews for this target.
+	pub deferred:      Option<bool>,
 	/// Model-facing refusal (read-only, disabled…); wins over `path`.
 	pub error:         Option<String>,
 	/// Writable while plan mode is active (sandbox-scoped scheme).
@@ -250,6 +254,17 @@ pub struct EditApplyOutcome {
 // Store
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Disk callers supply absolute paths; host-owned keys are opaque identities.
+fn store_key(key: &str) -> PathBuf {
+	let path = PathBuf::from(key);
+	let location = if path.is_absolute() {
+		Location::Disk(path)
+	} else {
+		Location::Hosted(path)
+	};
+	location.canonical_key()
+}
+
 /// Session-scoped snapshots, clipboard registers, and the no-op loop guard.
 #[napi]
 #[derive(Default)]
@@ -273,7 +288,7 @@ impl EditStore {
 		text: String,
 		seen_lines: Option<Vec<u32>>,
 	) -> String {
-		let key = canonical_key(Path::new(&absolute_path));
+		let key = store_key(&absolute_path);
 		let (_, body) = pi_edit::text::strip_bom(&text);
 		self
 			.inner
@@ -298,7 +313,7 @@ impl EditStore {
 	pub fn record_seen_lines(&self, absolute_path: String, tag: String, lines: Vec<u32>) {
 		self
 			.inner
-			.record_seen_lines(&canonical_key(Path::new(&absolute_path)), &tag, &lines);
+			.record_seen_lines(&store_key(&absolute_path), &tag, &lines);
 	}
 
 	/// Merge the lines a hashline-formatted `body` displays into the
@@ -309,7 +324,7 @@ impl EditStore {
 		if !lines.is_empty() {
 			self
 				.inner
-				.record_seen_lines(&canonical_key(Path::new(&absolute_path)), &tag, &lines);
+				.record_seen_lines(&store_key(&absolute_path), &tag, &lines);
 		}
 	}
 
@@ -318,16 +333,14 @@ impl EditStore {
 	pub fn head_text(&self, absolute_path: String) -> Option<String> {
 		self
 			.inner
-			.head(&canonical_key(Path::new(&absolute_path)))
+			.head(&store_key(&absolute_path))
 			.map(|s| s.text.to_string())
 	}
 
 	/// Latest recorded tag for `absolutePath`.
 	#[napi]
 	pub fn head_hash(&self, absolute_path: String) -> Option<String> {
-		self
-			.inner
-			.head_hash(&canonical_key(Path::new(&absolute_path)))
+		self.inner.head_hash(&store_key(&absolute_path))
 	}
 
 	/// Recorded text of `absolutePath` tagged `hash`.
@@ -335,7 +348,7 @@ impl EditStore {
 	pub fn by_hash_text(&self, absolute_path: String, hash: String) -> Option<String> {
 		self
 			.inner
-			.by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
+			.by_hash(&store_key(&absolute_path), &hash)
 			.map(|s| s.text.to_string())
 	}
 
@@ -345,22 +358,18 @@ impl EditStore {
 	pub fn seen_lines(&self, absolute_path: String, hash: String) -> Option<Vec<u32>> {
 		self
 			.inner
-			.by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
+			.by_hash(&store_key(&absolute_path), &hash)
 			.and_then(|s| s.seen_lines.map(|set| set.iter().copied().collect()))
 	}
 
 	#[napi]
 	pub fn invalidate(&self, absolute_path: String) {
-		self
-			.inner
-			.invalidate(&canonical_key(Path::new(&absolute_path)));
+		self.inner.invalidate(&store_key(&absolute_path));
 	}
 
 	#[napi]
 	pub fn relocate(&self, from: String, to: String) {
-		self
-			.inner
-			.relocate(&canonical_key(Path::new(&from)), &canonical_key(Path::new(&to)));
+		self.inner.relocate(&store_key(&from), &store_key(&to));
 	}
 
 	#[napi]
@@ -518,22 +527,46 @@ impl EditWriter for TsfnWriter {
 /// One host round trip for `url`, awaited on the async side (never blocking
 /// a thread on JS). A resolver or promise failure becomes a refusal carrying
 /// the failure message.
-async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlResolution {
+async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlAnswer {
 	let answer = match resolver.call_async(Ok(url.to_owned())).await {
 		Ok(promise) => promise.await,
 		Err(err) => Err(err),
 	};
 	match answer {
-		Ok(answer) => UrlResolution {
-			absolute:      answer.path.map(PathBuf::from),
-			error:         answer.error,
+		Ok(answer) => url_answer(url, answer),
+		Err(err) => UrlAnswer::Refused(err.reason),
+	}
+}
+
+fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
+	if answer.deferred.unwrap_or(false) {
+		return UrlAnswer::Pending;
+	}
+	if let Some(error) = answer.error {
+		return UrlAnswer::Refused(error);
+	}
+	if let Some(content) = answer.content {
+		let Some(key) = answer.path else {
+			return UrlAnswer::Refused(format!("No resource key backs {url}"));
+		};
+		return UrlAnswer::Hosted {
+			key:           key.into(),
+			content:       Some(content),
+			// The host enforces handler capabilities before preview/apply.
+			operations:    vec![
+				Operation::Create,
+				Operation::Update,
+				Operation::Delete,
+				Operation::Move,
+			],
 			plan_writable: answer.plan_writable,
+		};
+	}
+	match answer.path {
+		Some(path) => {
+			UrlAnswer::Backed { path: path.into(), plan_writable: answer.plan_writable }
 		},
-		Err(err) => UrlResolution {
-			absolute:      None,
-			error:         Some(err.reason),
-			plan_writable: false,
-		},
+		None => UrlAnswer::Refused(format!("No local file backs {url}")),
 	}
 }
 
@@ -586,7 +619,7 @@ async fn recover_one(cwd: &Path, authored: &str) -> Option<Resolved> {
 		return None;
 	}
 	let display = found.iter().next()?.path_lossy().into_owned();
-	Some(Resolved { absolute: cwd.join(&display), display })
+	Some(Resolved { location: cwd.join(&display).into(), display })
 }
 
 /// [`recover_one`] for every path, paired with its answer.
@@ -893,7 +926,7 @@ pub struct EditMatcherEntry {
 /// A destructive file operation a payload declares.
 #[napi(object)]
 pub struct EditFileOpIntent {
-	/// `delete` | `move`.
+	/// `create` | `delete` | `move`.
 	pub kind: String,
 	pub path: String,
 	pub to:   Option<String>,
@@ -927,6 +960,9 @@ pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 			.file_ops
 			.into_iter()
 			.map(|op| match op {
+				pi_edit::FileOpIntent::Create { path } => {
+					EditFileOpIntent { kind: "create".into(), path, to: None }
+				},
 				pi_edit::FileOpIntent::Delete { path } => {
 					EditFileOpIntent { kind: "delete".into(), path, to: None }
 				},
@@ -1137,7 +1173,7 @@ mod tests {
 		tree.write("deep/src/other.ts", "");
 		let recovered = recover_one(&tree.0, "src/a.ts").await.unwrap();
 		assert_eq!(recovered.display, "deep/src/a.ts");
-		assert_eq!(recovered.absolute, tree.0.join("deep/src/a.ts"));
+		assert_eq!(recovered.location.key(), tree.0.join("deep/src/a.ts"));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

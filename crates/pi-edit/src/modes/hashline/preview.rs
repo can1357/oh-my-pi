@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
-	engine::{FileOp as EngineFileOp, PreviewFile},
+	engine::{FileOp as EngineFileOp, Location, PreviewFile},
 	files::FileSource,
 	store::{Clipboard, EditStore},
 };
@@ -159,9 +159,24 @@ fn preview_section(
 			},
 			Err(err) => return Err(err),
 		};
+		// Hosted previews use the exact version the model read, never a newer
+		// checkout or head when the header names a historical snapshot.
+		let snapshot = if matches!(resolved.location, Location::Hosted(_)) {
+			let snapshot = match target.file_hash.as_deref() {
+				Some(tag) => store.by_hash(&read.canonical, tag),
+				None => store.head(&read.canonical),
+			};
+			Some(snapshot.ok_or_else(|| crate::error::EditError::DeferredUrl(target.path.clone()))?)
+		} else {
+			None
+		};
+		let text = snapshot
+			.as_ref()
+			.map_or(read.text.as_str(), |snapshot| snapshot.text.as_ref());
+
 		if streaming {
-			let (diff, first, file_op) = streaming_diff(target, &read.text, clipboard)
-				.map_err(crate::error::EditError::apply)?;
+			let (diff, first, file_op) =
+				streaming_diff(target, text, clipboard).map_err(crate::error::EditError::apply)?;
 			result.diff = Some(diff);
 			result.first_changed_line = first;
 			result.op = Some(if matches!(file_op, Some(FileOp::Rem)) {
@@ -173,7 +188,7 @@ fn preview_section(
 		}
 		let parsed = target.parse()?;
 		if target.file_hash.is_none() {
-			return Err(mismatch(target, &read.canonical, &read.text, "", store));
+			return Err(mismatch(target, &read.canonical, text, "", store));
 		}
 		let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			&[][..]
@@ -181,7 +196,7 @@ fn preview_section(
 			parsed.edits.as_slice()
 		};
 		let applied =
-			apply_with_recovery(target, &read.canonical, &read.text, edits, clipboard, store, None)?;
+			apply_with_recovery(target, &read.canonical, text, edits, clipboard, store, None)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete
 		} else {
@@ -191,7 +206,7 @@ fn preview_section(
 			Some(FileOp::Move { dest }) => Some(dest.clone()),
 			_ => None,
 		};
-		if applied.text == read.text {
+		if applied.text == text {
 			if parsed.file_op.is_some() {
 				result.diff = Some(String::new());
 				return Ok(());
@@ -201,7 +216,7 @@ fn preview_section(
 				target.path
 			)));
 		}
-		let diff = generate_diff_string(&read.text, &applied.text, None, &BlockContextSource {
+		let diff = generate_diff_string(text, &applied.text, None, &BlockContextSource {
 			path:      Some(&target.path),
 			lang:      None,
 			streaming: false,
@@ -212,6 +227,7 @@ fn preview_section(
 	})();
 	if let Err(error) = outcome {
 		result.diff = None;
+		result.deferred = error.is_deferred();
 		result.error = Some(error.to_string());
 	}
 	result

@@ -19,7 +19,7 @@ use crate::{
 	files::{FileCache, FileSource},
 	modes::hashline::syntax::has_syntax_oracle,
 	notebook,
-	path_policy::{PathPolicy, UrlResolution, canonical_key},
+	path_policy::{PathPolicy, UrlAnswer},
 	store::{EditStore, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
@@ -221,7 +221,7 @@ impl Session {
 	/// Record the host answer for `url`; clears cached reads/resolutions for
 	/// it and makes [`Self::preview_pending`] true. Answers provided before
 	/// the apply phase serve previews only.
-	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
+	pub fn provide(&mut self, url: String, resolution: UrlAnswer) {
 		self.files.provide(url, resolution);
 		self.generation += 1;
 	}
@@ -280,7 +280,7 @@ impl Session {
 		let inspection = self.engine.inspect(&snapshot);
 		let moves = inspection.file_ops.iter().filter_map(|op| match op {
 			FileOpIntent::Move { to, .. } => Some(to),
-			FileOpIntent::Delete { .. } => None,
+			FileOpIntent::Create { .. } | FileOpIntent::Delete { .. } => None,
 		});
 		let policy = &self.config.policy;
 		let mut targets: Vec<String> = Vec::new();
@@ -308,9 +308,37 @@ impl Session {
 		let generation = self.generation;
 		let streaming = !self.args.is_finished();
 		let snapshot = self.args.snapshot();
+		let inspection = self.engine.inspect(&snapshot);
+		for intent in &inspection.file_ops {
+			let (path, op, to) = match intent {
+				FileOpIntent::Create { path } => (path, FileOp::Create, None),
+				FileOpIntent::Delete { path } => (path, FileOp::Delete, None),
+				FileOpIntent::Move { from, to } => (from, FileOp::Update, Some(to.as_str())),
+			};
+			if let Err(error) = self.files.enforce_operations(path, op, to) {
+				self.previewed = generation;
+				if !streaming {
+					self.final_pass_done = true;
+				}
+				return PreviewBatch {
+					generation,
+					streaming,
+					files: vec![PreviewFile {
+						display: path.clone(),
+						error: Some(error.to_string()),
+						..PreviewFile::default()
+					}],
+				};
+			}
+		}
+
 		let mut files = self
 			.engine
 			.preview(&snapshot, streaming, &mut self.files, &self.store);
+		// Deferral is host state, independent of any path-qualified engine error.
+		// Never publish it as a preview failure or trigger the host's abort
+		// guard.
+		files.retain(|file| !file.deferred);
 		if streaming {
 			for file in &mut files {
 				if let Some(diff) = file.diff.take() {
@@ -360,16 +388,19 @@ impl Session {
 		let last_write = staged.iter().rposition(|file| file.op != FileOp::Noop);
 		let mut files = Vec::with_capacity(staged.len());
 		for (index, mut file) in staged.into_iter().enumerate() {
-			let canonical = canonical_key(&file.absolute);
+			let canonical = file.location.canonical_key();
 			let response = if file.op == FileOp::Noop {
 				WriteResponse::default()
 			} else {
 				writer
 					.write(WriteRequest {
-						absolute:     file.absolute.clone(),
+						absolute:     file.location.key().to_path_buf(),
 						display:      file.display.clone(),
 						op:           file.op,
-						move_to:      file.move_to.as_ref().map(|m| m.absolute.clone()),
+						move_to:      file
+							.move_to
+							.as_ref()
+							.map(|m| m.location.key().to_path_buf()),
 						content:      file.persisted.clone(),
 						flush_lsp:    request.lsp_flush && last_write == Some(index),
 						lsp_batch_id: request.lsp_batch_id.clone(),
@@ -389,7 +420,7 @@ impl Session {
 					}
 				},
 				FileOp::Create | FileOp::Update => {
-					let dest_canonical = file.move_to.as_ref().map(|m| canonical_key(&m.absolute));
+					let dest_canonical = file.move_to.as_ref().map(|m| m.location.canonical_key());
 					let track_provenance = file.record_snapshot
 						&& file.op == FileOp::Update
 						&& file.header == HeaderKind::HashlineTag;
@@ -470,10 +501,13 @@ impl Session {
 			let (old_text, new_text, snapshots_pruned) = prune_snapshots(old_text, new_text);
 
 			files.push(FileOutcome {
-				absolute: file.absolute.clone(),
+				absolute: file.location.key().to_path_buf(),
 				display: file.display.clone(),
 				op: file.op,
-				move_to: file.move_to.as_ref().map(|m| m.absolute.clone()),
+				move_to: file
+					.move_to
+					.as_ref()
+					.map(|m| m.location.key().to_path_buf()),
 				diff: file.diff.clone(),
 				first_changed_line: file.first_changed_line,
 				old_text,
@@ -504,7 +538,7 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 	if file.persisted.as_deref() == Some(written) {
 		return file.after.clone();
 	}
-	if notebook::is_notebook_path(&file.absolute) {
+	if file.location.is_notebook() {
 		return notebook::notebook_to_editable_text(written, &file.display)
 			.map_or_else(|_| file.after.clone(), |text| normalize_to_lf(&text).into_owned());
 	}
@@ -665,7 +699,7 @@ mod tests {
 		session.provide_recovery(
 			"src/a.ts".to_owned(),
 			Some(Resolved {
-				absolute: tmp.path().join("deep/src/a.ts"),
+				location: tmp.path().join("deep/src/a.ts").into(),
 				display:  "deep/src/a.ts".to_owned(),
 			}),
 		);
@@ -686,7 +720,7 @@ mod tests {
 			"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n",
 		);
 		let answer = Resolved {
-			absolute: tmp.path().join("deep/src/a.ts"),
+			location: tmp.path().join("deep/src/a.ts").into(),
 			display:  "deep/src/a.ts".to_owned(),
 		};
 		session.provide_recovery("src/a.ts".to_owned(), Some(answer.clone()));
