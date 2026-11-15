@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `reserveReleaseHours` to the `omp usage` policy line, which reports the released reserve state near each window reset
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

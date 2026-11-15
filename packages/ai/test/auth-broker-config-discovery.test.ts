@@ -69,6 +69,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				provider: "anthropic",
 				account: { email: "policy@example.com" },
 				reservePct: 25,
+				reserveReleaseHours: 24,
 				reclaimAbovePct: 60,
 			},
 		] satisfies AuthAccountPolicies;

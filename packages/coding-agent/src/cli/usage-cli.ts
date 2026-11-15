@@ -15,7 +15,7 @@ import {
 	type OAuthAccountIdentity,
 	type OAuthAccountSummary,
 	type ResetCreditRedeemOutcome,
-	isWithinUsageReserve,
+	isAnyLimitWithinUsageReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
@@ -670,6 +670,7 @@ export type UsagePolicyDiagnostics = {
 	priority: number;
 	reservePct: number;
 	reserveSource: "global" | "override";
+	reserveReleaseHours?: number;
 	reclaimAbovePct?: number;
 } & (
 	| { state: "unknown"; remainingPct?: never }
@@ -699,6 +700,7 @@ function computePolicyDiagnostics(
 		priority: policy?.priority ?? 0,
 		reservePct,
 		reserveSource: configuredReservePct === undefined ? "global" : "override",
+		...(policy?.reserveReleaseHours === undefined ? {} : { reserveReleaseHours: policy.reserveReleaseHours }),
 		...(policy?.reclaimAbovePct === undefined ? {} : { reclaimAbovePct: policy.reclaimAbovePct }),
 	} as const;
 	if (usedFractions.length === 0) return { ...base, state: exhausted ? "exhausted" : "unknown" };
@@ -706,7 +708,7 @@ function computePolicyDiagnostics(
 	const state =
 		exhausted || remainingFraction <= 0
 			? "exhausted"
-			: isWithinUsageReserve(remainingFraction, reservePct / 100)
+			: isAnyLimitWithinUsageReserve(limits ?? [], reservePct / 100, Date.now(), policy?.reserveReleaseHours)
 				? "inside-reserve"
 				: "eligible";
 	// Rounded exactly as the text view prints it (`toFixed(1)`), so JSON carries 9 rather than 8.999999999999996.
@@ -714,8 +716,10 @@ function computePolicyDiagnostics(
 }
 
 function formatPolicyLine(policy: UsagePolicyDiagnostics): string {
+	const releaseLabel =
+		policy.reserveReleaseHours === undefined ? "" : ` · release ${policy.reserveReleaseHours}h before reset`;
 	const reclaimLabel = policy.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
-	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${reclaimLabel}`;
+	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${releaseLabel}${reclaimLabel}`;
 	if (policy.remainingPct === undefined) {
 		return `${prefix} · ${policy.state === "exhausted" ? "exhausted" : "reserve unknown"}`;
 	}

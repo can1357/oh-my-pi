@@ -62,6 +62,11 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/**
+	 * Hours before a usage window resets over which this account's reserve shrinks
+	 * linearly to zero, so quota that would expire unused at the reset is spent.
+	 */
+	readonly reserveReleaseHours?: number;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
 }

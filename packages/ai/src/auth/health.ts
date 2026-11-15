@@ -1,6 +1,6 @@
 import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
-import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
+import { isAnyLimitWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
 	UsageCredential,
@@ -134,12 +134,16 @@ export class CredentialHealth implements HealthApi {
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: this.#deps.policies.defaultReservePct / 100;
 
-		const resolveReserveFraction = (entry: StoredCredential): number => {
+		const resolveReserve = (entry: StoredCredential): { fraction: number; releaseHours: number | undefined } => {
 			const policy = this.#deps.policies.forCredential(provider, entry.credential);
 			const configured = policy?.reservePct;
-			return configured === undefined || !Number.isFinite(configured)
-				? reserveFraction
-				: Math.max(0, Math.min(1, configured / 100));
+			return {
+				fraction:
+					configured === undefined || !Number.isFinite(configured)
+						? reserveFraction
+						: Math.max(0, Math.min(1, configured / 100)),
+				releaseHours: policy?.reserveReleaseHours,
+			};
 		};
 		const nowMs = Date.now();
 		let accounts = await Promise.all(
@@ -222,10 +226,13 @@ export class CredentialHealth implements HealthApi {
 					return { credentialId: entry.id, credentialType, state: "unknown" };
 				}
 				const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+				const reserve = resolveReserve(entry);
 				return {
 					credentialId: entry.id,
 					credentialType,
-					state: isWithinUsageReserve(remainingFraction, resolveReserveFraction(entry)) ? "reserve" : "healthy",
+					state: isAnyLimitWithinUsageReserve(currentLimits, reserve.fraction, nowMs, reserve.releaseHours)
+						? "reserve"
+						: "healthy",
 					remainingFraction,
 				};
 			}),

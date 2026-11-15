@@ -621,6 +621,33 @@ describe("usage JSON policy", () => {
 		expect(text).toContain("policy: priority 5 · reserve 2% (override) · reclaim above 40% · exhausted · 0.5% left");
 	});
 
+	it("evaluates the reserve after reserveReleaseHours shrinks it near the window reset", () => {
+		const weekly = (resetsIn: number) => ({
+			...makeLimit({ id: "7d", provider: "anthropic", usedFraction: 0.85 }),
+			window: { id: "7d", label: "7d", durationMs: 7 * 24 * 3_600_000, resetsAt: Date.now() + resetsIn },
+		});
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({
+				provider: "anthropic",
+				account: { email: identity.email },
+				reservePct: 20,
+				reserveReleaseHours: 24,
+			}),
+		};
+		const far = makeReport("anthropic", "far@example.test", [weekly(2 * 24 * 3_600_000)]);
+		const near = makeReport("anthropic", "near@example.test", [weekly(6 * 3_600_000)]);
+		const [farPolicy, nearPolicy] = annotateUsagePolicy([far, near], [], [], options).reports.map(
+			report => report.policy,
+		);
+		expect(farPolicy?.state).toBe("inside-reserve");
+		expect(nearPolicy?.state).toBe("eligible");
+		const text = stripVTControlCharacters(formatUsageBreakdown([near], [], Date.now(), undefined, [], options));
+		expect(text).toContain(
+			"policy: priority 0 · reserve 20% (override) · release 24h before reset · eligible · 15.0% left",
+		);
+	});
+
 	it("rounds remainingPct the way the text line prints it", () => {
 		// (1 - 0.0195) * 100 is 98.0499… in binary: toFixed(1) prints 98.0, while rounding ×1000 gives 98.1.
 		const report = makeReport("openai-codex", "boundary@example.test", [
