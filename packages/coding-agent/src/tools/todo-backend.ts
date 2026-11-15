@@ -20,7 +20,9 @@ export function sanitizeTodoBackendText(value: unknown): string {
 
 /**
  * The `todo` tool's params, as validated by the tool: the same value the native op applied, with
- * keys the tool schema does not declare removed.
+ * keys the tool schema does not declare removed. `task` is passed as given: the native op may split
+ * a string or array entry that names no task verbatim into several targets, so the tasks it hit are
+ * only in `next`.
  */
 export type TodoBackendParams = TodoParams;
 
