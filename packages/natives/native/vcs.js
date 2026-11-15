@@ -77,6 +77,18 @@ export function gitInfo(dir) {
 	return api().vcsGitRepoInfo(dir);
 }
 
+/**
+ * Whether a work-discarding command run in `dir` would destroy anything:
+ * uncommitted changes to tracked files, or with `check.clean` the untracked
+ * files that `git clean` would delete, in the repository and work tree
+ * `check.gitDir`/`check.workTree` name (else the ones git discovers from
+ * `dir`). Synchronous, for approval checks, and runs no program the
+ * repository configures; `false` outside a repository.
+ */
+export function discardsWorkSync(dir, check) {
+	return api().vcsGitDiscardsWork(dir, check);
+}
+
 /** Discover the Jujutsu workspace containing `dir`; `null` when absent. */
 export function jj(dir) {
 	return api().vcsJjDiscover(dir);
