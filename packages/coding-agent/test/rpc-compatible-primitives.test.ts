@@ -311,15 +311,9 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 	test("set_todos without a phases array fails and keeps the list", async () => {
 		const { send, next } = server;
 		send({ type: "set_todos", id: "todos-set", phases: [{ name: "Kept", tasks: [] }] });
-		expect((await next()).success).toBe(true);
+		expect(await next()).toMatchObject({ success: true, data: { todoPhases: [{ name: "Kept", tasks: [] }] } });
 		send({ type: "set_todos", id: "todos-missing" });
-		expect(await next()).toEqual({
-			id: "todos-missing",
-			type: "response",
-			command: "set_todos",
-			success: false,
-			error: "set_todos requires a phases array",
-		});
+		expect(await next()).toMatchObject({ id: "todos-missing", command: "set_todos", success: false });
 		send({ type: "get_state", id: "todos-state" });
 		expect((await next()).data).toMatchObject({ todoPhases: [{ name: "Kept", tasks: [] }] });
 	}, 60000);

@@ -2372,11 +2372,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
-				// An updater returning `undefined` means "no change", so a missing list would report success.
-				if (!Array.isArray(command.phases)) return error(id, "set_todos", "set_todos requires a phases array");
-				const committed = await session.editTodoPhases(() => command.phases);
+				// Refuse anything but a list: an updater returning `undefined` would mean "no change" and report success.
+				const { phases } = command;
+				if (!Array.isArray(phases)) return error(id, "set_todos", "set_todos requires a phases array");
 				// The committed list, not a later read: a write queued behind this one can land before this handler resumes.
-				return success(id, "set_todos", { todoPhases: committed ?? session.getTodoPhases() });
+				return success(id, "set_todos", { todoPhases: await session.editTodoPhases(() => phases) });
 			}
 
 			case "set_host_tools": {
