@@ -323,6 +323,7 @@
 - Fixed browser interactions behind modal dialogs incorrectly reporting success; covered fields and disabled elements are now rejected, and covered drag endpoints are detected.
 - Fixed RPC login for providers that require an at-your-own-risk confirmation; the confirmation is now presented to the host and login proceeds only after approval.
 - On Linux, language-server file watching no longer consumes excessive inotify watches in `node_modules` and `.git/objects`.
+- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.22.0] - 2026-11-16
 
