@@ -405,6 +405,69 @@ describe("AgyHost stateful steps", () => {
 		expect(next.writer.output.content).toEqual([{ type: "text", text: "Steered response." }]);
 	});
 
+	it("steers parked MCP tool-result images as ACP prompt blocks and keeps only text in the MCP reply", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		let released = false;
+		void state.output.then(() => {
+			released = true;
+		});
+		const firstImage = { type: "image" as const, data: "c21hbGw=", mimeType: "image/jpeg" };
+		const firstCall = state.first.writer.output.content.find(block => block.type === "toolCall");
+		if (!firstCall || firstCall.type !== "toolCall") throw new Error("Expected first tool call");
+		const firstResult: ToolResultMessage = {
+			...result(state.first.writer.output, "Read image file [image/jpeg]"),
+			content: [{ type: "text", text: "Read image file [image/jpeg]" }, firstImage],
+		};
+		const second = step(state.host, [...state.messages, firstResult]);
+		const imageSteer = await state.fake.prompts.next();
+		expect(released).toBe(false);
+		expect(imageSteer.request.prompt).toEqual([
+			{ type: "text", text: `<tool_result id=${JSON.stringify(firstCall.id)} name="read">` },
+			firstImage,
+			{ type: "text", text: "</tool_result>" },
+		]);
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		expect(await state.output).toEqual({
+			content: [{ type: "text", text: "Read image file [image/jpeg]" }],
+			isError: false,
+		});
+		state.fake.text("Checking second image.");
+		const secondOutput = state.fake.call("read", { path: "b.png" });
+		await second.done;
+
+		const secondImage = { type: "image" as const, data: "c2Vjb25k", mimeType: "image/png" };
+		const secondCall = second.writer.output.content.find(block => block.type === "toolCall");
+		if (!secondCall || secondCall.type !== "toolCall") throw new Error("Expected second tool call");
+		const imageOnlyResult: ToolResultMessage = {
+			...result(second.writer.output),
+			content: [secondImage],
+		};
+		const third = step(state.host, [
+			...state.messages,
+			firstResult,
+			second.writer.output,
+			imageOnlyResult,
+			user("compare both"),
+		]);
+		const combinedSteer = await state.fake.prompts.next();
+		imageSteer.response.resolve({ stopReason: "end_turn" });
+		expect(await secondOutput).toEqual({
+			content: [{ type: "text", text: "[Image delivered in prompt]" }],
+			isError: false,
+		});
+		expect(combinedSteer.request.prompt).toEqual([
+			{ type: "text", text: `<tool_result id=${JSON.stringify(secondCall.id)} name="read">` },
+			secondImage,
+			{ type: "text", text: "</tool_result>" },
+			{ type: "text", text: "compare both" },
+		]);
+		state.fake.text("Both show benches.");
+		combinedSteer.response.resolve({ stopReason: "end_turn" });
+		await third.done;
+		expect(third.writer.output.content).toEqual([{ type: "text", text: "Both show benches." }]);
+	});
+
 	it("waits for confirmed cancellation before releasing a deadline-held MCP call or sending its late result", async () => {
 		const state = await parked({ holdLimitMs: 20, cancelTimeoutMs: 300 });
 		state.fake.cancelMode = "hold";
