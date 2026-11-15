@@ -18,6 +18,18 @@ omp downloads agy from Google's release manifests, checks SHA-512, and keeps ver
 
 Login exports the resulting OAuth grant into omp's credential store so normal refresh and broker distribution can manage it. The ACP child uses a private, account-scoped native credential file rather than modifying your ordinary agy login. A child-only headless-auth environment selects agy's file storage. Do not copy access tokens into `--api-key`: the transport expects the structured OAuth credential produced by login.
 
+If you logged out of `antigravity-cli` **before the logout cleanup fix**, the staged token file is not removed retroactively: omp no longer has that account's credential to identify it. Stop any omp/agy processes using that account, then delete **only its token file**. The account directory is the SHA-256 digest of `email:<email>` with the email trimmed and lowercased; if the login had no email, it is the digest of `sub:<accountId>` instead. On Linux, for an email-based account:
+
+```sh
+email='account@example.com' # replace with the logged-out account's lowercase email
+agy_data="$HOME/.omp/antigravity-cli" # use the actual profile/XDG data directory if configured
+account=$(printf 'email:%s' "$email" | sha256sum | cut -d ' ' -f1)
+token="$agy_data/gemini/$account/antigravity-cli/antigravity-oauth-token"
+test -f "$token" && rm -- "$token"
+```
+
+For an account identified only by its subject, hash `sub:<accountId>` instead of `email:<email>`; on macOS, use `shasum -a 256` instead of `sha256sum`. With XDG data enabled, the default-profile `agy_data` is `$XDG_DATA_HOME/omp/antigravity-cli`; named profiles may use `profiles/<name>/antigravity-cli` under their data root. Do not delete the account directory: it may also contain conversation history. The managed agy binary lives outside `gemini/` and does not need removal.
+
 omp supplies the system prompt and tool schemas through ACP and an IDE MCP bridge. Tool names remain bare in omp; agy presents them to the model as `mcp_ide-tools_<name>`. The built-in agent prompt and coding tools are removed, but agy's `manage_task` and MCP resource tools remain internal to agy. Tool execution and approvals for the supplied tools stay with omp.
 
 The transport retains agy's conversation between model steps, including while omp executes a tool. Edits, branches and changed context restore a matching saved turn boundary when possible; otherwise the retained transcript is supplied to a fresh conversation. Native conversations and credentials are local to the machine running inference. agy's three-minute MCP timeout means longer tool operations require cancelling its waiting turn and delivering the completed result as a subsequent message.
