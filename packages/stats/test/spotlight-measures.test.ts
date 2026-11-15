@@ -52,7 +52,7 @@ function shapedRead(
 		kept?: [number, number][];
 		heat?: string;
 		artifact?: number;
-	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated">> = {},
+	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "plainTokens" | "gated">> = {},
 ): string {
 	return shaped(
 		b,
@@ -65,6 +65,7 @@ function shapedRead(
 			...(opts.holdout ? { holdout: opts.holdout } : {}),
 			...(opts.scoreFree ? { scoreFree: true } : {}),
 			...(opts.gated ? { gated: true } : {}),
+			...(opts.plainTokens === undefined ? {} : { plainTokens: opts.plainTokens }),
 			original: {
 				url: `artifact://${opts.artifact ?? 0}`,
 				lines: opts.lines ?? 60,
@@ -253,6 +254,29 @@ describe("Spotlight holdout-adjusted net", () => {
 		const time = stats.timeCost;
 		expect(time).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 4000, agentMs: 24_000 });
 		expect(time.share).toBeCloseTo((4000 + time.shapeMs) / 24_000, 12);
+	});
+
+	it("measures the baseline apart for results plain capped, whose cuts get fetched beyond plain's page anyway", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Held out: a capped read (plain showed 2,000 of 3,000 tokens) whose hidden lines come back (100 tokens) and an
+		// uncapped one that nothing fetches.
+		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: "artifact://9" }, plainTokens: 2000 });
+		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(400));
+		shapedRead(b, "src/b.ts", { holdout: { shapedUrl: "artifact://9" } });
+		// Applied: one capped cut recovered (200 tokens), two uncapped, one of them recovered (100 tokens).
+		shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+		shapedRead(b, "src/d.ts");
+		call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+		shapedRead(b, "src/e.ts");
+		await write("capped.jsonl", b);
+
+		const stats = await dashboard();
+		// By bin: the capped cut gets 100 back anyway, the uncapped ones 0, so 300 − 100 is excess. A pooled baseline
+		// (50 a cut over three cuts) would have called 150 excess.
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens.value).toBe(200);
+		expect(stats.adjusted.excessTokens.value).toBe(200);
 	});
 });
 

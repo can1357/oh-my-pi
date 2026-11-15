@@ -70,13 +70,20 @@ export interface SessionMoney {
 	spotlightUsd: number;
 }
 
-/** One tool's cuts and holdouts. */
+/**
+ * One tool's cuts and holdouts, with the share of each whose `plain` capped (showed less than the whole output). A
+ * capped result's cut hides lines beyond plain's page too, which the agent would fetch under plain as well, so its
+ * baseline is measured apart.
+ */
 interface ToolCell {
 	cuts: number;
 	recovered: number;
 	holdouts: number;
 	/** Would-be recovered tokens of the held-out results. */
 	baseline: number;
+	cappedCuts: number;
+	cappedHoldouts: number;
+	cappedBaseline: number;
 }
 
 /** Cells by tool. */
@@ -96,7 +103,26 @@ interface AdjustedIntervals {
 }
 
 function emptyToolCell(): ToolCell {
-	return { cuts: 0, recovered: 0, holdouts: 0, baseline: 0 };
+	return { cuts: 0, recovered: 0, holdouts: 0, baseline: 0, cappedCuts: 0, cappedHoldouts: 0, cappedBaseline: 0 };
+}
+
+/**
+ * Tokens a tool's cuts get fetched back anyway: each size bin (plain-capped or not) at its own holdouts' per-cut rate,
+ * a bin without holdouts at the tool's pooled rate.
+ */
+function expectedRecovered(
+	cuts: number,
+	holdouts: number,
+	baseline: number,
+	cappedCuts: number,
+	cappedHoldouts: number,
+	cappedBaseline: number,
+): number {
+	const pooled = holdouts > 0 ? baseline / holdouts : 0;
+	const uncappedHoldouts = holdouts - cappedHoldouts;
+	const uncappedRate = uncappedHoldouts > 0 ? (baseline - cappedBaseline) / uncappedHoldouts : pooled;
+	const cappedRate = cappedHoldouts > 0 ? cappedBaseline / cappedHoldouts : pooled;
+	return uncappedRate * (cuts - cappedCuts) + cappedRate * cappedCuts;
 }
 
 /** The cell of `tool` in `cells`, created empty when missing. */
@@ -142,10 +168,20 @@ export function emptyAdjusted(): SpotlightAdjusted {
 	};
 }
 
-/** Excess per tool of summed cells: max(0, recovered − baseline per cut × cuts). */
+/** Excess per tool of summed cells: max(0, recovered − what its cuts get fetched back anyway, by size bin). */
 function excessOf(cells: ToolCells): Map<SpotlightTool, number> {
 	const excess = new Map<SpotlightTool, number>();
-	for (const [tool, cell] of cells) excess.set(tool, Math.max(0, cell.recovered - baselinePerCut(cell) * cell.cuts));
+	for (const [tool, c] of cells) {
+		const expected = expectedRecovered(
+			c.cuts,
+			c.holdouts,
+			c.baseline,
+			c.cappedCuts,
+			c.cappedHoldouts,
+			c.cappedBaseline,
+		);
+		excess.set(tool, Math.max(0, c.recovered - expected));
+	}
 	return excess;
 }
 
@@ -157,6 +193,9 @@ function addCells(into: ToolCells, cells: ToolCells): void {
 		sum.recovered += cell.recovered;
 		sum.holdouts += cell.holdouts;
 		sum.baseline += cell.baseline;
+		sum.cappedCuts += cell.cappedCuts;
+		sum.cappedHoldouts += cell.cappedHoldouts;
+		sum.cappedBaseline += cell.cappedBaseline;
 	}
 }
 
@@ -174,8 +213,8 @@ function recoveredOf(cells: ToolCells): number {
 
 /**
  * Holdout-adjusted net savings: each tool's applied cuts (scored and score-free) recover tokens; held-out would-be
- * cuts of the same tool show how many the agent fetches back anyway. Intervals resample experiment sessions
- * jointly. `byTool` lists `tools` in their order.
+ * cuts of the same tool and size bin (plain-capped or not) show how many the agent fetches back anyway. Intervals
+ * resample experiment sessions jointly. `byTool` lists `tools` in their order.
  */
 export function computeAdjusted(
 	evaluated: readonly Evaluated[],
@@ -190,12 +229,18 @@ export function computeAdjusted(
 		const session = sessions.get(analysis.session.session_file);
 		if (!session || (!result.shortened && !result.holdout)) continue;
 		const cell = toolCell(session.tools, tool);
+		const capped = result.plainTokens < result.inTokens;
 		if (result.shortened) {
 			cell.cuts++;
 			cell.recovered += recoveredTokens(call);
+			if (capped) cell.cappedCuts++;
 		} else if (result.holdout) {
 			cell.holdouts++;
 			cell.baseline += call.baselineTokens;
+			if (capped) {
+				cell.cappedHoldouts++;
+				cell.cappedBaseline += call.baselineTokens;
+			}
 		}
 	}
 	const list = [...sessions.values()];
@@ -237,8 +282,13 @@ export function computeAdjusted(
 	};
 }
 
-/** Numbers per cell in {@link adjustedIntervals}' flat cell runs: tool index, cuts, recovered, holdouts, baseline. */
-const RUN_FIELDS = 5;
+/**
+ * Numbers per cell in {@link adjustedIntervals}' flat cell runs: tool index, cuts, recovered, holdouts, baseline, and
+ * the plain-capped cuts, holdouts and baseline.
+ */
+const RUN_FIELDS = 8;
+/** Summed numbers per tool in a bootstrap round: a run's fields after the tool index. */
+const CELL_FIELDS = RUN_FIELDS - 1;
 
 /**
  * Intervals of the adjusted net's statistics from one joint bootstrap over the sessions: each round resamples them
@@ -257,14 +307,23 @@ function adjustedIntervals(list: readonly AdjustedSession[], tools: readonly Spo
 				index = toolIndex.size;
 				toolIndex.set(tool, index);
 			}
-			runs.push(index, cell.cuts, cell.recovered, cell.holdouts, cell.baseline);
+			runs.push(
+				index,
+				cell.cuts,
+				cell.recovered,
+				cell.holdouts,
+				cell.baseline,
+				cell.cappedCuts,
+				cell.cappedHoldouts,
+				cell.cappedBaseline,
+			);
 		}
 	});
 	starts[list.length] = runs.length;
 	const toolSlot = tools.map(tool => toolIndex.get(tool) ?? -1);
 
-	// cuts, recovered, holdouts, baseline per tool.
-	const cells = new Float64Array(toolIndex.size * 4);
+	// cuts, recovered, holdouts, baseline, cappedCuts, cappedHoldouts, cappedBaseline per tool.
+	const cells = new Float64Array(toolIndex.size * CELL_FIELDS);
 	const toolExcess = new Float64Array(toolIndex.size);
 	const total = jointSamples();
 	const net = jointSamples();
@@ -284,22 +343,26 @@ function adjustedIntervals(list: readonly AdjustedSession[], tools: readonly Spo
 			recoveryUsd += money.recoveryUsd;
 			spotlightUsd += money.spotlightUsd;
 			for (let at = starts[pick]; at < starts[pick + 1]; at += RUN_FIELDS) {
-				const cell = runs[at] * 4;
-				cells[cell] += runs[at + 1];
-				cells[cell + 1] += runs[at + 2];
-				cells[cell + 2] += runs[at + 3];
-				cells[cell + 3] += runs[at + 4];
+				const cell = runs[at] * CELL_FIELDS;
+				for (let f = 0; f < CELL_FIELDS; f++) cells[cell + f] += runs[at + 1 + f];
 			}
 		}
 		let sum = 0;
 		let recovered = 0;
 		for (let t = 0; t < toolIndex.size; t++) {
-			const holdouts = cells[t * 4 + 2];
-			const perCut = holdouts > 0 ? cells[t * 4 + 3] / holdouts : 0;
-			const toolSum = Math.max(0, cells[t * 4 + 1] - perCut * cells[t * 4]);
+			const c = t * CELL_FIELDS;
+			const expected = expectedRecovered(
+				cells[c],
+				cells[c + 2],
+				cells[c + 3],
+				cells[c + 4],
+				cells[c + 5],
+				cells[c + 6],
+			);
+			const toolSum = Math.max(0, cells[c + 1] - expected);
 			toolExcess[t] = toolSum;
 			sum += toolSum;
-			recovered += cells[t * 4 + 1];
+			recovered += cells[c + 1];
 		}
 		total[r] = sum;
 		net[r] = saved - sum;

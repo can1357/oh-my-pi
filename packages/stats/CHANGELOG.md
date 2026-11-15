@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Spotlight headline's holdout baseline mixing results plain showed whole with results plain truncated, whose cuts get fetched beyond plain's page anyway
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed
