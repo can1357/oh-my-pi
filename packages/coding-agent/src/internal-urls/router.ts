@@ -94,6 +94,34 @@ const QUERY_START_RE = /\?[\w.-]*=/;
 // Selectors a mutating tool accepts: whole-file display modes that do not change which bytes are addressed.
 const WHOLE_FILE_SELECTOR_RE = /^(?:raw|conflicts)$/i;
 
+/**
+ * Throw when `handler`'s spec write policy disagrees with the handler: `write()` exists exactly for
+ * `write.via: "handler"`; `write.via: "file"` needs a mutable file-backed spec with `locate()`; a
+ * `sandbox` scope needs a linkable `locateSync()` so {@link InternalUrlRouter.sandboxRoots} can locate its root.
+ */
+export function assertProtocolHandlerSpec(handler: ProtocolHandler): void {
+	const { scheme, spec } = handler;
+	const via = spec.write?.via;
+	if (via === "handler" && !handler.write) {
+		throw new Error(`${scheme}:// spec.write.via is "handler" but the handler lacks write()`);
+	}
+	if (via !== "handler" && handler.write) {
+		throw new Error(
+			`${scheme}:// handler has write() but spec.write.via is ${via === undefined ? "absent" : `"${via}"`}`,
+		);
+	}
+	if (via === "file") {
+		if (spec.backing !== "file") {
+			throw new Error(`${scheme}:// spec.write.via "file" requires backing "file", not "${spec.backing}"`);
+		}
+		if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
+		if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
+	}
+	if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
+		throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
+	}
+}
+
 /** Process-global scheme registry; tools route internal URLs through its spec-driven API. */
 export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;
@@ -145,33 +173,12 @@ export class InternalUrlRouter {
 	}
 
 	/**
-	 * Install (or replace) the handler for `handler.scheme`. Throws when the spec's write
-	 * policy disagrees with the handler: `write()` exists exactly for `write.via: "handler"`;
-	 * `write.via: "file"` needs a mutable file-backed spec with `locate()`; a `sandbox` scope
-	 * needs a linkable `locateSync()` so {@link sandboxRoots} can locate its root.
+	 * Install (or replace) the handler for `handler.scheme`. Throws when the handler fails
+	 * {@link assertProtocolHandlerSpec}.
 	 */
 	register(handler: ProtocolHandler): void {
-		const { scheme, spec } = handler;
-		const via = spec.write?.via;
-		if (via === "handler" && !handler.write) {
-			throw new Error(`${scheme}:// spec.write.via is "handler" but the handler lacks write()`);
-		}
-		if (via !== "handler" && handler.write) {
-			throw new Error(
-				`${scheme}:// handler has write() but spec.write.via is ${via === undefined ? "absent" : `"${via}"`}`,
-			);
-		}
-		if (via === "file") {
-			if (spec.backing !== "file") {
-				throw new Error(`${scheme}:// spec.write.via "file" requires backing "file", not "${spec.backing}"`);
-			}
-			if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
-			if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
-		}
-		if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
-			throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
-		}
-		this.#handlers.set(scheme.toLowerCase(), handler);
+		assertProtocolHandlerSpec(handler);
+		this.#handlers.set(handler.scheme.toLowerCase(), handler);
 	}
 
 	/** Whether the router constructor registered `scheme` (case-insensitive): an OMP-owned scheme hosts may not replace. */

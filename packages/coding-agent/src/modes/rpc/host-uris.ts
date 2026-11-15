@@ -1,4 +1,5 @@
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { extensionUrlSchemeHolder } from "../../extensibility/extensions/url-schemes";
 import { InternalUrlRouter } from "../../internal-urls";
 import type {
 	InternalResource,
@@ -89,7 +90,8 @@ export class RpcHostUriBridge {
 	/**
 	 * Replace the registered set of host URI schemes. Previously registered
 	 * schemes that no longer appear in the new set are unregistered from the
-	 * router; surviving and new schemes get fresh handler instances.
+	 * router; surviving and new schemes get fresh handler instances. Throws,
+	 * changing nothing, for a built-in scheme or one an extension holds.
 	 */
 	setSchemes(schemes: RpcHostUriSchemeDefinition[]): string[] {
 		const normalized = new Map<string, RpcHostUriSchemeDefinition>();
@@ -105,6 +107,12 @@ export class RpcHostUriBridge {
 			// the whole process, and `clear()` would then delete it for later sessions.
 			if (this.#router.isBuiltin(scheme)) {
 				throw new Error(`Host URI scheme is reserved by OMP: ${scheme}://`);
+			}
+			// An extension's claim routes the scheme by session and restores it on resume;
+			// replacing its handler would strand that claim.
+			const holder = extensionUrlSchemeHolder(this.#router, scheme);
+			if (holder !== undefined) {
+				throw new Error(`Host URI scheme is registered by extension ${holder}: ${scheme}://`);
 			}
 			normalized.set(scheme, {
 				scheme,
