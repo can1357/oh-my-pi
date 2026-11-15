@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { closeDb, initDb, insertMessageStats, readDailyActivity } from "@oh-my-pi/omp-stats/db";
+import * as db from "@oh-my-pi/omp-stats/db";
 import { refreshRollups } from "@oh-my-pi/omp-stats/rollup";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
@@ -48,26 +48,31 @@ async function whileLocked<T>(fn: () => Promise<T> | T): Promise<T> {
 
 describe("opening the stats database", () => {
 	it("reopens an initialized database without taking the write lock", async () => {
-		await initDb();
-		insertMessageStats([request("a", Date.now() - 60 * 60_000)]);
-		closeDb();
-		// Another process mid-write: a write here would wait out the busy timeout and fail.
+		await db.initDb();
+		db.insertMessageStats([request("a", Date.now() - 60 * 60_000)]);
+		db.closeDb();
+		// Another process mid-write: a write here would wait out the busy timeout
+		// and reject with "database is locked".
 		const started = performance.now();
-		await whileLocked(() => initDb());
+		const outcome = await whileLocked(() => db.initDb()).then(
+			() => "opened",
+			(error: unknown) => String(error),
+		);
+		expect(outcome).toBe("opened");
 		expect(performance.now() - started).toBeLessThan(2_000);
 	}, 20_000);
 
 	it("reads the daily activity while another connection holds the write lock", async () => {
-		await initDb();
+		await db.initDb();
 		const timestamp = Date.now() - 60 * 60_000;
-		insertMessageStats([request("a", timestamp), request("b", timestamp + 1)]);
+		db.insertMessageStats([request("a", timestamp), request("b", timestamp + 1)]);
 		await refreshRollups();
-		closeDb();
-		const points = await whileLocked(() => readDailyActivity());
+		db.closeDb();
+		const points = await whileLocked(() => db.readDailyActivity());
 		expect(points?.reduce((sum, point) => sum + point.requests, 0)).toBe(2);
 	}, 20_000);
 
 	it("reads no activity before any database exists", () => {
-		expect(readDailyActivity()).toBeNull();
+		expect(db.readDailyActivity()).toBeNull();
 	});
 });
