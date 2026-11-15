@@ -372,36 +372,51 @@ pub(crate) fn run_sync_capped(
 /// read from the repository's own config file only. Every inherited `GIT_*`
 /// variable is dropped, not only the repository-location family [`apply_env`]
 /// strips: `GIT_CONFIG_*`, `GIT_EXEC_PATH` and the like would otherwise reach
-/// the child. Submodules are the caller's to exclude.
+/// the child. `repository` then names the repository and work tree for every
+/// git the call runs (`GIT_DIR`, `GIT_WORK_TREE`); empty, git discovers them
+/// from `cwd`. Submodules are the caller's to exclude.
 pub(crate) fn run_sync_inert(
 	cwd: &Path,
+	repository: &[(&str, &OsStr)],
 	args: &[String],
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
 	let mut blanked = Vec::new();
-	for driver in filter_drivers(cwd, timeout)? {
+	for driver in filter_drivers(cwd, repository, timeout)? {
 		for (var, value) in [("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")] {
 			blanked.push((format!("filter.{driver}.{var}"), value.to_owned()));
 		}
 	}
 	// `-c` splits its argument at the first `=`, so it cannot name a driver
 	// whose name contains one; `GIT_CONFIG_KEY_<n>` carries the key whole.
-	let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), blanked.len().to_string())];
+	let mut config = vec![("GIT_CONFIG_COUNT".to_owned(), blanked.len().to_string())];
 	for (index, (key, value)) in blanked.into_iter().enumerate() {
-		env.push((format!("GIT_CONFIG_KEY_{index}"), key));
-		env.push((format!("GIT_CONFIG_VALUE_{index}"), value));
+		config.push((format!("GIT_CONFIG_KEY_{index}"), key));
+		config.push((format!("GIT_CONFIG_VALUE_{index}"), value));
 	}
+	let mut env = repository.to_vec();
+	env.extend(
+		config
+			.iter()
+			.map(|(key, value)| (key.as_str(), OsStr::new(value))),
+	);
 	run_sync_impl(cwd, args, timeout, limit, SyncMode::Inert(&env))
 }
 
-/// The names of the filter drivers git's configuration in `cwd` defines.
+/// The names of the filter drivers git's configuration defines for the
+/// repository `repository` names, or the one git discovers from `cwd`.
 /// Reading configuration runs no program.
-fn filter_drivers(cwd: &Path, timeout: Duration) -> Result<BTreeSet<String>> {
+fn filter_drivers(
+	cwd: &Path,
+	repository: &[(&str, &OsStr)],
+	timeout: Duration,
+) -> Result<BTreeSet<String>> {
 	let args: Vec<String> = ["config", "--null", "--name-only", "--get-regexp", r"^filter\."]
 		.map(str::to_owned)
 		.to_vec();
-	let output = run_sync_impl(cwd, &args, timeout, OUTPUT_LIMIT_BYTES, SyncMode::Inert(&[]))?;
+	let output =
+		run_sync_impl(cwd, &args, timeout, OUTPUT_LIMIT_BYTES, SyncMode::Inert(repository))?;
 	// Exit status 1: no key matched.
 	if output.exit_code == 1 && output.stdout.is_empty() {
 		return Ok(BTreeSet::new());
@@ -434,7 +449,7 @@ enum SyncMode<'a> {
 	Write(&'a SyncWrite<'a>),
 	/// Both, every inherited `GIT_*` variable dropped, lazy fetches and
 	/// transports refused, then these variables set (see [`run_sync_inert`]).
-	Inert(&'a [(String, String)]),
+	Inert(&'a [(&'a str, &'a OsStr)]),
 }
 
 /// Shared synchronous runner.

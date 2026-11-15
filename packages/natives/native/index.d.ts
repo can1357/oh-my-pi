@@ -4280,6 +4280,9 @@ export interface VcsDiffOptions {
  * What [`vcs_git_discards_work`] checks: uncommitted changes to tracked
  * files, or with `clean` the untracked files a `git clean` with these options
  * would delete.
+ *
+ * `git_dir` and `work_tree` name the repository and work tree to check; git
+ * discovers them from the checked directory when they are unset.
  */
 export interface VcsDiscardCheck {
   /** Preview `git clean` instead of tracked changes. */
@@ -4296,6 +4299,10 @@ export interface VcsDiscardCheck {
   excludes?: Array<string>
   /** Pathspecs, relative to the checked directory. */
   pathspecs?: Array<string>
+  /** `--git-dir`: the repository, as an absolute path. */
+  gitDir?: string
+  /** `--work-tree`: the work tree, as an absolute path. */
+  workTree?: string
 }
 
 /** Discover the repository owning a directory. */

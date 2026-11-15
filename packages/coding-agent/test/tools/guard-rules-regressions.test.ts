@@ -341,6 +341,34 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("checks the repository a command names with `--git-dir` and `--work-tree`", async () => {
+		const app = path.join(cwd, "app");
+		const home = path.join(cwd, "home");
+		const dot = path.join(cwd, "dot.git");
+		fs.mkdirSync(app);
+		fs.mkdirSync(home);
+		fs.writeFileSync(path.join(app, "a.txt"), "one\n");
+		await $`git init -q && git add a.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(app)
+			.quiet();
+		fs.writeFileSync(path.join(home, ".bashrc"), "one\n");
+		const dotfiles = ["--git-dir", dot, "--work-tree", home];
+		await $`git init -q --bare ${dot}`.quiet();
+		await $`git ${dotfiles} add .bashrc && git ${dotfiles} -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(cwd)
+			.quiet();
+		fs.writeFileSync(path.join(home, ".bashrc"), "two\n");
+		// The session's own repository is clean; the named one is not.
+		for (const command of [
+			`git --git-dir=${dot} --work-tree=${home} checkout -f`,
+			"git --git-dir ../dot.git --work-tree ../home reset --hard",
+			// A stash in the directory's own repository keeps nothing of the named one.
+			`git stash && git --git-dir=${dot} --work-tree=${home} reset --hard`,
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(app, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
 	it.skipIf(process.platform === "win32")("reuses a slow probe's answer for the whole cache window", () => {
 		const spawn = spyOn(Bun, "spawnSync");
 		// Each probe takes 1.5 s of clock time, longer than the window an answer is reused for.

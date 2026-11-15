@@ -374,6 +374,16 @@ pub struct CleanCheck {
 	pub pathspecs:           Vec<String>,
 }
 
+/// The repository and work tree a git command names with `--git-dir` and
+/// `--work-tree`, in place of the ones git discovers from its directory.
+#[derive(Debug, Clone, Default)]
+pub struct RepositoryPaths {
+	/// `--git-dir`: the repository.
+	pub git_dir:   Option<PathBuf>,
+	/// `--work-tree`: the work tree.
+	pub work_tree: Option<PathBuf>,
+}
+
 /// Options for the CLI-backed `push`.
 #[derive(Debug, Clone, Default)]
 pub struct PushOptions {

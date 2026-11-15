@@ -543,28 +543,62 @@ function cachedProbe(key: string, run: () => string | boolean | undefined): stri
 const GIT_VALUE_OPTIONS: Record<string, true> = {
 	"-C": true,
 	"-c": true,
-	"--git-dir": true,
-	"--work-tree": true,
 	"--namespace": true,
 	"--exec-path": true,
 	"--config-env": true,
 };
 const MASS_PATHSPECS: Record<string, true> = { ".": true, ":/": true, "*": true, ":(top)": true, "./": true };
 
-/** A git command's subcommand, its arguments, and the `-C` directory. */
-function gitInvocation(command: ShellCommand): { sub: string; rest: string[]; directory?: string } {
+/**
+ * Where a git command works: the directory it runs in after its `-C`s, and the repository and work
+ * tree it names with `--git-dir` and `--work-tree`, resolved against that directory as git does.
+ */
+interface GitTarget {
+	where: string;
+	gitDir?: string;
+	workTree?: string;
+}
+
+/**
+ * A git command's subcommand, its arguments, and where it works; no `target` when a directory it
+ * names is a word the guard cannot resolve.
+ */
+function gitInvocation(command: ShellCommand, home: string): { sub: string; rest: string[]; target?: GitTarget } {
 	const argv = args(command);
-	let directory: string | undefined;
+	let where: string | undefined = command.cwd;
+	const named: { gitDir?: string; workTree?: string } = {};
 	let i = 0;
 	while (i < argv.length && argv[i].startsWith("-")) {
-		if (Object.hasOwn(GIT_VALUE_OPTIONS, argv[i])) {
-			if (argv[i] === "-C" && i + 1 < argv.length) directory = argv[i + 1];
+		const arg = argv[i];
+		const eq = arg.indexOf("=");
+		const option = eq > 0 ? arg.slice(0, eq) : arg;
+		if (option === "--git-dir" || option === "--work-tree") {
+			const value = eq > 0 ? arg.slice(eq + 1) : argv[++i];
+			if (option === "--git-dir") named.gitDir = value;
+			else named.workTree = value;
+			i++;
+		} else if (Object.hasOwn(GIT_VALUE_OPTIONS, arg)) {
+			// Each `-C` is relative to the directory the one before it left.
+			if (arg === "-C" && where !== undefined && i + 1 < argv.length) {
+				where = resolveShellWordPath(argv[i + 1], where, home);
+			}
 			i += 2;
 		} else {
 			i++;
 		}
 	}
-	return i < argv.length ? { sub: argv[i], rest: argv.slice(i + 1), directory } : { sub: "", rest: [], directory };
+	const sub = i < argv.length ? argv[i] : "";
+	const rest = argv.slice(i + 1);
+	if (where === undefined) return { sub, rest };
+	const target: GitTarget = { where };
+	for (const key of ["gitDir", "workTree"] as const) {
+		const word = named[key];
+		if (word === undefined) continue;
+		const resolved = resolveShellWordPath(word, where, home);
+		if (resolved === undefined) return { sub, rest };
+		target[key] = resolved;
+	}
+	return { sub, rest, target };
 }
 
 /** Whether `arg` is the long option `name` or an abbreviation git expands to it (`--har` for `--hard`). */
@@ -748,21 +782,24 @@ const STASH_RELEASES: Record<string, true> = { pop: true, drop: true, clear: tru
 
 /**
  * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its
- * `&&` chain) saved in the directory `where` and still hold, or `undefined` for none. A later
- * `pop`, `drop`, `clear` or `branch`, in whatever directory, gives that up.
+ * `&&` chain) saved where `target` points and still hold, or `undefined` for none. A later `pop`,
+ * `drop`, `clear` or `branch`, wherever it runs, gives that up.
  */
-function stashedBefore(command: ShellCommand, where: string, scope: GuardScope): Stashed | undefined {
+function stashedBefore(command: ShellCommand, target: GitTarget, scope: GuardScope): Stashed | undefined {
 	let stashed: Stashed | undefined;
 	for (const earlier of command.succeeded) {
 		if (earlier.argv[0] !== "git") continue;
-		const { sub, rest, directory } = gitInvocation(earlier);
-		if (sub !== "stash") continue;
-		if (rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0])) {
+		const stash = gitInvocation(earlier, scope.home);
+		if (stash.sub !== "stash") continue;
+		if (stash.rest.length > 0 && Object.hasOwn(STASH_RELEASES, stash.rest[0])) {
 			stashed = undefined;
 			continue;
 		}
-		const dir = directory === undefined ? earlier.cwd : resolveShellWordPath(directory, earlier.cwd, scope.home);
-		const saved = dir === where ? stashSaves(rest) : undefined;
+		const same =
+			stash.target?.where === target.where &&
+			stash.target.gitDir === target.gitDir &&
+			stash.target.workTree === target.workTree;
+		const saved = same ? stashSaves(stash.rest) : undefined;
 		if (saved) {
 			stashed = {
 				untracked: saved.untracked || (stashed?.untracked ?? false),
@@ -775,15 +812,13 @@ function stashedBefore(command: ShellCommand, where: string, scope: GuardScope):
 
 function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
-	const { sub, rest, directory } = gitInvocation(command);
+	const { sub, rest, target } = gitInvocation(command, scope.home);
 	const probe = discardProbe(command, scope, sub, rest);
-	if (!probe) return undefined;
-	const where = directory === undefined ? command.cwd : resolveShellWordPath(directory, command.cwd, scope.home);
-	if (where === undefined) return undefined;
-	let check = probe.check;
+	if (!probe || !target) return undefined;
+	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
 	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
 	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full.
-	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, where, scope);
+	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, target, scope);
 	if (stashed) {
 		if (!check.clean || stashed.ignored) return undefined;
 		if (stashed.untracked) {
@@ -791,6 +826,7 @@ function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | un
 			check = { ...check, includeIgnored: false, ignoredOnly: true };
 		}
 	}
+	const { where } = target;
 	const answer = cachedProbe(`git\0${where}\0${JSON.stringify(check)}`, () => vcs.discardsWorkSync(where, check));
 	return answer === true ? hit("discard_changes", probe.what) : undefined;
 }

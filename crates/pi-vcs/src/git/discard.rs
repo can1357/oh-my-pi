@@ -1,10 +1,13 @@
 //! Whether a work-discarding git command would destroy anything, answered
 //! before the command is approved.
 
-use std::{path::Path, time::Duration};
+use std::{ffi::OsStr, path::Path, time::Duration};
 
 use super::{cli, discover_info};
-use crate::{error::Result, types::DiscardCheck};
+use crate::{
+	error::Result,
+	types::{DiscardCheck, RepositoryPaths},
+};
 
 /// Deadline for [`discards_work`]: it runs synchronously while a tool call
 /// waits for approval.
@@ -17,16 +20,29 @@ const DISCARD_CHECK_CAPTURE_LIMIT: usize = 4 * 1024;
 /// That is uncommitted changes to tracked files (`git status --porcelain
 /// --untracked-files=no`), or the untracked files `git clean` with the
 /// check's options would delete (`git clean --dry-run`, pathspecs relative to
-/// `dir`). `false` outside a repository.
+/// `dir`), in the repository and work tree the command names in
+/// `repository` (`--git-dir`, `--work-tree`), or else the ones git discovers
+/// from `dir`. `false` outside a repository.
 ///
 /// The question is asked while the command awaits approval, about a
 /// repository the agent may have just rewritten, so git runs through
 /// [`cli::run_sync_inert`]: no fsmonitor hook, no filter driver, no fetch from
 /// a promisor remote, no inherited `GIT_*` variable. Submodules are not
 /// entered.
-pub fn discards_work(dir: &Path, check: &DiscardCheck) -> Result<bool> {
-	if discover_info(dir)?.is_none() {
+pub fn discards_work(
+	dir: &Path,
+	repository: &RepositoryPaths,
+	check: &DiscardCheck,
+) -> Result<bool> {
+	if repository.git_dir.is_none() && discover_info(dir)?.is_none() {
 		return Ok(false);
+	}
+	let mut location: Vec<(&str, &OsStr)> = Vec::new();
+	if let Some(git_dir) = &repository.git_dir {
+		location.push(("GIT_DIR", git_dir.as_os_str()));
+	}
+	if let Some(work_tree) = &repository.work_tree {
+		location.push(("GIT_WORK_TREE", work_tree.as_os_str()));
 	}
 	let mut args: Vec<String> = Vec::new();
 	match check {
@@ -65,8 +81,8 @@ pub fn discards_work(dir: &Path, check: &DiscardCheck) -> Result<bool> {
 	} else {
 		DISCARD_CHECK_CAPTURE_LIMIT
 	};
-	let output =
-		cli::run_sync_inert(dir, &args, DISCARD_CHECK_TIMEOUT, limit)?.into_checked(&args)?;
+	let output = cli::run_sync_inert(dir, &location, &args, DISCARD_CHECK_TIMEOUT, limit)?
+		.into_checked(&args)?;
 	if !clean {
 		return Ok(!output.stdout.trim().is_empty());
 	}
@@ -118,21 +134,27 @@ mod tests {
 		DiscardCheck::Clean(check)
 	}
 
+	/// No `--git-dir` or `--work-tree`: git discovers the repository.
+	const DISCOVERED: RepositoryPaths = RepositoryPaths { git_dir: None, work_tree: None };
+
 	#[test]
 	fn reports_tracked_changes_and_untracked_files_separately() -> TestResult {
 		let dir = repo()?;
 		let root = dir.path();
-		assert!(!discards_work(root, &DiscardCheck::Tracked)?);
-		assert!(!discards_work(root, &clean(CleanCheck::default()))?);
+		assert!(!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
+		assert!(!discards_work(root, &DISCOVERED, &clean(CleanCheck::default()))?);
 
 		fs::write(root.join("scratch.txt"), "x\n")?;
-		assert!(!discards_work(root, &DiscardCheck::Tracked)?, "untracked files survive a reset");
-		assert!(discards_work(root, &clean(CleanCheck::default()))?);
+		assert!(
+			!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?,
+			"untracked files survive a reset"
+		);
+		assert!(discards_work(root, &DISCOVERED, &clean(CleanCheck::default()))?);
 		let excluded = CleanCheck { excludes: vec!["scratch.txt".to_owned()], ..Default::default() };
-		assert!(!discards_work(root, &clean(excluded))?);
+		assert!(!discards_work(root, &DISCOVERED, &clean(excluded))?);
 
 		fs::write(root.join("a.txt"), "two\n")?;
-		assert!(discards_work(root, &DiscardCheck::Tracked)?);
+		assert!(discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
 		Ok(())
 	}
 
@@ -143,16 +165,16 @@ mod tests {
 		fs::create_dir(root.join("sub"))?;
 		fs::write(root.join("sub").join("keep.txt"), "x\n")?;
 		let here = CleanCheck { pathspecs: vec![".".to_owned()], ..Default::default() };
-		assert!(discards_work(&root.join("sub"), &clean(here.clone()))?);
+		assert!(discards_work(&root.join("sub"), &DISCOVERED, &clean(here.clone()))?);
 		fs::create_dir(root.join("empty-sub"))?;
-		assert!(!discards_work(&root.join("empty-sub"), &clean(here))?);
+		assert!(!discards_work(&root.join("empty-sub"), &DISCOVERED, &clean(here))?);
 		Ok(())
 	}
 
 	#[test]
 	fn is_false_outside_a_repository() -> TestResult {
 		let dir = tempfile::tempdir()?;
-		assert!(!discards_work(dir.path(), &DiscardCheck::Tracked)?);
+		assert!(!discards_work(dir.path(), &DISCOVERED, &DiscardCheck::Tracked)?);
 		Ok(())
 	}
 
@@ -164,9 +186,12 @@ mod tests {
 		fs::create_dir(&nested)?;
 		init(&nested)?;
 		let once = CleanCheck { directories: true, ..Default::default() };
-		assert!(!discards_work(root, &clean(once))?, "a single -f skips a nested repository");
+		assert!(
+			!discards_work(root, &DISCOVERED, &clean(once))?,
+			"a single -f skips a nested repository"
+		);
 		let twice = CleanCheck { directories: true, nested_repositories: true, ..Default::default() };
-		assert!(discards_work(root, &clean(twice))?);
+		assert!(discards_work(root, &DISCOVERED, &clean(twice))?);
 		Ok(())
 	}
 
@@ -198,10 +223,67 @@ mod tests {
 			.write(true)
 			.open(root.join("a.txt"))?
 			.set_modified(future)?;
-		assert!(!discards_work(root, &DiscardCheck::Tracked)?);
+		assert!(!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
 		fs::write(root.join("a.txt"), "two\n")?;
-		assert!(discards_work(root, &DiscardCheck::Tracked)?);
+		assert!(discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
 		assert!(!marker.exists(), "a repository-configured program ran");
+		Ok(())
+	}
+
+	/// A bare repository with its work tree elsewhere, as for dotfiles
+	/// (`git --git-dir=~/.dotfiles --work-tree=~`): the check looks there, not
+	/// in the repository of the directory it runs in, and blanks the filter
+	/// drivers the named repository configures.
+	#[cfg(unix)]
+	#[test]
+	fn checks_the_repository_and_work_tree_a_command_names() -> TestResult {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = repo()?;
+		let root = dir.path();
+		let other = tempfile::tempdir()?;
+		let git_dir = other.path().join("dot.git");
+		let work_tree = other.path().join("home");
+		fs::create_dir(&work_tree)?;
+		git(other.path(), &["init", "-q", "--bare", "dot.git"])?;
+		let location = [
+			format!("--git-dir={}", git_dir.display()),
+			format!("--work-tree={}", work_tree.display()),
+		];
+		let named = |args: &[&str]| {
+			let mut all: Vec<&str> = location.iter().map(String::as_str).collect();
+			all.extend_from_slice(args);
+			git(other.path(), &all)
+		};
+		fs::write(work_tree.join(".bashrc"), "one\n")?;
+		named(&["add", ".bashrc"])?;
+		named(&["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init"])?;
+		let marker = other.path().join("marker");
+		let hook = other.path().join("hook.sh");
+		fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()))?;
+		fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
+		let hook = hook.to_string_lossy().into_owned();
+		fs::write(work_tree.join(".gitattributes"), ".bashrc filter=x\n")?;
+		named(&["config", "filter.x.clean", &hook])?;
+		named(&["config", "filter.x.required", "true"])?;
+
+		let repository =
+			RepositoryPaths { git_dir: Some(git_dir), work_tree: Some(work_tree.clone()) };
+		let future = std::time::SystemTime::now() + Duration::from_mins(1);
+		fs::File::options()
+			.write(true)
+			.open(work_tree.join(".bashrc"))?
+			.set_modified(future)?;
+		assert!(!discards_work(root, &repository, &DiscardCheck::Tracked)?);
+		fs::write(work_tree.join(".bashrc"), "two\n")?;
+		assert!(
+			!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?,
+			"the directory's own repository is clean"
+		);
+		assert!(discards_work(root, &repository, &DiscardCheck::Tracked)?);
+		// From a directory in no repository too.
+		assert!(discards_work(other.path(), &repository, &DiscardCheck::Tracked)?);
+		assert!(!marker.exists(), "a program the named repository configures ran");
 		Ok(())
 	}
 
@@ -225,7 +307,7 @@ mod tests {
 		// A HEAD commit the object store lacks: the check fails instead of
 		// fetching it.
 		fs::write(root.join(".git").join("HEAD"), format!("{}\n", "1".repeat(40)))?;
-		assert!(discards_work(root, &DiscardCheck::Tracked).is_err());
+		assert!(discards_work(root, &DISCOVERED, &DiscardCheck::Tracked).is_err());
 		assert!(!marker.exists(), "a repository-configured program ran");
 		Ok(())
 	}

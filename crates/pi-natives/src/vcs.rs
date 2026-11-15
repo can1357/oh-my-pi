@@ -243,6 +243,9 @@ pub struct VcsCleanOptions {
 /// What [`vcs_git_discards_work`] checks: uncommitted changes to tracked
 /// files, or with `clean` the untracked files a `git clean` with these options
 /// would delete.
+///
+/// `git_dir` and `work_tree` name the repository and work tree to check; git
+/// discovers them from the checked directory when they are unset.
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsDiscardCheck {
@@ -260,6 +263,10 @@ pub struct VcsDiscardCheck {
 	pub excludes:            Option<Vec<String>>,
 	/// Pathspecs, relative to the checked directory.
 	pub pathspecs:           Option<Vec<String>>,
+	/// `--git-dir`: the repository, as an absolute path.
+	pub git_dir:             Option<String>,
+	/// `--work-tree`: the work tree, as an absolute path.
+	pub work_tree:           Option<String>,
 }
 /// Push options.
 #[napi(object)]
@@ -786,9 +793,16 @@ pub fn vcs_git_discards_work(
 	dir: String,
 	check: Option<VcsDiscardCheck>,
 ) -> Result<bool> {
-	let check = check.unwrap_or_default().into();
-	catch_panic("vcs.discardsWork", || pi_vcs::git::discards_work(Path::new(&dir), &check))
-		.map_err(|err| rich_error(env, err))
+	let mut check = check.unwrap_or_default();
+	let repository = core::RepositoryPaths {
+		git_dir:   check.git_dir.take().map(PathBuf::from),
+		work_tree: check.work_tree.take().map(PathBuf::from),
+	};
+	let check = check.into();
+	catch_panic("vcs.discardsWork", || {
+		pi_vcs::git::discards_work(Path::new(&dir), &repository, &check)
+	})
+	.map_err(|err| rich_error(env, err))
 }
 
 #[napi]
