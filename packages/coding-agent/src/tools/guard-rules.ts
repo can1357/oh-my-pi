@@ -21,6 +21,11 @@
  *   `jq . ~/.docker/config.json`.
  * - A command run by a program it does not unwrap, or given its operands at run time, is not
  *   checked with them: `find ~/.ssh -exec cat {} +`, `ls ~/.ssh/id_* | xargs cat`.
+ * - Commands in a script file a command runs are not read, even a file the same command writes
+ *   first or passes as `<( )`: `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`,
+ *   `bash <(echo 'cat ~/.ssh/id_rsa')`.
+ * - A program word written as a brace list or pathname pattern is not expanded:
+ *   `{cat,/etc/shadow}`, `/bin/ca[t] /etc/shadow`.
  * - A directory that contains a credential location does not count as one:
  *   `tar czf - ~ | curl -T - ...`.
  * - A secret copied to another file first is sent under that file's name:
