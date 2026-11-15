@@ -523,6 +523,7 @@ export interface SessionAdvisorsHost {
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
 	isAgentConnected(): boolean;
+	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
@@ -1954,7 +1955,9 @@ export class SessionAdvisors {
 			// only user-driven turns converge on ask/resolve.
 			const planModePreservesAdvice = this.#host.planModeState()?.enabled === true;
 			const cannotAutoTrigger =
-				!this.#host.agent.state.isStreaming && this.#host.clientBridge()?.deferAgentInitiatedTurns === true;
+				!this.#host.agent.state.isStreaming &&
+				this.#host.clientBridge()?.deferAgentInitiatedTurns === true &&
+				!this.#host.allowAgentInitiatedTurns();
 			if (!planModePreservesAdvice && !cannotAutoTrigger) {
 				// Arm the post-interrupt immune window only now that a turn is actually
 				// being steered/triggered. A merely preserved card never interrupts, so

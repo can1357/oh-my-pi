@@ -1140,6 +1140,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
 	#unsubscribeQueueChange?: () => void;
+	#allowAcpAgentInitiatedTurns = false;
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -3003,6 +3004,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
 			isAgentConnected: () => this.#unsubscribeAgent !== undefined,
+			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
@@ -7786,9 +7788,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		const before = manager.getDeliveryState(ownerFilter);
 		if (before.queued === 0 && !before.delivering) return false;
-		const drained = await manager.drainDeliveries({ timeoutMs: options?.timeoutMs, filter: ownerFilter });
-		const after = manager.getDeliveryState(ownerFilter);
-		return drained && (before.queued !== after.queued || before.delivering !== after.delivering);
+		const previousAllowAcpAgentInitiatedTurns = this.#allowAcpAgentInitiatedTurns;
+		this.#allowAcpAgentInitiatedTurns = true;
+		try {
+			const drained = await manager.drainDeliveries({ timeoutMs: options?.timeoutMs, filter: ownerFilter });
+			const after = manager.getDeliveryState(ownerFilter);
+			return drained && (before.queued !== after.queued || before.delivering !== after.delivering);
+		} finally {
+			this.#allowAcpAgentInitiatedTurns = previousAllowAcpAgentInitiatedTurns;
+		}
 	}
 
 	/**
@@ -11065,7 +11073,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// bracket the ordinary gates below still apply (not streaming,
 		// user-interrupt suppression, provider-valid tail for follow-up-only
 		// resumes).
-		if (this.#clientBridge?.deferAgentInitiatedTurns === true && this.#clientPromptInFlightCount === 0) {
+		if (
+			this.#clientBridge?.deferAgentInitiatedTurns === true &&
+			!this.#allowAcpAgentInitiatedTurns &&
+			this.#clientPromptInFlightCount === 0
+		) {
 			return false;
 		}
 		if (this.isStreaming) return false;
@@ -11536,7 +11548,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		if (options?.deliverAs === "nextTurn") {
 			if (options?.triggerTurn) {
-				if (this.#clientBridge?.deferAgentInitiatedTurns) {
+				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 					return false;
 				}
@@ -11578,7 +11590,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#recordWithoutTurn([normalizedAppMessage]);
 				return false;
 			}
-			if (this.#clientBridge?.deferAgentInitiatedTurns) {
+			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
@@ -11598,7 +11610,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		if (options?.triggerTurn) {
-			if (this.#clientBridge?.deferAgentInitiatedTurns) {
+			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
