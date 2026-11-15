@@ -3,13 +3,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { JudgmentRequest, JudgmentResult, Message, Questions } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import * as judgment from "@oh-my-pi/pi-coding-agent/judgment";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SpotlightClient } from "@oh-my-pi/pi-coding-agent/spotlight/client";
 import { type CalledToolResult, shapeCalledTool } from "@oh-my-pi/pi-coding-agent/spotlight/index";
+import { JudgeScorer } from "@oh-my-pi/pi-coding-agent/spotlight/judge-scorer";
 import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlight/context";
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import {
@@ -206,6 +209,44 @@ describe("spotlight ranker", () => {
 		const judge = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
 		expect(standaloneFindSpotlight(auto)?.client).toBeDefined();
 		expect(standaloneFindSpotlight(judge)).toBeUndefined();
+	});
+
+	it("gives the judge a budget of its own on every call it reranks under auto", async () => {
+		// Spotlight's client waits longer than the judge's budget: each call spends that wait before the handover.
+		const settings = Settings.isolated({ "spotlight.timeoutMs": 60 });
+		const manager = SessionManager.inMemory(await tmpDir());
+		const client = spotlightClient(fakeSpotlight({ hang: true }), 120);
+		const experiment = new SpotlightExperiment(client, "low", manager, { ranker: "auto" });
+		let asked = 0;
+		const judge = {
+			label: "fake/judge",
+			async judge<Q extends Questions>(
+				request: JudgmentRequest<Q>,
+				options?: { signal?: AbortSignal },
+			): Promise<JudgmentResult<Q>> {
+				await Promise.resolve();
+				if (options?.signal?.aborted) throw new Error("aborted");
+				asked++;
+				const answers: Record<string, unknown> = {};
+				for (const key of Object.keys(request.questions)) answers[key] = { type: "noul", noul: 0.5 };
+				return {
+					answers,
+					usage: { input: 100, output: 1, totalTokens: 101, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+				} as unknown as JudgmentResult<Q>;
+			},
+		};
+		vi.spyOn(judgment, "resolveJudge").mockReturnValue(judge as unknown as judgment.ChainJudge);
+		const scorer = experiment.makeScorer({ settings, sessionManager: manager, modelRegistry: {} as ModelRegistry });
+		const ctx = { task: "Fix the service.", said: "", intent: "", commands: [], source: "bash cat log" };
+		// Two ranking calls of one result, each as `scoreLines` runs it: Spotlight times out, the judge reranks.
+		for (let call = 0; call < 2; call++) {
+			expect(await scorer.score(["a", "b"], ctx)).toBeNull();
+			expect(await scorer.fallback!.score(["a", "b"], ctx)).toEqual([0.5, 0.5]);
+		}
+		expect(asked).toBe(2);
+		expect(scorer.fallback).toBeInstanceOf(JudgeScorer);
+		expect((scorer.fallback as JudgeScorer).usage).toMatchObject({ calls: 2, failures: 0, tokens: 200 });
+		client.close();
 	});
 
 	it("keeps the Spotlight client under the default ranker", async () => {
