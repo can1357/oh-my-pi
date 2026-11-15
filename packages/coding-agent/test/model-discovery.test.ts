@@ -3495,7 +3495,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(rosterFor("image")).toEqual(["image-generator"]);
 	});
 
-	test("openai-models-list routes gateway speech, transcription and decision rows by their declared modalities", async () => {
+	test("openai-models-list routes gateway speech and transcription rows by their declared modalities", async () => {
 		writeRawModelsJson({
 			"gateway-test": {
 				baseUrl: "http://127.0.0.1:9993",
@@ -3550,17 +3550,6 @@ describe("ModelRegistry runtime discovery", () => {
 								},
 							},
 							{ id: "openrouter/vendor/tts-lite", architecture: { modality: "text->speech" } },
-							{
-								id: "openrouter/vendor/decider",
-								architecture: {
-									modality: "text+image->decisions",
-									input_modalities: ["text", "image"],
-									output_modalities: ["decisions"],
-								},
-								context_length: 32768,
-							},
-							// OpenRouter's summary string alone is enough.
-							{ id: "openrouter/vendor/decider-lite", architecture: { modality: "text->decisions" } },
 							// Nothing declared: stays chat, whatever the id suggests.
 							{ id: "vendor/flash-tts", supported_methods: ["generateContent"] },
 							{
@@ -3599,15 +3588,6 @@ describe("ModelRegistry runtime discovery", () => {
 			baseUrl: "http://127.0.0.1:9993/v1",
 			supportsTools: false,
 		});
-		for (const id of ["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]) {
-			expect(registry.find("gateway-test", id)).toMatchObject({
-				kind: "judge",
-				api: "openai-decisions",
-				baseUrl: "http://127.0.0.1:9993/v1",
-				supportsTools: false,
-			});
-		}
-		expect(registry.find("gateway-test", "openrouter/vendor/decider")?.contextWindow).toBe(32768);
 		const rosterFor = (kind: ModelKind) =>
 			registry
 				.getAll(kind)
@@ -3625,7 +3605,6 @@ describe("ModelRegistry runtime discovery", () => {
 		]);
 		expect(rosterFor("tts")).toEqual(["openrouter/vendor/tts-lite", "speechify/simba-3.5"]);
 		expect(rosterFor("stt")).toEqual(["x-ai/grok-stt-2.0"]);
-		expect(rosterFor("judge")).toEqual(["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]);
 	});
 
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {

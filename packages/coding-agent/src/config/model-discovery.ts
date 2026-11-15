@@ -882,9 +882,9 @@ function extractOpenAIModelsListInputCapabilities(item: {
  * serves it, on the same OpenAI-compatible root the provider already serves
  * its model list from. Only a sole output that names its task is routed:
  * `embeddings` (`/embeddings`), `image` (`/images/generations`), and
- * OpenRouter's `decisions` (`/decisions`), `speech` (`/audio/speech`) and
- * `transcription` (`/audio/transcriptions`). Outputs come from the row's arrays
- * or OpenRouter's `architecture.modality` summary (`text->speech`).
+ * OpenRouter's `speech` (`/audio/speech`) and `transcription`
+ * (`/audio/transcriptions`). Outputs come from the row's arrays or
+ * OpenRouter's `architecture.modality` summary (`text->speech`).
  *
  * Anything else stays chat. Rows that also emit `text` are ordinary
  * (multimodal) chat models, and an `audio` or `video` output alone cannot
@@ -892,7 +892,10 @@ function extractOpenAIModelsListInputCapabilities(item: {
  * video-job API: Poe lists TTS voices, music generators and `gpt-audio` alike
  * as `text->audio` and serves them all on `/chat/completions`. Text from audio
  * input reads the same for a transcriber and an audio-understanding chat model.
- * A row that declares nothing keeps the provider's chat API.
+ * OpenRouter's `decisions` output is left alone too: it names a task but not
+ * the wire (OpenRouter's own `/decisions` takes the System One body, OpenAI's
+ * Decisions API another). A row that declares nothing keeps the provider's
+ * chat API.
  */
 function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
@@ -915,8 +918,6 @@ function extractOpenAIModelsListOutputTask(item: {
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
 			return { kind: "image", api: "openai-images" };
-		case "decisions":
-			return { kind: "judge", api: "openai-decisions" };
 		case "speech":
 			return { kind: "tts", api: "openai-speech" };
 		case "transcription":
@@ -1307,8 +1308,8 @@ export async function discoverOpenAIModelsList(
 				input,
 				supportsTools: false,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Embeddings and judges cap their input by context; image jobs
-				// carry no token window. None produces output tokens.
+				// Embeddings, judges, speech and transcription cap their input by
+				// context; image jobs carry no token window. None produces output tokens.
 				contextWindow: task.kind === "image" ? null : reportedContextWindow,
 				maxTokens: null,
 				headers: baseHeaders,
