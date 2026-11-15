@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added opt-in `tools.guardRules` setting: best-effort checks that ask before bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19293](https://github.com/can1357/oh-my-pi/pull/19293) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
+
+### Added
+
+- Added opt-in `tools.guardRules` setting: best-effort checks that ask before bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19293](https://github.com/can1357/oh-my-pi/pull/19293) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
