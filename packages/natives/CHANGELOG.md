@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown.
+- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown. The sidecar never inherits `PSModulePath` from its parent process — never the bash-tainted value a parent Git Bash/WSL/MSYS shell left behind — resetting it instead to the true OS-persisted value: on Windows, the Machine and User `PSModulePath` read straight from the registry (the same two sources Windows merges for any normally spawned process); elsewhere, or when neither registry value is set, the variable is left unset so pwsh rebuilds its own default module search path at startup.
 
 ### Fixed
 

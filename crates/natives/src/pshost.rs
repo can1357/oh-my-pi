@@ -1246,6 +1246,14 @@ async fn run_sidecar(core: &Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u
 	if let Some(cwd) = &core.config.cwd {
 		command.current_dir(cwd);
 	}
+	// Reset `PSModulePath` to the value Windows itself would hand a freshly
+	// spawned process, instead of whatever this process's own shell
+	// inherited. omp is routinely launched from a bash shell (Git Bash,
+	// WSL, MSYS), whose startup scripts frequently export a stale or
+	// POSIX-translated module path that breaks module resolution. See
+	// `reset_module_path` for why this reads the registry on Windows
+	// rather than just clearing the variable.
+	reset_module_path(&mut command);
 	if let Some(env) = &core.config.session_env {
 		command.envs(env);
 	}
@@ -1341,6 +1349,89 @@ async fn run_sidecar(core: &Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u
 	writer.abort();
 	stderr_pump.abort();
 	let _ = child.wait().await;
+}
+
+/// Resets `PSModulePath` for `command` to the value Windows itself would
+/// hand a freshly created process, rather than whatever this process's own
+/// shell happened to inherit.
+///
+/// Blindly clearing the variable would also discard any module directory a
+/// user deliberately persisted via `setx`/System Properties, so on Windows
+/// this reads the true Machine and User `PSModulePath` straight from the
+/// registry -- the same two sources Windows merges into the environment
+/// block of any normally spawned process -- and sets that explicitly. pwsh
+/// already de-duplicates and replaces its own edition-specific entries on
+/// top of that base at startup, so nothing further needs filtering here.
+/// When neither registry value is set (the common case), and on every
+/// other platform, where there is no OS-level persisted equivalent to
+/// read, the variable is left unset so pwsh/powershell.exe rebuild their
+/// hardcoded default from scratch.
+fn reset_module_path(command: &mut Command) {
+	command.env_remove("PSModulePath");
+	#[cfg(windows)]
+	if let Some(value) = windows_os_module_path() {
+		command.env("PSModulePath", value);
+	}
+}
+
+/// Reads `PSModulePath` from `HKLM\...\Environment` and `HKCU\Environment`
+/// (the Machine and User environment-variable stores Windows itself merges
+/// for a normally spawned process) and joins them in that order. `None` when
+/// neither is set, which is the common case -- most installs never persist
+/// `PSModulePath` outside the per-process default pwsh/powershell.exe
+/// compute on startup.
+#[cfg(windows)]
+fn windows_os_module_path() -> Option<String> {
+	use winreg::{HKCU, HKLM, RegKey, enums::KEY_READ, types::FromRegValue};
+
+	fn read(key: &RegKey, subkey: &str) -> Option<String> {
+		let opened = key.open_subkey_with_flags(subkey, KEY_READ).ok()?;
+		let raw = opened.get_raw_value("PSModulePath").ok()?;
+		let expand = raw.vtype == winreg::enums::REG_EXPAND_SZ;
+		let value = String::from_reg_value(&raw).ok()?;
+		if value.is_empty() {
+			return None;
+		}
+		Some(if expand {
+			expand_environment_strings(&value)
+		} else {
+			value
+		})
+	}
+
+	let machine = read(&HKLM, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+	let user = read(&HKCU, "Environment");
+	match (machine, user) {
+		(Some(machine), Some(user)) => Some(format!("{machine};{user}")),
+		(Some(machine), None) => Some(machine),
+		(None, Some(user)) => Some(user),
+		(None, None) => None,
+	}
+}
+
+/// Expands `%VAR%` references via `ExpandEnvironmentStringsW`, matching how
+/// Windows resolves a `REG_EXPAND_SZ`-typed environment value for any
+/// normally spawned process (registry-stored `PSModulePath` entries that
+/// reference `%ProgramFiles%` etc. are otherwise handed through literally).
+#[cfg(windows)]
+fn expand_environment_strings(value: &str) -> String {
+	use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+	let source: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+	// SAFETY: `source` is a valid, NUL-terminated UTF-16 buffer; a null
+	// destination with a zero size is the documented way to query the
+	// required buffer length (including the terminator) without writing.
+	let needed = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), std::ptr::null_mut(), 0) };
+	if needed == 0 {
+		return value.to_string();
+	}
+	let mut dest = vec![0u16; needed as usize];
+	// SAFETY: `dest` has room for exactly the length just reported.
+	let written = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), dest.as_mut_ptr(), needed) };
+	if written == 0 || written > needed {
+		return value.to_string();
+	}
+	String::from_utf16_lossy(&dest[..(written as usize).saturating_sub(1)])
 }
 
 /// Drain framed requests to the child's stdin.
@@ -1529,6 +1620,36 @@ mod tests {
 			.expect("exec returns a result");
 		let output = collector.await.expect("chunk collector joins");
 		(output.trim().to_string(), result)
+	}
+
+	/// A bash-launched omp (Git Bash, WSL, MSYS) can export a stale or
+	/// POSIX-translated `PSModulePath` that breaks the sidecar's own module
+	/// resolution. The host must not inherit it: with the variable unset,
+	/// pwsh rebuilds its own default search path at startup instead.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sidecar_does_not_inherit_a_bad_module_path() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		// Simulate the bad inherited value a parent bash shell would export.
+		// Safe here: cargo-nextest runs each test in its own process.
+		const BAD_MODULE_PATH: &str = "/mnt/c/bogus/modules:/another/bogus/path";
+		unsafe { std::env::set_var("PSModulePath", BAD_MODULE_PATH) };
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+		let (out, _) = run_cmd(&host, "$env:PSModulePath", task::CancelToken::default()).await;
+		host.dispose().await.expect("host disposes");
+
+		unsafe { std::env::remove_var("PSModulePath") };
+
+		assert!(
+			!out.contains(BAD_MODULE_PATH),
+			"sidecar must not inherit the bash-exported module path: {out:?}"
+		);
+		assert!(out.contains("Modules"), "pwsh should rebuild its own default module path: {out:?}");
 	}
 
 	/// A previous command's fire-and-forget child (started without waiting
@@ -1893,7 +2014,7 @@ mod tests {
 			.await
 			.expect("supervision ends after the handle drops");
 		assert!(
-			!matches!(process.status(), pi_shell::process::ProcessStatus::Running),
+			!matches!(process.status(), super::core_process::ProcessStatus::Running),
 			"sidecar is gone after the handle drops"
 		);
 	}
