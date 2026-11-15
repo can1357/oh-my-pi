@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `logout hook="…"` auth rule, naming a hook that removes a provider's local copies of an OAuth grant on `/logout`; `antigravity-cli` declares one ([#19326](https://github.com/can1357/oh-my-pi/issues/19326))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

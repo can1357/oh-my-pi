@@ -6,10 +6,13 @@ import * as AIError from "../../error";
 import { agyGeminiDir, resolveAgyBinary } from "../../providers/antigravity-cli/binary";
 import {
 	AGY_OAUTH_CLIENT_ID,
+	agyAccountKey,
 	agyCredentialEnv,
 	exportAgyCredentials,
 	refreshAgyCredentials,
+	removeAgyCredentials,
 } from "../../providers/antigravity-cli/credentials";
+import { stopAgyHosts } from "../../providers/antigravity-cli/host";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const PROVIDER = "antigravity-cli";
@@ -215,3 +218,13 @@ export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthC
 }
 
 export const refreshAntigravityCli = refreshAgyCredentials;
+
+/**
+ * `/logout` for one account: stop its agy processes so none can rewrite the
+ * grant, then delete the copy staged for inference. Conversations stay.
+ */
+export async function logoutAntigravityCli(credentials: OAuthCredentials): Promise<void> {
+	const directory = path.join(agyGeminiDir(), agyAccountKey(credentials));
+	await stopAgyHosts(directory);
+	await removeAgyCredentials(directory);
+}

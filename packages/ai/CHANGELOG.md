@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `logoutOAuthCredentials(provider, credentials)` in `@oh-my-pi/pi-ai/oauth`, which runs a provider's `logout` hook after one of its stored grants is removed
+
+### Fixed
+
+- Fixed logging out of `antigravity-cli` leaving that account's staged `antigravity-oauth-token` (access and refresh tokens) on disk; logout now stops the account's running agy processes and deletes the file ([#19326](https://github.com/can1357/oh-my-pi/issues/19326))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

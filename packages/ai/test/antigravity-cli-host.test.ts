@@ -13,6 +13,7 @@ import {
 	type AgyStepOptions,
 	type AgyTransport,
 	type AgyTransportOptions,
+	stopAgyHosts,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
@@ -611,6 +612,34 @@ describe("AgyHost stateful steps", () => {
 		expect(state.clock.timers.size).toBe(0);
 		expect(state.fake.closed).toBe(true);
 		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("logout stops only that account's agy and resolves after the process exits", async () => {
+		const exit = Promise.withResolvers<number>();
+		const fakes = new Queue<FakeAgy>();
+		const target = await fixture({
+			startTransport: async input => {
+				const fake = new FakeAgy(input);
+				fakes.push(fake);
+				return { connection: fake.connection, exited: exit.promise, close: () => fake.close() };
+			},
+		});
+		const other = await fixture();
+		const run = step(target.host, [user("hello")]);
+		const fake = await fakes.next();
+		await fake.prompts.next();
+		step(other.host, [user("hello")]);
+		const otherFake = await other.started.next();
+		await otherFake.prompts.next();
+
+		const stopping = stopAgyHosts(target.dir).then(() => "stopped");
+		await expect(run.done).rejects.toThrow();
+		expect(fake.closed).toBe(true);
+		// Staged credentials may only be deleted once agy can no longer rewrite them.
+		expect(await Promise.race([stopping, Promise.resolve("pending")])).toBe("pending");
+		exit.resolve(0);
+		await stopping;
+		expect(otherFake.closed).toBe(false);
 	});
 
 	it("closes a transport that arrives after an abort during startup", async () => {

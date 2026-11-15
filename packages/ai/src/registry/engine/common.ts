@@ -19,6 +19,7 @@ import type {
 	ExchangeContext,
 	HeadersHook,
 	LoginHook,
+	LogoutHook,
 	RefreshHook,
 	ValueHook,
 } from "../hooks/types";
@@ -41,6 +42,10 @@ export async function loadLoginHook(name: string): Promise<LoginHook> {
 
 export async function loadRefreshHook(name: string): Promise<RefreshHook> {
 	return (HOOKS.refresh[name] ?? missingHook("refresh", name))();
+}
+
+export async function loadLogoutHook(name: string): Promise<LogoutHook> {
+	return (HOOKS.logout[name] ?? missingHook("logout", name))();
 }
 
 export async function loadAfterExchangeHook(name: string): Promise<AfterExchangeHook> {

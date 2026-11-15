@@ -595,6 +595,8 @@ export interface CompiledAuthProvider {
 	result?: "api-key";
 	login?: CompiledLogin;
 	refresh?: CompiledRefresh;
+	/** Hook (`logout hook=…`) that removes provider-owned local copies of an OAuth grant when `/logout` deletes it. */
+	logout?: string;
 }
 
 /** Compiled auth stratum: providers in `/login` display order. */

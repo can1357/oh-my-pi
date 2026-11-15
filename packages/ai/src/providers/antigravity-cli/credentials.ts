@@ -120,8 +120,7 @@ export function parseAgyApiKey(apiKey: string): OAuthCredentials {
 }
 
 /** Stable account namespace: token rotation never changes conversation ownership. */
-export function agyCredentialKey(apiKey: string): string {
-	const credentials = parseAgyApiKey(apiKey);
+export function agyAccountKey(credentials: Pick<OAuthCredentials, "email" | "accountId">): string {
 	// Native ACP login retains id_token_email, often without a subject. Prefer
 	// that identity so a later refresh adding an ID token cannot move accounts.
 	const account = credentials.email
@@ -131,6 +130,11 @@ export function agyCredentialKey(apiKey: string): string {
 			: undefined;
 	if (!account) throw invalid("Antigravity CLI credentials have no account identity; sign in again");
 	return createHash("sha256").update(account).digest("hex");
+}
+
+/** {@link agyAccountKey} of the request-time API key envelope. */
+export function agyCredentialKey(apiKey: string): string {
+	return agyAccountKey(parseAgyApiKey(apiKey));
 }
 
 /** Non-secret revision for restarting a host whose cached token source is stale. */
@@ -200,6 +204,11 @@ export async function stageAgyCredentials(apiKey: string, geminiDir: string): Pr
 	} finally {
 		await fs.rm(temporary, { force: true }).catch(() => {});
 	}
+}
+
+/** Delete the grant {@link stageAgyCredentials} imported; stop the account's agy processes first. */
+export async function removeAgyCredentials(geminiDir: string): Promise<void> {
+	await fs.rm(path.join(geminiDir, TOKEN_FILE), { force: true });
 }
 
 /** Bounded, secret-safe refresh; only known OAuth error codes reach callers. */

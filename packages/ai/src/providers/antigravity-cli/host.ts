@@ -47,6 +47,17 @@ const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
 
+/** Hosts that may own a running agy process, by account directory; see {@link stopAgyHosts}. */
+const liveHosts = new Map<string, Set<AgyHost>>();
+
+/**
+ * Stop every in-process host for one account directory and await its agy exit,
+ * so no process can rewrite that account's staged credentials (logout).
+ */
+export async function stopAgyHosts(geminiDir: string): Promise<void> {
+	await Promise.all([...(liveHosts.get(geminiDir) ?? [])].map(host => host.stop()));
+}
+
 /** Per-step request settings. */
 export interface AgyStepOptions {
 	cwd?: string;
@@ -333,6 +344,7 @@ export class AgyHost implements ProviderSessionState {
 		} finally {
 			options.signal?.removeEventListener("abort", onAbort);
 			if (this.#step === step) this.#step = undefined;
+			this.#untrackIfIdle();
 		}
 	}
 
@@ -342,8 +354,8 @@ export class AgyHost implements ProviderSessionState {
 		this.#conversation = undefined;
 	}
 
-	/** Stop first, await process exit, then remove only conversations this host created (never fork sources). */
-	async dispose(): Promise<void> {
+	/** Close, then await process exit; on-disk conversations and credentials are untouched. */
+	async stop(): Promise<void> {
 		this.close();
 		await withTimeout(
 			Promise.all(this.#exits),
@@ -351,8 +363,21 @@ export class AgyHost implements ProviderSessionState {
 			"Antigravity CLI did not exit",
 			this.#options.schedule,
 		);
+		this.#untrackIfIdle();
+	}
+
+	/** Stop, then remove only conversations this host created (never fork sources). */
+	async dispose(): Promise<void> {
+		await this.stop();
 		await Promise.all([...this.#ownedConversations].map(id => deleteConversation(this.#geminiDir, id)));
 		this.#ownedConversations.clear();
+	}
+
+	#untrackIfIdle(): void {
+		if (this.#process || this.#step || this.#exits.size > 0) return;
+		const hosts = liveHosts.get(this.#geminiDir);
+		hosts?.delete(this);
+		if (hosts?.size === 0) liveHosts.delete(this.#geminiDir);
 	}
 
 	async #setup<T>(operation: Promise<T>): Promise<T> {
@@ -381,6 +406,13 @@ export class AgyHost implements ProviderSessionState {
 		const detached = this.#pending?.state === "detached" ? this.#pending : undefined;
 		const ledger = this.#ledger;
 		this.#stopProcess();
+		// Track before spawning: a logout during startup must abort this process too.
+		let hosts = liveHosts.get(this.#geminiDir);
+		if (!hosts) {
+			hosts = new Set();
+			liveHosts.set(this.#geminiDir, hosts);
+		}
+		hosts.add(this);
 		if (detached) {
 			this.#pending = detached;
 			this.#ledger = ledger;
@@ -430,15 +462,18 @@ export class AgyHost implements ProviderSessionState {
 		};
 		this.#process = agy;
 		this.#exits.add(transport.exited);
-		void transport.exited.then(
-			code => {
-				this.#exits.delete(transport.exited);
-				if (this.#process === agy) this.#fail(new Error(`Antigravity CLI exited with code ${code}`));
-			},
-			() => {
-				if (this.#process === agy) this.#fail(new Error("Antigravity CLI process exit failed"));
-			},
-		);
+		void transport.exited
+			.then(
+				code => {
+					this.#exits.delete(transport.exited);
+					if (this.#process === agy) this.#fail(new Error(`Antigravity CLI exited with code ${code}`));
+				},
+				() => {
+					this.#exits.delete(transport.exited);
+					if (this.#process === agy) this.#fail(new Error("Antigravity CLI process exit failed"));
+				},
+			)
+			.finally(() => this.#untrackIfIdle());
 		agy.connection.signal.addEventListener("abort", agy.onClosed, { once: true });
 		if (agy.connection.signal.aborted) agy.onClosed();
 		await this.#setup(

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/logout` of an `antigravity-cli` account leaving its staged agy OAuth token file on disk; logout now stops that account's running agy and deletes the file ([#19326](https://github.com/can1357/oh-my-pi/issues/19326))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

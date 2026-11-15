@@ -7,12 +7,12 @@ import type { CompiledAuthProvider } from "@oh-my-pi/pi-catalog/compat/types";
 import { $pickenv } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { createApiKeyLogin } from "./engine/api-key";
-import { loadLoginHook } from "./engine/common";
+import { loadLoginHook, loadLogoutHook } from "./engine/common";
 import { createDeviceCodeLogin } from "./engine/device-code";
 import { createOAuthCodeLogin } from "./engine/oauth-code";
 import { createRefresh } from "./engine/refresh";
 import { HOOKS } from "./hooks";
-import type { OAuthController } from "./oauth/types";
+import type { OAuthController, OAuthCredentials } from "./oauth/types";
 import type { KeyResolver, ProviderDefinition } from "./types";
 
 /** Request/model shaping a provider implements in TypeScript beside its KDL auth policy. */
@@ -56,6 +56,7 @@ export function buildProviderDefinition(
 	const envKeys = envResolver(policy.env);
 	const login = loginFor(policy);
 	const refreshToken = createRefresh(policy);
+	const logoutHook = policy.logout;
 	return {
 		id: policy.id,
 		name: policy.name,
@@ -70,5 +71,8 @@ export function buildProviderDefinition(
 		...(policy.pasteCode ? { pasteCodeFlow: true } : {}),
 		...(login ? { login } : {}),
 		...(refreshToken ? { refreshToken } : {}),
+		...(logoutHook
+			? { logout: async (credentials: OAuthCredentials) => (await loadLogoutHook(logoutHook))(credentials) }
+			: {}),
 	};
 }

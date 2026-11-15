@@ -1,9 +1,10 @@
 /**
- * Whole-flow hooks: `login "custom" hook=…` and `refresh hook=…` for providers
- * whose flow is not expressible in the declarative grammar.
+ * Whole-flow hooks: `login "custom" hook=…`, `refresh hook=…` and
+ * `logout hook=…` for providers whose flow is not expressible in the
+ * declarative grammar.
  */
 import { loginMistralVibeSignIn } from "../oauth/mistral-vibe";
-import type { Lazy, LoginHook, RefreshHook } from "./types";
+import type { Lazy, LoginHook, LogoutHook, RefreshHook } from "./types";
 
 export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.loginGitHubCopilotHook),
@@ -20,4 +21,7 @@ export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	cursor: () => import("../oauth/cursor").then(module => module.refreshCursorHook),
 	snowflake: () => import("../oauth/snowflake").then(module => module.refreshSnowflakeToken),
 	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.refreshAntigravityCli),
+};
+export const CUSTOM_LOGOUT_HOOKS: Record<string, Lazy<LogoutHook>> = {
+	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.logoutAntigravityCli),
 };
