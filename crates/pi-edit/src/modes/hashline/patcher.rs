@@ -273,19 +273,23 @@ fn images_seen(maps: &[VersionMap], line: u32) -> bool {
 	})
 }
 
-/// True when `line` (current numbering) holds, at that same number, a line
-/// some retained version displayed: the model saw exactly this row where it
-/// still is, only under an earlier tag.
+/// True when `line` (current numbering) holds, at that same number, the row
+/// the newest retained version that displayed that number showed there: the
+/// model saw exactly this row where it still is, only under an earlier tag.
+/// Older versions never decide: once a newer tag displayed a different row
+/// at `line`, the model's latest view of that number is the other row.
 fn images_seen_unshifted(maps: &[VersionMap], line: u32) -> bool {
-	maps.iter().any(|map| {
-		map.seen.contains(&line)
-			&& (map.same_text
+	maps
+		.iter()
+		.find(|map| map.seen.contains(&line))
+		.is_some_and(|map| {
+			map.same_text
 				|| usize::try_from(line)
 					.ok()
 					.and_then(|n| n.checked_sub(1))
 					.and_then(|n| map.image.get(n).copied().flatten())
-					== Some(line))
-	})
+					== Some(line)
+		})
 }
 
 /// Trimmed content of current line `line` when it is long enough to serve as
@@ -1385,6 +1389,37 @@ mod lifecycle {
 			.await
 			.unwrap_err();
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
+	}
+
+	/// A newer tag that displayed a different row at a number overrides an
+	/// older tag that showed the current row there: the model's latest view
+	/// of line 22 is v20, so inserts and cuts at 22 stay rejected even though
+	/// the first read showed v22 at 22. Each op gets a fresh history because
+	/// a rejection reveals the line and so makes it seen.
+	#[tokio::test]
+	async fn newer_display_of_another_row_overrides_older_unshifted_display() {
+		for op in ["CUT 22", "PUT <22:\n+// before 22", "PUT >22:\n+// after 22"] {
+			let ctx = Lifecycle::new("case-u5.ts", 30);
+			let tag0 = ctx.read("case-u5.ts", &all_seen(30));
+			ctx.edit(&format!("[case-u5.ts#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
+				.await
+				.unwrap();
+			let seen: Vec<u32> = (15..=25).collect();
+			let tag1 = ctx.read("case-u5.ts", &seen);
+			assert_eq!(ctx.text("case-u5.ts").lines().nth(21).unwrap(), "let v0020 = 20;");
+			ctx.edit(&format!("[case-u5.ts#{tag1}]\nCUT 1.=2\n"))
+				.await
+				.unwrap();
+			let tag = ctx.head_tag("case-u5.ts");
+			let before = ctx.text("case-u5.ts");
+			assert_eq!(before.lines().nth(21).unwrap(), "let v0022 = 22;");
+			let err = ctx
+				.edit(&format!("[case-u5.ts#{tag}]\n{op}\n"))
+				.await
+				.expect_err(op);
+			assert!(err.contains("never displayed"), "{op}: unexpected error: {err}");
+			assert_eq!(ctx.text("case-u5.ts"), before, "{op} changed the file");
+		}
 	}
 
 	/// Body evidence alone is not enough: with no shifting edit in the
