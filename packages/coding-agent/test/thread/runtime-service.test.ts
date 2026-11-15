@@ -136,6 +136,23 @@ describe("runtime thread services: async jobs", () => {
 		expect(await probe("deliveries")).toEqual([{ jobId: id, text: "all done", status: "completed", isRow: true }]);
 	});
 
+	it("routes a worker job's agent progress through main's batcher to a worker progress sink", async () => {
+		const manager = newManager();
+		const probe = await startWorker();
+		await probe("progressSink", manager, "Worker");
+		const id = await probe("register", manager, "Worker", false, "ambient");
+		if (typeof id !== "string") throw new Error("register returned no id");
+		expect(manager.getJob(id)?.progressDelivery).toBe("ambient");
+
+		await probe("agentProgress", id, "line one");
+		expect(await probe("awaitProgressDeliveries")).toEqual([
+			{ jobId: id, text: expect.stringContaining("line one"), seq: 1, delivery: "ambient", isRow: true },
+		]);
+
+		await probe("finish", id, "done");
+		await manager.getJob(id)?.promise;
+	});
+
 	it("returns and consumes a job settled during a worker-homed eval wait", async () => {
 		const manager = newManager();
 		const probe = await startWorker();

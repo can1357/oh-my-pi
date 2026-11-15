@@ -226,6 +226,7 @@ it.each([false, true])("keeps tan's copied candidate model-gated (explicit=%s)",
 				jobId: "tan-test",
 				signal: new AbortController().signal,
 				reportProgress: async () => {},
+				reportAgentProgress: () => {},
 				markRunning: () => {},
 			});
 		return "tan-test";
