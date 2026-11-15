@@ -229,11 +229,10 @@ const ALLOWED_LEVELS_PATTERN = /(?:valid|supported|allowed) levels?/i;
 /** Fielded rejection verdicts in any word order: verdict-first, field-first, or bare mention plus verdict. */
 function messageCarriesEffortVerdict(message: string): boolean {
 	return (
-		/invalid[^\n]*(?:reasoning[_. ]?effort|reasoning value)/i.test(message) ||
-		/(?:reasoning[_. ]?effort|reasoning value)[^\n]*(?:invalid|unsupported|not supported|not permitted|must be|expected|unknown|unexpected|unrecognized)/i.test(
+		/(?:invalid|unsupported|not supported|not permitted|must be|expected|unknown|unexpected|unrecognized|extra)[^\n]*(?:reasoning[_. ]?effort|reasoning value)/i.test(
 			message,
 		) ||
-		/(?:unsupported|not supported|not permitted|unknown|unexpected|unrecognized|extra)[^\n]*(?:reasoning[_. ]?effort|reasoning value)/i.test(
+		/(?:reasoning[_. ]?effort|reasoning value)[^\n]*(?:invalid|unsupported|not supported|not permitted|must be|expected|unknown|unexpected|unrecognized)/i.test(
 			message,
 		)
 	);
