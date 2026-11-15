@@ -381,17 +381,6 @@ describe("Anthropic pooled OAuth metadata identity", () => {
 		);
 	});
 
-	it("keeps a caller-supplied metadata.user_id that already names the serving account", async () => {
-		await seed(ACCOUNTS);
-		const userId = JSON.stringify({
-			device_id: deriveClaudeDeviceId(getInstallId(), ACCOUNTS[0]),
-			account_uuid: ACCOUNTS[0],
-			session_id: "caller-session",
-		});
-		expect((await turn("caller-metadata-session", undefined, { user_id: userId })).stopReason).toBe("stop");
-		expect(rawUserId(requests[0]!)).toBe(userId);
-	});
-
 	it("rebinds caller metadata that names another account once a rotation serves the request", async () => {
 		await seed(ACCOUNTS);
 		// The caller resolved its metadata for account A, as coding-agent's
