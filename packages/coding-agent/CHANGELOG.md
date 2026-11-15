@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `edit` no longer rejects `PUT <N`, `PUT >N`, or `CUT` as "never displayed" when an earlier tag of the same file displayed that line and it still sits at the same number with the same content; lines that moved since every display, lines no read ever showed, and replacements without payload evidence stay rejected
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
