@@ -97,11 +97,14 @@ async function createHarness(factory: ExtensionFactory) {
 		flushPendingBashComponents: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
+		notifyComposerStash: vi.fn(),
+		cancelComposerStashNotice: vi.fn(),
 		handleClearCommand: vi.fn(),
 		resetDisplayAfterAppearanceRefresh: vi.fn(),
 		shutdown: vi.fn(async () => {}),
 		clearEditor: () => editor.clearDraft(),
 		withLocalSubmission: async <T>(_text: string, submit: () => Promise<T>) => submit(),
+		recordLocalSubmission: () => () => {},
 		isGuidedGoalInterviewActive: () => false,
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
@@ -134,7 +137,7 @@ async function createHarness(factory: ExtensionFactory) {
 		editor.imageLinks = editor.pendingImageLinks;
 		editor.setText(text);
 	}
-	return { ctx, editor, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
+	return { ctx, controller, editor, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -204,6 +207,24 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.pendingImages).toEqual([transformedImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg"]);
 	});
+
+	for (const decision of ["handles", "empties"] as const) {
+		it(`Ctrl+Enter restores a rich stash when its input hook ${decision} the next submission`, async () => {
+			const h = await createHarness(pi => {
+				pi.on("input", () => (decision === "handles" ? { handled: true } : { text: "", images: [] }));
+			});
+			h.draftWithImage("saved [Image #1]");
+			h.controller.handleStash();
+			h.editor.setText("intervening input");
+
+			await h.pressSubmit(FOLLOW_UP);
+
+			expect(h.prompt).not.toHaveBeenCalled();
+			expect(h.editor.getText()).toBe("saved [Image #1]");
+			expect(h.editor.pendingImages).toEqual([originalImage]);
+			expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
+		});
+	}
 
 	for (const decision of ["handles", "empties"] as const) {
 		it(`Ctrl+Enter preserves a newer draft when its delayed hook ${decision} input`, async () => {
@@ -304,6 +325,54 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.getExpandedText()).toBe("=> second\n\nnewer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("queue rejected");
+	});
+
+	it("Ctrl+Enter /queue hands a detached idle list's tail to its first entry and leaves the editor clear on acceptance", async () => {
+		const h = await createHarness(() => {});
+		h.session.isStreaming = false;
+		let submitted: Parameters<InteractiveModeContext["startPendingSubmission"]>[0] | undefined;
+		h.ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			submitted = input;
+			return { ...input, cancelled: false, started: false };
+		});
+		h.ctx.onInputCallback = vi.fn();
+		h.draftWithImage("/queue 1. first [Image #1]\n2. second");
+
+		await h.pressSubmit(FOLLOW_UP);
+		expect(submitted?.text).toBe("first [Image #1]");
+		expect(submitted?.images).toEqual([originalImage]);
+		expect(submitted?.followUps).toEqual(["second"]);
+		expect(h.session.followUp).not.toHaveBeenCalled();
+		expect(h.editor.getExpandedText()).toBe("");
+		submitted?.onAccepted?.();
+		expect(h.editor.getExpandedText()).toBe("");
+		expect(h.editor.pendingImages).toEqual([]);
+		expect(h.editor.pendingImageLinks).toEqual([]);
+	});
+
+	it("Ctrl+Enter /queue does not consume a stash made during its input hook", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.editor.setText("/queue queued");
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.draftWithImage("later [Image #1]", newerImage, "local://newer.jpg");
+		h.controller.handleStash();
+		release.resolve();
+		await submitting;
+		expect(h.session.followUp.mock.calls).toEqual([["queued", undefined]]);
+		expect(h.editor.getText()).toBe("");
+		expect(h.editor.pendingImages).toEqual([]);
+		h.controller.handleStash();
+		expect(h.editor.getExpandedText()).toBe("later [Image #1]");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
 	});
 
 	it("Ctrl+Enter /queue keeps a newer draft typed while its input hook ran", async () => {

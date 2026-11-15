@@ -26,7 +26,7 @@ import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { type ComposerDraftSnapshot, extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
@@ -312,6 +312,68 @@ export class InputController {
 
 	#enhancedPaste?: EnhancedPasteController;
 	#draftText: string | undefined;
+	#stashedDraft?: ComposerDraftSnapshot;
+	#restoredStashText?: string;
+	#restoredStashImages?: ImageContent[];
+
+	/** Only the untouched draft restored from this controller's stash may survive auto-submission. */
+	isRestoredStashDraft(): boolean {
+		if (this.#restoredStashText === undefined) return false;
+		const editor = this.ctx.editor;
+		const images = this.#restoredStashImages ?? [];
+		if (
+			editor.getText() !== this.#restoredStashText ||
+			editor.pendingImages.length !== images.length ||
+			editor.pendingImages.some((image, index) => image !== images[index])
+		) {
+			this.#restoredStashText = undefined;
+			this.#restoredStashImages = undefined;
+			return false;
+		}
+		return true;
+	}
+	/** Ctrl+S switches between an isolated rich draft and a fresh prompt. */
+	handleStash(): void {
+		const editor = this.ctx.editor;
+		this.#restoredStashText = undefined;
+		this.#restoredStashImages = undefined;
+		if (editor.getText().length > 0 || editor.pendingImages.length > 0) {
+			const currentDraft = editor.captureComposerDraft();
+			if (this.#stashedDraft) {
+				editor.restoreComposerDraft(this.#stashedDraft);
+			} else {
+				editor.clearDraft();
+			}
+			this.#stashedDraft = currentDraft;
+			this.ctx.notifyComposerStash();
+		} else if (this.#stashedDraft) {
+			this.#restoreStashIfEmpty();
+		}
+		this.ctx.ui.requestRender();
+	}
+
+	/** Capture the draft that belongs to this submission; later stashes must not be consumed by it. */
+	#restoreOnAccepted(): (() => void) | undefined {
+		const draft = this.#stashedDraft;
+		return draft
+			? () => {
+					if (this.#stashedDraft === draft) this.#restoreStashIfEmpty();
+				}
+			: undefined;
+	}
+
+	#restoreStashIfEmpty(): void {
+		if (!this.#stashedDraft || this.ctx.editor.getText().length > 0 || this.ctx.editor.pendingImages.length > 0)
+			return;
+		const draft = this.#stashedDraft;
+		this.#stashedDraft = undefined;
+		this.ctx.editor.restoreComposerDraft(draft);
+		this.#restoredStashText = this.ctx.editor.getText();
+		this.#restoredStashImages = [...this.ctx.editor.pendingImages];
+		this.ctx.cancelComposerStashNotice();
+		this.ctx.ui.requestRender();
+	}
+
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
@@ -787,12 +849,11 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.btw.inject")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleBtwInjectKey());
 		}
-		const hubKeys = new Set([
-			...this.ctx.keybindings.getKeys("app.agents.hub"),
-			...this.ctx.keybindings.getKeys("app.session.observe"),
-		]);
-		for (const key of hubKeys) {
+		for (const key of this.ctx.keybindings.getKeys("app.agents.hub")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.editor.stash")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.handleStash());
 		}
 
 		// Double-tap left arrow on an empty editor: opens the agent hub from the
@@ -819,6 +880,10 @@ export class InputController {
 
 		this.ctx.editor.onChange = (text: string) => {
 			const wasComposing = (this.#draftText ?? "").trim() !== "";
+			if (this.#restoredStashText !== undefined && text !== this.#restoredStashText) {
+				this.#restoredStashText = undefined;
+				this.#restoredStashImages = undefined;
+			}
 			this.#draftText = text;
 			// Typing signals an imminent turn; refresh the API connection now so
 			// the handshake overlaps composition instead of delaying the send.
@@ -1101,6 +1166,14 @@ export class InputController {
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
+			let accepted = false;
+			const restoreStash = this.#restoreOnAccepted();
+			const restoreOnAccepted = restoreStash
+				? () => {
+						accepted = true;
+						restoreStash();
+					}
+				: undefined;
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (slash/bash/python, loop,
@@ -1133,12 +1206,18 @@ export class InputController {
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
-					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
+					this.ctx.onInputCallback({
+						text,
+						cancelled: false,
+						started: true,
+						resume: true,
+						onAccepted: restoreOnAccepted,
+					});
 				} else if (this.ctx.session.isStreaming) {
 					// The input loop is parked on the running turn's prompt; resume here.
 					this.ctx.editor.clearDraft();
 					try {
-						await this.ctx.session.resume();
+						await this.ctx.session.resume({ onAccepted: restoreOnAccepted });
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -1152,6 +1231,16 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
+			// Mode handlers claim their images before an input hook awaits so a
+			// retyped mode draft starts its own numbering at #1. Side/lifecycle
+			// commands keep their upstream post-hook claim and paste renumbering.
+			const originalMode = parseSlashCommand(text)?.name;
+			const submittedDraftDetached =
+				originalMode === "plan" ||
+				originalMode === "vibe" ||
+				originalMode === "goal" ||
+				originalMode === "guided-goal";
+			if (submittedDraftDetached) this.#dropSubmittedPending(submittedImages);
 
 			// Input hooks pass in submission order with the follow-up key's (see `#submissionHookOrder`):
 			// `/queue` placement behind a queued `/compact` must follow the order the user sent them.
@@ -1170,17 +1259,24 @@ export class InputController {
 						// only the submitted attachments are dropped, and only while they
 						// are still the live prefix.
 						this.#dropSubmittedPending(inputImages);
+						restoreOnAccepted?.();
 						return;
 					}
 					({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 					hasInputImages = (inputImages?.length ?? 0) > 0;
 				}
+			} catch (error) {
+				if (submittedDraftDetached) {
+					restoreDetachedDraft(this.ctx.editor, submittedText, submittedImages, inputImageLinks);
+				}
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
 			} finally {
 				hooksDone.resolve();
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
 			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
-			if (draftDetached) this.#dropSubmittedPending(submittedImages);
+			if (draftDetached && !submittedDraftDetached) this.#dropSubmittedPending(submittedImages);
 
 			if (!text && !hasInputImages) return;
 
@@ -1190,6 +1286,7 @@ export class InputController {
 					historyText: text,
 					images: inputImages,
 					imageLinks: inputImageLinks,
+					onAccepted: restoreOnAccepted,
 				});
 				return;
 			}
@@ -1208,24 +1305,24 @@ export class InputController {
 			// Handle built-in slash commands
 			if (text) {
 				this.#recordSlashCommandUsage(text);
-				const input =
-					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
-						? { images: inputImages, imageLinks: inputImageLinks }
-						: undefined;
-				let slashResult: string | boolean;
+				const input = { images: inputImages, imageLinks: inputImageLinks, onAccepted: restoreOnAccepted };
+				let slashResult;
 				try {
 					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				} catch (error) {
-					// Detached mode commands (plan/vibe/goal/guided-goal) rethrow so
-					// this caller — the one that took the draft's images out of the
-					// editor before dispatch — restores the submission and reports
-					// the error, mirroring `handleFollowUp`'s Ctrl+Enter path.
+					// Detached mode commands leave restoration to their submitter; never
+					// replace a newer draft typed while the command was in flight.
 					if (!draftDetached) throw error;
-					restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
+					if (!accepted) restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					return;
 				}
 				if (slashResult === true) {
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					restoreOnAccepted?.();
+					return;
+				}
+				if (typeof slashResult === "object" && slashResult.pending) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
@@ -1262,6 +1359,7 @@ export class InputController {
 				// No local render: the prompt comes back from the host as a
 				// collab-prompt event/entry and renders with the author badge.
 				this.ctx.collabGuest.sendPrompt(text, images);
+				restoreOnAccepted?.();
 				return;
 			}
 
@@ -1272,6 +1370,7 @@ export class InputController {
 				await this.#runSideFileCommand(text, {
 					detach: () => this.#detachSideSubmission(draftText, submittedImages),
 					restore: () => this.#restoreResetSubmission(submittedText),
+					onAccepted: restoreOnAccepted,
 				})
 			) {
 				return;
@@ -1290,9 +1389,10 @@ export class InputController {
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 					this.ctx.queueCompactionMessage(text, "steer", images);
+					restoreOnAccepted?.();
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks, restoreOnAccepted)) {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
@@ -1315,7 +1415,8 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.clearDraft(text);
+					restoreOnAccepted?.();
 					await this.ctx.handleBashCommand(command, isExcluded);
 					this.ctx.isBashMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1336,7 +1437,8 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.clearDraft(text);
+					restoreOnAccepted?.();
 					await this.ctx.handlePythonCommand(code, isExcluded);
 					this.ctx.isPythonMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1354,6 +1456,7 @@ export class InputController {
 				// as loopPrompt while the drain executes it locally — and idle
 				// submissions never arm commands.
 				if (submittedMode === "loop" && !this.#isLocalExtensionCommand(text)) this.ctx.setLoopPrompt(text);
+				restoreOnAccepted?.();
 				return;
 			}
 
@@ -1363,8 +1466,16 @@ export class InputController {
 			if (this.#isLocalExtensionCommand(text)) {
 				this.ctx.editor.clearDraft(text);
 				try {
-					await this.ctx.session.prompt(text, { images: inputImages });
+					const forwarded = await this.ctx.session.prompt(text, {
+						images: inputImages,
+						onAccepted: restoreOnAccepted,
+					});
+					if (!forwarded) restoreOnAccepted?.();
 				} catch (error) {
+					if (accepted) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					// Restore the snapshot only when nothing newer was attached
 					// while the command ran; otherwise the newer draft wins.
 					if (inputImages && inputImages.length > 0 && this.ctx.editor.pendingImages.length === 0) {
@@ -1397,9 +1508,15 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() =>
+							this.ctx.session.prompt(text, {
+								streamingBehavior: "steer",
+								images,
+								onAccepted: restoreOnAccepted,
+							}),
 						{ imageCount: images?.length ?? 0 },
 					);
+					if (!forwarded) restoreOnAccepted?.();
 					// An inline `/loop` body arms the loop only after dispatch
 					// confirms it was forwarded: arming before the await would
 					// retain a body whose dispatch rejects, resubmitting a failed
@@ -1407,6 +1524,10 @@ export class InputController {
 					// state untouched, so the previous body (if any) survives.
 					if (submittedMode === "loop" && forwarded) this.ctx.setLoopPrompt(text);
 				} catch (error) {
+					if (accepted) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					// Don't lose the queued steer draft: restore images then the collapsed
 					// text so chip tokens (and band cards) survive the retry.
 					if (images && images.length > 0) {
@@ -1455,6 +1576,7 @@ export class InputController {
 						images,
 						imageLinks: inputImageLinks,
 						streamingBehavior: "steer",
+						onAccepted: restoreOnAccepted,
 					},
 					{ clearEditor: false },
 				);
@@ -1474,16 +1596,26 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() =>
+							this.ctx.session.prompt(text, {
+								streamingBehavior: "steer",
+								images,
+								onAccepted: restoreOnAccepted,
+							}),
 						{
 							imageCount: images?.length ?? 0,
 						},
 					);
+					if (!forwarded) restoreOnAccepted?.();
 					// The idle block above already armed this body synchronously.
 					// A locally-consumed dispatch starts no turn: park the armed
 					// loop instead of resubmitting a local action on next idle.
 					if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 				} catch (error) {
+					if (accepted) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					// Don't lose the message: hand images then collapsed text back to the
 					// editor so the user can retry (e.g. prompt dispatch rejecting an
 					// extension command).
@@ -1575,7 +1707,10 @@ export class InputController {
 	 * `draft.detach` releases the submission's remaining editor state before the side question
 	 * runs; `draft.restore` hands the submission back when its template fails to render.
 	 */
-	async #runSideFileCommand(text: string, draft: { detach?: () => void; restore: () => void }): Promise<boolean> {
+	async #runSideFileCommand(
+		text: string,
+		draft: { detach?: () => void; restore: () => void; onAccepted?: () => void },
+	): Promise<boolean> {
 		const invocation = parseFileSlashInvocation(text);
 		if (!invocation || !this.ctx.fileSlashCommands.has(invocation.name)) return false;
 		const session = this.ctx.session;
@@ -1595,7 +1730,8 @@ export class InputController {
 		this.ctx.editor.addToHistory(text);
 		draft.detach?.();
 		const args = invocation.args.trim();
-		await this.ctx.handleBtwCommand(question, undefined, args ? `/${command.name} ${args}` : `/${command.name}`);
+		if (await this.ctx.handleBtwCommand(question, undefined, args ? `/${command.name} ${args}` : `/${command.name}`))
+			draft.onAccepted?.();
 		return true;
 	}
 
@@ -1638,6 +1774,14 @@ export class InputController {
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const draftText = this.ctx.editor.getText();
+		let accepted = false;
+		const restoreStash = this.#restoreOnAccepted();
+		const restoreOnAccepted = restoreStash
+			? () => {
+					accepted = true;
+					restoreStash();
+				}
+			: undefined;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
@@ -1662,6 +1806,7 @@ export class InputController {
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					restoreOnAccepted?.();
 					return;
 				}
 			}
@@ -1674,6 +1819,7 @@ export class InputController {
 			(await this.#runSideFileCommand(text, {
 				detach: () => this.#detachSideSubmission(draftText, images),
 				restore: () => this.#restoreResetSubmission(text),
+				onAccepted: restoreOnAccepted,
 			}))
 		) {
 			return;
@@ -1688,13 +1834,20 @@ export class InputController {
 		this.ctx.editor.clearDraft(text);
 		try {
 			if (isContinueShortcut) {
-				await target.resume();
+				await target.resume({ onAccepted: restoreOnAccepted });
 			} else {
-				await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-					imageCount: images?.length ?? 0,
-				});
+				const forwarded = await this.ctx.withLocalSubmission(
+					text,
+					() => target.prompt(text, { streamingBehavior, images, onAccepted: restoreOnAccepted }),
+					{ imageCount: images?.length ?? 0 },
+				);
+				if (!forwarded) restoreOnAccepted?.();
 			}
 		} catch (error) {
+			if (accepted) {
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
+			}
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.
 			if (images && images.length > 0) {
@@ -1896,12 +2049,20 @@ export class InputController {
 		streamingBehavior: "steer" | "followUp",
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
+		onAccepted?: () => void,
 		preserveDraft = false,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
+		let accepted = false;
+		const acceptedSubmission = () => {
+			accepted = true;
+			onAccepted?.();
+		};
 		const restoreDraft = () => {
+			// A post-turn recovery rejection cannot put an accepted submission back.
+			if (accepted) return;
 			if (preserveDraft) {
 				restoreDetachedDraft(this.ctx.editor, text, draftImages, draftImageLinks);
 			} else {
@@ -1913,7 +2074,7 @@ export class InputController {
 						: draftImages.map(() => undefined);
 					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 				}
-				// Images first: collapsing reads `pendingImages.length` to decide which markers become chips.
+				// Images first: collapsing reads pendingImages.length to make chips.
 				this.ctx.editor.setCollapsedText(text);
 			}
 		};
@@ -1926,6 +2087,7 @@ export class InputController {
 				imageLinks: draftImageLinks,
 				optimistic: true,
 				propagateErrors: true,
+				...(onAccepted ? { onAccepted: acceptedSubmission } : {}),
 			});
 			if (!dispatched) restoreDraft();
 			return dispatched;
@@ -1953,23 +2115,25 @@ export class InputController {
 		}
 	}
 
-	/**
-	 * Queue `/queue` input behind an active turn, or start it immediately when idle.
-	 * `detached` is a submission whose draft already left the editor: its
-	 * attachments are queued and its text is restored if queueing fails. Without
-	 * it, the live editor draft is the submission.
-	 */
+	/** Queue `/queue` input behind the active turn, preserving detached drafts on failure. */
 	async handleQueueCommand(
 		text: string,
-		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted"> & { text?: string },
 	): Promise<void> {
-		const source = detached ?? {
+		// An explicitly supplied submission owns its attachments, even if empty;
+		// the editor may already hold a newer draft after an awaited hook.
+		const source = input ?? {
 			images: this.ctx.editor.pendingImages,
 			imageLinks: this.ctx.editor.pendingImageLinks,
 		};
 		const images = source.images?.length ? [...source.images] : undefined;
 		const imageLinks = images && source.imageLinks?.length ? [...source.imageLinks] : undefined;
-		await this.#queueForYield(text, { images, imageLinks, detachedText: detached?.text });
+		await this.#queueForYield(text, {
+			images,
+			imageLinks,
+			detachedText: input?.text,
+			...(input ? { onAccepted: input.onAccepted } : {}),
+		});
 	}
 
 	async #queueForYield(
@@ -1978,8 +2142,9 @@ export class InputController {
 			historyText?: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
-			/** The submitted draft already left the editor; anything there now is newer. Restored on failure. */
+			/** The submitted draft already left the editor; newer typing must survive. */
 			detachedText?: string;
+			onAccepted?: () => void;
 		},
 	): Promise<void> {
 		// Queue shorthand reaches this helper before the normal guest input gate.
@@ -2005,6 +2170,15 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
+		const restoreOnAccepted = "onAccepted" in options ? options.onAccepted : this.#restoreOnAccepted();
+		const awaitingStash = restoreOnAccepted ? this.#stashedDraft : undefined;
+		const appendQueueText = (text: string) => {
+			const draft = this.ctx.editor.captureComposerDraft();
+			this.ctx.editor.restoreComposerDraft({
+				...draft,
+				editor: { ...draft.editor, text: [draft.editor.text, text].filter(Boolean).join("\n\n") },
+			});
+		};
 		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText);
 
 		this.releaseStaleYieldCompaction();
@@ -2016,6 +2190,7 @@ export class InputController {
 					images: index === 0 ? images : undefined,
 				});
 			}
+			restoreOnAccepted?.();
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus(
 				messages.length === 1
@@ -2043,13 +2218,20 @@ export class InputController {
 							imageLinks,
 							streamingBehavior: "followUp",
 							followUps,
+							onAccepted: restoreOnAccepted,
 						}),
 					);
 				} else {
 					try {
 						await this.ctx.withLocalSubmission(
 							first,
-							() => this.ctx.session.prompt(first, { images, streamingBehavior: "followUp", followUps }),
+							() =>
+								this.ctx.session.prompt(first, {
+									images,
+									streamingBehavior: "followUp",
+									followUps,
+									onAccepted: restoreOnAccepted,
+								}),
 							{ imageCount: images?.length ?? 0 },
 						);
 					} catch (error) {
@@ -2069,6 +2251,7 @@ export class InputController {
 				await this.ctx.withLocalSubmission(message, () => this.ctx.session.followUp(message, queuedImages), {
 					imageCount: queuedImages?.length ?? 0,
 				});
+				if (queuedCount === 0) restoreOnAccepted?.();
 				queuedCount++;
 			}
 		} catch (error) {
@@ -2085,7 +2268,9 @@ export class InputController {
 				}
 			} else {
 				const restored = formatQueueShorthand(messages.slice(queuedCount));
-				if (options.detachedText !== undefined) restoreDetachedDraft(this.ctx.editor, restored);
+				// The accepted first entry already restored a stashed rich draft; keep it.
+				if (awaitingStash) appendQueueText(restored);
+				else if (options.detachedText !== undefined) restoreDetachedDraft(this.ctx.editor, restored);
 				else this.ctx.editor.setText(restored);
 			}
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
@@ -2113,6 +2298,7 @@ export class InputController {
 		let imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) return;
+		const restoreOnAccepted = this.#restoreOnAccepted();
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
 		if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
@@ -2145,7 +2331,10 @@ export class InputController {
 				if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
 					try {
 						const input = await this.#runInputHandlers(text, images, imageLinks);
-						if (!input) return;
+						if (!input) {
+							restoreOnAccepted?.();
+							return;
+						}
 						({ text, images, imageLinks } = input);
 					} catch (error) {
 						restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
@@ -2156,7 +2345,7 @@ export class InputController {
 			} finally {
 				hooksDone.resolve();
 			}
-			await this.#dispatchFollowUp(text, images, imageLinks, origin, admitted);
+			await this.#dispatchFollowUp(text, images, imageLinks, origin, admitted, restoreOnAccepted);
 		} finally {
 			admitted();
 		}
@@ -2169,10 +2358,23 @@ export class InputController {
 		imageLinks: (string | undefined)[] | undefined,
 		origin: ConversationPosition,
 		admitted: () => void,
+		onAccepted?: () => void,
 	): Promise<void> {
+		let accepted = false;
+		const restoreOnAccepted = onAccepted
+			? () => {
+					accepted = true;
+					onAccepted();
+				}
+			: undefined;
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
-		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
+		const restoreSideDraft = {
+			restore: () => {
+				if (!accepted) restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			},
+			onAccepted: restoreOnAccepted,
+		};
 
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
@@ -2193,13 +2395,13 @@ export class InputController {
 				return;
 			}
 			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
+			restoreOnAccepted?.();
 			return;
 		}
 
 		if (text) {
 			try {
-				const input =
-					(images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+				const input = { images, imageLinks, onAccepted: restoreOnAccepted };
 				const slashResult = await executeBuiltinSlashCommand(text, {
 					ctx: this.ctx,
 					input,
@@ -2208,16 +2410,20 @@ export class InputController {
 				});
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					restoreOnAccepted?.();
+					return;
+				}
+				if (typeof slashResult === "object" && slashResult.pending) {
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}
 				if (typeof slashResult === "string") {
-					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls it.
+					// Recall the slash command, not only the returned prompt body.
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			} catch (error) {
-				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+				if (!accepted) restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 				this.ctx.showError(error instanceof Error ? error.message : String(error));
 				return;
 			}
@@ -2228,7 +2434,7 @@ export class InputController {
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, restoreOnAccepted, true))) {
 			return;
 		}
 
@@ -2236,22 +2442,27 @@ export class InputController {
 		// queue rejection): restore both text AND pending images so an image-only
 		// or text+image draft can be retried, mirroring the main submit error path.
 		const restoreOnError = (error: unknown) => {
-			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			if (!accepted) restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		};
 
 		if (this.ctx.session.isStreaming) {
 			this.ctx.editor.addToHistory(text);
 			try {
-				await this.ctx.withLocalSubmission(
+				const forwarded = await this.ctx.withLocalSubmission(
 					text,
 					() => {
-						const pending = this.ctx.session.prompt(text, { streamingBehavior: "followUp", images });
+						const pending = this.ctx.session.prompt(text, {
+							streamingBehavior: "followUp",
+							images,
+							onAccepted: restoreOnAccepted,
+						});
 						admitted();
 						return pending;
 					},
 					{ imageCount: images?.length ?? 0 },
 				);
+				if (!forwarded) restoreOnAccepted?.();
 			} catch (error) {
 				restoreOnError(error);
 			}
@@ -2263,15 +2474,16 @@ export class InputController {
 		// Not streaming — just submit normally
 		this.ctx.editor.addToHistory(text);
 		try {
-			await this.ctx.withLocalSubmission(
+			const forwarded = await this.ctx.withLocalSubmission(
 				text,
 				() => {
-					const pending = this.ctx.session.prompt(text, { images });
+					const pending = this.ctx.session.prompt(text, { images, onAccepted: restoreOnAccepted });
 					admitted();
 					return pending;
 				},
 				{ imageCount: images?.length ?? 0 },
 			);
+			if (!forwarded) restoreOnAccepted?.();
 		} catch (error) {
 			restoreOnError(error);
 		}
@@ -2369,6 +2581,14 @@ export class InputController {
 		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
+		}
+		// Keep a previously restored Ctrl+S draft separate from the queued entries.
+		// This applies to both Alt+Up and restore-all, but not explicit currentText merges.
+		if (currentText === undefined && this.isRestoredStashDraft()) {
+			this.#stashedDraft = this.ctx.editor.captureComposerDraft();
+			this.#restoredStashText = undefined;
+			this.#restoredStashImages = undefined;
+			this.ctx.editor.clearDraft();
 		}
 		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
 		// (legacy drafts may still carry a trailing `attachment://N`). Each queued

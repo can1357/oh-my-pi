@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { ModeCommandResult } from "../../modes/types";
 import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "../types";
 
 /** Clear only text still owned by this submission, never a newer detached draft. */
@@ -46,20 +47,35 @@ export function refuseImages(command: ParsedSlashCommand, runtime: TuiSlashComma
 export async function runWithDetachedDraft(
 	command: ParsedSlashCommand,
 	runtime: TuiSlashCommandRuntime,
-	run: () => Promise<boolean>,
+	run: () => Promise<ModeCommandResult>,
 	options?: { restoreText?: boolean },
-): Promise<void> {
+): Promise<boolean> {
 	const { editor } = runtime.ctx;
+	// Detached submissions may have the same text as a newer draft.
 	if (!runtime.draftDetached) editor.clearDraft();
 	try {
 		const submitted = await run();
 		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
-		if (submitted || !(hasAttachments || options?.restoreText)) return;
+		if (submitted !== true && runtime.draftDetached && hasAttachments) {
+			restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+			return false;
+		}
+		if (submitted !== false) return submitted === true;
+		if (
+			runtime.input?.onAccepted &&
+			!options?.restoreText &&
+			!editor.getText() &&
+			editor.pendingImages.length === 0 &&
+			!runtime.draftDetached
+		)
+			editor.setText(command.text);
+		if (!(hasAttachments || options?.restoreText || (runtime.draftDetached && runtime.input?.onAccepted)))
+			return false;
 		if (runtime.draftDetached || options?.restoreText) {
 			// Newer typing may already sit in the editor: merge the submission
 			// back beside it so each draft's image markers keep their images.
 			restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
-			return;
+			return false;
 		}
 		editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];
 		editor.pendingImageLinks = [
@@ -67,6 +83,7 @@ export async function runWithDetachedDraft(
 			...editor.pendingImageLinks,
 		];
 		editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
+		return false;
 	} catch (error) {
 		if (runtime.draftDetached) {
 			// The caller already took this draft out of the editor before
@@ -83,5 +100,6 @@ export async function runWithDetachedDraft(
 			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
 		}
 		runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+		return false;
 	}
 }

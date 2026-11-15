@@ -229,4 +229,38 @@ describe("AgentSession.resume", () => {
 			["assistant", "more"],
 		]);
 	});
+
+	for (const answered of [false, true]) {
+		it(`accepts a ${answered ? "continue directive" : "re-run"} before its response finishes`, async () => {
+			const initial = stalledResponse();
+			const resumed = stalledResponse();
+			const { session } = createSession([answered ? { content: ["done"] } : initial.handler, resumed.handler]);
+			if (answered) {
+				await session.prompt("do the thing");
+			} else {
+				await abortDuring(session, session.prompt("do the thing"), initial.started);
+			}
+			let accepted = 0;
+			const pending = session.resume({ onAccepted: () => accepted++ });
+			await resumed.started;
+			expect(accepted).toBe(1);
+			await abortDuring(session, pending, resumed.started);
+			expect(accepted).toBe(1);
+		});
+	}
+
+	it("accepts a continue that interrupts a running turn once the continuation is live", async () => {
+		const running = stalledResponse();
+		const resumed = stalledResponse();
+		const { session } = createSession([running.handler, resumed.handler]);
+		const pending = session.prompt("still running");
+		await running.started;
+		let accepted = 0;
+		const resuming = session.resume({ onAccepted: () => accepted++ });
+		await resumed.started;
+		expect(accepted).toBe(1);
+		await pending;
+		await abortDuring(session, resuming, resumed.started);
+		expect(accepted).toBe(1);
+	});
 });

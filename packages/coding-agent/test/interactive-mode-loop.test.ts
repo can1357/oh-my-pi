@@ -63,6 +63,11 @@ describe("InteractiveMode loop auto-submit", () => {
 		}
 		await pendingInput;
 		pendingInput = undefined;
+		// Vibe tests mock tool activation but still persist the mode on this shared session.
+		if (session.getVibeModeState()?.enabled) {
+			session.setVibeModeState(undefined);
+			session.sessionManager.appendModeChange("none");
+		}
 		mode.vibeModeEnabled = false;
 		Reflect.deleteProperty(session, "isCompacting");
 		Reflect.deleteProperty(session, "isStreaming");
@@ -500,6 +505,42 @@ describe("InteractiveMode loop auto-submit", () => {
 		// custom message instead.
 		expect(mode.addMessageToChat).not.toHaveBeenCalled();
 		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("resubmits consecutive loop iterations without clearing an untouched restored stash", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.useFakeTimers();
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		const image = { type: "image" as const, data: "aGVsbG8=", mimeType: "image/png" as const };
+		mode.editor.pendingImages = [image];
+		mode.editor.pendingImageLinks = ["file:///stash.png"];
+		mode.editor.setText("draft [Image #1]");
+		mode.editor.handleInput("\x13");
+		mode.editor.handleInput("\x13");
+		expect(mode.editor.getText()).toBe("draft [Image #1]");
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "repeat this";
+		for (let iteration = 0; iteration < 2; iteration++) {
+			pendingInput = mode.getUserInput();
+			vi.advanceTimersByTime(800);
+			const input = await pendingInput;
+			expect(input.text).toBe("repeat this");
+			expect(mode.editor.getText()).toBe("draft [Image #1]");
+			expect(mode.editor.pendingImages).toEqual([image]);
+			expect(mode.editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+			mode.markPendingSubmissionStarted(input);
+			mode.finishPendingSubmission(input);
+		}
+
+		// Only an untouched restored stash is special; ordinary user edits are
+		// cleared by loop auto-submit as before.
+		mode.editor.handleInput("x");
+		pendingInput = mode.getUserInput();
+		vi.advanceTimersByTime(800);
+		expect((await pendingInput).text).toBe("repeat this");
+		expect(mode.editor.getText()).toBe("");
 	});
 
 	it("paints an optimistic user row for a resubmitted plain loop prompt", async () => {

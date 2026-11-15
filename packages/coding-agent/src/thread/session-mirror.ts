@@ -260,7 +260,7 @@ export type SessionHostProtocol = {
 	ensureOnDisk: RpcMethod<[], void>;
 	getArtifactPath: RpcMethod<[id: string], string | null>;
 	getArtifactContent: RpcMethod<[id: string], string | null>;
-	resume: RpcMethod<[], void>;
+	resume: RpcMethod<[options?: { onAccepted?: () => void }], void>;
 	retry: RpcMethod<[], boolean>;
 	abortRetry: RpcMethod<[], void>;
 	abortCompaction: RpcMethod<[reason?: unknown], void>;
