@@ -122,13 +122,14 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
 	});
 
-	it("commits modes, executable deletions, symlinks, and non-UTF-8 files exactly as in the worktree", async () => {
+	it("commits modes, executable deletions, symlinks, BOMs, and non-UTF-8 files exactly as in the worktree", async () => {
 		const { root, journal, write } = await emptyRepo();
 		const latin1 = (text: string) => Buffer.from(text, "latin1");
 		await Bun.write(path.join(root, "run.sh"), "#!/bin/sh\necho run\n");
 		await Bun.write(path.join(root, "tool.sh"), "#!/bin/sh\necho tool\n");
 		await Bun.write(path.join(root, "plain.txt"), "plain\n");
 		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\n"));
+		await Bun.write(path.join(root, "bom.ass"), "placeholder\n");
 		await fs.chmod(path.join(root, "run.sh"), 0o755);
 		await fs.chmod(path.join(root, "tool.sh"), 0o755);
 		await git(root, ["add", "."]);
@@ -139,6 +140,7 @@ describe("selective commit flow", () => {
 		await write("Main", undefined, "plain.txt", "plain\nmore\n");
 		await fs.chmod(path.join(root, "plain.txt"), 0o755);
 		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\nna\xefve\n"));
+		await Bun.write(path.join(root, "bom.ass"), "\uFEFF[Script Info]\r\nTitle: d\r\n");
 		await fs.symlink("plain.txt", path.join(root, "link"));
 		await journal.flush();
 
@@ -157,7 +159,13 @@ describe("selective commit flow", () => {
 					return [file, meta.split(" ")[0]];
 				}),
 		);
-		expect(modes).toEqual({ "latin1.txt": "100644", link: "120000", "plain.txt": "100755", "run.sh": "100644" });
+		expect(modes).toEqual({
+			"bom.ass": "100644",
+			"latin1.txt": "100644",
+			link: "120000",
+			"plain.txt": "100755",
+			"run.sh": "100644",
+		});
 	});
 
 	it("makes the first commit of a repository without commits", async () => {
@@ -202,5 +210,79 @@ describe("selective commit flow", () => {
 		await expect(
 			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
+	});
+
+	it("rejects an unknown hunk unit id without changing the selection", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
+		await Bun.write(path.join(root, "b.ts"), "export const b = 1;\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await write("Main", undefined, "a.ts", "export const a = 2;\nexport const extra = 3;\n");
+		await write(
+			"Other",
+			undefined,
+			"a.ts",
+			"export const a = 2;\nexport const extra = 3;\nexport const foreign = 4;\n",
+		);
+		await write("Main", undefined, "b.ts", "export const b = 2;\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.diff();
+		expect(selected).toContain("export const a = 2");
+		expect(selected).not.toContain("foreign");
+
+		expect(() => draft.take({ path: "a.ts", units: ["1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		expect(() => draft.drop({ path: "a.ts", units: ["1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		// b.ts has hunk 1 but no unit 1b; the call must fail before a.ts's 1b is selected.
+		expect(() => draft.take({ path: "*.ts", units: ["1b"] })).toThrow(/has no unit "1b"/);
+		expect(() => draft.take({ path: "a.ts", units: ["1b", "1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		expect(draft.diff()).toBe(selected);
+
+		expect(draft.take({ path: "a.ts", units: ["1b"] })).toBe("Selected 1 change line(s).");
+		expect(draft.diff()).toContain("+export const foreign = 4;");
+		expect(draft.drop({ path: "a.ts", units: ["1a"] })).toBe("Deselected 3 change line(s).");
+		expect(draft.diff()).not.toContain("export const extra = 3");
+
+		const byHunk = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(byHunk.take({ path: "a.ts", units: ["1"] })).toBe("Selected 1 change line(s).");
+		expect(byHunk.diff()).toContain("+export const foreign = 4;");
+		expect(byHunk.diff()).toContain("export const a = 2");
+	});
+
+	it.skipIf(process.platform === "win32")("commits a filename that requires a quoted diff header", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-quoted-"));
+		const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-artifacts-"));
+		tempDirs.push(root, artifacts);
+		await git(root, ["init", "-q", "-b", "main"]);
+		await git(root, ["config", "user.email", "test@example.com"]);
+		await git(root, ["config", "user.name", "Test"]);
+		await git(root, ["config", "commit.gpgSign", "false"]);
+		const filename = 'has"quote.txt';
+		const file = path.join(root, filename);
+		await Bun.write(file, "before\n");
+		await git(root, ["add", "--", filename]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await Bun.write(file, "after\n");
+		const journal = ChangeJournal.at(artifacts);
+		journal.recordChange({
+			agent: "Main",
+			tool: "edit",
+			path: file,
+			before: "before\n",
+			after: "after\n",
+		});
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: quoted filename" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		expect(outcome.paths).toEqual([filename]);
+		expect(await git(root, ["show", `HEAD:${filename}`])).toBe("after\n");
 	});
 });
