@@ -6,6 +6,9 @@ In-process builtins, ahead of PATH: {{join builtins ", "}}.
 `async` defers finite results but keeps the deadline (default {{defaultTimeoutSec}}s); `timeout: 0` for watchers and long jobs.
 {{/if}}
 Don't trunc output by habit, result will be summarized and saved as an artifact.
+{{#if hasPowerShell}}
+PowerShell (pwsh or powershell.exe): NEVER run it from bash; use the `powershell` tool{{#if powerShellMounted}} (`write xd://powershell`){{/if}} with `edition` (`"pwsh"` or `"powershell"`).
+{{/if}}
 {{#if hasLaunch}}
 Long-lived services:
 - unique name; ready requires name; no async/timeout; pty defaults true.

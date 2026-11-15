@@ -6,6 +6,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { DEFAULT_MAX_BYTES, OutputSink, streamTailUpdates, TailBuffer } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { $which, prompt } from "@oh-my-pi/pi-utils";
 import powershellDescription from "../prompts/tools/powershell.md" with { type: "text" };
+import powershellSummary from "../prompts/tools/powershell-summary.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { outputMeta, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
@@ -95,8 +96,15 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		if (params.edition) lines.push(`Edition: ${params.edition}`);
 		return lines;
 	};
-	readonly summary =
-		"Execute PowerShell in a persistent host whose session state (variables, modules, last result objects) is retained across calls";
+	// With `xd://` mounting in its default "catalog" docs mode this line is the
+	// only thing a model sees before its first call, so it must carry the
+	// edition routing on its own: a model that only reads this line should
+	// still pick `edition` over shelling out to pwsh/powershell.exe from bash.
+	get summary(): string {
+		return prompt.render(powershellSummary, {
+			defaultEdition: cfgPowerShellDefaultEdition.get(this.session.settings),
+		});
+	}
 	readonly loadMode = "discoverable";
 	readonly label = "PowerShell";
 	readonly parameters = powershellSchema;

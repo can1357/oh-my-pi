@@ -9,6 +9,21 @@ Unlike one-shot shells, every call runs in the **same runspace**: variables, imp
 
 For simple POSIX-style commands, prefer `bash`. For reading files, searching, or editing, use the dedicated `read` / `search` / `edit` tools.
 
+## Choosing the shell
+
+This one tool runs both PowerShell editions. Pick with `edition`:
+
+| You want | Call |
+|---|---|
+| PowerShell 7+ (`pwsh`) | `{"command": "…", "edition": "pwsh"}` |
+| Windows PowerShell 5.1 (`powershell.exe`) | `{"command": "…", "edition": "powershell"}` |
+
+Omitting `edition` uses the configured default. When the user names a shell ("in pwsh", "in Windows PowerShell", "in powershell.exe"), set `edition` explicitly rather than relying on the default.
+
+NEVER launch either shell any other way:
+- Not from `bash` (`pwsh -Command …`, `powershell.exe -Command …`): that bypasses the persistent session and inherits bash's environment, including a possibly broken `$env:PSModulePath`.
+- Not nested inside this tool's `command` (`powershell -NoProfile -Command …` run under `edition: "pwsh"`): that spawns a throwaway child process per call with no retained state. Switch `edition` instead.
+
 ## Session state
 
 The most recent command's output objects are retained:
