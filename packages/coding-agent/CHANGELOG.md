@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `reserveReleaseHours` to the `omp usage` policy line, which reports the released reserve state near each window reset
+- Added `reserveReleaseHours` to the `omp usage` policy line, which reports the released reserve state near each window reset ([#19323](https://github.com/can1357/oh-my-pi/pull/19323) by [@FMsongX2](https://github.com/FMsongX2))
 
 ## [18.20.2] - 2026-11-14
 
