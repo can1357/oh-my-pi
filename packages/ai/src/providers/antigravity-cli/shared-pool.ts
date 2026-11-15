@@ -11,9 +11,17 @@ import { postmortem, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { type InitializeResponse, RequestError, type SessionNotification } from "@oh-my-pi/pi-utils/acp";
 import {
 	getSharedAgyWorkerBridge,
+	setSharedAgyMainThreadAcquirer,
 	type SharedAgyBridgeLease,
 	type SharedAgyBridgeRequest,
 } from "../antigravity-cli-state";
+import {
+	McpBridge,
+	type McpCallHandler,
+	type McpToolDefinition,
+	type McpToolOutput,
+	validateMcpTools,
+} from "./mcp-bridge";
 import {
 	type AgyConnection,
 	type AgyScheduler,
@@ -24,14 +32,7 @@ import {
 	scheduleTimer,
 	spawnAgyCliProcess,
 	withTimeout,
-} from "./host";
-import {
-	McpBridge,
-	type McpCallHandler,
-	type McpToolDefinition,
-	type McpToolOutput,
-	validateMcpTools,
-} from "./mcp-bridge";
+} from "./process";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
@@ -101,6 +102,7 @@ async function startSharedBackendProcess(options: SharedAgyBackendStartOptions):
 
 class SharedAgyBackend {
 	readonly credentialVersion: string | undefined;
+	readonly credentialExpires: number | undefined;
 	readonly #geminiDir: string;
 	readonly #tools: readonly McpToolDefinition[];
 	readonly #idleTimeoutMs: number;
@@ -125,12 +127,14 @@ class SharedAgyBackend {
 	constructor(
 		geminiDir: string,
 		credentialVersion: string | undefined,
+		credentialExpires: number | undefined,
 		tools: readonly McpToolDefinition[],
 		options: Required<Omit<SharedAgyPoolOptions, "registerProcessHooks">>,
 		onDisposed: () => void,
 	) {
 		this.#geminiDir = geminiDir;
 		this.credentialVersion = credentialVersion;
+		this.credentialExpires = credentialExpires;
 		this.#tools = [...tools];
 		this.#idleTimeoutMs = options.idleTimeoutMs;
 		this.#closeTimeoutMs = options.closeTimeoutMs;
@@ -299,6 +303,8 @@ class SharedAgyBackend {
 		return {
 			connection,
 			exited: activeLease.exitDeferred.promise,
+			credentialVersion: this.credentialVersion,
+			credentialExpires: this.credentialExpires,
 			close: () => this.#closeLease(activeLease),
 		};
 	}
@@ -638,7 +644,12 @@ export class SharedAgyPool {
 		const poolKey = `${request.geminiDir}\0${toolsKey}`;
 
 		let backend = this.#backends.get(poolKey);
-		if (backend && !backend.dead && backend.credentialVersion !== request.credentialVersion) {
+		const staleRequest =
+			backend !== undefined &&
+			backend.credentialExpires !== undefined &&
+			request.credentialExpires !== undefined &&
+			request.credentialExpires < backend.credentialExpires;
+		if (backend && !backend.dead && backend.credentialVersion !== request.credentialVersion && !staleRequest) {
 			this.#backends.delete(poolKey);
 			this.#retiringBackends.add(backend);
 			backend.retire();
@@ -648,6 +659,7 @@ export class SharedAgyPool {
 			const created = new SharedAgyBackend(
 				request.geminiDir,
 				request.credentialVersion,
+				request.credentialExpires,
 				request.tools,
 				this.#options,
 				() => {
@@ -685,19 +697,13 @@ export class SharedAgyPool {
 		postmortem.register("antigravity-cli-shared-pool", () => {
 			this.closeAll();
 		});
-		process.once("exit", () => {
-			this.closeAll();
-		});
 	}
 }
 
 /** Process-wide shared `agy acp` pool on the main thread. */
 export const sharedAgyPool = new SharedAgyPool();
 
-/** Acquire a lease directly from the main-thread {@link sharedAgyPool}. */
-export function acquireMainThreadSharedAgyLease(request: SharedAgyBridgeRequest): Promise<SharedAgyBridgeLease> {
-	return sharedAgyPool.acquire(request);
-}
+setSharedAgyMainThreadAcquirer(request => sharedAgyPool.acquire(request));
 
 /**
  * Acquire a shared `agy` transport, delegating through the registered worker

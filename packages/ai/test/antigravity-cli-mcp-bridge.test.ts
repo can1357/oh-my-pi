@@ -154,7 +154,7 @@ describe("McpBridge", () => {
 
 	it("notifies the host when the active MCP connection disappears", async () => {
 		const disconnected = Promise.withResolvers<void>();
-		const bridge = new McpBridge(tools, async () => ({ content: [] }), disconnected.resolve);
+		const bridge = new McpBridge(tools, async () => ({ content: [] }), { onDisconnect: disconnected.resolve });
 		cleanups.push(() => bridge.close());
 		const peer = await client(bridge.port);
 		await peer.request("ping");
