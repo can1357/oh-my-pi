@@ -1515,8 +1515,10 @@ class ShellScriptParser {
 		let i = start;
 		while (i < text.length) {
 			const ch = text[i];
-			// A carriage return belongs to its word, except in a CRLF line end.
+			// A carriage return belongs to its word, except in a CRLF line end. A heredoc delimiter
+			// keeps even that one, as in bash: a CRLF body ends at a line that ends in one too.
 			if (ch === " " || ch === "\t" || (ch === "\r" && text[i + 1] === "\n")) {
+				if (ch === "\r" && delimiter && started) word += ch;
 				flush();
 				i++;
 			} else if (ch === "\\") {
@@ -1593,7 +1595,7 @@ class ShellScriptParser {
 					delimiter = { stripTabs: operator === "<<-" };
 				}
 				if (operator === "\n" && pending.length > 0) {
-					i = this.#heredocBodies(text, i, pending, scope);
+					i = this.#heredocBodies(text, i, pending, scope, close);
 				}
 			}
 		}
@@ -1604,10 +1606,12 @@ class ShellScriptParser {
 	/**
 	 * Reads the bodies of the heredocs opened on the line that just ended, from `start`, and returns
 	 * where the script goes on. In an unquoted heredoc, a backslash-newline joins two lines before the
-	 * delimiter is looked for. When a delimiter line never comes, every line stays in place and is
-	 * parsed as commands: a `<<` misread as a heredoc must not hide what follows it.
+	 * delimiter is looked for. Inside a `$( )` (`close`), a line that starts with the delimiter and
+	 * has a `)` after it ends the heredoc too, as in bash, and the script goes on right after the
+	 * delimiter (`EOF)`). When a delimiter line never comes, every line stays in place and is parsed
+	 * as commands: a `<<` misread as a heredoc must not hide what follows it.
 	 */
-	#heredocBodies(text: string, start: number, pending: PendingHeredoc[], scope: ReadScope): number {
+	#heredocBodies(text: string, start: number, pending: PendingHeredoc[], scope: ReadScope, close: boolean): number {
 		const bodies: string[] = [];
 		let pos = start;
 		for (const { delimiter, stripTabs, doc } of pending) {
@@ -1615,17 +1619,28 @@ class ShellScriptParser {
 			let closed = false;
 			while (pos < text.length && !closed) {
 				let line = "";
+				// Where each physical line joined into `line` starts, in `line` and in `text`.
+				const parts: { from: number; at: number }[] = [];
 				let joined = true;
 				while (joined) {
 					const newline = text.indexOf("\n", pos);
+					parts.push({ from: line.length, at: pos });
 					line += text.slice(pos, newline < 0 ? text.length : newline);
 					pos = newline < 0 ? text.length : newline + 1;
 					joined = doc.expands && newline >= 0 && ODD_TRAILING_BACKSLASHES_RE.test(line);
 					if (joined) line = line.slice(0, -1);
 				}
-				if (stripTabs) line = line.replace(/^\t+/, "");
-				if (line === delimiter) closed = true;
-				else lines.push(line);
+				const stripped = stripTabs ? line.replace(/^\t+/, "") : line;
+				const after = line.length - stripped.length + delimiter.length;
+				if (stripped === delimiter) {
+					closed = true;
+				} else if (close && stripped.startsWith(delimiter) && stripped.includes(")", delimiter.length)) {
+					const part = parts.findLast(({ from }) => from <= after)!;
+					pos = part.at + after - part.from;
+					closed = true;
+				} else {
+					lines.push(stripped);
+				}
 			}
 			if (!closed) {
 				pending.length = 0;
