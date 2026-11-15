@@ -2,20 +2,31 @@
 
 ## [Unreleased]
 
+## [18.20.1] - 2026-11-14
+
+### Breaking Changes
+
+- Changed lsTree() to return { path, mode } entries instead of bare paths; mode matches git ls-tree output (for example, 100755 or 120000).
+
 ### Added
 
-- Added optimistic concurrency and alternate-index support to `commitCreate()`: commits can use a separate index file without modifying the repository index and can reject stale commits when `HEAD` has moved.
-- Improved `grep()` and `glob()` performance for ovnfs checkouts by using the serving daemon when supported, while retaining native fallback behavior and existing streaming, filtering, and link-following options.
+- Added noVerify to commitCreate() options to skip the pre-commit and commit-msg hooks, matching git commit --no-verify.
+- Added optimistic concurrency and alternate-index support to commitCreate(), allowing commits to use a separate index and reject stale commits when HEAD has changed.
+- Improved grep() and glob() performance for ovnfs checkouts by using the serving daemon when available while preserving native fallback behavior and existing streaming, filtering, and link-following options.
+
+### Changed
+
+- Improved shell search across local and network filesystems: local searches avoid unexpectedly traversing network mounts, network-backed searches perform more directory operations concurrently, and fd supports parallel traversal together with ignore, pruning, depth, worker, and error-reporting options.
 
 ### Fixed
 
-- Fixed `<text>` elements disappearing from rendered SVGs when a generic font family refers to an unavailable font ([#15181](https://github.com/can1357/oh-my-pi/issues/15181), [#18538](https://github.com/can1357/oh-my-pi/pull/18538)).
-- Fixed `worktree add` with source checkouts containing read-only files or directories, including cleanup and safety issues involving tracked directories replaced by symlinks ([#14190](https://github.com/can1357/oh-my-pi/issues/14190), [#18537](https://github.com/can1357/oh-my-pi/pull/18537)).
-- Fixed cancelled or timed-out `Shell.run` calls so they stop only jobs started by that invocation while preserving the shell session for subsequent runs.
-- Improved shell search behavior across local and network filesystems: local searches no longer descend into network mounts unexpectedly, network-backed walks keep more directory operations in flight, and `fd` uses parallel traversal with support for its ignore, pruning, depth, worker, and error-reporting options.
-- Reduced memory usage in shell visualization for long multi-line commands ([#18791](https://github.com/can1357/oh-my-pi/issues/18791), [#19177](https://github.com/can1357/oh-my-pi/pull/19177)).
-- Fixed the shell `cp` builtin so symlink-following options used with archive and directory-copy modes correctly override one another without disabling recursion or attribute preservation ([#19215](https://github.com/can1357/oh-my-pi/pull/19215)).
-- Fixed a built-in shell crash when `[ ]` or `test` expressions contained very long `-a`/`-o` chains; excessively deep parenthesized expressions now produce a clear error instead ([#18498](https://github.com/can1357/oh-my-pi/pull/18498)).
+- Fixed binary patches produced by diffText({ binary: true }) and diffNoIndex(…, true) for non-UTF-8 text, such as Latin-1, so patches preserve the original bytes and apply correctly.
+- Fixed SVG rendering when a generic font family refers to an unavailable font, preventing <text> elements from disappearing.
+- Fixed worktree add for source checkouts containing read-only files or directories, including cases where tracked directories are replaced by symlinks.
+- Fixed cancelled and timed-out Shell.run calls so they terminate only jobs started by that invocation while preserving the shell session for later runs.
+- Reduced memory usage when visualizing long multi-line shell commands.
+- Fixed the shell cp builtin so symlink-following options work correctly with archive and directory-copy modes without disabling recursion or attribute preservation.
+- Replaced built-in shell crashes on very long -a/-o chains in [ ] and test expressions with a clear error for excessively deep expressions.
 
 ## [18.20.0] - 2026-11-12
 
