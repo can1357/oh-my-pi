@@ -20,6 +20,7 @@
  * {@link WireJobFeed} whose pulls and final push this module answers.
  */
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/wait";
 import type {
 	AsyncJob,
 	AsyncJobDeliverySink,
@@ -28,12 +29,16 @@ import type {
 	AsyncJobFilter,
 	AsyncJobManagerApi,
 	AsyncJobProcess,
+	AsyncJobProgressDelivery,
+	AsyncJobProgressSink,
 	AsyncJobReapResult,
 	AsyncJobRegisterOptions,
 	AsyncJobRun,
 	AsyncJobRunResult,
 	AsyncJobType,
+	ProgressDeliveryCoverage,
 } from "../../async/job-manager";
+import type { ProgressStreamProvenance } from "../../async/progress-lines";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
 import {
@@ -124,6 +129,11 @@ export class RemoteAsyncJob implements AsyncJob {
 	readonly agentOutputPublished?: boolean;
 	readonly queued?: boolean;
 	readonly foreground?: boolean;
+	readonly progressDelivery?: AsyncJob["progressDelivery"];
+	readonly progressDeliveredCount?: number;
+	readonly completionLeftover?: AsyncJob["completionLeftover"];
+	readonly progressArtifactId?: string;
+	readonly terminalTextProvenance?: AsyncJob["terminalTextProvenance"];
 	readonly process?: AsyncJobProcess;
 	readonly widgetInputs?: JobWidgetInputs;
 	readonly #manager: RemoteAsyncJobManager;
@@ -148,6 +158,11 @@ export class RemoteAsyncJob implements AsyncJob {
 		this.agentOutputPublished = wire.agentOutputPublished;
 		this.queued = wire.queued;
 		this.foreground = wire.foreground;
+		this.progressDelivery = wire.progressDelivery;
+		this.progressDeliveredCount = wire.progressDeliveredCount;
+		this.completionLeftover = wire.completionLeftover;
+		this.progressArtifactId = wire.progressArtifactId;
+		this.terminalTextProvenance = wire.terminalTextProvenance;
 		const pids = wire.process?.pids ?? [];
 		this.process =
 			local?.process ??
@@ -247,6 +262,7 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 					jobId: ctx.jobId,
 					signal: fromWireSignal(ctx.signal),
 					reportProgress: ctx.reportProgress,
+					reportAgentProgress: (text, info) => ignoreSettle(ctx.reportAgentProgress(text, info)),
 					markRunning: () => ignoreSettle(ctx.markRunning()),
 				});
 			} finally {
@@ -263,6 +279,7 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 			queued: options?.queued,
 			foreground: options?.foreground,
 			intent: options?.intent,
+			progressDelivery: options?.progressDelivery,
 			feed: feed?.wire(),
 		};
 		const id = this.#remote.callSync("register", type, label, wired, wireOptions);
@@ -359,6 +376,37 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 				sink(jobId, text, job ? this.#row(job) : undefined),
 			),
 		);
+	}
+
+	registerProgressSink(ownerId: string, sink: AsyncJobProgressSink): () => void {
+		const acknowledge = sink.acknowledge?.bind(sink);
+		const retune = sink.retune?.bind(sink);
+		return localUnsubscribe(
+			this.#remote.callSync(
+				"registerProgressSink",
+				ownerId,
+				(jobId, text, job, seq, info) => sink.deliver(jobId, text, this.#row(job), seq, info),
+				acknowledge ? jobId => acknowledge(jobId) : undefined,
+				retune ? (jobId, delivery) => retune(jobId, delivery) : undefined,
+			),
+		);
+	}
+
+	activateProgressDelivery(
+		jobId: string,
+		delivery: AsyncJobProgressDelivery,
+		foregroundStreamProvenance?: ProgressStreamProvenance,
+		coverage?: ProgressDeliveryCoverage,
+	): boolean {
+		return this.#remote.callSync("activateProgressDelivery", jobId, delivery, foregroundStreamProvenance, coverage);
+	}
+
+	setProgressArtifact(jobId: string, artifactId: string | undefined): boolean {
+		return this.#remote.callSync("setProgressArtifact", jobId, artifactId);
+	}
+
+	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus {
+		return this.#remote.callSync("retuneProgressDelivery", jobId, delivery, ownerId);
 	}
 
 	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean> {
