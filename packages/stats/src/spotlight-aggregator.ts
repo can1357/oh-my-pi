@@ -1306,6 +1306,12 @@ export function buildSpotlightDashboard(
 		compounding.promptTokens += sessionFacts?.promptTokens ?? 0;
 
 		const turnsCounted = new Set<string>();
+		// Recoveries of cuts per request: a turn is the cuts' when every call it made recovered one, as in economics.
+		const cutRecoveries = new Map<string, number>();
+		for (const call of analysis.calls) {
+			if (!call.recovery?.source.result?.shortened || !call.entryId) continue;
+			cutRecoveries.set(call.entryId, (cutRecoveries.get(call.entryId) ?? 0) + 1);
+		}
 		const sessionMoney: SessionMoney = {
 			sessionFile: analysis.session.session_file,
 			savedTokens: 0,
@@ -1367,7 +1373,8 @@ export function buildSpotlightDashboard(
 			}
 			compounding.recoveredCarriedTokens += call.recoveryCarry;
 			compounding.recoveryUsd += call.recoveryCarryUsd;
-			sessionMoney.recoveryUsd += call.recoveryCarryUsd;
+			// The adjusted net charges cuts only their own fetch-backs, not those of results shaping left whole.
+			if (recovery.source.result?.shortened) sessionMoney.recoveryUsd += call.recoveryCarryUsd;
 			const point = bucket(call.timestamp);
 			point.recoveries++;
 			point.recoveredTokens += call.tokens;
@@ -1381,7 +1388,7 @@ export function buildSpotlightDashboard(
 					totals.turnsUsd += turnUsd;
 				}
 				compounding.recoveryUsd += turnUsd;
-				sessionMoney.recoveryUsd += turnUsd;
+				if (cutRecoveries.get(call.entryId) === call.callsInTurn) sessionMoney.recoveryUsd += turnUsd;
 				point.netUsd -= turnUsd;
 			}
 		}

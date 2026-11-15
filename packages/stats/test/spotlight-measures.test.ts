@@ -254,6 +254,27 @@ describe("Spotlight holdout-adjusted net", () => {
 		expect(time).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 4000, agentMs: 24_000 });
 		expect(time.share).toBeCloseTo((4000 + time.shapeMs) / 24_000, 12);
 	});
+
+	it("charges the cuts no fetch-back of a result shaping left whole", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Applied, no holdouts: the whole recovery is excess.
+		shapedRead(b, "src/c.ts");
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+		// A result pi truncated natively, which shaping did not cut, and its own dive in a request of its own.
+		call(b, "bash", { command: "make" }, "built\n[cut: artifact://5]");
+		call(b, "read", { path: "artifact://5" }, "z".repeat(4000));
+		await write("native.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.clawback.events).toBe(2);
+		const read = stats.economics.find(e => e.tool === "read");
+		const { savedUsd, spotlightUsd } = stats.compounding;
+		expect(stats.adjusted.netUsd.value).toBeCloseTo(
+			savedUsd - (read?.recoveryUsd ?? 0) - (read?.turnUsd ?? 0) - spotlightUsd,
+			12,
+		);
+	});
 });
 
 describe("Spotlight historical gated reads", () => {

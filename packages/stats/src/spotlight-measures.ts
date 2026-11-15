@@ -65,7 +65,10 @@ export interface SessionMoney {
 	sessionFile: string;
 	savedTokens: number;
 	savedUsd: number;
-	/** Recovery tokens carried and priced plus extra-turn cost (its share of compounding.recoveryUsd). */
+	/**
+	 * Recovery tokens carried and priced plus extra-turn cost, of this session's cuts only: fetch-backs of results
+	 * shaping left whole (a native truncation's artifact) are in compounding.recoveryUsd but are not the cuts' to pay.
+	 */
 	recoveryUsd: number;
 	spotlightUsd: number;
 }
@@ -225,14 +228,12 @@ export function computeAdjusted(
 		};
 	});
 	const ratio = recoveredTotal > 0 ? excessTotal / recoveredTotal : 0;
+	const cutRecoveryUsd = sumOf(money.map(entry => entry.recoveryUsd));
 	return {
 		byTool,
 		excessTokens: estimate(excessTotal, intervals?.total),
 		netTokens: estimate(grossSavedTokens - excessTotal, intervals?.net),
-		netUsd: estimate(
-			compounding.savedUsd - compounding.recoveryUsd * ratio - compounding.spotlightUsd,
-			intervals?.netUsd,
-		),
+		netUsd: estimate(compounding.savedUsd - cutRecoveryUsd * ratio - compounding.spotlightUsd, intervals?.netUsd),
 		minHoldouts: MIN_HOLDOUTS,
 	};
 }

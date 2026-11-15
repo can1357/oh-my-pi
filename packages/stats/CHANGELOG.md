@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Spotlight headline's adjusted net subtracting fetch-backs of results that shaping left whole
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed
