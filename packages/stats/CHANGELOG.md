@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the Spotlight page charging a fetch-back turn that missed the prompt cache for rewriting context the next request would have rewritten anyway
+- Fixed the Spotlight page charging a fetch-back turn that partly missed the prompt cache for rewriting context the next request would have rewritten anyway
 
 ## [18.20.1] - 2026-11-14
 

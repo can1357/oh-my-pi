@@ -271,8 +271,9 @@ export interface Request {
 	context: number;
 	/**
 	 * What the request added to the bill: its cost, with cache writes beyond its context's growth since the previous
-	 * request (a rewrite of context already sent, after a cache miss or a compaction) priced at the read rate, since
-	 * the next request would have paid that rewrite had this one not run.
+	 * request (a rewrite of context already sent, after a partial cache miss or a compaction) priced at its own cache
+	 * read rate, since the next request would have paid that rewrite had this one not run. A request that read no cache
+	 * bills no read rate to price the rewrite at, so it keeps its whole cost.
 	 */
 	turnUsd: number;
 	compacted: boolean;
@@ -468,7 +469,8 @@ function toRequest(row: RequestRow, previous: Request | undefined): Request {
 		timestamp: row.timestamp,
 		durationMs: row.duration,
 		context,
-		turnUsd: row.cost_total - rewritten * Math.max(0, writeRate - readRate),
+		turnUsd:
+			row.cache_read_tokens > 0 ? row.cost_total - rewritten * Math.max(0, writeRate - readRate) : row.cost_total,
 		compacted: false,
 		readRate,
 		writeRate,

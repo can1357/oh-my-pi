@@ -484,6 +484,22 @@ describe("Spotlight cut economics", () => {
 		expect(stats.clawback.turnsUsd).toBeCloseTo(added, 12);
 		expect(stats.economics.find(e => e.tool === "read")?.turnUsd).toBeCloseTo(added, 12);
 	});
+
+	it("keeps a fetch-back turn that read no cache at its whole cost: it bills no read rate to price a rewrite at", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		const [dive] = b.request({
+			cacheWrite: 12_500,
+			calls: [{ name: "read", args: { path: "artifact://0:21-79" } }],
+		});
+		b.result(dive, { text: "x".repeat(400) });
+		await write("full-miss.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.clawback.turns).toBe(1);
+		expect(stats.clawback.turnsUsd).toBeCloseTo(0.0025 + 0.005 + 12_500 * 6.25e-6, 12);
+	});
 });
 
 describe("Spotlight fetch-back gaps", () => {
