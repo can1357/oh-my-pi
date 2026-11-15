@@ -6,6 +6,7 @@
 
 - The bash interceptor (`bashInterceptor.enabled`) redirects a bare `pwsh`/`powershell.exe` invocation to the `powershell` tool when it is available, so PowerShell runs in the persistent host with a correctly reset `$env:PSModulePath` instead of whatever bash's own environment carries ([#13236](https://github.com/can1357/oh-my-pi/pull/13236) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 - The `powershell` tool takes an `edition` argument (`pwsh` or `powershell`/Windows PowerShell) so a conversation can run both in the same session — each edition keeps its own independent session host, so switching never discards the other's state. New `powershell.defaultEdition` setting (default `pwsh`) picks which one a call uses when it doesn't specify ([#13236](https://github.com/can1357/oh-my-pi/pull/13236) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
+- In ACP mode, `powershell` tool calls ask the client for execution permission like `bash` does, and the permission prompt shows the command as `PS> …` ([#13237](https://github.com/can1357/oh-my-pi/pull/13237) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 
 ### Changed
 
