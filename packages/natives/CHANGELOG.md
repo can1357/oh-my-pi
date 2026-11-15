@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: the extracted addon is now matched to the embedded build by content hash, not size alone
+- Fixed a standalone binary loading the native addon a previous build of the same version extracted, instead of its own, when both addons happened to be the same size: the extracted addon is now matched to the embedded build by content hash, not size alone ([#19346](https://github.com/can1357/oh-my-pi/pull/19346) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
 
 ## [18.20.1] - 2026-11-14
 
