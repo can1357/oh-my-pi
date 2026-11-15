@@ -9,7 +9,10 @@
  * - a compaction is a request whose prompt (input + cache read + cache write) is under 60% of the previous one's;
  * - a rerun is a bash command equal to, extending (pipe, redirect, `&&`), or ≥ 60% token-similar to a recent one;
  *   for any other tool but `read`, a call of the same tool whose argument tokens (`argumentTokens`) are ≥ 60%
- *   similar.
+ *   similar;
+ * - an extra turn costs what it added to the bill: cache writes beyond its context's growth since the previous request
+ *   (a rewrite the next request would have paid anyway) are priced at its own cache-read rate, and one that read no
+ *   cache keeps its whole cost (see {@link Request.turnUsd}).
  */
 
 import type { Database, Statement } from "bun:sqlite";
