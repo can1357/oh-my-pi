@@ -4,6 +4,8 @@
 // (http://www.apache.org/licenses/LICENSE-2.0). Modified for omp: rewritten in TypeScript on this
 // tokenizer's operators, with `cd` and `( )` subshell tracking, `&&`-chain tracking, quote-aware
 // heredocs, and scripts fed to a shell's stdin. See packages/coding-agent/THIRD-PARTY-NOTICES.txt.
+// It reads shell text best-effort for the opt-in guard rules and is not a security boundary: values
+// it cannot know (most variables, substitution output) stay unexpanded.
 
 import * as path from "node:path";
 
