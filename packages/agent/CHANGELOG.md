@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an opt-in numeric faithfulness check for compaction summaries and handoff documents (`CompactionSettings.numberCheck`): numbers the summarizer was never shown go back to it once for a line-level fix, any left are replaced with `?`, and the findings are recorded in `details.numberCheck` ([#19290](https://github.com/can1357/oh-my-pi/pull/19290))
+- Added an opt-in numeric faithfulness check for compaction summaries and handoff documents (`CompactionSettings.numberCheck`): numbers the summarizer was never shown go back to it once for a line-level fix, any left are replaced with `?`, and the findings are recorded in `details.numberCheck` ([#19290](https://github.com/can1357/oh-my-pi/pull/19290) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.1] - 2026-11-14
 
