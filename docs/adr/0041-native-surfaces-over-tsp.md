@@ -134,7 +134,7 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
 | 0 | Wire module, probe arm, input routing, a port of v1's reference applier (`apply.ts`) as a test oracle, opt-out and recording | Unit tests: chunk cut rule (property), framing round-trip, probe demux; no user-visible change | Done |
 | 1 | Handshake, with the optimistic start on `TERM_PROGRAM=tern` (revoked after 1 s without a reply); inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer as a minimal `editor` (caret, no native editing) and status band as `rows`; overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) | Done |
 | 2 | Per-card descriptions (bash `ansi`+`follow`, edit `diff`, read `code`, todo `checklist`, task `agent`), status as `status`/`seg`, toasts, images via blobs (no palette `t`: Tern's theme applies) | Each card's description checked against the applier; `rows` count per frame logged | Done, except the `rows` count per frame: nothing logs it |
-| 3 | `editor` with `edit`/`undo`/`send`, autocomplete overlay at the caret, pickers and settings as `picker`/`prefs`, modal approvals in `layer`, `screen` surfaces for full-screen apps | Editor edits round-trip through UTF-16 offsets; picker selection drives the same commands as the cell UI | Partial. Done: modal approvals, settings as `el` forms, `screen` covers, native `edit` and `undo` (the editor half of the criterion, proven in P7). Owed: `send`, the autocomplete overlay at the caret, data-first pickers (the picker half), `prefs` and `effort` |
+| 3 | `editor` with `edit`/`undo`/`send`, autocomplete overlay at the caret, pickers and settings as `picker`/`prefs`, modal approvals in `layer`, `screen` surfaces for full-screen apps | Editor edits round-trip through UTF-16 offsets; picker selection drives the same commands as the cell UI | Done (2026-11-15; #648, #650, #653). Modal approvals, settings as a `prefs` sheet (an `el` form for an older Tern), `screen` covers, native `edit`, `undo` and `send`, data-first pickers, the autocomplete overlay at the caret and the `effort` seg. Both halves of the criterion are proven in P7. Owed: `aside` docking of the sheet, and `select`/`activate`/`focus` on it |
 | 4 (optional) | `flow` surfaces for print-mode output, stylesheets and `el`, Windows ConPTY input, `TERN_BLOB_DIR` | Owner decision per item | Partial. Done: the typed `el` builder, OSC 877 input. Owed: a `flow` caller, a stylesheet caller, a `TERN_BLOB_DIR` reader |
 
 ## Consequences
@@ -250,9 +250,12 @@ Phase 2 done (`crates/chat/src/cards/`, `crates/chat/src/tsp.rs`; `5790db5f4e`):
   node, then `rows`;
 - the status band as `status`/`seg`, and notices as `toast`, each falling back per kind through
   `hello.kinds`;
-- no palette is sent; nodes carry roles and tones only.
+- no palette is sent; nodes carry roles and tones only;
+- every frame logs, at debug level, a `tsp frame` event with the fields `surface`, `seq`, `ops` and
+  `rows`. `rows` counts the nodes that fell back to `rows` and is computed only when debug is on
+  (`crates/chat/src/tsp.rs:log_frame`; #648).
 
-Phase 3 partly done:
+Phase 3 done:
 - the approval prompt is a surface-scoped `el` form in the `layer` region; Tern `action` events
   are queued by the surface and routed to the same approval decision authority as the cell UI
   (`fe1b29c476`);
@@ -283,24 +286,51 @@ Phase 3 partly done:
   `transcode_into`, `transcode_with_case`, `transcoded_len` and `to_string`. Lengths go through
   `transcoded_len::<Utf8, Utf16Le>`, and `resolve` maps offsets by walking the characters.
 
-Phase 3 not done, checked against the code on `omp2`:
-- `send`. omp does not announce it and the composer node has no `sendable` prop, so Tern sends
-  no `send`. It needs a path that submits explicit text the way Enter classifies a draft
-  (commands, local `!` and `$` input, prompts) and keeps the draft;
-- pickers (`3da28502f6`, #344). `crates/chat/src/overlays/models.rs:ModelPicker::tsp_node` and
-  `crates/chat/src/overlays/mod.rs:HistoryPicker::tsp_node` send a `picker` whose rows are
-  `item` children and whose `selected` is a row number. The data-first picker of v1
-  (`TspPickerProps` in `packages/wire/src/tsp.ts` at `579da1d661`) carries its rows in the
-  `items` prop, names the selected row by id, and holds that row's preview as children.
-  `Host::route_tsp_event` picks a model on `select`; v1 (`routeSelectListPicker` in
-  `packages/tui/src/native/picker.ts`) previews on `select` and picks on `activate` or the
-  `confirm` action. No proof sends a picker event, so the picker half of the exit criterion is
-  not met;
-- the autocomplete overlay. `crates/chat/src/composer.rs:Composer::autocomplete_node` sends the
-  dropdown as a `picker` in the `layer` region, not at the caret, and nothing routes its
-  events;
-- `prefs` and `effort` nodes. No presenter sends them; the model hub and the other overlays use
-  the cell UI.
+- native `send` (#648). The `hello` query announces `send`. The composer carries `sendable`
+  while Enter would reach it: no approval and no modal overlay (`Presenter::composer_ready`).
+  `Host::route_tsp_send` accepts a `send` only for the live session composer
+  (`Surface::addresses_composer`). It submits the sanitized text (`edit.rs:send_text`) through
+  `Presenter::send_prompt`, the same classification and refusals as Enter, so a sent `/exit`
+  quits. The draft it displaces is kept for Up recall (`Composer::stage_send`), as v1 parks it in
+  local recall. v1's only `sendable` gate is a bootstrap flag that omp2 lacks. P7
+  `tsp_native_sends_take_the_path_enter_takes`;
+- data-first pickers (#650). `crates/chat/src/overlays/models.rs:ModelPicker::tsp_node` and
+  `crates/chat/src/overlays/mod.rs:HistoryPicker::tsp_node` send a `picker` shaped like v1's
+  `TspPickerProps`, with typed props in `crates/tui/src/tsp/picker.rs`:
+  - rows in `items`, keyed by catalog key or history row id;
+  - the list's filtered rows in `order`, and the cursor row named by id in `selected`;
+  - the selected model's preview as children.
+
+  `crates/chat/src/tsp.rs:Surface::present_sheet` patches the sheet in place, so a cursor move
+  sends `selected` and the preview, never the catalogue. The whole catalogue rides one frame,
+  chunked under the `apc` limit. `Host::route_tsp_gesture` routes the events through the same
+  `PickerEvent`s as the cell picker's keys: `select` previews, `activate` or the `confirm` action
+  picks, and `close` or `cancel` closes. A Tern without `picker` keeps the cell overlay. P7
+  `tsp_the_model_picker_previews_on_select_and_picks_on_activate_or_confirm` is the picker half
+  of the exit criterion;
+- the autocomplete overlay (#650). `crates/chat/src/composer.rs:Composer::autocomplete_node`
+  sends an `overlay` anchored to the composer's caret around a `list` of the dropdown's window.
+  A row's `select` or `activate` is accepted as a click on the cell row is
+  (`Composer::accept_completion`). P7
+  `tsp_the_completion_list_sits_at_the_caret_and_accepts_a_row`;
+- `prefs` and `effort` (#653). The settings panel describes itself as a data-first `prefs`
+  sheet (`crates/chat/src/tsp/prefs.rs`, `SettingsPanel::tsp_prefs`). It goes on the screen
+  cover when `hello.kinds` has `prefs`; otherwise the panel sends its `el` form. Its `change`
+  events commit through `SettingsPanel::stage_commit`, the cell UI's validation, rollback and
+  `writecfg` path, and `null` resets a row to its default. The model hub stays a `picker`, as in
+  v1. P7 `tsp_a_prefs_change_commits_the_setting_like_the_cell_ui`. The status band carries
+  thinking effort as an `effort` seg, falling back to a four-step `blocks` meter and then to
+  text. A click cycles the level (`thinking.cycle`).
+
+Phase 3 not done:
+- `aside` docking. v1 docks the `prefs` sheet in `layer` when Tern advertises `aside`; omp
+  always uses the screen cover;
+- `select`, `activate` and `focus` events on the `prefs` sheet are not routed;
+- no P7 proof covers `effort`, because the sandbox model reports no reasoning. Unit tests against
+  the reference applier cover it;
+- a P7 run on the merged prefs branch twice failed one test with "chat did not quit": the
+  surface closed and the terminal was restored, but the process did not exit within 20 s. Each
+  time the test passed when rerun, alone and in the full suite. The cause is unknown.
 
 Phase 4 partly done (`f44c83c249`, `ee8b23083f`):
 - a typed `ElementTag` builder (`crates/chat/src/tsp.rs:element_node`) keeps Tern's tag
