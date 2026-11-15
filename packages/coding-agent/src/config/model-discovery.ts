@@ -26,6 +26,7 @@ import {
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
+	type KindApiKind,
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
@@ -901,7 +902,7 @@ function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
 	output_modalities?: unknown;
 	architecture?: unknown;
-}): { kind: ModelKind; api: Api } | undefined {
+}): { kind: KindApiKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
 	const output = collectModalities([
