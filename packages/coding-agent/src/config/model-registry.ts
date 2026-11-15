@@ -4338,7 +4338,7 @@ export class ModelRegistry {
 		const providerApi = config.api;
 		const providerCompat = config.compat;
 		return {
-			providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+			providerId: providerName,
 			staticModels: [],
 			cacheDbPath: this.#cacheDbPath,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
