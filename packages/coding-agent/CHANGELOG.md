@@ -4,8 +4,8 @@
 
 ### Added
 
-- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls approval allowed, such as deletions outside the working directory, force pushes, or uploads, and refuses those the user did not ask for. Calls that only read are never judged, a judge failure lets the call through, and personal allowances live in `tools.guard.allowances` in your global config.
-- On Linux the tool guard also refuses heavy work (installs, builds, test suites) started while the host is strained by memory pressure, swapping, CPU saturation, I/O stalls, or a nearly full disk, and suggests moving it to another host or waiting.
+- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls approval allowed, such as deletions outside the working directory, force pushes, or uploads, and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- On Linux the tool guard also refuses heavy work (installs, builds, test suites) started while the host is strained by memory pressure, swapping, CPU saturation, I/O stalls, or a nearly full disk, and suggests moving it to another host or waiting ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.2] - 2026-11-14
 

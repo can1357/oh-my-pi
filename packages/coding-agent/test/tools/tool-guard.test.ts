@@ -386,7 +386,7 @@ describe("tool guard", () => {
 		await expect(
 			wrapped.execute("call-1", { command: "rm -rf /srv/db" }, undefined, undefined, {
 				settings,
-			} as unknown as AgentToolContext),
+			} as AgentToolContext),
 		).rejects.toThrow("The tool guard refused this call");
 		expect(execute).not.toHaveBeenCalled();
 	});
