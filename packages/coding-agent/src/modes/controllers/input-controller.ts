@@ -2815,7 +2815,7 @@ export class InputController {
 			const bareDialog = modalFocus && !promptTarget ? modalFocus : null;
 			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
 			else finishPaste = promptTarget?.beginPaste?.();
-			const textOnlyPrompt = modalFocus !== null && promptPaste === undefined;
+			const textOnlyFocus = modalFocus !== null && promptPaste === undefined;
 			const sink = promptPaste?.sink ?? this.#editorImageSink;
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
@@ -2837,7 +2837,7 @@ export class InputController {
 			// `readMacFileUrls` returns an empty list off Darwin, so on every
 			// other platform this is a no-op and the bitmap read below still
 			// runs first.
-			const fileUrls = textOnlyPrompt ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
+			const fileUrls = textOnlyFocus ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
 			let attachedFromFileUrls = false;
 			for (const url of fileUrls) {
 				const candidate = extractImagePathFromText(url);
@@ -2862,7 +2862,7 @@ export class InputController {
 			);
 			const image = await this.clipboard.readImage();
 			if (image) {
-				if (textOnlyPrompt) {
+				if (textOnlyFocus) {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
 					return false;
 				}
@@ -2891,7 +2891,7 @@ export class InputController {
 			// text. Covers terminals that paste the Finder file path as
 			// plain text rather than as a `public.file-url` (most macOS
 			// terminals do this for image clipboards).
-			const imagePath = textOnlyPrompt ? null : extractImagePathFromText(text);
+			const imagePath = textOnlyFocus ? null : extractImagePathFromText(text);
 			if (imagePath) {
 				await this.#pasteImagePath(imagePath, sink);
 				return true;
