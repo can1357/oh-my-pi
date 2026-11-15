@@ -770,10 +770,17 @@ function sentFiles(command: ShellCommand): string[] {
 	return files;
 }
 
+/**
+ * Whether a command prints the environment: `printenv`, `env` with no command, and the builtins that
+ * list exported variables when given no names: `export` (`-p`, `-n`), `declare`/`typeset` (`-p`,
+ * `-x`), and a bare `set`.
+ */
 function dumpsEnvironment(command: ShellCommand): boolean {
-	const name = command.argv[0];
+	const [name, ...rest] = command.argv;
 	if (name === "printenv" || (name === "env" && shellPositionalArgs(command.argv).length === 0)) return true;
-	return name === "export" && command.argv.length === 2 && command.argv[1] === "-p";
+	if (name === "export") return rest.every(arg => /^-[pn]+$/.test(arg));
+	if (name === "declare" || name === "typeset") return rest.every(arg => /^-[px]+$/.test(arg));
+	return name === "set" && rest.length === 0;
 }
 
 /** The secret a command puts on its output: the environment, or a credential or `.env` file it reads. */
