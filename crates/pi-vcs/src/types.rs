@@ -347,14 +347,25 @@ pub struct CleanOptions {
 
 /// What a work-discarding command would destroy, for
 /// [`discards_work`](crate::git::discards_work).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum DiscardCheck {
 	/// Uncommitted changes to tracked files (`reset --hard`, `checkout .`,
 	/// `restore .`).
-	#[default]
-	Tracked,
+	Tracked(TrackedCheck),
 	/// The untracked files a `git clean` with these options would delete.
 	Clean(CleanCheck),
+}
+
+/// Which changes to tracked files [`DiscardCheck::Tracked`] counts.
+#[derive(Debug, Clone, Default)]
+pub struct TrackedCheck {
+	/// Only changes the work tree holds beyond the index: the command
+	/// overwrites the work tree but leaves the index alone (`git checkout .`,
+	/// `git restore .`), which keeps staged changes.
+	pub worktree_only: bool,
+	/// Pathspecs the command restores, relative to the directory the check
+	/// runs in; empty for the whole work tree.
+	pub pathspecs:     Vec<String>,
 }
 
 /// The options of a `git clean` that [`DiscardCheck::Clean`] previews.

@@ -251,6 +251,10 @@ pub struct VcsCleanOptions {
 pub struct VcsDiscardCheck {
 	/// Preview `git clean` instead of tracked changes.
 	pub clean:               Option<bool>,
+	/// Tracked changes: count only those the work tree holds beyond the index,
+	/// for a command that leaves the index alone (`git checkout .`, `git
+	/// restore .`).
+	pub worktree_only:       Option<bool>,
 	/// `-d`: untracked directories too.
 	pub directories:         Option<bool>,
 	/// `-x`: ignored files too.
@@ -261,7 +265,9 @@ pub struct VcsDiscardCheck {
 	pub nested_repositories: Option<bool>,
 	/// `-e` patterns.
 	pub excludes:            Option<Vec<String>>,
-	/// Pathspecs, relative to the checked directory.
+	/// Pathspecs, relative to the checked directory: what `git clean`
+	/// previews (the directory when empty), or where tracked changes count
+	/// (the whole work tree when empty).
 	pub pathspecs:           Option<Vec<String>>,
 	/// `--git-dir`: the repository, as an absolute path.
 	pub git_dir:             Option<String>,
@@ -440,7 +446,10 @@ impl From<VcsRestoreOptions> for core::RestoreOptions {
 impl From<VcsDiscardCheck> for core::DiscardCheck {
 	fn from(v: VcsDiscardCheck) -> Self {
 		if !v.clean.unwrap_or(false) {
-			return Self::Tracked;
+			return Self::Tracked(core::TrackedCheck {
+				worktree_only: v.worktree_only.unwrap_or(false),
+				pathspecs:     v.pathspecs.unwrap_or_default(),
+			});
 		}
 		Self::Clean(core::CleanCheck {
 			directories:         v.directories.unwrap_or(false),

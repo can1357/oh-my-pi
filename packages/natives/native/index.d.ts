@@ -4287,6 +4287,12 @@ export interface VcsDiffOptions {
 export interface VcsDiscardCheck {
   /** Preview `git clean` instead of tracked changes. */
   clean?: boolean
+  /**
+   * Tracked changes: count only those the work tree holds beyond the index,
+   * for a command that leaves the index alone (`git checkout .`, `git
+   * restore .`).
+   */
+  worktreeOnly?: boolean
   /** `-d`: untracked directories too. */
   directories?: boolean
   /** `-x`: ignored files too. */
@@ -4297,7 +4303,11 @@ export interface VcsDiscardCheck {
   nestedRepositories?: boolean
   /** `-e` patterns. */
   excludes?: Array<string>
-  /** Pathspecs, relative to the checked directory. */
+  /**
+   * Pathspecs, relative to the checked directory: what `git clean`
+   * previews (the directory when empty), or where tracked changes count
+   * (the whole work tree when empty).
+   */
   pathspecs?: Array<string>
   /** `--git-dir`: the repository, as an absolute path. */
   gitDir?: string

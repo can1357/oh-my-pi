@@ -249,7 +249,8 @@ describe("discard_changes", () => {
 			const future = new Date(Date.now() + 60_000);
 			fs.utimesSync(path.join(repo, "a.txt"), future, future);
 			expect(bashApproval(repo, "git reset --hard")).toBe("exec");
-			fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+			// Without its filter, a file the filter handles counts as changed when its size changed.
+			fs.writeFileSync(path.join(repo, "a.txt"), "changed\n");
 			clearGuardProbeCache();
 			expect(ruleOf(bashApproval(repo, "git reset --hard"))).toBe("discard_changes");
 			expect(fs.existsSync(marker)).toBe(false);

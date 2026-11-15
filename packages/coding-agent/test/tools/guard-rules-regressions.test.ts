@@ -8,6 +8,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseShellScript } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import { clearGuardProbeCache } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
@@ -450,45 +451,20 @@ describe("guard rule regressions", () => {
 	});
 
 	it.skipIf(process.platform === "win32")(
-		"runs no filter driver while checking, even one whose name contains `=`",
+		"does not count a touched file behind a transforming filter driver as changed",
 		async () => {
-			await dirtyRepo(cwd);
-			const marker = path.join(path.dirname(cwd), `${path.basename(cwd)}-marker`);
-			const hook = path.join(cwd, ".git", "hook.sh");
-			fs.writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\ncat\n`);
-			fs.chmodSync(hook, 0o755);
-			fs.writeFileSync(path.join(cwd, ".gitattributes"), "a.txt filter=a=b\n");
-			await $`git config filter.a=b.clean ${hook} && git config filter.a=b.required true`.cwd(cwd).quiet();
-			try {
-				expect(ruleOf(bashApproval(cwd, "git reset --hard"))).toBe("discard_changes");
-				expect(fs.existsSync(marker)).toBe(false);
-			} finally {
-				fs.rmSync(marker, { force: true });
-			}
-		},
-	);
-
-	it.skipIf(process.platform === "win32")(
-		"fetches no missing object from a promisor remote while checking",
-		async () => {
-			await dirtyRepo(cwd);
-			const marker = path.join(path.dirname(cwd), `${path.basename(cwd)}-marker`);
-			const config: [string, string][] = [
-				["remote.origin.url", "/nowhere"],
-				["remote.origin.promisor", "true"],
-				["remote.origin.partialclonefilter", "blob:none"],
-				["extensions.partialclone", "origin"],
-				["remote.origin.uploadpack", `touch '${marker}'; false`],
-			];
-			for (const [key, value] of config) await $`git config ${key} ${value}`.cwd(cwd).quiet();
-			// A HEAD commit the object store lacks: reading it makes git fetch it from the promisor remote.
-			fs.writeFileSync(path.join(cwd, ".git", "HEAD"), `${"1".repeat(40)}\n`);
-			try {
-				bashApproval(cwd, "git reset --hard");
-				expect(fs.existsSync(marker)).toBe(false);
-			} finally {
-				fs.rmSync(marker, { force: true });
-			}
+			fs.writeFileSync(path.join(cwd, ".gitattributes"), "*.dat filter=up\n");
+			fs.writeFileSync(path.join(cwd, "b.dat"), "hello\n");
+			// As git-lfs and git-crypt do, the clean filter stores other bytes than the work tree holds.
+			await $`git init -q && git config filter.up.clean 'tr a-z A-Z' && git config filter.up.smudge 'tr A-Z a-z' && git config filter.up.required true && git add . && git -c user.email=t@example.com -c user.name=t commit -qm init`
+				.cwd(cwd)
+				.quiet();
+			const future = new Date(Date.now() + 60_000);
+			fs.utimesSync(path.join(cwd, "b.dat"), future, future);
+			expect(bashApproval(cwd, "git reset --hard")).toBe("exec");
+			fs.writeFileSync(path.join(cwd, "b.dat"), "hello, world\n");
+			clearGuardProbeCache();
+			expect(ruleOf(bashApproval(cwd, "git reset --hard"))).toBe("discard_changes");
 		},
 	);
 

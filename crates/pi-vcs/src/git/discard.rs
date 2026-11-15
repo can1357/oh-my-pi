@@ -1,34 +1,44 @@
 //! Whether a work-discarding git command would destroy anything, answered
 //! before the command is approved.
 
-use std::{ffi::OsStr, path::Path, time::Duration};
+use std::{
+	ffi::OsStr,
+	path::{Path, PathBuf},
+	time::{Duration, Instant},
+};
+
+use gix::bstr::ByteSlice;
 
 use super::{cli, discover_info};
 use crate::{
-	error::Result,
-	types::{DiscardCheck, RepositoryPaths},
+	error::{Error, Result},
+	types::{CleanCheck, DiscardCheck, RepositoryPaths, TrackedCheck},
 };
 
-/// Deadline for [`discards_work`]: it runs synchronously while a tool call
-/// waits for approval.
+/// Deadline for [`discards_work`], shared by every git call it makes: it runs
+/// synchronously while a tool call waits for approval.
 const DISCARD_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-/// Bytes retained from the check's output; the answer is only "any entry?".
-const DISCARD_CHECK_CAPTURE_LIMIT: usize = 4 * 1024;
 
 /// Whether a work-discarding command run in `dir` would destroy anything.
 ///
-/// That is uncommitted changes to tracked files (`git status --porcelain
-/// --untracked-files=no`), or the untracked files `git clean` with the
-/// check's options would delete (`git clean --dry-run`, pathspecs relative to
-/// `dir`), in the repository and work tree the command names in
-/// `repository` (`--git-dir`, `--work-tree`), or else the ones git discovers
-/// from `dir`. `false` outside a repository.
+/// That is uncommitted changes to tracked files under the check's pathspecs
+/// (`git status --porcelain --untracked-files=no`; with `worktree_only`, only
+/// those the work tree holds beyond the index), or the untracked files `git
+/// clean` with the check's options would delete (`git clean --dry-run`), with
+/// pathspecs relative to `dir`, in the repository and work tree the command
+/// names in `repository` (`--git-dir`, `--work-tree`), or else the ones git
+/// discovers from `dir`. `false` outside a repository.
 ///
 /// The question is asked while the command awaits approval, about a
 /// repository the agent may have just rewritten, so git runs through
-/// [`cli::run_sync_inert`]: no fsmonitor hook, no filter driver, no fetch from
-/// a promisor remote, no inherited `GIT_*` variable. Submodules are not
-/// entered.
+/// [`cli::InertGit`]: no fsmonitor hook, no filter driver, no fetch from a
+/// promisor remote, no inherited `GIT_*` variable. Submodules are not
+/// entered. A work-tree change to a file a configured filter driver handles
+/// (git-lfs, git-crypt) counts when git sees it without the content (deleted,
+/// changed type) or the file's size differs from the size the index recorded
+/// for it: git compares the unfiltered content with the filtered blob, which
+/// differ for a file that was only touched, and telling a touched file from a
+/// same-size edit would mean running the filter.
 pub fn discards_work(
 	dir: &Path,
 	repository: &RepositoryPaths,
@@ -44,56 +54,174 @@ pub fn discards_work(
 	if let Some(work_tree) = &repository.work_tree {
 		location.push(("GIT_WORK_TREE", work_tree.as_os_str()));
 	}
-	let mut args: Vec<String> = Vec::new();
+	let deadline = Instant::now() + DISCARD_CHECK_TIMEOUT;
+	let git = cli::InertGit::open(dir, &location, remaining(deadline))?;
 	match check {
-		DiscardCheck::Tracked => {
-			args.extend(
-				["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"]
-					.map(str::to_owned),
-			);
-		},
-		DiscardCheck::Clean(clean) => {
-			args.extend(["clean", "--dry-run"].map(str::to_owned));
-			if clean.directories {
-				args.push("-d".to_owned());
-			}
-			// A second `-f` also deletes untracked nested repositories, which a
-			// single one only skips.
-			if clean.nested_repositories {
-				args.push("-ff".to_owned());
-			}
-			if clean.ignored_only {
-				args.push("-X".to_owned());
-			} else if clean.include_ignored {
-				args.push("-x".to_owned());
-			}
-			for pattern in &clean.excludes {
-				args.push("-e".to_owned());
-				args.push(pattern.clone());
-			}
-			args.push("--".to_owned());
-			args.extend(clean.pathspecs.iter().cloned());
-		},
+		DiscardCheck::Tracked(tracked) => loses_tracked_changes(&git, dir, tracked, deadline),
+		DiscardCheck::Clean(clean) => deletes_untracked_files(&git, dir, clean, deadline),
 	}
-	let clean = matches!(check, DiscardCheck::Clean(_));
-	let limit = if clean {
-		cli::OUTPUT_LIMIT_BYTES
-	} else {
-		DISCARD_CHECK_CAPTURE_LIMIT
+}
+
+/// What is left of the check's time at `deadline`.
+fn remaining(deadline: Instant) -> Duration {
+	deadline.saturating_duration_since(Instant::now())
+}
+
+/// Runs `args` in `dir` before `deadline` and fails on a non-zero exit.
+fn run_checked(
+	git: &cli::InertGit,
+	dir: &Path,
+	args: &[String],
+	stdin: &[u8],
+	deadline: Instant,
+) -> Result<String> {
+	let output = git.run(dir, args, stdin, remaining(deadline), cli::OUTPUT_LIMIT_BYTES)?;
+	Ok(output.into_checked(args)?.stdout)
+}
+
+/// Whether restoring the files `check` names would lose changes to them.
+fn loses_tracked_changes(
+	git: &cli::InertGit,
+	dir: &Path,
+	check: &TrackedCheck,
+	deadline: Instant,
+) -> Result<bool> {
+	let mut args: Vec<String> =
+		["status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=all", "--"]
+			.map(str::to_owned)
+			.to_vec();
+	args.extend(check.pathspecs.iter().cloned());
+	let status = run_checked(git, dir, &args, &[], deadline)?;
+	if cli::is_truncated(&status) {
+		return Ok(true);
+	}
+	// `XY <path>`: X the index against HEAD, Y the work tree against the
+	// index. A rename or copy carries its source path in the next field.
+	let mut unsure = Vec::new();
+	let mut fields = status.split('\0');
+	while let Some(entry) = fields.next() {
+		let (Some(&index), Some(&worktree), Some(path)) =
+			(entry.as_bytes().first(), entry.as_bytes().get(1), entry.get(3..))
+		else {
+			continue;
+		};
+		if matches!(index, b'R' | b'C') {
+			fields.next();
+		}
+		if index != b' ' && !check.worktree_only {
+			return Ok(true);
+		}
+		match worktree {
+			b' ' => {},
+			b'M' if !git.blanked_filters().is_empty() => unsure.push(path),
+			_ => return Ok(true),
+		}
+	}
+	if unsure.is_empty() {
+		return Ok(false);
+	}
+	changed_behind_filters(git, dir, &unsure, deadline)
+}
+
+/// Whether any of `paths` (relative to the top of the work tree), which git
+/// saw modified in the work tree with every filter driver blanked, really
+/// changed: no blanked driver filters it, or its size differs from the size
+/// the index recorded. A path a blanked driver filters was compared
+/// unfiltered against its filtered blob, so it shows modified whenever its
+/// stat data changed. An index that cannot be read counts as a change.
+fn changed_behind_filters(
+	git: &cli::InertGit,
+	dir: &Path,
+	paths: &[&str],
+	deadline: Instant,
+) -> Result<bool> {
+	let args: Vec<String> =
+		["rev-parse", "--show-toplevel", "--git-path", "index", "--show-object-format"]
+			.map(str::to_owned)
+			.to_vec();
+	let location = run_checked(git, dir, &args, &[], deadline)?;
+	let mut lines = location.lines();
+	let (Some(top), Some(index_path), Some(object_format)) =
+		(lines.next(), lines.next(), lines.next())
+	else {
+		return Err(Error::backend("git rev-parse", "missing the work tree or index location"));
 	};
-	let output = cli::run_sync_inert(dir, &location, &args, DISCARD_CHECK_TIMEOUT, limit)?
-		.into_checked(&args)?;
-	if !clean {
-		return Ok(!output.stdout.trim().is_empty());
+	let top = PathBuf::from(top);
+
+	let args: Vec<String> = ["check-attr", "-z", "--stdin", "filter"]
+		.map(str::to_owned)
+		.to_vec();
+	let mut stdin = Vec::new();
+	for path in paths {
+		stdin.extend_from_slice(path.as_bytes());
+		stdin.push(0);
 	}
+	let attributes = run_checked(git, &top, &args, &stdin, deadline)?;
+	// `<path>\0filter\0<value>\0` for each path.
+	let mut fields = attributes.split('\0');
+	let mut filtered = Vec::with_capacity(paths.len());
+	while let (Some(path), Some(_), Some(value)) = (fields.next(), fields.next(), fields.next()) {
+		if !git.blanked_filters().contains(value) {
+			return Ok(true);
+		}
+		filtered.push(path);
+	}
+	if filtered.len() < paths.len() {
+		return Ok(true);
+	}
+
+	// `--git-path` is relative to the directory rev-parse ran in.
+	let index = object_format
+		.parse::<gix::hash::Kind>()
+		.ok()
+		.and_then(|kind| {
+			gix::index::File::at(dir.join(index_path), kind, true, Default::default()).ok()
+		});
+	let Some(index) = index else {
+		return Ok(true);
+	};
+	Ok(filtered.iter().any(|path| {
+		// The index keeps the low 32 bits of the size.
+		let recorded = index
+			.entry_by_path(path.as_bytes().as_bstr())
+			.map(|entry| entry.stat.size);
+		let actual = std::fs::symlink_metadata(top.join(path)).map(|meta| meta.len() as u32);
+		recorded.is_none() || recorded != actual.ok()
+	}))
+}
+
+/// Whether the `git clean` `check` describes would delete anything.
+fn deletes_untracked_files(
+	git: &cli::InertGit,
+	dir: &Path,
+	check: &CleanCheck,
+	deadline: Instant,
+) -> Result<bool> {
+	let mut args: Vec<String> = ["clean", "--dry-run"].map(str::to_owned).to_vec();
+	if check.directories {
+		args.push("-d".to_owned());
+	}
+	// A second `-f` also deletes untracked nested repositories, which a
+	// single one only skips.
+	if check.nested_repositories {
+		args.push("-ff".to_owned());
+	}
+	if check.ignored_only {
+		args.push("-X".to_owned());
+	} else if check.include_ignored {
+		args.push("-x".to_owned());
+	}
+	for pattern in &check.excludes {
+		args.push("-e".to_owned());
+		args.push(pattern.clone());
+	}
+	args.push("--".to_owned());
+	args.extend(check.pathspecs.iter().cloned());
+	let output = run_checked(git, dir, &args, &[], deadline)?;
 	// A dry run also prints what it leaves ("Would skip repository", "Would
 	// refuse to remove current working directory"); only "Would remove" lines
-	// name a deletion. Messages are in the C locale ([`cli::run_sync_inert`]).
-	Ok(cli::is_truncated(&output.stdout)
-		|| output
-			.stdout
-			.lines()
-			.any(|line| line.starts_with("Would remove ")))
+	// name a deletion. Messages are in the C locale ([`cli::InertGit`]).
+	Ok(cli::is_truncated(&output) || output.lines().any(|line| line.starts_with("Would remove ")))
 }
 
 #[cfg(test)]
@@ -101,7 +229,7 @@ mod tests {
 	use std::{fs, process::Command};
 
 	use super::*;
-	use crate::types::CleanCheck;
+	use crate::types::{CleanCheck, TrackedCheck};
 
 	type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -136,25 +264,76 @@ mod tests {
 
 	/// No `--git-dir` or `--work-tree`: git discovers the repository.
 	const DISCOVERED: RepositoryPaths = RepositoryPaths { git_dir: None, work_tree: None };
+	/// Every uncommitted change to a tracked file, as `git reset --hard` loses.
+	const HARD_RESET: DiscardCheck =
+		DiscardCheck::Tracked(TrackedCheck { worktree_only: false, pathspecs: Vec::new() });
+
+	/// Sets `path`'s modification time a minute ahead without changing its
+	/// content: git has to compare the content to tell whether it changed.
+	fn touch(path: &Path) -> TestResult {
+		let future = std::time::SystemTime::now() + Duration::from_mins(1);
+		fs::File::options()
+			.write(true)
+			.open(path)?
+			.set_modified(future)?;
+		Ok(())
+	}
 
 	#[test]
 	fn reports_tracked_changes_and_untracked_files_separately() -> TestResult {
 		let dir = repo()?;
 		let root = dir.path();
-		assert!(!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?);
 		assert!(!discards_work(root, &DISCOVERED, &clean(CleanCheck::default()))?);
 
 		fs::write(root.join("scratch.txt"), "x\n")?;
-		assert!(
-			!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?,
-			"untracked files survive a reset"
-		);
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?, "untracked files survive a reset");
 		assert!(discards_work(root, &DISCOVERED, &clean(CleanCheck::default()))?);
 		let excluded = CleanCheck { excludes: vec!["scratch.txt".to_owned()], ..Default::default() };
 		assert!(!discards_work(root, &DISCOVERED, &clean(excluded))?);
 
 		fs::write(root.join("a.txt"), "two\n")?;
-		assert!(discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
+		Ok(())
+	}
+
+	/// `git checkout .` and `git restore .` restore the files under the
+	/// directory from the index: changes elsewhere, and staged ones, survive.
+	#[test]
+	fn counts_only_the_changes_the_restore_overwrites() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		fs::create_dir(root.join("docs"))?;
+		fs::create_dir(root.join("src"))?;
+		fs::write(root.join("docs").join("d.md"), "d\n")?;
+		fs::write(root.join("src").join("s.ts"), "s\n")?;
+		git(root, &["add", "docs", "src"])?;
+		git(root, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "two"])?;
+		let from_index = |pathspec: &str| {
+			DiscardCheck::Tracked(TrackedCheck {
+				worktree_only: true,
+				pathspecs:     vec![pathspec.to_owned()],
+			})
+		};
+
+		fs::write(root.join("src").join("s.ts"), "changed\n")?;
+		let docs = root.join("docs");
+		assert!(!discards_work(&docs, &DISCOVERED, &from_index("."))?, "src/ is not under docs/");
+		assert!(discards_work(&docs, &DISCOVERED, &from_index(":/"))?);
+		assert!(discards_work(&docs, &DISCOVERED, &HARD_RESET)?);
+		assert!(discards_work(root, &DISCOVERED, &from_index("."))?);
+
+		git(root, &["add", "src/s.ts"])?;
+		assert!(
+			!discards_work(root, &DISCOVERED, &from_index("."))?,
+			"the index keeps a staged change"
+		);
+		let from_head = DiscardCheck::Tracked(TrackedCheck {
+			worktree_only: false,
+			pathspecs:     vec![".".to_owned()],
+		});
+		assert!(discards_work(root, &DISCOVERED, &from_head)?);
+		assert!(!discards_work(&docs, &DISCOVERED, &from_head)?);
 		Ok(())
 	}
 
@@ -174,7 +353,7 @@ mod tests {
 	#[test]
 	fn is_false_outside_a_repository() -> TestResult {
 		let dir = tempfile::tempdir()?;
-		assert!(!discards_work(dir.path(), &DISCOVERED, &DiscardCheck::Tracked)?);
+		assert!(!discards_work(dir.path(), &DISCOVERED, &HARD_RESET)?);
 		Ok(())
 	}
 
@@ -216,17 +395,42 @@ mod tests {
 		git(root, &["config", "filter.a=b.clean", &hook])?;
 		git(root, &["config", "filter.a=b.required", "true"])?;
 
-		// Same size, new mtime: git compares the content, through the clean
+		// Same content, new mtime: git compares the content, through the clean
 		// filter when one is configured.
-		let future = std::time::SystemTime::now() + Duration::from_mins(1);
-		fs::File::options()
-			.write(true)
-			.open(root.join("a.txt"))?
-			.set_modified(future)?;
-		assert!(!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
-		fs::write(root.join("a.txt"), "two\n")?;
-		assert!(discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?);
+		touch(&root.join("a.txt"))?;
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?);
+		fs::write(root.join("a.txt"), "changed\n")?;
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
 		assert!(!marker.exists(), "a repository-configured program ran");
+		Ok(())
+	}
+
+	/// With its clean filter blanked, a file whose filter transforms the
+	/// content (git-lfs stores a pointer, git-crypt ciphertext) differs from
+	/// its blob even when only touched: it counts as changed only when its size
+	/// differs from the size the index recorded. A file no configured driver
+	/// filters still counts for any change.
+	#[cfg(unix)]
+	#[test]
+	fn a_touched_file_behind_a_transforming_filter_is_unchanged() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		git(root, &["config", "filter.up.clean", "tr a-z A-Z"])?;
+		git(root, &["config", "filter.up.smudge", "tr A-Z a-z"])?;
+		git(root, &["config", "filter.up.required", "true"])?;
+		fs::write(root.join(".gitattributes"), "*.dat filter=up\n")?;
+		fs::write(root.join("b.dat"), "hello\n")?;
+		git(root, &["add", ".gitattributes", "b.dat"])?;
+		git(root, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "dat"])?;
+
+		touch(&root.join("b.dat"))?;
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?, "a touched file is unchanged");
+		fs::write(root.join("a.txt"), "two\n")?;
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?, "a.txt has no filter");
+		git(root, &["checkout", "--", "a.txt"])?;
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?);
+		fs::write(root.join("b.dat"), "hello, world\n")?;
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
 		Ok(())
 	}
 
@@ -269,20 +473,16 @@ mod tests {
 
 		let repository =
 			RepositoryPaths { git_dir: Some(git_dir), work_tree: Some(work_tree.clone()) };
-		let future = std::time::SystemTime::now() + Duration::from_mins(1);
-		fs::File::options()
-			.write(true)
-			.open(work_tree.join(".bashrc"))?
-			.set_modified(future)?;
-		assert!(!discards_work(root, &repository, &DiscardCheck::Tracked)?);
-		fs::write(work_tree.join(".bashrc"), "two\n")?;
+		touch(&work_tree.join(".bashrc"))?;
+		assert!(!discards_work(root, &repository, &HARD_RESET)?);
+		fs::write(work_tree.join(".bashrc"), "changed\n")?;
 		assert!(
-			!discards_work(root, &DISCOVERED, &DiscardCheck::Tracked)?,
+			!discards_work(root, &DISCOVERED, &HARD_RESET)?,
 			"the directory's own repository is clean"
 		);
-		assert!(discards_work(root, &repository, &DiscardCheck::Tracked)?);
+		assert!(discards_work(root, &repository, &HARD_RESET)?);
 		// From a directory in no repository too.
-		assert!(discards_work(other.path(), &repository, &DiscardCheck::Tracked)?);
+		assert!(discards_work(other.path(), &repository, &HARD_RESET)?);
 		assert!(!marker.exists(), "a program the named repository configures ran");
 		Ok(())
 	}
@@ -307,7 +507,7 @@ mod tests {
 		// A HEAD commit the object store lacks: the check fails instead of
 		// fetching it.
 		fs::write(root.join(".git").join("HEAD"), format!("{}\n", "1".repeat(40)))?;
-		assert!(discards_work(root, &DISCOVERED, &DiscardCheck::Tracked).is_err());
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET).is_err());
 		assert!(!marker.exists(), "a repository-configured program ran");
 		Ok(())
 	}
