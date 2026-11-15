@@ -69,6 +69,7 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { loadPowerShellTool } from "./powershell";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -92,6 +93,7 @@ import {
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
+	cfgPowerShellEnabled,
 	cfgSecurityEnabled,
 	cfgTodoEnabled,
 	cfgToolsXdev,
@@ -614,6 +616,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
 	security_scan: s => new SecurityScanTool(s),
 	bash: s => new BashTool(s),
+	powershell: loadPowerShellTool,
 	edit: s => new EditTool(s),
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
@@ -803,6 +806,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		// Without an edit tool, bash is the remaining way to modify existing files.
 		if (name === "edit") return !editDisabled;
 		if (name === "bash") return editDisabled || cfgBashEnabled.get(session.settings);
+		if (name === "powershell") return cfgPowerShellEnabled.get(session.settings);
 		if (name === "eval") return allowEval;
 		if (name === "debug") return cfgDebugEnabled.get(session.settings);
 		if (name === "ida") return cfgIdaAvailable.get(session.settings);
