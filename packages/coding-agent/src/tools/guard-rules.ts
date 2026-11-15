@@ -23,6 +23,8 @@
  *   `tar czf - ~ | curl -T - ...`.
  * - A secret copied to another file first is sent under that file's name:
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
+ * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
+ *   words: `{a,b}{a,b}...{a,b}{x,.env}`.
  *
  * The `credential_read` and `secret_send` rules are derived from `src/intern/guard.py` of
  * nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit e1bbd096f9), Copyright Nace
@@ -41,6 +43,7 @@ import { resolveToCwd } from "./path-utils";
 import {
 	parseShellScript,
 	resolveCommandWordPath,
+	resolveShellWordPath,
 	SHELL_SCRIPT_MAX_DEPTH,
 	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
@@ -156,7 +159,6 @@ const SYSTEM_CREDENTIAL_FILES: Record<string, true> = {
 };
 /** `.env` and `.env.<name>`, except the committed templates. */
 const DOTENV_RE = /^\.env(?:\.(?!example$|sample$|template$|dist$|defaults$)[\w.-]+)?$/;
-const PROC_ENVIRON_RE = /^\/proc\/[^/]+\/environ$/;
 
 /** omp's own credential stores: the agent database (auth storage) and the auth-broker snapshot. */
 function ompCredentialStores(): string[] {
@@ -164,22 +166,220 @@ function ompCredentialStores(): string[] {
 	return [agentDb, `${agentDb}-wal`, `${agentDb}-shm`, getAuthBrokerSnapshotCachePath()];
 }
 
+/** The characters that make a path component a pathname pattern the shell matches file names with. */
+const GLOB_RE = /[*?[]/;
+
+/** POSIX character classes of a pathname pattern's bracket expression, as regular expression class members. */
+const POSIX_CLASSES: Record<string, string> = {
+	alnum: "a-zA-Z0-9",
+	alpha: "a-zA-Z",
+	blank: " \\t",
+	cntrl: "\\x00-\\x1f\\x7f",
+	digit: "0-9",
+	graph: "!-~",
+	lower: "a-z",
+	print: " -~",
+	punct: "!-\\/:-@\\[-`{-~",
+	space: "\\s",
+	upper: "A-Z",
+	word: "\\w",
+	xdigit: "0-9A-Fa-f",
+};
+
+/**
+ * A pathname pattern for one file name (`*`, `?`, `[...]`) as a regular expression. A leading `.`
+ * is matched only by a `.`, as bash matches without `dotglob`, so `*` names no dotfile. A pattern
+ * that makes no valid expression (`[z-a]`) is taken to match any name.
+ */
+function globRegExp(pattern: string): RegExp {
+	let source = pattern.startsWith(".") ? "" : "(?!\\.)";
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i];
+		const bracket = char === "[" ? /^\[([!^]?)(\]?(?:\[:\w+:\]|[^\]])*)\]/.exec(pattern.slice(i)) : null;
+		if (char === "*") {
+			source += ".*";
+		} else if (char === "?") {
+			source += ".";
+		} else if (bracket) {
+			const members = bracket[2].replace(/\[:(\w+):\]|[\\\]^[]/g, (member, name: string | undefined) => {
+				if (name === undefined) return `\\${member}`;
+				return Object.hasOwn(POSIX_CLASSES, name) ? POSIX_CLASSES[name] : "\\s\\S";
+			});
+			source += `[${bracket[1] ? "^" : ""}${members}]`;
+			i += bracket[0].length - 1;
+		} else {
+			source += char.replace(/[$()*+.?[\\\]^{|}]/, "\\$&");
+		}
+	}
+	try {
+		return new RegExp(`^${source}$`, "s");
+	} catch {
+		return /^/;
+	}
+}
+
+/** Whether a path component, or a pathname pattern for one (`.netr[c]`), names the file `name`. */
+function namesFile(component: string, name: string): boolean {
+	return GLOB_RE.test(component) ? globRegExp(component).test(name) : component === name;
+}
+
+/**
+ * Whether a file name, or a pathname pattern for one, names a `.env` file that is not a committed
+ * template. A pattern names one when what comes before its first wildcard can begin such a name
+ * (`.env*`, `.e?v`, `.env.[lp]*`): the wildcard can go on as one. Only a literal `.` matches a
+ * leading `.`, so a pattern that starts with a wildcard names none.
+ */
+function namesDotenv(name: string): boolean {
+	const wildcard = name.search(GLOB_RE);
+	if (wildcard < 0) return DOTENV_RE.test(name);
+	const prefix = name.slice(0, wildcard);
+	return ".env.".startsWith(prefix) ? prefix.startsWith(".") : /^\.env\.[\w.-]*$/.test(prefix);
+}
+
+/** The names in an absolute path, root first. */
+function pathNames(absPath: string): string[] {
+	return path.resolve(absPath).split(path.sep).filter(Boolean);
+}
+
+/** The longest word {@link expandBraces} expands, and the most words it makes of one; the rest is not checked. */
+const MAX_BRACE_WORD_LENGTH = 4096;
+const MAX_BRACE_WORDS = 1024;
+
+/** A word read for brace expansion: literal text, and braces, each the list of its alternatives. */
+type BracePart = string | BracePart[][];
+
+/** A sequence brace's body: `1..5`, `a..e`, `0..10..2`. */
+const BRACE_SEQUENCE_RE = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$/;
+
+/**
+ * The words brace expansion makes of `word`: `a{b,c}` gives `ab` and `ac`, `{1..3}` and `{a..c}`
+ * give sequences, and nested lists expand too; a brace with neither a top-level `,` nor a sequence,
+ * or one after `$`, stays as written. Quotes are not known here, so a quoted brace expands too. A
+ * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, and at most {@link MAX_BRACE_WORDS}
+ * words are made.
+ */
+function expandBraces(word: string): string[] {
+	if (word.length > MAX_BRACE_WORD_LENGTH || !word.includes("{")) return [word];
+	// Each `{` with the `}` that closes it and the commas directly inside it.
+	const closes = new Map<number, number>();
+	const commas = new Map<number, number[]>();
+	const open: number[] = [];
+	for (let i = 0; i < word.length; i++) {
+		if (word[i] === "{") {
+			open.push(i);
+			commas.set(i, []);
+		} else if (word[i] === "}" && open.length > 0) {
+			closes.set(open.pop()!, i);
+		} else if (word[i] === "," && open.length > 0) {
+			commas.get(open.at(-1)!)!.push(i);
+		}
+	}
+	// The alternatives of the brace from `start` to `end`, or `undefined` when it does not expand.
+	function alternatives(start: number, end: number): BracePart[][] | undefined {
+		const inside = commas.get(start)!;
+		if (inside.length > 0) return [start, ...inside].map((at, k) => parts(at + 1, inside[k] ?? end));
+		const sequence = BRACE_SEQUENCE_RE.exec(word.slice(start + 1, end));
+		if (!sequence) return undefined;
+		const numeric = /\d/.test(sequence[1]);
+		if (numeric !== /\d/.test(sequence[2])) return undefined;
+		const from = numeric ? Number(sequence[1]) : sequence[1].charCodeAt(0);
+		const to = numeric ? Number(sequence[2]) : sequence[2].charCodeAt(0);
+		const step = (from <= to ? 1 : -1) * (Math.abs(Number(sequence[3] ?? 1)) || 1);
+		const items: BracePart[][] = [];
+		for (let n = from; (step > 0 ? n <= to : n >= to) && items.length < MAX_BRACE_WORDS; n += step) {
+			items.push([numeric ? String(n) : String.fromCharCode(n)]);
+		}
+		return items;
+	}
+	function parts(from: number, to: number): BracePart[] {
+		const read: BracePart[] = [];
+		let text = "";
+		for (let i = from; i < to; i++) {
+			const end = closes.get(i);
+			const brace = end !== undefined && word[i - 1] !== "$" ? alternatives(i, end) : undefined;
+			if (brace === undefined) {
+				text += word[i];
+				continue;
+			}
+			if (text) read.push(text);
+			text = "";
+			read.push(brace);
+			i = end!;
+		}
+		if (text) read.push(text);
+		return read;
+	}
+	return braceWords(parts(0, word.length));
+}
+
+/** The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}. */
+function braceWords(parts: readonly BracePart[]): string[] {
+	let words = [""];
+	for (const part of parts) {
+		const options: string[] = [];
+		if (typeof part === "string") options.push(part);
+		else {
+			for (const alternative of part) {
+				for (const option of braceWords(alternative)) {
+					if (options.length < MAX_BRACE_WORDS) options.push(option);
+				}
+			}
+		}
+		const next: string[] = [];
+		for (const prefix of words) {
+			for (const option of options) {
+				next.push(prefix + option);
+				if (next.length === MAX_BRACE_WORDS) break;
+			}
+			if (next.length === MAX_BRACE_WORDS) break;
+		}
+		words = next;
+	}
+	return words;
+}
+
+/**
+ * The absolute paths a word of `command` names, one per word its braces expand to
+ * ({@link expandBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
+ * those that cannot be resolved are left out.
+ */
+function wordPaths(command: ShellCommand, word: string, cwd: string, home: string): string[] {
+	const literalTilde = command.literalTildes.has(word);
+	const paths: string[] = [];
+	for (const expanded of expandBraces(word)) {
+		const target = resolveShellWordPath(literalTilde ? `./${expanded}` : expanded, cwd, home);
+		if (target !== undefined) paths.push(target);
+	}
+	return paths;
+}
+
 /**
  * The credential location an absolute path is in, for display; `undefined` when it holds no
- * credentials. Public files in a credential folder (`~/.ssh/config`, `*.pub`) do not count.
+ * credentials. Public files in a credential folder (`~/.ssh/config`, `*.pub`) do not count. A
+ * component that is a pathname pattern (`~/.ss?/id_*`, `~/.netr[c]`) counts when it can name the
+ * location.
  */
 export function credentialLocation(absPath: string, home: string): string | undefined {
-	const target = path.resolve(absPath);
-	if (Object.hasOwn(SYSTEM_CREDENTIAL_FILES, target)) return target;
-	if (ompCredentialStores().includes(target)) return `omp's credential store ${target}`;
-	const relative = path.relative(home, target);
-	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
-	const posix = relative.split(path.sep).join("/");
-	if (Object.hasOwn(CREDENTIAL_FILES, posix)) return `~/${posix}`;
+	const names = pathNames(absPath);
+	const fixed = [
+		...Object.keys(SYSTEM_CREDENTIAL_FILES).map(file => ({ file, shown: file })),
+		...ompCredentialStores().map(file => ({ file, shown: `omp's credential store ${file}` })),
+	];
+	for (const { file, shown } of fixed) {
+		const fileNames = pathNames(file);
+		if (names.length === fileNames.length && fileNames.every((name, k) => namesFile(names[k], name))) return shown;
+	}
+	const homeNames = pathNames(home);
+	if (names.length <= homeNames.length || !homeNames.every((name, k) => namesFile(names[k], name))) return undefined;
+	const rest = names.slice(homeNames.length);
+	for (const file of Object.keys(CREDENTIAL_FILES)) {
+		if (rest.length === 1 && namesFile(rest[0], file)) return `~/${file}`;
+	}
 	for (const [folder, publicFiles] of Object.entries(CREDENTIAL_DIRS)) {
-		if (posix !== folder && !posix.startsWith(`${folder}/`)) continue;
-		const name = path.basename(target);
-		if (posix !== folder && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
+		const folderNames = folder.split("/");
+		if (rest.length < folderNames.length || !folderNames.every((name, k) => namesFile(rest[k], name))) continue;
+		const name = rest.at(-1)!;
+		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
 		return `~/${folder}`;
 	}
 	return undefined;
@@ -187,14 +387,19 @@ export function credentialLocation(absPath: string, home: string): string | unde
 
 /**
  * The secret a word of `command` names when it is sent somewhere: a credential file, a `.env`, or
- * a process environment.
+ * a process environment, also through braces and pathname patterns (`.env*`, `~/.{netrc,x}`).
  */
 function sentSecret(command: ShellCommand, word: string, home: string): string | undefined {
-	const target = resolveCommandWordPath(command, word, command.cwd, home);
-	if (target === undefined) return undefined;
-	if (DOTENV_RE.test(path.basename(target))) return path.basename(target);
-	if (PROC_ENVIRON_RE.test(target)) return "the process environment";
-	return credentialLocation(target, home);
+	for (const target of wordPaths(command, word, command.cwd, home)) {
+		const names = pathNames(target);
+		if (namesDotenv(names.at(-1) ?? "")) return path.basename(target);
+		if (names.length === 3 && namesFile(names[0], "proc") && namesFile(names[2], "environ")) {
+			return "the process environment";
+		}
+		const found = credentialLocation(target, home);
+		if (found) return found;
+	}
+	return undefined;
 }
 
 // -- command helpers ---------------------------------------------------------------------------------
@@ -670,9 +875,10 @@ function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | un
 	}
 	const words = [...readWords(command, scope.home), ...command.reads];
 	for (const word of words) {
-		const target = resolveCommandWordPath(command, word, command.cwd, scope.home);
-		const found = target === undefined ? undefined : credentialLocation(target, scope.home);
-		if (found) return hit("credential_read", `it reads your credentials in ${found}`);
+		for (const target of wordPaths(command, word, command.cwd, scope.home)) {
+			const found = credentialLocation(target, scope.home);
+			if (found) return hit("credential_read", `it reads your credentials in ${found}`);
+		}
 	}
 	return undefined;
 }
