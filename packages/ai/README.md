@@ -661,6 +661,8 @@ The library implements 4 API interfaces, each with its own streaming function an
 - **`openai-completions`**: OpenAI's Chat Completions API (`streamOpenAICompletions`, `OpenAICompletionsOptions`)
 - **`openai-responses`**: OpenAI's Responses API (`streamOpenAIResponses`, `OpenAIResponsesOptions`)
 
+HTTP Responses requests can use `previous_response_id` chaining with `sessionId` and `providerSessionState`. Full replays containing native compaction items are sent with `store: false` to avoid OpenAI `item_conflict` errors when saving a compacted window again. Those responses are not used as HTTP chain anchors. Existing stored anchors still support delta-only requests that do not retransmit compaction items. See [OpenAI's compaction guide](https://developers.openai.com/api/docs/guides/compaction).
+
 ### Providers and Models
 
 A **provider** offers models through a specific API. For example:

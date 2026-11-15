@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI conversations failing with `item_conflict` after replaying compacted history while preserving normal response chaining.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
