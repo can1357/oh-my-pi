@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a crash with `TypeError: undefined is not an object` when the TUI suspended with Ctrl-Z while stdin input was still being delivered ([#19372](https://github.com/can1357/oh-my-pi/issues/19372)).
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
