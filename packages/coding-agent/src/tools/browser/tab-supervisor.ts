@@ -1048,7 +1048,8 @@ async function setWebKitTabShown(tab: WebKitTabSession, shown: boolean): Promise
  */
 export async function setWebKitTabsShown(shown: boolean): Promise<void> {
 	let failure: unknown;
-	for (const tab of tabs.values()) {
+	// oxlint-disable-next-line unicorn/no-useless-spread -- Snapshot before awaited host calls mutate the tab registry.
+	for (const tab of [...tabs.values()]) {
 		if (tab.backend !== "webkit" || tab.state !== "alive" || !tab.browser.webkit.canShow) continue;
 		try {
 			await setWebKitTabShown(tab, shown);
