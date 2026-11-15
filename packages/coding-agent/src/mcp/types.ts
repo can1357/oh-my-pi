@@ -328,6 +328,15 @@ export interface MCPTransport {
 	/** Whether the transport is connected */
 	readonly connected: boolean;
 
+	/**
+	 * True once the transport has seen its server stop: a stdio server closed
+	 * stdout, or a write failed because it exited. From then on the transport
+	 * fails every pending request with why the server stopped, within its own
+	 * close deadline, so a caller deadline that expires meanwhile waits for that
+	 * report instead of replacing it.
+	 */
+	readonly reportingExit?: boolean;
+
 	/** Event handlers */
 	onClose?: () => void;
 	onError?: (error: Error) => void;

@@ -22,9 +22,11 @@ import type {
 import { toJsonRpcError } from "../../mcp/types";
 import {
 	createMCPJsonRpcError,
+	MCP_ERROR_MESSAGE_MAX_CHARS,
 	MCPTransportError,
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
+	redactCredentials,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
@@ -404,14 +406,15 @@ interface FrameSink {
  * Returns `true` when the frame was accepted synchronously, `false` when the
  * sink threw — callers signal transport closure on `false`. An asynchronous
  * failure cannot be reflected in the return value; it is neutralized here and
- * the dead transport is detected by the read loop / request timeout instead.
+ * reported to `onAsyncFailure`, so the transport can learn why the process went away.
  */
-export function writeFrame(stdin: FrameSink, frame: string): boolean {
+export function writeFrame(stdin: FrameSink, frame: string, onAsyncFailure?: () => void): boolean {
+	const failed = () => onAsyncFailure?.();
 	try {
 		const wrote = stdin.write(frame);
-		if (isThenable(wrote)) wrote.then(undefined, () => {});
+		if (isThenable(wrote)) wrote.then(undefined, failed);
 		const flushed = stdin.flush();
-		if (isThenable(flushed)) flushed.then(undefined, () => {});
+		if (isThenable(flushed)) flushed.then(undefined, failed);
 		return true;
 	} catch {
 		return false;
@@ -422,10 +425,31 @@ export function writeFrame(stdin: FrameSink, frame: string): boolean {
 const TERM_GRACE_MS = 1000;
 /** Grace window to observe SIGKILL taking effect before `close()` gives up and returns. */
 const KILL_GRACE_MS = 500;
+/**
+ * The longest the transport waits for a subprocess to go away: `close()` gives
+ * it {@link TERM_GRACE_MS} after SIGTERM and {@link KILL_GRACE_MS} after SIGKILL,
+ * then returns whether or not it exited. When stdout ends, or a write finds the
+ * pipe closed, the server is going away; from the first of those signs the
+ * transport waits for its exit code and the rest of its stderr until one
+ * deadline this far away, however many signs follow. Reporting why a server
+ * died then never holds the transport open longer than closing it would, and a
+ * request deadline cannot cut the wait short. This is the close bound, not a
+ * request deadline: a request may have none (`timeout: 0`), while the close path
+ * must always end.
+ */
+const CLOSE_DEADLINE_MS = TERM_GRACE_MS + KILL_GRACE_MS;
+/** Longest stderr word the exit report shows; a longer one is never kept, only noted as omitted. */
+const STDERR_WORD_MAX_CHARS = 256;
+/** Characters of redacted stderr kept for the exit report. */
+const STDERR_TAIL_CHARS = 16 * 1024;
+/** Words before the current one that redaction sees, enough for `Authorization: Bearer` and `api_key =`. */
+const STDERR_CONTEXT_WORDS = 6;
+/** End of each context word redaction sees: a label ends the word before its value. */
+const STDERR_CONTEXT_WORD_CHARS = 64;
 
 /**
  * The subset of `Subprocess` that termination needs. Decoupled from the
- * `Subprocess<In, Out, Err>` stdio generics — `#process`'s pipes are
+ * `Subprocess<In, Out, Err>` stdio generics — a connection's pipes are
  * irrelevant to signaling — so tests can exercise it against a plain
  * `Bun.spawn(cmd, { stdio: "ignore" })` child without fighting the generics.
  */
@@ -436,23 +460,23 @@ interface KillableSubprocess {
 }
 
 /**
- * Race `exited` against a timer. Resolves `true` once the process has exited
- * within `timeoutMs`, `false` if the timer wins first. `exited` resolving OR
- * rejecting both count as "exited" — mirrors `waitForExit()` in
- * `lsp/client.ts`, which treats the same ambiguity (Bun documents
+ * Race `promise` against a timer. Resolves `true` once `promise` settles
+ * within `timeoutMs`, `false` if the timer wins first. Resolving OR rejecting
+ * both count as settled: for `Subprocess.exited` this mirrors `waitForExit()`
+ * in `lsp/client.ts`, which treats the same ambiguity (Bun documents
  * `Subprocess.exited` as resolve-only, but a settle either way means there is
  * nothing left to wait on).
  *
- * The timer is always cleared before returning — win or lose — so a process
- * that exits promptly never leaves a dangling `timeoutMs` timer holding the
+ * The timer is always cleared before returning — win or lose — so a promise
+ * that settles promptly never leaves a dangling `timeoutMs` timer holding the
  * event loop open behind it.
  */
-async function waitForProcessExit(exited: Promise<number>, timeoutMs: number): Promise<boolean> {
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
 	const { promise: timedOut, resolve: resolveTimedOut } = Promise.withResolvers<false>();
 	const timer = setTimeout(() => resolveTimedOut(false), timeoutMs);
 	try {
 		return await Promise.race([
-			exited.then(
+			promise.then(
 				() => true,
 				() => true,
 			),
@@ -460,6 +484,140 @@ async function waitForProcessExit(exited: Promise<number>, timeoutMs: number): P
 		]);
 	} finally {
 		clearTimeout(timer);
+	}
+}
+
+/**
+ * The last non-empty lines of `text`, at most `maxChars` characters in all.
+ * A single last line longer than that keeps its end from the start of a word,
+ * marked with `…`: cutting inside a word could leave a fragment that
+ * {@link redactCredentials} reads differently when the error is built.
+ */
+function lastLines(text: string, maxChars: number): string {
+	const lines = text
+		.split(/\r\n|\r|\n/)
+		.map(line => line.trimEnd())
+		.filter(line => line.trim().length > 0);
+	let kept = "";
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const line = lines[index];
+		const joined = kept ? `${line}\n${kept}` : line;
+		if (joined.length > maxChars) {
+			if (kept) return kept;
+			const from = line.length - (maxChars - 1);
+			const wordStart = line.slice(from - 1).search(/\s\S/);
+			return `…${line.slice(wordStart === -1 ? from : from + wordStart)}`;
+		}
+		kept = joined;
+	}
+	return kept;
+}
+
+/**
+ * The end of a subprocess's stderr, kept in bounded memory for its exit report.
+ *
+ * Stderr can hold credentials, and {@link redactCredentials} finds a value
+ * from its label (`api_key=`, `Bearer`), so nothing may be cut before
+ * redaction has seen the label that precedes it. The tail therefore redacts
+ * stderr as it arrives, one whole word at a time, and keeps only redacted
+ * text, which can then be cut anywhere:
+ *
+ * - A whitespace run becomes one space, or one newline if it holds a line
+ *   break (`\n` or `\r`). Redaction reads any whitespace run between a label
+ *   and its value alike, so this hides nothing it would find, and it bounds
+ *   the distance between them.
+ * - Each word is redacted together with the words before it (the end of each,
+ *   since a label ends the word before its value), with the real redactor.
+ * - A word longer than {@link STDERR_WORD_MAX_CHARS} is never shown, only
+ *   noted; its end still serves as context for the next word.
+ */
+class StderrTail {
+	readonly #decoder = new TextDecoder();
+	/** Redacted stderr, trimmed from the start to about {@link STDERR_TAIL_CHARS}. */
+	#redacted = "";
+	/** The words before the current one, each with the separator before it; see {@link STDERR_CONTEXT_WORDS}. */
+	#context: string[] = [];
+	/** Separator before the word being written: `""` at the start, else `" "` or `"\n"`. */
+	#separator = "";
+	/** Whether whitespace has been seen since the last word. */
+	#inSpace = false;
+	/** The word being written, while it is at most {@link STDERR_WORD_MAX_CHARS} long; then its end. */
+	#word = "";
+	#wordLength = 0;
+
+	/** Add a chunk of stderr; a character split across chunks is decoded whole. */
+	push(chunk: Uint8Array): void {
+		this.#append(this.#decoder.decode(chunk, { stream: true }));
+	}
+
+	/** Stderr ended: an incomplete character still in the decoder becomes U+FFFD. */
+	end(): void {
+		this.#append(this.#decoder.decode());
+		this.#finishWord();
+	}
+
+	/**
+	 * The last lines of stderr with credential values redacted, at most
+	 * `maxChars` characters; see {@link lastLines}. They are stderr's own last
+	 * lines, whatever they say: the error built from them drops one trailing
+	 * fetch hint, as it does for every MCP error, and nothing else.
+	 */
+	report(maxChars: number): string {
+		const current = this.#wordLength > 0 ? this.#redactWord() : "";
+		return lastLines(this.#redacted + current, maxChars);
+	}
+
+	#append(text: string): void {
+		for (const [run] of text.matchAll(/\s+|\S+/g)) {
+			if (/^\s/.test(run)) {
+				this.#finishWord();
+				if (!this.#inSpace) this.#separator = "";
+				this.#inSpace = true;
+				if (/[\r\n]/.test(run)) this.#separator = "\n";
+				else if (this.#separator === "") this.#separator = " ";
+				continue;
+			}
+			this.#inSpace = false;
+			this.#wordLength += run.length;
+			this.#word = (this.#word + run).slice(
+				this.#wordLength <= STDERR_WORD_MAX_CHARS ? 0 : -STDERR_CONTEXT_WORD_CHARS,
+			);
+		}
+	}
+
+	/**
+	 * The word being written as the report shows it, with the separator before
+	 * it: redacted in the context of the words before it, or a note when too long.
+	 */
+	#redactWord(): string {
+		const separator = this.#redacted === "" && this.#context.length === 0 ? "" : this.#separator;
+		if (this.#wordLength > STDERR_WORD_MAX_CHARS) {
+			return `${separator}[${this.#wordLength}-character word omitted]`;
+		}
+		const context = this.#context.join("");
+		const before = redactCredentials(context);
+		const after = redactCredentials(`${context}${separator}${this.#word}`);
+		// The redactor rewrites only from a label onward and keeps the label, so
+		// the context's own redaction is a prefix; anything else is redacted whole.
+		return after.startsWith(before) ? after.slice(before.length) : `${separator}[redacted]`;
+	}
+
+	#finishWord(): void {
+		if (this.#wordLength === 0) return;
+		this.#redacted += this.#redactWord();
+		// Redacted text may be cut anywhere: keep about the last STDERR_TAIL_CHARS.
+		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#redacted = this.#redacted.slice(-STDERR_TAIL_CHARS);
+		const separator = this.#context.length === 0 ? "" : this.#separator;
+		this.#context.push(`${separator}${this.#word.slice(-STDERR_CONTEXT_WORD_CHARS)}`);
+		if (this.#context.length > STDERR_CONTEXT_WORDS) {
+			this.#context.shift();
+			// The oldest context word starts the context; drop its separator.
+			this.#context[0] = this.#context[0]!.replace(/^\s/, "");
+		}
+		this.#word = "";
+		this.#wordLength = 0;
+		this.#separator = "";
+		this.#inSpace = false;
 	}
 }
 
@@ -533,7 +691,7 @@ export async function terminateStdioProcess(
 	termGraceMs = TERM_GRACE_MS,
 ): Promise<void> {
 	signalStdioProcess(proc, detached, "SIGTERM", platform);
-	const exitedOnTerm = await waitForProcessExit(proc.exited, termGraceMs);
+	const exitedOnTerm = await settlesWithin(proc.exited, termGraceMs);
 	// A non-detached transport has no process group beyond the leader itself:
 	// once it exits, there is nothing left to signal. A detached transport's
 	// leader exiting is NOT proof the group is empty — a grandchild it spawned
@@ -545,7 +703,72 @@ export async function terminateStdioProcess(
 	// to wait on for this call — the SIGKILL above is a fire-and-forget sweep
 	// for any surviving group members — so only block on the grace window
 	// when the leader itself is still the thing being escalated against.
-	if (!exitedOnTerm) await waitForProcessExit(proc.exited, KILL_GRACE_MS);
+	if (!exitedOnTerm) await settlesWithin(proc.exited, KILL_GRACE_MS);
+}
+
+/** A request written to a connection and not yet settled. */
+interface PendingRequest {
+	resolve: (value: unknown) => void;
+	reject: (error: Error) => void;
+	onProgress?: MCPRequestOptions["onProgress"];
+}
+
+/**
+ * One spawned server process and all state that belongs to it. `connect()`
+ * makes a new one each time, and every loop, report and close takes the
+ * connection it was started for: nothing an old process does (its end of
+ * output, its exit report, its stderr) can reach the requests or the report
+ * of a connection opened after it.
+ */
+class StdioConnection {
+	/** False once closed; its pending requests are then rejected and nothing is written to it. */
+	open = true;
+	/**
+	 * True once stdout has ended. The close then rejects every pending request
+	 * with the exit code and stderr within the close deadline, so a request
+	 * deadline that expires meanwhile must not report a bare timeout.
+	 */
+	outputDone = false;
+	/**
+	 * When the transport stops waiting to learn why the process went away
+	 * (`performance.now()` time); set by the first sign of it, stdout ending or
+	 * a failed write, so later signs share it. See {@link CLOSE_DEADLINE_MS}.
+	 */
+	closeDeadline: number | undefined;
+	readonly pending = new Map<string | number, PendingRequest>();
+	readonly stderr = new StderrTail();
+	/** The stderr loop's reader; `close()` cancels it to end the loop's pending read. */
+	stderrReader: { cancel(): Promise<void> } | undefined;
+	stderrLoop: Promise<void> | undefined;
+	readLoop: Promise<void> | undefined;
+
+	constructor(
+		readonly process: Subprocess<"pipe", "pipe", "pipe">,
+		/**
+		 * From `resolveStdioSpawnCommand()`'s `detached` flag. Gates process-group
+		 * signaling in `close()`: only a process spawned into its own session may
+		 * be signaled as a group.
+		 */
+		readonly detached: boolean,
+	) {}
+
+	/**
+	 * Set by the first failed write ({@link StdioTransport}'s `#exitAfterFailedWrite`):
+	 * true once the connection is closing with the exit report, false if the
+	 * process was still running at the close deadline.
+	 */
+	exitWatch: Promise<boolean> | undefined;
+
+	/** Whether a sign of the exit came: stdout ended, or a write failed (which starts the close deadline). */
+	get exitObserved(): boolean {
+		return this.outputDone || this.closeDeadline !== undefined;
+	}
+
+	/** Milliseconds left until the close deadline, which this call starts if no sign of the exit came before. */
+	untilCloseDeadline(): number {
+		this.closeDeadline ??= performance.now() + CLOSE_DEADLINE_MS;
+		return Math.max(0, this.closeDeadline - performance.now());
+	}
 }
 
 /**
@@ -553,23 +776,8 @@ export async function terminateStdioProcess(
  * Spawns a subprocess and communicates via stdin/stdout.
  */
 export class StdioTransport implements MCPTransport {
-	#process: Subprocess<"pipe", "pipe", "pipe"> | null = null;
-	#pendingRequests = new Map<
-		string | number,
-		{
-			resolve: (value: unknown) => void;
-			reject: (error: Error) => void;
-			onProgress?: MCPRequestOptions["onProgress"];
-		}
-	>();
-	#connected = false;
-	#readLoop: Promise<void> | null = null;
-	/**
-	 * Set from `resolveStdioSpawnCommand()`'s `detached` flag in `connect()`.
-	 * Gates process-group signaling in `close()` — only a transport that
-	 * actually spawned into its own session may target it.
-	 */
-	#detached = false;
+	/** The process spawned by the last `connect()`, until `close()`. */
+	#connection: StdioConnection | null = null;
 	readonly #requestIds = new RequestIdAllocator();
 
 	onClose?: () => void;
@@ -580,7 +788,12 @@ export class StdioTransport implements MCPTransport {
 	constructor(private config: MCPStdioServerConfig) {}
 
 	get connected(): boolean {
-		return this.#connected;
+		return this.#connection?.open ?? false;
+	}
+
+	/** See {@link MCPTransport.reportingExit}: set by the first sign of the exit, stdout ending or a failed write. */
+	get reportingExit(): boolean {
+		return this.#connection?.exitObserved ?? false;
 	}
 
 	/**
@@ -588,7 +801,7 @@ export class StdioTransport implements MCPTransport {
 	 */
 	async connect(signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
-		if (this.#connected) return;
+		if (this.#connection?.open) return;
 
 		const env = {
 			...Bun.env,
@@ -615,7 +828,7 @@ export class StdioTransport implements MCPTransport {
 		// triggers macOS Apple Events TCC prompts uses the same shape; the
 		// one-object `{ cmd }` overload timed out before prompting for `mcpbridge`
 		// even with `detached: false` (#5085).
-		this.#process = Bun.spawn(spawnCommand.cmd, {
+		const child = Bun.spawn(spawnCommand.cmd, {
 			cwd,
 			env,
 			stdin: "pipe",
@@ -625,25 +838,22 @@ export class StdioTransport implements MCPTransport {
 			detached: spawnCommand.detached,
 			windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
 		});
-		this.#detached = spawnCommand.detached;
+		const connection = new StdioConnection(child, spawnCommand.detached);
+		this.#connection = connection;
 
-		this.#connected = true;
-
-		// Start reading stdout
-		this.#readLoop = this.#startReadLoop();
-
-		// Log stderr for debugging
-		this.#startStderrLoop();
+		// Keep the end of stderr before reading stdout: when stdout ends early,
+		// the EOF error reports what the server printed there.
+		connection.stderrLoop = this.#readStderr(connection);
+		connection.readLoop = this.#readStdout(connection);
 	}
 
-	async #startReadLoop(): Promise<void> {
-		if (!this.#process?.stdout) return;
+	async #readStdout(connection: StdioConnection): Promise<void> {
 		let closeError: MCPTransportError | undefined;
 		try {
-			for await (const line of readJsonl(this.#process.stdout)) {
-				if (!this.#connected) break;
+			for await (const line of readJsonl(connection.process.stdout)) {
+				if (!connection.open) break;
 				try {
-					this.#handleMessage(line as JsonRpcMessage);
+					this.#handleMessage(connection, line as JsonRpcMessage);
 				} catch {
 					// Skip malformed message shapes; malformed JSON is handled by readJsonl.
 				}
@@ -653,67 +863,99 @@ export class StdioTransport implements MCPTransport {
 				transport: "stdio",
 				stage: error instanceof SyntaxError ? "decode" : "receive",
 			});
-			if (this.#connected) {
+			if (connection.open) {
 				this.onError?.(closeError);
 			}
 		} finally {
-			if (this.#connected && closeError === undefined) {
-				const exitCode = this.#process?.exitCode;
-				closeError = new MCPTransportError({
-					transport: "stdio",
-					stage: "receive",
-					failure: "eof",
-					message:
-						exitCode === null || exitCode === undefined
-							? "MCP subprocess closed stdout before responding"
-							: `MCP subprocess exited with code ${exitCode} before responding`,
-					retryable: false,
-					code: exitCode ?? undefined,
-				});
+			connection.outputDone = true;
+			if (connection.open && closeError === undefined) {
+				closeError = await this.#endOfOutputError(connection);
 			}
-			this.#handleClose(closeError);
+			this.#handleClose(connection, closeError);
 		}
 	}
 
-	async #startStderrLoop(): Promise<void> {
-		if (!this.#process?.stderr) return;
+	/**
+	 * The error for stdout ending while connected. A server that exits before
+	 * answering (a credential wrapper refusing a secret, a missing runtime)
+	 * says why on stderr, and its exit code is rarely reaped yet when stdout
+	 * ends, so wait for both, up to the close deadline, before reporting. The
+	 * message budgets the summary first and gives stderr the rest, keeping its
+	 * end, where the reason is.
+	 */
+	async #endOfOutputError(connection: StdioConnection): Promise<MCPTransportError> {
+		const { process: child } = connection;
+		await settlesWithin(Promise.allSettled([child.exited, connection.stderrLoop]), connection.untilCloseDeadline());
+		const exitCode = child.exitCode;
+		const summary =
+			exitCode === null
+				? "MCP subprocess closed stdout before responding"
+				: `MCP subprocess exited with code ${exitCode} before responding`;
+		const reason = connection.stderr.report(MCP_ERROR_MESSAGE_MAX_CHARS - summary.length - ": ".length);
+		return new MCPTransportError({
+			transport: "stdio",
+			stage: "receive",
+			failure: "eof",
+			message: reason ? `${summary}: ${reason}` : summary,
+			retryable: false,
+			code: exitCode ?? undefined,
+		});
+	}
 
-		const reader = this.#process.stderr.getReader();
-		const decoder = new TextDecoder();
+	/**
+	 * After a failed write, learn whether the server exited: wait up to the close
+	 * deadline for the process itself (not its stdout, which a descendant can hold
+	 * open) and, if it exited, close the connection with its exit report, which
+	 * every pending request then gets. False when the process is still running at
+	 * the close deadline: it is alive, and its requests keep their own deadlines.
+	 * Once per connection; later failed writes share it.
+	 */
+	#exitAfterFailedWrite(connection: StdioConnection): Promise<boolean> {
+		connection.exitWatch ??= (async () => {
+			const exited = await settlesWithin(connection.process.exited, connection.untilCloseDeadline());
+			// Stdout ended meanwhile: the read loop reports and closes.
+			if (connection.outputDone || !connection.open) return true;
+			if (!exited) return false;
+			this.#handleClose(connection, await this.#endOfOutputError(connection));
+			return true;
+		})();
+		return connection.exitWatch;
+	}
 
+	async #readStderr(connection: StdioConnection): Promise<void> {
+		const reader = connection.process.stderr.getReader();
+		connection.stderrReader = reader;
 		try {
-			while (this.#connected) {
+			for (;;) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				// Log stderr but don't treat as error - servers use it for logging
-				const text = decoder.decode(value, { stream: true });
-				if (text.trim()) {
-					// Could expose via onStderr callback if needed
-					// For now, silent - MCP spec says clients MAY capture/ignore
-				}
+				// Servers log to stderr, so it is no error by itself (the MCP spec
+				// lets clients capture or ignore it); only its end is kept.
+				connection.stderr.push(value);
 			}
 		} catch {
-			// Ignore stderr read errors
+			// A read error ends stderr like its end of file.
 		} finally {
+			connection.stderr.end();
 			reader.releaseLock();
 		}
 	}
 
-	#handleMessage(message: JsonRpcMessage | JsonRpcMessage[]): void {
+	#handleMessage(connection: StdioConnection, message: JsonRpcMessage | JsonRpcMessage[]): void {
 		if (Array.isArray(message)) {
-			for (const m of message) this.#handleMessage(m);
+			for (const m of message) this.#handleMessage(connection, m);
 			return;
 		}
 		// Server-to-client request: has both method and id
 		if ("method" in message && "id" in message && message.id != null) {
-			void this.#handleServerRequest(message as JsonRpcRequest);
+			void this.#handleServerRequest(connection, message as JsonRpcRequest);
 			return;
 		}
 
 		// Response to our request: has id
 		if ("id" in message && message.id != null) {
 			const response = message as JsonRpcResponse;
-			const pending = this.#pendingRequests.get(response.id);
+			const pending = connection.pending.get(response.id);
 			if (pending) {
 				if (response.error) {
 					pending.reject(createMCPJsonRpcError("stdio", response.error));
@@ -730,38 +972,40 @@ export class StdioTransport implements MCPTransport {
 			routeProgressNotification(
 				notification.method,
 				notification.params,
-				token => this.#pendingRequests.get(token)?.onProgress,
+				token => connection.pending.get(token)?.onProgress,
 			);
 			this.onNotification?.(notification.method, notification.params);
 		}
 	}
 
-	async #handleServerRequest(request: JsonRpcRequest): Promise<void> {
+	async #handleServerRequest(connection: StdioConnection, request: JsonRpcRequest): Promise<void> {
 		try {
 			if (!this.onRequest) {
-				this.#sendResponse(request.id, undefined, { code: -32601, message: "Method not found" });
+				this.#sendResponse(connection, request.id, undefined, { code: -32601, message: "Method not found" });
 				return;
 			}
 			const result = await this.onRequest(request.method, request.params);
-			this.#sendResponse(request.id, result);
+			this.#sendResponse(connection, request.id, result);
 		} catch (error) {
-			this.#sendResponse(request.id, undefined, toJsonRpcError(error));
+			this.#sendResponse(connection, request.id, undefined, toJsonRpcError(error));
 		}
 	}
 
-	#sendResponse(id: string | number, result?: unknown, error?: JsonRpcError): void {
-		if (!this.#connected || !this.#process?.stdin) return;
+	#sendResponse(connection: StdioConnection, id: string | number, result?: unknown, error?: JsonRpcError): void {
+		if (!connection.open) return;
 		const response = error
 			? { jsonrpc: "2.0" as const, id, error }
 			: { jsonrpc: "2.0" as const, id, result: result ?? {} };
-		// Silent on failure — a dead subprocess has no use for the response,
-		// and the read loop will close the transport on EOF.
-		writeFrame(this.#process.stdin, `${JSON.stringify(response)}\n`);
+		// A dead subprocess has no use for the response; a failed write is still
+		// a sign of its exit, so it starts the connection's exit watch.
+		writeFrame(connection.process.stdin, `${JSON.stringify(response)}\n`, () => {
+			void this.#exitAfterFailedWrite(connection);
+		});
 	}
 
-	#handleClose(error?: MCPTransportError): void {
-		if (!this.#connected) return;
-		this.#connected = false;
+	#handleClose(connection: StdioConnection, error?: MCPTransportError): void {
+		if (!connection.open) return;
+		connection.open = false;
 
 		const closeError = error
 			? nonRetryableMCPTransportError(error)
@@ -772,10 +1016,12 @@ export class StdioTransport implements MCPTransport {
 					message: "Transport closed",
 					retryable: false,
 				});
-		// request() records and writes each frame synchronously; a synchronous
-		// write throw removes its entry, so every remaining request was handed
-		// to the subprocess.
-		for (const [, pending] of this.#pendingRequests) {
+		// request() records and writes each frame synchronously. A request whose
+		// write failed stays pending for a bounded wait to learn why (`failFromSend`
+		// in request()); when the close comes first, the subprocess is gone and must
+		// not be relaunched to replay it, so every remaining request gets the
+		// non-retryable close error.
+		for (const pending of connection.pending.values()) {
 			pending.reject(closeError);
 		}
 
@@ -787,7 +1033,8 @@ export class StdioTransport implements MCPTransport {
 		params?: Record<string, unknown>,
 		options?: MCPRequestOptions,
 	): Promise<T> {
-		if (!this.#connected || !this.#process?.stdin) {
+		const connection = this.#connection;
+		if (!connection?.open) {
 			throw new MCPTransportError({
 				transport: "stdio",
 				stage: "connect",
@@ -813,7 +1060,7 @@ export class StdioTransport implements MCPTransport {
 			return Promise.reject(reason);
 		}
 
-		const stdin = this.#process.stdin;
+		const stdin = connection.process.stdin;
 		const message = `${JSON.stringify(request)}\n`;
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
 		let timer: NodeJS.Timeout | undefined;
@@ -830,14 +1077,14 @@ export class StdioTransport implements MCPTransport {
 			if (signal) {
 				signal.removeEventListener("abort", onAbort);
 			}
-			this.#pendingRequests.delete(id);
+			connection.pending.delete(id);
 			if (error) reject(error);
 			else resolve(value as T);
 			return true;
 		};
 
 		const sendCancellation = (reason: string) => {
-			if (!sent || method === "initialize" || !this.#connected || this.#process?.stdin !== stdin) return;
+			if (!sent || method === "initialize" || !connection.open) return;
 			writeFrame(
 				stdin,
 				`${JSON.stringify({
@@ -845,15 +1092,19 @@ export class StdioTransport implements MCPTransport {
 					method: "notifications/cancelled",
 					params: { requestId: id, reason },
 				})}\n`,
+				() => void this.#exitAfterFailedWrite(connection),
 			);
 		};
 
+		// An abort is the caller giving up on the request, not a deadline: it settles
+		// the request at once, even while the transport is still collecting the exit
+		// report that would otherwise reject it.
 		const onAbort = () => {
 			const reason = signal?.reason instanceof Error ? signal.reason : new Error("Aborted");
 			if (settle(reason)) sendCancellation("Request cancelled by the client");
 		};
 
-		this.#pendingRequests.set(id, {
+		connection.pending.set(id, {
 			onProgress: options?.onProgress,
 			resolve: (value: unknown) => {
 				settle(undefined, value);
@@ -864,7 +1115,7 @@ export class StdioTransport implements MCPTransport {
 		});
 
 		if (isMCPTimeoutEnabled(timeout)) {
-			timer = setTimeout(() => {
+			const expire = () => {
 				if (
 					settle(
 						new MCPTransportError({
@@ -878,6 +1129,17 @@ export class StdioTransport implements MCPTransport {
 				) {
 					sendCancellation(`Request timed out after ${timeout}ms`);
 				}
+			};
+			timer = setTimeout(() => {
+				// A sign of the exit came (stdout ended, or any request's write failed):
+				// the close is about to reject this request with the server's exit code
+				// and stderr, which say more than a timeout would. A process still running
+				// at the close deadline is alive, and the timeout stands.
+				if (!connection.exitObserved) return expire();
+				if (connection.outputDone) return;
+				void (connection.exitWatch ?? Promise.resolve(false)).then(reported => {
+					if (!reported) expire();
+				});
 			}, timeout);
 		}
 
@@ -886,9 +1148,27 @@ export class StdioTransport implements MCPTransport {
 		}
 
 		const failFromSend = (error: unknown) => {
+			// A failed write is a sign of the exit for the whole connection, also when
+			// this request has settled already (an explicit abort won): its other
+			// pending requests then get the report.
+			const watch = this.#exitAfterFailedWrite(connection);
 			if (settled) return;
 			const normalized = normalizeMCPTransportError(error, { transport: "stdio", stage: "send" });
-			settle(sent ? nonRetryableMCPTransportError(normalized) : normalized);
+			const sendError = sent ? nonRetryableMCPTransportError(normalized) : normalized;
+			// A write fails when the subprocess has closed its stdin, usually by exiting.
+			// If it exits within the close deadline (which the failed write starts unless
+			// an earlier sign of the exit did), the connection closes with the exit code
+			// and stderr, which say why, and every pending request gets them; the bare
+			// write error is reported only when the process is still running at the
+			// deadline. That wait replaces the request deadline, so a deadline cannot
+			// preempt the diagnosis.
+			if (timer) {
+				clearTimeout(timer);
+				timer = undefined;
+			}
+			void watch.then(reported => {
+				if (!reported) settle(sendError);
+			});
 		};
 		try {
 			// Never `await` write/flush. Bun's FileSink returns a pending Promise
@@ -898,7 +1178,7 @@ export class StdioTransport implements MCPTransport {
 			// past the timeout timer and the abort handler, orphaning the deferred
 			// rejection and hanging the caller (#3945). Route sync throws (Windows
 			// EPIPE) and async rejections (POSIX EPIPE on processTicksAndRejections)
-			// into `reject()` while leaving the returned promise free to settle
+			// into `failFromSend()` while leaving the returned promise free to settle
 			// from the response, timer, abort signal, or read-loop transport-close.
 			const wrote = stdin.write(message);
 			sent = true;
@@ -913,7 +1193,8 @@ export class StdioTransport implements MCPTransport {
 	}
 
 	async notify(method: string, params?: Record<string, unknown>): Promise<void> {
-		if (!this.#connected || !this.#process?.stdin) {
+		const connection = this.#connection;
+		if (!connection?.open) {
 			throw new MCPTransportError({
 				transport: "stdio",
 				stage: "connect",
@@ -939,7 +1220,12 @@ export class StdioTransport implements MCPTransport {
 		// `initializeConnection()` runs before the manager installs its
 		// `onClose` handler, so a swallowed failure there would yield a
 		// "connected" handle wrapping a dead transport. See #1710.
-		if (!writeFrame(this.#process.stdin, `${JSON.stringify(notification)}\n`)) {
+		if (
+			!writeFrame(connection.process.stdin, `${JSON.stringify(notification)}\n`, () => {
+				// Accepted, then failed: a sign of the exit, which the watch reports.
+				void this.#exitAfterFailedWrite(connection);
+			})
+		) {
 			const error = new MCPTransportError({
 				transport: "stdio",
 				stage: "send",
@@ -947,7 +1233,7 @@ export class StdioTransport implements MCPTransport {
 				message: `Transport closed while sending notification "${method}"`,
 				retryable: true,
 			});
-			this.#handleClose(error);
+			this.#handleClose(connection, error);
 			throw error;
 		}
 	}
@@ -955,43 +1241,37 @@ export class StdioTransport implements MCPTransport {
 	async close(): Promise<void> {
 		// `close()` is the authoritative resource teardown. `#handleClose()`
 		// may have already run (read-loop EOF, or a notify() write failure
-		// that surfaces the dead transport to the caller) and flipped
-		// `#connected` to false — but the subprocess and read loop are still
-		// alive in that path, so we MUST keep cleaning up regardless. Each
-		// step is individually guarded so this remains idempotent across
-		// repeat calls.
-		if (this.#connected) {
-			this.#handleClose();
+		// that surfaces the dead transport to the caller) — but the subprocess
+		// and its pipes are still held in that path, so we MUST keep cleaning
+		// up regardless. Take the connection and clear the field before any
+		// `await`, so a concurrent/repeat `close()` finds nothing left to do.
+		const connection = this.#connection;
+		if (!connection) return;
+		this.#connection = null;
+		this.#handleClose(connection);
+
+		// 1. Cooperative EOF first: a well-behaved server sees stdin close
+		// and can exit on its own before any signal is sent. Guarded — the
+		// sink can throw if the pipe is already closed/dead (e.g. the child
+		// already exited and the read loop got there first).
+		try {
+			connection.process.stdin.end();
+		} catch {
+			// Already closed/dead.
 		}
 
-		if (this.#process) {
-			// Grab the handle and null the field immediately (before any
-			// `await`) so a concurrent/repeat `close()` sees `#process` already
-			// cleared and skips straight past this block — no double-signal.
-			const proc = this.#process;
-			this.#process = null;
+		// 2-3. Group-aware SIGTERM (when this transport actually spawned
+		// detached), bounded wait, then escalate to SIGKILL. See
+		// `terminateStdioProcess` for the exact signaling/escalation rules.
+		await terminateStdioProcess(connection.process, connection.detached);
 
-			// 1. Cooperative EOF first: a well-behaved server sees stdin close
-			// and can exit on its own before any signal is sent. Guarded — the
-			// sink can throw if the pipe is already closed/dead (e.g. the child
-			// already exited and the read loop got there first).
-			try {
-				proc.stdin.end();
-			} catch {
-				// Already closed/dead.
-			}
-
-			// 2-3. Group-aware SIGTERM (when this transport actually spawned
-			// detached), bounded wait, then escalate to SIGKILL. See
-			// `terminateStdioProcess` for the exact signaling/escalation rules.
-			await terminateStdioProcess(proc, this.#detached);
-		}
-
-		if (this.#readLoop) {
-			// Do not block/await the read loop as it can hang indefinitely in some environments
-			this.#readLoop.catch(() => {});
-			this.#readLoop = null;
-		}
+		// 4. Stop reading stderr: a descendant can hold the pipe open long after
+		// the server is gone, and nothing reads this connection's report now.
+		// Cancelling ends the stderr loop's pending read.
+		connection.stderrReader?.cancel().catch(() => {});
+		connection.stderrLoop?.catch(() => {});
+		// Do not block/await the read loop as it can hang indefinitely in some environments
+		connection.readLoop?.catch(() => {});
 	}
 }
 

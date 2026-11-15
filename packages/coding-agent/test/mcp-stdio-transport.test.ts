@@ -7,6 +7,13 @@ import { resolveStdioSpawnCommand, StdioTransport, writeFrame } from "@oh-my-pi/
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { trackUnhandled } from "./helpers/rejection";
 
+/**
+ * Budget for a test that spawns a Bun child and waits for what the transport
+ * reports. On a loaded host the child's startup alone can take seconds; these
+ * tests assert the report, not its speed.
+ */
+const SPAWN_TEST_TIMEOUT_MS = 60_000;
+
 describe("resolveStdioSpawnCommand", () => {
 	it("resolves bare Windows commands through PATHEXT and wraps .cmd shims with cmd.exe", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-"));
@@ -661,34 +668,38 @@ describe("StdioTransport.notify", () => {
 		await expect(transport.notify("noop")).rejects.toThrow("Transport not connected");
 	});
 
-	it("does not surface unhandled rejections when the subprocess exits before notify settles", async () => {
-		const tracker = trackUnhandled();
-		const closed = Promise.withResolvers<void>();
-		transport = new StdioTransport({
-			type: "stdio",
-			command: "bun",
-			args: ["-e", "process.exit(0)"],
-		});
-		transport.onClose = () => {
-			closed.resolve();
-		};
-
-		try {
-			await transport.connect();
-			const notify = transport.notify("notifications/initialized").catch((error: unknown) => {
-				expect(error).toBeInstanceOf(Error);
+	it(
+		"does not surface unhandled rejections when the subprocess exits before notify settles",
+		async () => {
+			const tracker = trackUnhandled();
+			const closed = Promise.withResolvers<void>();
+			transport = new StdioTransport({
+				type: "stdio",
+				command: "bun",
+				args: ["-e", "process.exit(0)"],
 			});
+			transport.onClose = () => {
+				closed.resolve();
+			};
 
-			await closed.promise;
-			await notify;
-			await Promise.resolve();
+			try {
+				await transport.connect();
+				const notify = transport.notify("notifications/initialized").catch((error: unknown) => {
+					expect(error).toBeInstanceOf(Error);
+				});
 
-			expect(tracker.capture()).toEqual([]);
-			expect(transport.connected).toBe(false);
-		} finally {
-			tracker.release();
-		}
-	});
+				await closed.promise;
+				await notify;
+				await Promise.resolve();
+
+				expect(tracker.capture()).toEqual([]);
+				expect(transport.connected).toBe(false);
+			} finally {
+				tracker.release();
+			}
+		},
+		SPAWN_TEST_TIMEOUT_MS,
+	);
 });
 
 describe("StdioTransport request failure diagnostics", () => {
@@ -699,45 +710,98 @@ describe("StdioTransport request failure diagnostics", () => {
 		transport = undefined;
 	});
 
-	it("reports abrupt subprocess termination as EOF instead of a generic close", async () => {
-		transport = new StdioTransport({
-			type: "stdio",
-			command: "bun",
-			args: ["-e", "process.stdin.once('data', () => process.exit(23)); process.stdin.resume()"],
-			timeout: 1_000,
-		});
-		await transport.connect();
-		const error = await transport.request("tools/list").then(
-			() => undefined,
-			reason => reason,
+	it(
+		"reports abrupt subprocess termination as EOF instead of a generic close",
+		async () => {
+			transport = new StdioTransport({
+				type: "stdio",
+				command: "bun",
+				args: ["-e", "process.stdin.once('data', () => process.exit(23)); process.stdin.resume()"],
+				// No request deadline: the subprocess's exit settles the request. A deadline
+				// would race the child's startup, which on a loaded host can outlast it.
+				timeout: 0,
+			});
+			await transport.connect();
+			const error = await transport.request("tools/list").then(
+				() => undefined,
+				reason => reason,
+			);
+			if (!(error instanceof MCPTransportError)) throw error;
+
+			expect(error).toMatchObject({
+				transport: "stdio",
+				stage: "receive",
+				failure: "eof",
+				retryable: false,
+			});
+			expect(error.message).toContain("MCP subprocess");
+		},
+		SPAWN_TEST_TIMEOUT_MS,
+	);
+
+	for (const failure of ["throws", "rejects"] as const) {
+		it(
+			`reports a subprocess that exited before the first write by its exit code and stderr when the write ${failure}`,
+			async () => {
+				// A credential wrapper that refuses exits at once. A request written after that
+				// fails on the closed pipe (synchronously or later) while stdout has yet to
+				// report end of file; the caller must still learn the exit code and the reason.
+				const reason = "refused: run secret-run KEY -- <command>";
+				const child = Bun.spawn(
+					[process.execPath, "-e", `console.error(${JSON.stringify(reason)}); process.exit(77)`],
+					{ stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+				);
+				await child.exited;
+				const spawn = vi.spyOn(Bun, "spawn").mockReturnValueOnce(child);
+				try {
+					transport = new StdioTransport({ type: "stdio", command: process.execPath, timeout: 0 });
+					await transport.connect();
+				} finally {
+					spawn.mockRestore();
+				}
+				// Pin the broken-pipe outcome: whether Bun reports it on write depends on timing.
+				const brokenPipe = Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE" });
+				vi.spyOn(child.stdin, "write").mockImplementationOnce(() => {
+					if (failure === "rejects") return Promise.reject(brokenPipe);
+					throw brokenPipe;
+				});
+				const error = await transport.request("initialize").then(
+					() => undefined,
+					rejection => rejection,
+				);
+				if (!(error instanceof MCPTransportError)) throw error;
+
+				expect(error).toMatchObject({ stage: "receive", failure: "eof", retryable: false, code: 77 });
+				expect(error.message).toContain("exited with code 77");
+				expect(error.message).toContain(reason);
+			},
+			// The body must never outlive its test: it installs a one-shot `Bun.spawn` mock
+			// that a later test would otherwise consume.
+			SPAWN_TEST_TIMEOUT_MS,
 		);
-		if (!(error instanceof MCPTransportError)) throw error;
+	}
 
-		expect(error).toMatchObject({
-			transport: "stdio",
-			stage: "receive",
-			failure: "eof",
-			retryable: false,
-		});
-		expect(error.message).toContain("MCP subprocess");
-	});
+	it(
+		"reports malformed subprocess JSON at the decode stage",
+		async () => {
+			transport = new StdioTransport({
+				type: "stdio",
+				command: "bun",
+				args: ["-e", "process.stdin.once('data', () => console.log('{not-json')); process.stdin.resume()"],
+				// No request deadline: the decode failure settles the request (see above).
+				timeout: 0,
+			});
+			await transport.connect();
 
-	it("reports malformed subprocess JSON at the decode stage", async () => {
-		transport = new StdioTransport({
-			type: "stdio",
-			command: "bun",
-			args: ["-e", "process.stdin.once('data', () => console.log('{not-json')); process.stdin.resume()"],
-			timeout: 1_000,
-		});
-		await transport.connect();
-
-		await expect(transport.request("tools/list")).rejects.toMatchObject({
-			transport: "stdio",
-			stage: "decode",
-			failure: "malformed_response",
-			retryable: false,
-		});
-	});
+			await expect(transport.request("tools/list")).rejects.toMatchObject({
+				transport: "stdio",
+				stage: "decode",
+				failure: "malformed_response",
+				retryable: false,
+			});
+		},
+		SPAWN_TEST_TIMEOUT_MS,
+	);
 });
 
 describe("StdioTransport send acceptance", () => {
@@ -789,7 +853,7 @@ describe("StdioTransport send acceptance", () => {
 // ---------------------------------------------------------------------------
 // StdioTransport.close — authoritative resource teardown that must keep
 // cleaning up the subprocess and read loop even when `#handleClose()` has
-// already flipped `#connected` (read-loop EOF, or a notify() write failure
+// already closed the connection (read-loop EOF, or a notify() write failure
 // in the connectToServer() failure path). See PR #1711 follow-up.
 //
 // Bun's parent-side stdout reader only sees EOF when the subprocess
@@ -809,40 +873,44 @@ describe("StdioTransport.close", () => {
 		transport = undefined;
 	});
 
-	it("completes cleanup when called after the read loop has already torn down", async () => {
-		// Subprocess exits cleanly; the read loop sees EOF and fires
-		// `#handleClose()`, flipping `#connected` to false. `close()` then
-		// runs in exactly the state the reviewer flagged — `#connected`
-		// already false, `#process` and `#readLoop` still set — and must
-		// still null them out instead of early-returning.
-		transport = new StdioTransport({
-			type: "stdio",
-			command: "bun",
-			args: ["-e", "process.exit(0)"],
-		});
+	it(
+		"completes cleanup when called after the read loop has already torn down",
+		async () => {
+			// Subprocess exits cleanly; the read loop sees EOF and fires
+			// `#handleClose()`, closing the connection. `close()` then runs in
+			// exactly the state the reviewer flagged — the connection already
+			// closed, its process and read loop still held — and must still
+			// release them instead of early-returning.
+			transport = new StdioTransport({
+				type: "stdio",
+				command: "bun",
+				args: ["-e", "process.exit(0)"],
+			});
 
-		let closeCount = 0;
-		transport.onClose = () => {
-			closeCount++;
-		};
+			let closeCount = 0;
+			const closed = Promise.withResolvers<void>();
+			transport.onClose = () => {
+				closeCount++;
+				closed.resolve();
+			};
 
-		await transport.connect();
+			await transport.connect();
 
-		// Wait for the read loop to observe EOF and fire #handleClose.
-		for (let i = 0; i < 100 && transport.connected; i++) {
-			await Bun.sleep(10);
-		}
-		expect(transport.connected).toBe(false);
-		expect(closeCount).toBe(1);
+			// The read loop observes EOF, collects the exit code, then fires #handleClose.
+			await closed.promise;
+			expect(transport.connected).toBe(false);
+			expect(closeCount).toBe(1);
 
-		// Must not throw and must not re-fire onClose.
-		await transport.close();
-		expect(closeCount).toBe(1);
+			// Must not throw and must not re-fire onClose.
+			await transport.close();
+			expect(closeCount).toBe(1);
 
-		// Second close is a no-op too — every resource is already released.
-		await transport.close();
-		expect(closeCount).toBe(1);
-	});
+			// Second close is a no-op too — every resource is already released.
+			await transport.close();
+			expect(closeCount).toBe(1);
+		},
+		SPAWN_TEST_TIMEOUT_MS,
+	);
 
 	it("is idempotent — repeat close() calls fire onClose exactly once", async () => {
 		transport = new StdioTransport({
@@ -902,8 +970,10 @@ describe("StdioTransport.close", () => {
 				// Wait for the child to actually register its SIGTERM handler before
 				// closing: closing too early races the child's startup and hits the
 				// default (terminate) action instead of exercising the escalation
-				// path this test defends.
-				for (let i = 0; i < 100; i++) {
+				// path this test defends. The child's startup has no upper bound on a
+				// loaded host, so poll (the child has no other channel to report
+				// readiness) until the test's own budget runs out.
+				for (;;) {
 					try {
 						await fs.access(readyPath);
 						break;
@@ -926,6 +996,6 @@ describe("StdioTransport.close", () => {
 				await fs.rm(tempDir, { recursive: true, force: true });
 			}
 		},
-		5000,
+		SPAWN_TEST_TIMEOUT_MS,
 	);
 });

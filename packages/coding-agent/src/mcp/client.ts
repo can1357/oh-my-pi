@@ -203,7 +203,9 @@ export async function connectToServer(
 				instructions: initResult.instructions,
 			};
 		} catch (error) {
-			await closeTransport();
+			// Close in the background: the error is the result, and a server that ignores
+			// SIGTERM must not hold it for the close's kill grace.
+			void closeTransport()?.catch(() => {});
 			throw error;
 		}
 	};
@@ -214,7 +216,18 @@ export async function connectToServer(
 		if (!isMCPTimeoutEnabled(timeoutMs)) {
 			return await untilAborted(options?.signal, connect());
 		}
-		return await withTimeout(connect(), timeoutMs, timeoutError, options?.signal);
+		// A deadline that expires after the transport saw the server stop (stdout
+		// ended, or a write failed) keeps waiting: the transport is already failing
+		// the handshake with why the server stopped (its exit code and stderr) within
+		// its close deadline, which says more than a timeout. An abort is the caller
+		// giving up, so it still ends the wait at once.
+		return await withTimeout(
+			connect(),
+			timeoutMs,
+			timeoutError,
+			options?.signal,
+			() => transport?.reportingExit === true,
+		);
 	} catch (error) {
 		controller.abort(error);
 		// Close an existing transport; in-flight creation observes the aborted signal.
