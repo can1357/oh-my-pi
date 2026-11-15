@@ -668,6 +668,45 @@ describe("native transcript", () => {
 		}
 	});
 
+	it("reopens a folded call on a click instead of re-collapsing it", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const tool = new ToolExecutionComponent("lookup_thing", { q: "x" }, {}, undefined, ui);
+		try {
+			tool.updateResult({ content: [{ type: "text", text: "row one\nrow two" }], isError: false });
+			tool.setToolOutputDetailsHidden(true);
+			expect(tool.describe(cx).p).toMatchObject({ collapsed: true, preview: "none" });
+
+			// Ctrl+H folds the transcript, it does not remove the disclosure control: the terminal
+			// reports the click on the one-row summary as a toggle, and the card has to stay open
+			// afterwards or the click paints nothing.
+			tool.handleNativeEvent({ type: "toggle", key: "", collapsed: false });
+			expect(tool.describe(cx).p).toMatchObject({ collapsed: false });
+			expect(JSON.stringify(tool.describe(cx).c)).toContain("row two");
+
+			// The fallback card (a terminal without the data-first `tool` feature) reopens too.
+			expect(tool.describe().p).toMatchObject({ collapsed: false });
+
+			tool.handleNativeEvent({ type: "toggle", key: "", collapsed: true });
+			expect(tool.describe(cx).p).toMatchObject({ collapsed: true, preview: "none" });
+
+			// Folding the transcript again gives up a reveal, or one call would keep its output on
+			// screen after the user asked for none.
+			tool.handleNativeEvent({ type: "toggle", key: "", collapsed: false });
+			tool.setToolOutputDetailsHidden(false);
+			tool.setToolOutputDetailsHidden(true);
+			expect(tool.describe(cx).p).toMatchObject({ collapsed: true, preview: "none" });
+		} finally {
+			tool.dispose();
+		}
+	});
+
 	it("drops a tool card's body clamp when the transcript folds tool output details", async () => {
 		let builder: ChatTranscriptBuilder | undefined;
 		const h = await startWith(h => {

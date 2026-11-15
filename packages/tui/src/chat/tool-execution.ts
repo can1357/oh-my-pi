@@ -1364,16 +1364,23 @@ export class ToolExecutionComponent extends Container {
 		return Math.max(0, Math.round((ended ?? performance.now()) - started));
 	}
 
+	/** Whether the transcript-wide Ctrl+H fold is in force for this call: a call the user opened
+	 *  keeps its body, because the terminal's click arrives as that same expanded state. */
+	#detailsFolded(): boolean {
+		return this.#toolOutputDetailsHidden && !this.#expanded;
+	}
+
 	/**
 	 * The native `collapsed` prop: the transcript's expand state, except that a
 	 * view that asks to be {@link NativeToolView.open} never starts folded, a
 	 * call streaming its body (edit, write) stays open until it settles, then
 	 * folds like a finished thought, and Ctrl+H's `hideToolOutputDetails` folds
-	 * every call to its summary regardless. The user's own toggle still wins
-	 * meanwhile: the terminal keeps local collapse state until this prop changes.
+	 * every call to its summary. The user's own toggle still wins meanwhile: the
+	 * terminal keeps local collapse state until this prop changes, and a call the
+	 * user opened stays open, because the click arrives as that same toggle.
 	 */
 	#nativeCollapsed(status: TspCardStatus, view: NativeToolView): boolean {
-		if (this.#toolOutputDetailsHidden) return true;
+		if (this.#toolOutputDetailsHidden) return !this.#expanded;
 		if (view.open) return false;
 		const live = status === "pending" || status === "running";
 		return !this.#expanded && !(live && streamsBody(this.#toolName));
@@ -1440,7 +1447,7 @@ export class ToolExecutionComponent extends Container {
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
 				preview: hasBody
-					? this.#toolOutputDetailsHidden
+					? this.#detailsFolded()
 						? "none"
 						: preview === "auto"
 							? { lines: DEFAULT_TERMINAL_PREVIEW_LINES }
@@ -1515,7 +1522,7 @@ export class ToolExecutionComponent extends Container {
 				status,
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
-				preview: hasBody && !this.#toolOutputDetailsHidden ? cardPreview(view.preview) : undefined,
+				preview: hasBody && !this.#detailsFolded() ? cardPreview(view.preview) : undefined,
 			},
 			children,
 		);
@@ -1653,6 +1660,10 @@ export class ToolExecutionComponent extends Container {
 	setToolOutputDetailsHidden(hidden: boolean): void {
 		if (this.#toolOutputDetailsHidden === hidden) return;
 		this.#toolOutputDetailsHidden = hidden;
+		// A fold is transcript-wide, so an open call gives up its reveal: otherwise Ctrl+H would
+		// leave that one call's output on screen, and the next un-fold would resurrect an expansion
+		// the user had already hidden.
+		if (hidden) this.#expanded = false;
 		super.invalidate();
 	}
 
