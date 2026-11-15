@@ -936,8 +936,8 @@ export class CmuxTab implements InProcessRunTab {
 		await this.#evalScript(this.#mouseTransitionScript("mouseup", opts?.button));
 	}
 
-	async clickAt(x: number, y: number, opts?: { button?: string; clickCount?: number }): Promise<void> {
-		const args = { x, y, button: opts?.button ?? "left", clickCount: opts?.clickCount ?? 1 };
+	async clickAt(x: number, y: number, opts?: { button?: string; count?: number }): Promise<void> {
+		const args = { x, y, button: opts?.button ?? "left", clickCount: opts?.count ?? 1 };
 		await this.#evalScript(`(() => {
 			const args = ${JSON.stringify(args)};
 			const target = document.elementFromPoint(args.x, args.y) || document.body;

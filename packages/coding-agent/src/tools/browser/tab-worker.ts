@@ -508,7 +508,7 @@ interface TabApi {
 		y: number,
 		opts?: {
 			button?: "left" | "right" | "middle" | "back" | "forward";
-			clickCount?: number;
+			count?: number;
 		},
 	): Promise<void>;
 	wheel(deltaX: number, deltaY: number): Promise<void>;
@@ -1060,9 +1060,9 @@ export function toActionableHandle(
 		enriched.click = options =>
 			clickElement(enriched, "handle.click()", undefined, {
 				button: options?.button,
-				clickCount: options?.count,
+				count: options?.count,
 			});
-		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { clickCount: 2 });
+		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { count: 2 });
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
 		enriched.select = (...values) => selectElementOptions(enriched, values, "handle.select()");
@@ -1146,7 +1146,7 @@ export function toActionableHandle(
 					() =>
 						clickElement(enriched, "handle.click()", signal, {
 							button: options?.button,
-							clickCount: options?.count,
+							count: options?.count,
 						}),
 					invalidate,
 				),
@@ -1161,7 +1161,7 @@ export function toActionableHandle(
 					originals,
 					"handle.dblclick()",
 					signal,
-					() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+					() => clickElement(enriched, "handle.dblclick()", signal, { count: 2 }),
 					invalidate,
 				),
 			"answers",
@@ -2903,7 +2903,7 @@ export class WorkerCore {
 					actionOpMs,
 					async sig => {
 						const label = `tab.click(${JSON.stringify(selector)})`;
-						const click = { button: opts?.button, clickCount: opts?.count };
+						const click = { button: opts?.button, count: opts?.count };
 						const resolved = normalizeSelector(selector);
 						if (resolved.startsWith("text/") && parseAriaRefSelector(selector) === null) {
 							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, click);
@@ -3374,7 +3374,7 @@ export class WorkerCore {
 					actionOpMs,
 					async sig => {
 						await this.#clickSelector(selector, actionOpMs, sig, handle =>
-							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 }),
+							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { count: 2 }),
 						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS, dialog: "answers" },

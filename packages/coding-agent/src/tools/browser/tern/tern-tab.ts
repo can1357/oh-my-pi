@@ -2245,9 +2245,9 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Click at viewport coordinates. */
-	async clickAt(x: number, y: number, opts?: { button?: MouseButtonName; clickCount?: number }): Promise<void> {
+	async clickAt(x: number, y: number, opts?: { button?: MouseButtonName; count?: number }): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y)) throw new ToolError("clickAt coordinates must be finite numbers");
-		await this.#clickAt({ x, y }, this.#button(opts?.button), Math.max(1, Math.floor(opts?.clickCount ?? 1)));
+		await this.#clickAt({ x, y }, this.#button(opts?.button), Math.max(1, Math.floor(opts?.count ?? 1)));
 	}
 
 	/** A trusted wheel event at the pointer (the viewport centre before any pointer move). */
@@ -4186,7 +4186,7 @@ export class TernPageFacade {
 			move: (x, y, options) => tab.mouseMove(x, y, options),
 			down: options => tab.mouseDown(options),
 			up: options => tab.mouseUp(options),
-			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, clickCount: options?.count }),
+			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, count: options?.count }),
 			wheel: delta => tab.wheel(delta.deltaX ?? 0, delta.deltaY ?? 0),
 		};
 	}

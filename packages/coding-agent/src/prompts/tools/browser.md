@@ -17,8 +17,8 @@ BrowserTab, every helper awaited:
 navigation: url title goto back forward reload pushState
 inspection: observe({selector?, compact?, viewportOnly?, includeAll?}) ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?}) a11y extract(format?, {selector?, outline?, filter?}) text html value attr count box styles isVisible isEnabled isChecked
 capture: screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?}) diffScreenshot(baselinePath, {threshold?, output?}) pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})
-interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt wheel scroll drag highlight scrollIntoView select uploadFile
-waiting: waitFor waitForSelector waitForUrl waitForText
+interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt(x, y, {button?, count?}) wheel scroll drag highlight scrollIntoView select uploadFile
+waiting: waitFor waitForSelector waitForUrl(urlPattern, {timeout?}) waitForText
 frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector screenshot
 dialogs: dialog handleDialog setDialogs
 emulation: emulate(options?) devices()
