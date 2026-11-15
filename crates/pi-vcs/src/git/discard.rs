@@ -12,8 +12,9 @@ const DISCARD_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Bytes retained from the check's output; the answer is only "any entry?".
 const DISCARD_CHECK_CAPTURE_LIMIT: usize = 4 * 1024;
 
-/// Whether a work-discarding command run in `dir` would destroy anything:
-/// uncommitted changes to tracked files (`git status --porcelain
+/// Whether a work-discarding command run in `dir` would destroy anything.
+///
+/// That is uncommitted changes to tracked files (`git status --porcelain
 /// --untracked-files=no`), or the untracked files `git clean` with the
 /// check's options would delete (`git clean --dry-run`, pathspecs relative to
 /// `dir`). `false` outside a repository.
@@ -58,7 +59,8 @@ pub fn discards_work(dir: &Path, check: &DiscardCheck) -> Result<bool> {
 	} else {
 		DISCARD_CHECK_CAPTURE_LIMIT
 	};
-	let output = cli::run_sync_inert(dir, &args, DISCARD_CHECK_TIMEOUT, limit)?.into_checked(&args)?;
+	let output =
+		cli::run_sync_inert(dir, &args, DISCARD_CHECK_TIMEOUT, limit)?.into_checked(&args)?;
 	if !clean {
 		return Ok(!output.stdout.trim().is_empty());
 	}
