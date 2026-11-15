@@ -366,9 +366,10 @@ pub struct TrackedCheck {
 	/// Pathspecs the command restores, relative to the directory the check
 	/// runs in; empty for the whole work tree.
 	pub pathspecs:     Vec<String>,
-	/// `git reset --merge`: it reverts the staged changes, and refuses while a
-	/// path has changes both staged and in the work tree (then it loses
-	/// nothing). Counts the staged changes only; `worktree_only` does not apply.
+	/// `git reset --merge`: it reverts the staged changes, conflicted paths
+	/// included, and refuses while a path has a staged change and a work-tree
+	/// modification (then it loses nothing). Counts the staged changes only;
+	/// `worktree_only` does not apply.
 	pub merge:         bool,
 }
 

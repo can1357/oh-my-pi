@@ -139,8 +139,11 @@ fn tracked_status(
 }
 
 /// Whether `git reset --merge` would lose a staged change. Git refuses, and
-/// loses nothing, while a path has changes both staged and in the work tree;
-/// otherwise it reverts the staged changes, which are then gone.
+/// loses nothing, while a path has a staged change and a work-tree
+/// modification it would keep (`MM`, `AM`, `RM`, `MT`); otherwise it reverts
+/// the staged changes, which are then gone. That includes a staged path
+/// deleted in the work tree (`MD`, `AD`) and an unmerged one (`UU`, `AA`,
+/// `DU`, ...), whose conflict resolution in the work tree it overwrites.
 fn loses_staged_changes(
 	git: &cli::InertGit,
 	dir: &Path,
@@ -161,7 +164,9 @@ fn loses_staged_changes(
 		if matches!(index, b'R' | b'C') {
 			fields.next();
 		}
-		if index != b' ' && worktree != b' ' {
+		// No unmerged entry (`UU`, `AA`, `DU`, ...) has `M` or `T` in its second
+		// column.
+		if index != b' ' && matches!(worktree, b'M' | b'T') {
 			return Ok(false);
 		}
 		staged |= index != b' ';
@@ -610,6 +615,39 @@ mod tests {
 			!discards_work(root, &DISCOVERED, &merge)?,
 			"a path changed both ways makes git refuse"
 		);
+		Ok(())
+	}
+
+	/// Git refuses only for a path whose work-tree change it would keep, so
+	/// `git reset --merge` overwrites the resolution of an unmerged path (`UU`)
+	/// and restores a staged path deleted from the work tree (`MD`).
+	#[test]
+	fn reset_merge_loses_a_conflict_resolution_and_a_deleted_staged_path() -> TestResult {
+		let merge = DiscardCheck::Tracked(TrackedCheck { merge: true, ..TrackedCheck::default() });
+		let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+		let dir = repo()?;
+		let root = dir.path();
+		git(root, &["checkout", "-qb", "side"])?;
+		fs::write(root.join("a.txt"), "side\n")?;
+		git(root, &[&identity[..], &["commit", "-qam", "side"]].concat())?;
+		git(root, &["checkout", "-q", "main"])?;
+		fs::write(root.join("a.txt"), "main\n")?;
+		git(root, &[&identity[..], &["commit", "-qam", "main"]].concat())?;
+		let merged = Command::new("git")
+			.current_dir(root)
+			.args(identity)
+			.args(["merge", "-q", "side"])
+			.output()?;
+		assert!(!merged.status.success(), "the merge stops on a conflict");
+		fs::write(root.join("a.txt"), "resolved\n")?;
+		assert!(discards_work(root, &DISCOVERED, &merge)?, "the resolution is overwritten");
+
+		let dir = repo()?;
+		let root = dir.path();
+		fs::write(root.join("a.txt"), "two\n")?;
+		git(root, &["add", "a.txt"])?;
+		fs::remove_file(root.join("a.txt"))?;
+		assert!(discards_work(root, &DISCOVERED, &merge)?, "the staged change is reverted");
 		Ok(())
 	}
 
