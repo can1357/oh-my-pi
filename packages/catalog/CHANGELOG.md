@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `deliveredImageSize()` to `compat/image-tokenization`: the size at which a model's own resize delivers an image, so callers that map coordinates back can size it first; `fitLongEdge()` is exported beside it
+
 ### Fixed
 
 - Fixed `deepseek/deepseek-v4-flash` dropping attached images: DeepSeek serves the retired id with the multimodal V4.1 Flash, so it now keeps image input like `deepseek-flash` ([#19288](https://github.com/can1357/oh-my-pi/issues/19288))
