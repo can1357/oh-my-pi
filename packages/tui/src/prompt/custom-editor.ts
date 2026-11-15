@@ -367,6 +367,18 @@ export function extractImagePastePathsFromText(text: string): string[] | undefin
 	return wholePath ? [wholePath] : undefined;
 }
 
+/** What a bracketed paste into an image-accepting prompt means. */
+export type ImagePaste =
+	/** Empty: the terminal's cue that the clipboard holds an image. */
+	{ kind: "clipboard" } | { kind: "paths"; paths: string[] } | { kind: "text" };
+
+/** Classifies the content of a bracketed paste (markers already stripped). */
+export function classifyImagePaste(content: string): ImagePaste {
+	if (content.length === 0) return { kind: "clipboard" };
+	const paths = extractImagePastePathsFromText(content);
+	return paths ? { kind: "paths", paths } : { kind: "text" };
+}
+
 function bracketedPastePayload(data: string): string | undefined {
 	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
 	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
@@ -1937,12 +1949,13 @@ export class CustomEditor extends Editor {
 		// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
 		// completes — fixes the race where submit runs against an empty `pendingImages`.
 		if (remaining.length > 0) this.#pendingInput.push(draft ? { draft: remaining } : remaining);
-		if (content.length === 0 && this.onPasteImage) {
+		const image = classifyImagePaste(content);
+		if (image.kind === "clipboard" && this.onPasteImage) {
 			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 			return true;
 		}
-		const attachmentPaths = extractImagePastePathsFromText(content);
-		if (attachmentPaths && this.onPasteImagePath) {
+		if (image.kind === "paths" && this.onPasteImagePath) {
+			const attachmentPaths = image.paths;
 			this.#trackAsyncPaste(
 				(async () => {
 					for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
