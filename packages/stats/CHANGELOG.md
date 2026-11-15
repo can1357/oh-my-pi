@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the Spotlight headline's adjusted net subtracting fetch-backs of results that shaping left whole
+- Fixed the Spotlight headline's adjusted net subtracting fetch-backs of results that shaping left whole ([#19370](https://github.com/can1357/oh-my-pi/pull/19370) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.1] - 2026-11-14
 
