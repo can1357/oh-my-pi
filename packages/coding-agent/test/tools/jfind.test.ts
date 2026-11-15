@@ -449,8 +449,8 @@ describe("jfind cascade", () => {
 			expect(result.isError).toBe(true);
 			expect(result.details?.coverage).toBe("unavailable");
 			const fallback = result.details?.lexicalFallback ?? [];
-			expect(fallback.length).toBeGreaterThan(1);
-			expect(fallback.length).toBeLessThanOrEqual(20);
+			// 51 matching lines across two files fill the 20-row cap, and both files contribute.
+			expect(fallback).toHaveLength(20);
 			expect(new Set(fallback.map(match => match.rel))).toEqual(new Set(["dense.ts", "sparse.ts"]));
 		} finally {
 			await removeWithRetries(dir);

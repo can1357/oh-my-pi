@@ -336,11 +336,19 @@ export const findToolRenderer = {
 				{ icon: "warning", title: "Find", titleColor: "toolTitle", description, meta: emptyMeta },
 				uiTheme,
 			);
+			const fallback = details.lexicalFallback ?? [];
 			const empty =
-				details.coverage === "partial"
-					? "No relevant passages found in the judged files"
-					: "No relevant passages found";
+				fallback.length > 0
+					? "Unranked literal keyword matches (not semantically judged)"
+					: details.coverage === "partial"
+						? "No relevant passages found in the judged files"
+						: "No relevant passages found";
 			const lines = [header, formatEmptyMessage(empty, uiTheme)];
+			for (const match of fallback) {
+				lines.push(
+					`  ${formatStyledPath(`${match.rel}:${match.line}`, uiTheme)} ${uiTheme.fg("toolOutput", replaceTabs(match.snippet))}`,
+				);
+			}
 			for (const failure of stats.failures) lines.push(uiTheme.fg("warning", failure));
 			return new Text(lines.join("\n"), 0, 0);
 		}
@@ -437,11 +445,20 @@ export const findToolRenderer = {
 			keyed(text([span(failure, "warning")], { wrap: "word", role: "omp.tool.notice" }), `fail${i}`),
 		);
 		if (hits.length === 0) {
+			const fallback = (details.lexicalFallback ?? []).map((match, i) =>
+				keyed(
+					text([span(`${match.rel}:${match.line}`, "muted"), span(` ${replaceTabs(match.snippet)}`)], {
+						wrap: "word",
+					}),
+					`lex${i}`,
+				),
+			);
+			const body = [...fallback, ...failures];
 			return {
 				tool: findNativeHead(query, compact(["0 hits", scope, failed])),
 				tone: "warning",
 				inline: true,
-				body: failures.length > 0 ? failures : undefined,
+				body: body.length > 0 ? body : undefined,
 			};
 		}
 		const shown = options.expanded ? hits : hits.slice(0, COLLAPSED_HITS);
