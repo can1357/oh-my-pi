@@ -903,6 +903,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cachedContent?: string;
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/** Pass an empty managed workspace directory to Antigravity CLI (`agy`) instead of `cwd` (default: `true`). */
+	antigravityIsolateWorkspace?: boolean;
 	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is
