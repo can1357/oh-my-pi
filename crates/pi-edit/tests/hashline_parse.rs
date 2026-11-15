@@ -795,31 +795,35 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 }
 
 #[test]
-fn mismatch_message_says_tags_are_copied_never_invented() {
-	let placeholder = MismatchDetails {
+fn mismatch_message_says_where_tags_come_from_once() {
+	let details = |tag: &str, origins: &[&str]| MismatchDetails {
 		path:               Some("a.ts".into()),
-		expected_file_hash: "0000".into(),
+		expected_file_hash: tag.into(),
 		actual_file_hash:   "3C4D".into(),
 		file_lines:         vec!["one".into(), "two".into()],
 		anchor_lines:       vec![1],
 		hash_recognized:    false,
-		tag_origin_paths:   Vec::new(),
+		tag_origin_paths:   origins.iter().map(|&origin| origin.into()).collect(),
 	};
-	let message = format_mismatch_message(&placeholder);
+	let message = format_mismatch_message(&details("0000", &[]));
 	assert!(
 		message.contains("hash #0000 is not from this session: it is a placeholder, not a tag"),
 		"{message}"
 	);
-	assert!(
-		message.contains("copy the [path#tag] header verbatim from the latest read or search output")
-	);
-	let invented = MismatchDetails { expected_file_hash: "7E21".into(), ..placeholder };
-	let message = format_mismatch_message(&invented);
-	assert!(message.contains("hash #7E21 is not from this session"));
-	assert!(message.contains("Tags are never invented or guessed"));
-	// A tag issued for another file is a mix-up, not an invention.
-	let elsewhere = MismatchDetails { tag_origin_paths: vec!["/w/b.ts".into()], ..invented };
-	assert!(!format_mismatch_message(&elsewhere).contains("Tags are never invented"));
+	// An unissued tag may come from a prior session (restart, store eviction):
+	// advise where tags come from, once, without calling this one invented.
+	for case in [details("0000", &[]), details("7E21", &[]), details("7E21", &["/w/b.ts"])] {
+		let message = format_mismatch_message(&case);
+		assert_eq!(
+			message
+				.matches("Copy the [path#tag] header verbatim from the latest read or search output")
+				.count(),
+			1,
+			"{message}"
+		);
+		assert_eq!(message.matches("invent").count(), 1, "{message}");
+		assert!(!message.contains("invented"), "{message}");
+	}
 }
 
 #[test]

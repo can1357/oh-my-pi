@@ -5,7 +5,7 @@
 ### Fixed
 
 - `edit` no longer rejects `PUT <N`, `PUT >N`, or `CUT` as "never displayed" when an earlier tag of the same file displayed that line and it still sits at the same number with the same content; lines that moved since every display, lines no read ever showed, and replacements without payload evidence stay rejected ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
-- `edit` rejections for a tag this session never issued (including the `#0000` placeholder, now named as such) say that tags are copied verbatim from the latest read or search output and never invented ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- `edit` tag rejections say once where a current tag comes from (copied verbatim from the latest read, search, or edit output for the file), and name the `#0000` placeholder as such ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.2] - 2026-11-14
 

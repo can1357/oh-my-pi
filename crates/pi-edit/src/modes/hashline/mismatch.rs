@@ -118,15 +118,6 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
-		// A tag no file in this session was ever issued is invented: say where
-		// tags come from instead of only that this one is wrong.
-		if !details.expected_file_hash.is_empty() && details.tag_origin_paths.is_empty() {
-			lines.push(
-				"Tags are never invented or guessed: copy the [path#tag] header verbatim from the \
-				 latest read or search output for this file (or the latest edit response for it)."
-					.to_owned(),
-			);
-		}
 		lines.push(current_tag_advice(&details.actual_file_hash));
 		lines
 	};
@@ -138,10 +129,14 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 	lines.join("\n")
 }
 
+/// Where a current tag comes from. The only place a rejection says tags are
+/// never invented: an unissued tag may still be real, from a prior session.
 fn current_tag_advice(actual_file_hash: &str) -> String {
 	format!(
-		"The current file hashes to #{actual_file_hash}. Re-read the file with `read` to copy a \
-		 current [path#tag] header — never invent the tag and never reuse one from a prior session."
+		"The current file hashes to #{actual_file_hash}. Copy the [path#tag] header verbatim from \
+		 the latest read or search output for this file, or from the latest edit response for it; \
+		 re-read the file with `read` if neither is current, but never invent the tag and never \
+		 reuse one from a prior session."
 	)
 }
 
