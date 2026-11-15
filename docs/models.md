@@ -625,8 +625,12 @@ use 128,000 context and 32,768 output as generic chat defaults. Output caps are 
 Anthropic-routed models use an 8,192-token fallback output cap.
 
 A row advertising only image output becomes an image-generation runner; embedding-only output
-becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
-`omp models --kind all`, not the default chat listing.
+becomes an embedding runner. Audio as the only output of a row that takes text (or declares no
+input) becomes a `tts` runner on `openai-speech`, text as the only output of audio-only input an
+`stt` runner on `openai-transcriptions`, and `decisions` output an `openai-decisions` judge.
+Modalities come from the row's modality arrays or OpenRouter's `architecture.modality` summary
+(`text+image->decisions`). Mixed outputs, and rows that declare no modalities, remain chat models.
+These runners are visible with `omp models --kind all`, not the default chat listing.
 
 ### Explicit provider discovery
 

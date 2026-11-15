@@ -26,7 +26,6 @@ import {
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
-	type KindApiKind,
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
@@ -880,31 +879,51 @@ function extractOpenAIModelsListInputCapabilities(item: {
 
 /**
  * Map an explicit non-chat output modality onto the runner kind and API that
- * serves it. Only endpoint-unambiguous tasks are routed: a row whose sole
- * output is `embeddings` or an image answers through the `/embeddings` and
- * `/images/generations` surfaces of the same OpenAI-compatible root the
- * provider already serves its model list from.
+ * serves it, on the same OpenAI-compatible root the provider already serves
+ * its model list from. Only rows whose declared modalities name one task are
+ * routed:
+ * - sole `embeddings` or `image` output: `/embeddings`, `/images/generations`;
+ * - sole `decisions` output (OpenRouter's decision models): `/decisions`;
+ * - sole `audio` output from text (or undeclared) input: `/audio/speech`;
+ * - sole `text` output from audio input without text: `/audio/transcriptions`.
  *
- * Anything else stays chat. Rows that also emit `text` are ordinary (multimodal)
- * chat models, and an `audio` or `video` output alone cannot distinguish a TTS
- * SKU from a music generator, or a chat response from a video-job API — those
- * need explicit task metadata this list shape does not carry.
+ * Modalities come from the row's arrays or OpenRouter's `architecture.modality`
+ * summary (`text+image->text`). Anything else stays chat: rows that also emit
+ * `text` are ordinary (multimodal) chat models, a `video` output alone cannot
+ * tell a chat response from a video-job API, and a row that declares nothing
+ * keeps the provider's chat API.
  */
 function extractOpenAIModelsListOutputTask(item: {
+	input?: unknown;
+	input_modalities?: unknown;
 	output?: unknown;
 	output_modalities?: unknown;
 	architecture?: unknown;
-}): { kind: KindApiKind; api: Api } | undefined {
+}): { kind: ModelKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.output, item.output_modalities, architecture?.output_modalities]);
-	if (modalities.size !== 1) return undefined;
-	const [modality] = modalities;
+	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
+	const [summaryInput, summaryOutput] = summary.length === 2 ? summary.map(side => side.split("+")) : [];
+	const input = collectModalities([item.input, item.input_modalities, architecture?.input_modalities, summaryInput]);
+	const output = collectModalities([
+		item.output,
+		item.output_modalities,
+		architecture?.output_modalities,
+		summaryOutput,
+	]);
+	if (output.size !== 1) return undefined;
+	const [modality] = output;
 	switch (modality) {
 		case "embedding":
 		case "embeddings":
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
 			return { kind: "image", api: "openai-images" };
+		case "decisions":
+			return { kind: "judge", api: "openai-decisions" };
+		case "audio":
+			return input.size === 0 || input.has("text") ? { kind: "tts", api: "openai-speech" } : undefined;
+		case "text":
+			return input.has("audio") && !input.has("text") ? { kind: "stt", api: "openai-transcriptions" } : undefined;
 		default:
 			return undefined;
 	}

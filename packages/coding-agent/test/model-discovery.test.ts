@@ -3476,13 +3476,14 @@ describe("ModelRegistry runtime discovery", () => {
 			kind: "image",
 			api: "openai-images",
 		});
-		// Text output — including multimodal rows — stays on the provider's chat API,
-		// and an audio-only row carries too little metadata to pick a runner.
-		for (const id of ["vision-chat", "multimodal-chat", "speech-or-music"]) {
+		// Text output, including multimodal rows, stays on the provider's chat API.
+		for (const id of ["vision-chat", "multimodal-chat"]) {
 			const model = registry.find("openai-test", id);
 			expect(model?.kind).toBeUndefined();
 			expect(model?.api).toBe("openai-completions");
 		}
+		// Audio as the only output answers on the speech endpoint.
+		expect(registry.find("openai-test", "speech-or-music")).toMatchObject({ kind: "tts", api: "openai-speech" });
 		// The chat roster no longer offers models the chat endpoint cannot serve.
 		const rosterFor = (kind: ModelKind) =>
 			registry
@@ -3490,9 +3491,94 @@ describe("ModelRegistry runtime discovery", () => {
 				.filter(model => model.provider === "openai-test")
 				.map(model => model.id)
 				.sort();
-		expect(rosterFor("chat")).toEqual(["multimodal-chat", "speech-or-music", "vision-chat"]);
+		expect(rosterFor("chat")).toEqual(["multimodal-chat", "vision-chat"]);
 		expect(rosterFor("embedding")).toEqual(["bare-embedder", "openrouter/openai/text-embedding-3-small"]);
 		expect(rosterFor("image")).toEqual(["image-generator"]);
+	});
+
+	test("openai-models-list routes gateway speech, transcription and decision rows by their declared modalities", async () => {
+		writeRawModelsJson({
+			"gateway-test": {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9993/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "vendor/some-tts",
+								architecture: { input_modalities: ["text"], output_modalities: ["audio"] },
+							},
+							{
+								id: "vendor/transcriber",
+								architecture: { input_modalities: ["audio"], output_modalities: ["text"] },
+							},
+							{
+								id: "openrouter/vendor/decider",
+								architecture: {
+									modality: "text+image->decisions",
+									input_modalities: ["text", "image"],
+									output_modalities: ["decisions"],
+								},
+								context_length: 32768,
+							},
+							// OpenRouter's summary string alone is enough.
+							{ id: "openrouter/vendor/decider-lite", architecture: { modality: "text->decisions" } },
+							// Nothing declared: stays chat, whatever the id suggests.
+							{ id: "vendor/flash-tts", supported_methods: ["generateContent"] },
+							{
+								id: "vendor/chat",
+								architecture: { modality: "text+image->text", output_modalities: ["text"] },
+							},
+							{
+								id: "vendor/voice-chat",
+								architecture: { input_modalities: ["text", "audio"], output_modalities: ["text", "audio"] },
+							},
+							{ id: "vendor/plain-chat" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("gateway-test", "vendor/some-tts")).toMatchObject({
+			kind: "tts",
+			api: "openai-speech",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
+		expect(registry.find("gateway-test", "vendor/transcriber")).toMatchObject({
+			kind: "stt",
+			api: "openai-transcriptions",
+		});
+		for (const id of ["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]) {
+			expect(registry.find("gateway-test", id)).toMatchObject({
+				kind: "judge",
+				api: "openai-decisions",
+				baseUrl: "http://127.0.0.1:9993/v1",
+				supportsTools: false,
+			});
+		}
+		expect(registry.find("gateway-test", "openrouter/vendor/decider")?.contextWindow).toBe(32768);
+		const rosterFor = (kind: ModelKind) =>
+			registry
+				.getAll(kind)
+				.filter(model => model.provider === "gateway-test")
+				.map(model => model.id)
+				.sort();
+		expect(rosterFor("chat")).toEqual(["vendor/chat", "vendor/flash-tts", "vendor/plain-chat", "vendor/voice-chat"]);
+		expect(rosterFor("tts")).toEqual(["vendor/some-tts"]);
+		expect(rosterFor("stt")).toEqual(["vendor/transcriber"]);
+		expect(rosterFor("judge")).toEqual(["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]);
 	});
 
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
