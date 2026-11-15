@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed subagents running on models outside the active `enabledModels` scope through a requested model, agent override, frontmatter model or parent-model auth fallback ([#14381](https://github.com/can1357/oh-my-pi/issues/14381), [#16782](https://github.com/can1357/oh-my-pi/pull/16782) by [@Xytronix](https://github.com/Xytronix))
+- Fixed subagents running on models outside the active `enabledModels` scope through a requested model, agent override, frontmatter model or parent-model auth fallback ([#16782](https://github.com/can1357/oh-my-pi/pull/16782) by [@Xytronix](https://github.com/Xytronix); reported in [#14381](https://github.com/can1357/oh-my-pi/issues/14381))
 
 ## [18.20.2] - 2026-11-14
 

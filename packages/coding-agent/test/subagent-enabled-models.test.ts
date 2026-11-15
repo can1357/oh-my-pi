@@ -67,7 +67,7 @@ function session(agentModel: string[] = ["scope-test/allowed"]): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getActiveModelString: () => "scope-test/allowed",
-	} as unknown as ToolSession;
+	};
 }
 
 test.each(["request", "settings override", "frontmatter"] as const)(
