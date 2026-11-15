@@ -4,18 +4,18 @@
 
 ### Breaking Changes
 
-- When explicitly enabled, Google Antigravity uses a Go transport helper by default; source SDK installs must build it, while compiled CLI builds embed it. Explicit fetch overrides remain supported.
+- When explicitly enabled, Google Antigravity uses a Go transport helper by default; source SDK installs must build it, while compiled CLI builds embed it. Explicit fetch overrides remain supported and are required for per-request proxy settings. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 
 ### Added
 
-- Added observational AGY wire comparison tooling with explicit exclusions and missing-evidence reporting; matching fingerprints do not establish attestation.
+- Added observational AGY wire comparison tooling with explicit exclusions and missing-evidence reporting; matching fingerprints do not establish attestation. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 
 ### Fixed
 
-- Antigravity continuations retain cumulative usage, avoid unsafe checkpoint replay, and surface next-leg HTTP failures.
-- Antigravity login uses its browser callback without an unnecessary paste-code prompt, and project discovery honors explicit fetch overrides.
-- Antigravity image streams surface provider errors, tool results use the serving model's role, and logical execution identity stays stable through tool turns.
-- Transport helpers support bodyless responses and stop without keeping idle hosts alive.
+- Antigravity continuations retain cumulative usage, avoid unsafe checkpoint replay, and surface next-leg HTTP failures. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity login uses its browser callback without an unnecessary paste-code prompt, and project discovery honors explicit fetch overrides. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Antigravity image streams surface provider errors, tool results use the serving model's role, and logical execution identity stays stable through tool turns. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
+- Transport helpers support bodyless responses and stop without keeping idle hosts alive. ([#19308](https://github.com/can1357/oh-my-pi/pull/19308) by [@pickpocket](https://github.com/pickpocket))
 
 ## [18.20.2] - 2026-11-14
 
