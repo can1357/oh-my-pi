@@ -8,16 +8,27 @@
  * The rules are best-effort, opt-in heuristics over shell text (off by default), not a security
  * boundary; a determined or obfuscated command can get past them. Known gaps:
  * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`.
- * - Commands inside a `bash -c` or `eval` string, or captured by `$( )`, are not linked to the
- *   pipeline around them: `bash -c 'cat .env' | curl -d @- ...`.
+ * - Commands inside a `bash -c` or `eval` string are not linked to the pipeline around them, and a
+ *   value captured by `$( )` and sent later is not followed: `bash -c 'cat .env' | curl -d @- ...`,
+ *   `x=$(cat .env); curl -d "$x" ...`.
  * - A heredoc opened inside `$( )` whose body starts after the closing `)` is not that command's
  *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
- * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`.
- * - Upload syntaxes and network tools it does not model are not seen: `gh gist create .env`.
+ * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`. Nor is
+ *   a relative path after a `cd`, `pushd` or `popd` to such a directory, though a `.env` there
+ *   still counts by its name: `cd "$dir" && cat .npmrc`. A directory change is followed whether or
+ *   not it runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
+ * - Upload syntaxes, network tools and shell forms it does not model are not seen:
+ *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
+ *   `exec 3< .env; cat <&3 | nc ...`.
  * - Programs outside the reader list are not seen reading: `tac ~/.ssh/id_rsa`,
  *   `jq . ~/.docker/config.json`.
  * - A command run by a program it does not unwrap, or given its operands at run time, is not
  *   checked with them: `find ~/.ssh -exec cat {} +`, `ls ~/.ssh/id_* | xargs cat`.
+ * - Commands in a script file a command runs are not read, even a file the same command writes
+ *   first or passes as `<( )`: `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`,
+ *   `bash <(echo 'cat ~/.ssh/id_rsa')`.
+ * - A program word written as a brace list or pathname pattern is not expanded:
+ *   `{cat,/etc/shadow}`, `/bin/ca[t] /etc/shadow`.
  * - A directory that contains a credential location does not count as one:
  *   `tar czf - ~ | curl -T - ...`.
  * - A secret copied to another file first is sent under that file's name:
@@ -26,6 +37,11 @@
  *   by `discard_changes`: the probe runs no filter, so it compares such a file by size.
  * - The probes of one call share {@link PROBE_BUDGET_MS}; in a command that asks more than fit, such
  *   as many distinct `pkill` patterns, the ones left without time count as no match.
+ * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
+ *   words: `{a,b}{a,b}...{a,b}{x,.env}`.
+ * - A path that reaches a credential location through a symlink, hard link or bind mount is not
+ *   recognized: `ln -s ~/.ssh k && cat k/id_rsa`. Nor do bare wildcards for every component of
+ *   `~/Library/Keychains` name it: `cat ~/???????/?????????/login.keychain-db`.
  *
  * `discard_changes` and `kills_harness` confirm a match with a read-only probe (the
  * `@oh-my-pi/pi-natives/vcs` discard check, `pgrep`) and fire only when the probe shows something
@@ -53,9 +69,12 @@ import { resolveToCwd } from "./path-utils";
 import {
 	parseShellScript,
 	resolveCommandWordPath,
+	resolveShellWordPath,
 	SHELL_SCRIPT_MAX_DEPTH,
+	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
+	type ShellUpstream,
 	shellPositionalArgs,
 	type SucceededLink,
 } from "./shell-tokenize";
@@ -173,7 +192,6 @@ const SYSTEM_CREDENTIAL_FILES: Record<string, true> = {
 };
 /** `.env` and `.env.<name>`, except the committed templates. */
 const DOTENV_RE = /^\.env(?:\.(?!example$|sample$|template$|dist$|defaults$)[\w.-]+)?$/;
-const PROC_ENVIRON_RE = /^\/proc\/[^/]+\/environ$/;
 
 /** omp's own credential stores: the agent database (auth storage) and the auth-broker snapshot. */
 function ompCredentialStores(): string[] {
@@ -181,48 +199,381 @@ function ompCredentialStores(): string[] {
 	return [agentDb, `${agentDb}-wal`, `${agentDb}-shm`, getAuthBrokerSnapshotCachePath()];
 }
 
+/** The characters that make a path component a pathname pattern the shell matches file names with. */
+const GLOB_RE = /[*?[]/;
+
+/** POSIX character classes of a pathname pattern's bracket expression, as regular expression class members. */
+const POSIX_CLASSES: Record<string, string> = {
+	alnum: "a-zA-Z0-9",
+	alpha: "a-zA-Z",
+	blank: " \\t",
+	cntrl: "\\x00-\\x1f\\x7f",
+	digit: "0-9",
+	graph: "!-~",
+	lower: "a-z",
+	print: " -~",
+	punct: "!-\\/:-@\\[-`{-~",
+	space: "\\s",
+	upper: "A-Z",
+	word: "\\w",
+	xdigit: "0-9A-Fa-f",
+};
+
+/**
+ * Whether file names match without regard to case, as on the default file systems of macOS and
+ * Windows, where `~/.SSH/id_rsa` opens `~/.ssh/id_rsa`.
+ */
+function foldsCase(): boolean {
+	return process.platform === "darwin" || process.platform === "win32";
+}
+
+/** A `[:name:]` class in a pathname pattern's bracket expression, read where it starts. */
+const POSIX_CLASS_RE = /\[:\w+:\]/y;
+
+/** A part of a pathname pattern for one file name. */
+interface GlobPart {
+	/** A run of `*`, a `?`, a literal character, or a bracket expression. */
+	kind: "*" | "?" | "char" | "[";
+	/** The pattern text of a `*`, `?` or character; a bracket expression as a regular expression class. */
+	text: string;
+}
+
+/**
+ * The parts of a pathname pattern for one file name (`*`, `?`, `[...]`), read in one pass, or
+ * `undefined` once more than `limit` of them take a character: such a pattern names no file of
+ * `limit` characters, and reading no further keeps a long pattern from costing its length per
+ * name. A `[` with no closing `]` is a literal character, and so is every `[` after it: a later
+ * one could close only at the `]` ending a `[:name:]` class, and the literal `[` already keeps the
+ * pattern from naming any file the guard looks for.
+ */
+function globParts(pattern: string, limit: number): GlobPart[] | undefined {
+	const parts: GlobPart[] = [];
+	let taking = 0;
+	let unclosed = false;
+	for (let i = 0; i < pattern.length; i++) {
+		if (taking > limit) return undefined;
+		const char = pattern[i];
+		if (char === "*") {
+			if (parts.at(-1)?.kind !== "*") parts.push({ kind: "*", text: char });
+			continue;
+		}
+		taking++;
+		if (char === "?") {
+			parts.push({ kind: "?", text: char });
+			continue;
+		}
+		if (char === "[" && !unclosed) {
+			let end = i + 1;
+			const negated = pattern[end] === "!" || pattern[end] === "^";
+			if (negated) end++;
+			const start = end;
+			// A `]` right after the `[` (or `[!`) is a member.
+			if (pattern[end] === "]") end++;
+			while (end < pattern.length && pattern[end] !== "]") {
+				POSIX_CLASS_RE.lastIndex = end;
+				end = POSIX_CLASS_RE.test(pattern) ? POSIX_CLASS_RE.lastIndex : end + 1;
+			}
+			if (end < pattern.length) {
+				const members = pattern.slice(start, end).replace(/\[:(\w+):\]|[\\\]^[]/g, (member, name?: string) => {
+					if (name === undefined) return `\\${member}`;
+					return Object.hasOwn(POSIX_CLASSES, name) ? POSIX_CLASSES[name] : "\\s\\S";
+				});
+				parts.push({ kind: "[", text: `[${negated ? "^" : ""}${members}]` });
+				i = end;
+				continue;
+			}
+			unclosed = true;
+		}
+		parts.push({ kind: "char", text: char });
+	}
+	return taking > limit ? undefined : parts;
+}
+
+/**
+ * Whether a pathname pattern for one file name (`*`, `?`, `[...]`) matches `name`, ignoring case
+ * when the file system does. A leading `.` is matched only by a `.`, as bash matches without
+ * `dotglob`, so `*` names no dotfile. A pattern with a bracket expression that makes no valid class
+ * (`[z-a]`) is taken to match any name it is not too long for. Every part but `*` takes one
+ * character, so `*` only needs the last place it was tried from to go back to: the time is linear
+ * in the pattern's length plus the square of the name's, whatever the pattern holds.
+ */
+function globMatches(pattern: string, name: string): boolean {
+	if (!pattern.startsWith(".") && name.startsWith(".")) return false;
+	const parts = globParts(pattern, name.length);
+	if (parts === undefined) return false;
+	const fold = foldsCase();
+	// Per part, the test of the character it takes, `undefined` for `*`.
+	const tests: (((char: string) => boolean) | undefined)[] = [];
+	for (const { kind, text } of parts) {
+		if (kind === "*") {
+			tests.push(undefined);
+		} else if (kind === "?") {
+			tests.push(() => true);
+		} else if (kind === "char") {
+			const literal = fold ? text.toLowerCase() : text;
+			tests.push(char => (fold ? char.toLowerCase() : char) === literal);
+		} else {
+			let members: RegExp;
+			try {
+				members = new RegExp(text, fold ? "i" : "");
+			} catch {
+				return true;
+			}
+			tests.push(char => members.test(char));
+		}
+	}
+	let part = 0;
+	let at = 0;
+	// After the last `*` passed: the part that follows it, and where in `name` it was last tried.
+	let afterStar = -1;
+	let retry = 0;
+	while (at < name.length) {
+		const test = tests[part];
+		if (part < tests.length && test === undefined) {
+			afterStar = ++part;
+			retry = at;
+		} else if (test?.(name[at])) {
+			part++;
+			at++;
+		} else if (afterStar >= 0) {
+			part = afterStar;
+			at = ++retry;
+		} else {
+			return false;
+		}
+	}
+	while (part < tests.length && tests[part] === undefined) part++;
+	return part === tests.length;
+}
+
+/** Whether a path component, or a pathname pattern for one (`.netr[c]`), names the file `name`. */
+function namesFile(component: string, name: string): boolean {
+	if (GLOB_RE.test(component)) return globMatches(component, name);
+	return foldsCase() ? component.toLowerCase() === name.toLowerCase() : component === name;
+}
+
+/**
+ * Whether a file name, or a pathname pattern for one, names a `.env` file that is not a committed
+ * template. A pattern names one when what comes before its first wildcard can begin such a name
+ * (`.env*`, `.e?v`, `.env.[lp]*`): the wildcard can go on as one. Only a literal `.` matches a
+ * leading `.`, so a pattern that starts with a wildcard names none.
+ */
+function namesDotenv(file: string): boolean {
+	const name = foldsCase() ? file.toLowerCase() : file;
+	const wildcard = name.search(GLOB_RE);
+	if (wildcard < 0) return DOTENV_RE.test(name);
+	const prefix = name.slice(0, wildcard);
+	return ".env.".startsWith(prefix) ? prefix.startsWith(".") : /^\.env\.[\w.-]*$/.test(prefix);
+}
+
+/** The names in an absolute path, root first. */
+function pathNames(absPath: string): string[] {
+	return path.resolve(absPath).split(path.sep).filter(Boolean);
+}
+
+/** The longest word {@link expandBraces} expands, and the most words it makes of one; the rest is not checked. */
+const MAX_BRACE_WORD_LENGTH = 4096;
+const MAX_BRACE_WORDS = 1024;
+/**
+ * The most characters {@link expandBraces} makes while the guard checks one command line, each word
+ * counted with one for the space after it. Every rule checks each word made, so this bounds the
+ * guard's work on brace lists however many of them a command has; past it no more words are made
+ * and the command fails closed (`nesting_limit`).
+ */
+const MAX_BRACE_TEXT = 256 * 1024;
+/** What is left of {@link MAX_BRACE_TEXT} for the command line being checked, below 0 once passed; {@link findShellGuardHit} resets it. */
+let braceTextLeft = MAX_BRACE_TEXT;
+
+/** A word read for brace expansion: literal text, and braces, each the list of its alternatives. */
+type BracePart = string | BracePart[][];
+
+/** A sequence brace's body: `1..5`, `a..e`, `0..10..2`. */
+const BRACE_SEQUENCE_RE = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$/;
+
+/**
+ * The words brace expansion makes of `word`: `a{b,c}` gives `ab` and `ac`, `{1..3}` and `{a..c}`
+ * give sequences, and nested lists expand too; a brace with neither a top-level `,` nor a sequence,
+ * or one after `$`, stays as written. Quotes are not known here, so a quoted brace expands too. A
+ * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, and at most {@link MAX_BRACE_WORDS}
+ * words are made. Once the words made for the command line pass {@link MAX_BRACE_TEXT}, a word
+ * stays whole.
+ */
+function expandBraces(word: string): string[] {
+	if (word.length > MAX_BRACE_WORD_LENGTH || !word.includes("{")) return [word];
+	// Each `{` with the `}` that closes it and the commas directly inside it.
+	const closes = new Map<number, number>();
+	const commas = new Map<number, number[]>();
+	const open: number[] = [];
+	for (let i = 0; i < word.length; i++) {
+		if (word[i] === "{") {
+			open.push(i);
+			commas.set(i, []);
+		} else if (word[i] === "}" && open.length > 0) {
+			closes.set(open.pop()!, i);
+		} else if (word[i] === "," && open.length > 0) {
+			commas.get(open.at(-1)!)!.push(i);
+		}
+	}
+	// The alternatives of the brace from `start` to `end`, or `undefined` when it does not expand.
+	function alternatives(start: number, end: number): BracePart[][] | undefined {
+		const inside = commas.get(start)!;
+		if (inside.length > 0) return [start, ...inside].map((at, k) => parts(at + 1, inside[k] ?? end));
+		const sequence = BRACE_SEQUENCE_RE.exec(word.slice(start + 1, end));
+		if (!sequence) return undefined;
+		const numeric = /\d/.test(sequence[1]);
+		if (numeric !== /\d/.test(sequence[2])) return undefined;
+		const from = numeric ? Number(sequence[1]) : sequence[1].charCodeAt(0);
+		const to = numeric ? Number(sequence[2]) : sequence[2].charCodeAt(0);
+		const step = (from <= to ? 1 : -1) * (Math.abs(Number(sequence[3] ?? 1)) || 1);
+		const items: BracePart[][] = [];
+		for (let n = from; (step > 0 ? n <= to : n >= to) && items.length < MAX_BRACE_WORDS; n += step) {
+			items.push([numeric ? String(n) : String.fromCharCode(n)]);
+		}
+		return items;
+	}
+	function parts(from: number, to: number): BracePart[] {
+		const read: BracePart[] = [];
+		let text = "";
+		for (let i = from; i < to; i++) {
+			const end = closes.get(i);
+			const brace = end !== undefined && word[i - 1] !== "$" ? alternatives(i, end) : undefined;
+			if (brace === undefined) {
+				text += word[i];
+				continue;
+			}
+			if (text) read.push(text);
+			text = "";
+			read.push(brace);
+			i = end!;
+		}
+		if (text) read.push(text);
+		return read;
+	}
+	if (braceTextLeft < 0) return [word];
+	const words = braceWords(parts(0, word.length), braceTextLeft);
+	if (words === undefined) {
+		braceTextLeft = -1;
+		return [word];
+	}
+	for (const made of words) braceTextLeft -= made.length + 1;
+	return words;
+}
+
+/**
+ * The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}, or `undefined` once they, or
+ * the alternatives of one brace, come to more than `maxText` characters.
+ */
+function braceWords(parts: readonly BracePart[], maxText: number): string[] | undefined {
+	let words = [""];
+	for (const part of parts) {
+		const options: string[] = [];
+		if (typeof part === "string") options.push(part);
+		else {
+			let optionsText = 0;
+			for (const alternative of part) {
+				const made = braceWords(alternative, maxText);
+				if (made === undefined) return undefined;
+				for (const option of made) {
+					if (options.length === MAX_BRACE_WORDS) break;
+					options.push(option);
+					optionsText += option.length + 1;
+					if (optionsText > maxText) return undefined;
+				}
+			}
+		}
+		const next: string[] = [];
+		let text = 0;
+		for (const prefix of words) {
+			for (const option of options) {
+				next.push(prefix + option);
+				text += prefix.length + option.length + 1;
+				if (text > maxText) return undefined;
+				if (next.length === MAX_BRACE_WORDS) break;
+			}
+			if (next.length === MAX_BRACE_WORDS) break;
+		}
+		words = next;
+	}
+	return words;
+}
+
+/**
+ * The absolute paths a word of `command` names, one per word its braces expand to
+ * ({@link expandBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
+ * those that cannot be resolved, relative ones from an unknown `cwd` included, are left out.
+ */
+function wordPaths(command: ShellCommand, word: string, cwd: string | undefined, home: string): string[] {
+	const literalTilde = command.literalTildes.has(word);
+	const paths: string[] = [];
+	for (const expanded of expandBraces(word)) {
+		const target = resolveShellWordPath(literalTilde ? `./${expanded}` : expanded, cwd, home);
+		if (target !== undefined) paths.push(target);
+	}
+	return paths;
+}
+
 /**
  * The credential location an absolute path is in, for display; `undefined` when it holds no
- * credentials. Public files in a credential folder (`~/.ssh/config`, `*.pub`) do not count.
+ * credentials. Public files in a credential folder (`~/.ssh/config`, `*.pub`) do not count. A
+ * component that is a pathname pattern (`~/.ss?/id_*`, `~/.netr[c]`) counts when it can name the
+ * location, and names are compared without regard to case where the file system does so
+ * ({@link foldsCase}). Paths are compared as written: a symlink to a location is not followed.
  */
 export function credentialLocation(absPath: string, home: string): string | undefined {
-	const target = path.resolve(absPath);
-	if (Object.hasOwn(SYSTEM_CREDENTIAL_FILES, target)) return target;
-	if (ompCredentialStores().includes(target)) return `omp's credential store ${target}`;
-	const relative = path.relative(home, target);
-	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
-	const posix = relative.split(path.sep).join("/");
-	if (Object.hasOwn(CREDENTIAL_FILES, posix)) return `~/${posix}`;
+	const names = pathNames(absPath);
+	const fixed = [
+		...Object.keys(SYSTEM_CREDENTIAL_FILES).map(file => ({ file, shown: file })),
+		...ompCredentialStores().map(file => ({ file, shown: `omp's credential store ${file}` })),
+	];
+	for (const { file, shown } of fixed) {
+		const fileNames = pathNames(file);
+		if (names.length === fileNames.length && fileNames.every((name, k) => namesFile(names[k], name))) return shown;
+	}
+	const homeNames = pathNames(home);
+	if (names.length <= homeNames.length || !homeNames.every((name, k) => namesFile(names[k], name))) return undefined;
+	const rest = names.slice(homeNames.length);
+	for (const file of Object.keys(CREDENTIAL_FILES)) {
+		if (rest.length === 1 && namesFile(rest[0], file)) return `~/${file}`;
+	}
 	for (const [folder, publicFiles] of Object.entries(CREDENTIAL_DIRS)) {
-		if (posix !== folder && !posix.startsWith(`${folder}/`)) continue;
-		const name = path.basename(target);
-		if (posix !== folder && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
+		const folderNames = folder.split("/");
+		if (rest.length < folderNames.length || !folderNames.every((name, k) => namesFile(rest[k], name))) continue;
+		// Bare wildcards for every component (`~/*/*/package.json`) name any folder, not this one.
+		if (!folderNames.some((_, k) => /[^*?]/.test(rest[k]))) continue;
+		const name = foldsCase() ? rest.at(-1)!.toLowerCase() : rest.at(-1)!;
+		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
 		return `~/${folder}`;
 	}
 	return undefined;
 }
 
 /**
- * The secret a word of `command` names when it is sent somewhere: a credential file, a `.env`, or
- * a process environment.
+ * The secret a word of `command`, resolved from `cwd`, names when it is sent somewhere: a
+ * credential file, a `.env`, or a process environment, also through braces and pathname patterns
+ * (`.env*`, `~/.{netrc,x}`). From an unknown `cwd`, a relative `.env` still counts by its name.
  */
-function sentSecret(command: ShellCommand, word: string, home: string): string | undefined {
-	const target = resolveCommandWordPath(command, word, command.cwd, home);
-	if (target === undefined) return undefined;
-	if (DOTENV_RE.test(path.basename(target))) return path.basename(target);
-	if (PROC_ENVIRON_RE.test(target)) return "the process environment";
-	return credentialLocation(target, home);
+function sentSecret(command: ShellCommand, word: string, cwd: string | undefined, home: string): string | undefined {
+	for (const target of wordPaths(command, word, cwd, home)) {
+		const names = pathNames(target);
+		if (namesDotenv(names.at(-1) ?? "")) return path.basename(target);
+		if (names.length === 3 && namesFile(names[0], "proc") && namesFile(names[2], "environ")) {
+			return "the process environment";
+		}
+		const found = credentialLocation(target, home);
+		if (found) return found;
+	}
+	if (cwd === undefined) {
+		for (const target of wordPaths(command, word, path.sep, home)) {
+			if (namesDotenv(path.basename(target))) return path.basename(target);
+		}
+	}
+	return undefined;
 }
 
 // -- command helpers ---------------------------------------------------------------------------------
 
 function args(command: ShellCommand): string[] {
 	return command.argv.slice(1);
-}
-
-/** The directory a command runs in, or `undefined` once a `cd` the parser could not resolve has moved it. */
-function commandDir(command: ShellCommand): string | undefined {
-	return command.unknownCwd ? undefined : command.cwd;
 }
 
 /** Commands that put a file's content on their output or in another file. */
@@ -340,7 +691,7 @@ function copyOperands(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1));
+			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -352,7 +703,7 @@ function copyOperands(command: ShellCommand): string[] {
 			while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 			if (k === arg.length - 1) i++;
 		} else {
-			operands.push(arg);
+			operands.push(...expandBraces(arg));
 		}
 	}
 	return operands;
@@ -541,7 +892,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1));
+			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -564,7 +915,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 				break;
 			}
 		} else {
-			operands.push(arg);
+			operands.push(...expandBraces(arg));
 		}
 	}
 	return [...words, ...operands.slice(supplied ? 0 : 1)];
@@ -627,7 +978,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1));
+			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -648,7 +999,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 				words.push(arg);
 			}
 		} else {
-			operands.push(arg);
+			operands.push(...expandBraces(arg));
 		}
 	}
 	if (destination && !targeted) operands.pop();
@@ -674,27 +1025,54 @@ function readWords(command: ShellCommand, home: string): string[] {
 
 // -- credential_read ---------------------------------------------------------------------------------
 
+/** The options of `security find-generic-password`/`find-internet-password` that take a value. */
+const KEYCHAIN_VALUE_LETTERS = "acCdDGjlpPrst";
+
+/**
+ * Whether a `security` command prints a keychain password: `find-generic-password` or
+ * `find-internet-password` with `-w` (the password alone) or `-g` (with the item), also in a bundle
+ * (`-ga`) up to a letter that takes a value. `add-*-password -w` gives the password to store.
+ */
+function printsKeychainPassword(argv: readonly string[]): boolean {
+	if (!/^find-\w+-password$/.test(argv[1] ?? "")) return false;
+	for (let i = 2; i < argv.length; i++) {
+		const arg = argv[i];
+		if (!/^-[A-Za-z]+$/.test(arg)) continue;
+		for (let k = 1; k < arg.length; k++) {
+			if (arg[k] === "w" || arg[k] === "g") return true;
+			if (KEYCHAIN_VALUE_LETTERS.includes(arg[k])) {
+				if (k === arg.length - 1) i++;
+				break;
+			}
+		}
+	}
+	return false;
+}
+
 function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	const name = command.argv[0];
 	const first = command.argv[1] ?? "";
 	if (name === "security" && (first === "dump-keychain" || first === "export")) {
 		return hit("credential_read", "it exports the keychain");
 	}
-	if (
-		name === "security" &&
-		first.includes("password") &&
-		args(command).some(arg => /^-[A-Za-z]+$/.test(arg) && arg.includes("w"))
-	) {
+	if (name === "security" && printsKeychainPassword(command.argv)) {
 		return hit("credential_read", "it prints a keychain password");
 	}
 	if (name === "gpg" && args(command).some(arg => arg.startsWith("--export-secret"))) {
 		return hit("credential_read", "it exports private keys");
 	}
-	const words = [...readWords(command, scope.home), ...command.reads];
-	for (const word of words) {
-		const target = resolveCommandWordPath(command, word, command.cwd, scope.home);
-		const found = target === undefined ? undefined : credentialLocation(target, scope.home);
-		if (found) return hit("credential_read", `it reads your credentials in ${found}`);
+	// Its arguments are read from where it runs, its `<` redirections from where the shell opens them.
+	const sources = [
+		{ words: readWords(command, scope.home), cwd: command.cwd },
+		{ words: command.reads, cwd: command.shellCwd },
+	];
+	for (const { words, cwd } of sources) {
+		for (const word of words) {
+			for (const target of wordPaths(command, word, cwd, scope.home)) {
+				const found = credentialLocation(target, scope.home);
+				if (found) return hit("credential_read", `it reads your credentials in ${found}`);
+			}
+		}
 	}
 	return undefined;
 }
@@ -729,14 +1107,44 @@ const CURL_DATA_OPTIONS: Record<string, true> = {
 	"-T": true,
 	"--upload-file": true,
 };
-/** wget's options that send a file, as `--post-file=file` or `--post-file file`. */
-const WGET_FILE_OPTIONS: Record<string, true> = { "--post-file": true, "--body-file": true };
+/**
+ * wget's options that send a file, as `--post-file=file` or `--post-file file`, each with the
+ * shortest abbreviation wget takes for it (`--post-` could also be `--post-data`).
+ */
+const WGET_FILE_OPTIONS: Record<string, string> = { "--post-file": "--post-f", "--body-file": "--body-f" };
 
-/** The local files a network command sends. */
+/**
+ * The files a curl `-F` field reads after an `@` or `<` right after its `=`: a list split by `,` and
+ * ended by `;` (where the field's options start), each name possibly double-quoted
+ * (`f=@"a,b.txt",.env;type=text/plain`). A field with other text after its `=` is sent as written.
+ */
+function formFiles(value: string): string[] {
+	const eq = value.indexOf("=");
+	if (eq < 0 || (value[eq + 1] !== "@" && value[eq + 1] !== "<")) return [];
+	const files: string[] = [];
+	let i = eq + 2;
+	for (;;) {
+		let file = "";
+		if (value[i] === '"') {
+			for (i++; i < value.length && value[i] !== '"'; i++) {
+				if (value[i] === "\\" && i + 1 < value.length) i++;
+				file += value[i];
+			}
+		}
+		for (; i < value.length && value[i] !== "," && value[i] !== ";"; i++) {
+			if (value[i] !== '"') file += value[i];
+		}
+		files.push(file);
+		if (value[i] !== ",") return files;
+		i++;
+	}
+}
+
+/** The local files a network command sends through its arguments. */
 function sentFiles(command: ShellCommand): string[] {
 	const name = command.argv[0];
 	const argv = args(command);
-	const files = [...command.reads];
+	const files: string[] = [];
 	if (name === "curl") {
 		for (let i = 0; i < argv.length; i++) {
 			const arg = argv[i];
@@ -759,17 +1167,28 @@ function sentFiles(command: ShellCommand): string[] {
 			}
 			if (value === undefined) continue;
 			if (option === "-T" || option === "--upload-file") {
-				files.push(value);
-			} else {
-				const at = value.search(/[@<]/);
-				if (at >= 0) files.push(value.slice(at + 1).split(";")[0]);
+				// `-T "{a,b}"` uploads each file of the list, as braces expand ({@link sentSecret}), and
+				// curl reads a set of one, `-T "{.env}"`, as its file.
+				files.push(value.replace(/\{([^{},]*)\}/g, "$1"));
+			} else if (option === "-F" || option === "--form") {
+				files.push(...formFiles(value));
+			} else if (option === "--data-urlencode") {
+				// `name@file` or `@file`; after an `=`, the rest is the content.
+				const at = value.indexOf("@");
+				const eq = value.indexOf("=");
+				if (at >= 0 && (eq < 0 || at < eq)) files.push(value.slice(at + 1));
+			} else if (value.startsWith("@")) {
+				files.push(value.slice(1).split(";")[0]);
 			}
 		}
 	} else if (name === "wget") {
 		for (let i = 0; i < argv.length; i++) {
 			const eq = argv[i].indexOf("=");
 			const option = eq > 0 ? argv[i].slice(0, eq) : argv[i];
-			if (!Object.hasOwn(WGET_FILE_OPTIONS, option)) continue;
+			const sends = Object.entries(WGET_FILE_OPTIONS).some(
+				([full, shortest]) => option.startsWith(shortest) && full.startsWith(option),
+			);
+			if (!sends) continue;
 			const value = eq > 0 ? argv[i].slice(eq + 1) : argv[++i];
 			if (value !== undefined) files.push(value);
 		}
@@ -792,45 +1211,116 @@ function sentFiles(command: ShellCommand): string[] {
 	return files;
 }
 
+/**
+ * Whether a command prints the environment: `printenv` with no names, `env` with no command, and the
+ * builtins that list exported variables when given no names: `export` (`-p`, `-n`),
+ * `declare`/`typeset` (`-p`, `-x`), and a bare `set`.
+ */
 function dumpsEnvironment(command: ShellCommand): boolean {
-	const name = command.argv[0];
-	if (name === "printenv" || (name === "env" && shellPositionalArgs(command.argv).length === 0)) return true;
-	return name === "export" && command.argv.length === 2 && command.argv[1] === "-p";
+	const [name, ...rest] = command.argv;
+	if (name === "printenv" || name === "env") return shellPositionalArgs(command.argv).length === 0;
+	if (name === "export") return rest.every(arg => /^-[pn]+$/.test(arg));
+	if (name === "declare" || name === "typeset") return rest.every(arg => /^-[px]+$/.test(arg));
+	return name === "set" && rest.length === 0;
 }
 
-/** The secret a command puts on its output: the environment, or a credential or `.env` file it reads. */
-function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
-	if (dumpsEnvironment(command)) return "the environment";
-	const name = command.argv[0];
-	const words = [...(name === "source" ? args(command) : readWords(command, scope.home)), ...command.reads];
+/** The first secret one of `words` of `command` names, each resolved from `cwd` ({@link sentSecret}). */
+function firstSecret(
+	command: ShellCommand,
+	words: readonly string[],
+	cwd: string | undefined,
+	home: string,
+): string | undefined {
 	for (const word of words) {
-		const found = sentSecret(command, word, scope.home);
+		const found = sentSecret(command, word, cwd, home);
 		if (found) return found;
 	}
 	return undefined;
 }
 
 /**
- * The first secret one of `commands` can put on its output: its own ({@link secretOutput}), or one
- * a command in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
+ * The secret a command puts on its output: the environment, or a credential or `.env` file it
+ * reads, through its arguments from where it runs or its `<` redirections from where the shell opens them.
  */
-function firstSecretOutput(commands: readonly ShellCommand[], scope: GuardScope): string | undefined {
-	for (const command of commands) {
-		const found = secretOutput(command, scope) ?? firstSecretOutput(command.subs, scope);
-		if (found) return found;
-	}
-	return undefined;
+function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
+	if (dumpsEnvironment(command)) return "the environment";
+	const words = command.argv[0] === "source" ? args(command) : readWords(command, scope.home);
+	return (
+		firstSecret(command, command.reads, command.shellCwd, scope.home) ??
+		firstSecret(command, words, command.cwd, scope.home)
+	);
 }
 
-/** A network command sending a secret: in a file it uploads, an upstream stage's output, or a substitution's. */
-function secretSend(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
-	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
-	let found: string | undefined;
-	for (const file of sentFiles(command)) {
-		found = sentSecret(command, file, scope.home);
-		if (found) break;
+/**
+ * The secrets commands put on their output, each command and upstream stage worked out once per
+ * {@link findShellGuardHit}, so a long pipeline of senders costs no more than its length.
+ */
+class SecretOutputs {
+	readonly #commands = new Map<ShellCommand, string | undefined>();
+	/** Per command list of an upstream stage, the index of the first command from each index on that puts a secret out. */
+	readonly #next = new Map<readonly ShellCommand[], Int32Array>();
+	readonly #upstream = new Map<ShellUpstream, string | undefined>();
+
+	constructor(readonly scope: GuardScope) {}
+
+	/**
+	 * The secret `command` can put on its output: its own ({@link secretOutput}), or one a command
+	 * in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
+	 */
+	of(command: ShellCommand): string | undefined {
+		if (this.#commands.has(command)) return this.#commands.get(command);
+		const found = secretOutput(command, this.scope) ?? this.first(command.subs);
+		this.#commands.set(command, found);
+		return found;
 	}
-	found ??= firstSecretOutput(command.upstream, scope) ?? firstSecretOutput(command.subs, scope);
+
+	/** The first secret one of `commands` can put on its output. */
+	first(commands: readonly ShellCommand[]): string | undefined {
+		for (const command of commands) {
+			const found = this.of(command);
+			if (found) return found;
+		}
+		return undefined;
+	}
+
+	/** The first secret a command upstream can put on its output, the earliest stage first. */
+	upstream(upstream: ShellUpstream | undefined): string | undefined {
+		const stages: ShellUpstream[] = [];
+		let known = upstream;
+		for (; known && !this.#upstream.has(known); known = known.before) stages.push(known);
+		let found = known === undefined ? undefined : this.#upstream.get(known);
+		for (const stage of stages.reverse()) {
+			found ??= this.#stage(stage);
+			this.#upstream.set(stage, found);
+		}
+		return found;
+	}
+
+	/** The first secret a command of the stage itself can put on its output. */
+	#stage({ commands, from, to }: ShellUpstream): string | undefined {
+		let next = this.#next.get(commands);
+		if (!next) {
+			next = new Int32Array(commands.length + 1);
+			next[commands.length] = commands.length;
+			for (let i = commands.length - 1; i >= 0; i--) next[i] = this.of(commands[i]) ? i : next[i + 1];
+			this.#next.set(commands, next);
+		}
+		return next[from] < to ? this.of(commands[next[from]]) : undefined;
+	}
+}
+
+/**
+ * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, from
+ * an upstream stage's output, or from a substitution's.
+ */
+function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | undefined {
+	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
+	const { home } = outputs.scope;
+	const found =
+		firstSecret(command, command.reads, command.shellCwd, home) ??
+		firstSecret(command, sentFiles(command), command.cwd, home) ??
+		outputs.upstream(command.upstream) ??
+		outputs.first(command.subs);
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
@@ -978,7 +1468,7 @@ interface GitTarget {
  */
 function gitInvocation(command: ShellCommand, home: string): { sub: string; rest: string[]; target?: GitTarget } {
 	const argv = args(command);
-	let where: string | undefined = commandDir(command);
+	let where = command.cwd;
 	const named: { gitDir?: string; workTree?: string } = {};
 	for (const assignment of command.assignments) {
 		const eq = assignment.indexOf("=");
@@ -1044,7 +1534,7 @@ function resolvePathspecs(words: readonly string[], command: ShellCommand, scope
 		if (BRACE_EXPANSION_RE.test(word)) return undefined;
 		if (!SHELL_EXPANDED_RE.test(word)) return word;
 		return ABSOLUTE_EXPANSION_RE.test(word)
-			? resolveCommandWordPath(command, word, commandDir(command), scope.home)
+			? resolveCommandWordPath(command, word, command.cwd, scope.home)
 			: undefined;
 	});
 	return resolved.every((word): word is string => word !== undefined) ? resolved : [];
@@ -1536,7 +2026,7 @@ function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] 
 				!bsd && !regexp && processName.length >= COMM_LENGTH ? processName.slice(0, COMM_LENGTH) : processName;
 			return pgrepProbe(["pgrep", ...select, ...match, "--", probe]);
 		}
-		const executable = resolveCommandWordPath(command, processName, commandDir(command), scope.home);
+		const executable = resolveCommandWordPath(command, processName, command.cwd, scope.home);
 		if (executable === undefined) return [];
 		const run = () =>
 			Process.fromPath(fs.realpathSync(executable))
@@ -1595,9 +2085,11 @@ export interface ShellGuardOptions {
 /**
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
- * command it runs. A command nested deeper than the parser follows, or with more nested script
- * text than it reads, fails closed (`nesting_limit`). Probing rules run only after every cheap rule
- * has passed, and their probes share one budget: the ones left without time count as no match.
+ * command it runs. A command nested deeper than the parser follows, with more nested script text
+ * than it reads, with more text to search for heredoc delimiters that never come, or with brace
+ * lists that expand past {@link MAX_BRACE_TEXT} and break no rule before that, fails closed
+ * (`nesting_limit`). Probing rules run only after every other rule has passed, and their probes
+ * share one budget: the ones left without time count as no match.
  */
 export function findShellGuardHit(
 	command: string,
@@ -1605,6 +2097,7 @@ export function findShellGuardHit(
 	options: ShellGuardOptions = {},
 ): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
+	braceTextLeft = MAX_BRACE_TEXT;
 	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
 	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
@@ -1629,14 +2122,21 @@ export function findShellGuardHit(
 	if (truncated) {
 		return hit(
 			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, past what the guard can check`,
+			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, or has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, past what the guard can check`,
 		);
 	}
+	const outputs = new SecretOutputs(scope);
 	for (const pipeline of pipelines) {
 		const found =
-			pipeline.map(c => secretSend(c, scope)).find(Boolean) ??
+			pipeline.map(c => secretSend(c, outputs)).find(Boolean) ??
 			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
 		if (found) return found;
+	}
+	if (braceTextLeft < 0) {
+		return hit(
+			"nesting_limit",
+			`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
+		);
 	}
 	if (options.probe === false) return undefined;
 	const key = `${scope.cwd}\0${scope.home}\0${command}`;
