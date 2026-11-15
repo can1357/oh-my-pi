@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	type VibeSessionState,
 	type VibeScreenSnapshot,
@@ -103,6 +104,12 @@ export interface VibeParentSession {
 			Pick<SessionManager, "appendModeChange" | "appendEntriesAtomically" | "recoverPersistenceFromCurrentState">
 		>;
 	asyncJobManager?: AsyncJobManagerApi;
+	/**
+	 * Called once per settled worker turn, before the result self-delivers into
+	 * the parent conversation. Lets the parent session account worker spend
+	 * (goal budgets) at settlement time, before any wake turn baselines it away.
+	 */
+	onVibeWorkerTurnSettled?: () => void | Promise<void>;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
@@ -531,6 +538,23 @@ export class VibeSessionRegistry {
 			if (record.ownerId === ownerId && record.state !== "dead") ids.push(record.id);
 		}
 		return ids;
+	}
+
+	/**
+	 * Whether any live worker in this parent's scope has a turn in flight.
+	 * Goal continuation consults this so it never fires while worker results
+	 * are still coming — delivery itself wakes the director.
+	 */
+	hasInFlightTurns(session: VibeParentSession): boolean {
+		const scope = this.ownerScope(session);
+		const manager = session.asyncJobManager;
+		for (const record of this.#records.values()) {
+			if (!matchesScope(record, scope) || record.state === "dead") continue;
+			if (!record.turn) continue;
+			const job = manager?.getJob(record.turn.jobId);
+			if (!manager || !job || job.status === "running") return true;
+		}
+		return false;
 	}
 
 	/**
@@ -1432,6 +1456,9 @@ export class VibeSessionRegistry {
 		record.turn = undefined;
 		record.live = undefined;
 		record.lastActivityAt = Date.now();
+		// Account worker spend before delivery can start a parent wake turn, so a
+		// goal budget sees it as a delta instead of absorbing it into a new baseline.
+		await session.onVibeWorkerTurnSettled?.();
 		if (record.killed || record.suspended) {
 			record.state = "dead";
 			return;
@@ -1572,4 +1599,76 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 		}
 	}
 	return any ? total : null;
+}
+
+export interface VibeWorkerUsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
+/**
+ * Per-worker cumulative token totals ever observed for an owner's workers.
+ * Values are per-field maxima, so a worker parking (live session dropped from
+ * the AgentRegistry) or reviving with a fresh session object never lowers its
+ * recorded spend — without this, one worker's disappearance would mask another
+ * worker's new usage in the summed aggregate. Entries for dead workers are
+ * kept: their spend stays part of the owner's total for this process.
+ */
+const workerUsageHighWater = new Map<string, VibeWorkerUsageTotals>();
+
+function sumAssistantUsage(messages: readonly AgentMessage[]): VibeWorkerUsageTotals {
+	const totals: VibeWorkerUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		const usage = message.usage;
+		if (!usage) continue;
+		totals.input += usage.input ?? 0;
+		totals.output += usage.output ?? 0;
+		totals.cacheRead += usage.cacheRead ?? 0;
+		totals.cacheWrite += usage.cacheWrite ?? 0;
+	}
+	return totals;
+}
+
+/**
+ * Cumulative token usage across every vibe worker owned by `ownerId`, summed
+ * from live worker sessions' assistant-message usage. Intended for goal-budget
+ * accounting in the parent session: the caller adds it to its own totals, and
+ * GoalRuntime flushes deltas against a persistent baseline so worker spend is
+ * charged to the goal even while the director is idle between turns.
+ *
+ * After a process restart the map starts empty and live transcripts replay
+ * their full history, so the aggregate starts at the workers' true lifetime
+ * totals — goals restored from the journal resume paused, and their accounting
+ * baseline re-arms at resume time, so no spend is double-charged.
+ */
+export function aggregateVibeWorkerUsage(ownerId: string): VibeWorkerUsageTotals {
+	const totals: VibeWorkerUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const registry = AgentRegistry.global();
+	for (const id of VibeSessionRegistry.global().listIdsByOwner(ownerId)) {
+		const key = `${ownerId}\0${id}`;
+		const session = registry.get(id)?.session;
+		if (session) {
+			const seen = sumAssistantUsage(session.messages);
+			const previous = workerUsageHighWater.get(key);
+			const highWater: VibeWorkerUsageTotals = previous
+				? {
+						input: Math.max(previous.input, seen.input),
+						output: Math.max(previous.output, seen.output),
+						cacheRead: Math.max(previous.cacheRead, seen.cacheRead),
+						cacheWrite: Math.max(previous.cacheWrite, seen.cacheWrite),
+					}
+				: seen;
+			workerUsageHighWater.set(key, highWater);
+		}
+		const recorded = workerUsageHighWater.get(key);
+		if (!recorded) continue;
+		totals.input += recorded.input;
+		totals.output += recorded.output;
+		totals.cacheRead += recorded.cacheRead;
+		totals.cacheWrite += recorded.cacheWrite;
+	}
+	return totals;
 }
