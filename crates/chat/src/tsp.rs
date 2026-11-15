@@ -16,7 +16,7 @@ use omp_tui::tsp::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
-use strum::{IntoStaticStr, VariantArray as _};
+use strum::{EnumCount as _, IntoStaticStr, VariantArray as _};
 
 use crate::{
 	chrome::PLACEHOLDER,
@@ -127,9 +127,22 @@ pub struct Surface {
 	status_effort:    Option<(Str, Option<Kind>)>,
 	approval_id:      Str,
 	form_id:          Str,
+	/// What each [`Sheet`] last sent, so the next one is patched in place.
+	sheets:           [Option<Node>; Sheet::COUNT],
 	cover:            Cover,
 	events:           VecDeque<Event>,
 }
+
+/// A node the presenter keeps mounted in the layer region and patches in
+/// place as it changes ([`Surface::present_sheet`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumCount)]
+pub enum Sheet {
+	/// The open picker overlay (models, prompt history).
+	Picker,
+	/// The composer's completion list at the caret.
+	Completion,
+}
+
 /// HTML-like element tags supported by Tern's `el` vocabulary.
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
 #[strum(serialize_all = "lowercase")]
@@ -259,6 +272,7 @@ impl Surface {
 			status_effort: None,
 			approval_id: Str::default(),
 			form_id: Str::default(),
+			sheets: Default::default(),
 			cover: Cover::new(),
 			events: VecDeque::new(),
 		}
@@ -336,6 +350,7 @@ impl Surface {
 		self.status_text = Str::default();
 		self.approval_id = Str::default();
 		self.form_id = Str::default();
+		self.sheets = Default::default();
 		self.cover.forget();
 		self.dirty = true;
 	}
@@ -465,6 +480,46 @@ impl Surface {
 		Ok(())
 	}
 
+	/// Presents, patches or removes the node one [`Sheet`] holds in the layer
+	/// region.
+	///
+	/// A sheet whose root id and kind stay the same is patched in place: a
+	/// `set` with the props that changed (`null` for those it dropped), and its
+	/// children patched alike while their ids and kinds stay in order, else
+	/// replaced. So moving a picker's selection sends its `selected` and the
+	/// preview's text, never its catalogue again. Nothing is sent while the
+	/// node is unchanged.
+	///
+	/// # Errors
+	/// Returns the error writing to the terminal.
+	pub fn present_sheet(
+		&mut self,
+		writer: &mut impl io::Write,
+		sheet: Sheet,
+		node: Option<&Node>,
+	) -> io::Result<()> {
+		let slot = sheet as usize;
+		if self.sheets[slot].as_ref() == node {
+			return Ok(());
+		}
+		if self.suspended || !self.credit_available() {
+			self.dirty = true;
+			return Ok(());
+		}
+		let mut ops = Vec::new();
+		match (self.sheets[slot].as_ref(), node) {
+			(Some(old), Some(new)) => patch(old, new, LAYER_ID, &mut ops),
+			(Some(old), None) => ops.push(Op::Del(old.id.clone())),
+			(None, Some(new)) => ops.push(add_node(new.clone(), LAYER_ID)),
+			(None, None) => {},
+		}
+		if !ops.is_empty() {
+			self.send_frame(writer, ops)?;
+		}
+		self.sheets[slot] = node.cloned();
+		Ok(())
+	}
+
 	/// Covers the pane with a `screen` surface that draws `view`, or removes the
 	/// cover when `view` is `None`.
 	///
@@ -562,6 +617,7 @@ impl Surface {
 				self.status_text = Str::default();
 				self.approval_id = Str::default();
 				self.form_id = Str::default();
+				self.sheets = Default::default();
 				self.dirty = true;
 			},
 			Incoming::Event(event) => self.events.push_back(event),
@@ -966,6 +1022,37 @@ fn changed_props(sent: &Map<String, Value>, next: &Map<String, Value>) -> Map<St
 		}
 	}
 	props
+}
+
+/// The ops that turn `old`, a child of `parent`, into `new`.
+fn patch(old: &Node, new: &Node, parent: &str, ops: &mut Vec<Op>) {
+	if old.id != new.id || old.k != new.k {
+		ops.push(Op::Del(old.id.clone()));
+		ops.push(add_node(new.clone(), parent));
+		return;
+	}
+	let changed = changed_props(&old.p, &new.p);
+	if !changed.is_empty() {
+		ops.push(Op::Set { id: new.id.clone(), props: changed });
+	}
+	let same_shape = old.c.len() == new.c.len()
+		&& old
+			.c
+			.iter()
+			.zip(&new.c)
+			.all(|(old, new)| old.id == new.id && old.k == new.k);
+	if same_shape {
+		for (old_child, new_child) in old.c.iter().zip(&new.c) {
+			patch(old_child, new_child, new.id.as_str(), ops);
+		}
+		return;
+	}
+	ops.extend(old.c.iter().map(|child| Op::Del(child.id.clone())));
+	ops.extend(
+		new.c
+			.iter()
+			.map(|child| add_node(child.clone(), new.id.as_str())),
+	);
 }
 
 fn node_for(block: &RenderedBlock, hello: &Hello) -> (Node, Str) {

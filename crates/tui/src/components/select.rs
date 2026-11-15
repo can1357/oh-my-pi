@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{iter::FusedIterator, ops::Range};
 
 use omp_core::{IntoStr, Str, sf};
 use smallvec::SmallVec;
@@ -253,6 +253,19 @@ impl Select {
 		};
 		self.state.cursor = position as u16;
 		true
+	}
+
+	/// Values of the options the live query shows, in display order. A host
+	/// that describes the list elsewhere (a native picker's `order`) reads
+	/// the filtering from here instead of ranking again.
+	pub fn visible_values(&self) -> impl DoubleEndedIterator<Item = &Str> + FusedIterator + '_ {
+		self
+			.state
+			.visible
+			.iter()
+			.map(|&index| &self.state.options[usize::from(index)])
+			.filter(|option| !option.custom)
+			.map(|option| &option.value)
 	}
 
 	/// The live filter query.
