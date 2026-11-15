@@ -55,6 +55,7 @@ import {
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
+import { cfgMcpStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
@@ -4050,7 +4051,8 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(1);
 			const request = calls[0]!;
 			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
-			expect(request.message).toContain("Staging is green; production has a pending migration.");
+			// Section titles are the fields' property titles; the message keeps only the other form text.
+			expect(request.message).toBe("Staging is green; production has a pending migration.");
 			expect(request.requestedSchema.required).toEqual(["replicas"]);
 			expect(request.requestedSchema.properties).toEqual({
 				target: {
@@ -4520,6 +4522,25 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			// server's tool. Before the fix, this late arrival was dropped.
 			await pollUntil(() => refreshSpy.mock.calls.length > 1);
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("binds a slow server's tools before session/new returns when mcp.startupTimeoutMs covers it (#19253)", async () => {
+		const harness = await createHarness();
+		// Above the fixture's 450ms initialize delay, so the tools must be bound
+		// by the first, synchronous refresh instead of a background one.
+		cfgMcpStartupTimeoutMs.set(Settings.instance, 5_000);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+
+		try {
+			await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
+			});
+			expect(namesOf(refreshSpy.mock.calls[0]?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 		} finally {
 			refreshSpy.mockRestore();
 		}
