@@ -192,6 +192,10 @@
 
 - Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
+### Added
+
+- Shared `agy acp` processes and IDE MCP bridges across concurrent `antigravity-cli` sessions with matching credentials and tool sets (`shareProcess` / `antigravityShareProcess`, env `PI_AGY_SHARE_PROCESS`), with per-conversation MCP call routing, credential-rotation retirement, and unreferenced idle shutdown.
+
 ### Changed
 
 - Isolated the `antigravity-cli` ACP child working directory in an empty managed workspace by default (`isolateWorkspace` / `antigravityIsolateWorkspace`, env `PI_AGY_ISOLATE_WORKSPACE`), preventing `agy` from indexing large host repositories into memory while host tools continue executing in the real session directory.

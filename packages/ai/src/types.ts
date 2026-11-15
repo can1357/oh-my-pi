@@ -904,6 +904,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cachedContent?: string;
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/** Share `agy acp` processes across Antigravity CLI sessions with matching credentials and tools (default: `true`). */
+	antigravityShareProcess?: boolean;
 	/** Pass an empty managed workspace directory to Antigravity CLI (`agy`) instead of `cwd` (default: `true`). */
 	antigravityIsolateWorkspace?: boolean;
 	/**
