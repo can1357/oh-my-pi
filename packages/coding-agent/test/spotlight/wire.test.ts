@@ -188,10 +188,16 @@ describe("spotlight ranker", () => {
 		expect(entries(manager, SPOTLIGHT_ENTRY.session)[0]).toMatchObject({ ranker: "judge", urlHost: "", model: "" });
 	});
 
-	it("builds the Spotlight client for auto through the real session path, and ranks with it", () => {
-		const settings = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "auto" });
-		const manager = SessionManager.inMemory("/nonexistent");
-		const experiment = startSpotlightExperiment(settings, manager);
+	it("builds the Spotlight client for auto through the real session path, and ranks with it", async () => {
+		// Policy-blocked, so the warm-up the start sends never reaches the network.
+		const settings = Settings.isolated({
+			"spotlight.experiment.enabled": true,
+			"spotlight.ranker": "auto",
+			"models.noSpotlight": true,
+		});
+		const manager = SessionManager.inMemory(await tmpDir());
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const experiment = startSpotlightExperiment(settings, manager, () => "local");
 		expect(experiment?.client).toBeDefined();
 		expect(experiment?.ranker).toBe("auto");
 		// Auto ranks with Spotlight first, so the entry names the endpoint it will try.
@@ -202,12 +208,16 @@ describe("spotlight ranker", () => {
 		expect(scorer.fallback).toBeDefined();
 		expect(scorer.fallback!.fallback).toBeUndefined();
 		expect(scorer.scoreFree).toBeUndefined();
+		expect(fetchSpy).not.toHaveBeenCalled();
+		experiment!.client!.close();
 	});
 
 	it("ranks standalone find with Spotlight under auto, and only skips it for judge", () => {
 		const auto = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "auto" });
 		const judge = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
-		expect(standaloneFindSpotlight(auto)?.client).toBeDefined();
+		const found = standaloneFindSpotlight(auto);
+		expect(found?.client).toBeDefined();
+		found?.client.close();
 		expect(standaloneFindSpotlight(judge)).toBeUndefined();
 	});
 
