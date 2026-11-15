@@ -574,8 +574,12 @@ function toolSource(database: Database, cutoff: number | null, fine: boolean): S
 }
 
 /** Run `select … FROM (<facts>) f <tail>` over the message facts for a window. */
-function queryMessages<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number }, select: string, tail = ""): T[] {
-	const database = currentDb();
+function queryMessages<T>(
+	window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number },
+	select: string,
+	tail = "",
+	database: Database | null = currentDb(),
+): T[] {
 	if (!database) return [];
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = messageSource(database, normalizeCutoff(window.cutoff), fine);
@@ -912,15 +916,18 @@ export function getProviderHourlyBurn(cutoff: number | null = null): ProviderHou
  * or while the dirty backlog is too large for exact reads; callers then
  * aggregate the raw rows instead.
  */
-export function getDailyActivityFromRollup(cutoff: number): DailyActivityPoint[] | null {
+export function getDailyActivityFromRollup(
+	cutoff: number,
+	database: Database | null = currentDb(),
+): DailyActivityPoint[] | null {
 	if (new Date().getTimezoneOffset() % 60 !== 0 || new Date(cutoff).getTimezoneOffset() % 60 !== 0) return null;
-	const database = currentDb();
 	if (!database || !dirtyIsSmall(database)) return null;
 	return queryMessages<{ day: string; cost: number; requests: number; total_tokens: number | null }>(
 		{ cutoff },
 		`date(f.bucket / 1000, 'unixepoch', 'localtime') AS day, TOTAL(f.cost_total) AS cost,
 		 SUM(f.requests) AS requests, SUM(f.total_tokens) AS total_tokens`,
 		"GROUP BY day ORDER BY day",
+		database,
 	).map(row => ({ day: row.day, cost: row.cost, requests: row.requests, totalTokens: row.total_tokens ?? 0 }));
 }
 

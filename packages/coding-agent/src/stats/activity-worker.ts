@@ -6,7 +6,7 @@
  * thread; the parent SIGKILLs the child once `done` arrives.
  */
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
+import { getDailyActivity, readDailyActivity } from "@oh-my-pi/omp-stats/db";
 import type { StatsActivityTransport, StatsActivityWorkerInbound } from "./activity-protocol";
 
 async function handleLoad(
@@ -14,9 +14,11 @@ async function handleLoad(
 	message: Extract<StatsActivityWorkerInbound, { type: "load" }>,
 ): Promise<void> {
 	try {
-		// Whatever the DB already has paints first; the incremental sync then
-		// converges the heatmap on fresh session data.
-		transport.send({ type: "activity", id: message.id, points: await getDailyActivity() });
+		// The stored rows paint first through a connection that never writes, so
+		// another process mid-write cannot hold back or fail the heatmap; the
+		// incremental sync then converges it on fresh session data.
+		const cached = readDailyActivity();
+		if (cached) transport.send({ type: "activity", id: message.id, points: cached });
 		await syncAllSessions();
 		transport.send({ type: "activity", id: message.id, points: await getDailyActivity() });
 		transport.send({ type: "done", id: message.id });

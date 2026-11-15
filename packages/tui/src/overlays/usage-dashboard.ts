@@ -631,7 +631,8 @@ export interface UsageDashboardOptions {
 	/**
 	 * Stream daily activity into the heatmap: push cached DB rows immediately,
 	 * then push again after an incremental session sync. Resolves when the sync
-	 * settles; rejection renders as a dim unavailable note. `signal` aborts when
+	 * settles; rejection before any rows renders as a dim unavailable note, and
+	 * after rows were pushed keeps them, marked as not synced. `signal` aborts when
 	 * the dashboard closes so an in-flight sync can stop early.
 	 */
 	loadActivity: (push: (points: DailyActivityPoint[]) => void, signal: AbortSignal) => Promise<void>;
@@ -685,6 +686,8 @@ export class UsageDashboardComponent implements Component {
 	#scroll = 0;
 	#activity: DailyActivityPoint[] | null = null;
 	#activityError: string | null = null;
+	/** Why the sync after a painted history failed; the painted rows stay, marked stale. */
+	#syncError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
 	/** ANSI overview rows; rebuilt when the revision or width changes. */
@@ -725,11 +728,21 @@ export class UsageDashboardComponent implements Component {
 				this.#changed();
 			}, this.#closeController.signal);
 		} catch (error) {
-			this.#activityError = error instanceof Error ? error.message : String(error);
+			const message = error instanceof Error ? error.message : String(error);
+			// Rows already painted are the stored history: a failed refresh (another
+			// process holding the database, say) leaves them stale, not unavailable.
+			if (this.#activity) this.#syncError = message;
+			else this.#activityError = message;
 		} finally {
 			this.#syncing = false;
 			if (!this.#closed) this.#changed();
 		}
+	}
+
+	/** The stale history's note: the shown rows predate a sync that failed. */
+	#staleNote(): string {
+		const detail = formatActivityErrorDetail(this.#syncError ?? "");
+		return detail ? `not synced (${detail})` : "not synced";
 	}
 
 	invalidate(): void {
@@ -980,7 +993,7 @@ export class UsageDashboardComponent implements Component {
 		const reset = "\x1b[39m";
 
 		summary.push(
-			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${formatActivityTotals(layout)} · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
+			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${formatActivityTotals(layout)} · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : this.#syncError ? theme.fg("dim", ` · ${this.#staleNote()}`) : ""}`,
 		);
 		summary.push("");
 
@@ -1483,6 +1496,8 @@ export class UsageDashboardComponent implements Component {
 		const meta: NativeChild[] = [];
 		if (this.#syncing && this.#activity) {
 			meta.push(node("spinner", { style: "dots", label: [span("Syncing", "dim")] }));
+		} else if (this.#syncError) {
+			meta.push(text([span(this.#staleNote(), "dim")], { role: "omp.usage.section.meta" }));
 		} else if (layout) {
 			const today = new Date();
 			const range = `${layout.start.getDate()} ${MONTH_NAMES[layout.start.getMonth()]} ${layout.start.getFullYear()} – ${today.getDate()} ${MONTH_NAMES[today.getMonth()]} ${today.getFullYear()}`;
