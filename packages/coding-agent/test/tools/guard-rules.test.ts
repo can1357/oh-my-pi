@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -311,19 +312,42 @@ describe("discard_changes", () => {
 });
 
 describe.skipIf(process.platform === "win32")("kills_harness", () => {
-	it("flags pkill/killall only when pgrep lists this process or an ancestor", () => {
+	// On macOS and FreeBSD, pgrep skips its own ancestors, this test process included: a `pkill`
+	// probe never lists it there, as the `pkill` would spare it. `killall` probes ask with `-a`.
+	const bsd = process.platform === "darwin" || process.platform === "freebsd";
+	const ownName = path.basename(process.execPath).slice(0, 15);
+	beforeEach(() => clearGuardProbeCache());
+	afterEach(() => clearGuardProbeCache());
+
+	it("flags killall only when pgrep lists this process or an ancestor", () => {
 		const cwd = process.cwd();
-		// `-P <ppid>` matches every child of our parent, this test process included.
-		expect(ruleOf(bashApproval(cwd, `pkill -P ${process.ppid}`))).toBe("kills_harness");
-		expect(ruleOf(bashApproval(cwd, `bash -c "eval 'pkill -9 -P ${process.ppid}'"`))).toBe("kills_harness");
+		expect(ruleOf(bashApproval(cwd, `killall ${ownName}`))).toBe("kills_harness");
+		expect(ruleOf(bashApproval(cwd, `bash -c "eval 'killall -9 ${ownName}'"`))).toBe("kills_harness");
 		expect(bashApproval(cwd, "pkill -f my-dev-server")).toBe("exec");
 		expect(bashApproval(cwd, "killall omp-guard-no-such-process")).toBe("exec");
 	});
 
+	it.skipIf(bsd)("flags pkill when pgrep lists this process", () => {
+		// `-P <ppid>` matches every child of our parent, this test process included.
+		expect(ruleOf(bashApproval(process.cwd(), `pkill -P ${process.ppid}`))).toBe("kills_harness");
+	});
+
+	it("selects the processes of the user killall -u names", () => {
+		const cwd = process.cwd();
+		const user = os.userInfo().username;
+		expect(ruleOf(bashApproval(cwd, `killall -u ${user}`))).toBe("kills_harness");
+		expect(ruleOf(bashApproval(cwd, `killall -9 --user=${user}`))).toBe("kills_harness");
+		expect(bashApproval(cwd, `killall -u ${user} omp-guard-no-such-process`)).toBe("exec");
+	});
+
+	it.skipIf(bsd)("selects the processes running the executable a killall path names", () => {
+		expect(ruleOf(bashApproval(process.cwd(), `killall ${process.execPath}`))).toBe("kills_harness");
+		expect(bashApproval(process.cwd(), "killall /nonexistent/omp-guard-no-such-process")).toBe("exec");
+	});
+
 	it("probes once per call across approval paths and skips probes when yolo ignores the result", () => {
 		const cwd = process.cwd();
-		const command = `pkill -P ${process.ppid}`;
-		clearGuardProbeCache();
+		const command = `killall ${ownName}`;
 		const spawn = spyOn(Bun, "spawnSync");
 		try {
 			const tool = new BashTool(createSession(cwd));

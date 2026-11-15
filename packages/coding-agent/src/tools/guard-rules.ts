@@ -38,6 +38,7 @@
  * a `git stash` earlier in the same `&&` chain counts as keeping the work. See
  * packages/coding-agent/THIRD-PARTY-NOTICES.txt.
  */
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type VcsDiscardCheck } from "@oh-my-pi/pi-natives";
@@ -847,18 +848,19 @@ export function clearGuardProbeCache(): void {
 /**
  * The answer to the probe `key`: reused while fresh, else `run`'s, which is memoized for
  * {@link PROBE_CACHE_TTL_MS} from when it arrived, so a slow probe is reused like a fast one.
+ * Ages come from the monotonic clock: a wall clock stepped back must not keep an answer alive.
  * A probe that throws answers `undefined`.
  */
 function cachedProbe(key: string, run: () => string | boolean | undefined): string | boolean | undefined {
 	const cached = probeCache.get(key);
-	if (cached && Date.now() - cached.at < PROBE_CACHE_TTL_MS) return cached.answer;
+	if (cached && performance.now() - cached.at < PROBE_CACHE_TTL_MS) return cached.answer;
 	let answer: string | boolean | undefined;
 	try {
 		answer = run();
 	} catch {
 		answer = undefined;
 	}
-	const now = Date.now();
+	const now = performance.now();
 	probeCache.delete(key);
 	probeCache.set(key, { at: now, answer });
 	for (const [oldest, entry] of probeCache) {
@@ -1246,20 +1248,46 @@ function harnessLineage(): number[] {
 
 /** A signal given as an option (`-9`, `-KILL`); single capitals such as `-P` are matching options. */
 const SIGNAL_OPTION_RE = /^-(?:\d+|[A-Z][A-Z0-9+-]+)$/;
-const KILLALL_VALUE_OPTIONS: Record<string, true> = {
-	"-u": true,
-	"--user": true,
-	"-o": true,
-	"--older-than": true,
-	"-y": true,
-	"--younger-than": true,
-	"-n": true,
-	"--ns": true,
-	"-Z": true,
-};
+/** psmisc `killall` short options that take a value: the rest of their bundle, or the next word. */
+const KILLALL_VALUE_LETTERS = "uoynZs";
+/** psmisc `killall` long options that take a value: after `=`, or the next word. */
+const KILLALL_VALUE_OPTIONS = ["--user", "--older-than", "--younger-than", "--ns", "--context"];
 
-/** The `pgrep` argument lists that match what a `pkill`/`killall` would signal. */
-function killMatchProbes(command: ShellCommand): string[][] {
+/**
+ * One question that lists what a `pkill`/`killall` would signal: a `pgrep` with the same
+ * selection, or for a `killall` name that is a path, the processes running that executable.
+ */
+interface KillProbe {
+	/** The cache key. */
+	key: string;
+	/** The PIDs it lists, one per line, or `undefined` when it fails. */
+	run(): string | undefined;
+}
+
+/** A probe running `pgrep` with `argv`; none for an argument holding a substitution the guard did not run. */
+function pgrepProbe(argv: string[]): KillProbe[] {
+	if (argv.some(arg => arg.includes("\0"))) return [];
+	const run = () => {
+		const result = Bun.spawnSync(argv, {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "ignore",
+			timeout: PROBE_TIMEOUT_MS,
+		});
+		return result.success ? result.stdout.toString() : undefined;
+	};
+	return [{ key: argv.join("\0"), run }];
+}
+
+/**
+ * The probes that list what a `pkill`/`killall` would signal. `pkill` takes `pgrep`'s options, so
+ * its own are kept as they are (on the BSDs both spare their ancestors, so omp, unless given
+ * `-a`). psmisc `killall` selects processes by exact name (`-r` a regular expression, `-I`
+ * ignoring case), by the executable a name that contains a `/` resolves to, and by owner (`-u`,
+ * every process of that user when it names none). BSD `killall` has no path names, and the
+ * `pgrep` asking for it gets `-a`: the probe is a child of omp, so without it omp is never listed.
+ */
+function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] {
 	const name = command.argv[0];
 	const signalValues = name === "pkill" ? ["--signal"] : ["-s", "--signal"];
 	const kept: string[] = [];
@@ -1271,36 +1299,64 @@ function killMatchProbes(command: ShellCommand): string[][] {
 			kept.push(arg);
 		}
 	}
-	if (name === "pkill") return kept.some(arg => !arg.startsWith("-")) ? [["pgrep", ...kept]] : [];
+	if (name === "pkill") return kept.some(arg => !arg.startsWith("-")) ? pgrepProbe(["pgrep", ...kept]) : [];
 	const names: string[] = [];
+	let user: string | undefined;
+	let ignoreCase = false;
+	let regexp = false;
 	for (let i = 0; i < kept.length; i++) {
-		if (Object.hasOwn(KILLALL_VALUE_OPTIONS, kept[i])) i++;
-		else if (!kept[i].startsWith("-")) names.push(kept[i]);
+		const arg = kept[i];
+		if (arg === "--") {
+			names.push(...kept.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const valueOption = KILLALL_VALUE_OPTIONS.find(option => isLongOption(arg, option));
+			const value = eq > 0 ? arg.slice(eq + 1) : valueOption ? kept[++i] : undefined;
+			if (valueOption === "--user") user = value;
+			else if (isLongOption(arg, "--ignore-case")) ignoreCase = true;
+			else if (isLongOption(arg, "--regexp")) regexp = true;
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				if (letter === "I") ignoreCase = true;
+				else if (letter === "r") regexp = true;
+				else if (KILLALL_VALUE_LETTERS.includes(letter)) {
+					const value = k + 1 < arg.length ? arg.slice(k + 1) : kept[++i];
+					if (letter === "u") user = value;
+					break;
+				}
+			}
+		} else {
+			names.push(arg);
+		}
 	}
-	const match = [
-		...(kept.includes("-I") || kept.includes("--ignore-case") ? ["-i"] : []),
-		...(kept.includes("-r") || kept.includes("--regexp") ? [] : ["-x"]),
-	];
-	return names.map(processName => ["pgrep", ...match, "--", processName]);
+	const bsd = process.platform === "darwin" || process.platform === "freebsd";
+	const select = [...(bsd ? ["-a"] : []), ...(user === undefined ? [] : ["-u", user])];
+	if (names.length === 0) return user === undefined ? [] : pgrepProbe(["pgrep", ...select]);
+	const match = [...(ignoreCase ? ["-i"] : []), ...(regexp ? [] : ["-x"])];
+	return names.flatMap(processName => {
+		if (bsd || regexp || !processName.includes("/"))
+			return pgrepProbe(["pgrep", ...select, ...match, "--", processName]);
+		const executable = resolveCommandWordPath(command, processName, command.cwd, scope.home);
+		if (executable === undefined) return [];
+		const run = () =>
+			Process.fromPath(fs.realpathSync(executable))
+				.map(found => found.pid)
+				.join("\n");
+		return [{ key: `executable\0${executable}`, run }];
+	});
 }
 
-function killsHarness(command: ShellCommand): GuardHit | undefined {
+function killsHarness(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	const name = command.argv[0];
 	if (name !== "pkill" && name !== "killall") return undefined;
-	const probes = killMatchProbes(command);
+	const probes = killMatchProbes(command, scope);
 	if (probes.length === 0) return undefined;
 	const lineage = harnessLineage();
 	for (const probe of probes) {
-		if (probe.some(arg => arg.includes("\0"))) continue;
-		const output = cachedProbe(probe.join("\0"), () => {
-			const result = Bun.spawnSync(probe, {
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "ignore",
-				timeout: PROBE_TIMEOUT_MS,
-			});
-			return result.success ? result.stdout.toString() : undefined;
-		});
+		const output = cachedProbe(probe.key, probe.run);
 		if (typeof output !== "string") continue;
 		const matched = output
 			.split("\n")
@@ -1376,7 +1432,7 @@ export function findShellGuardHit(
 	if (options.probe === false) return undefined;
 	for (const pipeline of pipelines) {
 		for (const simple of pipeline) {
-			const found = discardChanges(simple, scope) ?? killsHarness(simple);
+			const found = discardChanges(simple, scope) ?? killsHarness(simple, scope);
 			if (found) return found;
 		}
 	}

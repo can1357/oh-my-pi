@@ -523,13 +523,14 @@ describe("guard rule regressions", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("reuses a slow probe's answer for the whole cache window", () => {
+		clearGuardProbeCache();
 		const spawn = spyOn(Bun, "spawnSync");
 		// Each probe takes 1.5 s of clock time, longer than the window an answer is reused for.
-		const clock = spyOn(Date, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_500);
+		const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_500);
 		try {
 			const tool = new BashTool(createSession(cwd));
 			const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
-			const command = `pkill -P ${process.ppid}`;
+			const command = `killall ${path.basename(process.execPath).slice(0, 15)}`;
 			expect(ruleOf(approval({ command }))).toBe("kills_harness");
 			expect(spawn.mock.calls.length).toBe(1);
 			expect(ruleOf(approval({ command }))).toBe("kills_harness");
@@ -537,6 +538,7 @@ describe("guard rule regressions", () => {
 		} finally {
 			clock.mockRestore();
 			spawn.mockRestore();
+			clearGuardProbeCache();
 		}
 	});
 });
