@@ -70,6 +70,17 @@ nix run github:can1357/oh-my-pi
 nix profile add github:can1357/oh-my-pi
 ```
 
+A community-operated [Cachix cache](https://aw1cks-omp.cachix.org) publishes CI builds for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`. On NixOS or nix-darwin, configure:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://aw1cks-omp.cachix.org" ];
+  extra-trusted-public-keys = [
+    "aw1cks-omp.cachix.org-1:zGOxpNqodE7sOs8EE9f6F18YLAZZvE6nKmA+LdKH0jo="
+  ];
+};
+```
+
 Flake consumers can use `packages.<system>.omp`, `overlays.default`, `nixosModules.default`, or `homeManagerModules.default`. A Home Manager configuration can install OMP and own its settings declaratively:
 
 ```nix
