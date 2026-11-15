@@ -24,6 +24,8 @@ omp supplies the system prompt and tool schemas through ACP and an IDE MCP bridg
 
 Invalid tool arguments are returned to the model with the failing paths and the tool's expected schema, so the model can correct the call without ending the turn.
 
+By default (`providers.antigravity-cli.isolateWorkspace`, env `PI_AGY_ISOLATE_WORKSPACE`), omp passes an empty managed workspace directory (`<geminiDir>/empty-workspace`) as `agy`'s working directory so `agy` does not index large repositories into memory while omp executes all bridged tools in the real session directory. Set `providers.antigravity-cli.isolateWorkspace: false` or `PI_AGY_ISOLATE_WORKSPACE=0` to pass the session working directory to `agy` directly.
+
 The transport retains agy's conversation between model steps, including while omp executes a tool. Edits, branches and changed context restore a matching saved turn boundary when possible; otherwise the retained transcript is supplied to a fresh conversation. Native conversations and credentials are local to the machine running inference. agy's three-minute MCP timeout means longer tool operations require cancelling its waiting turn and delivering the completed result as a subsequent message.
 
 Routine OAuth refresh preserves the native conversation, even while a host tool is running. When broker-managed credentials require an agy restart, omp reloads the same conversation before sending the completed tool result. Checkpoints written by earlier omp versions still fall back to transcript replay if a fork is needed.

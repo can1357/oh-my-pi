@@ -403,6 +403,12 @@ therefore completes through the paste-code path.
 | `DEBUG_CURSOR`     | Enables provider debug logs; `2`/`verbose` for detailed payload snippets |
 | `DEBUG_CURSOR_LOG` | Optional file path for JSONL debug log output                            |
 
+### Antigravity CLI (`antigravity-cli`)
+
+| Variable                   | Behavior                                                                                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_AGY_ISOLATE_WORKSPACE` | `0`/`false` passes the session working directory to `agy` instead of an empty managed workspace directory (default `true`). Persisted equivalent: `omp config set providers.antigravity-cli.isolateWorkspace`     |
+
 ### Prompt cache compatibility switch
 
 | Variable             | Behavior                                                                                                                                          |
