@@ -37,7 +37,7 @@ pub use engine::{
 	Resolved, StagedFile,
 };
 pub use error::{EditError, EditResult, Rejection};
-pub use path_policy::{Operation, PathPolicy, UrlAnswer};
+pub use path_policy::{PathPolicy, UrlAnswer};
 pub use session::{
 	ApplyOutcome, ApplyRequest, EditWriter, FileOutcome, PreviewBatch, Session, WriteRequest,
 	WriteResponse,

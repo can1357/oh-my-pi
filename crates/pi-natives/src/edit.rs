@@ -41,7 +41,7 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_edit::{
-	EditError, EditMode, EditResult, Location, Operation, PathPolicy, Resolved, Session, UrlAnswer,
+	EditError, EditMode, EditResult, Location, PathPolicy, Resolved, Session, UrlAnswer,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
 	path_policy::RecoveryGlob,
@@ -126,7 +126,9 @@ impl EditPolicy {
 /// Host answer for one internal URL (`resolveUrl`).
 #[napi(object)]
 pub struct EditUrlResolution {
-	/// Absolute backing file, or opaque URL key when `content` is supplied.
+	/// Absolute backing file, or a canonical resource URL when `content` is
+	/// supplied. Hosted keys must use `scheme://authority/absolute-path`, never
+	/// disk paths.
 	pub path:          Option<String>,
 	/// Full remote file text; `path` is then its opaque URL key.
 	pub content:       Option<String>,
@@ -187,12 +189,13 @@ impl From<PreviewBatch> for EditPreviewBatch {
 /// Host write request; the host owns the bytes.
 #[napi(object)]
 pub struct EditWriteRequest {
-	/// Absolute path.
+	/// Absolute disk path or opaque hosted resource key.
 	pub path:         String,
 	pub display_path: String,
 	/// `create` | `update` | `delete` | `move`.
 	pub op:           String,
-	/// Absolute destination for `move` (write `content` there, delete `path`).
+	/// Destination disk path or hosted key for `move` (write `content` there,
+	/// delete `path`).
 	pub move_to:      Option<String>,
 	/// Final bytes as text; null for `delete`.
 	pub content:      Option<String>,
@@ -220,7 +223,7 @@ pub struct EditApplyRequest {
 /// One file's apply outcome.
 #[napi(object)]
 pub struct EditFileOutcome {
-	/// Absolute path.
+	/// Absolute disk path or opaque hosted resource key.
 	pub path:               String,
 	pub display_path:       String,
 	/// `create` | `update` | `delete`.
@@ -254,18 +257,43 @@ pub struct EditApplyOutcome {
 // Store
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Disk callers supply absolute paths; host-owned keys are opaque identities.
+/// A canonical host resource URL, preserved byte-for-byte as an opaque key.
+/// Reject disk paths and incomplete URLs consistently on every platform.
+fn hosted_key(key: &str) -> Option<PathBuf> {
+	let (scheme, rest) = key.split_once("://")?;
+	if scheme.len() == 1
+		|| scheme.eq_ignore_ascii_case("file")
+		|| !scheme.as_bytes().first()?.is_ascii_alphabetic()
+		|| !scheme
+			.bytes()
+			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+		|| key
+			.bytes()
+			.any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+		|| key.contains('\\')
+	{
+		return None;
+	}
+	let (authority, _) = rest.split_once('/')?;
+	if authority.is_empty() {
+		return None;
+	}
+	Some(PathBuf::from(key))
+}
+
+/// The same hosted-URL contract is used by snapshot methods and resolver
+/// answers.
 fn store_key(key: &str) -> PathBuf {
-	let path = PathBuf::from(key);
-	let location = if path.is_absolute() {
-		Location::Disk(path)
-	} else {
-		Location::Hosted(path)
-	};
-	location.canonical_key()
+	match hosted_key(key) {
+		Some(key) => Location::Hosted(key).canonical_key(),
+		None => Location::Disk(key.into()).canonical_key(),
+	}
 }
 
 /// Session-scoped snapshots, clipboard registers, and the no-op loop guard.
+///
+/// Keys are absolute disk paths or canonical resource URLs (for example,
+/// `ssh://host/home/u/x`); hosted URLs are never filesystem-canonicalized.
 #[napi]
 #[derive(Default)]
 pub struct EditStore {
@@ -549,16 +577,16 @@ fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
 		let Some(key) = answer.path else {
 			return UrlAnswer::Refused(format!("No resource key backs {url}"));
 		};
+		let Some(key) = hosted_key(&key) else {
+			return UrlAnswer::Refused(
+				"Hosted edit keys must be canonical resource URLs such as ssh://host/absolute-path, \
+				 not disk paths"
+					.into(),
+			);
+		};
 		return UrlAnswer::Hosted {
-			key:           key.into(),
-			content:       Some(content),
-			// The host enforces handler capabilities before preview/apply.
-			operations:    vec![
-				Operation::Create,
-				Operation::Update,
-				Operation::Delete,
-				Operation::Move,
-			],
+			key,
+			content: Some(content),
 			plan_writable: answer.plan_writable,
 		};
 	}
@@ -1134,6 +1162,51 @@ pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<S
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn hosted_answer(key: &str) -> UrlAnswer {
+		url_answer("ssh://host/authored.txt", EditUrlResolution {
+			path:          Some(key.into()),
+			content:       Some("alpha\n".into()),
+			deferred:      None,
+			error:         None,
+			plan_writable: false,
+		})
+	}
+
+	#[test]
+	fn hosted_answers_refuse_disk_paths_and_incomplete_resource_urls() {
+		for key in [
+			"/home/u/x",
+			"C:\\home\\u\\x",
+			"C:/home/u/x",
+			"C://home/u/x",
+			"\\\\server\\share\\x",
+			"relative.txt",
+			"ssh:///home/u/x",
+			"ssh://host",
+			"file:///tmp/x",
+		] {
+			let UrlAnswer::Refused(error) = hosted_answer(key) else {
+				panic!("accepted invalid hosted key {key}");
+			};
+			assert!(error.contains("canonical resource URLs"), "{error}");
+		}
+	}
+
+	#[test]
+	fn hosted_answer_and_snapshot_methods_share_one_opaque_key() {
+		let key = "ssh://host/home/u/a%20b.ipynb";
+		let UrlAnswer::Hosted { key: resolved, .. } = hosted_answer(key) else {
+			panic!("valid hosted URL refused");
+		};
+		assert_eq!(resolved, PathBuf::from(key));
+		assert_eq!(store_key(key), resolved);
+		let store = EditStore::new();
+		let tag = store.record_snapshot(key.into(), "alpha\n".into(), None);
+		assert_eq!(store.head_text(key.into()).as_deref(), Some("alpha\n"));
+		assert_eq!(store.by_hash_text(key.into(), tag).as_deref(), Some("alpha\n"));
+		assert!(store.inner.head(&resolved).is_some());
+	}
 
 	/// A fresh directory removed on drop.
 	struct Scratch(PathBuf);

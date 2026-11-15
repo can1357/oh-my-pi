@@ -5,9 +5,7 @@
 mod common;
 
 use common::{DiskWriter, Workspace};
-use pi_edit::{
-	ApplyRequest, EditError, EditMode, FileOp, Operation, UrlAnswer, session::PreviewBatch,
-};
+use pi_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlAnswer, session::PreviewBatch};
 
 #[derive(Default)]
 struct RemoteWriter {
@@ -30,7 +28,6 @@ fn remote_answer(url: &str, content: &str) -> UrlAnswer {
 	UrlAnswer::Hosted {
 		key:           url.into(),
 		content:       Some(content.into()),
-		operations:    vec![Operation::Update],
 		plan_writable: false,
 	}
 }
@@ -63,22 +60,85 @@ fn hosted_tagged_preview_uses_the_read_version_instead_of_the_latest_head() {
 }
 
 #[test]
-fn unsupported_hosted_operations_are_errors_before_previewing_content() {
-	let mut ws = Workspace::new(EditMode::ApplyPatch);
+fn missing_hosted_snapshot_reports_an_error_and_keeps_the_local_preview() {
+	for has_head in [false, true] {
+		for remote_first in [false, true] {
+			let mut ws = Workspace::new(EditMode::Hashline);
+			ws.config.policy.url_schemes = vec!["ssh".into()];
+			ws.write("local.txt", "before\n");
+			let local = ws.cwd().join("local.txt");
+			let local_tag =
+				ws.store
+					.record(&pi_edit::path_policy::canonical_key(&local), "before\n", None);
+			let url = "ssh://host/notes.txt";
+			if has_head {
+				ws.store
+					.record(std::path::Path::new(url), "alpha\nbeta\n", None);
+			}
+			let remote = format!("[{url}#AB12]\nPUT 1.=1:\n+ALPHA\n");
+			let local_section = format!("[{}#{local_tag}]\nPUT 1.=1:\n+after\n", local.display());
+			let input = if remote_first {
+				remote + &local_section
+			} else {
+				local_section + &remote
+			};
+			let mut session = ws.session();
+			session.set_args_json(&serde_json::json!({"input": input}).to_string());
+			session.finish();
+			session.provide(url.into(), remote_answer(url, "alpha\nbeta\n"));
+			let preview = session.preview();
+			let hosted = preview
+				.files
+				.iter()
+				.find(|file| file.display == url)
+				.expect("visible hosted error");
+			assert!(
+				hosted
+					.error
+					.as_deref()
+					.is_some_and(|error| error.contains("hash #AB12 is not from this session")),
+				"{preview:?}"
+			);
+			assert!(!hosted.deferred && hosted.diff.is_none(), "{preview:?}");
+			assert!(
+				preview
+					.files
+					.iter()
+					.any(|file| file.display.ends_with("local.txt") && file.diff.is_some()),
+				"{preview:?}"
+			);
+			assert!(!session.preview_pending());
+		}
+	}
+}
+
+#[test]
+fn providing_a_hosted_answer_preserves_unrelated_reads_and_refreshes_its_aliases() {
+	use pi_edit::files::{FileCache, FileSource};
+	let mut ws = Workspace::new(EditMode::Replace);
 	ws.config.policy.url_schemes = vec!["ssh".into()];
-	let url = "ssh://host/notes.txt";
-	let mut session = ws.session();
-	session.set_args_json(&serde_json::json!({ "input": format!("*** Begin Patch\n*** Delete File: {url}\n*** End Patch") }).to_string());
-	session.finish();
-	session.provide(url.into(), remote_answer(url, "do not preview me"));
-	let preview = session.preview();
-	assert_eq!(preview.files[0].error.as_deref(), Some("ssh:// does not support delete operations"));
-	assert!(preview.files[0].diff.is_none());
-	assert!(!session.preview_pending(), "a refused preview must finish its pass");
+	ws.write("local.txt", "disk\n");
+	let mut files = FileCache::new(ws.config.policy.clone());
+	let url = "ssh://host/a.txt";
+	let alias = "ssh://host/~/a.txt";
+	let other = "ssh://host/b.txt";
+	files.provide(url.into(), remote_answer(url, "old\n"));
+	files.provide(alias.into(), remote_answer(url, "old\n"));
+	files.provide(other.into(), remote_answer(other, "other\n"));
+	let local_read = files.read("local.txt").unwrap();
+	let other_read = files.read(other).unwrap();
+	let old = files.read(alias).unwrap();
+	files.provide(url.into(), remote_answer(url, "new\n"));
+	assert!(std::sync::Arc::ptr_eq(&local_read, &files.read("local.txt").unwrap()));
+	assert!(std::sync::Arc::ptr_eq(&other_read, &files.read(other).unwrap()));
+	let fresh = files.read(alias).unwrap();
+	assert!(!std::sync::Arc::ptr_eq(&old, &fresh));
+	assert_eq!(fresh.text, "new\n");
+	assert_eq!(files.read(url).unwrap().text, "new\n");
 }
 
 #[tokio::test]
-async fn hosted_create_uses_declared_operations_and_keeps_notebooks_as_raw_json() {
+async fn hosted_create_keeps_notebooks_as_raw_json() {
 	let mut ws = Workspace::new(EditMode::ApplyPatch);
 	ws.config.policy.url_schemes = vec!["hosted".into()];
 	let mut session = ws.session();
@@ -88,14 +148,13 @@ async fn hosted_create_uses_declared_operations_and_keeps_notebooks_as_raw_json(
 	session.provide("hosted://account/new.ipynb".into(), UrlAnswer::Hosted {
 		key:           "opaque-notebook-key".into(),
 		content:       None,
-		operations:    vec![Operation::Create],
 		plan_writable: false,
 	});
 	let writer = RemoteWriter::default();
 	session
 		.apply(ApplyRequest::default(), &writer)
 		.await
-		.expect("declared create");
+		.expect("hosted create");
 	let requests = writer.requests.lock();
 	assert_eq!(requests[0].absolute.to_str(), Some("opaque-notebook-key"));
 	assert_eq!(requests[0].content.as_deref(), Some("{\"cells\":[]}\n"));
@@ -111,7 +170,6 @@ fn hosted_aliases_share_the_latest_checkout_without_using_a_disk_path() {
 	let answer = |text: &str| UrlAnswer::Hosted {
 		key:           key.clone(),
 		content:       Some(text.into()),
-		operations:    vec![Operation::Update],
 		plan_writable: false,
 	};
 	let mut files = FileCache::new(ws.config.policy.clone());
@@ -212,29 +270,6 @@ async fn remote_apply_uses_fresh_host_text_even_when_its_length_is_unchanged() {
 	let requests = writer.requests.lock();
 	assert_eq!(requests[0].absolute.to_str(), Some(url));
 	assert_eq!(requests[0].content.as_deref(), Some("delta\nBETA\n"));
-}
-
-#[tokio::test]
-async fn unsupported_remote_delete_prevents_earlier_local_writes_in_a_batch() {
-	let url = "ssh://oracle/tmp/edit-repro.txt";
-	let mut ws = Workspace::new(EditMode::ApplyPatch);
-	ws.config.policy.url_schemes = vec!["ssh".into()];
-	ws.write("local.txt", "old\n");
-	let mut session = ws.session();
-	session.set_args_json(&serde_json::json!({ "input": format!(
-		"*** Begin Patch\n*** Update File: local.txt\n@@\n-old\n+new\n*** Delete File: {url}\n*** End Patch"
-	) }).to_string());
-	session.finish();
-	session.begin_apply_url_targets();
-	session.provide(url.into(), remote_answer(url, "remote\n"));
-	let writer = DiskWriter::default();
-	let error = session
-		.apply(ApplyRequest::default(), &writer)
-		.await
-		.expect_err("unsupported remote delete");
-	assert!(error.to_string().contains("ssh:// does not support delete"), "{error}");
-	assert!(writer.requests.lock().is_empty());
-	assert_eq!(ws.read("local.txt").as_deref(), Some("old\n"));
 }
 
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";

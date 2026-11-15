@@ -166,7 +166,15 @@ fn preview_section(
 				Some(tag) => store.by_hash(&read.canonical, tag),
 				None => store.head(&read.canonical),
 			};
-			Some(snapshot.ok_or_else(|| crate::error::EditError::DeferredUrl(target.path.clone()))?)
+			Some(snapshot.ok_or_else(|| {
+				mismatch(
+					target,
+					&read.canonical,
+					&read.text,
+					target.file_hash.as_deref().unwrap_or(""),
+					store,
+				)
+			})?)
 		} else {
 			None
 		};
@@ -252,7 +260,7 @@ pub fn preview_patch(
 	let mut previews = Vec::new();
 	for (index, section) in patch.sections.iter().take(count).enumerate() {
 		let preview = preview_section(section, streaming, files, store, &mut clipboard);
-		if preview.error.is_some() && (streaming || count > 1) && index + 1 == count {
+		if preview.error.is_some() && streaming && index + 1 == count {
 			continue;
 		}
 		previews.push(preview);

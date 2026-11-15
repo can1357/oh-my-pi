@@ -13,7 +13,8 @@ use regex::Regex;
 use super::patch::{Operation, PatchEngine, PatchInput, stage_patch};
 use crate::{
 	engine::{
-		EditMode, FileOp, FileOpIntent, Inspection, ModeEngine, PreviewFile, Resolved, StagedFile,
+		EditMode, FileOp, FileOpIntent, Inspection, Location, ModeEngine, PreviewFile, Resolved,
+		StagedFile,
 	},
 	error::{EditError, Rejection},
 	files::{FileRead, FileSource},
@@ -326,11 +327,11 @@ impl FileSource for VirtualFiles<'_> {
 		self.source.resolve(authored, true)
 	}
 
-	fn exists(&mut self, absolute: &crate::engine::Location) -> bool {
+	fn exists(&mut self, location: &Location) -> bool {
 		self
 			.state
-			.get(&absolute.canonical_key())
-			.map_or_else(|| self.source.exists(absolute), Option::is_some)
+			.get(&location.canonical_key())
+			.map_or_else(|| self.source.exists(location), Option::is_some)
 	}
 
 	fn read(&mut self, authored: &str) -> Result<Arc<FileRead>, EditError> {

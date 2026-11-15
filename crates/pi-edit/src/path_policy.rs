@@ -27,27 +27,22 @@ use crate::{
 /// Host answer for one internal URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UrlAnswer {
-	Backed {
-		path:          PathBuf,
-		plan_writable: bool,
-	},
+	/// A local backing file; normal filesystem canonicalization and stamps
+	/// apply.
+	Backed { path: PathBuf, plan_writable: bool },
+	/// Host-owned text, keyed as an opaque identity without filesystem access.
 	Hosted {
+		/// Identity shared by aliases and the snapshot store; never a local
+		/// backing file.
 		key:           PathBuf,
+		/// Full UTF-8 text, or `None` for a host target that does not exist.
 		content:       Option<String>,
-		operations:    Vec<Operation>,
 		plan_writable: bool,
 	},
+	/// Resolution requires execution approval; preview only this target later.
 	Pending,
+	/// A model-facing host refusal, propagated verbatim.
 	Refused(String),
-}
-
-/// Operations explicitly granted by a hosted handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-	Create,
-	Update,
-	Delete,
-	Move,
 }
 
 impl UrlAnswer {

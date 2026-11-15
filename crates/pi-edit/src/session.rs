@@ -55,10 +55,12 @@ pub struct PreviewBatch {
 /// Host write request. Rust never touches disk for writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRequest {
+	/// Absolute disk path or opaque hosted key; route hosted keys to their
+	/// handler.
 	pub absolute:     PathBuf,
 	pub display:      String,
 	pub op:           FileOp,
-	/// Absolute destination for a rename; the host writes `content` there
+	/// Destination disk path or hosted key; the host writes `content` there
 	/// and deletes `absolute`.
 	pub move_to:      Option<PathBuf>,
 	/// Final bytes as text; `None` for deletes.
@@ -93,6 +95,7 @@ pub struct ApplyRequest {
 /// Per-file apply outcome.
 #[derive(Debug, Clone)]
 pub struct FileOutcome {
+	/// Absolute disk path or opaque hosted key, matching the writer identity.
 	pub absolute:           PathBuf,
 	pub display:            String,
 	pub op:                 FileOp,
@@ -308,30 +311,6 @@ impl Session {
 		let generation = self.generation;
 		let streaming = !self.args.is_finished();
 		let snapshot = self.args.snapshot();
-		let inspection = self.engine.inspect(&snapshot);
-		for intent in &inspection.file_ops {
-			let (path, op, to) = match intent {
-				FileOpIntent::Create { path } => (path, FileOp::Create, None),
-				FileOpIntent::Delete { path } => (path, FileOp::Delete, None),
-				FileOpIntent::Move { from, to } => (from, FileOp::Update, Some(to.as_str())),
-			};
-			if let Err(error) = self.files.enforce_operations(path, op, to) {
-				self.previewed = generation;
-				if !streaming {
-					self.final_pass_done = true;
-				}
-				return PreviewBatch {
-					generation,
-					streaming,
-					files: vec![PreviewFile {
-						display: path.clone(),
-						error: Some(error.to_string()),
-						..PreviewFile::default()
-					}],
-				};
-			}
-		}
-
 		let mut files = self
 			.engine
 			.preview(&snapshot, streaming, &mut self.files, &self.store);

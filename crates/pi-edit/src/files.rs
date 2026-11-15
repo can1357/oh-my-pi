@@ -27,7 +27,7 @@ use crate::{
 	engine::{FileOp, Location, Resolved},
 	error::{EditError, EditResult, Rejection},
 	notebook,
-	path_policy::{Operation, PathPolicy, RecoveryGlob, UrlAnswer},
+	path_policy::{PathPolicy, RecoveryGlob, UrlAnswer},
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 
@@ -80,12 +80,12 @@ pub trait FileSource {
 
 	/// Resolve an authored path without reading it. When `must_exist` and
 	/// the resolved file is missing, the host's unique-suffix recovery answer
-	/// may substitute a different display/absolute pair (never for internal
+	/// may substitute a different display/location pair (never for internal
 	/// URLs, which fail with [`EditError::UnresolvedUrl`] until the host
 	/// answers them).
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> EditResult<Resolved>;
 
-	/// Whether `absolute` currently exists (file or directory).
+	/// Whether `location` exists on disk or has host-supplied content.
 	fn exists(&mut self, location: &Location) -> bool;
 
 	/// Read a target that must exist. Fails with `File not found: <display>`
@@ -179,11 +179,18 @@ impl FileCache {
 	/// Record the host answer for `url`, dropping cached resolutions and
 	/// reads made for it.
 	pub fn provide(&mut self, url: String, resolution: UrlAnswer) {
-		// A new checkout replaces every alias of the same host-owned identity.
-		self.resolutions.clear();
-		self.reads.clear();
-		self.hosted_reads.clear();
+		let policy = &self.policy;
+		let names_url = |authored: &str| policy.url_target(authored).as_deref() == Some(url.as_str());
+		self
+			.resolutions
+			.retain(|(authored, _), _| !names_url(authored));
+		self
+			.reads
+			.retain(|_, (_, read)| !names_url(&read.resolved.display));
 		if let UrlAnswer::Hosted { key, content, .. } = &resolution {
+			// Every alias of this identity reads the new checkout. Other hosted
+			// identities and stamp-validated disk reads keep their caches.
+			self.hosted_reads.remove(key);
 			self.hosted.insert(key.clone(), content.clone());
 		}
 		self.unresolved.retain(|missed| *missed != url);
@@ -225,52 +232,12 @@ impl FileCache {
 		self.recovery_misses.clear();
 	}
 
-	/// Write guard, judging URL targets by their host answers.
+	/// Enforce plan-mode write restrictions using the host's URL answers.
 	///
 	/// # Errors
-	/// [`EditError::Apply`] for unsupported remote file operations;
 	/// [`EditError::Plan`] when plan mode refuses the write.
 	pub fn enforce_write(&self, display: &str, op: FileOp, move_to: Option<&str>) -> EditResult<()> {
-		self.enforce_operations(display, op, move_to)?;
 		self.policy.enforce_write(display, op, move_to, &self.urls)
-	}
-
-	/// Reject operations the handler has not granted, before generating a diff.
-	pub fn enforce_operations(
-		&self,
-		display: &str,
-		op: FileOp,
-		move_to: Option<&str>,
-	) -> EditResult<()> {
-		let operation = if move_to.is_some() {
-			Operation::Move
-		} else {
-			match op {
-				FileOp::Create => Operation::Create,
-				FileOp::Update | FileOp::Noop => Operation::Update,
-				FileOp::Delete => Operation::Delete,
-			}
-		};
-		for target in std::iter::once(display).chain(move_to) {
-			if let Some(url) = self.policy.url_target(target)
-				&& let Some(UrlAnswer::Hosted { operations, .. }) = self.urls.get(url.as_ref())
-				&& !operations.contains(&operation)
-			{
-				let scheme = url
-					.split_once("://")
-					.map_or_else(|| url.as_ref(), |(scheme, _)| scheme);
-				let operation = match operation {
-					Operation::Create => "create",
-					Operation::Update => "update",
-					Operation::Delete => "delete",
-					Operation::Move => "move",
-				};
-				return Err(EditError::apply(format!(
-					"{scheme}:// does not support {operation} operations"
-				)));
-			}
-		}
-		Ok(())
 	}
 
 	fn read_resolved(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {

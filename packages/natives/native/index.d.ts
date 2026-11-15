@@ -232,7 +232,12 @@ export declare class EditSession {
   close(): void
 }
 
-/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
+/**
+ * Session-scoped snapshots, clipboard registers, and the no-op loop guard.
+ *
+ * Keys are absolute disk paths or canonical resource URLs (for example,
+ * `ssh://host/home/u/x`); hosted URLs are never filesystem-canonicalized.
+ */
 export declare class EditStore {
   constructor()
   /**
@@ -1952,7 +1957,7 @@ export interface EditFileOpIntent {
 
 /** One file's apply outcome. */
 export interface EditFileOutcome {
-  /** Absolute path. */
+  /** Absolute disk path or opaque hosted resource key. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete`. */
@@ -2052,7 +2057,11 @@ export interface EditPreviewBatch {
 
 /** Host answer for one internal URL (`resolveUrl`). */
 export interface EditUrlResolution {
-  /** Absolute backing file, or opaque URL key when `content` is supplied. */
+  /**
+   * Absolute backing file, or a canonical resource URL when `content` is
+   * supplied. Hosted keys must use `scheme://authority/absolute-path`, never
+   * disk paths.
+   */
   path?: string
   /** Full remote file text; `path` is then its opaque URL key. */
   content?: string
@@ -2066,12 +2075,15 @@ export interface EditUrlResolution {
 
 /** Host write request; the host owns the bytes. */
 export interface EditWriteRequest {
-  /** Absolute path. */
+  /** Absolute disk path or opaque hosted resource key. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete` | `move`. */
   op: string
-  /** Absolute destination for `move` (write `content` there, delete `path`). */
+  /**
+   * Destination disk path or hosted key for `move` (write `content` there,
+   * delete `path`).
+   */
   moveTo?: string
   /** Final bytes as text; null for `delete`. */
   content?: string

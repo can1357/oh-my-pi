@@ -72,17 +72,23 @@ impl FileOp {
 /// pass through filesystem canonicalization or notebook projection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Location {
+	/// A filesystem path, canonicalized and read through local disk APIs.
 	Disk(PathBuf),
+	/// An opaque host identity; never canonicalized or interpreted as a local
+	/// file.
 	Hosted(PathBuf),
 }
 
 impl Location {
+	/// Return the disk path or opaque hosted key passed to the host writer.
 	pub fn key(&self) -> &Path {
 		match self {
 			Self::Disk(path) | Self::Hosted(path) => path,
 		}
 	}
 
+	/// Canonicalize a disk path using the filesystem; preserve a hosted key
+	/// verbatim.
 	pub fn canonical_key(&self) -> PathBuf {
 		match self {
 			Self::Disk(path) => crate::path_policy::canonical_key(path),
@@ -90,6 +96,8 @@ impl Location {
 		}
 	}
 
+	/// True only for local notebooks; hosted notebooks retain their raw text
+	/// view.
 	pub fn is_notebook(&self) -> bool {
 		matches!(self, Self::Disk(path) if crate::notebook::is_notebook_path(path))
 	}
@@ -124,7 +132,7 @@ pub enum HeaderKind {
 pub struct StagedFile {
 	/// Display path as authored (after suffix / tag recovery).
 	pub display:            String,
-	/// Absolute target path.
+	/// Local disk target or opaque hosted identity.
 	pub location:           Location,
 	pub op:                 FileOp,
 	/// Destination for a rename (`*** Move to:` / hashline `MV`). The write
@@ -218,11 +226,11 @@ pub struct Inspection {
 	/// `(path, digest)` — the digest is the text the edit introduces into that
 	/// file (added lines only, no patch grammar). Same-path sections merge.
 	pub entries:  Vec<(String, String)>,
-	/// Delete / move intents for the ACP permission gate.
+	/// Whole-file intents; the ACP permission gate consumes deletes and moves.
 	pub file_ops: Vec<FileOpIntent>,
 }
 
-/// A destructive file operation a payload declares.
+/// An explicit whole-file operation declared by the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOpIntent {
 	Create { path: String },
