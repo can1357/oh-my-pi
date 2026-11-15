@@ -262,7 +262,8 @@ describe("resolveImageTokenization", () => {
 			["openrouter", "deepseek/deepseek-v4.1-flash-1017"],
 			["openrouter", "deepseek/deepseek-v4.1-flash"],
 			["deepseek", "deepseek-flash"],
-			// DeepSeek's API serves the retired preview id with the current Flash.
+			// DeepSeek's API serves the retired V4.0 ids with the current Flash.
+			["deepseek", "deepseek-v4-flash"],
 			["deepseek", "deepseek-v4-flash-vision-exp"],
 			["fireworks", "deepseek-v4.1-flash"],
 			["together", "deepseek-ai/DeepSeek-V4.1-Flash"],

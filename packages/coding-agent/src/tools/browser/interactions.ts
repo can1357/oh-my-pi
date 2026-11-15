@@ -32,8 +32,8 @@ import {
 export interface ClickAtOptions {
 	/** Mouse button to press. */
 	button?: MouseButton;
-	/** Number of clicks to dispatch. */
-	clickCount?: number;
+	/** Number of clicks to dispatch (2 double-clicks), as `tab.click`'s `count`. */
+	count?: number;
 }
 
 /** Options accepted by pointer movement. */
@@ -2004,7 +2004,7 @@ async function clickPoint(
 	signal?: AbortSignal,
 	firstDown?: () => Promise<unknown>,
 ): Promise<void> {
-	const count = options.clickCount ?? 1;
+	const count = options.count ?? 1;
 	if (count < 1) throw new ToolError("Click must occur a positive number of times.");
 	throwIfAborted(signal);
 	// Not awaited before the press, as in puppeteer's `mouse.click`: Chrome holds a pointer move until the page's
