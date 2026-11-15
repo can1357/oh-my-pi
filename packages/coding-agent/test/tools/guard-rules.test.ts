@@ -402,9 +402,9 @@ describe.skipIf(process.platform === "win32")("kills_harness", () => {
 	});
 
 	it.skipIf(bsd)("probes a killall name of 15 or more characters by its first 15, the name the kernel keeps", () => {
-		const spawn = spyOn(Bun, "spawnSync").mockImplementation((argv: string[]) => {
+		const spawn = spyOn(Bun, "spawnSync").mockImplementation((argv: unknown) => {
 			// Only a process named by its first 15 characters exists.
-			const listed = argv.includes("omp-guard-long-");
+			const listed = Array.isArray(argv) && argv.includes("omp-guard-long-");
 			return { success: listed, stdout: Buffer.from(listed ? `${process.pid}\n` : "") } as never;
 		});
 		try {
