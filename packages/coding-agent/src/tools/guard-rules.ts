@@ -953,12 +953,27 @@ const SHELL_EXPANDED_RE = /[$\0]|^~/;
 const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
 
 /**
+ * `words`, pathspecs a git command names, as git sees them: a word the shell expands is resolved
+ * like a path (`"$PWD"`, `~/repo`). Empty (git's default scope, which covers them all) when one
+ * cannot be: another variable, a substitution, a brace expansion.
+ */
+function resolvePathspecs(words: readonly string[], command: ShellCommand, scope: GuardScope): string[] {
+	const resolved = words.map(word => {
+		if (BRACE_EXPANSION_RE.test(word)) return undefined;
+		if (!SHELL_EXPANDED_RE.test(word)) return word;
+		return ABSOLUTE_EXPANSION_RE.test(word)
+			? resolveCommandWordPath(command, word, command.cwd, scope.home)
+			: undefined;
+	});
+	return resolved.every((word): word is string => word !== undefined) ? resolved : [];
+}
+
+/**
  * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run. Without
  * `-f`, git refuses to clean (by default), so checking it anyway only prompts for a call that fails.
- * `-q` and `-i` do not change what is deleted; a second `-f` adds untracked nested repositories. A
- * pathspec the shell expands is resolved like a path (`"$PWD"`, `~/repo`); when one cannot be
- * (another variable, a substitution, a brace expansion), the whole directory is previewed. An
- * exclude the shell expands is dropped, which only widens the preview.
+ * `-q` and `-i` do not change what is deleted; a second `-f` adds untracked nested repositories.
+ * Pathspecs are resolved by {@link resolvePathspecs}; without any, the whole directory is
+ * previewed. An exclude the shell expands is dropped, which only widens the preview.
  */
 function cleanCheck(rest: readonly string[], command: ShellCommand, scope: GuardScope): VcsDiscardCheck | undefined {
 	let force = 0;
@@ -1000,13 +1015,7 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 			pathspecs.push(arg);
 		}
 	}
-	const resolved = pathspecs.map(word => {
-		if (BRACE_EXPANSION_RE.test(word)) return undefined;
-		if (!SHELL_EXPANDED_RE.test(word)) return word;
-		return ABSOLUTE_EXPANSION_RE.test(word)
-			? resolveCommandWordPath(command, word, command.cwd, scope.home)
-			: undefined;
-	});
+
 	return {
 		clean: true,
 		directories,
@@ -1014,8 +1023,49 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 		ignoredOnly,
 		nestedRepositories: force > 1,
 		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word) && !BRACE_EXPANSION_RE.test(word)),
-		pathspecs: resolved.every((word): word is string => word !== undefined) ? resolved : [],
+		pathspecs: resolvePathspecs(pathspecs, command, scope),
 	};
+}
+
+/**
+ * The operands of a `git checkout` or `git restore`, without their options and the values
+ * `valueOptions` take as the next word: `named` before a `--`, `paths` after it.
+ */
+function gitOperands(
+	rest: readonly string[],
+	valueOptions: Record<string, true>,
+): { named: string[]; paths: string[] | undefined } {
+	const named: string[] = [];
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i];
+		if (arg === "--") return { named, paths: rest.slice(i + 1) };
+		if (Object.hasOwn(valueOptions, arg)) i++;
+		else if (!arg.startsWith("-") || arg === "-") named.push(arg);
+	}
+	return { named, paths: undefined };
+}
+
+const CHECKOUT_VALUE_OPTIONS: Record<string, true> = { "-b": true, "-B": true, "--orphan": true };
+const RESTORE_VALUE_OPTIONS: Record<string, true> = { "-s": true, "--source": true };
+/**
+ * Short options of the discarding git subcommands that take a value: the rest of their bundle,
+ * when there is one, is that value (`-bfix` names a branch, it does not force).
+ */
+const SHORT_VALUE_LETTERS: Record<string, string> = { checkout: "bBt", switch: "cCt", restore: "s", clean: "e" };
+
+/** The short option letters `rest` gives a git subcommand, without the values stuck to them. */
+function shortOptionLetters(sub: string, rest: readonly string[]): string {
+	const valueLetters = Object.hasOwn(SHORT_VALUE_LETTERS, sub) ? SHORT_VALUE_LETTERS[sub] : "";
+	let letters = "";
+	for (const arg of rest) {
+		if (arg === "--") break;
+		if (!/^-[A-Za-z]/.test(arg)) continue;
+		for (const letter of arg.slice(1)) {
+			letters += letter;
+			if (valueLetters.includes(letter)) break;
+		}
+	}
+	return letters;
 }
 
 /** The discard check for a git command, with the rule's reason, or `undefined` when it discards nothing. */
@@ -1026,25 +1076,38 @@ function discardProbe(
 	rest: readonly string[],
 ): { check: VcsDiscardCheck; what: string } | undefined {
 	const has = (name: string) => rest.some(arg => arg.startsWith("--") && isLongOption(arg, name));
-	const short = rest
-		.filter(arg => /^-[A-Za-z]+$/.test(arg))
-		.map(arg => arg.slice(1))
-		.join("");
-	const massPath = rest.some(arg => !arg.startsWith("-") && Object.hasOwn(MASS_PATHSPECS, arg));
-	const tracked = {
-		check: {},
-		what: `\`git ${sub}\` would discard uncommitted changes; keep them recoverable first, e.g. \`git stash && git ${sub} ...\``,
-	};
-	if (sub === "reset" && (has("--hard") || has("--merge"))) return tracked;
+	const short = shortOptionLetters(sub, rest);
+	// `-h` and `--help` print the usage and run nothing.
+	if (short.includes("h") || rest.some(arg => arg === "--help" || arg === "--help-all")) return undefined;
+	const tracked = (check: VcsDiscardCheck) => ({
+		check,
+		what: `\`git ${sub}\` would discard uncommitted changes; commit or otherwise save them first`,
+	});
+	if (sub === "reset" && (has("--hard") || has("--merge"))) return tracked({});
+	if (sub === "checkout" || sub === "restore") {
+		const checkout = sub === "checkout";
+		const { named, paths } = gitOperands(rest, checkout ? CHECKOUT_VALUE_OPTIONS : RESTORE_VALUE_OPTIONS);
+		// `git checkout [<commit>] [--] <paths>`: before a `--`, the first operand names a commit
+		// unless it is a whole-tree pathspec. `git restore` names its commit with `--source`.
+		const fromCommit =
+			checkout && named.length > 0 && (paths !== undefined || !Object.hasOwn(MASS_PATHSPECS, named[0]));
+		const pathspecs = paths ?? (fromCommit ? named.slice(1) : named);
+		if (pathspecs.some(arg => Object.hasOwn(MASS_PATHSPECS, arg))) {
+			// Restoring from the index keeps the staged changes there; restoring from a commit, or
+			// `restore --staged --worktree`, overwrites the index too.
+			const staged = !checkout && (has("--staged") || short.includes("S"));
+			if (staged && !has("--worktree") && !short.includes("W")) return undefined;
+			return tracked({
+				worktreeOnly: checkout ? !fromCommit : !staged,
+				pathspecs: resolvePathspecs(pathspecs, command, scope),
+			});
+		}
+	}
 	if (
 		(sub === "checkout" || sub === "switch") &&
-		(has("--force") || has("--discard-changes") || short.includes("f") || massPath)
+		(has("--force") || has("--discard-changes") || short.includes("f"))
 	) {
-		return tracked;
-	}
-	if (sub === "restore" && massPath) {
-		const stagedOnly = (has("--staged") || short.includes("S")) && !(has("--worktree") || short.includes("W"));
-		return stagedOnly ? undefined : tracked;
+		return tracked({});
 	}
 	if (sub === "clean") {
 		const check = cleanCheck(rest, command, scope);

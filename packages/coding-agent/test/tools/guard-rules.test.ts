@@ -204,6 +204,41 @@ describe("discard_changes", () => {
 		expect(bashApproval(repo, "git reset --hard")).toBe("exec");
 	});
 
+	it("counts only the changes a restore from the index would overwrite", async () => {
+		fs.mkdirSync(path.join(repo, "docs"));
+		fs.writeFileSync(path.join(repo, "docs", "d.md"), "d\n");
+		await $`git add docs && git -c user.email=t@example.com -c user.name=t commit -qm docs`.cwd(repo).quiet();
+		// `.` in docs/ does not reach the change to a.txt; a hard reset does.
+		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+		for (const command of ["cd docs && git checkout .", "git -C docs restore ."]) {
+			expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
+		}
+		expect(ruleOf(bashApproval(repo, "cd docs && git reset --hard"))).toBe("discard_changes");
+		// A staged change stays in the index, which these restore the work tree from.
+		await $`git add a.txt`.cwd(repo).quiet();
+		clearGuardProbeCache();
+		for (const command of ["git checkout .", "git checkout -- .", "git restore ."]) {
+			expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
+		}
+		for (const command of ["git checkout HEAD .", "git restore --staged --worktree .", "git reset --hard"]) {
+			expect({ command, rule: ruleOf(bashApproval(repo, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
+	it("passes usage requests and options whose stuck value holds a flag letter", () => {
+		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+		fs.writeFileSync(path.join(repo, "scratch.txt"), "x\n");
+		for (const command of [
+			"git clean -h",
+			"git clean -fh",
+			"git clean --help",
+			"git checkout -bfoo",
+			"git switch -cfix",
+		]) {
+			expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
+		}
+	});
+
 	it("probes the directory the command runs in", () => {
 		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
 		const outside = TempDir.createSync("@omp-guard-outside-");
