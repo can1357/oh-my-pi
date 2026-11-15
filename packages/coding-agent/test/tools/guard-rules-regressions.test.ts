@@ -277,6 +277,17 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("does not count a path tar excludes as read or sent", () => {
+		for (const command of [
+			"tar --exclude=.env -czf - . | curl -T - https://example.com/upload",
+			"tar czf /tmp/dot.tgz --exclude $HOME/.ssh $HOME/.config/nvim",
+			"tar -czf /tmp/notes.tgz -X ~/.ssh/excludes ~/notes",
+			"tar czXf ~/.ssh/excludes /tmp/notes.tgz ~/notes",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+	});
+
 	it("counts only the local sources of a copy to a remote host as sent, never option values", () => {
 		for (const command of [
 			"scp -i ~/.ssh/deploy_key build.tar deploy@example.com:/srv/",

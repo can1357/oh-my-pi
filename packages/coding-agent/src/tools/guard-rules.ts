@@ -327,18 +327,25 @@ function copyOperands(command: ShellCommand): string[] {
 const ABSOLUTE_EXPANSION_RE = /^(?:~(?:\/|$)|\$\{?(?:HOME|PWD)\b)/;
 /** tar's one-letter options that take a value; in a bundle, the first of them takes the rest of the word. */
 const TAR_VALUE_LETTERS = "bCfFgHIKLNTVX";
-/** tar's long options that take a separate value word (`--file x.tar`), besides `--directory`. */
-const TAR_VALUE_OPTIONS: Record<string, true> = {
+/**
+ * tar's long options that take a separate value word (`--file x.tar`), besides `--directory`: true
+ * when the value counts as read (the archive, a member list), false for an exclusion, whose paths
+ * tar leaves out.
+ */
+const TAR_VALUE_OPTIONS: Record<string, boolean> = {
 	"--file": true,
 	"--files-from": true,
-	"--exclude": true,
-	"--exclude-from": true,
+	"--exclude": false,
+	"--exclude-from": false,
 };
+/** tar's letter for an exclusion list (`-X list`), whose paths tar leaves out. */
+const TAR_EXCLUDE_LETTER = "X";
 
 /**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
  * that directory, as tar does; each `-C` is relative to the one before it. Option values stay as
- * written. A member after a directory the guard cannot resolve is left out unless it is absolute.
+ * written, and exclusions are left out. A member after a directory the guard cannot resolve is
+ * left out unless it is absolute.
  */
 function tarReadWords(command: ShellCommand, home: string): string[] {
 	const argv = args(command);
@@ -355,7 +362,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			if (!TAR_VALUE_LETTERS.includes(letter) || i >= argv.length) continue;
 			const value = argv[i++];
 			if (letter === "C") changeDir(value);
-			else words.push(value);
+			else if (letter !== TAR_EXCLUDE_LETTER) words.push(value);
 		}
 	}
 	let options = true;
@@ -373,7 +380,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 				if (target !== undefined) changeDir(target);
 			} else if (Object.hasOwn(TAR_VALUE_OPTIONS, flag)) {
 				const target = value ?? argv[++i];
-				if (target !== undefined) words.push(target);
+				if (target !== undefined && TAR_VALUE_OPTIONS[flag]) words.push(target);
 			}
 		} else if (options && arg.startsWith("-") && arg.length > 1) {
 			let k = 1;
@@ -382,7 +389,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			const value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
 			if (value === undefined) continue;
 			if (arg[k] === "C") changeDir(value);
-			else words.push(value);
+			else if (arg[k] !== TAR_EXCLUDE_LETTER) words.push(value);
 		} else {
 			const member: string | undefined =
 				dir !== undefined
