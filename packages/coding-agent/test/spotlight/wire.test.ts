@@ -16,6 +16,7 @@ import { JudgeScorer } from "@oh-my-pi/pi-coding-agent/spotlight/judge-scorer";
 import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlight/context";
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import {
+	noCredentialNotice,
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
 	standaloneFindSpotlight,
@@ -1266,6 +1267,10 @@ describe("spotlight session entry", () => {
 		const manager = SessionManager.inMemory(await tmpDir());
 		expect(startSpotlightExperiment(Settings.isolated({}), manager)).toBeUndefined();
 		expect(entries(manager, SPOTLIGHT_ENTRY.session)).toEqual([]);
+	});
+
+	it("warns without a credential that the judge ranks under auto, not that the unranked rules cut", () => {
+		expect(noCredentialNotice("auto")).not.toBe(noCredentialNotice("spotlight"));
 	});
 });
 
