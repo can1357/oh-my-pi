@@ -795,20 +795,20 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 }
 
 #[test]
-fn unissued_tag_rejection_names_the_current_tag() {
-	for tag in ["0000", "7E21"] {
-		let message = format_mismatch_message(&MismatchDetails {
-			path:               Some("a.ts".into()),
-			expected_file_hash: tag.into(),
-			actual_file_hash:   "3C4D".into(),
-			file_lines:         vec!["one".into(), "two".into()],
-			anchor_lines:       vec![1],
-			hash_recognized:    false,
-			tag_origin_paths:   Vec::new(),
-		});
-		assert!(message.contains(&format!("#{tag}")), "{message}");
-		assert!(message.contains("#3C4D"), "{message}");
-	}
+fn unknown_tag_rejection_offers_resend_only_for_shown_rows_of_this_file() {
+	let details = |anchors: Vec<u32>, origins: Vec<String>| MismatchDetails {
+		path:               Some("a.ts".into()),
+		expected_file_hash: "7E21".into(),
+		actual_file_hash:   "3C4D".into(),
+		file_lines:         vec!["one".into(), "two".into()],
+		anchor_lines:       anchors,
+		hash_recognized:    false,
+		tag_origin_paths:   origins,
+	};
+	let offers_resend = |message: &str| message.contains("resend the edit under #3C4D");
+	assert!(offers_resend(&format_mismatch_message(&details(vec![1], Vec::new()))));
+	assert!(!offers_resend(&format_mismatch_message(&details(Vec::new(), Vec::new()))));
+	assert!(!offers_resend(&format_mismatch_message(&details(vec![1], vec!["/w/b.ts".into()]))));
 }
 
 #[test]

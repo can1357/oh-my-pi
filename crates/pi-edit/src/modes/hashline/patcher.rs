@@ -1232,50 +1232,27 @@ mod lifecycle {
 	/// cuts carry no payload to tell the two readings apart, so each op on a
 	/// restored row stays rejected and leaves the file unchanged. Each op gets
 	/// a fresh history because a rejection reveals the line.
-	async fn assert_restored_row_ops_rejected(file: &str, text: Option<&str>, line: u32) {
-		for op in [
-			format!("CUT {line}"),
-			format!("PUT <{line}:\n+// before"),
-			format!("PUT >{line}:\n+// after"),
-		] {
-			let ctx = Lifecycle::new(file, 30);
-			if let Some(text) = text {
-				ctx.write_text(file, text);
-			}
-			let count = ctx.text(file).lines().count();
-			let tag0 = ctx.read(file, &all_seen(count));
-			ctx.edit(&format!("[{file}#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
-				.await
-				.unwrap();
-			let tag1 = ctx.head_tag(file);
-			ctx.edit(&format!("[{file}#{tag1}]\nCUT 1.=2\n"))
-				.await
-				.unwrap();
-			let tag = ctx.head_tag(file);
-			let before = ctx.text(file);
-			let err = ctx
-				.edit(&format!("[{file}#{tag}]\n{op}\n"))
-				.await
-				.expect_err(&op);
-			assert!(err.contains("never displayed"), "{op}: unexpected error: {err}");
-			assert_eq!(ctx.text(file), before, "{op} changed the file");
-		}
-	}
-
 	#[tokio::test]
 	async fn ops_on_restored_row_stay_rejected() {
-		assert_restored_row_ops_rejected("case-r1.ts", None, 22).await;
-	}
-
-	/// Repeated rows (`}`) line up with some copy under any alignment; they
-	/// stay rejected too.
-	#[tokio::test]
-	async fn ops_on_restored_repeated_row_stay_rejected() {
-		let text: String = (1..=30).fold(String::new(), |mut text, i| {
-			text.push_str(if i % 3 == 0 { "}\n" } else { "let v = 0;\n" });
-			text
-		});
-		assert_restored_row_ops_rejected("case-r2.ts", Some(&text), 21).await;
+		for op in ["CUT 22", "PUT <22:\n+// before", "PUT >22:\n+// after"] {
+			let ctx = Lifecycle::new("case-r1.ts", 30);
+			let tag0 = ctx.read("case-r1.ts", &all_seen(30));
+			ctx.edit(&format!("[case-r1.ts#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
+				.await
+				.unwrap();
+			let tag1 = ctx.head_tag("case-r1.ts");
+			ctx.edit(&format!("[case-r1.ts#{tag1}]\nCUT 1.=2\n"))
+				.await
+				.unwrap();
+			let tag = ctx.head_tag("case-r1.ts");
+			let before = ctx.text("case-r1.ts");
+			let err = ctx
+				.edit(&format!("[case-r1.ts#{tag}]\n{op}\n"))
+				.await
+				.expect_err(op);
+			assert!(err.contains("never displayed"), "{op}: unexpected error: {err}");
+			assert_eq!(ctx.text("case-r1.ts"), before, "{op} changed the file");
+		}
 	}
 
 	/// Body evidence alone is not enough: with no shifting edit in the

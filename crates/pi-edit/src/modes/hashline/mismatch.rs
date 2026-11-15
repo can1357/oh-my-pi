@@ -111,7 +111,11 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
-		lines.push(current_tag_advice(&details.actual_file_hash, !context.is_empty()));
+		// A tag issued for another file (often the same rows in a sibling
+		// checkout) must not be resent here: that is the wrong-tree write the
+		// origin lines above guard against.
+		let offer_resend = !context.is_empty() && details.tag_origin_paths.is_empty();
+		lines.push(current_tag_advice(&details.actual_file_hash, offer_resend));
 		lines
 	};
 	if !context.is_empty() {
@@ -122,11 +126,11 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 }
 
 /// What to do with an unknown tag. It may be real (a restart or store
-/// eviction forgets issued tags), so the advice offers the current tag for
-/// the rows shown instead of sending the model back to output it already
-/// copied from.
-fn current_tag_advice(actual_file_hash: &str, rows_shown: bool) -> String {
-	if rows_shown {
+/// eviction forgets issued tags), so when the rows are shown the advice
+/// offers the current tag for them instead of sending the model back to
+/// output it already copied from.
+fn current_tag_advice(actual_file_hash: &str, offer_resend: bool) -> String {
+	if offer_resend {
 		format!(
 			"The current file hashes to #{actual_file_hash}. If the rows below are the ones you \
 			 mean, resend the edit under #{actual_file_hash}; otherwise re-read the file with `read` \
