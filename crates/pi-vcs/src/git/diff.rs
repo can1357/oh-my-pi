@@ -741,11 +741,7 @@ fn render_change(
 		.map_err(|err| Error::backend("git diff", err))?;
 
 	let mut text = String::new();
-	text.push_str("diff --git a/");
-	text.push_str(&change.old_path);
-	text.push_str(" b/");
-	text.push_str(&change.new_path);
-	text.push('\n');
+	push_diff_header(&mut text, &change.old_path, &change.new_path);
 	// Callers receive the patch as a `String`, which cannot hold a text hunk of
 	// bytes that are not UTF-8. An appliable (`binary_patch`) render carries
 	// such content as a binary block instead; `git apply` takes either form.
@@ -824,7 +820,8 @@ fn render_change(
 }
 
 fn render_gitlink(change: &FileChange) -> Rendered {
-	let mut text = format!("diff --git a/{} b/{}\n", change.old_path, change.new_path);
+	let mut text = String::new();
+	push_diff_header(&mut text, &change.old_path, &change.new_path);
 	// Gitlinks have no content to score, so only an exact-id rename carries a
 	// meaningful similarity; the "compute later" sentinel has nothing to
 	// compute.
@@ -857,10 +854,6 @@ fn render_gitlink(change: &FileChange) -> Rendered {
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
-	// Rewrite a verbatim header when it would be ambiguous or corrupt.
-	// Names with neither spaces nor bytes that must be quoted skip the
-	// allocation.
-	requote_diff_header(out, &change.old_path, &change.new_path);
 	if let Some(similarity) = similarity {
 		let _ = writeln!(out, "similarity index {similarity}%");
 		out.push_str("rename from ");
@@ -1572,27 +1565,6 @@ fn push_range(out: &mut String, start: u32, len: u32) {
 	if len != 1 {
 		out.push(',');
 		out.push_str(len.format_into(&mut buf));
-	}
-}
-
-/// Rewrite a verbatim `diff --git` header when it would not parse back to
-/// the same paths. Names with neither spaces nor bytes that must be quoted
-/// return without allocating.
-fn requote_diff_header(out: &mut String, old_path: &str, new_path: &str) {
-	if !(path_needs_quoting(old_path)
-		|| path_needs_quoting(new_path)
-		|| old_path.contains(' ')
-		|| new_path.contains(' '))
-	{
-		return;
-	}
-	let mut header = String::new();
-	push_diff_header(&mut header, old_path, new_path);
-	// Match the exact bytes the callers wrote. A name can contain a newline,
-	// so the header is not always one line.
-	let verbatim = format!("diff --git a/{old_path} b/{new_path}\n");
-	if out.starts_with(&verbatim) && verbatim != header {
-		out.replace_range(..verbatim.len(), &header);
 	}
 }
 

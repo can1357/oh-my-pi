@@ -203,20 +203,27 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		let index_path = options.index_path.as_deref();
+		// An alternate index that does not exist is a caller error, never a
+		// silent fallback to the repository's index.
+		let load_index = || match index_path {
+			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
+				Error::backend("git commit", format!("index file not found: {}", path.display()))
+			}),
+			None => load_index_or_head(&repo, "git commit"),
+		};
 		// Refuse unresolved stages before hooks or HEAD updates. Omitting
 		// stages 1-3 while writing the tree deletes those paths from the
 		// commit; `git commit` rejects them in prepare_index and does not
-		// run hooks. The index checked is the one the commit is built from,
-		// including an alternate index.
-		let index = match index_path {
-			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
-				Error::backend("git commit", format!("index file not found: {}", path.display()))
-			})?,
-			None => load_index_or_head(&repo, "git commit")?,
-		};
+		// run hooks. A pathspec commit copies only the selected paths, so
+		// conflicts elsewhere in the index must be caught here, not by
+		// `write_index_tree`.
+		let mut index = load_index()?;
 		reject_unmerged_index(&index, "git commit")?;
 		if !options.no_verify {
 			run_commit_hook(self, "pre-commit", &[], index_path)?;
+			// The hook may have edited the index.
+			index = load_index()?;
+			reject_unmerged_index(&index, "git commit")?;
 		}
 		let mut head = repo
 			.head()
@@ -237,18 +244,6 @@ impl GitRepo {
 				});
 			}
 		}
-		// The hook may have edited the index. A pathspec commit copies only
-		// the selected paths onto the parent tree, so conflict stages outside
-		// that set never reach `write_index_tree`.
-		let index = match index_path {
-			// An alternate index that does not exist is a caller error, never a
-			// silent fallback to the repository's index.
-			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
-				Error::backend("git commit", format!("index file not found: {}", path.display()))
-			})?,
-			None => load_index_or_head(&repo, "git commit")?,
-		};
-		reject_unmerged_index(&index, "git commit")?;
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
