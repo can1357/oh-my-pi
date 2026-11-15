@@ -36,7 +36,7 @@ import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import type { ToolSession } from ".";
-import { resolveApprovalFromContext, truncateForPrompt } from "./approval";
+import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { checkBashInterception } from "./bash-interceptor";
@@ -602,22 +602,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return undefined;
 	}
 
-	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision =>
-		this.#decide(args, ctx, this.#probeCanChangeDecision(ctx));
-
-	/**
-	 * Whether a `discard_changes`/`kills_harness` probe can change how this call resolves. Under
-	 * `yolo` a bare safety override is ignored, so a hit only matters when the user set a
-	 * `tools.approval.bash` policy (a hit then replaces a `bash.patterns` allow). The mode is
-	 * resolved the way the extension wrapper resolves it: from the call context, else the session
-	 * settings.
-	 */
-	#probeCanChangeDecision(ctx: AgentToolContext | undefined): boolean {
-		const { approvalMode, userPolicies } = resolveApprovalFromContext(ctx ?? { settings: this.session.settings });
-		return approvalMode !== "yolo" || Object.hasOwn(userPolicies, this.name);
-	}
-
-	#decide(args: unknown, ctx: AgentToolContext | undefined, probe: boolean): ToolApprovalDecision {
+	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
 		const input = (args ?? {}) as Partial<BashToolInput>;
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
@@ -660,7 +645,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
-		const guardHit = this.#guardHit(command, input.cwd, probe);
+		const guardHit = this.#guardHit(command, input.cwd);
 		const criticalCommand = guardHit !== undefined;
 		const criticalDecision: ToolApprovalDecision = {
 			tier: "exec",
@@ -680,14 +665,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
-	}
+	};
 	/**
 	 * The fixed rule `command` breaks. With `tools.guardRules` off, a critical pattern matched against
 	 * the raw command line; on, every guard rule, through shell nesting.
 	 */
-	#guardHit(command: string, cwd: unknown, probe: boolean): GuardHit | undefined {
+	#guardHit(command: string, cwd: unknown): GuardHit | undefined {
 		if (cfgToolsGuardRules.get(this.session.settings)) {
-			return findShellGuardHit(command, this.#guardScope(cwd), { probe });
+			return findShellGuardHit(command, this.#guardScope(cwd));
 		}
 		return command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))
 			? { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON }
@@ -695,7 +680,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 	/**
 	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
-	 * resolves it) or the session cwd. An internal-URL cwd has no host directory to probe.
+	 * resolves it) or the session cwd.
 	 */
 	#guardScope(cwd: unknown): GuardScope {
 		const sessionCwd = this.session.cwd ?? process.cwd();
@@ -759,10 +744,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
 				return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
 			}
-			return this.#guardHit(segment.text, cwd, true);
+			return this.#guardHit(segment.text, cwd);
 		});
 		const wholeChainOnlyCritical =
-			this.#guardHit(command, cwd, true) !== undefined && !segmentHits.some(hit => hit !== undefined);
+			this.#guardHit(command, cwd) !== undefined && !segmentHits.some(hit => hit !== undefined);
 		if (wholeChainOnlyCritical) return null;
 
 		let chainUntainted = true;
@@ -1462,9 +1447,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// URL paths resolve through the embedded shell's filesystem, within the
 		// tier this command was approved at. A URL cwd stays a URL: only that
 		// filesystem can enter it, so external backends (service, PTY, client
-		// terminal) never run there. The call is already approved, so no guard probe runs here: a
-		// probe hit could only raise the tier this lookup grants.
-		const approval = this.#decide({ command: rawCommand }, undefined, false);
+		// terminal) never run there.
+		const approval = this.approval({ command: rawCommand });
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
