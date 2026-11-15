@@ -256,27 +256,54 @@ describe("Spotlight holdout-adjusted net", () => {
 		expect(time.share).toBeCloseTo((4000 + time.shapeMs) / 24_000, 12);
 	});
 
-	it("measures the baseline apart for results plain capped, whose cuts get fetched beyond plain's page anyway", async () => {
-		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		b.user("go");
-		// Held out: a capped read (plain showed 2,000 of 3,000 tokens) whose hidden lines come back (100 tokens) and an
-		// uncapped one that nothing fetches.
-		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: "artifact://9" }, plainTokens: 2000 });
-		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(400));
-		shapedRead(b, "src/b.ts", { holdout: { shapedUrl: "artifact://9" } });
-		// Applied: one capped cut recovered (200 tokens), two uncapped, one of them recovered (100 tokens).
-		shapedRead(b, "src/c.ts", { plainTokens: 2000 });
-		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
-		shapedRead(b, "src/d.ts");
-		call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
-		shapedRead(b, "src/e.ts");
-		await write("capped.jsonl", b);
+	it("prices each size bin's cuts at its own holdouts' rate, in the estimate and in its interval", async () => {
+		// Three identical sessions: every resample sums to the same cells, so the interval is the estimate.
+		for (let s = 0; s < 3; s++) {
+			const b = new SpotlightSessionBuilder(T0 + s * DAY).header("/repo").marker();
+			b.user("go");
+			// Held out: ten reads plain capped (showed 2,000 of 3,000 tokens) whose hidden lines come back (100 tokens
+			// each), and ten plain showed whole that nothing fetches.
+			for (let i = 0; i < 10; i++) {
+				shapedRead(b, `src/capped${i}.ts`, { holdout: { shapedUrl: "artifact://9" }, plainTokens: 2000 });
+				call(b, "read", { path: `src/capped${i}.ts:20-30` }, "x".repeat(400));
+				shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: "artifact://9" } });
+			}
+			// Applied: one capped cut recovered (200 tokens), two uncapped, one of them recovered (100 tokens).
+			shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+			call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
+			shapedRead(b, "src/d.ts");
+			call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+			shapedRead(b, "src/e.ts");
+			await write(`binned${s}.jsonl`, b);
+		}
 
 		const stats = await dashboard();
-		// By bin: the capped cut gets 100 back anyway, the uncapped ones 0, so 300 − 100 is excess. A pooled baseline
-		// (50 a cut over three cuts) would have called 150 excess.
-		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens.value).toBe(200);
-		expect(stats.adjusted.excessTokens.value).toBe(200);
+		// 30 holdouts a bin: the 3 capped cuts get 100 back anyway each, the 6 uncapped ones 0, so 900 − 300 is
+		// excess. A pooled baseline (50 a cut over nine cuts) would call 450 excess.
+		const excess = { value: 600, lo: 600, hi: 600 };
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens).toEqual(excess);
+		expect(stats.adjusted.excessTokens).toEqual(excess);
+	});
+
+	it("prices a size bin with fewer holdouts than the trust threshold at its tool's pooled rate", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// Held out: 30 reads plain showed whole that nothing fetches, and one plain capped whose hidden lines come back
+		// (310 tokens), the capped bin's only holdout.
+		for (let i = 0; i < 30; i++) shapedRead(b, `src/whole${i}.ts`, { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: "artifact://9" }, plainTokens: 2000 });
+		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(1240));
+		// Applied: one capped cut recovered (400 tokens), one uncapped (100 tokens).
+		shapedRead(b, "src/c.ts", { plainTokens: 2000 });
+		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(1600));
+		shapedRead(b, "src/d.ts");
+		call(b, "read", { path: "src/d.ts:20-30" }, "z".repeat(400));
+		await write("thin.jsonl", b);
+
+		const stats = await dashboard();
+		// The uncapped cut gets its bin's 0 back anyway; the capped one the pooled 310 / 31 = 10, not its lone holdout's
+		// 310 (which would call 190 excess). 500 − 10 is excess.
+		expect(stats.adjusted.byTool.find(t => t.tool === "read")?.excessTokens.value).toBe(490);
 	});
 });
 

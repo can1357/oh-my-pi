@@ -73,7 +73,7 @@ export interface SessionMoney {
 /**
  * One tool's cuts and holdouts, with the share of each whose `plain` capped (showed less than the whole output). A
  * capped result's cut hides lines beyond plain's page too, which the agent would fetch under plain as well, so its
- * baseline is measured apart.
+ * baseline is measured apart once enough holdouts back it (see {@link expectedRecovered}).
  */
 interface ToolCell {
 	cuts: number;
@@ -107,8 +107,8 @@ function emptyToolCell(): ToolCell {
 }
 
 /**
- * Tokens a tool's cuts get fetched back anyway: each size bin (plain-capped or not) at its own holdouts' per-cut rate,
- * a bin without holdouts at the tool's pooled rate.
+ * Tokens a tool's cuts get fetched back anyway: each size bin (plain-capped or not) at its own holdouts' per-cut rate
+ * once it has {@link MIN_HOLDOUTS} of them, a thinner bin at the tool's pooled rate.
  */
 function expectedRecovered(
 	cuts: number,
@@ -120,8 +120,8 @@ function expectedRecovered(
 ): number {
 	const pooled = holdouts > 0 ? baseline / holdouts : 0;
 	const uncappedHoldouts = holdouts - cappedHoldouts;
-	const uncappedRate = uncappedHoldouts > 0 ? (baseline - cappedBaseline) / uncappedHoldouts : pooled;
-	const cappedRate = cappedHoldouts > 0 ? cappedBaseline / cappedHoldouts : pooled;
+	const uncappedRate = uncappedHoldouts >= MIN_HOLDOUTS ? (baseline - cappedBaseline) / uncappedHoldouts : pooled;
+	const cappedRate = cappedHoldouts >= MIN_HOLDOUTS ? cappedBaseline / cappedHoldouts : pooled;
 	return uncappedRate * (cuts - cappedCuts) + cappedRate * cappedCuts;
 }
 
@@ -213,8 +213,9 @@ function recoveredOf(cells: ToolCells): number {
 
 /**
  * Holdout-adjusted net savings: each tool's applied cuts (scored and score-free) recover tokens; held-out would-be
- * cuts of the same tool and size bin (plain-capped or not) show how many the agent fetches back anyway. Intervals
- * resample experiment sessions jointly. `byTool` lists `tools` in their order.
+ * cuts of the same tool and size bin (plain-capped or not; a bin under {@link MIN_HOLDOUTS} holdouts pools the tool's)
+ * show how many the agent fetches back anyway. Intervals resample experiment sessions jointly. `byTool` lists `tools`
+ * in their order.
  */
 export function computeAdjusted(
 	evaluated: readonly Evaluated[],
