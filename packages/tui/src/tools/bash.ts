@@ -1,6 +1,6 @@
 import type { Component } from "../tui";
 import { getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
-import { highlightCode, type Theme } from "../theme/theme";
+import { highlightCode, type SymbolKey, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
 import { formatOutputPaneLines } from "../render/output-pane";
@@ -113,6 +113,8 @@ export interface BashToolDetails {
 		jobId: string;
 		type: "bash";
 	};
+	/** Which PowerShell backend ran the command (`powershell` tool only); distinguishes its success-header icon. */
+	edition?: "pwsh" | "powershell";
 }
 
 function escapeBashEnvValueForDisplay(value: unknown): string {
@@ -271,6 +273,8 @@ export interface ShellRendererConfig<TArgs> {
 	showHeader?: boolean;
 	commandLanguage?: string;
 	commandPrefix?: string;
+	/** Success-header identity icon for this call; defaults to `"tool.bash"`. */
+	resolveIcon?: (details: BashToolDetails | undefined) => SymbolKey;
 }
 
 function getPartialJson<TArgs>(args: TArgs | undefined): string | undefined {
@@ -575,7 +579,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					: renderStatusLine(
 							success
 								? {
-										iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
+										iconOverride: uiTheme.styledSymbol(
+											config.resolveIcon?.(details) ?? "tool.bash",
+											"accent",
+										),
 										title: config.resolveTitle(args, options),
 									}
 								: {

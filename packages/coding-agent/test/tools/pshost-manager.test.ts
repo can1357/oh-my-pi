@@ -4,6 +4,7 @@ import {
 	acquirePsHost,
 	disposeAllPsHosts,
 	disposePsHostSession,
+	psHostEditionKey,
 	setPsHostSpawnerForTests,
 	spawnEphemeralPsHost,
 } from "../../src/tools/pshost-manager";
@@ -137,6 +138,29 @@ describe("pshost-manager pool (fake hosts)", () => {
 		const again = await acquirePsHost({ ...baseOpts, sessionId: "a", idleTtlMs: 0 });
 		expect(again.host).not.toBe(a.host);
 		again.release();
+	});
+
+	test("psHostEditionKey gives the pwsh and powershell editions independent hosts for one session", async () => {
+		const hosts: FakeHost[] = [];
+		setPsHostSpawnerForTests(async () => {
+			const host = makeFakeHost(hosts.length + 1);
+			hosts.push(host);
+			return host as unknown as PsHost;
+		});
+		const pwshKey = psHostEditionKey("same-session", "pwsh");
+		const windowsKey = psHostEditionKey("same-session", "powershell");
+
+		const pwsh = await acquirePsHost({ ...baseOpts, sessionId: pwshKey, idleTtlMs: 0 });
+		const windows = await acquirePsHost({ ...baseOpts, sessionId: windowsKey, idleTtlMs: 0 });
+		expect(pwsh.host).not.toBe(windows.host);
+		pwsh.release();
+		windows.release();
+
+		// Disposing one edition's host must not touch the other's, even though
+		// both derive from the same base session key.
+		await disposePsHostSession(pwshKey);
+		expect(hosts[0]?.disposed).toBe(true);
+		expect(hosts[1]?.disposed).toBe(false);
 	});
 
 	test("disposePsHostSession waits for that session's in-flight spawn", async () => {

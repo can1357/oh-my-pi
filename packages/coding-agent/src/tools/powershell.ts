@@ -10,8 +10,15 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { outputMeta, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { acquirePsHost, disposePsHostSession, spawnEphemeralPsHost } from "./pshost-manager";
 import {
+	acquirePsHost,
+	disposePsHostSession,
+	psHostEditionKey,
+	spawnEphemeralPsHost,
+	type PowerShellEdition,
+} from "./pshost-manager";
+import {
+	cfgPowerShellDefaultEdition,
 	cfgPowerShellHistoryDepth,
 	cfgPowerShellIdleTtlMs,
 	cfgPowerShellOutputWidth,
@@ -29,6 +36,9 @@ const powershellSchema = type({
 	"host?": type('"session" | "ephemeral" | "new-session"').describe(
 		'which host runs the command: "session" (default) the persistent session host; "ephemeral" a throwaway host fully terminated before the result returns; "new-session" discard the session host and run in a fresh replacement',
 	),
+	"edition?": type('"pwsh" | "powershell"').describe(
+		'which PowerShell backend runs the command: "pwsh" (PowerShell 7+) or "powershell" (Windows PowerShell 5.1, powershell.exe). Defaults to the configured powershell.defaultEdition. Each edition keeps its own session state — a "host" mode applies only to the selected edition\'s host',
+	),
 });
 
 type PowerShellToolParams = typeof powershellSchema.infer;
@@ -39,6 +49,8 @@ export interface PowerShellToolDetails {
 	meta?: OutputMeta;
 	/** Which host ran the command. */
 	host?: PowerShellHostMode;
+	/** Which PowerShell backend ran the command. */
+	edition?: PowerShellEdition;
 	/**
 	 * PID of the backing pwsh host (attach with `Enter-PSHostProcess -Id`).
 	 * For ephemeral runs the process has already exited; the PID is only a
@@ -80,6 +92,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		const lines = [`Command: ${truncateForPrompt(command)}`];
 		if (typeof params.cwd === "string" && params.cwd.length > 0) lines.push(`Directory: ${params.cwd}`);
 		if (params.host && params.host !== "session") lines.push(`Host: ${params.host}`);
+		if (params.edition) lines.push(`Edition: ${params.edition}`);
 		return lines;
 	};
 	readonly summary =
@@ -103,17 +116,27 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 
 	async execute(
 		_toolCallId: string,
-		{ command, cwd, timeout: rawTimeout, host: hostMode = "session" }: PowerShellToolParams,
+		{
+			command,
+			cwd,
+			timeout: rawTimeout,
+			host: hostMode = "session",
+			edition: requestedEdition,
+		}: PowerShellToolParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<PowerShellToolDetails>,
 		_ctx?: AgentToolContext,
 	): Promise<AgentToolResult<PowerShellToolDetails>> {
 		const settings = this.session.settings;
 		const timeoutSec = clampTimeout("powershell", rawTimeout, cfgToolsMaxTimeout.get(settings));
+		const edition: PowerShellEdition = requestedEdition ?? cfgPowerShellDefaultEdition.get(settings);
 
 		const spawnOptions = {
 			cwd: this.session.cwd,
-			shellPath: cfgPowerShellShellPath.get(settings)?.trim() || undefined,
+			// Only the "pwsh" edition has a path override setting: "powershell"
+			// always means the one Windows PowerShell 5.1 executable.
+			shellPath:
+				edition === "powershell" ? "powershell.exe" : cfgPowerShellShellPath.get(settings)?.trim() || undefined,
 			historyDepth: cfgPowerShellHistoryDepth.get(settings),
 		};
 
@@ -139,7 +162,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		// assemblies and file locks are state and releasing them is the point
 		// of the mode. For a session host it only returns the lease to the
 		// pool (refreshing the idle clock); nothing is disposed.
-		const sessionKey = psHostPoolKey(this.session);
+		const sessionKey = psHostEditionKey(psHostPoolKey(this.session), edition);
 		let host: PsHost;
 		let teardown: () => void | Promise<void>;
 		if (hostMode === "ephemeral") {
@@ -233,6 +256,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 
 		const details: PowerShellToolDetails = {
 			host: hostMode,
+			edition,
 			pid,
 			execId: result.execId,
 			exitCode,
@@ -252,12 +276,11 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 	}
 }
 
-/** Factory: only expose the tool when a pwsh executable is resolvable. */
+/** Factory: only expose the tool when at least one PowerShell edition is resolvable. */
 export async function loadPowerShellTool(session: ToolSession): Promise<PowerShellTool | null> {
 	const settings = session.settings;
-	const shellPath = cfgPowerShellShellPath.get(settings)?.trim();
-	const probe = shellPath || "pwsh";
-	const resolved = await $which(probe);
-	if (!resolved) return null;
+	const pwshPath = cfgPowerShellShellPath.get(settings)?.trim() || "pwsh";
+	const [pwshResolved, windowsResolved] = await Promise.all([$which(pwshPath), $which("powershell.exe")]);
+	if (!pwshResolved && !windowsResolved) return null;
 	return new PowerShellTool(session);
 }
