@@ -846,6 +846,11 @@ if "__omp_prelude_loaded__" not in globals():
 
     def wait(handles, timeout=None, *, raise_errors=True):
         """Wait for agent/completion handles in input order."""
+        if isinstance(handles, (int, float)):
+            raise TypeError(
+                "wait() takes agent or completion handles; it is not a sleep. "
+                "Wait for page state with tab.waitFor*(…), or pause with await asyncio.sleep(seconds)."
+            )
         items = [handles] if isinstance(handles, _Handle) else list(handles)
         for handle in items:
             if not isinstance(handle, _Handle):
