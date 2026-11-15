@@ -247,17 +247,19 @@ pub struct VcsCleanOptions {
 #[derive(Default)]
 pub struct VcsDiscardCheck {
 	/// Preview `git clean` instead of tracked changes.
-	pub clean:           Option<bool>,
+	pub clean:               Option<bool>,
 	/// `-d`: untracked directories too.
-	pub directories:     Option<bool>,
+	pub directories:         Option<bool>,
 	/// `-x`: ignored files too.
-	pub include_ignored: Option<bool>,
+	pub include_ignored:     Option<bool>,
 	/// `-X`: only ignored files.
-	pub ignored_only:    Option<bool>,
+	pub ignored_only:        Option<bool>,
+	/// `-ff`: untracked nested repositories too.
+	pub nested_repositories: Option<bool>,
 	/// `-e` patterns.
-	pub excludes:        Option<Vec<String>>,
+	pub excludes:            Option<Vec<String>>,
 	/// Pathspecs, relative to the checked directory.
-	pub pathspecs:       Option<Vec<String>>,
+	pub pathspecs:           Option<Vec<String>>,
 }
 /// Push options.
 #[napi(object)]
@@ -434,11 +436,12 @@ impl From<VcsDiscardCheck> for core::DiscardCheck {
 			return Self::Tracked;
 		}
 		Self::Clean(core::CleanCheck {
-			directories:     v.directories.unwrap_or(false),
-			include_ignored: v.include_ignored.unwrap_or(false),
-			ignored_only:    v.ignored_only.unwrap_or(false),
-			excludes:        v.excludes.unwrap_or_default(),
-			pathspecs:       v.pathspecs.unwrap_or_default(),
+			directories:         v.directories.unwrap_or(false),
+			include_ignored:     v.include_ignored.unwrap_or(false),
+			ignored_only:        v.ignored_only.unwrap_or(false),
+			nested_repositories: v.nested_repositories.unwrap_or(false),
+			excludes:            v.excludes.unwrap_or_default(),
+			pathspecs:           v.pathspecs.unwrap_or_default(),
 		})
 	}
 }

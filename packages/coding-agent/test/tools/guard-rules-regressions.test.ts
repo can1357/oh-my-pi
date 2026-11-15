@@ -156,6 +156,30 @@ describe("guard rule regressions", () => {
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"fetches no missing object from a promisor remote while checking",
+		async () => {
+			await dirtyRepo(cwd);
+			const marker = path.join(path.dirname(cwd), `${path.basename(cwd)}-marker`);
+			const config: [string, string][] = [
+				["remote.origin.url", "/nowhere"],
+				["remote.origin.promisor", "true"],
+				["remote.origin.partialclonefilter", "blob:none"],
+				["extensions.partialclone", "origin"],
+				["remote.origin.uploadpack", `touch '${marker}'; false`],
+			];
+			for (const [key, value] of config) await $`git config ${key} ${value}`.cwd(cwd).quiet();
+			// A HEAD commit the object store lacks: reading it makes git fetch it from the promisor remote.
+			fs.writeFileSync(path.join(cwd, ".git", "HEAD"), `${"1".repeat(40)}\n`);
+			try {
+				bashApproval(cwd, "git reset --hard");
+				expect(fs.existsSync(marker)).toBe(false);
+			} finally {
+				fs.rmSync(marker, { force: true });
+			}
+		},
+	);
+
 	it("counts a `git stash` earlier in the same `&&` chain as keeping the work", async () => {
 		await dirtyRepo(cwd);
 		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");

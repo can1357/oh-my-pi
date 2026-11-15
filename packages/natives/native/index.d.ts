@@ -4290,6 +4290,8 @@ export interface VcsDiscardCheck {
   includeIgnored?: boolean
   /** `-X`: only ignored files. */
   ignoredOnly?: boolean
+  /** `-ff`: untracked nested repositories too. */
+  nestedRepositories?: boolean
   /** `-e` patterns. */
   excludes?: Array<string>
   /** Pathspecs, relative to the checked directory. */

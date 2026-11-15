@@ -361,15 +361,17 @@ pub enum DiscardCheck {
 #[derive(Debug, Clone, Default)]
 pub struct CleanCheck {
 	/// Untracked directories too (`-d`).
-	pub directories:     bool,
+	pub directories:         bool,
 	/// Ignored files too (`-x`).
-	pub include_ignored: bool,
+	pub include_ignored:     bool,
 	/// Only ignored files (`-X`).
-	pub ignored_only:    bool,
+	pub ignored_only:        bool,
+	/// Untracked nested repositories too (`-ff`).
+	pub nested_repositories: bool,
 	/// Extra ignore patterns (`-e`).
-	pub excludes:        Vec<String>,
+	pub excludes:            Vec<String>,
 	/// Pathspecs, relative to the directory the check runs in.
-	pub pathspecs:       Vec<String>,
+	pub pathspecs:           Vec<String>,
 }
 
 /// Options for the CLI-backed `push`.

@@ -21,8 +21,9 @@ const DISCARD_CHECK_CAPTURE_LIMIT: usize = 4 * 1024;
 ///
 /// The question is asked while the command awaits approval, about a
 /// repository the agent may have just rewritten, so git runs through
-/// [`cli::run_sync_inert`]: no fsmonitor hook, no filter driver, no inherited
-/// `GIT_*` variable. Submodules are not entered.
+/// [`cli::run_sync_inert`]: no fsmonitor hook, no filter driver, no fetch from
+/// a promisor remote, no inherited `GIT_*` variable. Submodules are not
+/// entered.
 pub fn discards_work(dir: &Path, check: &DiscardCheck) -> Result<bool> {
 	if discover_info(dir)?.is_none() {
 		return Ok(false);
@@ -39,6 +40,11 @@ pub fn discards_work(dir: &Path, check: &DiscardCheck) -> Result<bool> {
 			args.extend(["clean", "--dry-run"].map(str::to_owned));
 			if clean.directories {
 				args.push("-d".to_owned());
+			}
+			// A second `-f` also deletes untracked nested repositories, which a
+			// single one only skips.
+			if clean.nested_repositories {
+				args.push("-ff".to_owned());
 			}
 			if clean.ignored_only {
 				args.push("-X".to_owned());
@@ -94,13 +100,17 @@ mod tests {
 		Ok(())
 	}
 
-	fn repo() -> std::result::Result<tempfile::TempDir, Box<dyn std::error::Error>> {
-		let dir = tempfile::tempdir()?;
-		let root = dir.path();
+	/// Makes `root` a repository with one committed file, `a.txt`.
+	fn init(root: &Path) -> TestResult {
 		git(root, &["init", "-q", "-b", "main"])?;
 		fs::write(root.join("a.txt"), "one\n")?;
 		git(root, &["add", "a.txt"])?;
-		git(root, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init"])?;
+		git(root, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init"])
+	}
+
+	fn repo() -> std::result::Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+		let dir = tempfile::tempdir()?;
+		init(dir.path())?;
 		Ok(dir)
 	}
 
@@ -146,6 +156,20 @@ mod tests {
 		Ok(())
 	}
 
+	#[test]
+	fn clean_lists_nested_repositories_only_when_forced_twice() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		let nested = root.join("nested");
+		fs::create_dir(&nested)?;
+		init(&nested)?;
+		let once = CleanCheck { directories: true, ..Default::default() };
+		assert!(!discards_work(root, &clean(once))?, "a single -f skips a nested repository");
+		let twice = CleanCheck { directories: true, nested_repositories: true, ..Default::default() };
+		assert!(discards_work(root, &clean(twice))?);
+		Ok(())
+	}
+
 	/// The repository's configuration decides what `git status` may run: an
 	/// fsmonitor hook on every status, a clean filter on every stat-dirty file.
 	/// A driver name containing `=` cannot be blanked with `-c`, which splits
@@ -177,6 +201,31 @@ mod tests {
 		assert!(!discards_work(root, &DiscardCheck::Tracked)?);
 		fs::write(root.join("a.txt"), "two\n")?;
 		assert!(discards_work(root, &DiscardCheck::Tracked)?);
+		assert!(!marker.exists(), "a repository-configured program ran");
+		Ok(())
+	}
+
+	/// A partial clone fetches a missing object from its promisor remote, and
+	/// the fetch runs the upload-pack command the configuration names.
+	#[cfg(unix)]
+	#[test]
+	fn fetches_nothing_from_a_promisor_remote() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		let marker = root.join(".git").join("marker");
+		for (key, value) in [
+			("remote.origin.url", "/nowhere".to_owned()),
+			("remote.origin.promisor", "true".to_owned()),
+			("remote.origin.partialclonefilter", "blob:none".to_owned()),
+			("extensions.partialclone", "origin".to_owned()),
+			("remote.origin.uploadpack", format!("touch '{}'; false", marker.display())),
+		] {
+			git(root, &["config", key, &value])?;
+		}
+		// A HEAD commit the object store lacks: the check fails instead of
+		// fetching it.
+		fs::write(root.join(".git").join("HEAD"), format!("{}\n", "1".repeat(40)))?;
+		assert!(discards_work(root, &DiscardCheck::Tracked).is_err());
 		assert!(!marker.exists(), "a repository-configured program ran");
 		Ok(())
 	}

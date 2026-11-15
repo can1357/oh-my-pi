@@ -363,10 +363,16 @@ pub(crate) fn run_sync_capped(
 /// program the repository configures: `--no-optional-locks` as for every
 /// read, `core.fsmonitor` and the untracked cache pinned off as on the write
 /// path, and every filter driver the configuration names blanked for the
-/// call, so a stat-dirty file is compared without its clean filter. Every
-/// inherited `GIT_*` variable is dropped, not only the repository-location
-/// family [`apply_env`] strips: `GIT_CONFIG_*`, `GIT_EXEC_PATH` and the like
-/// would otherwise reach the child. Submodules are the caller's to exclude.
+/// call, so a stat-dirty file is compared without its clean filter. A missing
+/// object is never fetched from a promisor remote, which would run the
+/// transport, upload-pack or ssh command the configuration names:
+/// `GIT_NO_LAZY_FETCH` turns lazy fetches off (git 2.45+), and an empty
+/// `GIT_ALLOW_PROTOCOL` refuses every transport on older git. Promisor remotes
+/// cannot be unset for the call instead, because `extensions.partialClone` is
+/// read from the repository's own config file only. Every inherited `GIT_*`
+/// variable is dropped, not only the repository-location family [`apply_env`]
+/// strips: `GIT_CONFIG_*`, `GIT_EXEC_PATH` and the like would otherwise reach
+/// the child. Submodules are the caller's to exclude.
 pub(crate) fn run_sync_inert(
 	cwd: &Path,
 	args: &[String],
@@ -426,8 +432,8 @@ enum SyncMode<'a> {
 	Read,
 	/// fsmonitor/untracked cache pinned off, with stdin and extra variables.
 	Write(&'a SyncWrite<'a>),
-	/// Both, every inherited `GIT_*` variable dropped, then these variables set
-	/// (see [`run_sync_inert`]).
+	/// Both, every inherited `GIT_*` variable dropped, lazy fetches and
+	/// transports refused, then these variables set (see [`run_sync_inert`]).
 	Inert(&'a [(String, String)]),
 }
 
@@ -473,6 +479,8 @@ fn run_sync_impl(
 		}
 	}
 	if let SyncMode::Inert(env) = mode {
+		cmd.env("GIT_NO_LAZY_FETCH", "1")
+			.env("GIT_ALLOW_PROTOCOL", "");
 		for (key, value) in env {
 			cmd.env(key, value);
 		}
