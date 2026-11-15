@@ -409,6 +409,37 @@ class MappedValue<S, T> extends Derived<T> {
 	}
 }
 
+class OperatorValue<T> extends Derived<T> {
+	readonly #source: Derived<T>;
+
+	constructor(source: Derived<T>) {
+		super();
+		this.#source = source;
+	}
+
+	get sources(): readonly AnySetting[] {
+		return this.#source.sources;
+	}
+
+	inputs(settings: Settings): readonly unknown[] {
+		return [this.#source.get(settings.grantAuthority())];
+	}
+
+	compute(inputs: readonly unknown[]): T {
+		return inputs[0] as T;
+	}
+}
+
+/**
+ * `source` as the operator configured it ({@link Settings.grantAuthority}: global, `--config` and
+ * runtime layers, never a project layer), for settings a repository must not control because the
+ * agent can write its settings files. Listeners and effects fire when the merged value changes, so
+ * pair it with a settings-panel condition that hides the row while a project layer supplies it.
+ */
+export function operatorValue<T>(source: Derived<T>): Derived<T> {
+	return new OperatorValue(source);
+}
+
 /** Value types of a record of derivations. */
 export type DerivedValues<R extends Record<string, Derived<unknown>>> = {
 	[K in keyof R]: R[K] extends Derived<infer V> ? V : never;

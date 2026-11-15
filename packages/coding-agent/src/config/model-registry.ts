@@ -154,6 +154,8 @@ setCodexAttestationProvider(generateCodexAttestation);
 
 /** One built-in discovery pass rewriting more payload rows than this is debug-logged. */
 const MODEL_CACHE_REWRITE_LOG_THRESHOLD = 5;
+/** Minimum spacing of {@link ModelRegistry.retryUnavailableDiscovery} passes. */
+const DISCOVERY_RETRY_INTERVAL_MS = 60_000;
 /** `scheme://user:pass@` in free text (e.g. a fetch error echoing the request URL). */
 const URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
 const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
@@ -385,6 +387,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#discoveryRetry?: Promise<void>;
+	#lastDiscoveryRetryAt = Number.NEGATIVE_INFINITY;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
 	#initialRefreshSettled = false;
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
@@ -1054,10 +1058,10 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Refresh only named discovery providers (configured `models.yml` providers or
-	 * extension `fetchDynamicModels` managers). Unlike {@link refreshProvider},
-	 * this avoids a static reload and leaves unrelated runtime discovery alone.
-	 * Unknown ids have no effect.
+	 * Refresh only named discovery providers (built-in managers, configured
+	 * `models.yml` providers, or extension `fetchDynamicModels` managers). Unlike
+	 * {@link refreshProvider}, this avoids a static reload and leaves unrelated
+	 * runtime discovery alone. Unknown ids have no effect.
 	 */
 	async refreshDiscoverableProviders(
 		providerIds: Iterable<string>,
@@ -1067,6 +1071,45 @@ export class ModelRegistry {
 		const filter = new Set(providerIds);
 		if (filter.size === 0) return;
 		await this.#refreshRuntimeDiscoveries(strategy, filter);
+	}
+
+	/**
+	 * Re-run discovery for providers whose last attempt left them `unavailable`,
+	 * so a long-lived session recovers discovered models (Codex rosters, local
+	 * servers) after a startup failure instead of serving the bundled catalog
+	 * until restart. Views that list models (`^` mentions) call this as they
+	 * read the catalog. Single-flight and spaced by
+	 * {@link DISCOVERY_RETRY_INTERVAL_MS}; while the initial background refresh
+	 * runs it stands in for the retry.
+	 *
+	 * Returns the pass to wait for before re-reading the catalog, or `undefined`
+	 * when none is due. The pass never rejects.
+	 */
+	retryUnavailableDiscovery(): Promise<void> | undefined {
+		if (this.#discoveryRetry) return this.#discoveryRetry;
+		const now = Date.now();
+		if (now - this.#lastDiscoveryRetryAt < DISCOVERY_RETRY_INTERVAL_MS) return undefined;
+		const providers: string[] = [];
+		for (const state of this.#providerDiscoveryStates.values()) {
+			if (state.status === "unavailable") providers.push(state.provider);
+		}
+		if (providers.length === 0) return undefined;
+		this.#lastDiscoveryRetryAt = now;
+		const pass = this.isBackgroundRefreshPending()
+			? this.awaitBackgroundRefresh()
+			: this.refreshDiscoverableProviders(providers);
+		const retry = pass
+			.catch(error => {
+				logger.debug("model discovery retry failed", {
+					providers,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				this.#discoveryRetry = undefined;
+			});
+		this.#discoveryRetry = retry;
+		return retry;
 	}
 
 	/**

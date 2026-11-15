@@ -8,12 +8,13 @@ The `commit` object exists in JavaScript and Python Eval; it is not a standalone
 - Repository (`repo`): omitted → the repository containing the session cwd; a path (relative to the cwd) inside another checkout → that repository, e.g. `commit.draft(repo="../other")`. The draft and its commit stay in that repository.
 - The summary lists Selected (`✓` whole file, `◐` part of it), Review (`?`), other agents of the session left out, and how many paths are not yours.
 - `show(path=None)` lists hunks. Each change line shows its unit id (`3b` = hunk 3, unit b; a unit is one actor's lines within a hunk), a mark (`✓` selected, `?` needs review, `·` left out), and its owner. Without a path: every partially selected or review file.
-- `take(path=None, *units, grep=None)` / `drop(...)`: `path` is exact, a glob (`packages/tui/**`), or a unique suffix (`CHANGELOG.md` when only one changed). No units → the whole file. `grep` → every unit with a line matching the regex, across all files unless `path` is given. `only(*globs)` deselects everything outside the globs; use it to split the work into several commits.
+- `take(path=None, *units, grep=None)` / `drop(...)`: `path` is exact, a glob (`packages/tui/**`), or a unique suffix (`CHANGELOG.md` when only one changed). No units → the whole file. `grep` → every unit with a line matching the regex, across all files unless `path` is given. `take("**")` selects every change in the repository, including ones no agent made (the user's own work). `only(*globs)` deselects everything outside the globs; use it to split the work into several commits.
+- Binary, non-UTF-8, and large files, symlinks, and mode-only changes (`chmod`) have a single unit `1` and commit whole, as in the worktree. A mode change of a text file goes with its selected lines. Submodules are listed as skipped.
 - `diff()` prints the exact candidate commit against HEAD.
-- `commit(subject, body=None, *, fixes=None, amend=False)`: one-line subject; body is a string or a list of lines; `fixes=123` appends `Fixes #123`. Builds the commit from a private index on the current HEAD: other agents' staged entries stay staged, the worktree is never touched, and a concurrent commit by someone else is never overwritten (when it changed the same lines the call fails; draft again). Prints the commit and what remains. `amend=True` only rewrites a commit this flow made in this session.
+- `commit(subject, body=None, *, fixes=None, amend=False, no_verify=False)`: one-line subject; body is a string or a list of lines; `fixes=123` appends `Fixes #123`. Builds the commit from a private index on the current HEAD (or as the first commit of a new repository): other agents' staged entries stay staged, the worktree is never touched, and a concurrent commit by someone else is never overwritten (when it changed the same lines the call fails; draft again). Hooks and commit signing run as with `git commit`; `no_verify=True` skips the `pre-commit` and `commit-msg` hooks (only when the user asks). Prints the commit and what remains; the draft then holds what remains, freshly preselected, so keep using it for the next commit. `amend=True` only rewrites a commit this flow made in this session.
 - Review reasons: "edits lines added by X that were never committed" means your edit builds on someone's uncommitted lines, so committing yours alone commits part of theirs; "in-scope lines rewritten afterwards by …" means the file no longer holds what you wrote. Decide from what you did; ask the user only when you cannot tell.
 - Every method is async and prints its result; `silent=True` skips printing. `print(d)` repeats the current summary.
-- JavaScript: same names with an options object: `commit.draft({ agents: "self", repo: "../other" })`, `d.take("src/a.ts", { units: ["2a"] })`, `d.commit("fix: …", { body: ["- …"], fixes: 12 })`.
+- JavaScript: same names with an options object: `commit.draft({ agents: "self", repo: "../other" })`, `d.take("src/a.ts", { units: ["2a"] })`, `d.commit("fix: …", { body: ["- …"], fixes: 12, noVerify: true })`.
 </instruction>
 
 <examples>
@@ -28,6 +29,14 @@ await d.commit("fix(tui): kept the cursor on wrapped lines", ["- Clamped the col
 ```python
 d = await commit.draft("ParserFix")  # one subagent's work only
 await d.commit("feat(parser): added the streaming parser")
+```
+
+```python
+d = await commit.draft()  # several commits from one draft
+await d.only("src/parser/**", "test/parser/**")
+await d.commit("feat(parser): added the streaming parser", ["- Added `StreamParser`."])
+await d.only("docs/**")  # d now holds what remains, preselected again
+await d.commit("docs: documented the streaming parser")
 ```
 </examples>
 
