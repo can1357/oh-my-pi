@@ -11,6 +11,7 @@
 - Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
 - omp's WebKit browser engine now installs and updates to the newest stable ABKit release instead of the one each omp release pinned; the first WebKit open in a process checks for a newer one
 - omp keeps each ABKit version in `~/.o2/lib/abkit-versions/<version>` and links `~/.o2/lib/abkit` to the current one, so an engine update no longer waits for running browser hosts to exit
+- The `omp compress` prompt no longer cites RFC 2119 by number, as a precaution: Google Antigravity rejects that citation followed by the six standard requirement words with a bare `429 RESOURCE_EXHAUSTED` ([#19270](https://github.com/can1357/oh-my-pi/pull/19270) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
@@ -50,7 +51,6 @@
 - Fixed `page.on()` and other event-listener methods inside `tab.run` on Tern and WebKit tabs throwing `page.on is not a function`; they now name the backend and the helpers to use instead (`tab.requests()`, `tab.waitForResponse()`, `tab.console()`)
 
 - Fixed `read` line selectors on `xd://` docs (`xd://eval/browser:1-200`) failing with `Unknown topic`; `write` now rejects a selector on an `xd://` device URL instead of treating it as part of the device name
-- The `omp compress` prompt and shipped skill prompts no longer cite RFC 2119, a sentence Google Antigravity answered with a bare `429 RESOURCE_EXHAUSTED` ([#19270](https://github.com/can1357/oh-my-pi/pull/19270) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 
