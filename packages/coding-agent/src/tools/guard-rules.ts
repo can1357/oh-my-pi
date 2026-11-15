@@ -394,6 +394,13 @@ const CURL_DATA_OPTIONS: Record<string, true> = {
 	"-T": true,
 	"--upload-file": true,
 };
+/**
+ * curl's one-letter options that take a value. In a bundle (`-sd @file`), the first of them takes
+ * the rest of the word, or the next word when it ends the bundle.
+ */
+const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
+/** wget's options that send a file, as `--post-file=file` or `--post-file file`. */
+const WGET_FILE_OPTIONS: Record<string, true> = { "--post-file": true, "--body-file": true };
 
 /** The local files a network command sends. */
 function sentFiles(command: ShellCommand): string[] {
@@ -403,26 +410,38 @@ function sentFiles(command: ShellCommand): string[] {
 	if (name === "curl") {
 		for (let i = 0; i < argv.length; i++) {
 			const arg = argv[i];
+			let option: string;
 			let value: string | undefined;
-			const eq = arg.indexOf("=");
-			if (Object.hasOwn(CURL_DATA_OPTIONS, arg)) value = argv[i + 1];
-			else if (arg.startsWith("--") && eq > 0 && Object.hasOwn(CURL_DATA_OPTIONS, arg.slice(0, eq))) {
-				value = arg.slice(eq + 1);
-			} else if ((arg.startsWith("-d") || arg.startsWith("-F") || arg.startsWith("-T")) && arg.length > 2) {
-				value = arg.slice(2);
-			}
-			if (value === undefined) continue;
-			if (arg.startsWith("-T") || arg.startsWith("--upload-file")) {
-				files.push(value);
+			if (arg.startsWith("--")) {
+				const eq = arg.indexOf("=");
+				option = eq > 0 ? arg.slice(0, eq) : arg;
+				if (!Object.hasOwn(CURL_DATA_OPTIONS, option)) continue;
+				value = eq > 0 ? arg.slice(eq + 1) : argv[++i];
+			} else if (arg.startsWith("-") && arg.length > 1) {
+				let k = 1;
+				while (k < arg.length && !CURL_VALUE_LETTERS.includes(arg[k])) k++;
+				if (k === arg.length) continue;
+				option = `-${arg[k]}`;
+				value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
+				if (!Object.hasOwn(CURL_DATA_OPTIONS, option)) continue;
+			} else {
 				continue;
 			}
-			const at = value.search(/[@<]/);
-			if (at >= 0) files.push(value.slice(at + 1).split(";")[0]);
+			if (value === undefined) continue;
+			if (option === "-T" || option === "--upload-file") {
+				files.push(value);
+			} else {
+				const at = value.search(/[@<]/);
+				if (at >= 0) files.push(value.slice(at + 1).split(";")[0]);
+			}
 		}
 	} else if (name === "wget") {
-		for (const arg of argv) {
-			if (arg.startsWith("--post-file=") || arg.startsWith("--body-file="))
-				files.push(arg.slice(arg.indexOf("=") + 1));
+		for (let i = 0; i < argv.length; i++) {
+			const eq = argv[i].indexOf("=");
+			const option = eq > 0 ? argv[i].slice(0, eq) : argv[i];
+			if (!Object.hasOwn(WGET_FILE_OPTIONS, option)) continue;
+			const value = eq > 0 ? argv[i].slice(eq + 1) : argv[++i];
+			if (value !== undefined) files.push(value);
 		}
 	} else if (name === "http" || name === "https" || name === "xh") {
 		for (const arg of argv) {
