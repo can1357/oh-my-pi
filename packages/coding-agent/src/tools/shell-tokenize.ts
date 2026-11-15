@@ -959,12 +959,18 @@ export function readShellWord(text: string): { value: string; rest: string } | "
 	return { value, rest: text.slice(i).trim() };
 }
 
-/** Nested `bash -c`, `eval`, heredoc-script and substitution levels {@link parseShellScript} follows. */
+/**
+ * Nested `bash -c`, `eval`, heredoc-script and substitution levels {@link parseShellScript} follows,
+ * and the most `${ }` expansions it reads inside one another.
+ */
 export const SHELL_SCRIPT_MAX_DEPTH = 8;
 
 /** One simple command found by {@link parseShellScript}, with its wrappers peeled off. */
 export interface ShellCommand {
-	/** Arguments after quote removal and wrapper unwrapping; `argv[0]` is the program's basename. */
+	/**
+	 * Arguments after quote removal and wrapper unwrapping; `argv[0]` is the program's basename.
+	 * Empty for a command that is only redirections (`$(< file)`, `done < file`).
+	 */
 	argv: string[];
 	/** Per `argv` entry, whether the word was quoted or escaped in the source (`"reboot"`, `\rm`). */
 	quoted: boolean[];
@@ -984,9 +990,9 @@ export interface ShellCommand {
 	/** Directory the command runs in, after the `cd`s that precede it in the script. */
 	cwd: string;
 	/**
-	 * Commands known to have succeeded by the time this one starts: the earlier members of its `&&`
-	 * chain (none once an `||` makes them optional) and of the chains around the `( )` group or
-	 * nested script it is in, in order.
+	 * Commands known to have succeeded by the time this one starts: the last command of each earlier
+	 * pipeline in its `&&` chain (none once an `||` makes them optional) and in the chains around the
+	 * `( )` group or nested script it is in, in order.
 	 */
 	succeeded: readonly ShellCommand[];
 }
@@ -997,7 +1003,10 @@ export interface ParsedShellScript {
 	pipelines: ShellCommand[][];
 	/** Source text of every nested script (`bash -c` and `eval` strings, shell heredocs, substitution bodies). */
 	scripts: string[];
-	/** True when a script nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels was not parsed. */
+	/**
+	 * True when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels was left unparsed,
+	 * possibly with the rest of the text after it.
+	 */
 	truncated: boolean;
 }
 
@@ -1150,26 +1159,77 @@ interface PendingHeredoc {
 	doc: ShellHeredoc;
 }
 
-/** Index of the `close` ending the group `open` started just before `start`. */
-function closingDelimiter(text: string, start: number, open: string, close: string): number {
-	let depth = 1;
-	let i = start;
-	while (i < text.length) {
-		const ch = text[i];
-		if (ch === "\\") {
-			i += 2;
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			const end = text.indexOf(ch, i + 1);
-			i = end < 0 ? text.length : end + 1;
-			continue;
-		}
-		if (ch === open) depth++;
-		else if (ch === close && --depth === 0) return i;
-		i++;
+/** What text being read is nested in: where its substitutions run, and the map their keys go in. */
+interface ReadScope {
+	cwd: string;
+	depth: number;
+	subs: Map<string, ShellCommand[][]>;
+	succeeded: readonly ShellCommand[];
+}
+
+/** A substitution's key in a word; it stands for the commands the substitution runs. */
+const SUBSTITUTION_KEY_RE = /\0\d+\0/g;
+
+/** A line ending in an odd number of backslashes: in an unquoted heredoc, it continues on the next line. */
+const ODD_TRAILING_BACKSLASHES_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
+
+/** The one-letter escapes of a `$'...'` string. */
+const ANSI_C_ESCAPES: Record<string, string> = {
+	a: "\x07",
+	b: "\b",
+	e: "\x1b",
+	E: "\x1b",
+	f: "\f",
+	n: "\n",
+	r: "\r",
+	t: "\t",
+	v: "\v",
+	"\\": "\\",
+	"'": "'",
+	'"': '"',
+	"?": "?",
+};
+/** The numeric escapes of a `$'...'` string: octal, `\x`, `\u`, `\U`, and `\c` control characters. */
+const ANSI_C_NUMERIC_RE = /^(?:[0-7]{1,3}|x[\da-fA-F]{1,2}|u[\da-fA-F]{1,4}|U[\da-fA-F]{1,8}|c[^'])/;
+
+/** The character a numeric `$'...'` escape stands for. */
+function ansiCCharacter(escape: string): string {
+	if (escape[0] === "c") return String.fromCharCode(escape.charCodeAt(1) & 0x1f);
+	if (escape[0] === "u" || escape[0] === "U") {
+		const code = Number.parseInt(escape.slice(1), 16);
+		return code <= 0x10ffff ? String.fromCodePoint(code) : "";
 	}
-	return text.length;
+	// Octal and `\x` escapes give one byte.
+	const code = escape[0] === "x" ? Number.parseInt(escape.slice(1), 16) : Number.parseInt(escape, 8);
+	return String.fromCharCode(code & 0xff);
+}
+
+/**
+ * Reads a `$'...'` string from `start`, just past its opening quote: its value with the escapes
+ * decoded, cut at the first NUL as bash cuts it, and the index of its closing quote. Unlike in a
+ * plain single-quoted string, a backslash escapes the quote.
+ */
+function readAnsiCString(text: string, start: number): { value: string; end: number } {
+	let value = "";
+	let cut = false;
+	let i = start;
+	while (i < text.length && text[i] !== "'") {
+		let char = text[i++];
+		if (char === "\\" && i < text.length) {
+			const numeric = ANSI_C_NUMERIC_RE.exec(text.slice(i, i + 9))?.[0];
+			if (Object.hasOwn(ANSI_C_ESCAPES, text[i])) {
+				char = ANSI_C_ESCAPES[text[i++]];
+			} else if (numeric !== undefined) {
+				char = ansiCCharacter(numeric);
+				i += numeric.length;
+			} else {
+				char += text[i++];
+			}
+		}
+		cut ||= char === "\0";
+		if (!cut) value += char;
+	}
+	return { value, end: i };
 }
 
 /** Where the command a wrapper chain runs starts in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`). */
@@ -1208,36 +1268,42 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[]): numbe
 	return i;
 }
 
-/** Shell options that take the next word as their value (`-o pipefail`, `--rcfile file`). */
+/** Long shell options that take the next word as their value (`--rcfile file`). */
 const SHELL_VALUE_OPTIONS: Record<string, true> = {
-	"-o": true,
-	"+o": true,
-	"-O": true,
-	"+O": true,
 	"--rcfile": true,
 	"--init-file": true,
 };
 
 /**
- * How a shell (`argv[0]` in {@link SCRIPT_SHELLS}) gets its script: the `-c` string, `"stdin"` when
- * it reads the script from its input (no script file, or `-s`), or `undefined` for a script file.
- * Long options (`--norc`, `--login`) come before the short ones.
+ * How a shell (`argv[0]` in {@link SCRIPT_SHELLS}) gets its script: with `-c`, the first word after
+ * the options; `"stdin"` when it reads the script from its input (no such word, or `-s`); or
+ * `undefined` for a script file. Each `o` or `O` in a short option bundle takes the next word as its
+ * value (`-o pipefail`, `-euo pipefail`); long options (`--norc`, `--login`) come before the short ones.
  */
 function shellScriptSource(argv: readonly string[]): string | undefined {
-	for (let i = 1; i < argv.length; i++) {
+	let command = false;
+	let stdin = false;
+	let i = 1;
+	for (; i < argv.length; i++) {
 		const arg = argv[i];
-		// `-` and `--` end the options; a word after them is a script file.
-		if (arg === "-" || arg === "--") return i + 1 < argv.length ? undefined : "stdin";
+		// `-` and `--` end the options.
+		if (arg === "-" || arg === "--") {
+			i++;
+			break;
+		}
 		if (Object.hasOwn(SHELL_VALUE_OPTIONS, arg)) {
 			i++;
-			continue;
+		} else if (!arg.startsWith("--")) {
+			if (!/^[-+]./.test(arg)) break;
+			for (const letter of arg.slice(1)) {
+				if (letter === "c") command = true;
+				else if (letter === "s") stdin = true;
+				else if (letter === "o" || letter === "O") i++;
+			}
 		}
-		if (arg.startsWith("--")) continue;
-		if (!(arg.startsWith("-") || arg.startsWith("+"))) return undefined;
-		if (arg.slice(1).includes("c")) return argv[i + 1] ?? "";
-		if (arg.slice(1).includes("s")) return "stdin";
 	}
-	return "stdin";
+	if (command) return argv[i] ?? "";
+	return stdin || i >= argv.length ? "stdin" : undefined;
 }
 
 /** The script a `bash -c '...'` or `eval ...` runs. */
@@ -1261,8 +1327,8 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 
 /**
  * Which commands are known to have succeeded before the next one starts, as a script runs: the
- * members of the current `&&` chain, until an `||` makes earlier members optional, on top of what
- * had succeeded when the enclosing `( )` group or nested script started.
+ * last command of each pipeline in the current `&&` chain, until an `||` makes earlier members
+ * optional, on top of what had succeeded when the enclosing `( )` group or nested script started.
  */
 class SucceededCommands {
 	/** Succeeded before the current and-or list started. */
@@ -1284,9 +1350,12 @@ class SucceededCommands {
 		return this.#optional ? this.#base : this.#chain;
 	}
 
-	/** A pipeline ended; a negated (`!`) pipeline succeeds when its commands fail, so it counts as none. */
-	finish(pipeline: readonly ShellCommand[]): void {
-		this.#last = pipeline;
+	/**
+	 * A pipeline ended. Its status is its last command's, so only that one counts; a negated (`!`)
+	 * pipeline succeeds when its commands fail, so it counts as none.
+	 */
+	finish(pipeline: readonly ShellCommand[], negated: boolean): void {
+		this.#last = negated ? [] : pipeline.slice(-1);
 	}
 
 	operator(operator: string): void {
@@ -1320,39 +1389,40 @@ class SucceededCommands {
 
 class ShellScriptParser {
 	#count = 0;
+	/** `${ }`/`$[ ]` expansions being read inside one another. */
+	#braces = 0;
 	readonly scripts: string[] = [];
-	/** Set when a script nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} was left unparsed. */
+	/** Set when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} was left unparsed. */
 	truncated = false;
 	constructor(readonly home: string) {}
 
 	/**
-	 * The pipelines `source` runs, nested ones after the top level. `succeeded` is what had
-	 * succeeded when it started. In `arithmetic` text (`$(( ))`), `<<` is a shift, never a heredoc.
+	 * The pipelines `source` runs, nested ones after the top level. `succeeded` is what had succeeded
+	 * when it started.
 	 */
-	parse(
-		source: string,
-		startCwd: string,
-		depth: number,
-		succeeded: readonly ShellCommand[],
-		arithmetic = false,
-	): ShellCommand[][] {
+	parse(source: string, cwd: string, depth: number, succeeded: readonly ShellCommand[]): ShellCommand[][] {
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
 			this.truncated = true;
 			return [];
 		}
 		if (depth > 0) this.scripts.push(source);
-		let cwd = startCwd;
+		const scope: ReadScope = { cwd, depth, subs: new Map(), succeeded };
+		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope);
+	}
+
+	/** The pipelines `tokens`, read in `scope`, run, nested ones after the top level. */
+	#pipelines(tokens: readonly ShellScriptToken[], scope: ReadScope): ShellCommand[][] {
+		const { depth, subs } = scope;
+		let cwd = scope.cwd;
 		// A `( )` subshell's `cd` ends with the group: the directory is restored at its `)`.
 		const subshellCwds: string[] = [];
-		const subs = new Map<string, ShellCommand[][]>();
-		const segments = this.#segments(this.#tokens(source, cwd, depth, subs, succeeded, !arithmetic));
 		const pipelines: ShellCommand[][] = [];
 		const nested: ShellCommand[][] = [];
-		const done = new SucceededCommands(succeeded);
+		const done = new SucceededCommands(scope.succeeded);
 		let pipeline: ShellCommand[] = [];
 		let feeding: ShellScriptSegment[] = [];
 		let negated = false;
-		for (const segment of segments) {
+		for (const segment of this.#segments(tokens)) {
 			if (pipeline.length === 0 && segment.words[0] === "!" && !segment.quoted[0]) negated = true;
 			const command = this.#command(segment, cwd, subs, depth, nested, done.current);
 			if (command) {
@@ -1368,7 +1438,7 @@ class ShellScriptParser {
 					const target = shellPositionalArgs(only.argv)[0];
 					cwd = target === undefined ? this.home : (resolveShellWordPath(target, cwd, this.home) ?? cwd);
 				}
-				done.finish(negated ? [] : pipeline);
+				done.finish(pipeline, negated);
 				pipeline = [];
 				feeding = [];
 				negated = false;
@@ -1405,17 +1475,18 @@ class ShellScriptParser {
 	}
 
 	/**
-	 * Words and operators; a quoted word is never an operator. A heredoc body is read when its line
-	 * ends and attached to the delimiter word; with `heredocs` off (arithmetic), `<<` is a shift.
+	 * Words and operators from `start`; a quoted word is never an operator. A heredoc body is read
+	 * when its line ends and attached to the delimiter word. With `heredocs` off (`$(( ))`), and
+	 * inside a `(( ))` command, `<<` is a shift. With `close`, reading stops at the `)` that closes a
+	 * `$( )` opened just before `start`: `end` is its index, or the text's length when none comes.
 	 */
 	#tokens(
 		text: string,
-		cwd: string,
-		depth: number,
-		subs: Map<string, ShellCommand[][]>,
-		succeeded: readonly ShellCommand[],
+		start: number,
+		scope: ReadScope,
 		heredocs: boolean,
-	): ShellScriptToken[] {
+		close: boolean,
+	): { tokens: ShellScriptToken[]; end: number } {
 		const out: ShellScriptToken[] = [];
 		let word = "";
 		let started = false;
@@ -1423,8 +1494,10 @@ class ShellScriptParser {
 		// Set after `<<`/`<<-`: the next word is a heredoc delimiter.
 		let delimiter: { stripTabs: boolean } | undefined;
 		const pending: PendingHeredoc[] = [];
-		// End of the `(( ))` arithmetic command being read: `<<` inside it is a shift.
-		let arithmeticEnd = -1;
+		// `(` operators not closed yet, and how many were open when the `(( ))` command being read
+		// started (-1 outside one).
+		let parens = 0;
+		let arithmetic = -1;
 		const flush = () => {
 			if (started) {
 				const token: ShellScriptToken = { text: word, operator: false, quoted };
@@ -1439,10 +1512,11 @@ class ShellScriptParser {
 			started = false;
 			quoted = false;
 		};
-		let i = 0;
+		let i = start;
 		while (i < text.length) {
 			const ch = text[i];
-			if (ch === " " || ch === "\t" || ch === "\r") {
+			// A carriage return belongs to its word, except in a CRLF line end.
+			if (ch === " " || ch === "\t" || (ch === "\r" && text[i + 1] === "\n")) {
 				flush();
 				i++;
 			} else if (ch === "\\") {
@@ -1454,6 +1528,12 @@ class ShellScriptParser {
 				started = true;
 				quoted = true;
 				i += 2;
+			} else if (ch === "$" && text[i + 1] === "'") {
+				const ansi = readAnsiCString(text, i + 2);
+				word += ansi.value;
+				started = true;
+				quoted = true;
+				i = ansi.end + 1;
 			} else if (ch === "'") {
 				let end = text.indexOf("'", i + 1);
 				if (end < 0) end = text.length;
@@ -1462,20 +1542,19 @@ class ShellScriptParser {
 				quoted = true;
 				i = end + 1;
 			} else if (ch === '"') {
-				i = this.#double(text, i + 1, cwd, depth, subs, succeeded, part => {
-					word += part;
-				});
+				const double = this.#double(text, i + 1, scope);
+				word += double.value;
 				started = true;
 				quoted = true;
+				i = double.after;
 			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
 				// `${ }` and `$[ ]` belong to the word: a `<<` inside them is not a heredoc.
-				const end = closingDelimiter(text, i + 2, text[i + 1], text[i + 1] === "{" ? "}" : "]");
-				const keys = this.#expansions(text.slice(i + 2, end), cwd, depth, subs, succeeded);
+				const { end, keys } = this.#parameter(text, i + 2, scope);
 				word += text.slice(i, end + 1) + keys.join("");
 				started = true;
 				i = end + 1;
 			} else if (ch === "`" || ((ch === "$" || ch === "<" || ch === ">") && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, cwd, depth, subs, succeeded);
+				const sub = this.#substitution(text, i, scope);
 				word += sub.key;
 				i = sub.after;
 				started = true;
@@ -1490,6 +1569,10 @@ class ShellScriptParser {
 					i++;
 					continue;
 				}
+				if (operator === ")" && parens === 0 && close) {
+					flush();
+					return { tokens: out, end: i };
+				}
 				// The file descriptor of `2>`.
 				if ((operator[0] === "<" || operator[0] === ">") && started && /^\d+$/.test(word)) {
 					word = "";
@@ -1499,45 +1582,48 @@ class ShellScriptParser {
 				delimiter = undefined;
 				out.push({ text: operator, operator: true, quoted: false });
 				i += operator.length;
-				if (operator === "(" && text[i] === "(" && i > arithmeticEnd) {
-					arithmeticEnd = closingDelimiter(text, i, "(", ")");
+				if (operator === "(") {
+					if (text[i] === "(" && arithmetic < 0) arithmetic = parens;
+					parens++;
+				} else if (operator === ")" && parens > 0) {
+					parens--;
+					if (parens <= arithmetic) arithmetic = -1;
 				}
-				if ((operator === "<<" || operator === "<<-") && heredocs && i > arithmeticEnd) {
+				if ((operator === "<<" || operator === "<<-") && heredocs && arithmetic < 0) {
 					delimiter = { stripTabs: operator === "<<-" };
 				}
 				if (operator === "\n" && pending.length > 0) {
-					i = this.#heredocBodies(text, i, pending, cwd, depth, subs, succeeded);
+					i = this.#heredocBodies(text, i, pending, scope);
 				}
 			}
 		}
 		flush();
-		return out;
+		return { tokens: out, end: text.length };
 	}
 
 	/**
 	 * Reads the bodies of the heredocs opened on the line that just ended, from `start`, and returns
-	 * where the script goes on. When a delimiter line never comes, every line stays in place and is
+	 * where the script goes on. In an unquoted heredoc, a backslash-newline joins two lines before the
+	 * delimiter is looked for. When a delimiter line never comes, every line stays in place and is
 	 * parsed as commands: a `<<` misread as a heredoc must not hide what follows it.
 	 */
-	#heredocBodies(
-		text: string,
-		start: number,
-		pending: PendingHeredoc[],
-		cwd: string,
-		depth: number,
-		subs: Map<string, ShellCommand[][]>,
-		succeeded: readonly ShellCommand[],
-	): number {
+	#heredocBodies(text: string, start: number, pending: PendingHeredoc[], scope: ReadScope): number {
 		const bodies: string[] = [];
 		let pos = start;
-		for (const { delimiter, stripTabs } of pending) {
+		for (const { delimiter, stripTabs, doc } of pending) {
 			const lines: string[] = [];
 			let closed = false;
 			while (pos < text.length && !closed) {
-				const newline = text.indexOf("\n", pos);
-				const end = newline < 0 ? text.length : newline;
-				const line = stripTabs ? text.slice(pos, end).replace(/^\t+/, "") : text.slice(pos, end);
-				pos = newline < 0 ? text.length : newline + 1;
+				let line = "";
+				let joined = true;
+				while (joined) {
+					const newline = text.indexOf("\n", pos);
+					line += text.slice(pos, newline < 0 ? text.length : newline);
+					pos = newline < 0 ? text.length : newline + 1;
+					joined = doc.expands && newline >= 0 && ODD_TRAILING_BACKSLASHES_RE.test(line);
+					if (joined) line = line.slice(0, -1);
+				}
+				if (stripTabs) line = line.replace(/^\t+/, "");
 				if (line === delimiter) closed = true;
 				else lines.push(line);
 			}
@@ -1549,52 +1635,97 @@ class ShellScriptParser {
 		}
 		for (const [index, { doc }] of pending.entries()) {
 			doc.body = bodies[index];
-			if (doc.expands) doc.subs = this.#expansions(doc.body, cwd, depth, subs, succeeded);
+			if (doc.expands) doc.subs = this.#expansions(doc.body, scope);
 		}
 		pending.length = 0;
 		return pos;
 	}
 
-	#double(
-		text: string,
-		start: number,
-		cwd: string,
-		depth: number,
-		subs: Map<string, ShellCommand[][]>,
-		succeeded: readonly ShellCommand[],
-		append: (part: string) => void,
-	): number {
+	/**
+	 * Reads a double-quoted string from `start`, just past its opening quote: its value, with a key in
+	 * place of each substitution, and the index after its closing quote.
+	 */
+	#double(text: string, start: number, scope: ReadScope): { value: string; after: number } {
+		let value = "";
 		let i = start;
 		while (i < text.length && text[i] !== '"') {
 			const ch = text[i];
 			if (ch === "\\" && i + 1 < text.length) {
 				const next = text[i + 1];
-				if (next === "$" || next === "`" || next === '"' || next === "\\") append(next);
-				else if (next !== "\n") append(ch + next);
+				if (next === "$" || next === "`" || next === '"' || next === "\\") value += next;
+				else if (next !== "\n") value += ch + next;
 				i += 2;
 			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, cwd, depth, subs, succeeded);
-				append(sub.key);
+				const sub = this.#substitution(text, i, scope);
+				value += sub.key;
 				i = sub.after;
+			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
+				const { end, keys } = this.#parameter(text, i + 2, scope);
+				value += text.slice(i, end + 1) + keys.join("");
+				i = end + 1;
 			} else {
-				append(ch);
+				value += ch;
 				i++;
 			}
 		}
-		return i + 1;
+		return { value, after: i + 1 };
 	}
 
 	/**
-	 * Keys of the `$( )` and backtick substitutions in text the shell expands without running it as a
-	 * script: an unquoted heredoc body, the inside of `${ }` or `$[ ]`. Quotes are not special there.
+	 * Reads a `${ }` or `$[ ]` whose opening bracket is just before `start`: the index of its closing
+	 * bracket, and the keys of the substitutions in it. Quotes, escapes, nested expansions and
+	 * substitutions hide a closing bracket; a bare `{` does not nest, a `[` in `$[ ]` does.
 	 */
-	#expansions(
-		text: string,
-		cwd: string,
-		depth: number,
-		subs: Map<string, ShellCommand[][]>,
-		succeeded: readonly ShellCommand[],
-	): string[] {
+	#parameter(text: string, start: number, scope: ReadScope): { end: number; keys: string[] } {
+		const close = text[start - 1] === "[" ? "]" : "}";
+		const keys: string[] = [];
+		if (this.#braces >= SHELL_SCRIPT_MAX_DEPTH) {
+			this.truncated = true;
+			return { end: text.length, keys };
+		}
+		this.#braces++;
+		let brackets = 0;
+		let end = text.length;
+		let i = start;
+		while (i < text.length) {
+			const ch = text[i];
+			if (ch === "\\") {
+				i += 2;
+			} else if (ch === "$" && text[i + 1] === "'") {
+				i = readAnsiCString(text, i + 2).end + 1;
+			} else if (ch === "'") {
+				const quote = text.indexOf("'", i + 1);
+				i = quote < 0 ? text.length : quote + 1;
+			} else if (ch === '"') {
+				const double = this.#double(text, i + 1, scope);
+				keys.push(...(double.value.match(SUBSTITUTION_KEY_RE) ?? []));
+				i = double.after;
+			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
+				const sub = this.#substitution(text, i, scope);
+				keys.push(sub.key);
+				i = sub.after;
+			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
+				const inner = this.#parameter(text, i + 2, scope);
+				keys.push(...inner.keys);
+				i = inner.end + 1;
+			} else if (ch === close && brackets === 0) {
+				end = i;
+				break;
+			} else {
+				if (close === "]" && ch === "[") brackets++;
+				else if (ch === close) brackets--;
+				i++;
+			}
+		}
+		this.#braces--;
+		return { end, keys };
+	}
+
+	/**
+	 * Keys of the `$( )` and backtick substitutions in an unquoted heredoc body, which the shell
+	 * expands without running the body as a script. Quotes are not special there.
+	 */
+	#expansions(text: string, scope: ReadScope): string[] {
 		const keys: string[] = [];
 		let i = 0;
 		while (i < text.length) {
@@ -1602,7 +1733,7 @@ class ShellScriptParser {
 			if (ch === "\\") {
 				i += 2;
 			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, cwd, depth, subs, succeeded);
+				const sub = this.#substitution(text, i, scope);
 				keys.push(sub.key);
 				i = sub.after;
 			} else {
@@ -1612,31 +1743,32 @@ class ShellScriptParser {
 		return keys;
 	}
 
-	#substitution(
-		text: string,
-		start: number,
-		cwd: string,
-		depth: number,
-		subs: Map<string, ShellCommand[][]>,
-		succeeded: readonly ShellCommand[],
-	): { key: string; after: number } {
-		let inner: string;
-		let after: number;
+	/**
+	 * Reads the substitution at `start` (`` ` ``, `$(`, `<(`, `>(`) and parses what it runs: the key
+	 * that stands for it in a word, and the index after it. A `$( )` body is read as commands up to
+	 * the `)` that closes it, so a `)` in quotes, in a comment or in a heredoc body does not end it.
+	 */
+	#substitution(text: string, start: number, scope: ReadScope): { key: string; after: number } {
+		const key = `\0${this.#count++}\0`;
+		const depth = scope.depth + 1;
 		if (text[start] === "`") {
 			let end = start + 1;
 			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
-			inner = text.slice(start + 1, end);
-			after = end + 1;
-		} else {
-			const end = closingDelimiter(text, start + 2, "(", ")");
-			inner = text.slice(start + 2, end);
-			after = end + 1;
+			scope.subs.set(key, this.parse(text.slice(start + 1, end), scope.cwd, depth, scope.succeeded));
+			return { key, after: end + 1 };
 		}
-		const key = `\0${this.#count++}\0`;
-		// `$(( ))` is arithmetic, or a command substitution that starts with a subshell: it is parsed
-		// as commands either way, but a `<<` in it is never a heredoc.
-		subs.set(key, this.parse(inner, cwd, depth + 1, succeeded, text.startsWith("$((", start)));
-		return { key, after };
+		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
+			// Only parsing the body finds its end, so the rest of the text is left unread.
+			this.truncated = true;
+			return { key, after: text.length };
+		}
+		const inner: ReadScope = { cwd: scope.cwd, depth, subs: new Map(), succeeded: scope.succeeded };
+		// `$(( ))` is arithmetic, or a command substitution that starts with a subshell: it is read as
+		// commands either way, but a `<<` in it is never a heredoc.
+		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
+		this.scripts.push(text.slice(start + 2, end));
+		scope.subs.set(key, this.#pipelines(tokens, inner));
+		return { key, after: end + 1 };
 	}
 
 	/** Each command's words, redirections, heredocs, and the operator after it. */
@@ -1702,7 +1834,8 @@ class ShellScriptParser {
 			argv.push(wrappers.pop()!);
 			quoted.push(false);
 		}
-		if (argv.length === 0 && writes.length === 0) return undefined;
+		// A command that is only redirections still opens its files (`$(< file)`, `done < file`).
+		if (argv.length === 0 && writes.length === 0 && reads.length === 0) return undefined;
 		const program = argv[0] ?? "";
 		if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
 		const everything = [
@@ -1724,10 +1857,11 @@ class ShellScriptParser {
 
 /**
  * Parses a shell script into the simple commands it runs, for safety rules that must see through
- * shell syntax. Follows quotes, escapes, comments, `;`/`&&`/`||`/`|` chains, `( )` groups,
- * redirections, heredocs (quote-aware, so a quoted `<<` opens none), `$( )`/backtick/`<( )`
- * substitutions (also inside unquoted heredoc bodies), `bash -c`/`sh -c`/`eval` strings and scripts
- * fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd` between commands, and
+ * shell syntax. Follows quotes (`$'...'` included), escapes, comments, `;`/`&&`/`||`/`|` chains,
+ * `( )` groups, redirections, heredocs (quote-aware, so a quoted `<<` opens none), `$( )`/backtick/
+ * `<( )` substitutions (read as commands to the `)` that closes them, and also found inside `${ }`
+ * and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval` strings and scripts fed to a shell's stdin
+ * (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd` between commands, and
  * wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `nice`, ...). It is a tokenizer, not a
  * shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code run by other interpreters
  * are not followed.
