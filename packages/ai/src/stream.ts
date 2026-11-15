@@ -36,6 +36,7 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import { reachesOfficialEndpoint } from "./providers/anthropic-state";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -53,6 +54,7 @@ import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
+	streamAntigravityCli,
 	streamAppleFoundationModels,
 	streamAzureOpenAIResponses,
 	streamBedrock,
@@ -1024,6 +1026,13 @@ function streamDispatch<TApi extends Api>(
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
 
+		case "antigravity-acp":
+			return streamAntigravityCli(
+				providerModel as Model<"antigravity-acp">,
+				context,
+				providerOptions as AntigravityCliOptions,
+			);
+
 		case "apple-foundation-models":
 			return streamAppleFoundationModels(
 				providerModel as Model<"apple-foundation-models">,
@@ -1833,6 +1842,8 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
+		stopSequences: options?.stopSequences,
+		frequencyPenalty: options?.frequencyPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,
 		maxHttpAttempts: options?.maxHttpAttempts,
@@ -2404,6 +2415,14 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
+		}
+		case "antigravity-acp": {
+			const agyModel = model as Model<"antigravity-acp">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && agyModel.reasoning
+					? requireSupportedEffort(agyModel, options.reasoning)
+					: undefined;
+			return castApi<"antigravity-acp">({ ...base, cwd: options?.cwd, reasoning });
 		}
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);

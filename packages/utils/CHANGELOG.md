@@ -2,9 +2,21 @@
 
 ## [Unreleased]
 
+## [18.20.2] - 2026-11-14
+
 ### Added
 
-- Added `mixHex` for blending two hex colors ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Added a profile-aware data directory for managed Antigravity CLI installations and isolated account state.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved extraction of Cloud Code Assist quota reset information, including compound durations and reset timestamps, to provide more accurate retry guidance.
 
 ## [18.19.0] - 2026-11-12
 

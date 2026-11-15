@@ -71,6 +71,11 @@ const GOLDENS = [
 			'[link](https://example.com/a_\\(b\\) "A title") and [https://same.test](https://same.test) ![A \\[pic\\]](pic.png "T")',
 	},
 	{
+		name: "spaces around an inline image",
+		html: '<p>see <img src="x.png" alt="a"> here</p>',
+		markdown: "see ![a](x.png) here",
+	},
+	{
 		name: "strikethrough and task list items",
 		html: '<p><del>gone</del> and <s>also</s></p><ul><li><input type="checkbox" checked> done</li><li><input type="checkbox"> todo</li></ul>',
 		markdown: "~~gone~~ and ~~also~~\n\n- [x]  done\n- [ ]  todo",

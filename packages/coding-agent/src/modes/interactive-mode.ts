@@ -268,6 +268,7 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	setProgramStatusSupported,
 	settleStartupRun,
 } from "../utils/run-status";
 import {
@@ -2719,9 +2720,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
-		// Only a frame that actually writes the mark needs a replacement; diff
-		// paints that keep the user bubble must not resend on every update.
+		const unsubscribeProgramStatus = this.ui.terminal.onProgramStatusSupport?.(supported => {
+			setProgramStatusSupported(supported);
+			this.ui.requestRender();
+		});
+		if (unsubscribeProgramStatus) this.#eventBusUnsubscribers.push(unsubscribeProgramStatus);
+		// OSC 133;A starts a shell prompt and may drop the current status
+		// record. Confirmed OSC 7501 receivers omit the mark while working or
+		// blocked; only a frame that writes the mark needs a status replacement.
 		this.#eventBusUnsubscribers.push(
 			this.ui.addFrameWriteListener(frame => {
 				if (frame.includes("\x1b]133;A\x07")) resendProgramStatus();
@@ -2929,9 +2935,18 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (event.type === "config_warnings_changed") {
 					this.#syncHeaderExtras();
 				}
-				// A turn the TUI did not submit (an extension message, a background job) leaves
-				// getUserInput pending, so arm the loop's next iteration here instead.
-				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
+				// A terminal provider failure is not a loop yield: resubmitting the
+				// captured prompt would append another user turn (and every @file
+				// attachment) without making progress. Non-terminal settles still
+				// belong to retry/maintenance and must not park the loop.
+				if (event.type === "agent_end" && event.isTerminal !== false) {
+					const last = event.messages.findLast(message => message.role === "assistant");
+					if (last?.stopReason === "error" && this.loopModeEnabled && this.loopPrompt) {
+						this.pauseLoop();
+					} else if (this.onInputCallback) {
+						this.#scheduleLoopAutoSubmit();
+					}
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),

@@ -14,7 +14,8 @@ let executable: string;
 let emptyDir: string;
 
 beforeAll(async () => {
-	root = await fs.mkdtemp(path.join(os.tmpdir(), "webkit-kind-"));
+	// Real path: the kind names the host by its real path (macOS's tmpdir is a link).
+	root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "webkit-kind-")));
 	engineDir = path.join(root, "engine");
 	emptyDir = path.join(root, "empty");
 	executable = path.join(engineDir, "ABHost");
@@ -77,7 +78,7 @@ describe("resolveBrowserKind with omp's WebKit host", () => {
 		).toBe("webkit");
 	});
 
-	it("keeps a visible tab on an engine that ships its viewer, found beside the host a link leads to", async () => {
+	it("runs the host a link leads to by its real path, with the viewer that ships beside it", async () => {
 		const shown = path.join(root, "engine-with-viewer");
 		const host = path.join(shown, "ABHost");
 		const viewer = path.join(shown, "ABView");
@@ -85,11 +86,12 @@ describe("resolveBrowserKind with omp's WebKit host", () => {
 			await Bun.write(file, "#!/bin/sh\n");
 			await fs.chmod(file, 0o755);
 		}
-		// The executable omp runs may be a link into the engine directory.
+		// The executable may be named through a link (Tern links ~/.o2/lib/abkit to a version): the host
+		// runs from the link's target, so it keeps its own version's helpers when the link moves on.
 		const link = path.join(root, "abhost");
 		await fs.symlink(host, link);
 		const env = { PI_BROWSER_WEBKIT_PATH: link };
-		const webkit: WebKitKind = { kind: "webkit", path: link, viewer: await fs.realpath(viewer) };
+		const webkit: WebKitKind = { kind: "webkit", path: host, viewer };
 		expect(resolveBrowserKind({ action: "open", headed: true }, session(), env)).toEqual(webkit);
 		expect(resolveBrowserKind({ action: "open" }, session({ "browser.headless": false }), env)).toEqual(webkit);
 		expect(resolveBrowserKind({ action: "open", headed: true, app: "webkit" }, session(), env)).toEqual(webkit);

@@ -2489,7 +2489,7 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 
 /**
  * Best-effort close of a specific page target in the browser. Close through
- * the browser CDP session rather than `page.close()`: a page whose navigation
+ * the root CDP connection rather than `page.close()`: a page whose navigation
  * wedged during initialization can make Puppeteer's page close wait for the
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
