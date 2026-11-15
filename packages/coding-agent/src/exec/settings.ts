@@ -107,6 +107,18 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		tool: "bash",
 		message: "Use `bash` with `name` for watch mode so its output, input, and lifecycle stay managed.",
 	},
+	{
+		// Bare `pwsh`/`powershell` (optionally `.exe`), case-insensitively, as
+		// the invoked command — not merely mentioned in an argument. A
+		// specific installation path (`/c/Program Files/PowerShell/7/pwsh.exe`)
+		// is not matched; only PATH-resolved invocations are, matching the
+		// scope of the other interpreter-name rules above.
+		pattern: "^\\s*(?:pwsh|powershell)(?:\\.exe)?(?:\\s|$)",
+		flags: "i",
+		tool: "powershell",
+		message:
+			"Use the `powershell` tool instead of invoking pwsh/powershell.exe directly from bash. It runs in a persistent host whose $env:PSModulePath is reset from the OS registry value rather than whatever bash's own (often stale or POSIX-translated) environment carries.",
+	},
 ];
 
 export const cfgShellPath = register({ id: "shellPath", type: "string", default: undefined });

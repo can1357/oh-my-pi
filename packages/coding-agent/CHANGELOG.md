@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The bash interceptor (`bashInterceptor.enabled`) redirects a bare `pwsh`/`powershell.exe` invocation to the `powershell` tool when it is available, so PowerShell runs in the persistent host with a correctly reset `$env:PSModulePath` instead of whatever bash's own environment carries
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
