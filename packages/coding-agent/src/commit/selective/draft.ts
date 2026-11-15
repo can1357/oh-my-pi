@@ -555,10 +555,10 @@ export class Draft {
 		if (target.units?.length && target.path === undefined) throw new Error("Units need a path.");
 		const files = target.path === undefined ? this.#files : this.#match(target.path);
 		const pattern = target.grep === undefined ? undefined : new RegExp(target.grep);
-		for (const file of files) this.#targetOps(file, target.units, pattern);
+		// Plan every file before changing any: a unit missing from one file rejects the whole request.
+		const plans = files.map(file => ({ file, ops: this.#targetOps(file, target.units, pattern) }));
 		let touched = 0;
-		for (const file of files) {
-			const ops = this.#targetOps(file, target.units, pattern);
+		for (const { file, ops } of plans) {
 			if (ops === "whole") {
 				if (file.wholeSelected !== take) touched++;
 				file.wholeSelected = take;
@@ -571,7 +571,7 @@ export class Draft {
 				touched++;
 			}
 		}
-		if (pattern && touched === 0 && !files.some(file => this.#targetOps(file, target.units, pattern) !== "whole")) {
+		if (pattern && touched === 0 && !plans.some(plan => plan.ops !== "whole")) {
 			throw new Error(`No change line matches /${target.grep}/.`);
 		}
 		return `${take ? "Selected" : "Deselected"} ${touched} change line(s).`;
