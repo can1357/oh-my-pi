@@ -1008,12 +1008,15 @@ export class TtsrManager {
 		return false;
 	}
 
-	/** Prefilter test of completed content: sandboxed conditions read `verdicts`, quarantined ones never run. */
+	/**
+	 * Prefilter test of completed content. `verdicts` holds every condition this call routed away from the
+	 * main thread, so a rule rebuild during an awaited prefilter cannot move one back in process.
+	 */
 	#matchesCondition(entry: TtsrEntry, content: string, verdicts: ReadonlyMap<RegExp, SandboxVerdict>): boolean {
 		for (const condition of entry.conditions) {
-			if (this.#quarantined.has(condition)) continue;
-			if (this.#sandboxed.has(condition)) {
-				if (verdicts.get(condition)?.matched) return true;
+			const verdict = verdicts.get(condition);
+			if (verdict !== undefined) {
+				if (verdict.matched) return true;
 				continue;
 			}
 			if (testTimed(condition, content, this.#onSlow)) return true;
@@ -1331,6 +1334,7 @@ export class TtsrManager {
 		}
 		const eligible: { entry: TtsrEntry; question: string }[] = [];
 		const isolated: RegExp[] = [];
+		const quarantined: RegExp[] = [];
 		for (const entry of this.#rules.values()) {
 			if (
 				!entry.question ||
@@ -1342,10 +1346,14 @@ export class TtsrManager {
 			}
 			eligible.push({ entry, question: entry.question });
 			for (const condition of entry.conditions) {
-				if (this.#sandboxed.has(condition) && !this.#quarantined.has(condition)) isolated.push(condition);
+				if (this.#quarantined.has(condition)) quarantined.push(condition);
+				else if (this.#sandboxed.has(condition)) isolated.push(condition);
 			}
 		}
 		const verdicts = this.#evaluateInSandbox(content, isolated);
+		for (const condition of [...isolated, ...quarantined]) {
+			if (!verdicts.has(condition)) verdicts.set(condition, NO_SANDBOX_MATCH);
+		}
 		const candidates: JudgedCandidate[] = [];
 		for (const { entry, question } of eligible) {
 			if (await this.#passesPrefilter(entry, content, context, verdicts)) {

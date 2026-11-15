@@ -199,6 +199,22 @@ describe("TTSR regex sandbox", () => {
 		expect(candidates.map(candidate => candidate.rule.name)).toEqual(["judged-1", "judged-3"]);
 		expect(spawn).toHaveBeenCalledTimes(1);
 	});
+
+	it("keeps an in-flight judged prefilter in the sandbox when the rules are rebuilt", async () => {
+		const judgedRules = [
+			{ ...rule("judged-plain", "zzz"), question: "Does it apply?" },
+			{ ...rule("judged-loop", INDENTED_LOOP), question: "Does it apply?" },
+		];
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		for (const judged of judgedRules) manager.addRule(judged);
+
+		const started = performance.now();
+		const pending = manager.judgedCandidates(`for item in items:\n${LOOP_BODY.repeat(9)}done = 1\n`, TEXT);
+		manager.replaceRules(judgedRules);
+
+		expect(await pending).toEqual([]);
+		expect(performance.now() - started).toBeLessThan(2_500);
+	}, 60_000);
 });
 
 describe("regex sandbox deadline", () => {
