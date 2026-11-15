@@ -5,6 +5,7 @@
 ### Fixed
 
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
 
 ## [18.20.2] - 2026-11-14
 
