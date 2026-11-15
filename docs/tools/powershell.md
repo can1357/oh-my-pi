@@ -84,7 +84,7 @@ Failure behavior:
 
 ## Settings
 - `powershell.enabled` (default `false`, opt-in) — gates tool registration.
-- `powershell.shellPath` — override for the `pwsh` executable; defaults to `pwsh` on PATH.
+- `powershell.shellPath` — override for the `pwsh` executable; defaults to `pwsh` on PATH. The bootstrap requires PowerShell `5.1+`, so `powershell.exe` (Windows PowerShell 5.1) also works, not only `pwsh` (7+).
 - `powershell.outputWidth` — `Out-String` render width.
 - `powershell.historyDepth` — retained-result ring size.
 - `powershell.idleTtlMs` — idle eviction window for pooled hosts.
@@ -99,5 +99,6 @@ Failure behavior:
 - The process spawn (~1s) is paid once per session; warm per-call cost is ~20–30 ms.
 - The bootstrap runs commands at top scope (via an array-subexpression assignment, not a child scope), so `$x = 1` in one call is visible in the next.
 - `$env:` assignments persist for the session (process-wide in the sidecar), matching shell-session semantics.
+- The sidecar never inherits `PSModulePath` from omp's own process (never the bash-tainted value a parent Git Bash/WSL/MSYS shell left behind). `pshost.rs`'s `reset_module_path()` resets it to the true OS-persisted value instead: on Windows, the Machine and User `PSModulePath` read straight from the registry (the same two sources Windows merges for any normally spawned process); elsewhere, or when neither registry value is set, the variable is left unset so pwsh rebuilds its own default search path at startup. This correction is specific to this tool's own `pwsh` host — `powershell.exe`/`pwsh` run directly as a `bash` external command gets none of it; see `docs/tools/bash.md`.
 - The tool exposes `command`, `cwd`, `timeout`, and `host`; there is no separate `env` field — set `$env:` inline.
 - For simple POSIX-style commands prefer `bash`; for file reads/search/edits use `read`/`search`/`edit`.
