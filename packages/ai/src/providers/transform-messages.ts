@@ -1231,7 +1231,7 @@ export function transformMessages<TApi extends Api>(
 								return {
 									type: "text" as const,
 									text: renderDemotedThinking(model.id, sanitized.thinking),
-									[kDemotedThinking]: true,
+									[kDemotedThinking]: sanitized.thinking,
 								};
 							}
 							return [];

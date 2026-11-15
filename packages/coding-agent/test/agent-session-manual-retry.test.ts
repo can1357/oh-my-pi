@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { INCOMPLETE_RECOVERY_MAX_RETRIES } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -86,6 +87,61 @@ describe("AgentSession manual retry", () => {
 		expect(mock.calls.length).toBe(2);
 		expect(lastAgentMessage(session).stopReason).toBe("stop");
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
+	});
+
+	it("retries retained reasoning after its automatic continuation allowance is exhausted", async () => {
+		const pendingTurns = INCOMPLETE_RECOVERY_MAX_RETRIES + 1;
+		const mock = createMockModel({
+			provider: "anthropic",
+			reasoning: true,
+			responses: [
+				...Array.from({ length: pendingTurns }, () => ({
+					content: [{ type: "thinking" as const, thinking: "unfinished reasoning", thinkingSignature: "sig" }],
+					stopReason: "length" as const,
+				})),
+				{ content: ["completed after explicit retry"], stopReason: "stop" },
+			],
+		});
+		const model = mock.model;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"compaction.autoContinue": true,
+				"retry.enabled": false,
+			}),
+			modelRegistry,
+		});
+
+		await session.prompt("Finish the original task.");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(pendingTurns);
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "assistant" && message.stopReason === "length",
+			),
+		).toHaveLength(pendingTurns);
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(pendingTurns + 1);
+		expect(
+			mock.calls
+				.at(-1)
+				?.context.messages.filter(message => message.role === "assistant" && message.stopReason === "length"),
+		).toHaveLength(pendingTurns);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "completed after explicit retry",
+		});
 	});
 
 	it.each(["retry", "new", "clear", "tree"])("handles a pruned refusal before %s", async action => {

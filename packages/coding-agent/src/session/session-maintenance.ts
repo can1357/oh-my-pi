@@ -703,6 +703,20 @@ export class SessionMaintenance {
 		this.#setIncompleteRecoveryAttempts(0);
 	}
 
+	/** Preserve pending reasoning when an admitted manual retry starts a new model turn. */
+	prepareManualRetry(): void {
+		this.resetForNewPrompt();
+		const message = this.#host.messages().at(-1);
+		if (
+			message?.role === "assistant" &&
+			message.stopReason === "length" &&
+			!assistantTurnDelivered(message) &&
+			hasReplayableThinking(message)
+		) {
+			this.#appendLengthContinuationCue();
+		}
+	}
+
 	/** Whether a `length` recovery loop is counting attempts, so model calls must respect its budget. */
 	get recoveringFromLengthStop(): boolean {
 		return this.#incompleteRecoveryAttempts > 0;
@@ -3474,12 +3488,7 @@ export class SessionMaintenance {
 						);
 				}
 				if (!autoContinue) return COMPACTION_CHECK_NONE;
-				this.#host.agent.appendMessage({
-					role: "developer",
-					content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }],
-					attribution: "agent",
-					timestamp: Date.now(),
-				});
+				this.#appendLengthContinuationCue();
 				this.#host.scheduleAgentContinue({ source: "incomplete-retry", delayMs: 100, generation });
 				return COMPACTION_CHECK_CONTINUATION;
 			}
@@ -3709,6 +3718,15 @@ export class SessionMaintenance {
 		this.#host.retainTerminalFailure({ ...message, stopReason: "error", errorMessage });
 		this.#host.emitNotice("error", errorMessage, "compaction");
 		return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+	}
+
+	#appendLengthContinuationCue(): void {
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
 	}
 
 	/**

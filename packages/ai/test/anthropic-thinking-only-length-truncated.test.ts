@@ -126,7 +126,7 @@ describe("transformMessages and thinking-only assistant turns", () => {
 		// An unterminated thinking block carries no verifiable signature. Unsigned thinking
 		// 400s on Anthropic, so the interrupted thought replays as demoted text instead.
 		const user: UserMessage = { role: "user", content: "follow-up question", timestamp: 1 };
-		const truncated = makeThinkingOnlyAssistant("partial reasoning", "", "length");
+		const truncated = makeThinkingOnlyAssistant("partial reasoning \t\n", "", "length");
 
 		const params = convertAnthropicMessages([user, truncated], model, false);
 		const blocks = params
@@ -134,6 +134,7 @@ describe("transformMessages and thinking-only assistant turns", () => {
 			.flatMap(p => (Array.isArray(p.content) ? p.content : []));
 		expect(blocks.some(b => b.type === "thinking")).toBe(false);
 		expect(blocks.some(b => b.type === "text" && b.text.includes("partial reasoning"))).toBe(true);
+		expect(blocks.at(-1)).toMatchObject({ type: "text", text: expect.stringMatching(/\S$/) });
 	});
 
 	it("drops error-stop thinking-only assistant turn without injecting any synthetic note", () => {

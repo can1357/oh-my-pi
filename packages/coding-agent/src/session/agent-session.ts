@@ -13508,9 +13508,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Retry the last failed assistant turn when the session is idle. */
 	async retry(): Promise<boolean> {
 		const didRetry = await this.#recovery.retry(this.#prunedTerminalFailure);
-		// A manual retry is the user resuming the run they interrupted, so it lifts the
-		// interrupt's auto-resume suppression the same way a typed prompt does.
-		if (didRetry) this.#advisors.autoResumeSuppressed = false;
+		// An admitted manual retry is an explicit resume: renew length recovery
+		// and lift the interrupt's auto-resume suppression.
+		if (didRetry) {
+			this.#maintenance.prepareManualRetry();
+			this.#advisors.autoResumeSuppressed = false;
+		}
 		return didRetry;
 	}
 
