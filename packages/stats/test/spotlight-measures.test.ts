@@ -261,13 +261,18 @@ describe("Spotlight holdout-adjusted net", () => {
 		// Applied, no holdouts: the whole recovery is excess.
 		shapedRead(b, "src/c.ts");
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
-		// A result pi truncated natively, which shaping did not cut, and its own dive in a request of its own.
+		// A result pi truncated natively, which shaping did not cut, and its own dive in a request of its own, whose
+		// tokens a later request carries.
 		call(b, "bash", { command: "make" }, "built\n[cut: artifact://5]");
 		call(b, "read", { path: "artifact://5" }, "z".repeat(4000));
+		call(b, "grep", { pattern: "x" });
 		await write("native.jsonl", b);
 
 		const stats = await dashboard();
 		expect(stats.clawback.events).toBe(2);
+		// The dive is both carried and an extra turn, so each must be kept out of the cuts' cost.
+		expect(stats.clawback.byKind.artifact).toMatchObject({ events: 1, turns: 1 });
+		expect(stats.clawback.byKind.artifact.usd).toBeGreaterThan(0);
 		const read = stats.economics.find(e => e.tool === "read");
 		const { savedUsd, spotlightUsd } = stats.compounding;
 		expect(stats.adjusted.netUsd.value).toBeCloseTo(
