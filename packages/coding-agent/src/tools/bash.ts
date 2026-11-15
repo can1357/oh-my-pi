@@ -608,12 +608,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/**
 	 * Whether a `discard_changes`/`kills_harness` probe can change how this call resolves. Under
 	 * `yolo` a bare safety override is ignored, so a hit only matters when the user set a
-	 * `tools.approval.bash` policy (a hit then replaces a `bash.patterns` allow). The mode is
-	 * resolved the way the extension wrapper resolves it: from the call context, else the session
-	 * settings.
+	 * `tools.approval.bash` policy (a hit then replaces a `bash.patterns` allow). The mode is the
+	 * one `resolveApproval` resolves this call under, which a caller can choose apart from the
+	 * settings (the ACP permission gate asks under `always-ask` when `yolo` is only the schema
+	 * default); a direct call resolves it the way the extension wrapper does: from the call
+	 * context, else the session settings.
 	 */
 	#probeCanChangeDecision(ctx: AgentToolContext | undefined): boolean {
-		const { approvalMode, userPolicies } = resolveApprovalFromContext(ctx ?? { settings: this.session.settings });
+		const { approvalMode, userPolicies } =
+			ctx?.approvalResolution ?? resolveApprovalFromContext(ctx ?? { settings: this.session.settings });
 		return approvalMode !== "yolo" || Object.hasOwn(userPolicies, this.name);
 	}
 
