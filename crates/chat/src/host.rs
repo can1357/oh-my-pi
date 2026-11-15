@@ -102,7 +102,7 @@ use crate::{
 	},
 	status_line::{StatusLine, advisor_badge, director_mode},
 	transcript::Projection,
-	tsp::{Sheet, Surface},
+	tsp::{PREFS_ID, Sheet, Surface, THINKING_CYCLE},
 	welcome::{WelcomeFacts, tip_seeded, welcome_seed},
 };
 
@@ -4720,6 +4720,23 @@ impl Host {
 			return;
 		}
 		match event {
+			// The status band's effort segment cycles the level as the cycle key does.
+			TspEvent::Action { ref act, .. } if act.as_str() == THINKING_CYCLE => {
+				let _ = self.presenter.cycle_thinking();
+			},
+			// The `prefs` sheet's changes and actions go to the panel it describes,
+			// which lowers them through its own commit and validation path.
+			TspEvent::Change { ref id, .. } | TspEvent::Action { ref id, .. }
+				if id.as_str() == PREFS_ID =>
+			{
+				let panel_event = match self.presenter.overlays.active_mut() {
+					Some(Overlay::Panel(panel)) => panel.tsp_prefs_event(&event),
+					_ => PanelEvent::Ignored,
+				};
+				if panel_event != PanelEvent::Ignored {
+					let _ = self.presenter.apply_panel_event(panel_event);
+				}
+			},
 			TspEvent::Action { act, .. } => {
 				let Some(approval) = self.presenter.overlays.approval().cloned() else {
 					return;
@@ -5176,10 +5193,17 @@ impl Host {
 			.map(|approval| (approval.id.clone(), approval.reason.clone()));
 		// A full-screen panel that describes itself natively covers the pane with a
 		// screen surface; the forms of smaller panels stay in the layer.
+		// A terminal that draws `prefs` gets a settings panel as that sheet, an
+		// older one its `el` form.
+		let prefs = self.tsp_surface.as_ref().is_some_and(Surface::draws_prefs);
 		let (form, cover) = match self.presenter.overlays.active() {
-			Some(Overlay::Panel(panel)) if panel.anchor() == PanelAnchor::Full => {
-				(None, panel.tsp_node())
-			},
+			Some(Overlay::Panel(panel)) if panel.anchor() == PanelAnchor::Full => (
+				None,
+				prefs
+					.then(|| panel.tsp_prefs())
+					.flatten()
+					.or_else(|| panel.tsp_node()),
+			),
 			Some(Overlay::Panel(panel)) => (panel.tsp_node(), None),
 			_ => (None, None),
 		};
@@ -5211,6 +5235,7 @@ impl Host {
 			return Ok(false);
 		}
 		surface.resume(renderer.writer_mut())?;
+		surface.set_effort(self.presenter.local.thinking.as_deref());
 		surface.set_sendable(sendable);
 		surface.present(renderer.writer_mut(), &blocks, &composer, cursor, &status, now, pacing)?;
 		surface.present_approval(

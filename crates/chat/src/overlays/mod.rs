@@ -28,7 +28,7 @@ use omp_tui::{
 			ColumnFormat, Fact, Gesture, KindProps as _, PickerAct, PickerAction, PickerColumn,
 			PickerItem, PickerLayout, PickerPreview, PickerProps, PickerSize,
 		},
-		wire::Node,
+		wire::{self, Node},
 	},
 };
 use tokio_util::sync::CancellationToken;
@@ -333,6 +333,19 @@ pub trait Panel {
 	/// Returns a native TSP form for overlays that expose structured fields.
 	fn tsp_node(&self) -> Option<omp_tui::tsp::wire::Node> {
 		None
+	}
+
+	/// Returns the panel as Tern's data-first `prefs` sheet, for a terminal
+	/// that draws one; `None` keeps [`Panel::tsp_node`] (or the cell overlay
+	/// when that is `None` too).
+	fn tsp_prefs(&self) -> Option<wire::Node> {
+		None
+	}
+
+	/// Applies a `change` or `action` event Tern sent from the panel's `prefs`
+	/// sheet.
+	fn tsp_prefs_event(&mut self, _event: &wire::Event) -> PanelEvent {
+		PanelEvent::Ignored
 	}
 
 	/// Applies a new ambient presentation context to retained panel state.
