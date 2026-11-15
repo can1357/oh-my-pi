@@ -12,6 +12,7 @@
 - `/marketplace` with no arguments (and `/marketplace install` or `/marketplace uninstall` with none) now shows `Marketplace error: …` when the plugin picker fails to load, such as when a marketplace's catalog is missing, instead of exiting the session ([#19234](https://github.com/can1357/oh-my-pi/pull/19234) by [@tuschla](https://github.com/tuschla))
 - An `edit` under a tag read before `write conflict://N` (or `conflict://*`) now carries over to the resolved file like after any other `write`, instead of failing with "hash is not from this session" ([#19233](https://github.com/can1357/oh-my-pi/pull/19233) by [@tuschla](https://github.com/tuschla))
 - ACP sessions now honor `mcp.startupTimeoutMs` when connecting the MCP servers a client declares in `session/new` ([#19253](https://github.com/can1357/oh-my-pi/issues/19253)) ([#19286](https://github.com/can1357/oh-my-pi/pull/19286) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed `/commit` and the eval `commit` namespace dropping a file's UTF-8 BOM from the committed blob, which left the committed file showing as modified ([#19327](https://github.com/can1357/oh-my-pi/issues/19327))
 
 ## [18.20.2] - 2026-11-14
 

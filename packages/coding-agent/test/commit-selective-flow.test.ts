@@ -122,13 +122,14 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
 	});
 
-	it("commits modes, executable deletions, symlinks, and non-UTF-8 files exactly as in the worktree", async () => {
+	it("commits modes, executable deletions, symlinks, BOMs, and non-UTF-8 files exactly as in the worktree", async () => {
 		const { root, journal, write } = await emptyRepo();
 		const latin1 = (text: string) => Buffer.from(text, "latin1");
 		await Bun.write(path.join(root, "run.sh"), "#!/bin/sh\necho run\n");
 		await Bun.write(path.join(root, "tool.sh"), "#!/bin/sh\necho tool\n");
 		await Bun.write(path.join(root, "plain.txt"), "plain\n");
 		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\n"));
+		await Bun.write(path.join(root, "bom.ass"), "placeholder\n");
 		await fs.chmod(path.join(root, "run.sh"), 0o755);
 		await fs.chmod(path.join(root, "tool.sh"), 0o755);
 		await git(root, ["add", "."]);
@@ -139,6 +140,7 @@ describe("selective commit flow", () => {
 		await write("Main", undefined, "plain.txt", "plain\nmore\n");
 		await fs.chmod(path.join(root, "plain.txt"), 0o755);
 		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\nna\xefve\n"));
+		await Bun.write(path.join(root, "bom.ass"), "\uFEFF[Script Info]\r\nTitle: d\r\n");
 		await fs.symlink("plain.txt", path.join(root, "link"));
 		await journal.flush();
 
@@ -157,7 +159,13 @@ describe("selective commit flow", () => {
 					return [file, meta.split(" ")[0]];
 				}),
 		);
-		expect(modes).toEqual({ "latin1.txt": "100644", link: "120000", "plain.txt": "100755", "run.sh": "100644" });
+		expect(modes).toEqual({
+			"bom.ass": "100644",
+			"latin1.txt": "100644",
+			link: "120000",
+			"plain.txt": "100755",
+			"run.sh": "100644",
+		});
 	});
 
 	it("makes the first commit of a repository without commits", async () => {
