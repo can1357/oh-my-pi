@@ -125,10 +125,7 @@ async fn declared_scheme_s5_joined_conformance() {
 		.await
 		.expect("selector peel");
 	assert_eq!(std::str::from_utf8(&selected).expect("utf8"), "line2\nline3\n");
-	assert!(
-		seen.lock().iter().any(|url| url == "widget://id"),
-		"handler must see peeled URL"
-	);
+	assert!(seen.lock().iter().any(|url| url == "widget://id"), "handler must see peeled URL");
 
 	// Undeclared + mcp stay opaque (S3 facts retained in the joined walk).
 	let undeclared = parse_uri("custom://pending:raw")
