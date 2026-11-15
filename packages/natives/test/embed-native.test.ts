@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { embeddedAddonFiles } from "../scripts/embed-native";
 import packageJson from "../package.json" with { type: "json" };
-import { type EmbeddedAddon, extractEmbeddedAddons } from "../native/loader-state.js";
+import { type EmbeddedAddon, embeddedAddonPath, extractEmbeddedAddons } from "../native/loader-state.js";
 
 describe("native addon embedding", () => {
 	for (const [label, contents] of [
@@ -74,13 +74,13 @@ describe("native addon embedding", () => {
 					variant: "default",
 					filename: "pi_natives.win32-arm64.node",
 					size: addon.length,
+					hash: Bun.hash.xxHash64(addon).toString(16).padStart(16, "0"),
 					zstdPath: path.join(await fs.realpath(outDir), "pi_natives.win32-arm64.node.zst"),
 				},
 			]);
-			expect(extractEmbeddedAddons({ files: embeddedAddon.files, targetDir: cacheDir })).toEqual([
-				path.join(cacheDir, "pi_natives.win32-arm64.node"),
-			]);
-			expect(await Bun.file(path.join(cacheDir, "pi_natives.win32-arm64.node")).text()).toBe(addon);
+			const extracted = embeddedAddonPath(cacheDir, embeddedAddon.files[0]);
+			expect(extractEmbeddedAddons({ files: embeddedAddon.files, targetDir: cacheDir })).toEqual([extracted]);
+			expect(await Bun.file(extracted).text()).toBe(addon);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
@@ -131,10 +131,12 @@ describe("native addon embedding", () => {
 					stderr: "ignore",
 				});
 				expect(await child.exited).toBe(0);
-				const extracted = (await fs.readdir(path.join(cache, packageJson.version)))
-					.filter(filename => filename.endsWith(".node"))
+				const extracted = (await fs.readdir(path.join(cache, packageJson.version), { recursive: true }))
+					.filter(file => file.endsWith(".node"))
 					.sort();
-				expect(extracted).toEqual(
+				// Each extracted addon sits in its own build's `embedded-<hash>/` directory.
+				expect(extracted.every(file => path.dirname(file).startsWith("embedded-"))).toBe(true);
+				expect(extracted.map(file => path.basename(file)).sort()).toEqual(
 					(variant === "modern"
 						? [`pi_natives.${tag}-modern.node`, `pi_natives.${tag}-baseline.node`]
 						: [`pi_natives.${tag}-baseline.node`]

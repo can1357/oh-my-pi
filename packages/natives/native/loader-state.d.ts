@@ -4,6 +4,8 @@ export interface EmbeddedAddonFile {
 	filename: string;
 	/** Decompressed addon size in bytes. */
 	size: number;
+	/** Build-time xxHash64 (hex) of the decompressed addon; names its extraction directory (`embedded-<hash>/`). */
+	hash: string;
 	/** Embedded zstd frame holding the addon bytes. */
 	zstdPath: string;
 }
@@ -91,8 +93,33 @@ export interface ExtractEmbeddedAddonsInput {
 	targetDir: string;
 }
 
-/** Decompress every manifest addon missing or wrong-sized in `targetDir`; returns the paths written. */
+/** Decompress each manifest addon to its `embedded-<hash>/<filename>` path unless that build is already there; returns the paths written. */
 export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
+
+/** Where `extractEmbeddedAddons` puts `file`: `<targetDir>/embedded-<hash>/<filename>`. */
+export function embeddedAddonPath(targetDir: string, file: EmbeddedAddonFile): string;
+
+export interface PruneStaleEmbeddedAddonsInput {
+	targetDir: string;
+	/** Hashes of the running binary's addons, whose directories are kept. */
+	keepHashes: string[];
+}
+
+/** Best-effort removal of other builds' `embedded-<hash>` directories; returns the directories removed. */
+export function pruneStaleEmbeddedAddons(input: PruneStaleEmbeddedAddonsInput): string[];
+
+export interface ResolveRuntimeCandidatesInput {
+	candidates: string[];
+	versionedDir: string;
+	/** True when the binary embeds an addon for this platform and version. */
+	hasEmbedded: boolean;
+	/** This build's hash-path candidates, probed first. */
+	embedded: string[];
+	staged: string | null;
+}
+
+/** `loadNative`'s probe order; drops the shared `versionedDir/<filename>` paths when `hasEmbedded`. */
+export function resolveRuntimeCandidates(input: ResolveRuntimeCandidatesInput): string[];
 
 export interface SelectCpuVariantInput {
 	arch: string;
