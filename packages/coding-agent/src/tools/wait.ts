@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -72,7 +73,7 @@ interface WaitMessaging {
 function handOffMail(messaging: WaitMessaging, woke?: IrcMessage): Promise<void> | undefined {
 	const inbox = messaging.registry.get(messaging.senderId)?.session;
 	if (!inbox) return undefined;
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(messaging.registry);
 	const mail = woke ? [woke] : [];
 	for (let msg = bus.take(messaging.senderId); msg; msg = bus.take(messaging.senderId)) mail.push(msg);
 	if (mail.length === 0) return inbox.hasIrcInterrupts() ? Promise.resolve() : undefined;
@@ -121,7 +122,10 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
 	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
-	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
+	for (const { to, sentAt, promised } of IrcBus.forRegistry(registry).unansweredSends(senderId, since)) {
+		// A cross-process peer is nothing the caller started: its turn is not visible here, so it can
+		// neither sustain a reply wait nor be reported as having stopped. Its reply arrives on its own.
+		if (to.startsWith(REMOTE_ID_PREFIX)) continue;
 		const session = registry.get(to)?.session;
 		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
 		else if (session && registry.awaits.blocksOn(to, USER_AWAIT_ID, sentAt)) replies.onUser.push(to);
@@ -347,7 +351,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		// Without a session to hand it to, a message the leg took would be lost.
 		const busLeg = messaging?.registry.get(messaging.senderId)?.session
-			? IrcBus.global()
+			? IrcBus.forRegistry(messaging.registry)
 					.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
 					.catch(() => null)
 			: undefined;

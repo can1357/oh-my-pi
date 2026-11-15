@@ -379,7 +379,10 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
-	/** Registry whose awaits table records this agent blocked on the user while a dialog waits for their answer. */
+	/**
+	 * Agent registry this session belongs to: its IRC bus is keyed by it (AgentRegistry.global() for the
+	 * root), and its awaits table records this agent blocked on the user while a dialog waits for their answer.
+	 */
 	agentRegistry?: AgentRegistryApi;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;

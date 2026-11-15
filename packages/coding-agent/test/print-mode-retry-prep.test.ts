@@ -64,6 +64,7 @@ function createMockSession(): { session: AgentSession; spies: RetryPrepSpies } {
 		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		waitForAdvisorCatchup: async () => true,
 		dispose: async () => {},
 	} as unknown as AgentSession;
@@ -135,7 +136,7 @@ describe("print-mode dispatched builtins", () => {
 		// No dashboard launched in this one-shot process: the historic
 		// undispatched behavior prompts the model with the literal text.
 		expect(exitCode).toBe(0);
-		expect(spies.prompt).toHaveBeenCalledWith("/stats");
+		expect(spies.prompt).toHaveBeenCalledWith("/stats", { streamingBehavior: "followUp" });
 		expect(spies.retry).not.toHaveBeenCalled();
 	});
 });

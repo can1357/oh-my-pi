@@ -51,6 +51,7 @@ function createHub(
 	agents: AgentRecordLike[],
 	focused: string[] = [],
 	observers = new SessionObserverRegistry(),
+	inSession?: (ref: AgentRecordLike) => boolean,
 ): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
 		observers,
@@ -68,12 +69,37 @@ function createHub(
 			throw new Error("lifecycle is not used by selection");
 		},
 		irc: { unreadCount: () => 0 },
+		hasLocalPresence: kind => kind !== "remote",
+		inSession,
 		activity: { setLive() {}, sync: async () => {}, query: () => [], recent: () => [] },
 		focusAgent: async id => {
 			focused.push(id);
 		},
 	});
 }
+
+// The roster's rows and its count share one filter: a remote proxy (no local presence) and a ref
+// from an earlier session (outside the open session's tree) are both left out of each, so the
+// picker never reports more agents than it lists.
+test("remote proxies and earlier-session refs are left out of both the roster rows and its total", () => {
+	const hub = createHub(
+		[
+			agent("Current", 3_000),
+			agent("@mesh/leia", 2_000, { kind: "remote" }),
+			agent("Earlier", 1_000, { sessionFile: "/earlier/Earlier.jsonl" }),
+		],
+		[],
+		new SessionObserverRegistry(),
+		ref => ref.id !== "Earlier",
+	);
+	try {
+		const props = pickerProps(hub);
+		expect(props.items?.map(item => item.id)).toEqual(["Current"]);
+		expect(props.total).toBe(1);
+	} finally {
+		hub.dispose();
+	}
+});
 
 function selectedRosterId(hub: AgentHubOverlayComponent): string | null | undefined {
 	const pending: NativeChild[] = [hub.describe(genericCx)];

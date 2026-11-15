@@ -180,6 +180,44 @@ describe("history:// protocol", () => {
 		expect(resource.content).toContain("| HubAgent | idle | sub |");
 	});
 
+	it("lists remote proxies (@ns/name, kind remote) in the index but has no transcript for them (murmur-q00p)", async () => {
+		AgentRegistry.global().register({
+			id: "HubAgent",
+			displayName: "task",
+			kind: "sub",
+			session: fakeLiveSession([]),
+			status: "idle",
+		});
+		AgentRegistry.global().register({
+			id: "@cluster-a/leia",
+			displayName: "leia",
+			kind: "remote",
+			session: null,
+			status: "running",
+		});
+
+		const index = await InternalUrlRouter.instance().resolve("history://");
+		expect(index.content).toContain("| HubAgent | idle | sub |");
+		// The model learns the full spellable id and that the row is a cross-process peer.
+		expect(index.content).toContain("| @cluster-a/leia | running | remote |");
+		expect(index.content).toContain("`remote` rows are peers in other processes");
+
+		// Through the real router: the `/leia` segment is part of the id, not a route, and the read is
+		// refused with a pointer to messaging rather than an unknown-agent lookup error.
+		await expect(InternalUrlRouter.instance().resolve("history://@cluster-a/leia")).rejects.toThrow(
+			/@cluster-a\/leia is a remote peer[\s\S]*write agent:\/\/@cluster-a\/leia/,
+		);
+		// A remote id is refused even when no proxy is registered (prefix-authoritative, like the bus).
+		await expect(InternalUrlRouter.instance().resolve("history://@cluster-b/han")).rejects.toThrow(
+			/@cluster-b\/han is a remote peer/,
+		);
+		// A bare namespace is in the reserved `@` space but not a peer: say so instead of "Unknown agent".
+		await expect(InternalUrlRouter.instance().resolve("history://@cluster-a")).rejects.toThrow(
+			/@cluster-a is not a valid remote agent id/,
+		);
+		expect(await InternalUrlRouter.instance().locate("history://@cluster-a/leia")).toBeNull();
+	});
+
 	it("history://<id> renders a live ref's in-memory transcript", async () => {
 		AgentRegistry.global().register({
 			id: "HubAgent",
@@ -195,6 +233,30 @@ describe("history:// protocol", () => {
 		expect(resource.content).toContain("## user");
 		expect(resource.content).toContain("hello from live");
 		expect(resource.notes).toContain("Source: live session");
+	});
+
+	it("resolves a live ref from the caller-bound registry, not a same-id agent in the global one (per-registry)", async () => {
+		// finding 7: history:// resolve must honor context.agentRegistry so a custom-registry session
+		// reads its OWN child history, never a same-id agent that happens to live in the global registry.
+		AgentRegistry.global().register({
+			id: "Kid",
+			displayName: "global kid",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "GLOBAL registry transcript", timestamp: 1 }]),
+			status: "idle",
+		});
+		const custom = new AgentRegistry();
+		custom.register({
+			id: "Kid",
+			displayName: "custom kid",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "CUSTOM registry transcript", timestamp: 1 }]),
+			status: "idle",
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://Kid", { agentRegistry: custom });
+		expect(resource.content).toContain("CUSTOM registry transcript");
+		expect(resource.content).not.toContain("GLOBAL registry transcript");
 	});
 
 	it("preserves the existing bare history://current named-agent route", async () => {

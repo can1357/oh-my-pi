@@ -118,6 +118,7 @@ function createDelayedSession(
 			subscriber = listener;
 			return () => {};
 		},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		prompt: async () => {
 			planModeAtPrompt = planModeState;
 			if (advisorDrainPrepared) throw new Error("headless advisor delivery armed before prompt completion");
@@ -315,6 +316,7 @@ describe("print mode working indicator", () => {
 				subscriber = listener;
 				return () => {};
 			},
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				messages.push(message);
 				return true;
@@ -377,6 +379,7 @@ describe("print mode working indicator", () => {
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: () => () => {},
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				messages.push(message);
 				return true;
@@ -425,6 +428,7 @@ describe("print mode working indicator", () => {
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: () => () => {},
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				messages.push(message);
 				return true;
