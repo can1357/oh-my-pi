@@ -113,6 +113,7 @@ import {
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
+import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -3472,7 +3473,14 @@ export class AcpAgent implements Agent {
 			};
 		}
 
-		const result = await manager.connectServers(configs, sources);
+		// Honor the user's startup window like the interactive path does
+		// (`sdk.ts`); `OMP_MCP_STARTUP_TIMEOUT_MS` still takes precedence.
+		const result = await manager.connectServers(
+			configs,
+			sources,
+			undefined,
+			cfgMcpStartupTimeoutMs.get(record.session.settings),
+		);
 		// A client-declared server whose initial connect fails (e.g. an expired
 		// client-owned bearer answering 401 inside the startup window) must not
 		// abort session creation: the record keeps the manager with the failed
