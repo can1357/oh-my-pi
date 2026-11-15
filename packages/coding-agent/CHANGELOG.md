@@ -440,6 +440,8 @@
 - Fixed Tern and WebKit browser calls that incorrectly exposed unsupported page event-listener APIs; errors now identify the supported alternatives.
 - Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
+- A hard-cancelled JavaScript eval cell keeps the text and display output its subprocess runtime had already produced, instead of losing what the killed process had not yet sent ([#19339](https://github.com/can1357/oh-my-pi/pull/19339) by [@jchanghong023](https://github.com/jchanghong023))
+- `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.2] - 2026-11-14
 
