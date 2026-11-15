@@ -45,11 +45,11 @@ describe("probeNativeJudgeRoute", () => {
 	});
 
 	test("a different served model is reported, not failed", async () => {
-		const { fetch } = respond(() => answered("jev-2026-11"));
+		const { fetch } = respond(() => answered("jev-1.14"));
 		const result = await probeNativeJudgeRoute(model, { apiKey: "key", fetch });
-		expect(result).toMatchObject({ ok: true, expectedModel: "jev-test", servedModel: "jev-2026-11" });
+		expect(result).toMatchObject({ ok: true, expectedModel: "jev-test", servedModel: "jev-1.14" });
 		expect(formatNativeJudgeProbe("fixture/jev-test", result)).toMatch(
-			/passed in \d+ ms · served by jev-2026-11 \(requested jev-test\)$/,
+			/passed in \d+ ms · served by jev-1\.14 \(requested jev-test\)$/,
 		);
 	});
 
