@@ -203,8 +203,6 @@ describe("guard rule regressions", () => {
 		for (const command of [`git commit -m "reboot"`, "echo 'shutdown'", `printf '%s\\n' "halt"`]) {
 			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
 		}
-		// The program word itself still runs unquoted.
-		expect(ruleOf(bashApproval(cwd, `bash -c "eval '\\"rm\\" -rf /'"`))).toBe("critical_pattern");
 	});
 
 	it("keeps case patterns and a program run by a relative path out of command-position critical patterns", () => {

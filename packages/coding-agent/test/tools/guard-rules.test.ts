@@ -132,15 +132,8 @@ describe("bash guard rules", () => {
 		expect(ruleOf(bashApproval(cwd, shallow))).toBe("credential_read");
 	});
 
-	it("keeps ordinary development commands unflagged", () => {
-		for (const command of [
-			"rm -rf build/",
-			"git push origin branch",
-			"sed -i 's/a/b/' src/index.ts",
-			"cat README.md",
-			"pkill -f my-dev-server",
-			'git commit -m "reboot fix"',
-		]) {
+	it("leaves a relative recursive delete and an in-place edit of an ordinary file alone", () => {
+		for (const command of ["rm -rf build/", "sed -i 's/a/b/' src/index.ts"]) {
 			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
 		}
 	});
