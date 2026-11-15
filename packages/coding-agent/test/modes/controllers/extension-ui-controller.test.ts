@@ -92,6 +92,7 @@ function makeHarness() {
 	const controller = new ExtensionUiController(ctx);
 
 	return {
+		ctx,
 		editor,
 		requestRender,
 		addAutocompleteProvider,
@@ -393,6 +394,24 @@ describe("ExtensionUiController form dialog", () => {
 		expect(await pending).toEqual({ data: { db: "postgres" } });
 		expect(harness.editor.getText()).toBe("half typed!");
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
+	});
+
+	it("owns the composer for a form only while its draft guard holds the keyboard", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed");
+		const pending = harness.controller.showFormDialog(html);
+		const dialog = harness.getFocused();
+		const owns = () => harness.ctx.composerOwner?.component === dialog && harness.ctx.composerOwner.owns();
+		dialog!.render(80);
+		expect(owns()).toBe(true);
+
+		harness.handleInput("\x1b[B");
+		dialog!.render(80);
+		expect(owns()).toBe(false);
+
+		harness.handleInput("\x1b");
+		await pending;
+		expect(harness.ctx.composerOwner).toBeUndefined();
 	});
 });
 

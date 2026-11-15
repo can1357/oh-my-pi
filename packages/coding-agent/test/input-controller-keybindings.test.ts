@@ -1,8 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
-import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
@@ -13,14 +10,7 @@ import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ComposerOwner, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import {
-	type Component,
-	getKeybindings,
-	type KeybindingsManager as BaseKeybindingsManager,
-	type KeyId,
-	matchesKey,
-	setKeybindings,
-} from "@oh-my-pi/pi-tui";
+import { type Component, type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -1062,21 +1052,18 @@ describe("InputController keybinding setup", () => {
 describe("InputController image paste into an image-accepting prompt", () => {
 	let settingsState: SettingsTestState | undefined;
 	let tempDir: TempDir;
-	let keybindingsBefore: BaseKeybindingsManager;
 
 	beforeAll(async () => {
 		await initTheme(false);
 	});
 
 	beforeEach(async () => {
-		keybindingsBefore = getKeybindings();
 		settingsState = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		tempDir = await TempDir.create("@omp-prompt-image-");
 	});
 
 	afterEach(async () => {
-		setKeybindings(keybindingsBefore);
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
 		await tempDir.remove();
@@ -1363,13 +1350,11 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.getText()).toBe("");
 	});
 
-	function statusCalls(ctx: InteractiveModeContext): number {
-		return (ctx.showStatus as Mock<(message: string) => void>).mock.calls.length;
-	}
-
-	/** Wait for an asynchronous paste to reach `done`; a regression then fails the assertions instead of leaking into the next test. */
-	async function settleUntil(done: () => boolean): Promise<void> {
-		for (let attempt = 0; attempt < 100 && !done(); attempt++) await Bun.sleep(1);
+	/** Resolves on the next call to `mock`. */
+	function nextCall<Args extends unknown[]>(mock: Mock<(...args: Args) => void>): Promise<void> {
+		const called = Promise.withResolvers<void>();
+		mock.mockImplementation(() => called.resolve());
+		return called.promise;
 	}
 
 	/** A focused dialog with no `pasteText`, as the approval and ask dialogs are. */
@@ -1391,29 +1376,6 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		return listeners;
 	}
 
-	it("refuses an enhanced image paste into a focused form dialog", async () => {
-		setKeybindings(KeybindingsManager.inMemory());
-		const context = await createPromptContext();
-		const form = new HtmlFormDialog(
-			parseHtmlForm(`<form><fieldset><legend>Database</legend>
-<label><input type="radio" name="db" value="sqlite" checked> SQLite</label><br>
-<label><input type="radio" name="db" value="pg"> Postgres</label></fieldset></form>`),
-			{ onSubmit: vi.fn(), onCancel: vi.fn() },
-		);
-		form.focused = true;
-		form.render(100);
-		context.setFocused(form);
-		form.handleInput("n");
-		const listeners = startEnhancedPaste(context);
-
-		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
-		await settleUntil(() => statusCalls(context.ctx) > 0);
-
-		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
-		expect(context.editor.pendingImages).toHaveLength(0);
-		form.dispose();
-	});
-
 	function mountComposerOwner(
 		context: { ctx: InteractiveModeContext; setFocused(target: unknown): void },
 		dialog: object,
@@ -1424,8 +1386,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 	}
 
 	it("sends an enhanced image paste to the main editor only for the dialog the composer owner owns", async () => {
-		const rows: { name: string; owner: (dialog: Component) => ComposerOwner; toEditor: boolean }[] = [
+		const rows: { name: string; owner?: (dialog: Component) => ComposerOwner; toEditor: boolean }[] = [
 			{ name: "owned", owner: component => ({ component, owns: () => true }), toEditor: true },
+			{ name: "no owner registered", toEditor: false },
 			{ name: "owner declines", owner: component => ({ component, owns: () => false }), toEditor: false },
 			{
 				name: "owner of another component",
@@ -1436,18 +1399,19 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		for (const row of rows) {
 			const context = await createPromptContext();
 			const { dialog } = createPlainDialog();
-			mountComposerOwner(context, dialog, row.owner(dialog));
+			mountComposerOwner(context, dialog, row.owner?.(dialog));
 			const listeners = startEnhancedPaste(context);
+			const showStatus = context.ctx.showStatus as Mock<(message: string) => void>;
+			const settled = Promise.race([
+				nextCall(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>),
+				nextCall(showStatus),
+			]);
 
 			dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
-			await settleUntil(() =>
-				row.toEditor
-					? (context.editor.insertAtom as Mock<(label: string, expansion: string) => void>).mock.calls.length > 0
-					: statusCalls(context.ctx) > 0,
-			);
+			await settled;
 
 			expect(context.editor.pendingImages, row.name).toHaveLength(row.toEditor ? 1 : 0);
-			expect(statusCalls(context.ctx) > 0, row.name).toBe(!row.toEditor);
+			expect(showStatus.mock.calls.length > 0, row.name).toBe(!row.toEditor);
 		}
 	});
 
