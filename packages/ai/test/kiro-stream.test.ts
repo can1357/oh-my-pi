@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
-import { type KiroRequest, normalizeKiroFrame, streamKiro } from "@oh-my-pi/pi-ai/providers/kiro/index";
+import {
+	type KiroOptions,
+	type KiroRequest,
+	normalizeKiroFrame,
+	streamKiro,
+} from "@oh-my-pi/pi-ai/providers/kiro/index";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
@@ -73,7 +78,7 @@ const recovered = () => eventsResponse([["assistantResponseEvent", { content: "r
 /** Runs one Kiro turn against `respond`, counting attempts and recording retry waits. */
 async function run(
 	respond: (attempt: number, init?: RequestInit) => Response | Promise<Response>,
-	options: Partial<Parameters<typeof streamKiro>[2]> = {},
+	options: Partial<KiroOptions> = {},
 ) {
 	let attempts = 0;
 	const waits: number[] = [];

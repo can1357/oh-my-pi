@@ -11,14 +11,17 @@ interface ToolState {
 }
 
 export class KiroToolAssembler {
+	readonly #output: AssistantMessage;
+	readonly #stream: AssistantMessageEventStream;
+	readonly #onVisibleOutput: () => void;
 	#states = new Map<string, ToolState>();
 	#emitted = 0;
 
-	constructor(
-		private readonly output: AssistantMessage,
-		private readonly stream: AssistantMessageEventStream,
-		private readonly onVisibleOutput: () => void,
-	) {}
+	constructor(output: AssistantMessage, stream: AssistantMessageEventStream, onVisibleOutput: () => void) {
+		this.#output = output;
+		this.#stream = stream;
+		this.#onVisibleOutput = onVisibleOutput;
+	}
 
 	get emittedCount(): number {
 		return this.#emitted;
@@ -39,11 +42,11 @@ export class KiroToolAssembler {
 		else if (event.input) state.snapshot = event.input;
 		this.#start(state);
 		if (typeof event.input === "string" && event.input.length > 0) {
-			this.stream.push({
+			this.#stream.push({
 				type: "toolcall_delta",
 				contentIndex: state.contentIndex!,
 				delta: event.input,
-				partial: this.output,
+				partial: this.#output,
 			});
 		}
 		if (event.stop) this.#finish(state);
@@ -68,7 +71,7 @@ export class KiroToolAssembler {
 			this.#finish(state);
 		}
 		// Splice from the end so earlier indices stay valid.
-		for (const index of dropped.sort((left, right) => right - left)) this.output.content.splice(index, 1);
+		for (const index of dropped.sort((left, right) => right - left)) this.#output.content.splice(index, 1);
 	}
 
 	#start(state: ToolState): void {
@@ -76,10 +79,10 @@ export class KiroToolAssembler {
 		if (!state.name) {
 			throw new KiroStreamError(`Tool ${state.id} started without a name`, { code: "MALFORMED_TOOL_EVENT" });
 		}
-		this.onVisibleOutput();
-		state.contentIndex = this.output.content.length;
-		this.output.content.push({ type: "toolCall", id: state.id, name: state.name, arguments: {} });
-		this.stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: this.output });
+		this.#onVisibleOutput();
+		state.contentIndex = this.#output.content.length;
+		this.#output.content.push({ type: "toolCall", id: state.id, name: state.name, arguments: {} });
+		this.#stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: this.#output });
 	}
 
 	#finish(state: ToolState): void {
@@ -102,15 +105,15 @@ export class KiroToolAssembler {
 				});
 			}
 		}
-		const block = this.output.content[state.contentIndex!] as ToolCall;
+		const block = this.#output.content[state.contentIndex!] as ToolCall;
 		block.arguments = args;
 		state.completed = true;
 		this.#emitted++;
-		this.stream.push({
+		this.#stream.push({
 			type: "toolcall_end",
 			contentIndex: state.contentIndex!,
 			toolCall: block,
-			partial: this.output,
+			partial: this.#output,
 		});
 	}
 }
