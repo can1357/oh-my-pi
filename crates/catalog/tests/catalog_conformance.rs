@@ -13,8 +13,8 @@ use omp_catalog::{
 	policy::{MaxTokensField, ReasoningDisableMode, ThinkingFormat, WirePolicy},
 	pricing::{PriceUnit, UsageDimensions},
 	provider::{
-		AuthSpecKind, OAuthExchangeKind, OAuthFlowSpec, OAuthRefreshBehavior, OAuthSpec,
-		PrincipalResolution,
+		AuthSpecKind, CredentialSourceSpec, OAuthExchangeKind, OAuthFlowSpec, OAuthRefreshBehavior,
+		OAuthSpec, PrincipalResolution,
 	},
 	snapshot::{Catalog, SnapshotProvenance},
 	thinking::{ThinkingEffort, ThinkingMode, ThinkingPolicy},
@@ -2032,4 +2032,180 @@ fn catalog_references_and_advertised_capabilities_are_internally_complete() {
 			);
 		}
 	}
+}
+
+/// ADR 0059 S1 (D1): the five public gateways resolve to their hosts, wire,
+/// env names and default models, and none is usable without a key.
+#[test]
+fn adr_0059_gateway_providers_resolve_env_hosts_codecs_and_defaults() {
+	let compiled = compile_frozen_oracle();
+	for (id, name, envs, base_url, default_model) in [
+		(
+			"sambanova",
+			"SambaNova",
+			&["OMP_SAMBANOVA_API_KEY", "SAMBANOVA_API_KEY"][..],
+			"https://api.sambanova.ai/v1",
+			Some("sambanova/gpt-oss-120b"),
+		),
+		(
+			"coralbricks",
+			"CoralBricks",
+			&["OMP_CORALBRICKS_API_KEY", "CORAL_API_KEY"][..],
+			"https://inference.coralbricks.ai/v1",
+			Some("coralbricks/glm-5.3-fast"),
+		),
+		(
+			"helmcode",
+			"Helmcode",
+			&["OMP_HELMCODE_API_KEY", "HELMCODE_API_KEY"][..],
+			"https://api.helmcode.com/v1",
+			Some("helmcode/deepseek-v4-flash"),
+		),
+		(
+			"modular",
+			"Modular",
+			&["OMP_MODULAR_API_KEY", "MODULAR_API_KEY"][..],
+			"https://api.modular.com/v1",
+			Some("modular/google/gemma-4-31b-it"),
+		),
+		// The roster is the set of models one workspace enables, so nothing is
+		// bundled and no default can name a bundled row.
+		(
+			"otari",
+			"Otari",
+			&["OMP_OTARI_API_KEY", "OTARI_API_KEY"][..],
+			"https://api.otari.ai/api/v1",
+			None,
+		),
+	] {
+		let provider = compiled
+			.providers
+			.iter()
+			.find(|provider| provider.id == id)
+			.unwrap_or_else(|| panic!("{id} is a catalog provider"));
+		assert_eq!(provider.name.as_str(), name, "{id} display name");
+		assert_eq!(
+			provider
+				.default_model
+				.as_ref()
+				.map(omp_catalog::ModelKey::as_str),
+			default_model,
+			"{id} default model"
+		);
+
+		// Key-gated: a bearer credential read from the ordered env names, then
+		// the account store. No provider here is anonymous or OAuth-only.
+		let auth = provider
+			.auth
+			.iter()
+			.filter_map(|auth_id| compiled.auth_specs.iter().find(|auth| &auth.id == auth_id))
+			.collect::<Vec<_>>();
+		assert_eq!(auth.len(), 1, "{id} has exactly one auth contract");
+		assert_eq!(auth[0].kind, AuthSpecKind::Bearer, "{id} auth kind");
+		assert!(auth[0].oauth.is_none(), "{id} has no login flow in S1");
+		let env_names = auth[0]
+			.credential_sources
+			.iter()
+			.find_map(|source| match source {
+				CredentialSourceSpec::Environment { ordered_names } => Some(
+					ordered_names
+						.iter()
+						.map(|name| name.as_str())
+						.collect::<Vec<_>>(),
+				),
+				_ => None,
+			})
+			.unwrap_or_else(|| panic!("{id} reads its key from the environment"));
+		assert_eq!(env_names, envs, "{id} env names in lookup order");
+
+		assert_eq!(provider.routes.len(), 1, "{id} has one route");
+		let route = compiled
+			.routes
+			.iter()
+			.find(|route| route.id == provider.routes[0])
+			.expect("provider route");
+		assert_eq!(route.codec.as_str(), "openai-chat", "{id} codec");
+		assert_eq!(route.endpoint.base_url.as_str(), base_url, "{id} base URL");
+		assert!(route.endpoint.region.is_none(), "{id} has no per-account placeholder");
+
+		if let Some(default_model) = default_model {
+			let model = compiled
+				.models
+				.iter()
+				.find(|model| model.key.as_str() == default_model)
+				.unwrap_or_else(|| panic!("{id} default {default_model} is a bundled row"));
+			assert!(model.routes.contains(&route.id), "{id} default rides the provider route");
+		} else {
+			assert!(
+				compiled
+					.models
+					.iter()
+					.all(|model| !model.key.as_str().starts_with("otari/")),
+				"{id} bundles no model rows"
+			);
+		}
+	}
+}
+
+/// ADR 0059 S1 (D1): the provider-wide dialect each upstream descriptor sets
+/// reaches the compiled wire policy of the provider's models.
+#[test]
+fn adr_0059_gateway_provider_dialects_reach_the_wire_policy() {
+	let compiled = compile_frozen_oracle();
+	let policy_of = |key: &str| -> &WirePolicy {
+		let model = compiled
+			.models
+			.iter()
+			.find(|model| model.key.as_str() == key)
+			.unwrap_or_else(|| panic!("{key} is a bundled row"));
+		compiled
+			.wire_policies
+			.iter()
+			.find(|policy| policy.content_id() == model.wire_policy)
+			.unwrap_or_else(|| panic!("{key} wire policy"))
+	};
+
+	// Coral's plain Chat Completions surface: `max_tokens`, the `system` role,
+	// and no `store` field.
+	let coral = policy_of("coralbricks/glm-5.3-fast");
+	assert_eq!(coral.context.max_tokens_field, Some(MaxTokensField::MaxTokens));
+	assert_eq!(coral.role.supports_developer_role, Some(false));
+	assert_eq!(coral.context.supports_store, Some(false));
+
+	// Modular's API takes OpenRouter's `reasoning` object for every model.
+	let modular = policy_of("modular/deepseek/deepseek-v4.1-flash");
+	assert_eq!(modular.reasoning.thinking_format, Some(ThinkingFormat::OpenRouter));
+	let single_rung = policy_of("modular/minimax/minimax-m3");
+	assert_eq!(single_rung.reasoning.thinking_format, Some(ThinkingFormat::OpenRouter));
+
+	// SambaNova documents `reasoning_effort` as low/medium/high.
+	let samba = policy_of("sambanova/gpt-oss-120b");
+	assert_eq!(samba.reasoning.thinking_format, Some(ThinkingFormat::OpenAi));
+}
+
+/// ADR 0059 S1: a provider's own wire policy is the only policy a row found by
+/// runtime discovery carries, so the dialect of a gateway with no bundled
+/// rows (`otari`) or an authoritative live roster (`coralbricks`) must sit
+/// there, not only in the cascade that shapes bundled rows.
+#[test]
+fn adr_0059_provider_policy_carries_the_dialect_for_discovered_rows() {
+	let compiled = compile_frozen_oracle();
+	let provider_policy = |id: &str| -> &WirePolicy {
+		let provider = compiled
+			.providers
+			.iter()
+			.find(|provider| provider.id == id)
+			.unwrap_or_else(|| panic!("{id} provider"));
+		compiled
+			.wire_policies
+			.iter()
+			.find(|policy| policy.content_id() == provider.wire_policy)
+			.unwrap_or_else(|| panic!("{id} provider wire policy"))
+	};
+	// Any-llm forwarding: some upstreams reject the `developer` role.
+	assert_eq!(provider_policy("otari").role.supports_developer_role, Some(false));
+	let coral = provider_policy("coralbricks");
+	assert_eq!(coral.context.max_tokens_field, Some(MaxTokensField::MaxTokens));
+	assert_eq!(coral.role.supports_developer_role, Some(false));
+	assert_eq!(coral.context.supports_store, Some(false));
 }

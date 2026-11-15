@@ -1,0 +1,66 @@
+// Provider-wire compat for "helmcode": an OpenAI-compatible gateway for private
+// EU inference serving open-weight chat models, a per-key GLM 5.3 add-on and
+// resold frontier models. `reasoning_effort` ladders follow helmcode.com/docs/models
+// ("Controlling reasoning"); they are provider-scoped so rows discovered at
+// runtime resolve the same ladder. Origin: upstream
+// `packages/catalog/src/compat/rules/providers/helmcode.kdl` (c308970263); see
+// THIRD-PARTY-NOTICES.txt.
+
+provider "helmcode" {
+	thinking-mode "effort"
+	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
+	// `minimal` through `max` only steer this adaptive model; `none` is the
+	// one value that skips reasoning, so thinking-off sends it.
+	models "deepseek-v4-flash" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+		reasoning-disable-mode "none-effort"
+	}
+	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
+	// Helmcode serves Qwen3.6 on the OpenAI `reasoning_effort` field, not the
+	// Qwen class's `enable_thinking` toggle, which would drop the chosen tier.
+	// `none` and `minimal` both skip reasoning, so `minimal` is not a tier and
+	// thinking-off sends `none`. With no field both default to a 16,384 token
+	// budget, which is the `high` tier.
+	models "qwen3.6" "gemma4" {
+		thinking-efforts "low" "medium" "high" "max"
+		thinking-default-level "high"
+		thinking-format "openai"
+		reasoning-disable-mode "none-effort"
+	}
+	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
+	models "glm5.3" "glm5.3-flash" "glm5.2" {
+		thinking-efforts "low" "medium" "high" "max"
+		thinking-default-level "max"
+	}
+
+	// The resold frontier models run on their vendors behind this same
+	// chat-completions surface, and Helmcode documents no `reasoning_effort`
+	// values for them. Keep them to the core low/medium/high tiers so the
+	// inherited vendor ladders never send `minimal`, `xhigh`, or `max`, nor a
+	// vendor-native thinking shape, to this host. priority=1 outranks the
+	// equally scoped lineage ladders in classes/*.kdl; Gemini's ladders are
+	// family-scoped there, so the override is too.
+	class "anthropic" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high"
+	}
+	// Helmcode bills cache writes only for Anthropic models; OpenAI and Google
+	// cache creation is free there, so the inherited OpenAI write rate is zeroed.
+	class "openai" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high"
+		cost-patch {
+			cache-write 0.0
+		}
+	}
+	class "gemini" {
+		family "flash" priority=1 {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+		family "lite" priority=1 {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+}
