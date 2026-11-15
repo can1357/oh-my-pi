@@ -904,6 +904,7 @@ function nativeJudge(
 				// Every id was answered by the cache or by `fresh`, which NativeJudge validated per question type.
 				answers: answers as JudgmentResult<Q>["answers"],
 				usage,
+				...(fresh === undefined && questions > 0 ? { cached: true } : {}),
 			};
 		},
 	};

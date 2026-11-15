@@ -84,6 +84,36 @@ describe("judge scorer", () => {
 		expect(scorer.usage.costUsd).toBeCloseTo(0.003);
 	});
 
+	it("counts chunks the judgment cache answered whole apart from the requests it sent", async () => {
+		let n = 0;
+		const judge = {
+			label: "fake/judge",
+			async judge<Q extends Questions>(request: JudgmentRequest<Q>): Promise<JudgmentResult<Q>> {
+				const answers: Record<string, unknown> = {};
+				for (const key of Object.keys(request.questions)) answers[key] = { type: "noul", noul: 0.5 };
+				// The second chunk comes from the cache: nothing sent, nothing billed.
+				const cached = n++ === 1;
+				const usage = cached ? { input: 0, cost: { total: 0 } } : { input: 100, cost: { total: 0.001 } };
+				return {
+					answers,
+					usage,
+					api: "fake",
+					provider: "fake",
+					model: "fake",
+					...(cached ? { cached: true } : {}),
+				} as unknown as JudgmentResult<Q>;
+			},
+		};
+		const scorer = new JudgeScorer(judge, 5_000);
+		await scorer.score(
+			Array.from({ length: 120 }, (_, i) => `line ${i}`),
+			context(),
+		);
+		expect(scorer.usage.calls).toBe(3);
+		expect(scorer.usage.cached).toBe(1);
+		expect(scorer.usage.tokens).toBe(200);
+	});
+
 	it("asks one noul question per line over a state whose keys are sorted", async () => {
 		const { judge, requests } = fakeJudge(() => 0.5);
 		await new JudgeScorer(judge, 5_000).score(["alpha", "beta"], context());

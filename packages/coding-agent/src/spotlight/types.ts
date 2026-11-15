@@ -72,9 +72,14 @@ export const CONTEXT_FIELD_CHARS = 2_000;
 
 /** What one ranking spent, for the session journal (`spotlight:shape`). */
 export interface ScorerUsage {
-	/** Requests sent. */
+	/**
+	 * Ranking requests issued: Spotlight's HTTP requests, or the judge's chunks (one judgment each). A judge chunk the
+	 * judgment cache answered whole reached no provider; {@link ScorerUsage.cached} counts those.
+	 */
 	calls: number;
-	/** Requests that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
+	/** Of the calls, judge chunks the judgment cache answered whole: no provider request, nothing billed. */
+	cached?: number;
+	/** Rankings that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
 	failures: number;
 	/**
 	 * Failed requests by cause, e.g. Spotlight's `no_credential`, `timeout`, `transport`, `bad_reply`, or the judge's

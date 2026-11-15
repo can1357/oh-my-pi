@@ -150,6 +150,7 @@ export class JudgeScorer implements Scorer {
 					});
 					this.usage.tokens += result.usage.input;
 					this.usage.costUsd += result.usage.cost.total;
+					if (result.cached) this.usage.cached = (this.usage.cached ?? 0) + 1;
 				} catch (error) {
 					failure ??= { cause: causeOf(error, budget, signal), error };
 				} finally {
