@@ -513,31 +513,37 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output.match(/\[redacted\]/g)).toHaveLength(3);
 	});
 
-	it("preserves a skill-prompt's user text past the 120-char body cap", () => {
-		const body = `# in-your-own-words\n${"Instruction line filling the skill body. ".repeat(20)}`;
-		const args = "Now explain closures in your own words, focusing on the counter example";
-		const output = formatSessionHistoryMarkdown(
-			[
-				{
-					role: "custom",
-					customType: "skill-prompt",
-					content: `[IMPORTANT: User invoked the "in-your-own-words" skill; follow its instructions. Full skill below.]\n\n${body}\n\n---\n\nUser: ${args}`,
-					display: true,
-					attribution: "user",
-					details: {
-						name: "in-your-own-words",
-						path: "/skills/in-your-own-words/SKILL.md",
-						args,
-						lineCount: 21,
+	// Current sessions record the submitted draft as `prompt`; older ones carry only `args`.
+	const args = "Now explain closures in your own words, focusing on the counter example";
+	for (const [label, extra] of [
+		["submitted draft", { prompt: `/skill:in-your-own-words ${args}` }],
+		["legacy args", {}],
+	] as const) {
+		it(`preserves a skill-prompt's user text past the 120-char body cap (${label})`, () => {
+			const body = `# in-your-own-words\n${"Instruction line filling the skill body. ".repeat(20)}`;
+			const output = formatSessionHistoryMarkdown(
+				[
+					{
+						role: "custom",
+						customType: "skill-prompt",
+						content: `[IMPORTANT: User invoked the "in-your-own-words" skill; follow its instructions. Full skill below.]\n\n${body}\n\n---\n\nUser: ${args}`,
+						display: true,
+						attribution: "user",
+						details: {
+							name: "in-your-own-words",
+							path: "/skills/in-your-own-words/SKILL.md",
+							args,
+							...extra,
+							lineCount: 21,
+						},
+						timestamp: 1,
 					},
-					timestamp: 1,
-				},
-			],
-			{ watchedRoles: true },
-		);
+				],
+				{ watchedRoles: true },
+			);
 
-		expect(output).toContain("[skill:in-your-own-words]");
-		expect(output).toContain("counter example");
-	});
-
+			expect(output).toContain("[skill:in-your-own-words]");
+			expect(output).toContain("counter example");
+		});
+	}
 });
