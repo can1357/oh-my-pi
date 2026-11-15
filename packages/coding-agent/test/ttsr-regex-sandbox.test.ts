@@ -50,6 +50,7 @@ describe("backtrack-prone condition classifier", () => {
 		["a repeated group around an alternation", '(?:[^"\\\\]|\\\\.)*"'],
 		["the indented-loop shape", INDENTED_LOOP],
 		["a repeated group around a bounded variable quantifier", "^(?:a{1,2})+b$"],
+		["a repeated group around a long-written bounded quantifier", "(?:a{1,000000000000000000000002})+b"],
 		["a fixed repeat of an alternation", "(?:a|a){30}b"],
 		["a repeated group around an optional atom", "(?:a?)+b"],
 		["a nested quantifier after an any-character class", "[^](a+)+b"],

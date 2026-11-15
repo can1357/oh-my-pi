@@ -485,6 +485,8 @@ function backtrackGroupOpener(source: string, start: number): { next: number; lo
 	return close === -1 ? undefined : { next: close + 1, look: false };
 }
 
+const BRACE_QUANTIFIER = /\{(\d+)(,(\d*))?\}/y;
+
 /** The quantifier at `index`: its source length and repeat bounds (`max` is Infinity when unbounded). */
 function readQuantifier(source: string, index: number): { length: number; min: number; max: number } | undefined {
 	const lazy = (end: number) => (source[end] === "?" ? 1 : 0);
@@ -496,7 +498,8 @@ function readQuantifier(source: string, index: number): { length: number; min: n
 		case "?":
 			return { length: 1 + lazy(index + 1), min: 0, max: 1 };
 		case "{": {
-			const match = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(index, index + 24));
+			BRACE_QUANTIFIER.lastIndex = index;
+			const match = BRACE_QUANTIFIER.exec(source);
 			if (!match) return undefined;
 			const min = Number(match[1]);
 			const max = match[2] === undefined ? min : match[3] === "" ? Infinity : Number(match[3]);
