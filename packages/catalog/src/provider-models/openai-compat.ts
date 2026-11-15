@@ -5712,29 +5712,25 @@ function applyCloudflareSearchPrices(model: ModelSpec<Api>, properties: unknown)
 		return { ...model, pricingStatus: "unknown" };
 	}
 	const units = new Map<string, number | null>();
-	const fields = new Map([
+	const fields = new Map<string, "input" | "output" | "cacheRead">([
 		["per M input tokens", "input"],
 		["per M output tokens", "output"],
 		["per M cached input tokens", "cacheRead"],
-	] as const);
+	]);
 	for (const item of priceProperties[0].value) {
-		if (!isRecord(item) || typeof item.unit !== "string" || !fields.has(item.unit as never)) continue;
-		const valid = item.currency === "USD" && typeof item.price === "number" && Number.isFinite(item.price) && item.price >= 0;
-		units.set(item.unit, units.has(item.unit) || !valid ? null : item.price as number);
-	}
-	// Clef bills media as input tokens and has no output token charge.
-	// Do not infer a rate when the catalog explicitly supplies an invalid one.
-	if (
-		/^workers-ai\/@cf\/cloudflare\/clef(?:-flash|-omni)?$/.test(model.id) &&
-		!units.has("per M output tokens")
-	) {
-		units.set("per M output tokens", 0);
+		if (!isRecord(item) || typeof item.unit !== "string" || !fields.has(item.unit)) continue;
+		const price = item.price;
+		if (item.currency !== "USD" || typeof price !== "number" || !Number.isFinite(price) || price < 0) {
+			units.set(item.unit, null);
+			continue;
+		}
+		units.set(item.unit, units.has(item.unit) ? null : price);
 	}
 	const input = units.get("per M input tokens");
 	const output = units.get("per M output tokens");
 	const complete = input !== undefined && input !== null && output !== undefined && output !== null;
 	const allKnown = priceProperties[0].value.every(item =>
-		isRecord(item) && typeof item.unit === "string" && fields.has(item.unit as never) && units.get(item.unit) !== null,
+		isRecord(item) && typeof item.unit === "string" && fields.has(item.unit) && units.get(item.unit) !== null,
 	);
 	// Preserve individually valid token rates, but do not claim a partial card is fixed or free.
 	const cost = { ...model.cost };

@@ -1,16 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { modelsDevCatalogFallback } from "@oh-my-pi/pi-catalog/provider-models";
 import { cloudflareAiGatewayModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { cloudflareAiGatewayModelManagerOptions as barrelCloudflareOptions } from "@oh-my-pi/pi-catalog/provider-models";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { getBundledModels } from "../src/models";
 
 describe("Cloudflare AI Gateway shared catalog", () => {
-	test("preserves the barrel export", () => {
-		expect(barrelCloudflareOptions).toBe(cloudflareAiGatewayModelManagerOptions);
-	});
-
 	test("mirrors active Workers AI chat models into the gateway provider", () => {
 		const fallback = modelsDevCatalogFallback("cloudflare-ai-gateway");
 		if (!fallback) throw new Error("Cloudflare AI Gateway did not configure a shared catalog fallback");

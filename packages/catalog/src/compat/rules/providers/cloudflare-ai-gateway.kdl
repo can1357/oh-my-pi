@@ -17,6 +17,13 @@ provider "cloudflare-ai-gateway" {
 		}
 	}
 
+	// Clef models bill media as input tokens and have no output token charge.
+	models "workers-ai/@cf/cloudflare/clef" "workers-ai/@cf/cloudflare/clef-flash" "workers-ai/@cf/cloudflare/clef-omni" {
+		cost-fallback {
+			output 0
+		}
+	}
+
 	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
 	// ladder is the generic five-tier scale, unlike the workers-ai chat rows.
 	models "deepseek/*" {

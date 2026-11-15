@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added live Cloudflare Workers AI catalog discovery for AI Gateway using existing Gateway credentials ([#19321](https://github.com/can1357/oh-my-pi/pull/19321)).
+- Added live Cloudflare Workers AI catalog discovery for AI Gateway ([#19321](https://github.com/can1357/oh-my-pi/pull/19321)).
 
 ### Fixed
 
