@@ -43,7 +43,11 @@ export interface ImageBytesInput {
 
 // 500KB target — aggressive compression; Anthropic's 5MB per-image cap is rarely the
 // binding constraint once images are downsized to 1568px (Anthropic's internal threshold).
-const DEFAULT_MAX_BYTES = 500 * 1024;
+export const DEFAULT_MAX_BYTES = 500 * 1024;
+
+// Anthropic's "internal recommended size" — Claude internally caps images at
+// 1568px on the longest edge before vision processing.
+export const DEFAULT_MAX_DIMENSION = 1568;
 
 // Smallest edge length (px) vision backends reliably accept. They tile images into
 // fixed patches (Anthropic uses 28px) and reject degenerate sub-patch images — e.g.
@@ -53,14 +57,55 @@ const DEFAULT_MAX_BYTES = 500 * 1024;
 const DEFAULT_MIN_DIMENSION = 200;
 
 const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP">> = {
-	// Anthropic's "internal recommended size" — Claude internally caps images at
-	// 1568px on the longest edge before vision processing.
-	maxWidth: 1568,
-	maxHeight: 1568,
+	maxWidth: DEFAULT_MAX_DIMENSION,
+	maxHeight: DEFAULT_MAX_DIMENSION,
 	maxBytes: DEFAULT_MAX_BYTES,
 	jpegQuality: 80,
 	minDimension: DEFAULT_MIN_DIMENSION,
 };
+
+/** User-configurable defaults for {@link resizeImage}; see {@link setImageResizeLimits}. */
+export interface ImageResizeLimits {
+	/** Longest-edge cap in px, applied to both width and height. */
+	maxDimension?: number;
+	/** Encoded-size budget in bytes. */
+	maxBytes?: number;
+}
+
+type ResolvedImageResizeLimits = Pick<Required<ImageResizeOptions>, "maxWidth" | "maxHeight" | "maxBytes">;
+
+let configuredLimits: ResolvedImageResizeLimits = {
+	maxWidth: DEFAULT_MAX_DIMENSION,
+	maxHeight: DEFAULT_MAX_DIMENSION,
+	maxBytes: DEFAULT_MAX_BYTES,
+};
+
+function positiveOrDefault(value: number | undefined, fallback: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+	// Floor before the check: a fractional value like 0.5 is positive but floors to 0, which is no cap at all.
+	const whole = Math.floor(value);
+	return whole >= 1 ? whole : fallback;
+}
+
+/**
+ * Sets the size limits {@link resizeImage} applies when a caller does not pass its own
+ * (the `images.maxDimension` / `images.maxBytes` settings). Non-positive or non-finite
+ * values restore the built-in defaults. Explicit per-call options — e.g. the browser
+ * screenshot caps — always win over these.
+ */
+export function setImageResizeLimits(limits: ImageResizeLimits): void {
+	const maxDimension = positiveOrDefault(limits.maxDimension, DEFAULT_MAX_DIMENSION);
+	configuredLimits = {
+		maxWidth: maxDimension,
+		maxHeight: maxDimension,
+		maxBytes: positiveOrDefault(limits.maxBytes, DEFAULT_MAX_BYTES),
+	};
+}
+
+/** The limits {@link resizeImage} currently applies to calls that do not pass their own. */
+export function getImageResizeLimits(): Readonly<ResolvedImageResizeLimits> {
+	return configuredLimits;
+}
 
 interface ImageHeaderDimensions {
 	width: number;
@@ -315,7 +360,7 @@ export async function resizeImage(
 	options?: ImageResizeOptions,
 ): Promise<ResizedImage> {
 	const excludeWebP = options?.excludeWebP ?? isWebPExcluded();
-	const opts = { ...DEFAULT_OPTIONS, ...options, excludeWebP };
+	const opts = { ...DEFAULT_OPTIONS, ...configuredLimits, ...options, excludeWebP };
 	let inputBuffer: Uint8Array;
 	let callerMime: string | undefined;
 	let originalData: string | undefined;
