@@ -116,4 +116,77 @@ describe("enabled speculative local reads", () => {
 		expect(startedBeforeProviderDone).toBe(true);
 		expect(messages.filter(message => message.role === "toolResult")).toHaveLength(1);
 	});
+
+	it("falls back to ordinary image reading when captureEvidence declines a claimed PNG after beforeToolCall", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-read-image-"));
+		temporaryDirectories.push(directory);
+		// 1x1 PNG generated inline so the test does not depend on external fixtures.
+		const tinyPng = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+			"base64",
+		);
+		await fs.writeFile(path.join(directory, "sample.png"), tinyPng);
+		const session = createSession(directory);
+		const tool = new ReadTool(session);
+		const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
+		const captureStarted = Promise.withResolvers<void>();
+		const toolExecutionStarted = Promise.withResolvers<void>();
+		const captureEvidence = host.captureEvidence.bind(host);
+		host.captureEvidence = async context => {
+			captureStarted.resolve();
+			await toolExecutionStarted.promise;
+			return await captureEvidence(context);
+		};
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "read-image-1",
+							name: "read",
+							arguments: { path: "sample.png" },
+						},
+					],
+				},
+				{ content: ["DONE"] },
+			],
+		});
+
+		const stream = agentLoop(
+			[{ role: "user", content: "Use read on sample.png", timestamp: Date.now() }],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				beforeToolCall: async () => undefined,
+				speculativeToolExecution: { enabled: true, host },
+			},
+			undefined,
+			mock.stream,
+		);
+
+		let sawToolExecutionEnd = false;
+		for await (const event of stream) {
+			if (event.type === "tool_execution_start" && event.toolCallId === "read-image-1") {
+				await captureStarted.promise;
+				await Bun.sleep(5);
+				toolExecutionStarted.resolve();
+			} else if (event.type === "tool_execution_end" && event.toolCallId === "read-image-1") {
+				sawToolExecutionEnd = true;
+			}
+		}
+
+		const messages = await stream.result();
+		expect(sawToolExecutionEnd).toBe(true);
+		const toolResult = messages.find(message => message.role === "toolResult");
+		expect(toolResult).toBeDefined();
+		if (!toolResult || toolResult.role !== "toolResult") {
+			throw new Error("expected a toolResult message");
+		}
+		expect(toolResult.isError).toBe(false);
+		expect(toolResult.content).toContainEqual({ type: "text", text: "Read image file [image/png]" });
+		expect(toolResult.content.some(block => block.type === "image" && block.mimeType === "image/png")).toBe(true);
+	});
 });

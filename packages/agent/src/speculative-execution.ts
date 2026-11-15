@@ -398,8 +398,18 @@ export class SpeculativeOperationCoordinator {
 		reason: string,
 		descendants = true,
 	): Promise<void> {
-		if (candidate.state === "discarded" || candidate.claimed) return;
+		// Once execution completes with a usable result, #commitCandidate owns
+		// validation, commit, and rollback; discarding while claimed before
+		// completion must still proceed so pending claim()/commit() waiters unblock.
+		if (
+			candidate.state === "discarded" ||
+			candidate.committed ||
+			(candidate.claimed && candidate.state === "completed")
+		) {
+			return;
+		}
 		candidate.state = "discarded";
+		candidate.claimed = false;
 		candidate.controller.abort();
 		candidate.rejectOutcome(new Error(reason));
 		const context = this.#createContext(candidate);
@@ -548,16 +558,26 @@ export class SpeculativeOperationCoordinator {
 				.map(candidate => this.#discardCandidate(candidate, "discarded", reason)),
 		);
 	}
+	#isClaimable(candidate: SpeculativeToolCandidate): boolean {
+		return !this.#closed && !candidate.claimed && candidate.state !== "discarded";
+	}
+
 	async #commitCandidate(
 		candidate: SpeculativeToolCandidate,
 		tool: AgentTool | undefined,
 		toolCall: AgentToolCall,
 		args: Readonly<Record<string, unknown>>,
+		signal?: AbortSignal,
 	): Promise<SpeculativeRawOutcome | undefined> {
-		if (candidate.claimed || candidate.state === "discarded") return undefined;
+		if (!this.#isClaimable(candidate)) return undefined;
 		candidate.dispatchReachedAt = Date.now();
 
 		const fingerprintMatches = await candidateMatchesFingerprint(candidate, toolCall, args);
+		if (signal?.aborted) {
+			await this.#discardCandidate(candidate, "aborted", "speculative execution aborted");
+			signal.throwIfAborted();
+		}
+		if (!this.#isClaimable(candidate)) return undefined;
 		if (candidate.tool !== tool || !fingerprintMatches) {
 			await this.#discardCandidate(candidate, "fingerprint_mismatch", "final speculation fingerprint changed");
 			return undefined;
@@ -565,9 +585,13 @@ export class SpeculativeOperationCoordinator {
 		candidate.claimed = true;
 		let physicalOutcome: SpeculativePhysicalOutcome;
 		try {
-			physicalOutcome = await candidate.outcome;
-		} catch {
+			physicalOutcome = await (signal ? untilAborted(signal, candidate.outcome) : candidate.outcome);
+		} catch (error) {
 			candidate.claimed = false;
+			if (signal?.aborted) {
+				await this.#discardCandidate(candidate, "aborted", "speculative execution aborted");
+				throw error;
+			}
 			await this.#discardCandidate(candidate, "discarded", "speculative execution failed");
 			return undefined;
 		}
@@ -627,7 +651,7 @@ export class SpeculativeOperationCoordinator {
 		// after the earlier shared writers have exposed their final effects.
 		if (earlierEffectsSettled) await untilAborted(signal, earlierEffectsSettled);
 		signal?.throwIfAborted();
-		return this.#commitCandidate(candidate, tool, toolCall, args);
+		return this.#commitCandidate(candidate, tool, toolCall, args, signal);
 	}
 
 	admitFinalized(
