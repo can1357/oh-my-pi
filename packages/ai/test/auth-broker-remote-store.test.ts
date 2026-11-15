@@ -288,8 +288,27 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 
 			await waitUntil(() => remote!.snapshot.credentials.length === 1, 5_000);
 			await waitUntil(() => storage!.usage.clientSummary(0).clients.length === 1, 5_000);
-			expect(proxy.requests.filter(p => p === "/v1/snapshot/stream").length).toBe(2);
-			expect(proxy.requests).not.toContain("/v1/snapshot");
+			// One long-poll covers the 404, then the stream reconnects instead of latching long-poll.
+			await waitUntil(() => proxy.requests.filter(p => p === "/v1/snapshot/stream").length === 2, 5_000);
+			expect(proxy.requests.filter(p => p === "/v1/snapshot").length).toBe(1);
+		} finally {
+			proxy.stop();
+		}
+	});
+
+	// A proxy that never routes the stream path must not stop credential sync:
+	// each stream 404 is followed by a long-poll, which delivers the snapshot.
+	test("keeps syncing credentials through long-poll when a proxy never routes the snapshot stream", async () => {
+		const proxy = startBrokerProxy(handle!.url, pathname =>
+			pathname === "/v1/snapshot/stream" ? { body: "404 page not found\n", contentType: "text/plain" } : undefined,
+		);
+		try {
+			const client = new AuthBrokerClient({ url: proxy.url, token });
+			remote = new RemoteAuthCredentialStore({ client });
+
+			await waitUntil(() => remote!.snapshot.credentials.length === 1, 5_000);
+			expect(proxy.requests).toContain("/v1/snapshot/stream");
+			expect(proxy.requests).toContain("/v1/snapshot");
 		} finally {
 			proxy.stop();
 		}
