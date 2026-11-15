@@ -2644,28 +2644,13 @@ export class InputController {
 		});
 	}
 
-	/**
-	 * True when the focused dialog hands typing to the main composer on purpose. The approval
-	 * dialog's type-to-steer is recognised by `approvalOwnsComposer` (its one-time
-	 * `editor.focused = true` is cleared when a selector closed over it re-focuses the dialog).
-	 * A form or ask dialog whose draft guard blocks is recognised by `editor.focused`, which its
-	 * `syncPresentation` re-sets on every render. The `editorContainer` checks matter because
-	 * `TUI.setFocus` clears `focused` only on the previously focused component, so the flag goes
-	 * stale under a selector that replaced the composer slot or under a fullscreen overlay; a
-	 * stale flag must not count.
-	 */
+	/** Whether `focused` is the registered composer owner and currently lets the composer take typing. */
 	#composerOwnsInput(focused: Component): boolean {
-		if (focused === this.ctx.editor) return false;
-		if (this.ctx.approvalOwnsComposer !== true && this.ctx.editor.focused !== true) return false;
-		const children = this.ctx.editorContainer.children;
-		return children.includes(this.ctx.editor) && children.includes(focused);
+		const owner = this.ctx.composerOwner;
+		return owner?.component === focused && owner.owns();
 	}
 
-	/**
-	 * Route an image paste to the focused destination. A focused prompt that did not opt into
-	 * images, or that has no `pasteText` at all, refuses, so the image never lands in the hidden
-	 * main editor (#6057). Dialogs that hand typing to the composer keep sending images there.
-	 */
+	/** Route an image paste to the focused destination; a dialog that can't take the image refuses it (#6057). */
 	async #pasteImageIntoFocus(paste: (sink: ImagePasteSink) => Promise<unknown>): Promise<void> {
 		const focused = this.ctx.ui.getFocused();
 		if (!focused || focused === this.ctx.editor || this.#composerOwnsInput(focused)) {
@@ -2817,22 +2802,20 @@ export class InputController {
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
 		let promptPaste: PromptImagePaste | undefined;
 		try {
-			// When a modal paste-capable prompt (login/API-key Input) owns focus,
-			// only clipboard text may land there. Image payloads must not mutate
+			// When a modal paste-capable prompt (login/API-key Input) or a dialog without
+			// `pasteText` owns focus, only clipboard text may land there. Image payloads must not mutate
 			// the hidden main editor — mirror the enhanced-paste `pasteImage`
 			// behavior and surface the unsupported-status instead (#6057).
 			// A prompt that opted into images gets the main editor's full image flow
 			// instead, delivered through one reservation.
 			const focusedNow = this.ctx.ui.getFocused();
-			// The focused component that receives the paste, unless it is the editor or the composer owns it.
 			const modalFocus =
 				focusedNow && focusedNow !== this.ctx.editor && !this.#composerOwnsInput(focusedNow) ? focusedNow : null;
 			const promptTarget = modalFocus && hasPasteText(modalFocus) ? modalFocus : null;
-			// A focused dialog without `pasteText`: text arrives as a bracketed paste, an image is refused.
 			const bareDialog = modalFocus && !promptTarget ? modalFocus : null;
 			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
 			else finishPaste = promptTarget?.beginPaste?.();
-			const textOnlyPrompt = (promptTarget !== null && promptPaste === undefined) || bareDialog !== null;
+			const textOnlyPrompt = modalFocus !== null && promptPaste === undefined;
 			const sink = promptPaste?.sink ?? this.#editorImageSink;
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
@@ -2914,8 +2897,7 @@ export class InputController {
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.
-			const initiator = promptTarget ?? bareDialog;
-			if (initiator && this.ctx.ui.getFocused() !== initiator) return false;
+			if (modalFocus && this.ctx.ui.getFocused() !== modalFocus) return false;
 			if (bareDialog) {
 				this.#pasteTextIntoFocus(text);
 				return true;
