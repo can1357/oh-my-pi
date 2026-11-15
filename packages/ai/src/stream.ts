@@ -2441,6 +2441,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				cwd: options?.cwd,
 				reasoning,
+				shareProcess: options?.antigravityShareProcess,
 				isolateWorkspace: options?.antigravityIsolateWorkspace,
 			});
 		}

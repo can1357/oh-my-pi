@@ -17,6 +17,8 @@ import { StepWriter } from "./antigravity-cli/step-writer";
 export interface AntigravityCliOptions extends StreamOptions {
 	/** Selected model's native `thought_level`. */
 	reasoning?: Effort;
+	/** Share `agy acp` processes across sessions with matching credentials and tools (default: `true`). */
+	shareProcess?: boolean;
 	/** Pass an empty managed workspace directory to `agy` instead of `cwd` (default: `true`). */
 	isolateWorkspace?: boolean;
 }
@@ -63,6 +65,7 @@ async function runStep(
 		reasoning: options.reasoning,
 		signal: options.signal,
 		credentialVersion: agyCredentialVersion(options.apiKey),
+		shareProcess: options.shareProcess,
 		isolateWorkspace: options.isolateWorkspace,
 	};
 	const sessions = options.providerSessionState;

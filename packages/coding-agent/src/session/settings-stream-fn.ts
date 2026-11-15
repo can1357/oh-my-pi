@@ -26,6 +26,7 @@ import {
 	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersAntigravityCliIsolateWorkspace,
+	cfgProvidersAntigravityCliShareProcess,
 	cfgProvidersCacheRetention,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersMuseCodeStoreResponses,
@@ -147,6 +148,9 @@ export function createSettingsAwareStreamFn(
 		const storeResponses =
 			streamOptions?.storeResponses ??
 			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
+		const antigravityShareProcess =
+			streamOptions?.antigravityShareProcess ??
+			(model.provider === "antigravity-cli" ? cfgProvidersAntigravityCliShareProcess.get(settings) : undefined);
 		const antigravityIsolateWorkspace =
 			streamOptions?.antigravityIsolateWorkspace ??
 			(model.provider === "antigravity-cli" ? cfgProvidersAntigravityCliIsolateWorkspace.get(settings) : undefined);
@@ -200,6 +204,7 @@ export function createSettingsAwareStreamFn(
 				? { fallbacks: undefined, disableServerSideFallback: true }
 				: {}),
 			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),
+			...(antigravityShareProcess !== undefined ? { antigravityShareProcess } : {}),
 			...(antigravityIsolateWorkspace !== undefined ? { antigravityIsolateWorkspace } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
