@@ -1033,7 +1033,9 @@ const SHELL_OPERATORS = [
 	"&&",
 	"||",
 	"|&",
+	";;&",
 	";;",
+	";&",
 	"&>>",
 	"&>",
 	">>",
@@ -1159,6 +1161,29 @@ interface PendingHeredoc {
 	doc: ShellHeredoc;
 }
 
+/** Reserved words after which the next word starts a command. */
+const COMMAND_PREFIXES: Record<string, true> = {
+	"!": true,
+	"{": true,
+	if: true,
+	then: true,
+	else: true,
+	elif: true,
+	while: true,
+	until: true,
+	do: true,
+};
+
+/** A `case` command being read: the `(` depth it started at, and what comes next in it. */
+interface CaseReading {
+	parens: number;
+	/**
+	 * `subject` right after `case`, then `in`; `clause` where a clause's patterns (or `esac`) start,
+	 * `pattern` within them, and `body` in the clause's commands.
+	 */
+	next: "subject" | "in" | "clause" | "pattern" | "body";
+}
+
 /** What text being read is nested in: where its substitutions run, and the map their keys go in. */
 interface ReadScope {
 	cwd: string;
@@ -1172,6 +1197,13 @@ const SUBSTITUTION_KEY_RE = /\0\d+\0/g;
 
 /** A line ending in an odd number of backslashes: in an unquoted heredoc, it continues on the next line. */
 const ODD_TRAILING_BACKSLASHES_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
+
+/**
+ * The escapes bash removes from a backtick body before parsing it: before `$`, a backtick and `\`,
+ * and inside double quotes before `"` too.
+ */
+const BACKTICK_ESCAPE_RE = /\\([$`\\])/g;
+const QUOTED_BACKTICK_ESCAPE_RE = /\\([$`\\"])/g;
 
 /** The one-letter escapes of a `$'...'` string. */
 const ANSI_C_ESCAPES: Record<string, string> = {
@@ -1479,6 +1511,8 @@ class ShellScriptParser {
 	 * when its line ends and attached to the delimiter word. With `heredocs` off (`$(( ))`), and
 	 * inside a `(( ))` command, `<<` is a shift. With `close`, reading stops at the `)` that closes a
 	 * `$( )` opened just before `start`: `end` is its index, or the text's length when none comes.
+	 * The `)` that ends a `case` pattern list is no parenthesis: it becomes a `;`, and the optional
+	 * `(` before the patterns is dropped.
 	 */
 	#tokens(
 		text: string,
@@ -1498,6 +1532,32 @@ class ShellScriptParser {
 		// started (-1 outside one).
 		let parens = 0;
 		let arithmetic = -1;
+		// `case` commands being read, innermost last.
+		const cases: CaseReading[] = [];
+		// Whether the next word starts a command, where `case` and `esac` are reserved words.
+		const commandPosition = () => {
+			const last = out.at(-1);
+			if (!last) return true;
+			if (last.operator) return !Object.hasOwn(SHELL_REDIRECTS, last.text);
+			return !last.quoted && Object.hasOwn(COMMAND_PREFIXES, last.text);
+		};
+		// Moves the `case` being read past the word just ended, or starts one.
+		const caseWord = () => {
+			const reading = cases.at(-1);
+			const reserved = quoted ? undefined : word;
+			if (reading && reading.next !== "body") {
+				if (reading.next === "subject") reading.next = "in";
+				else if (reading.next === "in" && reserved === "in") reading.next = "clause";
+				else if (reading.next === "in") cases.pop();
+				else if (reading.next === "clause" && reserved === "esac") cases.pop();
+				// Any other word is one of the clause's patterns.
+				else reading.next = "pattern";
+			} else if (reserved === "case" && commandPosition()) {
+				cases.push({ parens, next: "subject" });
+			} else if (reading && reserved === "esac" && reading.parens === parens && commandPosition()) {
+				cases.pop();
+			}
+		};
 		const flush = () => {
 			if (started) {
 				const token: ShellScriptToken = { text: word, operator: false, quoted };
@@ -1505,6 +1565,8 @@ class ShellScriptParser {
 					token.heredoc = { body: "", expands: !quoted, subs: [] };
 					pending.push({ delimiter: word, stripTabs: delimiter.stripTabs, doc: token.heredoc });
 					delimiter = undefined;
+				} else {
+					caseWord();
 				}
 				out.push(token);
 			}
@@ -1551,12 +1613,12 @@ class ShellScriptParser {
 				i = double.after;
 			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
 				// `${ }` and `$[ ]` belong to the word: a `<<` inside them is not a heredoc.
-				const { end, keys } = this.#parameter(text, i + 2, scope);
+				const { end, keys } = this.#parameter(text, i + 2, scope, false);
 				word += text.slice(i, end + 1) + keys.join("");
 				started = true;
 				i = end + 1;
 			} else if (ch === "`" || ((ch === "$" || ch === "<" || ch === ">") && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, scope);
+				const sub = this.#substitution(text, i, scope, false);
 				word += sub.key;
 				i = sub.after;
 				started = true;
@@ -1571,10 +1633,6 @@ class ShellScriptParser {
 					i++;
 					continue;
 				}
-				if (operator === ")" && parens === 0 && close) {
-					flush();
-					return { tokens: out, end: i };
-				}
 				// The file descriptor of `2>`.
 				if ((operator[0] === "<" || operator[0] === ">") && started && /^\d+$/.test(word)) {
 					word = "";
@@ -1582,6 +1640,28 @@ class ShellScriptParser {
 				}
 				flush();
 				delimiter = undefined;
+				const reading = cases.at(-1);
+				if (reading?.parens === parens) {
+					if (operator === ")" && (reading.next === "clause" || reading.next === "pattern")) {
+						out.push({ text: ";", operator: true, quoted: false });
+						reading.next = "body";
+						i++;
+						continue;
+					}
+					if (operator === "(" && reading.next === "clause") {
+						reading.next = "pattern";
+						i++;
+						continue;
+					}
+					if (operator === ";;" || operator === ";&" || operator === ";;&") {
+						if (reading.next === "body") reading.next = "clause";
+					} else if ((reading.next === "subject" || reading.next === "in") && operator !== "\n") {
+						cases.pop();
+					}
+				}
+				if (operator === ")" && parens === 0 && close) {
+					return { tokens: out, end: i };
+				}
 				out.push({ text: operator, operator: true, quoted: false });
 				i += operator.length;
 				if (operator === "(") {
@@ -1590,6 +1670,8 @@ class ShellScriptParser {
 				} else if (operator === ")" && parens > 0) {
 					parens--;
 					if (parens <= arithmetic) arithmetic = -1;
+					// A `case` left open in the group ends with it.
+					while ((cases.at(-1)?.parens ?? -1) > parens) cases.pop();
 				}
 				if ((operator === "<<" || operator === "<<-") && heredocs && arithmetic < 0) {
 					delimiter = { stripTabs: operator === "<<-" };
@@ -1671,11 +1753,11 @@ class ShellScriptParser {
 				else if (next !== "\n") value += ch + next;
 				i += 2;
 			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, scope);
+				const sub = this.#substitution(text, i, scope, true);
 				value += sub.key;
 				i = sub.after;
 			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
-				const { end, keys } = this.#parameter(text, i + 2, scope);
+				const { end, keys } = this.#parameter(text, i + 2, scope, true);
 				value += text.slice(i, end + 1) + keys.join("");
 				i = end + 1;
 			} else {
@@ -1689,9 +1771,10 @@ class ShellScriptParser {
 	/**
 	 * Reads a `${ }` or `$[ ]` whose opening bracket is just before `start`: the index of its closing
 	 * bracket, and the keys of the substitutions in it. Quotes, escapes, nested expansions and
-	 * substitutions hide a closing bracket; a bare `{` does not nest, a `[` in `$[ ]` does.
+	 * substitutions hide a closing bracket; a bare `{` does not nest, a `[` in `$[ ]` does. `quoted`
+	 * tells whether the expansion is inside double quotes.
 	 */
-	#parameter(text: string, start: number, scope: ReadScope): { end: number; keys: string[] } {
+	#parameter(text: string, start: number, scope: ReadScope, quoted: boolean): { end: number; keys: string[] } {
 		const close = text[start - 1] === "[" ? "]" : "}";
 		const keys: string[] = [];
 		if (this.#braces >= SHELL_SCRIPT_MAX_DEPTH) {
@@ -1716,11 +1799,11 @@ class ShellScriptParser {
 				keys.push(...(double.value.match(SUBSTITUTION_KEY_RE) ?? []));
 				i = double.after;
 			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, scope);
+				const sub = this.#substitution(text, i, scope, quoted);
 				keys.push(sub.key);
 				i = sub.after;
 			} else if (ch === "$" && (text[i + 1] === "{" || text[i + 1] === "[")) {
-				const inner = this.#parameter(text, i + 2, scope);
+				const inner = this.#parameter(text, i + 2, scope, quoted);
 				keys.push(...inner.keys);
 				i = inner.end + 1;
 			} else if (ch === close && brackets === 0) {
@@ -1748,7 +1831,7 @@ class ShellScriptParser {
 			if (ch === "\\") {
 				i += 2;
 			} else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
-				const sub = this.#substitution(text, i, scope);
+				const sub = this.#substitution(text, i, scope, false);
 				keys.push(sub.key);
 				i = sub.after;
 			} else {
@@ -1762,14 +1845,17 @@ class ShellScriptParser {
 	 * Reads the substitution at `start` (`` ` ``, `$(`, `<(`, `>(`) and parses what it runs: the key
 	 * that stands for it in a word, and the index after it. A `$( )` body is read as commands up to
 	 * the `)` that closes it, so a `)` in quotes, in a comment or in a heredoc body does not end it.
+	 * A backtick body loses the backslashes bash removes before parsing it (`quoted`: inside double
+	 * quotes), so `` \` `` nests a substitution and `\"` is a quote again.
 	 */
-	#substitution(text: string, start: number, scope: ReadScope): { key: string; after: number } {
+	#substitution(text: string, start: number, scope: ReadScope, quoted: boolean): { key: string; after: number } {
 		const key = `\0${this.#count++}\0`;
 		const depth = scope.depth + 1;
 		if (text[start] === "`") {
 			let end = start + 1;
 			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
-			scope.subs.set(key, this.parse(text.slice(start + 1, end), scope.cwd, depth, scope.succeeded));
+			const body = text.slice(start + 1, end).replace(quoted ? QUOTED_BACKTICK_ESCAPE_RE : BACKTICK_ESCAPE_RE, "$1");
+			scope.subs.set(key, this.parse(body, scope.cwd, depth, scope.succeeded));
 			return { key, after: end + 1 };
 		}
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
