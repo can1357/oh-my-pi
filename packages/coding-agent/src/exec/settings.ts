@@ -117,7 +117,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		flags: "i",
 		tool: "powershell",
 		message:
-			"Use the `powershell` tool instead of invoking pwsh/powershell.exe directly from bash. It runs in a persistent host whose $env:PSModulePath is reset from the OS registry value rather than whatever bash's own (often stale or POSIX-translated) environment carries.",
+			'Use the `powershell` tool instead of invoking pwsh/powershell.exe from bash: `edition: "pwsh"` for pwsh, `edition: "powershell"` for powershell.exe. It runs in a persistent host whose $env:PSModulePath is reset from the OS registry rather than inherited from bash.',
 	},
 ];
 

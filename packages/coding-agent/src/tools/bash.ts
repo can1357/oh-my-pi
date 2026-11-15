@@ -1014,6 +1014,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasLaunch: this.#launchEnabled,
 			hasPty: this.#ptyAvailable || this.#launchEnabled,
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
+			// `isToolActive` only covers top-level tools; `powershell` is
+			// discoverable and usually mounted under `xd://` instead, where the
+			// routing hint matters most.
+			hasPowerShell:
+				this.session.isToolActive?.("powershell") === true ||
+				this.session.xdev?.mountedNames.has("powershell") === true,
+			powerShellMounted: this.session.xdev?.mountedNames.has("powershell") === true,
 			// The embedded shell's session env is the shell config env (see bash-executor).
 			builtins: shellBuiltins(this.session.settings.getShellConfig().env),
 			isWindows: process.platform === "win32",

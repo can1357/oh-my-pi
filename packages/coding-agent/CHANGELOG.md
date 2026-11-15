@@ -12,6 +12,7 @@
 ### Changed
 
 - Empty-stop recovery now logs each scheduled retry with the model, provider and stop metadata, so a model that keeps returning nothing is visible in the session log instead of reading as an unexpected user message ([#20122](https://github.com/can1357/oh-my-pi/pull/20122) by [@FnSGit](https://github.com/FnSGit))
+- Models now get explicit PowerShell routing even when the `powershell` tool is only listed in the `xd://` catalog: its catalog line names both editions and the configured default, the `bash` prompt says to use the `powershell` tool with `edition` instead of running pwsh/powershell.exe, and the tool docs warn against nesting `powershell.exe` inside a pwsh command
 
 ### Fixed
 
