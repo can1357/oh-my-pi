@@ -4,6 +4,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	readlinkSync,
 	rmSync,
 	statSync,
@@ -214,6 +215,26 @@ describe.skipIf(process.platform === "win32")("worktree symlink materialization"
 		expect(readFileSync(join(linked, "file.txt"), "utf8")).toBe("victim\n");
 	});
 
+	test("applying a new gitlink does not follow a symlinked parent", async () => {
+		const { repo, outside } = await fixture();
+		writeFileSync(join(repo, "base.txt"), "base\n");
+		await git(repo, "add", "base.txt");
+		await git(repo, "commit", "-qm", "base");
+		const commit = await git(repo, "rev-parse", "HEAD");
+		await git(repo, "update-index", "--add", "--cacheinfo", `160000,${commit},dir/module`);
+		const patch = await git(repo, "diff", "--cached", "--no-ext-diff");
+		await git(repo, "reset", "-q");
+		const linked = join(outside, "linked");
+		mkdirSync(linked);
+		symlinkSync(linked, join(repo, "dir"), "dir");
+
+		await vcsGitDiscover(repo)!.applyPatch(patch, {});
+
+		expect(lstatSync(join(repo, "dir/module")).isDirectory()).toBe(true);
+		expect(lstatSync(join(repo, "dir")).isSymbolicLink()).toBe(false);
+		expect(readdirSync(linked)).toEqual([]);
+	});
+
 	test("restore preserves private permissions and only adjusts executable bits", async () => {
 		const { repo } = await fixture();
 		const privateFile = join(repo, "private.txt");
@@ -283,6 +304,24 @@ describe("worktree materialization without symlink support", () => {
 
 		expect(lstatSync(join(repo, "dir")).isFile()).toBe(true);
 		expect(readFileSync(join(repo, "dir"), "utf8")).toBe("blocking\n");
+	});
+
+	test("cherry-pick preserves an empty parent when a deleted leaf is already missing", async () => {
+		const { repo } = await fixture();
+		mkdirSync(join(repo, "dir"));
+		writeFileSync(join(repo, "dir/file.txt"), "tracked\n");
+		await git(repo, "add", "dir/file.txt");
+		await git(repo, "commit", "-qm", "base");
+		await git(repo, "checkout", "-qb", "deleted");
+		await git(repo, "rm", "-q", "dir/file.txt");
+		await git(repo, "commit", "-qm", "delete");
+		await git(repo, "checkout", "-q", "main");
+		rmSync(join(repo, "dir/file.txt"));
+
+		await vcsGitDiscover(repo)!.cherryPick("deleted");
+
+		expect(lstatSync(join(repo, "dir")).isDirectory()).toBe(true);
+		expect(readdirSync(join(repo, "dir"))).toEqual([]);
 	});
 
 	test("restore writes raw link text as a file when core.symlinks is false", async () => {

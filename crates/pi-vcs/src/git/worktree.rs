@@ -17,17 +17,6 @@ pub(super) enum MaterializedEntry<'a> {
 	Symlink { target: &'a [u8], enabled: bool },
 }
 
-/// What [`unlink_worktree_leaf`] did with the final path component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Leaf {
-	/// Nothing was at the path inside the repository.
-	Missing,
-	/// A file or symlink was unlinked. A symlink is removed, not followed.
-	Removed,
-	/// A real directory is in the way. The caller decides whether to remove it.
-	Directory,
-}
-
 /// Write `entry` at repo-relative `path` under `root`.
 ///
 /// A symlink in a parent component is replaced with a real directory before
@@ -50,9 +39,8 @@ pub(super) fn materialize_worktree_entry(
 }
 
 /// Unlink the file or symlink at repo-relative `path` without following it or
-/// any parent. Symlink parents are replaced with real directories first, so
-/// the removal cannot land outside `root`.
-pub(super) fn unlink_worktree_leaf(root: &Path, path: &str) -> Result<Leaf> {
+/// any parent. A real directory is an error, matching `remove_file`.
+pub(super) fn unlink_worktree_leaf(root: &Path, path: &str) -> Result<()> {
 	let parts = split_relative(path)?;
 	#[cfg(unix)]
 	{
@@ -64,23 +52,32 @@ pub(super) fn unlink_worktree_leaf(root: &Path, path: &str) -> Result<Leaf> {
 	}
 }
 
-/// Create every parent of repo-relative `path` as a real directory, replacing
-/// a symlink that blocks one. The final component is left untouched.
-pub(super) fn ensure_real_parents(root: &Path, path: &str) -> Result<()> {
+/// Remove the leaf at repo-relative `path`, then prune empty parents. A real
+/// directory leaf is removed only when empty. Missing leaves and parents are
+/// left alone, and all removals stay relative to open no-follow directories.
+pub(super) fn remove_worktree_path(root: &Path, path: &str) -> Result<()> {
 	let parts = split_relative(path)?;
-	let Some((_, parents)) = parts.split_last() else {
-		return Ok(());
-	};
-	if parents.is_empty() {
-		return Ok(());
-	}
 	#[cfg(unix)]
 	{
-		unix::ensure_parents(root, parents)
+		unix::remove_path(root, &parts)
 	}
 	#[cfg(not(unix))]
 	{
-		portable::ensure_parents(root, parents)
+		portable::remove_path(root, &parts)
+	}
+}
+
+/// Create repo-relative `path` as a real directory, replacing a symlink that
+/// blocks it or any parent. An existing real directory is left untouched.
+pub(super) fn ensure_worktree_directory(root: &Path, path: &str) -> Result<()> {
+	let parts = split_relative(path)?;
+	#[cfg(unix)]
+	{
+		unix::ensure_directory(root, &parts)
+	}
+	#[cfg(not(unix))]
+	{
+		portable::ensure_directory(root, &parts)
 	}
 }
 
@@ -141,28 +138,62 @@ mod unix {
 		})
 	}
 
-	pub(super) fn unlink_leaf(root: &Path, parts: &[&str]) -> crate::Result<super::Leaf> {
-		let (leaf, parents) = parts.split_last().ok_or_else(|| invalid())?;
+	pub(super) fn unlink_leaf(root: &Path, parts: &[&str]) -> crate::Result<()> {
+		let (leaf, parents) = parts.split_last().ok_or_else(invalid)?;
 		let Some(dir) = removal_parent(root, parents)? else {
-			return Ok(super::Leaf::Missing);
+			return Ok(());
 		};
 		let leaf = c_name(leaf)?;
 		match symlink_kind(&dir, &leaf)? {
-			Kind::Missing => Ok(super::Leaf::Missing),
-			Kind::Directory => Ok(super::Leaf::Directory),
-			Kind::Other => {
-				unlink_at(&dir, &leaf)?;
-				Ok(super::Leaf::Removed)
-			},
+			Kind::Missing => Ok(()),
+			Kind::Directory => Err(io::Error::from_raw_os_error(libc::EISDIR).into()),
+			Kind::Other => unlink_at(&dir, &leaf).map_err(Into::into),
 		}
 	}
 
-	pub(super) fn ensure_parents(root: &Path, parents: &[&str]) -> crate::Result<()> {
-		let mut dir = open_root(root)?;
+	pub(super) fn remove_path(root: &Path, parts: &[&str]) -> crate::Result<()> {
+		let (leaf, parents) = parts.split_last().ok_or_else(invalid)?;
+		let mut directories = Vec::with_capacity(parents.len() + 1);
+		directories.push(open_root(root)?);
 		for parent in parents {
-			dir = ensure_subdir(&dir, &c_name(parent)?)?;
+			let name = c_name(parent)?;
+			let dir = directories.last().expect("the root is always open");
+			match open_subdir(dir, &name) {
+				Ok(child) => directories.push(child),
+				Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+				Err(_) if is_symlink(dir, &name)? => {
+					unlink_at(dir, &name)?;
+					return Ok(());
+				},
+				Err(err) if err.raw_os_error() == Some(libc::ENOTDIR) => return Ok(()),
+				Err(err) => return Err(err.into()),
+			}
+		}
+		let leaf = c_name(leaf)?;
+		{
+			let dir = directories.last().expect("the root is always open");
+			match symlink_kind(dir, &leaf)? {
+				Kind::Missing => return Ok(()),
+				Kind::Directory => {
+					if remove_dir_at(dir, &leaf).is_err() {
+						return Ok(());
+					}
+				},
+				Kind::Other => unlink_at(dir, &leaf)?,
+			}
+		}
+		for parent in parents.iter().rev() {
+			drop(directories.pop());
+			let dir = directories.last().expect("the root remains open");
+			if remove_dir_at(dir, &c_name(parent)?).is_err() {
+				break;
+			}
 		}
 		Ok(())
+	}
+
+	pub(super) fn ensure_directory(root: &Path, parts: &[&str]) -> crate::Result<()> {
+		with_leaf(root, parts, |dir, leaf| ensure_subdir(dir, leaf).map(drop))
 	}
 
 	fn with_leaf<T>(
@@ -170,7 +201,7 @@ mod unix {
 		parts: &[&str],
 		op: impl FnOnce(&OwnedFd, &CStr) -> io::Result<T>,
 	) -> crate::Result<T> {
-		let (leaf, parents) = parts.split_last().ok_or_else(|| invalid())?;
+		let (leaf, parents) = parts.split_last().ok_or_else(invalid)?;
 		let mut dir = open_root(root)?;
 		for parent in parents {
 			dir = ensure_subdir(&dir, &c_name(parent)?)?;
@@ -334,6 +365,16 @@ mod unix {
 		.map(|_| ())
 	}
 
+	fn remove_dir_at(parent: &OwnedFd, name: &CStr) -> io::Result<()> {
+		retry(|| {
+			// SAFETY: `name` is a NUL-terminated component of `parent`.
+			// AT_REMOVEDIR removes only an empty directory and never follows a
+			// symlink at the leaf.
+			unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
+		})
+		.map(|_| ())
+	}
+
 	fn mkdir_at(parent: &OwnedFd, name: &CStr) -> io::Result<()> {
 		match retry(|| {
 			// SAFETY: `name` is a NUL-terminated component of `parent`.
@@ -386,7 +427,25 @@ mod unix {
 
 #[cfg(not(unix))]
 mod portable {
-	use std::{fs, io, path::Path};
+	#[cfg(windows)]
+	use std::os::windows::io::AsRawHandle;
+	use std::{
+		io::{self, Write},
+		path::Path,
+	};
+
+	use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+	#[cfg(windows)]
+	use cap_std::fs::OpenOptionsExt;
+	use cap_std::{
+		ambient_authority,
+		fs::{Dir, OpenOptions},
+	};
+	#[cfg(windows)]
+	use windows_sys::Win32::Storage::FileSystem::{
+		DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+		FileDispositionInfo, SetFileInformationByHandle,
+	};
 
 	use super::MaterializedEntry;
 
@@ -396,371 +455,213 @@ mod portable {
 		entry: MaterializedEntry<'_>,
 	) -> crate::Result<()> {
 		let (leaf, parents) = parts.split_last().expect("split rejects an empty path");
-		let dir = parents_path(root, parents)?;
-		let path = dir.join(leaf);
-		if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-			fs::remove_file(&path)?;
-		}
-		match entry {
-			MaterializedEntry::Symlink { target, .. } => {
-				if fs::symlink_metadata(&path).is_ok() {
-					fs::remove_file(&path)?;
-				}
-				fs::write(path, target)?;
-			},
-			MaterializedEntry::File { bytes, .. } => fs::write(path, bytes)?,
-		}
-		Ok(())
-	}
-
-	pub(super) fn unlink_leaf(root: &Path, parts: &[&str]) -> crate::Result<super::Leaf> {
-		let (leaf, parents) = parts.split_last().expect("split rejects an empty path");
-		let Some(dir) = removal_parent_path(root, parents)? else {
-			return Ok(super::Leaf::Missing);
+		let dir = ensure_parents(root, parents)?;
+		let bytes = match entry {
+			MaterializedEntry::File { bytes, .. } => bytes,
+			MaterializedEntry::Symlink { target, .. } => target,
 		};
-		let path = dir.join(leaf);
-		match fs::symlink_metadata(&path) {
-			Ok(meta) if meta.is_dir() => Ok(super::Leaf::Directory),
-			Ok(_) => {
-				fs::remove_file(path)?;
-				Ok(super::Leaf::Removed)
-			},
-			Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(super::Leaf::Missing),
-			Err(err) => Err(crate::Error::Io(err)),
-		}
-	}
-
-	pub(super) fn ensure_parents(root: &Path, parents: &[&str]) -> crate::Result<()> {
-		parents_path(root, parents)?;
+		write_file(&dir, leaf, bytes)?;
 		Ok(())
 	}
 
-	fn removal_parent_path(root: &Path, parents: &[&str]) -> io::Result<Option<std::path::PathBuf>> {
-		let mut dir = root.to_path_buf();
+	pub(super) fn unlink_leaf(root: &Path, parts: &[&str]) -> crate::Result<()> {
+		let (leaf, parents) = parts.split_last().expect("split rejects an empty path");
+		let Some(dir) = removal_parent(root, parents)? else {
+			return Ok(());
+		};
+		match dir.symlink_metadata(leaf) {
+			Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+				Err(io::Error::new(io::ErrorKind::IsADirectory, "worktree leaf is a directory").into())
+			},
+			Ok(_) => remove_file(&dir, leaf).map_err(Into::into),
+			Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+			Err(err) => Err(err.into()),
+		}
+	}
+
+	pub(super) fn remove_path(root: &Path, parts: &[&str]) -> crate::Result<()> {
+		let (leaf, parents) = parts.split_last().expect("split rejects an empty path");
+		let mut directories = Vec::with_capacity(parents.len() + 1);
+		directories.push(open_root(root)?);
 		for parent in parents {
-			dir.push(parent);
-			match fs::symlink_metadata(&dir) {
-				Ok(meta) if meta.file_type().is_symlink() => {
-					fs::remove_file(&dir)?;
-					return Ok(None);
+			let dir = directories.last().expect("the root is always open");
+			match dir.open_dir_nofollow(parent) {
+				Ok(child) => directories.push(child),
+				Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+				Err(err) => match dir.symlink_metadata(parent) {
+					Ok(meta) if meta.file_type().is_symlink() => {
+						remove_file(dir, parent)?;
+						return Ok(());
+					},
+					Ok(_) => return Ok(()),
+					Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+					Err(_) => return Err(err.into()),
 				},
-				Ok(meta) if meta.is_dir() => {},
-				Ok(_) => return Ok(None),
+			}
+		}
+		{
+			let dir = directories.last().expect("the root is always open");
+			match dir.symlink_metadata(leaf) {
+				Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+					if remove_dir(dir, leaf).is_err() {
+						return Ok(());
+					}
+				},
+				Ok(_) => remove_file(dir, leaf)?,
+				Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+				Err(err) => return Err(err.into()),
+			}
+		}
+		for parent in parents.iter().rev() {
+			drop(directories.pop());
+			let dir = directories.last().expect("the root remains open");
+			if remove_dir(dir, parent).is_err() {
+				break;
+			}
+		}
+		Ok(())
+	}
+
+	pub(super) fn ensure_directory(root: &Path, parts: &[&str]) -> crate::Result<()> {
+		let (leaf, parents) = parts.split_last().expect("split rejects an empty path");
+		let dir = ensure_parents(root, parents)?;
+		ensure_subdir(&dir, leaf)?;
+		Ok(())
+	}
+
+	fn open_root(root: &Path) -> io::Result<Dir> {
+		Dir::open_ambient_dir(root, ambient_authority())
+	}
+
+	fn ensure_parents(root: &Path, parents: &[&str]) -> io::Result<Dir> {
+		let mut dir = open_root(root)?;
+		for parent in parents {
+			dir = ensure_subdir(&dir, parent)?;
+		}
+		Ok(dir)
+	}
+
+	fn ensure_subdir(parent: &Dir, name: &str) -> io::Result<Dir> {
+		match parent.open_dir_nofollow(name) {
+			Ok(child) => Ok(child),
+			Err(err) if err.kind() == io::ErrorKind::NotFound => create_and_open(parent, name),
+			Err(_) if is_symlink(parent, name)? => {
+				remove_file(parent, name)?;
+				create_and_open(parent, name)
+			},
+			Err(err) => Err(err),
+		}
+	}
+
+	fn create_and_open(parent: &Dir, name: &str) -> io::Result<Dir> {
+		match parent.create_dir(name) {
+			Ok(()) => {},
+			Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {},
+			Err(err) => return Err(err),
+		}
+		parent.open_dir_nofollow(name)
+	}
+
+	fn removal_parent(root: &Path, parents: &[&str]) -> io::Result<Option<Dir>> {
+		let mut dir = open_root(root)?;
+		for parent in parents {
+			match dir.open_dir_nofollow(parent) {
+				Ok(child) => dir = child,
 				Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-				Err(err) => return Err(err),
+				Err(err) => match dir.symlink_metadata(parent) {
+					Ok(meta) if meta.file_type().is_symlink() => {
+						remove_file(&dir, parent)?;
+						return Ok(None);
+					},
+					Ok(_) => return Ok(None),
+					Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+					Err(_) => return Err(err),
+				},
 			}
 		}
 		Ok(Some(dir))
 	}
 
-	fn parents_path(root: &Path, parents: &[&str]) -> io::Result<std::path::PathBuf> {
-		let mut dir = root.to_path_buf();
-		for parent in parents {
-			dir.push(parent);
-			ensure_real_dir(&dir)?;
+	fn write_file(dir: &Dir, leaf: &str, bytes: &[u8]) -> io::Result<()> {
+		if is_symlink(dir, leaf)? {
+			remove_file(dir, leaf)?;
 		}
-		Ok(dir)
+		let mut options = OpenOptions::new();
+		options
+			.write(true)
+			.create(true)
+			.truncate(true)
+			.follow(FollowSymlinks::No);
+		#[cfg(windows)]
+		options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+		let mut file = dir.open_with(leaf, &options)?;
+		file.write_all(bytes)
 	}
 
-	fn ensure_real_dir(path: &Path) -> io::Result<()> {
-		match fs::symlink_metadata(path) {
-			Ok(meta) if meta.file_type().is_symlink() => {
-				fs::remove_file(path)?;
-				fs::create_dir(path)
-			},
-			Ok(meta) if meta.is_dir() => Ok(()),
-			Ok(_) => {
-				Err(io::Error::new(io::ErrorKind::AlreadyExists, "parent path is not a directory"))
-			},
-			Err(err) if err.kind() == io::ErrorKind::NotFound => fs::create_dir(path),
+	fn is_symlink(dir: &Dir, name: &str) -> io::Result<bool> {
+		match dir.symlink_metadata(name) {
+			Ok(meta) => Ok(meta.file_type().is_symlink()),
+			Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
 			Err(err) => Err(err),
 		}
 	}
-}
 
-#[cfg(all(test, unix))]
-mod tests {
-	use std::{
-		fs,
-		os::unix::fs::{PermissionsExt, symlink},
-		path::{Path, PathBuf},
-		process::Command,
-	};
-
-	use super::super::GitRepo;
-	use crate::types::{ApplyOptions, ResetMode, RestoreOptions};
-
-	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.arg("-C")
-			.arg(dir)
-			.args(args)
-			.output()
-			.expect("run git");
-		assert!(
-			output.status.success(),
-			"git {args:?} failed: {}",
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout)
-			.expect("utf-8")
-			.trim_end()
-			.to_owned()
+	#[cfg(windows)]
+	fn open_delete(dir: &Dir, name: &str) -> io::Result<cap_std::fs::File> {
+		let mut options = OpenOptions::new();
+		options.access_mode(DELETE);
+		options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+		options.follow(FollowSymlinks::No);
+		dir.open_with(name, &options)
 	}
 
-	fn init() -> (tempfile::TempDir, PathBuf) {
-		let temp = tempfile::tempdir().expect("tempdir");
-		let outside = temp.path().join("outside");
-		fs::create_dir(&outside).expect("outside");
-		let repo = temp.path().join("repo");
-		fs::create_dir(&repo).expect("repo");
-		git(&repo, &["init", "-q", "-b", "main"]);
-		git(&repo, &["config", "user.name", "Test"]);
-		git(&repo, &["config", "user.email", "test@example.com"]);
-		git(&repo, &["config", "core.autocrlf", "false"]);
-		(temp, outside)
-	}
-
-	fn repo_path(temp: &tempfile::TempDir) -> PathBuf {
-		temp.path().join("repo")
-	}
-
-	fn commit_file(repo: &Path, path: &str, bytes: &str) {
-		let absolute = repo.join(path);
-		if let Some(parent) = absolute.parent() {
-			fs::create_dir_all(parent).expect("parents");
+	#[cfg(windows)]
+	fn remove_file(dir: &Dir, name: &str) -> io::Result<()> {
+		let file = open_delete(dir, name)?;
+		let meta = file.metadata()?;
+		if meta.is_dir() && !meta.file_type().is_symlink() {
+			return Err(io::Error::new(io::ErrorKind::IsADirectory, "worktree leaf is a directory"));
 		}
-		fs::write(absolute, bytes).expect("write");
-		git(repo, &["add", path]);
-		git(repo, &["commit", "-qm", path]);
+		delete_open(file)
 	}
 
-	fn replace_with_link(path: &Path, target: &Path) {
-		if path.exists() || fs::symlink_metadata(path).is_ok() {
-			if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
-				fs::remove_dir_all(path).expect("remove dir");
-			} else {
-				fs::remove_file(path).expect("remove file");
-			}
+	#[cfg(not(windows))]
+	fn remove_file(dir: &Dir, name: &str) -> io::Result<()> {
+		dir.remove_file(name)
+	}
+
+	#[cfg(windows)]
+	fn remove_dir(dir: &Dir, name: &str) -> io::Result<()> {
+		let file = open_delete(dir, name)?;
+		let meta = file.metadata()?;
+		if !meta.is_dir() || meta.file_type().is_symlink() {
+			return Err(io::Error::new(io::ErrorKind::NotADirectory, "not a real directory"));
 		}
-		symlink(target, path).expect("symlink");
+		delete_open(file)
 	}
 
-	#[test]
-	fn restore_replaces_a_retargeted_symlink_without_writing_through_it() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		let victim = outside.join("victim.txt");
-		fs::write(&victim, "secret").expect("victim");
-		fs::write(repo.join("original.txt"), "inside\n").expect("original");
-		symlink("original.txt", repo.join("link")).expect("link");
-		git(&repo, &["add", "original.txt", "link"]);
-		git(&repo, &["commit", "-qm", "link"]);
-		replace_with_link(&repo.join("link"), &victim);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.restore(&RestoreOptions { files: vec!["link".into()], ..RestoreOptions::default() })
-			.expect("restore");
-
-		assert_eq!(fs::read_to_string(&victim).expect("victim"), "secret");
-		assert_eq!(
-			fs::read_link(repo.join("link")).expect("readlink"),
-			PathBuf::from("original.txt")
-		);
+	#[cfg(not(windows))]
+	fn remove_dir(dir: &Dir, name: &str) -> io::Result<()> {
+		dir.remove_dir(name)
 	}
 
-	#[test]
-	fn restore_does_not_smudge_a_symlink_target() {
-		let (temp, _) = init();
-		let repo = repo_path(&temp);
-		let smudge = temp.path().join("smudge.sh");
-		fs::write(&smudge, "#!/bin/sh\nsed 's/safe/SMUDGED/g'\n").expect("smudge");
-		fs::set_permissions(&smudge, fs::Permissions::from_mode(0o755)).expect("chmod");
-		git(&repo, &["config", "filter.corrupt.clean", "cat"]);
-		git(&repo, &["config", "filter.corrupt.smudge", smudge.to_str().expect("utf-8")]);
-		git(&repo, &["config", "filter.corrupt.required", "true"]);
-		fs::write(repo.join(".gitattributes"), "link filter=corrupt\ntext.txt filter=corrupt\n")
-			.expect("attrs");
-		symlink("safe-target", repo.join("link")).expect("link");
-		fs::write(repo.join("text.txt"), "safe\n").expect("text");
-		git(&repo, &["add", ".gitattributes", "link", "text.txt"]);
-		git(&repo, &["commit", "-qm", "filtered"]);
-		fs::write(repo.join("text.txt"), "dirty\n").expect("dirty text");
-		replace_with_link(&repo.join("link"), &temp.path().join("missing-target"));
-
-		let handle = GitRepo::require(&repo).expect("repo");
-		handle
-			.restore(&RestoreOptions {
-				files: vec!["link".into(), "text.txt".into()],
-				..RestoreOptions::default()
-			})
-			.expect("restore");
-
-		assert_eq!(fs::read_link(repo.join("link")).expect("readlink"), PathBuf::from("safe-target"));
-		assert_eq!(
-			fs::read_to_string(repo.join("text.txt")).expect("text"),
-			"SMUDGED\n",
-			"the smudge filter must still run for a regular file"
-		);
-	}
-
-	#[test]
-	fn restore_replaces_a_symlinked_parent_instead_of_writing_outside() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		commit_file(&repo, "dir/file.txt", "index-bytes\n");
-		let linked = outside.join("linked");
-		fs::create_dir(&linked).expect("linked");
-		fs::write(linked.join("file.txt"), "victim\n").expect("victim");
-		replace_with_link(&repo.join("dir"), &linked);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.restore(&RestoreOptions {
-				files: vec!["dir/file.txt".into()],
-				..RestoreOptions::default()
-			})
-			.expect("restore");
-
-		assert_eq!(fs::read_to_string(linked.join("file.txt")).expect("outside"), "victim\n");
-		assert!(
-			!fs::symlink_metadata(repo.join("dir"))
-				.expect("dir")
-				.file_type()
-				.is_symlink()
-		);
-		assert_eq!(fs::read_to_string(repo.join("dir/file.txt")).expect("restored"), "index-bytes\n");
-	}
-
-	#[test]
-	fn restore_replaces_an_intermediate_symlink_instead_of_writing_outside() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		commit_file(&repo, "dir/nested/deep.txt", "deep-bytes\n");
-		let linked = outside.join("linked");
-		fs::create_dir(&linked).expect("linked");
-		fs::write(linked.join("deep.txt"), "victim\n").expect("victim");
-		replace_with_link(&repo.join("dir/nested"), &linked);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.restore(&RestoreOptions {
-				files: vec!["dir/nested/deep.txt".into()],
-				..RestoreOptions::default()
-			})
-			.expect("restore");
-
-		assert_eq!(fs::read_to_string(linked.join("deep.txt")).expect("outside"), "victim\n");
-		assert!(
-			!fs::symlink_metadata(repo.join("dir/nested"))
-				.expect("nested")
-				.file_type()
-				.is_symlink()
-		);
-		assert_eq!(
-			fs::read_to_string(repo.join("dir/nested/deep.txt")).expect("restored"),
-			"deep-bytes\n"
-		);
-	}
-
-	#[test]
-	fn cherry_pick_replaces_a_symlink_with_a_file_without_writing_through() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		let victim = outside.join("victim.txt");
-		fs::write(&victim, "secret").expect("victim");
-		symlink(&victim, repo.join("link")).expect("link");
-		git(&repo, &["add", "link"]);
-		git(&repo, &["commit", "-qm", "symlink"]);
-		git(&repo, &["checkout", "-qb", "other"]);
-		fs::remove_file(repo.join("link")).expect("unlink");
-		fs::write(repo.join("link"), "picked\n").expect("file");
-		git(&repo, &["add", "link"]);
-		git(&repo, &["commit", "-qm", "file"]);
-		git(&repo, &["checkout", "-q", "main"]);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.cherry_pick("other")
-			.expect("cherry-pick");
-
-		assert_eq!(fs::read_to_string(&victim).expect("victim"), "secret");
-		assert!(
-			!fs::symlink_metadata(repo.join("link"))
-				.expect("link")
-				.file_type()
-				.is_symlink()
-		);
-		assert_eq!(fs::read_to_string(repo.join("link")).expect("picked"), "picked\n");
-	}
-
-	#[test]
-	fn apply_patch_does_not_write_a_new_file_through_a_symlinked_parent() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		commit_file(&repo, "dir/file.txt", "kept\n");
-		fs::write(repo.join("dir/extra.txt"), "added\n").expect("extra");
-		git(&repo, &["add", "dir/extra.txt"]);
-		git(&repo, &["commit", "-qm", "add extra"]);
-		let patch = git(&repo, &["diff", "--no-ext-diff", "HEAD~1", "HEAD"]);
-		git(&repo, &["reset", "--hard", "-q", "HEAD~1"]);
-		let linked = outside.join("linked");
-		fs::create_dir(&linked).expect("linked");
-		fs::write(linked.join("file.txt"), "victim\n").expect("victim");
-		replace_with_link(&repo.join("dir"), &linked);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.apply_patch(&patch, &ApplyOptions::default())
-			.expect("apply");
-
-		assert!(!linked.join("extra.txt").exists(), "patch wrote through the parent symlink");
-		assert_eq!(fs::read_to_string(linked.join("file.txt")).expect("outside"), "victim\n");
-		assert_eq!(fs::read_to_string(repo.join("dir/extra.txt")).expect("added"), "added\n");
-	}
-
-	#[test]
-	fn apply_patch_does_not_delete_through_a_symlinked_parent() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		commit_file(&repo, "dir/file.txt", "gone\n");
-		git(&repo, &["rm", "-q", "dir/file.txt"]);
-		git(&repo, &["commit", "-qm", "delete"]);
-		let patch = git(&repo, &["diff", "--no-ext-diff", "HEAD~1", "HEAD"]);
-		git(&repo, &["reset", "--hard", "-q", "HEAD~1"]);
-		let linked = outside.join("linked");
-		fs::create_dir(&linked).expect("linked");
-		fs::write(linked.join("file.txt"), "gone\n").expect("victim");
-		replace_with_link(&repo.join("dir"), &linked);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.apply_patch(&patch, &ApplyOptions::default())
-			.expect("apply");
-
-		assert_eq!(fs::read_to_string(linked.join("file.txt")).expect("outside"), "gone\n");
-	}
-
-	#[test]
-	fn hard_reset_does_not_delete_through_a_symlinked_parent() {
-		let (temp, outside) = init();
-		let repo = repo_path(&temp);
-		commit_file(&repo, "dir/file.txt", "tracked\n");
-		git(&repo, &["checkout", "-qb", "deleted"]);
-		git(&repo, &["rm", "-q", "dir/file.txt"]);
-		git(&repo, &["commit", "-qm", "delete"]);
-		git(&repo, &["checkout", "-q", "main"]);
-		let linked = outside.join("linked");
-		fs::create_dir(&linked).expect("linked");
-		fs::write(linked.join("file.txt"), "victim\n").expect("victim");
-		replace_with_link(&repo.join("dir"), &linked);
-
-		GitRepo::require(&repo)
-			.expect("repo")
-			.reset(ResetMode::Hard, Some("deleted"))
-			.expect("reset");
-
-		assert_eq!(fs::read_to_string(linked.join("file.txt")).expect("outside"), "victim\n");
+	#[cfg(windows)]
+	fn delete_open(file: cap_std::fs::File) -> io::Result<()> {
+		let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+		// SAFETY: `file` is a live handle opened with DELETE access, and the
+		// disposition pointer and size describe the local value exactly.
+		let result = unsafe {
+			SetFileInformationByHandle(
+				file.as_raw_handle(),
+				FileDispositionInfo,
+				(&raw const disposition).cast(),
+				size_of::<FILE_DISPOSITION_INFO>() as u32,
+			)
+		};
+		if result == 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(())
+		}
 	}
 }

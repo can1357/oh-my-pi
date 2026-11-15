@@ -1680,8 +1680,7 @@ fn write_patch_worktree(
 				// untouched. Parents are created without following a symlink, so
 				// the directory cannot appear outside the repository.
 				validate_repo_path(target).map_err(ApplyFailure::into_error)?;
-				super::worktree::ensure_real_parents(repo.root(), target)?;
-				fs::create_dir_all(repo.root().join(target))?;
+				super::worktree::ensure_worktree_directory(repo.root(), target)?;
 			} else {
 				write_worktree_entry(repo, gix_repo, filter, target, entry)?;
 			}
@@ -1891,26 +1890,7 @@ fn write_worktree_entry(
 /// in-repository leaf to remove.
 fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-	let absolute = repo.root().join(path);
-	match super::worktree::unlink_worktree_leaf(repo.root(), path)? {
-		super::worktree::Leaf::Directory => {
-			if fs::remove_dir(&absolute).is_err() {
-				return Ok(());
-			}
-		},
-		super::worktree::Leaf::Missing | super::worktree::Leaf::Removed => {},
-	}
-	let mut directory = absolute.parent();
-	while let Some(current) = directory {
-		if current == repo.root() {
-			break;
-		}
-		match fs::remove_dir(current) {
-			Ok(()) => directory = current.parent(),
-			Err(_) => break,
-		}
-	}
-	Ok(())
+	super::worktree::remove_worktree_path(repo.root(), path)
 }
 
 fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {

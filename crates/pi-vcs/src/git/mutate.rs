@@ -1652,14 +1652,9 @@ fn checkout_tree(
 	for entry in current.entries() {
 		let path = entry.path(&current).to_str_lossy();
 		if !target_paths.contains(path.as_ref()) {
-			// A directory here is a gitlink checkout. `remove_file` is what this
-			// loop used to call, and it fails on a real directory; keep that
-			// instead of deleting a checked-out submodule.
-			if super::worktree::unlink_worktree_leaf(owner.root(), path.as_ref())?
-				== super::worktree::Leaf::Directory
-			{
-				fs::remove_file(owner.root().join(path.as_ref()))?;
-			}
+			// A directory here is a gitlink checkout. Like `remove_file`, the
+			// helper fails on a real directory instead of deleting a submodule.
+			super::worktree::unlink_worktree_leaf(owner.root(), path.as_ref())?;
 		}
 	}
 	let mut opts = repo
