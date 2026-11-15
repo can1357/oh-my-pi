@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 5.1
 <#
     pshost_bootstrap.ps1 — persistent PowerShell host loop for the omp `PsHost`
     native sidecar.
@@ -36,6 +36,13 @@ param(
 Set-StrictMode -Off
 $ErrorActionPreference = 'Stop'
 
+# `$IsWindows` is a PowerShell 6+ automatic variable; it does not exist on
+# Windows PowerShell 5.1, where referencing it just reads as `$null` (falsy).
+# `[System.Environment]::OSVersion.Platform` is edition-agnostic and has
+# meant Windows vs. everything else since .NET 1.0, so it's used everywhere
+# below instead of the automatic variable.
+$script:IsWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+
 # Hard cap on a single frame in either direction; must match MAX_FRAME_BYTES in
 # pshost.rs. Outbound chunks are split below it, inbound violations mean the
 # stream is desynced beyond recovery.
@@ -68,7 +75,7 @@ Add-Type -Namespace Omp -Name Stdio -MemberDefinition @'
 // slot at the null device so spawned children can't touch the protocol channel.
 static System.IO.Stream Detach(int stdHandle, int posixFd, bool forWrite) {
     var access = forWrite ? System.IO.FileAccess.Write : System.IO.FileAccess.Read;
-    if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows)) {
+    if (System.Environment.OSVersion.Platform == System.PlatformID.Win32NT) {
         // Wrap the original pipe handle (ownsHandle:false — the process still
         // owns it), then point the inheritable slot at NUL. SetStdHandle only
         // repoints the std SLOT; it does not touch HANDLE_FLAG_INHERIT on the
@@ -638,7 +645,7 @@ while ($alive) {
             # backgrounded subshell in its OWN new process group, so it
             # survives regardless of what happens to this process or the
             # wrapper bash that spawned it.
-            if (-not $IsWindows) {
+            if (-not $script:IsWindowsHost) {
                 try {
                     $killScript = "set -m; ( kill -TERM -- -$PID 2>/dev/null; sleep 0.3; " +
                         "kill -KILL -- -$PID 2>/dev/null ) & disown"
