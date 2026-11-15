@@ -72,6 +72,7 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 }
 /** Resolve display semantics without mistaking an absent rate card for a free model. */
 export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingStatus">): ModelPricingStatus {
+	if (model.pricingStatus === "unknown") return "unknown";
 	const cost = getEffectiveTokenCost(model.cost);
 	if (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0) return "fixed";
 	return model.pricingStatus ?? "unknown";

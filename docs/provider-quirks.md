@@ -929,6 +929,9 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/clou
 
 - **Provider entry (`cloudflare-ai-gateway`)**: `packages/catalog/src/compat/rules/providers/cloudflare-ai-gateway.kdl` declares default model `anthropic/claude-opus-5`. Environment keys: `CLOUDFLARE_AI_GATEWAY_API_KEY`.
 - **Authored seeds**: `claude-sonnet-4-5`; bundle policy `empty`. Limits, capabilities, and prices are authored alongside these rows.
+- **Workers AI discovery**: The account-scoped Workers AI model search uses the Gateway credential's token, which needs Workers AI Read permission for the Gateway account. Gateway inference needs AI Gateway Run permission. The account ID comes from the Gateway credential, falling back to `CLOUDFLARE_ACCOUNT_ID`. Discovery does not use `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_AUTH_TOKEN` as token fallbacks.
+- **Workers AI metadata**: Discovery preserves trusted bundled metadata. New entries use conservative chat defaults without inferred pricing or tool support. Catalog availability does not establish chat protocol compatibility, including for decision models.
+- **Discovery failures**: HTTP 401 and 403 report a discovery permission error; cached models remain available after a failed refresh. Network and other HTTP failures fall back to available catalog data.
 - **Priority Wiring**: Assigned catalog priority level 39 in `providerPriority` (`packages/catalog/src/identity/priority.ts`).
 
 ## CoreWeave Serverless Inference (`coreweave`)

@@ -1,4 +1,4 @@
-import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
+import { $env, USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -48,6 +48,7 @@ import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, t
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
+import { parseCloudflareCredential } from "../wire/cloudflare";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
@@ -5648,20 +5649,238 @@ export function qianfanModelManagerOptions(
 // 19. Cloudflare AI Gateway
 // ---------------------------------------------------------------------------
 
+class CloudflareDiscoveryPermissionError extends Error {
+	constructor(status: number) {
+		super(`Cloudflare Workers AI model discovery returned HTTP ${status}. Configure the Gateway credential with Workers AI read permission for this account.`);
+	}
+}
+
 export interface CloudflareAiGatewayModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
 }
 
+// Search properties are sparse; absent, duplicate, or malformed values are not negative capabilities.
+function applyCloudflareSearchCapabilities(model: ModelSpec<Api>, properties: unknown): ModelSpec<Api> {
+	const fields: NonNullable<ModelSpec<Api>["discoveryMetadataFields"]> = [];
+	model = { ...model, discoveryMetadataFields: fields };
+	if (!Array.isArray(properties)) return model;
+	const value = (id: string): unknown => {
+		const matches = properties.filter(property => isRecord(property) && property.property_id === id);
+		return matches.length === 1 && isRecord(matches[0]) ? matches[0].value : undefined;
+	};
+	const boolean = (id: string): boolean | undefined => {
+		const raw = value(id);
+		if (raw === true || raw === "true") return true;
+		if (raw === false || raw === "false") return false;
+		return undefined;
+	};
+	const context = value("context_window");
+	if (typeof context === "string" && /^\d+$/.test(context)) {
+		const parsed = Number(context);
+		if (Number.isSafeInteger(parsed) && parsed > 0) {
+			fields.push("contextWindow");
+			model = { ...model, contextWindow: parsed };
+		}
+	}
+	const tools = boolean("function_calling");
+	const reasoning = boolean("reasoning");
+	const vision = boolean("vision");
+	if (tools !== undefined) {
+		fields.push("supportsTools");
+		model = { ...model, supportsTools: tools };
+	}
+	if (reasoning !== undefined) {
+		fields.push("reasoning");
+		model = { ...model, reasoning };
+	}
+	if (vision !== undefined) {
+		fields.push("input");
+		model = { ...model, input: vision ? ["text", "image"] : ["text"] };
+	}
+	return model;
+}
+
+// Cloudflare reports USD per million tokens directly on the search result.
+function applyCloudflareSearchPrices(model: ModelSpec<Api>, properties: unknown): ModelSpec<Api> {
+	model = { ...model, discoveryCostFields: [] };
+	if (!Array.isArray(properties)) return model;
+	const priceProperties = properties.filter(property => isRecord(property) && property.property_id === "price");
+	if (priceProperties.length === 0) return model;
+	if (priceProperties.length !== 1 || !isRecord(priceProperties[0]) || !Array.isArray(priceProperties[0].value)) {
+		return { ...model, pricingStatus: "unknown" };
+	}
+	const units = new Map<string, number | null>();
+	const fields = new Map<string, "input" | "output" | "cacheRead">([
+		["per M input tokens", "input"],
+		["per M output tokens", "output"],
+		["per M cached input tokens", "cacheRead"],
+	]);
+	for (const item of priceProperties[0].value) {
+		if (!isRecord(item) || typeof item.unit !== "string" || !fields.has(item.unit)) continue;
+		const price = item.price;
+		if (item.currency !== "USD" || typeof price !== "number" || !Number.isFinite(price) || price < 0) {
+			units.set(item.unit, null);
+			continue;
+		}
+		units.set(item.unit, units.has(item.unit) ? null : price);
+	}
+	const input = units.get("per M input tokens");
+	const output = units.get("per M output tokens");
+	const complete = input !== undefined && input !== null && output !== undefined && output !== null;
+	const allKnown = priceProperties[0].value.every(item =>
+		isRecord(item) && typeof item.unit === "string" && fields.has(item.unit) && units.get(item.unit) !== null,
+	);
+	// Preserve individually valid token rates, but do not claim a partial card is fixed or free.
+	const cost = { ...model.cost };
+	const discoveryCostFields: NonNullable<ModelSpec<Api>["discoveryCostFields"]> = [];
+	for (const [unit, field] of fields) {
+		const value = units.get(unit);
+		if (value !== undefined && value !== null) {
+			cost[field] = value;
+			discoveryCostFields.push(field);
+		}
+	}
+	model = { ...model, discoveryCostFields };
+	if (!complete || !allKnown) return { ...model, cost, pricingStatus: "unknown" };
+	if (units.get("per M cached input tokens") === 0 && input === 0 && output === 0 && cost.cacheWrite === 0) {
+		return { ...model, cost, pricingStatus: "free" };
+	}
+	if (input > 0 || output > 0 || (units.get("per M cached input tokens") ?? 0) > 0) {
+		return { ...model, cost, pricingStatus: undefined };
+	}
+	return { ...model, cost, pricingStatus: "unknown" };
+}
+
+function createCloudflareWorkersAiDiscovery(
+	accountId: string,
+	discoveryToken: string,
+	fetch?: FetchImpl,
+): () => Promise<ModelSpec<Api>[] | null> {
+	const references = createBundledReferenceMap<Api>("cloudflare-ai-gateway");
+	return async (): Promise<ModelSpec<Api>[] | null> => {
+		// Text Generation does not guarantee chat-completions compatibility.
+		// Publish classified models, using only explicit capability properties.
+		const models: ModelSpec<Api>[] = [];
+		const seen = new Set<string>();
+		try {
+			for (let page = 1; page <= 100; page++) {
+				const url = new URL(
+					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search`,
+				);
+				url.searchParams.set("task", "Text Generation");
+				url.searchParams.set("per_page", "100");
+				url.searchParams.set("page", String(page));
+				const response = await discoveryFetch(fetch)(url.toString(), {
+					headers: { Authorization: `Bearer ${discoveryToken}` },
+					signal: AbortSignal.timeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS),
+				});
+				if (response.status === 401 || response.status === 403) {
+					throw new CloudflareDiscoveryPermissionError(response.status);
+				}
+				if (!response.ok) return null;
+				const body: unknown = await response.json();
+				if (!isRecord(body) || body.success !== true || !Array.isArray(body.result)) return null;
+				for (const entry of body.result) {
+					if (!isRecord(entry) || typeof entry.name !== "string") continue;
+					if (!/^@[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(entry.name)) continue;
+					if (entry.status === "deprecated") continue;
+					const task = typeof entry.task === "string"
+						? entry.task
+						: isRecord(entry.task) && typeof entry.task.name === "string"
+							? entry.task.name
+							: null;
+					const textGeneration = task?.trim().toLowerCase().replace(/[\s_]+/g, "-") === "text-generation";
+					if (entry.task !== undefined && !textGeneration) continue;
+					const id = `workers-ai/${entry.name}`;
+					const reference = references.get(id);
+					if (seen.has(id) || (reference && reference.api !== "openai-completions")) continue;
+					if (!reference && !textGeneration) continue;
+					seen.add(id);
+					models.push(applyCloudflareSearchCapabilities(applyCloudflareSearchPrices(reference ?? {
+						id,
+						name: entry.name,
+						provider: "cloudflare-ai-gateway",
+						api: "openai-completions",
+						baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						pricingStatus: "unknown",
+						contextWindow: null,
+						maxTokens: null,
+					}, entry.properties), entry.properties));
+				}
+				if (body.result_info !== undefined) {
+					if (!isRecord(body.result_info)) return null;
+					const totalPages = body.result_info.total_pages;
+					if (totalPages !== undefined) {
+						if (typeof totalPages !== "number" || !Number.isSafeInteger(totalPages) || totalPages < 0) return null;
+						if (page >= totalPages) return models;
+						continue;
+					}
+				}
+				if (body.result.length < 100) return models;
+			}
+			return null;
+		} catch (error) {
+			if (error instanceof CloudflareDiscoveryPermissionError) throw error;
+			return null;
+		}
+	};
+}
+
 export function cloudflareAiGatewayModelManagerOptions(
 	config?: CloudflareAiGatewayModelManagerConfig,
-): ModelManagerOptions<"anthropic-messages"> {
-	return createSimpleAnthropicProviderOptions(
+): ModelManagerOptions<Api> {
+	const credential = parseCloudflareCredential(config?.apiKey ?? $env.CLOUDFLARE_AI_GATEWAY_API_KEY ?? "");
+	const accountId = credential?.accountId ?? $env.CLOUDFLARE_ACCOUNT_ID?.trim();
+	const gatewayId = credential?.gatewayId ?? $env.CLOUDFLARE_GATEWAY_ID?.trim();
+	const discoveryToken = credential?.token;
+	let baseUrl = config?.baseUrl?.trim();
+	if (baseUrl && accountId) baseUrl = baseUrl.replace("<account>", encodeURIComponent(accountId));
+	if (baseUrl && gatewayId) baseUrl = baseUrl.replace("<gateway>", encodeURIComponent(gatewayId));
+	const base = createSimpleAnthropicProviderOptions(
 		"cloudflare-ai-gateway",
 		"https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
-		config,
+		{ ...config, apiKey: credential?.token ?? config?.apiKey, ...(baseUrl ? { baseUrl } : {}) },
 	);
+	// Runtime model configuration can supply the default route as a baseUrl.
+	// Only a different endpoint opts into Anthropic discovery.
+	const defaultRoute = !baseUrl || /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/?#]+\/[^/?#]+\/anthropic\/?$/i.test(baseUrl);
+	const fetchAnthropicModels = defaultRoute ? undefined : base.fetchDynamicModels;
+	if (!discoveryToken || !accountId) {
+		return { ...base, fetchDynamicModels: fetchAnthropicModels };
+	}
+
+	const fetchWorkersModels = createCloudflareWorkersAiDiscovery(accountId, discoveryToken, config?.fetch);
+
+	return {
+		...base,
+		fetchDynamicModels: async () => {
+			const [workersResult, anthropic] = await Promise.all([
+				fetchWorkersModels().then(
+					models => ({ models }),
+					error => ({ models: null, error: error instanceof CloudflareDiscoveryPermissionError ? error : undefined }),
+				),
+				fetchAnthropicModels?.().catch(() => null) ?? Promise.resolve(undefined),
+			]);
+			const workers = workersResult.models;
+			const permissionError = "error" in workersResult ? workersResult.error : undefined;
+			if (workers === null && (anthropic === null || anthropic === undefined)) {
+				if (permissionError) throw permissionError;
+				return null;
+			}
+			const models = [...(anthropic ?? []), ...(workers ?? [])];
+			return workers === null || anthropic === null || anthropic?.complete === false
+				? Object.assign(models, {
+						complete: false as const,
+						...(permissionError ? { fetchError: permissionError.message } : {}),
+					})
+				: models;
+		},
+	};
 }
 
 // ---------------------------------------------------------------------------
