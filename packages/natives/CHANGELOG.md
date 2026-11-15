@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed restore, checkout, and patch application so a symlink is replaced instead of followed, including when a parent directory is a symlink, and discarding or merging a link no longer overwrites the file it points at ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat)).
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
