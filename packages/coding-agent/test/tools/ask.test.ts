@@ -1,7 +1,10 @@
-import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { agentLoop, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { AgentLoopConfig } from "@oh-my-pi/pi-agent-core/types";
-import type { Message } from "@oh-my-pi/pi-ai";
+import * as ai from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
@@ -13,8 +16,13 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, recoverAskHtml } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+
+// 1x1 transparent PNG.
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 const DB_FORM = `<form>
   <p>Sessions live in memory.</p>
@@ -597,5 +605,162 @@ describe("recoverAskHtml", () => {
 		expect(recoverAskHtml({ html: DB_FORM })).toBe(DB_FORM);
 		expect(recoverAskHtml({ questions: [{ id: "q", question: "Q?", options: [] }] })).toBeUndefined();
 		expect(recoverAskHtml("<form></form>")).toBeUndefined();
+	});
+});
+
+describe("AskTool option note images", () => {
+	const image = { type: "image" as const, data: TINY_PNG_BASE64, mimeType: "image/png" };
+	const second = { type: "image" as const, data: "second-image", mimeType: "image/jpeg" };
+	const notes = [
+		{
+			name: "store",
+			question: "Session store",
+			option: "Redis",
+			value: "redis",
+			text: "see [Image #1, 1x1]",
+			images: [image],
+		},
+		{
+			name: "ttl",
+			question: "Lifetime (days)",
+			option: "7",
+			value: "7",
+			text: "and [Image #1, 2x2]",
+			images: [second],
+		},
+	];
+
+	it("sends note images after the text with markers numbered across notes", async () => {
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "redis" }, notes }));
+		const result = await new AskTool(createSession()).execute(
+			"call-note-images",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({ formDialog }),
+		);
+
+		expect(formDialog.mock.calls[0]?.[1]).toMatchObject({ acceptImages: true });
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: `User answers:\n${JSON.stringify({ store: "redis" }, null, 2)}\nOption notes:\n- Session store: Redis [store="redis"] — see [Image #1, 1x1]\n- Lifetime (days): 7 [ttl="7"] — and [Image #2, 2x2]`,
+			},
+			image,
+			second,
+		]);
+		expect(result.details?.notes).toEqual([
+			{ name: "store", question: "Session store", option: "Redis", value: "redis", text: "see [Image #1, 1x1]" },
+			{ name: "ttl", question: "Lifetime (days)", option: "7", value: "7", text: "and [Image #2, 2x2]" },
+		]);
+	});
+
+	it("names an image's source file in a notice worded for an ask answer", async () => {
+		const tagged = tagImageAttachmentSource(image, "/tmp/shot.png", "image");
+		const result = await new AskTool(createSession()).execute(
+			"call-note-notice",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({
+				formDialog: async () => ({ data: { store: "redis" }, notes: [{ ...notes[0]!, images: [tagged] }] }),
+			}),
+		);
+
+		expect(result.content).toHaveLength(3);
+		const notice = result.content[1];
+		expect(notice?.type).toBe("text");
+		const noticeText = notice?.type === "text" ? notice.text : "";
+		expect(noticeText).toContain("to their ask answer");
+		expect(noticeText).toContain("/tmp/shot.png");
+		expect(result.content[2]).toMatchObject({ type: "image", data: image.data });
+	});
+
+	describe("for a text-only model", () => {
+		const visionModel = buildModel({
+			id: "gpt-4o",
+			name: "GPT-4o",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		});
+		const textModel: Model<Api> = { ...visionModel, id: "gpt-4.1-mini", input: ["text"] };
+		let tempDir: TempDir;
+
+		beforeEach(async () => {
+			tempDir = await TempDir.create("@omp-ask-describe-");
+			vi.spyOn(ai, "completeSimple").mockImplementation(
+				(async () =>
+					({
+						role: "assistant",
+						api: visionModel.api,
+						provider: visionModel.provider,
+						model: visionModel.id,
+						usage: {
+							input: 1,
+							output: 1,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+						content: [{ type: "text", text: "A red banner reading ZEBRA 42." }],
+					}) satisfies AssistantMessage) as unknown as typeof ai.completeSimple,
+			);
+		});
+
+		afterEach(async () => {
+			await tempDir.remove();
+		});
+
+		function run(model: Model<Api>, getApiKey: () => Promise<string | undefined> = async () => "test-key") {
+			return new AskTool(
+				createSession({
+					settings: Settings.isolated({ "ask.notify": "off" }),
+					getActiveModel: () => model,
+					getArtifactsDir: () => tempDir.path(),
+					getSessionId: () => "session",
+					modelRegistry: {
+						getAvailable: () => [visionModel],
+						getApiKey,
+						resolver: () => async () => "test-key",
+					} as unknown as ToolSession["modelRegistry"],
+				}),
+			).execute(
+				"call-describe",
+				{ html: DB_FORM },
+				undefined,
+				undefined,
+				createContext({ formDialog: async () => ({ data: { store: "redis" }, notes: [notes[0]!] }) }),
+			);
+		}
+
+		it("follows each note image with a vision-model description", async () => {
+			const result = await run(textModel);
+
+			expect(result.content.slice(1)).toEqual([
+				image,
+				{ type: "text", text: expect.stringContaining("A red banner reading ZEBRA 42.") },
+			]);
+		});
+
+		it("keeps the answer and its images when describing them fails", async () => {
+			const result = await run(textModel, async () => {
+				throw new Error("credential lookup failed");
+			});
+
+			expect(result.content.slice(1)).toEqual([image]);
+		});
+
+		it("sends the image alone to a vision model", async () => {
+			expect((await run(visionModel)).content.slice(1)).toEqual([image]);
+		});
 	});
 });

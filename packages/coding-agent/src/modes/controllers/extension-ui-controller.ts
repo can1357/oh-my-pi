@@ -909,6 +909,9 @@ export class ExtensionUiController {
 				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
 				onCancel: () => settle(undefined),
 				inputGuard,
+				acceptImages: dialogOptions?.acceptImages === true,
+				onPasteImage: () => this.ctx.handleImagePaste(),
+				onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 			});
 			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();

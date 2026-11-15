@@ -56,8 +56,12 @@ function makeHarness() {
 	const agent = new Agent();
 	const steeringChips = () =>
 		agent.peekSteeringQueue().map(message => (message.role === "user" ? String(message.content) : ""));
+	const handleImagePaste = vi.fn(async () => true);
+	const handleImagePathPaste = vi.fn(async () => {});
 	const ctx = {
 		editor,
+		handleImagePaste,
+		handleImagePathPaste,
 		ui: {
 			requestRender,
 			getFocused,
@@ -93,6 +97,8 @@ function makeHarness() {
 
 	return {
 		editor,
+		handleImagePaste,
+		handleImagePathPaste,
 		requestRender,
 		addAutocompleteProvider,
 		editorContainer,
@@ -328,6 +334,19 @@ describe("ExtensionUiController form dialog", () => {
 		});
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
+	it("routes image pastes in an open note to the host paste handlers", () => {
+		const harness = makeHarness();
+		void harness.controller.showFormDialog(html, { acceptImages: true });
+		harness.handleInput("\x1b[B");
+		harness.handleInput("n");
+
+		harness.handleInput("\x1b[200~\x1b[201~");
+		expect(harness.handleImagePaste).toHaveBeenCalledTimes(1);
+
+		harness.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
+		expect(harness.handleImagePathPaste).toHaveBeenCalledWith("/tmp/shot.png");
 	});
 
 	it("resolves undefined on Esc and restores the editor", async () => {

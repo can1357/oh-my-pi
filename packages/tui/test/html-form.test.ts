@@ -407,6 +407,209 @@ describe("html form", () => {
 		});
 	});
 
+	describe("option note images", () => {
+		const IMAGE = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		const DIMS = { width: 1, height: 1 };
+		const NOTE_KEY = "\x1bn";
+		const HOME = "\x1b[H";
+		const DELETE = "\x1b[3~";
+		const paste = (text: string) => `\x1b[200~${text}\x1b[201~`;
+
+		function addImage(form: HtmlFormDialog): string {
+			const settle = form.beginPaste();
+			const marker = form.attachImage(IMAGE, DIMS);
+			if (marker === undefined) throw new Error("note does not accept images");
+			settle(marker);
+			return marker;
+		}
+
+		function imageDialog(overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
+			return dialog(DB_FORM, { acceptImages: true, ...overrides });
+		}
+
+		it("puts an attached image's marker in the note and reports both after save", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("see ");
+			expect(addImage(form)).toBe("[Image #1, 1x1]");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toEqual([
+				{
+					name: "db",
+					question: expect.any(String),
+					option: "SQLite",
+					value: "sqlite",
+					text: "see [Image #1, 1x1]",
+					images: [IMAGE],
+				},
+			]);
+		});
+
+		it("drops the image of a deleted marker and renumbers the rest", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(" ");
+			const second = { ...IMAGE, data: "BBBB" };
+			form.beginPaste()(form.attachImage(second, DIMS));
+			form.handleInput(HOME);
+			form.handleInput(DELETE);
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "[Image #1, 1x1]", images: [second] }]);
+
+			form.handleInput(NOTE_KEY);
+			form.handleInput(HOME);
+			for (let i = 0; i < "[Image #1, 1x1]".length; i++) form.handleInput(DELETE);
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toEqual([]);
+		});
+
+		it("discards images added since the note opened when Esc closes it", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("kept");
+			form.handleInput(ENTER);
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(ESC);
+			expect(form.optionNotes()).toMatchObject([{ text: "kept" }]);
+			expect(form.optionNotes()[0]?.images).toBeUndefined();
+			form.handleInput(NOTE_KEY);
+			expect(form.attachImage(IMAGE, DIMS)).toBe("[Image #1, 1x1]");
+		});
+
+		it("restores a saved note's images on reopening and numbers a new paste after them", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(ENTER);
+			form.handleInput(NOTE_KEY);
+			const second = { ...IMAGE, data: "BBBB" };
+			expect(form.attachImage(second, DIMS)).toBe("[Image #2, 1x1]");
+			form.beginPaste()("[Image #2, 1x1]");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([
+				{ text: "[Image #1, 1x1][Image #2, 1x1]", images: [IMAGE, second] },
+			]);
+		});
+
+		it("accepts images only when opted in, a note is open and the form is shown", () => {
+			const plain = dialog(DB_FORM).form;
+			plain.handleInput(NOTE_KEY);
+			expect(plain.acceptsImages).toBe(false);
+			expect(plain.pasteText).toBeUndefined();
+			expect(plain.attachImage(IMAGE)).toBeUndefined();
+
+			const { form } = imageDialog();
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+			form.handleInput(NOTE_KEY);
+			expect(form.acceptsImages).toBe(true);
+			expect(form.pasteText).toBeDefined();
+			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+			form.handleNativeEvent({ type: "action", key: "", act: "show", mods: [] });
+			expect(form.acceptsImages).toBe(true);
+			expect(form.pasteText).toBeDefined();
+			form.dispose();
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+		});
+
+		it("saves on Enter only after a pending paste settles", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			const marker = form.attachImage(IMAGE, DIMS)!;
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			expect(form.optionNotes()).toEqual([]);
+			expect(settle(marker)).toBe(true);
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.optionNotes()).toMatchObject([{ text: marker, images: [IMAGE] }]);
+		});
+
+		it("cancels the queued save when a pending paste fails", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("text");
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(settle(undefined)).toBe(false);
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			expect(form.optionNotes()).toEqual([]);
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "text" }]);
+		});
+
+		it("delivers settled pastes into the note in reservation order", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			const first = form.beginPaste();
+			const second = form.beginPaste();
+			second("B");
+			first("A");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "AB" }]);
+		});
+
+		it("sends an empty bracketed paste to onPasteImage and image-path pastes to onPasteImagePath", () => {
+			const onPasteImage = vi.fn();
+			const onPasteImagePath = vi.fn();
+			const { form } = imageDialog({ onPasteImage, onPasteImagePath });
+			form.handleInput(NOTE_KEY);
+			form.handleInput(paste(""));
+			expect(onPasteImage).toHaveBeenCalledTimes(1);
+			form.handleInput(paste("/tmp/a.png /tmp/b.png"));
+			expect(onPasteImagePath.mock.calls).toEqual([["/tmp/a.png"], ["/tmp/b.png"]]);
+			form.handleInput(paste("plain words"));
+			form.handleInput(ENTER);
+			expect(onPasteImage).toHaveBeenCalledTimes(1);
+			expect(onPasteImagePath).toHaveBeenCalledTimes(2);
+			expect(form.optionNotes()).toMatchObject([{ text: "plain words" }]);
+		});
+
+		it("leaves bracketed pastes alone without acceptImages", () => {
+			const onPasteImage = vi.fn();
+			const { form } = dialog(DB_FORM, { onPasteImage });
+			form.handleInput(NOTE_KEY);
+			form.handleInput(paste(""));
+			form.handleInput(paste("/tmp/a.png"));
+			form.handleInput(ENTER);
+			expect(onPasteImage).not.toHaveBeenCalled();
+			expect(form.optionNotes()).toMatchObject([{ text: "/tmp/a.png" }]);
+		});
+
+		it("is not a paste target without acceptImages", () => {
+			const { form } = dialog(DB_FORM);
+			expect(form.pasteText).toBeUndefined();
+		});
+
+		it("delivers nothing into the note when a paste reserved before hiding completes", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("kept");
+			const settle = form.beginPaste();
+			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			expect(settle("secret")).toBe(false);
+			form.handleNativeEvent({ type: "action", key: "", act: "show", mods: [] });
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "kept" }]);
+		});
+
+		it("keeps image-path text in the focused text field when no note is open", () => {
+			const onPasteImagePath = vi.fn();
+			const { form } = dialog(`<form><label>Name<input name="who"></label></form>`, {
+				acceptImages: true,
+				onPasteImagePath,
+			});
+			form.handleInput(paste("/tmp/a.png"));
+			expect(onPasteImagePath).not.toHaveBeenCalled();
+			expect(form.data()).toEqual({ who: "/tmp/a.png" });
+		});
+	});
+
 	describe("parsing", () => {
 		it("joins radios split across a decision table into one field labeled by column headers", () => {
 			const form = parseHtmlForm(`<form><table>
