@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
-	engine::{FileOp as EngineFileOp, HeaderKind, Resolved, StagedFile},
+	engine::{FileOp as EngineFileOp, HeaderKind, Location, Resolved, StagedFile},
 	error::{EditError, Rejection},
 	files::FileSource,
 	store::{Clipboard, EditStore, Snapshot, file_hash, payload_hash},
@@ -727,24 +727,27 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 	format!("{op} → resolved {span} ({lines} line{}){suffix}", if lines == 1 { "" } else { "s" })
 }
 
-/// When the authored path does not exist, rebind the section to the one
-/// stored snapshot with the same content tag and file name. `None` keeps
-/// the authored section and target, which callers use by reference.
+/// Rebind a missing disk path to the unique snapshot with its tag and name.
+///
+/// Hosted identities never participate, regardless of authored spelling.
 pub(crate) fn recover_target(
 	section: &PatchSection,
 	initial: &Resolved,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Option<(PatchSection, Resolved)> {
+	let Location::Disk(initial_path) = &initial.location else {
+		return None;
+	};
 	if files.exists(&initial.location) {
 		return None;
 	}
 	let tag = section.file_hash.as_deref()?;
-	let authored_name = initial.location.key().file_name();
+	let authored_name = initial_path.file_name();
 	let mut candidates = store
 		.paths_with_hash(tag)
 		.into_iter()
-		.filter(|path| path.file_name() == authored_name && path.as_path() != initial.location.key())
+		.filter(|path| path.file_name() == authored_name && path != initial_path)
 		.collect::<Vec<_>>();
 	candidates.sort();
 	candidates.dedup();
@@ -1045,7 +1048,9 @@ mod lifecycle {
 	use tempfile::TempDir;
 
 	use crate::{
-		EditMode, EditResult, EditWriter, WriteRequest, WriteResponse,
+		EditMode, EditResult, EditWriter, Location, Resolved, WriteRequest, WriteResponse,
+		files::FileCache,
+		modes::hashline::input::{Patch, SplitOptions},
 		path_policy::{PathPolicy, canonical_key},
 		session::{ApplyRequest, Session, SessionConfig},
 		store::EditStore,
@@ -1152,6 +1157,35 @@ mod lifecycle {
 
 	fn all_seen(lines: usize) -> Vec<u32> {
 		(1..=lines as u32).collect()
+	}
+
+	#[test]
+	fn hosted_alias_cannot_retarget_a_local_snapshot() {
+		let mut ctx = Lifecycle::new("notes.txt", 1);
+		ctx.policy.cwd = ctx.dir.path().canonicalize().unwrap();
+		ctx.policy.home_dir.clone_from(&ctx.policy.cwd);
+		let tag = ctx.read("notes.txt", &[1]);
+		let authored = "alias/notes.txt";
+		let section = Patch::parse_single(
+			&format!("[{authored}#{tag}]\nPUT 1.=1:\n+updated\n"),
+			&SplitOptions::default(),
+		)
+		.unwrap();
+		let mut files = FileCache::new(ctx.policy.clone());
+		// A FileSource may resolve an authored alias to a hosted identity.
+		// The resolved kind, rather than the alias's spelling, forbids recovery.
+		let hosted = Resolved {
+			display:  authored.into(),
+			location: Location::Hosted("ssh://host/home/u/notes.txt".into()),
+		};
+		assert!(super::recover_target(&section, &hosted, &mut files, &ctx.store).is_none());
+		let disk = Resolved {
+			display:  authored.into(),
+			location: Location::Disk(ctx.dir.path().join(authored)),
+		};
+		let (_, recovered) = super::recover_target(&section, &disk, &mut files, &ctx.store)
+			.expect("disk aliases still recover");
+		assert_eq!(recovered.location, Location::Disk(ctx.canonical("notes.txt")));
 	}
 
 	/// Full read, two inserted lines above, then a replace at the shifted

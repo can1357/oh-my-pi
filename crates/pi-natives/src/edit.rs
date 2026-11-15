@@ -126,11 +126,10 @@ impl EditPolicy {
 /// Host answer for one internal URL (`resolveUrl`).
 #[napi(object)]
 pub struct EditUrlResolution {
-	/// Absolute backing file, or a canonical resource URL when `content` is
-	/// supplied. Hosted keys must use `scheme://authority/absolute-path`, never
-	/// disk paths.
+	/// Absolute backing file or canonical hosted resource URL. Hosted keys
+	/// use `scheme://authority/absolute-path`, never disk paths.
 	pub path:          Option<String>,
-	/// Full remote file text; `path` is then its opaque URL key.
+	/// Full hosted file text; omit it when the hosted target does not exist.
 	pub content:       Option<String>,
 	/// Resolve only after execution approval; omit previews for this target.
 	pub deferred:      Option<bool>,
@@ -573,29 +572,29 @@ fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
 	if let Some(error) = answer.error {
 		return UrlAnswer::Refused(error);
 	}
-	if let Some(content) = answer.content {
-		let Some(key) = answer.path else {
-			return UrlAnswer::Refused(format!("No resource key backs {url}"));
+	let Some(path) = answer.path else {
+		let kind = if answer.content.is_some() {
+			"resource key"
+		} else {
+			"local file"
 		};
-		let Some(key) = hosted_key(&key) else {
-			return UrlAnswer::Refused(
-				"Hosted edit keys must be canonical resource URLs such as ssh://host/absolute-path, \
-				 not disk paths"
-					.into(),
-			);
-		};
+		return UrlAnswer::Refused(format!("No {kind} backs {url}"));
+	};
+	if let Some(key) = hosted_key(&path) {
 		return UrlAnswer::Hosted {
 			key,
-			content: Some(content),
+			content: answer.content,
 			plan_writable: answer.plan_writable,
 		};
 	}
-	match answer.path {
-		Some(path) => {
-			UrlAnswer::Backed { path: path.into(), plan_writable: answer.plan_writable }
-		},
-		None => UrlAnswer::Refused(format!("No local file backs {url}")),
+	if answer.content.is_some() {
+		return UrlAnswer::Refused(
+			"Hosted edit keys must be canonical resource URLs such as ssh://host/absolute-path, not \
+			 disk paths"
+				.into(),
+		);
 	}
+	UrlAnswer::Backed { path: path.into(), plan_writable: answer.plan_writable }
 }
 
 /// The single file or directory below `cwd` whose path ends with the missing
@@ -1191,6 +1190,22 @@ mod tests {
 			};
 			assert!(error.contains("canonical resource URLs"), "{error}");
 		}
+	}
+
+	#[test]
+	fn hosted_answers_without_content_keep_the_missing_resource_identity() {
+		let key = "ssh://host/home/u/missing.ipynb";
+		let answer = url_answer("ssh://host/~/missing.ipynb", EditUrlResolution {
+			path:          Some(key.into()),
+			content:       None,
+			deferred:      None,
+			error:         None,
+			plan_writable: false,
+		});
+		let UrlAnswer::Hosted { key: resolved, content: None, .. } = answer else {
+			panic!("missing hosted resource lost its identity: {answer:?}");
+		};
+		assert_eq!(resolved, PathBuf::from(key));
 	}
 
 	#[test]

@@ -2058,12 +2058,11 @@ export interface EditPreviewBatch {
 /** Host answer for one internal URL (`resolveUrl`). */
 export interface EditUrlResolution {
   /**
-   * Absolute backing file, or a canonical resource URL when `content` is
-   * supplied. Hosted keys must use `scheme://authority/absolute-path`, never
-   * disk paths.
+   * Absolute backing file or canonical hosted resource URL. Hosted keys
+   * use `scheme://authority/absolute-path`, never disk paths.
    */
   path?: string
-  /** Full remote file text; `path` is then its opaque URL key. */
+  /** Full hosted file text; omit it when the hosted target does not exist. */
   content?: string
   /** Resolve only after execution approval; omit previews for this target. */
   deferred?: boolean
