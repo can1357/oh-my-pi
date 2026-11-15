@@ -420,6 +420,38 @@ describe("jfind cascade", () => {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toStartWith('find unavailable for "token refresh"');
 			expect(text).not.toContain("no hits");
+			expect(result.details?.lexicalFallback).toEqual([
+				{ rel: "auth.ts", line: 1, snippet: "export function refreshToken() { return 1; }" },
+			]);
+			expect(text).toContain("unranked literal keyword matches (not semantically judged):");
+			expect(text).toContain("auth.ts:1");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("shares fallback rows across files when one file is keyword-dense", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-fair-"));
+		try {
+			const dense = Array.from({ length: 50 }, (_, i) => `export const refreshToken${i} = ${i};`).join("\n");
+			await Bun.write(path.join(dir, "dense.ts"), `${dense}\n`);
+			await Bun.write(path.join(dir, "sparse.ts"), "export function refreshToken() { return 1; }\n");
+			vi.spyOn(ChainJudge.prototype, "judge").mockRejectedValue(new Error("402 billing account rejected"));
+			const tool = new FindTool({
+				cwd: dir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({ "find.enabled": "on" }),
+				modelRegistry: {} as never,
+			});
+			const result = await tool.execute("x", { query: "token refresh", grep_keywords: ["refreshToken"] });
+			expect(result.isError).toBe(true);
+			expect(result.details?.coverage).toBe("unavailable");
+			const fallback = result.details?.lexicalFallback ?? [];
+			expect(fallback.length).toBeGreaterThan(1);
+			expect(fallback.length).toBeLessThanOrEqual(20);
+			expect(new Set(fallback.map(match => match.rel))).toEqual(new Set(["dense.ts", "sparse.ts"]));
 		} finally {
 			await removeWithRetries(dir);
 		}

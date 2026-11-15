@@ -58,6 +58,16 @@ export interface FindHit {
 	truncated: boolean;
 }
 
+/** One literal keyword line from a file the lexical pass already read; unranked and not semantically judged. */
+export interface FindLexicalMatch {
+	/** Display path relative to {@link FindToolDetails.cwd}, or an internal URL under URL scopes. */
+	rel: string;
+	/** 1-based line number in the file. */
+	line: number;
+	/** Verbatim source line, trimmed and clipped. */
+	snippet: string;
+}
+
 /**
  * How much of a search the judge actually covered. `unavailable`: every judge
  * request failed, so an empty result is not evidence of absence. `partial`:
@@ -105,6 +115,8 @@ export interface FindToolDetails {
 	/** Verified-passage probability at or above which a file is a hit. */
 	threshold: number;
 	hits: FindHit[];
+	/** Literal keyword lines from the already-read files, present when every judge request failed. */
+	lexicalFallback?: FindLexicalMatch[];
 	coverage: FindCoverage;
 	stats: FindStats;
 	/** Set when the deadline ended verification; the hits are those verified before it. */
