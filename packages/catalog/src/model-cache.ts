@@ -187,9 +187,8 @@ export interface CacheEntry<TApi extends Api = Api> {
 	authoritative: boolean;
 	/**
 	 * `authoritative` of the payload row itself, ignoring the
-	 * `model_cache_refresh` side row. A failed refresh flips only the side row
-	 * (freshness plus retry backoff), so this keeps answering "were `models`
-	 * written by an authoritative discovery result?" after such a write.
+	 * `model_cache_freshness` side row. It tracks whether the payload preserves
+	 * a complete discovery baseline, independently of refresh retry state.
 	 */
 	payloadAuthoritative: boolean;
 	updatedAt: number;
@@ -524,6 +523,9 @@ const MaterializedModel = type({
 		.narrow(compat => !Array.isArray(compat))
 		.or("undefined"),
 	cost: { input: "number", output: "number", cacheRead: "number", cacheWrite: "number" },
+	"discoveryCostFields?": "('input' | 'output' | 'cacheRead' | 'cacheWrite')[] | undefined",
+	"discoveryMetadataFields?": "('input' | 'reasoning' | 'supportsTools' | 'contextWindow')[] | undefined",
+	"pricingStatus?": "'free' | 'included' | 'variable' | 'unknown' | undefined",
 });
 
 function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
@@ -773,6 +775,7 @@ export function writeModelCache<TApi extends Api>(
 	dbPath?: string,
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
+	payloadAuthoritative?: boolean,
 ): void {
 	try {
 		invalidateReadRow(providerId, dbPath);
@@ -821,6 +824,7 @@ export function writeModelCache<TApi extends Api>(
 			}
 			const policy = materializationPolicy();
 			const authoritativeFlag = authoritative ? 1 : 0;
+			const payloadAuthoritativeFlag = (payloadAuthoritative ?? authoritative) ? 1 : 0;
 			const serializedHeaderOmitted = JSON.stringify(headerOmittedModelIds);
 			const serializedUnrestorable = JSON.stringify(unrestorableHeaderModelIds);
 			const serializedModels = JSON.stringify(cachedModels);
@@ -855,7 +859,7 @@ export function writeModelCache<TApi extends Api>(
 					} finally {
 						matchStmt.finalize();
 					}
-					if (stored) {
+					if (stored && (payloadAuthoritative === undefined || stored.authoritative === payloadAuthoritativeFlag)) {
 						const state = rowState(stored);
 						if (state.updatedAt === updatedAt && state.authoritative === authoritative) return "skipped";
 						db.run(
@@ -879,7 +883,7 @@ export function writeModelCache<TApi extends Api>(
 							CACHE_SCHEMA_VERSION,
 							policy,
 							updatedAt,
-							authoritativeFlag,
+							payloadAuthoritativeFlag,
 							staticFingerprint,
 							serializedHeaderOmitted,
 							serializedUnrestorable,
@@ -892,6 +896,14 @@ export function writeModelCache<TApi extends Api>(
 						providerId,
 						policy,
 					]);
+					if (payloadAuthoritative !== undefined && payloadAuthoritative !== authoritative) {
+						db.run(
+							`INSERT INTO model_cache_freshness (
+								provider_id, materialization_policy, payload_updated_at, updated_at, authoritative
+							) VALUES (?, ?, ?, ?, ?)`,
+							[providerId, policy, updatedAt, updatedAt, authoritativeFlag],
+						);
+					}
 					pruneOtherPolicies(db, providerId, policy);
 					return "written";
 				})

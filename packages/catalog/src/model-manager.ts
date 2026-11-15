@@ -99,8 +99,10 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 * command-backed credentials that must wait until an actual request.
 	 */
 	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
-	/** Optional dynamic endpoint fetcher. */
-	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Optional dynamic endpoint fetcher. Partial results merge with cache and remain non-authoritative. */
+	fetchDynamicModels?: () => Promise<
+		(readonly ModelSpec<TApi>[] & { readonly complete?: false; readonly fetchError?: string }) | null
+	>;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
@@ -351,12 +353,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
+	const dynamicFetchComplete = dynamicFetchSucceeded && dynamicFetch?.complete !== false;
 	const anyRemoteFetchSucceeded = modelsDevFetchSucceeded || dynamicFetchSucceeded;
 	const allConfiguredRemoteFetchesSucceeded =
 		hasRemoteFetcher &&
 		(!hasModelsDevFetcher || modelsDevFetchSucceeded) &&
-		(!hasDynamicFetcher || dynamicFetchSucceeded);
-	const authoritativeDynamicFetchSucceeded = dynamicModelsAuthoritative && dynamicFetchSucceeded;
+		(!hasDynamicFetcher || dynamicFetchComplete);
+	const authoritativeDynamicFetchSucceeded = dynamicModelsAuthoritative && dynamicFetchComplete;
 	const remoteResolutionComplete = authoritativeDynamicFetchSucceeded || allConfiguredRemoteFetchesSucceeded;
 	const preparedCacheModels = remoteResolutionComplete
 		? []
@@ -376,7 +379,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// short retry that recovers a transient empty response (#6620). Shared
 	// models.dev snapshots may be empty for one provider and remain authoritative.
 	const cacheAuthoritative = hasDynamicFetcher
-		? dynamicFetchSucceeded &&
+		? dynamicFetchComplete &&
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
@@ -396,23 +399,67 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	)
 		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
 		: mergedWithModelsDev;
+	// A complete refresh prunes cached rows, but sparse discovery cards still
+	// need previously reported prices and metadata for the same model.
+	const droppedCacheIds = cacheFingerprintMatches ? undefined : new Set(options.dropCachedModelIdsOnStaticMismatch);
+	const cachedPrices = remoteResolutionComplete
+		? new Map(usableCachedModels.filter(model => !droppedCacheIds?.has(model.id)).map(model => [model.id, model]))
+		: new Map<string, Model<TApi>>();
+	const dynamicModelsWithCachedPrices = dynamicModels.map(row => {
+		const cached = cachedPrices.get(row.id);
+		let model = row;
+		if (cached && row.discoveryMetadataFields !== undefined && cached.discoveryMetadataFields !== undefined) {
+			const fields = row.discoveryMetadataFields;
+			const previous = cached.discoveryMetadataFields.filter(field => !fields.includes(field));
+			model = {
+				...row,
+				...(previous.includes("input") ? { input: cached.input } : {}),
+				...(previous.includes("reasoning") ? { reasoning: cached.reasoning } : {}),
+				...(previous.includes("supportsTools") ? { supportsTools: cached.supportsTools } : {}),
+				...(previous.includes("contextWindow") ? { contextWindow: cached.contextWindow } : {}),
+				discoveryMetadataFields: [...fields, ...previous],
+			};
+		}
+		const fields = model.discoveryCostFields;
+		if (!cached || fields === undefined) return model;
+		const cachedFields = cached.discoveryCostFields ?? [];
+		const previous = cachedFields.filter(field => !fields.includes(field));
+		return {
+			...model,
+			cost: {
+				...model.cost,
+				...Object.fromEntries(previous.map(field => [field, cached.cost[field]])),
+			},
+			discoveryCostFields: [...new Set([...fields, ...(cached.discoveryCostFields ?? [])])],
+			pricingStatus: model.pricingStatus ??
+				(fields.length === 0 && (cacheFingerprintMatches || previous.length > 0) ? cached.pricingStatus : undefined),
+		};
+	});
 	const mergedModels = mergeDynamicModels(
 		mergedWithCatalogMetrics,
-		dynamicModels,
+		dynamicModelsWithCachedPrices,
 		mergeAuthority,
 		fetchedDynamicModels?.explicitKindModels,
 	);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded
 			? retainModelIds(mergedModels, dynamicModels)
-			: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0
-				? retainModelIds(mergedModels, usableCachedModels)
-				: mergedModels,
+			: dynamicFetch?.complete === false && isAuthoritativeDynamicCache && usableCachedModels.length > 0
+				? retainModelIds(mergedModels, [...usableCachedModels, ...dynamicModels])
+				: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0
+					? retainModelIds(mergedModels, usableCachedModels)
+					: mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
-		if (anyRemoteFetchSucceeded) {
+		if (
+			anyRemoteFetchSucceeded &&
+			!(dynamicFetch?.complete === false && cacheHasUnresolvedHeaders) &&
+			!(dynamicFetch?.complete === false && models.length === 0 && cache === null)
+		) {
+			// A partial result extends the last authoritative model set without
+			// making this refresh authoritative for freshness or retry purposes.
 			writeModelCache(
 				cacheProviderId,
 				remoteUpdatedAt!,
@@ -422,8 +469,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				dynamicFetch?.complete === false && isAuthoritativeDynamicCache ? true : undefined,
 			);
-		} else {
+		} else if (!anyRemoteFetchSucceeded) {
 			// Remote fetch failed. Re-persist any prior catalog as a
 			// non-authoritative snapshot so stale state stays visible while the
 			// retry backoff applies. When there is no prior cache and nothing to
@@ -532,11 +580,12 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 
 /** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
-	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
+	fetcher: NonNullable<ModelManagerOptions<TApi>["fetchDynamicModels"]>,
+): Promise<{ models: DiscoveredModelSet<TApi> | null; complete?: boolean; error?: string }> {
 	try {
-		const models = await fetcher();
-		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+		const result = await fetcher();
+		if (result === null) return { models: null };
+		return { models: buildDiscoveredModelSpecs<TApi>(result), complete: result.complete, error: result.fetchError };
 	} catch (error) {
 		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -586,7 +635,9 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 		if (droppedIds?.has(model.id)) {
 			continue;
 		}
-		sanitizedModels.push(staticIds?.has(model.id) ? { ...model, contextWindow: null, maxTokens: null } : model);
+		sanitizedModels.push(staticIds?.has(model.id)
+			? { ...model, contextWindow: model.discoveryMetadataFields?.includes("contextWindow") ? model.contextWindow : null, maxTokens: null }
+			: model);
 	}
 	return sanitizedModels;
 }
@@ -711,13 +762,15 @@ function mergeDynamicModel<TApi extends Api>(
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative = endpointChanged || authority.input;
-	const supportsImage = dynamicInputAuthoritative
-		? dynamicModel.input.includes("image")
-		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
-	// Providers with authoritative reasoning metadata must not regain a
-	// stale bundled dial after explicitly reporting no reasoning. Others
-	// retain the additive fallback for discovery that omits capabilities.
-	const reasoning = authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
+	const metadata = dynamicModel.discoveryMetadataFields;
+	const supportsImage = metadata !== undefined
+		? (metadata.includes("input") ? dynamicModel : existingModel).input.includes("image")
+		: dynamicInputAuthoritative
+			? dynamicModel.input.includes("image")
+			: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const reasoning = metadata !== undefined
+		? (metadata.includes("reasoning") ? dynamicModel.reasoning : existingModel.reasoning)
+		: authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
@@ -746,9 +799,34 @@ function mergeDynamicModel<TApi extends Api>(
 		liveCompat !== undefined &&
 		"trustExplicitThinkingOnly" in liveCompat &&
 		liveCompat.trustExplicitThinkingOnly === true;
+	const mergeCost = (field: "input" | "output" | "cacheRead" | "cacheWrite") =>
+		dynamicModel.discoveryCostFields === undefined
+			? preferDiscoveryCost(dynamicModel.cost[field], existingModel.cost[field], authority.cost)
+			: dynamicModel.discoveryCostFields.includes(field)
+				? dynamicModel.cost[field]
+				: existingModel.cost[field];
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
+		// Track only rates actually reported by discovery, not bundled fallbacks.
+		discoveryCostFields: dynamicModel.discoveryCostFields === undefined
+			? undefined
+			: [...new Set([...(existingModel.discoveryCostFields ?? []), ...dynamicModel.discoveryCostFields])],
+		discoveryMetadataFields: metadata === undefined
+			? undefined
+			: [...new Set([...(existingModel.discoveryMetadataFields ?? []), ...metadata])],
+		...(metadata !== undefined && !metadata.includes("supportsTools")
+			? { supportsTools: existingModel.supportsTools }
+			: {}),
+		// An explicit unknown on the newer card must survive even when some rates are positive.
+		// Conversely, a priced newer card without a status replaces an older unknown card.
+		pricingStatus: dynamicModel.pricingStatus ??
+			(existingModel.pricingStatus === "unknown" &&
+			(dynamicModel.discoveryCostFields === undefined || dynamicModel.discoveryCostFields.length > 0) &&
+			(dynamicModel.cost.input > 0 || dynamicModel.cost.output > 0 ||
+				dynamicModel.cost.cacheRead > 0 || dynamicModel.cost.cacheWrite > 0)
+				? undefined
+				: existingModel.pricingStatus),
 		name:
 			authority.staticNames?.get(dynamicModel.id) ??
 			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
@@ -756,14 +834,18 @@ function mergeDynamicModel<TApi extends Api>(
 		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
-			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
-			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output, authority.cost),
-			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead, authority.cost),
-			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite, authority.cost),
+			input: mergeCost("input"),
+			output: mergeCost("output"),
+			cacheRead: mergeCost("cacheRead"),
+			cacheWrite: mergeCost("cacheWrite"),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},
-		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
+		contextWindow: metadata === undefined
+			? preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow)
+			: metadata.includes("contextWindow")
+				? dynamicModel.contextWindow
+				: existingModel.contextWindow,
 		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
 		headers: resolveHeaders
 			? undefined
@@ -864,6 +946,9 @@ const ModelSpecShape = type({
 		"timeBased?": TimeBasedCostShape.or("undefined"),
 		"longContext?": FiniteTokenCost.and({ inputThreshold: "number > 0" }).or("undefined"),
 	}),
+	"discoveryCostFields?": "('input' | 'output' | 'cacheRead' | 'cacheWrite')[] | undefined",
+	"discoveryMetadataFields?": "('input' | 'reasoning' | 'supportsTools' | 'contextWindow')[] | undefined",
+	"pricingStatus?": "'free' | 'included' | 'variable' | 'unknown' | undefined",
 	contextWindow: "number > 0 | null",
 	maxTokens: "number > 0 | null",
 });

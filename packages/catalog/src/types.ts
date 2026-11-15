@@ -1750,10 +1750,14 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	promptCacheConfig?: ModelPromptCache;
 	/**
-	 * Interpretation of an all-zero token-rate card. Omitted zero-rate cards
-	 * are unknown; any non-zero rate is always treated as fixed pricing.
+	 * Explicit pricing interpretation. Unknown also applies to partial cards
+	 * with some non-zero rates; omitted all-zero cards remain unknown.
 	 */
 	pricingStatus?: Exclude<ModelPricingStatus, "fixed">;
+	/** Token rates explicitly reported by a discovery row, including zero rates. */
+	discoveryCostFields?: ("input" | "output" | "cacheRead" | "cacheWrite")[];
+	/** Capability and limit fields explicitly reported by sparse discovery. */
+	discoveryMetadataFields?: ("input" | "reasoning" | "supportsTools" | "contextWindow")[];
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;

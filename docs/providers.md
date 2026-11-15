@@ -230,6 +230,10 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
+The Gateway credential's token needs **AI Gateway Run** permission for inference and **Workers AI Read** permission for live Workers AI model discovery on the same account. Discovery uses the Gateway token, not `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_AUTH_TOKEN`. The account ID comes from the stored Gateway credentials or, when not stored, `CLOUDFLARE_ACCOUNT_ID`.
+
+Discovery lists text-generation models from the Workers AI account API. A 401 or 403 indicates that the Gateway token or its account permissions need attention; cached models remain available when a refresh fails. Other discovery failures fall back to available catalog data. The separate `cloudflare-workers-ai` provider has its own inference permissions below.
+
 `cloudflare-workers-ai` serves Cloudflare's Clef decision models (`cloudflare-workers-ai/@cf/cloudflare/clef` and `cloudflare-workers-ai/@cf/cloudflare/clef-flash`) as `judge` models; assign one to the `judge` role to use it. `/login cloudflare-workers-ai` prompts for a Cloudflare API token with Workers AI Read and Edit permissions (create one at `https://dash.cloudflare.com/profile/api-tokens`) and your account ID, then stores both together. To use environment variables, set `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID`.
 
 `liquid` serves Liquid AI's decision models (`liquid/d1.1` and `liquid/d1-ultra`) as `judge` models; assign one to the `judge` role to use it. `/login liquid` prompts for an API key from `https://console.liquid.ai/` (Dashboard > API Keys); to use an environment variable, set `LIQUID_API_KEY`. Images sent to Liquid are resized to fit its 10,000 patches of 32×32 pixels per request.
