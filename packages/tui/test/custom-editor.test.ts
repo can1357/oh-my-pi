@@ -434,6 +434,37 @@ describe("CustomEditor bracketed path paste", () => {
 			expect(editor.getText()).toBe("use ");
 		});
 
+		it("keeps a comma in a submitted mention and outside restored chips", () => {
+			const editor = makeModelEditor();
+			for (const ch of "use ^a/x,") editor.handleInput(ch);
+			expect(editor.getText()).toBe("use ^a/x,");
+			expect(editor.getExpandedText()).toBe("use ^a/x,");
+
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("use ^a/x,");
+
+			editor.setCollapsedText("use ^c/z, then ^a/x.");
+			expect(editor.getText()).toBe(`use ${modelMentionChipLabel("Zed")}, then ${modelMentionChipLabel("X One")}.`);
+			expect(editor.getExpandedText()).toBe("use ^c/z, then ^a/x.");
+		});
+
+		it("waits for whitespace before collapsing a model id containing a comma", () => {
+			const editor = makeModelEditor();
+			editor.resolveModelMention = selector =>
+				selector === "a/x,foo"
+					? { label: modelMentionChipLabel("Comma Model"), selector }
+					: selector === "a/x"
+						? { label: modelMentionChipLabel("X One"), selector }
+						: undefined;
+			for (const ch of "use ^a/x,foo ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`use ${modelMentionChipLabel("Comma Model")} `);
+			expect(editor.getExpandedText()).toBe("use ^a/x,foo ");
+		});
+
 		it("leaves unknown selectors literal", () => {
 			const editor = makeModelEditor();
 			for (const ch of "use ^nope/z ") editor.handleInput(ch);

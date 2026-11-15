@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Model mentions followed by punctuation collapse into editable chips without swallowing the punctuation ([#19369](https://github.com/can1357/oh-my-pi/issues/19369))
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
