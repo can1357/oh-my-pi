@@ -5,6 +5,7 @@ import {
 	lateToolResultPrompt,
 	planTurn,
 	replayPrompt,
+	toolResultImagesPrompt,
 	transcriptDigest,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/reconcile";
 import type {
@@ -201,6 +202,31 @@ describe("replayPrompt", () => {
 		expect(inputBlocks({ role: "user", content, timestamp: 0 })).toEqual(content);
 		const blocks = lateToolResultPrompt({ ...toolResult("a", ""), content });
 		expect(blocks.slice(1, -1)).toEqual(content);
+	});
+
+	it("extracts only image blocks with a tool_result envelope for live MCP continuations", () => {
+		expect(toolResultImagesPrompt(toolResult("call-1", "plain text"))).toEqual([]);
+		const first = { type: "image" as const, data: "Zmlyc3Q=", mimeType: "image/jpeg" };
+		const second = { type: "image" as const, data: "c2Vjb25k", mimeType: "image/png" };
+		const mixed: ToolResultMessage = {
+			...toolResult("call-2", "Read image file [image/jpeg]"),
+			content: [
+				{ type: "text", text: "Read image file [image/jpeg]" },
+				first,
+				{ type: "text", text: "note" },
+				second,
+			],
+		};
+		expect(toolResultImagesPrompt(mixed)).toEqual([
+			{ type: "text", text: '<tool_result id="call-2" name="read">' },
+			first,
+			second,
+			{ type: "text", text: "</tool_result>" },
+		]);
+		expect(toolResultImagesPrompt({ ...mixed, isError: true })[0]).toEqual({
+			type: "text",
+			text: '<tool_result id="call-2" name="read" error="true">',
+		});
 	});
 	it("sends trailing user input as-is and labels earlier transcript messages", () => {
 		const blocks = replayPrompt([

@@ -143,6 +143,21 @@ export function lateToolResultPrompt(result: ToolResultMessage): ContentBlock[] 
 	];
 }
 
+/** Deliver MCP tool-result images as ACP prompt blocks because agy offloads MCP media to unexposed files. */
+export function toolResultImagesPrompt(result: ToolResultMessage): ContentBlock[] {
+	const images = result.content.filter((part): part is ImageContent => part.type === "image");
+	if (images.length === 0) return [];
+	const error = result.isError ? ' error="true"' : "";
+	return [
+		{
+			type: "text",
+			text: `<tool_result id=${JSON.stringify(result.toolCallId)} name=${JSON.stringify(result.toolName)}${error}>`,
+		},
+		...images.map((part): ContentBlock => ({ type: "image", data: part.data, mimeType: part.mimeType })),
+		{ type: "text", text: "</tool_result>" },
+	];
+}
+
 /** ACP input preserves text/image ordering and the complete image bytes. */
 export function inputBlocks(message: InputMessage): ContentBlock[] {
 	return contentBlocks(message.content);
