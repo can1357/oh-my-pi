@@ -580,4 +580,21 @@ describe("guard rule regressions", () => {
 		// A case-sensitive file system keeps `.SSH` apart from `.ssh`.
 		expect(on("linux", "cat ~/.SSH/id_rsa")).toBe("exec");
 	});
+
+	it("counts a `security find-*-password` that prints the password, not one that stores it", () => {
+		for (const command of [
+			"security find-generic-password -ga my-account",
+			"security find-internet-password -g -s example.com",
+			"security find-generic-password -s my-service -w",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+		for (const command of [
+			`security add-generic-password -U -a "$USER" -s my-service -w "$TOKEN"`,
+			"security find-generic-password -s my-service",
+			"security find-generic-password -sw",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+	});
 });

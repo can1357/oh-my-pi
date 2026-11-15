@@ -952,17 +952,37 @@ function readWords(command: ShellCommand, home: string): string[] {
 
 // -- credential_read ---------------------------------------------------------------------------------
 
+/** The options of `security find-generic-password`/`find-internet-password` that take a value. */
+const KEYCHAIN_VALUE_LETTERS = "acCdDGjlpPrst";
+
+/**
+ * Whether a `security` command prints a keychain password: `find-generic-password` or
+ * `find-internet-password` with `-w` (the password alone) or `-g` (with the item), also in a bundle
+ * (`-ga`) up to a letter that takes a value. `add-*-password -w` gives the password to store.
+ */
+function printsKeychainPassword(argv: readonly string[]): boolean {
+	if (!/^find-\w+-password$/.test(argv[1] ?? "")) return false;
+	for (let i = 2; i < argv.length; i++) {
+		const arg = argv[i];
+		if (!/^-[A-Za-z]+$/.test(arg)) continue;
+		for (let k = 1; k < arg.length; k++) {
+			if (arg[k] === "w" || arg[k] === "g") return true;
+			if (KEYCHAIN_VALUE_LETTERS.includes(arg[k])) {
+				if (k === arg.length - 1) i++;
+				break;
+			}
+		}
+	}
+	return false;
+}
+
 function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	const name = command.argv[0];
 	const first = command.argv[1] ?? "";
 	if (name === "security" && (first === "dump-keychain" || first === "export")) {
 		return hit("credential_read", "it exports the keychain");
 	}
-	if (
-		name === "security" &&
-		first.includes("password") &&
-		args(command).some(arg => /^-[A-Za-z]+$/.test(arg) && arg.includes("w"))
-	) {
+	if (name === "security" && printsKeychainPassword(command.argv)) {
 		return hit("credential_read", "it prints a keychain password");
 	}
 	if (name === "gpg" && args(command).some(arg => arg.startsWith("--export-secret"))) {
