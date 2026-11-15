@@ -3519,6 +3519,24 @@ describe("ModelRegistry runtime discovery", () => {
 								id: "vendor/transcriber",
 								architecture: { input_modalities: ["audio"], output_modalities: ["text"] },
 							},
+							// OpenRouter's TTS and STT rows, verbatim from its roster.
+							{
+								id: "speechify/simba-3.5",
+								architecture: {
+									modality: "text->speech",
+									input_modalities: ["text"],
+									output_modalities: ["speech"],
+								},
+							},
+							{
+								id: "x-ai/grok-stt-2.0",
+								architecture: {
+									modality: "audio->transcription",
+									input_modalities: ["audio"],
+									output_modalities: ["transcription"],
+								},
+							},
+							{ id: "openrouter/vendor/tts-lite", architecture: { modality: "text->speech" } },
 							{
 								id: "openrouter/vendor/decider",
 								architecture: {
@@ -3560,6 +3578,18 @@ describe("ModelRegistry runtime discovery", () => {
 			kind: "stt",
 			api: "openai-transcriptions",
 		});
+		expect(registry.find("gateway-test", "speechify/simba-3.5")).toMatchObject({
+			kind: "tts",
+			api: "openai-speech",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
+		expect(registry.find("gateway-test", "x-ai/grok-stt-2.0")).toMatchObject({
+			kind: "stt",
+			api: "openai-transcriptions",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
 		for (const id of ["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]) {
 			expect(registry.find("gateway-test", id)).toMatchObject({
 				kind: "judge",
@@ -3576,8 +3606,8 @@ describe("ModelRegistry runtime discovery", () => {
 				.map(model => model.id)
 				.sort();
 		expect(rosterFor("chat")).toEqual(["vendor/chat", "vendor/flash-tts", "vendor/plain-chat", "vendor/voice-chat"]);
-		expect(rosterFor("tts")).toEqual(["vendor/some-tts"]);
-		expect(rosterFor("stt")).toEqual(["vendor/transcriber"]);
+		expect(rosterFor("tts")).toEqual(["openrouter/vendor/tts-lite", "speechify/simba-3.5", "vendor/some-tts"]);
+		expect(rosterFor("stt")).toEqual(["vendor/transcriber", "x-ai/grok-stt-2.0"]);
 		expect(rosterFor("judge")).toEqual(["openrouter/vendor/decider", "openrouter/vendor/decider-lite"]);
 	});
 

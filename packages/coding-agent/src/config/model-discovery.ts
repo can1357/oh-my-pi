@@ -884,6 +884,8 @@ function extractOpenAIModelsListInputCapabilities(item: {
  * routed:
  * - sole `embeddings` or `image` output: `/embeddings`, `/images/generations`;
  * - sole `decisions` output (OpenRouter's decision models): `/decisions`;
+ * - sole `speech` or `transcription` output (OpenRouter's TTS and STT rows):
+ *   `/audio/speech`, `/audio/transcriptions`;
  * - sole `audio` output from text (or undeclared) input: `/audio/speech`;
  * - sole `text` output from audio input without text: `/audio/transcriptions`.
  *
@@ -920,6 +922,10 @@ function extractOpenAIModelsListOutputTask(item: {
 			return { kind: "image", api: "openai-images" };
 		case "decisions":
 			return { kind: "judge", api: "openai-decisions" };
+		case "speech":
+			return { kind: "tts", api: "openai-speech" };
+		case "transcription":
+			return { kind: "stt", api: "openai-transcriptions" };
 		case "audio":
 			return input.size === 0 || input.has("text") ? { kind: "tts", api: "openai-speech" } : undefined;
 		case "text":
