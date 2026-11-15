@@ -1494,7 +1494,10 @@ function standardizedEstimate(
 	};
 }
 
-/** A result's fetch-back group; null for a cut the no-score fallback made because Spotlight's calls failed. */
+/**
+ * A result's fetch-back group; null for a cut the no-score fallback made because no ranker answered (a Spotlight call
+ * failed and no `auto` judge reranked the call).
+ */
 function cutGroup(result: Result): SpotlightCutGroup | null {
 	if (result.holdout) return "holdout";
 	if (result.gated) return "gated";
@@ -1504,11 +1507,11 @@ function cutGroup(result: Result): SpotlightCutGroup | null {
 }
 
 /**
- * Fetch-back rates per tool (in `tools` order): applied (Spotlight-scored) cuts, score-free cuts, held-out results,
- * unchanged results standardized to the applied cuts' original-size mix (bins without unchanged results drop from
- * both; with no applied cuts, the reference keeps its own mix), and reads pi's former edit gate kept whole (only
- * where there are any). Results without a recorded call (issued before the session's marker) and cuts whose
- * Spotlight calls failed are not measured.
+ * Fetch-back rates per tool (in `tools` order): applied (ranked: Spotlight-scored, or reranked by the `auto` ranker's
+ * judge after a Spotlight call failed) cuts, score-free cuts, held-out results, unchanged results standardized to the
+ * applied cuts' original-size mix (bins without unchanged results drop from both; with no applied cuts, the reference
+ * keeps its own mix), and reads pi's former edit gate kept whole (only where there are any). Results without a
+ * recorded call (issued before the session's marker) and cuts no ranker answered for are not measured.
  */
 function computeFetchBack(evaluated: readonly Evaluated[], tools: readonly SpotlightTool[]): SpotlightFetchBackCell[] {
 	const cells: SpotlightFetchBackCell[] = [];

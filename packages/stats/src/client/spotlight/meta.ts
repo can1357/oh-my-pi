@@ -113,7 +113,7 @@ export const CUT_GROUP: Record<SpotlightCutGroup, CutGroupMeta> = {
 		label: "Shortened",
 		color: "var(--spot-applied)",
 		shape: "dot",
-		rule: "Spotlight scored the result, shaping shortened it and the model saw the cut",
+		rule: "Spotlight ranked the result (or, under the auto ranker, the judge reranked it), shaping shortened it and the model saw the cut",
 	},
 	scoreFree: {
 		label: "Score-free",

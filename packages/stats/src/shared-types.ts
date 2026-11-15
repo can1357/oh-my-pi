@@ -510,7 +510,8 @@ export interface SpotlightResultRow {
 
 /**
  * Who saw what for a result in the fetch-back comparison:
- * - `applied`: Spotlight shortened it and the model saw the shortened text;
+ * - `applied`: shaping shortened it on Spotlight's scores (or, under the `auto` ranker, on the judge's after a
+ *   Spotlight call failed) and the model saw the shortened text;
  * - `holdout`: Spotlight would have shortened it, but the result was held out at random and the model saw it
  *   unshaped (the experiment's true counterfactual);
  * - `reference`: shaping left it unchanged (results of the same tool and sessions, standardized to the applied
@@ -519,7 +520,8 @@ export interface SpotlightResultRow {
  *   (`spotlight.experiment.scoreFree`), the model saw the cut: against `applied`, what Spotlight's scores add;
  * - `gated`: a read pi's former edit gate (removed) kept whole, the model saw plain's page; only in transcripts
  *   journaled while the gate ran.
- * `applied` holds only cuts Spotlight scored (score-free cuts and cuts whose Spotlight calls failed are not in it).
+ * `applied` holds only ranked cuts: Spotlight scored them, or the `auto` ranker's judge reranked them after a Spotlight
+ * call failed. Score-free cuts and cuts no ranker answered for are not in it.
  */
 export type SpotlightCutGroup = "applied" | "holdout" | "reference" | "scoreFree" | "gated";
 
