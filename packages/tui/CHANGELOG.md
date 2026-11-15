@@ -5,9 +5,6 @@
 ### Added
 
 - `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest
-### Changed
-
-- `extractPastePathsFromText` and `extractImagePastePathsFromText` moved from `@oh-my-pi/pi-tui/prompt/custom-editor` to `@oh-my-pi/pi-tui/prompt/image-paste`; paste behaviour is unchanged
 
 ## [18.20.1] - 2026-11-14
 

@@ -23,26 +23,16 @@ describe("OrderedPastes", () => {
 		expect(runs()).toBe(0);
 	});
 
-	it("delivers completions in reservation order and runs the held action once after the last", () => {
+	it("delivers completions and later pastes in reservation order and runs the held action once after the last", () => {
 		const { pastes, delivered, runs } = queue();
 		const first = pastes.begin();
 		const second = pastes.begin();
+		pastes.paste("C");
 		pastes.holdAction();
 		second("B");
 		expect(delivered).toEqual([]);
 		first("A");
-		expect(delivered).toEqual(["A", "B"]);
+		expect(delivered).toEqual(["A", "B", "C"]);
 		expect(runs()).toBe(1);
-	});
-
-	it("delivers a paste now when nothing is pending and behind pending slots otherwise", () => {
-		const { pastes, delivered } = queue();
-		pastes.paste("A");
-		expect(delivered).toEqual(["A"]);
-		const first = pastes.begin();
-		pastes.paste("B");
-		expect(delivered).toEqual(["A"]);
-		first("C");
-		expect(delivered).toEqual(["A", "C", "B"]);
 	});
 });

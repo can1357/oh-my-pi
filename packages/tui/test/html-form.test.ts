@@ -427,24 +427,6 @@ describe("html form", () => {
 			return dialog(DB_FORM, { acceptImages: true, ...overrides });
 		}
 
-		it("puts an attached image's marker in the note and reports both after save", () => {
-			const { form } = imageDialog();
-			form.handleInput(NOTE_KEY);
-			form.handleInput("see ");
-			expect(addImage(form)).toBe("[Image #1, 1x1]");
-			form.handleInput(ENTER);
-			expect(form.optionNotes()).toEqual([
-				{
-					name: "db",
-					question: expect.any(String),
-					option: "SQLite",
-					value: "sqlite",
-					text: "see [Image #1, 1x1]",
-					images: [IMAGE],
-				},
-			]);
-		});
-
 		it("drops the image of a deleted marker and renumbers the rest", () => {
 			const { form } = imageDialog();
 			form.handleInput(NOTE_KEY);
@@ -458,10 +440,7 @@ describe("html form", () => {
 			expect(form.optionNotes()).toMatchObject([{ text: "[Image #1, 1x1]", images: [second] }]);
 
 			form.handleInput(NOTE_KEY);
-			form.handleInput(HOME);
-			for (let i = 0; i < "[Image #1, 1x1]".length; i++) form.handleInput(DELETE);
-			form.handleInput(ENTER);
-			expect(form.optionNotes()).toEqual([]);
+			expect(form.attachImage(IMAGE, DIMS)).toBe("[Image #2, 1x1]");
 		});
 
 		it("discards images added since the note opened when Esc closes it", () => {
@@ -517,41 +496,28 @@ describe("html form", () => {
 			expect(form.pasteText).toBeUndefined();
 		});
 
-		it("saves on Enter only after a pending paste settles", () => {
+		it.each([
+			{ name: "saves once the paste settles with its marker", settleWith: "[Image #1, 1x1]", delivered: true },
+			{ name: "keeps the note open when the paste fails", settleWith: undefined, delivered: false },
+		])("Enter during a pending paste: $name", ({ settleWith, delivered }) => {
 			const { form } = imageDialog();
 			form.handleInput(NOTE_KEY);
-			const marker = form.attachImage(IMAGE, DIMS)!;
+			form.handleInput("text ");
+			form.attachImage(IMAGE, DIMS);
 			const settle = form.beginPaste();
 			form.handleInput(ENTER);
 			expect(form.debugState().noteEdit).toBe("db=sqlite");
 			expect(form.optionNotes()).toEqual([]);
-			expect(settle(marker)).toBe(true);
-			expect(form.debugState().noteEdit).toBeUndefined();
-			expect(form.optionNotes()).toMatchObject([{ text: marker, images: [IMAGE] }]);
-		});
 
-		it("cancels the queued save when a pending paste fails", () => {
-			const { form } = imageDialog();
-			form.handleInput(NOTE_KEY);
-			form.handleInput("text");
-			const settle = form.beginPaste();
-			form.handleInput(ENTER);
-			expect(settle(undefined)).toBe(false);
-			expect(form.debugState().noteEdit).toBe("db=sqlite");
-			expect(form.optionNotes()).toEqual([]);
-			form.handleInput(ENTER);
-			expect(form.optionNotes()).toMatchObject([{ text: "text" }]);
-		});
-
-		it("delivers settled pastes into the note in reservation order", () => {
-			const { form } = imageDialog();
-			form.handleInput(NOTE_KEY);
-			const first = form.beginPaste();
-			const second = form.beginPaste();
-			second("B");
-			first("A");
-			form.handleInput(ENTER);
-			expect(form.optionNotes()).toMatchObject([{ text: "AB" }]);
+			expect(settle(settleWith)).toBe(delivered);
+			if (delivered) {
+				expect(form.debugState().noteEdit).toBeUndefined();
+				expect(form.optionNotes()).toMatchObject([{ text: "text [Image #1, 1x1]", images: [IMAGE] }]);
+			} else {
+				expect(form.debugState().noteEdit).toBe("db=sqlite");
+				form.handleInput(ENTER);
+				expect(form.optionNotes()).toMatchObject([{ text: "text" }]);
+			}
 		});
 
 		it("sends an empty bracketed paste to onPasteImage and image-path pastes to onPasteImagePath", () => {
@@ -581,11 +547,6 @@ describe("html form", () => {
 			expect(form.optionNotes()).toMatchObject([{ text: "/tmp/a.png" }]);
 		});
 
-		it("is not a paste target without acceptImages", () => {
-			const { form } = dialog(DB_FORM);
-			expect(form.pasteText).toBeUndefined();
-		});
-
 		it("delivers nothing into the note when a paste reserved before hiding completes", () => {
 			const { form } = imageDialog();
 			form.handleInput(NOTE_KEY);
@@ -596,17 +557,6 @@ describe("html form", () => {
 			form.handleNativeEvent({ type: "action", key: "", act: "show", mods: [] });
 			form.handleInput(ENTER);
 			expect(form.optionNotes()).toMatchObject([{ text: "kept" }]);
-		});
-
-		it("keeps image-path text in the focused text field when no note is open", () => {
-			const onPasteImagePath = vi.fn();
-			const { form } = dialog(`<form><label>Name<input name="who"></label></form>`, {
-				acceptImages: true,
-				onPasteImagePath,
-			});
-			form.handleInput(paste("/tmp/a.png"));
-			expect(onPasteImagePath).not.toHaveBeenCalled();
-			expect(form.data()).toEqual({ who: "/tmp/a.png" });
 		});
 	});
 

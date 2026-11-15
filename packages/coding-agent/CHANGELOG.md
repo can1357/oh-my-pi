@@ -5,9 +5,6 @@
 ### Added
 
 - `ask` form notes take pasted screenshots again: with a note open, `Ctrl+V` (`Alt+V` on Windows) or the terminal's own paste attaches the image, and it reaches the model after the answers as `[Image #N]`, described for text-only models
-### Changed
-
-- `modes/components` also re-exports `@oh-my-pi/pi-tui/prompt/image-paste`, where `extractPastePathsFromText` and `extractImagePastePathsFromText` now live
 
 ### Fixed
 

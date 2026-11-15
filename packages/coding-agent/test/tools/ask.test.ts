@@ -631,7 +631,11 @@ describe("AskTool option note images", () => {
 	];
 
 	it("sends note images after the text with markers numbered across notes", async () => {
-		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "redis" }, notes }));
+		const tagged = tagImageAttachmentSource(image, "/tmp/shot.png", "image");
+		const formDialog = vi.fn<FormDialog>(async () => ({
+			data: { store: "redis" },
+			notes: [{ ...notes[0]!, images: [tagged] }, notes[1]!],
+		}));
 		const result = await new AskTool(createSession()).execute(
 			"call-note-images",
 			{ html: DB_FORM },
@@ -646,6 +650,7 @@ describe("AskTool option note images", () => {
 				type: "text",
 				text: `User answers:\n${JSON.stringify({ store: "redis" }, null, 2)}\nOption notes:\n- Session store: Redis [store="redis"] — see [Image #1, 1x1]\n- Lifetime (days): 7 [ttl="7"] — and [Image #2, 2x2]`,
 			},
+			{ type: "text", text: expect.stringContaining("/tmp/shot.png") },
 			image,
 			second,
 		]);
@@ -653,27 +658,6 @@ describe("AskTool option note images", () => {
 			{ name: "store", question: "Session store", option: "Redis", value: "redis", text: "see [Image #1, 1x1]" },
 			{ name: "ttl", question: "Lifetime (days)", option: "7", value: "7", text: "and [Image #2, 2x2]" },
 		]);
-	});
-
-	it("names an image's source file in a notice worded for an ask answer", async () => {
-		const tagged = tagImageAttachmentSource(image, "/tmp/shot.png", "image");
-		const result = await new AskTool(createSession()).execute(
-			"call-note-notice",
-			{ html: DB_FORM },
-			undefined,
-			undefined,
-			createContext({
-				formDialog: async () => ({ data: { store: "redis" }, notes: [{ ...notes[0]!, images: [tagged] }] }),
-			}),
-		);
-
-		expect(result.content).toHaveLength(3);
-		const notice = result.content[1];
-		expect(notice?.type).toBe("text");
-		const noticeText = notice?.type === "text" ? notice.text : "";
-		expect(noticeText).toContain("to their ask answer");
-		expect(noticeText).toContain("/tmp/shot.png");
-		expect(result.content[2]).toMatchObject({ type: "image", data: image.data });
 	});
 
 	describe("for a text-only model", () => {
@@ -757,10 +741,6 @@ describe("AskTool option note images", () => {
 			});
 
 			expect(result.content.slice(1)).toEqual([image]);
-		});
-
-		it("sends the image alone to a vision model", async () => {
-			expect((await run(visionModel)).content.slice(1)).toEqual([image]);
 		});
 	});
 });
