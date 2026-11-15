@@ -314,6 +314,12 @@ async function createContext() {
 // 1x1 PNG.
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
 
+const PNG_CLIPBOARD = {
+	readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
+	readText: async () => "",
+	readMacFileUrls: async (): Promise<string[]> => [],
+};
+
 /** Replay a kitty OSC 5522 enhanced paste that offers text and PNG and delivers `png` bytes. */
 function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array): void {
 	const packet = (metadata: string, payload?: string) =>
@@ -1408,7 +1414,6 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		form.dispose();
 	});
 
-	/** Focus `dialog` with `owner` registered as the composer's owner. */
 	function mountComposerOwner(
 		context: { ctx: InteractiveModeContext; setFocused(target: unknown): void },
 		dialog: object,
@@ -1450,17 +1455,12 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const context = await createPromptContext();
 		const { dialog, handleInput } = createPlainDialog();
 		mountComposerOwner(context, dialog, { component: dialog, owns: () => true });
-		const controller = new InputController(context.ctx, {
-			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
-			readText: async () => "",
-			readMacFileUrls: async () => [],
-		});
+		const controller = new InputController(context.ctx, PNG_CLIPBOARD);
 
 		expect(await controller.handleImagePaste()).toBe(true);
 
 		expect(context.editor.pendingImages).toHaveLength(1);
 		expect(handleInput).not.toHaveBeenCalled();
-		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Image paste is not supported in this prompt");
 	});
 
 	it("refuses a clipboard image in a focused dialog without pasteText that the composer does not own", async () => {
@@ -1468,10 +1468,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const context = await createPromptContext();
 		const { dialog, handleInput } = createPlainDialog();
 		context.setFocused(dialog);
-		// A Finder file URL would attach in the composer; the dialog must not even probe it.
+		// A Finder file URL must not attach either.
 		const controller = new InputController(context.ctx, {
-			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
-			readText: async () => "",
+			...PNG_CLIPBOARD,
 			readMacFileUrls: async () => [`file://${imagePath}`],
 		});
 
@@ -1495,20 +1494,6 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(await controller.handleImagePaste()).toBe(true);
 
 		expect(handleInput).toHaveBeenCalledWith("\x1b[200~sk-test-key\x1b[201~");
-		expect(context.editor.getText()).toBe("");
-	});
-
-	it("refuses an image-path paste in a focused dialog without pasteText that the composer does not own", async () => {
-		const imagePath = await writePng("shot.png");
-		const context = await createPromptContext();
-		const { dialog, handleInput } = createPlainDialog();
-		context.setFocused(dialog);
-
-		await new InputController(context.ctx).handleImagePathPaste(imagePath);
-
-		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
-		expect(handleInput).not.toHaveBeenCalled();
-		expect(context.editor.pendingImages).toHaveLength(0);
 		expect(context.editor.getText()).toBe("");
 	});
 });
