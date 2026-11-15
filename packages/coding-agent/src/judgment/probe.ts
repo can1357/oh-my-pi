@@ -2,7 +2,7 @@
  * One-shot test of a native judge route: a single yes/no judgment sent straight to the model's endpoint,
  * outside the judge role chain (no cooldowns, cache, fallbacks or usage ledger), classified for display.
  */
-import { type ApiKey, createNativeJudge, type Model, type Usage } from "@oh-my-pi/pi-ai";
+import { type ApiKey, createNativeJudge, JudgmentApiError, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -19,8 +19,10 @@ export interface NativeJudgeProbeOptions {
 
 /** Why a route test failed. */
 export type NativeJudgeProbeFailure =
-	/** 401/403: the key was refused. */
+	/** 401/403: the key was refused (or, for a 403 whose body does not say, possibly the model). */
 	| "credential"
+	/** 401/403 whose body says the model is blocked, not allowed or unknown for this key. */
+	| "model-refused"
 	/** 402: billing or quota refused the request. */
 	| "billing"
 	/** 404: the endpoint root is wrong or does not serve the model. */
@@ -68,6 +70,21 @@ function detail(error: unknown): string {
 }
 
 /**
+ * What a 401/403 error body says was refused: the model (blocked, not allowed, unknown for this key) or the key
+ * itself; `undefined` when the body says neither.
+ */
+function refusedSubject(error: JudgmentApiError): "model" | "key" | undefined {
+	const text = `${error.code ?? ""} ${error.detail ?? ""}`.toLowerCase();
+	if (
+		/model/.test(text) &&
+		/not[ _]allowed|blocked|not[ _]found|does not exist|unknown|no access|not available/.test(text)
+	)
+		return "model";
+	if (/api[ _-]?key|virtual[ _-]?key|token|unauthori[sz]ed|authenticat|credential/.test(text)) return "key";
+	return undefined;
+}
+
+/**
  * Send one yes/no judgment through `model`'s native route and classify the outcome. The caller's `signal`
  * aborting rethrows; every other failure resolves to an `ok: false` result.
  */
@@ -107,8 +124,21 @@ export async function probeNativeJudgeRoute(
 		});
 		if (error instanceof AIError.ProviderHttpError) {
 			const { status } = error;
-			if (status === 401 || status === 403)
-				return failed("credential", `HTTP ${status}: the API key was refused`, status);
+			if (status === 401 || status === 403) {
+				const target = expectedModel ?? model.id;
+				const refused = error instanceof JudgmentApiError ? error : undefined;
+				const why = refused?.detail ? `: ${detail(refused.detail)}` : "";
+				const subject = refused ? refusedSubject(refused) : undefined;
+				if (subject === "model")
+					return failed("model-refused", `HTTP ${status}: the endpoint refused model ${target}${why}`, status);
+				if (subject === "key" || status === 401)
+					return failed("credential", `HTTP ${status}: the API key was refused${why}`, status);
+				return failed(
+					"credential",
+					`HTTP 403: the API key was refused, or the key may not use ${target}${why}`,
+					status,
+				);
+			}
 			if (status === 402) return failed("billing", "HTTP 402: billing or quota refused the request", status);
 			if (status === 404) {
 				return failed(

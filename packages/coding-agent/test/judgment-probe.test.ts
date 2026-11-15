@@ -56,6 +56,36 @@ describe("probeNativeJudgeRoute", () => {
 	test.each([
 		["a refused key", () => new Response("unauthorized", { status: 401 }), "credential", "API key was refused"],
 		[
+			"a model the key may not use (Bifrost's 403 body)",
+			() =>
+				Response.json(
+					{
+						type: "model_blocked",
+						status_code: 403,
+						error: { message: "Model 'fixture/other-model' is not allowed for virtual key 'vk-test'" },
+					},
+					{ status: 403 },
+				),
+			"model-refused",
+			"HTTP 403: the endpoint refused model jev-test: Model 'fixture/other-model' is not allowed",
+		],
+		[
+			"a key the body names as refused",
+			() =>
+				Response.json(
+					{ type: "virtual_key_required", error: { message: "virtual key is required." } },
+					{ status: 401 },
+				),
+			"credential",
+			"HTTP 401: the API key was refused: virtual key is required.",
+		],
+		[
+			"a 403 whose body names neither",
+			() => new Response("forbidden", { status: 403 }),
+			"credential",
+			"HTTP 403: the API key was refused, or the key may not use jev-test",
+		],
+		[
 			"an unknown root or model",
 			() => new Response("not found", { status: 404 }),
 			"not-found",

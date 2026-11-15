@@ -393,9 +393,18 @@ export interface NativeJudgeCallOptions extends JudgeOptions {
 	onPartialUsage?: (usage: Usage) => void;
 }
 
-/** Non-2xx response from a native judgment API; `code` is the error envelope's `code` or `type`. */
+/**
+ * Non-2xx response from a native judgment API. `code` is the error envelope's `code` or `type`, else the body's
+ * top-level `type` (as Bifrost sends); `detail` is the envelope's message, else the body text.
+ */
 export class JudgmentApiError extends AIError.ProviderHttpError {
 	override readonly name = "JudgmentApiError";
+	readonly detail: string | undefined;
+
+	constructor(message: string, status: number, options?: AIError.ProviderHttpErrorOptions & { detail?: string }) {
+		super(message, status, options);
+		this.detail = options?.detail;
+	}
 }
 
 /**
@@ -742,9 +751,14 @@ export class NativeJudge implements Judge {
 			}
 			if (response.ok) return await response.json();
 			const text = await response.text();
+			const errorBody = tryParseJson(text);
+			const envelope = AIError.OpenAIHttpError.parseEnvelope(errorBody, text);
 			const error = new JudgmentApiError(`${this.label} API error (${response.status}): ${text}`, response.status, {
 				headers: response.headers,
-				code: AIError.OpenAIHttpError.parseEnvelope(tryParseJson(text), text).code,
+				code:
+					envelope.code ??
+					(isRecord(errorBody) && typeof errorBody.type === "string" ? errorBody.type : undefined),
+				detail: envelope.detail,
 			});
 			const transient =
 				(response.status === 408 || response.status === 429 || response.status >= 500) &&
