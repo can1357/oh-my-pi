@@ -913,8 +913,37 @@ const CURL_DATA_OPTIONS: Record<string, true> = {
 	"-T": true,
 	"--upload-file": true,
 };
-/** wget's options that send a file, as `--post-file=file` or `--post-file file`. */
-const WGET_FILE_OPTIONS: Record<string, true> = { "--post-file": true, "--body-file": true };
+/**
+ * wget's options that send a file, as `--post-file=file` or `--post-file file`, each with the
+ * shortest abbreviation wget takes for it (`--post-` could also be `--post-data`).
+ */
+const WGET_FILE_OPTIONS: Record<string, string> = { "--post-file": "--post-f", "--body-file": "--body-f" };
+
+/**
+ * The files a curl `-F` field reads after `@` or `<`: a list split by `,` and ended by `;` (where
+ * the field's options start), each name possibly double-quoted (`f=@"a,b.txt",.env;type=text/plain`).
+ */
+function formFiles(value: string): string[] {
+	const at = value.search(/[@<]/);
+	if (at < 0) return [];
+	const files: string[] = [];
+	let i = at + 1;
+	for (;;) {
+		let file = "";
+		if (value[i] === '"') {
+			for (i++; i < value.length && value[i] !== '"'; i++) {
+				if (value[i] === "\\" && i + 1 < value.length) i++;
+				file += value[i];
+			}
+		}
+		for (; i < value.length && value[i] !== "," && value[i] !== ";"; i++) {
+			if (value[i] !== '"') file += value[i];
+		}
+		files.push(file);
+		if (value[i] !== ",") return files;
+		i++;
+	}
+}
 
 /** The local files a network command sends. */
 function sentFiles(command: ShellCommand): string[] {
@@ -943,7 +972,10 @@ function sentFiles(command: ShellCommand): string[] {
 			}
 			if (value === undefined) continue;
 			if (option === "-T" || option === "--upload-file") {
+				// `-T "{a,b}"` uploads each file of the list, as braces expand ({@link sentSecret}).
 				files.push(value);
+			} else if (option === "-F" || option === "--form") {
+				files.push(...formFiles(value));
 			} else {
 				const at = value.search(/[@<]/);
 				if (at >= 0) files.push(value.slice(at + 1).split(";")[0]);
@@ -953,7 +985,10 @@ function sentFiles(command: ShellCommand): string[] {
 		for (let i = 0; i < argv.length; i++) {
 			const eq = argv[i].indexOf("=");
 			const option = eq > 0 ? argv[i].slice(0, eq) : argv[i];
-			if (!Object.hasOwn(WGET_FILE_OPTIONS, option)) continue;
+			const sends = Object.entries(WGET_FILE_OPTIONS).some(
+				([full, shortest]) => option.startsWith(shortest) && full.startsWith(option),
+			);
+			if (!sends) continue;
 			const value = eq > 0 ? argv[i].slice(eq + 1) : argv[++i];
 			if (value !== undefined) files.push(value);
 		}
