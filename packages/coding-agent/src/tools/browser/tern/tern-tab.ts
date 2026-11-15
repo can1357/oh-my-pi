@@ -1494,6 +1494,12 @@ export class TernTab implements InProcessRunTab {
 				let loaded = events.some(event => event.type === "loaded");
 				if (!loaded && iteration % 4 === 0) {
 					const state = await this.#refreshState();
+					// Tern's `state` names the address a goto asked for before its web view starts the load,
+					// so leaving about:blank (never a same-document navigation) also needs the page's own report.
+					const arrived = !(
+						opts.leavesBlank &&
+						(this.#url === BLANK_URL || (opts.startUrl === BLANK_URL && !changed))
+					);
 					if (
 						state.loading === false &&
 						arrived &&
@@ -1537,6 +1543,7 @@ export class TernTab implements InProcessRunTab {
 				pull: true,
 				timeoutNote: () =>
 					sawBlank
+						? `${this.product} reported an about:blank load since the goto, not the requested page`
 						: `the page is at ${this.#url}`,
 			},
 		);
@@ -1710,6 +1717,7 @@ export class TernTab implements InProcessRunTab {
 	 * the block's size, and no op floats it again.
 	 */
 	async #viewportFailure(error: unknown, width: number, height: number): Promise<unknown> {
+		if (this.product !== "Tern" || !(error instanceof TernError) || error.kind !== "failed") return error;
 		const entry = await listTernBlocks(this.#client, { timeoutMs: 2_000, signal: this.#signal })
 			.then(blocks => blocks.find(candidate => candidate.block === this.block))
 			.catch(() => undefined);

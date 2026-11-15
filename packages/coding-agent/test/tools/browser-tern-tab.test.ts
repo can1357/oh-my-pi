@@ -140,6 +140,39 @@ describe("TernTab", () => {
 		expect(tab.url()).toBe("https://example.test/");
 	});
 
+	it.each(["about:blank", "https://example.test/"])(
+		"does not take an about:blank load reported after the first goto for that navigation (state at %s)",
+		async stateUrl => {
+			// Tern reported the blank page's load before the goto and again after it, then never
+			// loaded the address (its `state` names either page, settled): the open must not return
+			// as if the page had arrived.
+			let seq = 0;
+			let goto = false;
+			let afterGoto = 0;
+			const fake = await startFakeDaemon((op): FakeAnswer => {
+				if (op.op === "open") return { ok: { block: 7, url: "about:blank" } };
+				if (op.op === "goto") goto = true;
+				if (op.op === "state") return { ok: { url: stateUrl, loading: false, width: 800, height: 600 } };
+				if (op.op !== "events") return { ok: {} };
+				const batch = seq === 0 || (goto && afterGoto++ === 0) ? BLANK_LOAD : [];
+				const events = batch.map(event => ({ seq: ++seq, ...event }));
+				return { ok: { events, next: seq, dropped: 0 } };
+			});
+			daemon = fake;
+			client = new TernSocketClient({ socketPath: fake.socketPath });
+			const failure = await TernTab.open(client, {
+				name: "main",
+				pane: 3,
+				viewport: { width: 800, height: 600 },
+				timeoutMs: 1_500,
+				url: "https://example.test/",
+			}).catch((error: unknown) => error);
+			expect(String(failure)).toContain('tab.goto("https://example.test/") timed out');
+			expect(String(failure)).toContain("about:blank load since the goto");
+			// The PiP of the failed open is closed again.
+			expect(opsOf(fake)).toContain("close");
+		},
+	);
 
 	it("opens at about:blank without a goto, which a Tern web view would never load", async () => {
 		const fake = await startPage({ eventBatches: [], kit: {} });
@@ -440,6 +473,7 @@ describe("TernTab", () => {
 				case "blocks":
 					return { ok: { blocks: gone ? [] : [{ block: 7, url: "about:blank", title: "", owner: 3 }] } };
 				case "state":
+					if (gone) return { error: { kind: "not_found", message: "no browser block 7 in this window" } };
 					return { ok: { url: "about:blank", width: 800, height: 600 } };
 				default:
 					return { ok: {} };
