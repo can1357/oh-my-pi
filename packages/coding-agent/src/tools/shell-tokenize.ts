@@ -1208,6 +1208,9 @@ interface ReadScope {
 /** A substitution's key in a word; it stands for the commands the substitution runs. */
 const SUBSTITUTION_KEY_RE = /\0\d+\0/g;
 
+/** Characters a `${ }` reads differently once a single quote around them is a plain character. */
+const QUOTE_SENSITIVE_RE = /[[\]}"\\$`]/;
+
 /** Appends `items` to `target`; unlike `push(...items)`, any number of them. */
 function append<T>(target: T[], items: Iterable<T>): void {
 	for (const item of items) target.push(item);
@@ -1452,24 +1455,51 @@ class ShellScriptParser {
 	readonly scripts: string[] = [];
 	/** Characters of nested script read so far, against {@link SHELL_SCRIPT_MAX_NESTED_TEXT}. */
 	#nestedText = 0;
+	/**
+	 * Whether a `'` in a double-quoted `${ }` is read as a quote, as bash reads it, rather than as
+	 * a plain character, as POSIX shells (dash, `bash --posix`) read it in `"${v:-it's}"`.
+	 */
+	#bashQuotes = false;
+	/** Set when the text being read has such a `'` that the two readings take differently. */
+	#ambiguous = false;
 	/** Set when something was left unparsed: nested too deep, or past the nested text budget. */
 	truncated = false;
 	constructor(readonly home: string) {}
 
-	/** The pipelines `source` runs, nested ones after the top level. */
+	/**
+	 * The pipelines `source` runs, nested ones after the top level. When a `'` in a double-quoted
+	 * `${ }` makes bash and POSIX shells read `source` differently, the commands of both readings.
+	 */
 	parse(source: string, cwd: string, depth: number): ShellCommand[][] {
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
 			this.truncated = true;
 			return [];
 		}
-		if (depth > 0) {
-			this.#nestedText += source.length;
-			if (this.#nestedText > SHELL_SCRIPT_MAX_NESTED_TEXT) {
-				this.truncated = true;
-				return [];
-			}
-			this.scripts.push(source);
+		if (!this.#budget(source, depth)) return [];
+		if (depth > 0) this.scripts.push(source);
+		const outer = { bashQuotes: this.#bashQuotes, ambiguous: this.#ambiguous };
+		this.#bashQuotes = false;
+		this.#ambiguous = false;
+		const pipelines = this.#read(source, cwd, depth);
+		if (this.#ambiguous && this.#budget(source, depth)) {
+			this.#bashQuotes = true;
+			append(pipelines, this.#read(source, cwd, depth));
 		}
+		this.#bashQuotes = outer.bashQuotes;
+		this.#ambiguous = outer.ambiguous;
+		return pipelines;
+	}
+
+	/** Counts a nested `source` against the nested text budget: false, and truncated, once past it. */
+	#budget(source: string, depth: number): boolean {
+		if (depth === 0) return true;
+		this.#nestedText += source.length;
+		if (this.#nestedText <= SHELL_SCRIPT_MAX_NESTED_TEXT) return true;
+		this.truncated = true;
+		return false;
+	}
+
+	#read(source: string, cwd: string, depth: number): ShellCommand[][] {
 		const scope: ReadScope = { cwd, depth, subs: new Map() };
 		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope);
 	}
@@ -1805,7 +1835,8 @@ class ShellScriptParser {
 	 * Reads a `${ }` or `$[ ]` whose opening bracket is just before `start`: the index of its closing
 	 * bracket, and the keys of the substitutions in it. Quotes, escapes, nested expansions and
 	 * substitutions hide a closing bracket; a bare `{` does not nest, a `[` in `$[ ]` does. `quoted`
-	 * tells whether the expansion is inside double quotes.
+	 * tells whether the expansion is inside double quotes, where a `'` is read as
+	 * {@link #bashQuotes} says.
 	 */
 	#parameter(text: string, start: number, scope: ReadScope, quoted: boolean): { end: number; keys: string[] } {
 		const close = text[start - 1] === "[" ? "]" : "}";
@@ -1815,6 +1846,7 @@ class ShellScriptParser {
 			return { end: text.length, keys };
 		}
 		this.#braces++;
+		const plainQuotes = quoted && !this.#bashQuotes;
 		let brackets = 0;
 		let end = text.length;
 		let i = start;
@@ -1823,10 +1855,16 @@ class ShellScriptParser {
 			if (ch === "\\") {
 				i += 2;
 			} else if (ch === "$" && text[i + 1] === "'") {
-				i = readAnsiCString(text, i + 2).end + 1;
+				const ansi = readAnsiCString(text, i + 2);
+				if (quoted && (ansi.end >= text.length || QUOTE_SENSITIVE_RE.test(text.slice(i + 2, ansi.end)))) {
+					this.#ambiguous = true;
+				}
+				// Read plainly, the `$` is a character and the `'` after it is read on its own.
+				i = plainQuotes ? i + 1 : ansi.end + 1;
 			} else if (ch === "'") {
 				const quote = text.indexOf("'", i + 1);
-				i = quote < 0 ? text.length : quote + 1;
+				if (quoted && (quote < 0 || QUOTE_SENSITIVE_RE.test(text.slice(i + 1, quote)))) this.#ambiguous = true;
+				i = plainQuotes ? i + 1 : quote < 0 ? text.length : quote + 1;
 			} else if (ch === '"') {
 				const double = this.#double(text, i + 1, scope);
 				append(keys, double.value.match(SUBSTITUTION_KEY_RE) ?? []);

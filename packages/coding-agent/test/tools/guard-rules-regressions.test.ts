@@ -121,6 +121,18 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("reads a `'` in a double-quoted parameter expansion both as bash does, a quote, and as POSIX shells do, a plain character", () => {
+		for (const command of [
+			// dash and `bash --posix` print `it's fine`, then run the `cat`; bash reports a missing `'`.
+			`echo "\${MSG:-it's fine}"; cat ~/.ssh/id_rsa`,
+			`echo "\${v:-$'}"; cat ~/.ssh/id_rsa`,
+			// bash reads `'"'` as a quoted `"` and runs the `cat`; dash reports a missing `"`.
+			`echo "\${v:-'"'}"; cat ~/.ssh/id_rsa`,
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("ends a heredoc in a substitution at a line that starts with the delimiter and closes the substitution", () => {
 		const commit = `git commit -m "$(cat <<'EOF'\nDon't leak\nEOF)"`;
 		expect(ruleOf(bashApproval(cwd, `${commit} && cat ~/.ssh/id_rsa`))).toBe("credential_read");
