@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Parking or disposing a subagent with running background jobs no longer silently dead-letters them: dispose records the cancelled owner-scoped jobs (id, label) in the transcript, so a revived agent reads what was lost instead of confabulating job state ([#11564](https://github.com/can1357/oh-my-pi/issues/11564))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
