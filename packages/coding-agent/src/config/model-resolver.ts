@@ -1334,6 +1334,7 @@ export interface AgentModelPatternResolutionOptions {
 	requestModel?: string | string[];
 	settingsOverride?: string | string[];
 	agentModel?: string | string[];
+	agentThinkingLevel?: string;
 	settings?: Settings;
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
@@ -1343,11 +1344,37 @@ interface EffectiveAgentModelSelection {
 	source?: string | string[];
 	patterns: string[];
 }
+function applyDefaultThinkingToBareRolePatterns(
+	value: string | string[] | undefined,
+	defaultThinkingLevel: string | undefined,
+	settings?: ModelRoleLookup,
+): string[] | undefined {
+	if (!value) return undefined;
+	const patterns = normalizeModelPatternList(value);
+	if (!defaultThinkingLevel) return patterns;
+	return patterns.map(pattern => {
+		const prefixLength = modelRoleAliasPrefixLength(pattern);
+		if (prefixLength === undefined) return pattern;
+		const { base, level } = splitThinkingSuffix(pattern, prefixLength, MAX_THINKING_SUFFIX_OPTIONS);
+		if (level !== undefined) return pattern;
+		const role = getModelRoleAlias(base, settings);
+		if (!role) return pattern;
+		return `${pattern}:${defaultThinkingLevel}`;
+	});
+}
 
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
-	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
+	const {
+		requestModel,
+		settingsOverride,
+		agentModel,
+		agentThinkingLevel,
+		settings,
+		activeModelPattern,
+		fallbackModelPattern,
+	} = options;
 
 	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
 	if (requestPatterns.length > 0) {
@@ -1359,8 +1386,9 @@ function resolveEffectiveAgentModelSelection(
 		return { source: settingsOverride, patterns: overridePatterns };
 	}
 
-	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
+	const effectiveAgentModel = applyDefaultThinkingToBareRolePatterns(agentModel, agentThinkingLevel, settings);
+	const normalizedAgentPatterns = normalizeModelPatternList(effectiveAgentModel);
+	const configuredAgentPatterns = resolveConfiguredModelPatterns(effectiveAgentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
 	if (configuredAgentPatterns.length > 0) {
@@ -1368,9 +1396,9 @@ function resolveEffectiveAgentModelSelection(
 			singleAgentPattern === formatModelRoleAlias("task") ||
 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 		) {
-			return { source: agentModel, patterns: configuredAgentPatterns };
+			return { source: effectiveAgentModel, patterns: configuredAgentPatterns };
 		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+		if (!agentInheritsSessionModel) return { source: effectiveAgentModel, patterns: configuredAgentPatterns };
 	}
 
 	const fallback =
