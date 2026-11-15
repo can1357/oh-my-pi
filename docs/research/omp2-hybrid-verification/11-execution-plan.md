@@ -7,8 +7,17 @@ the actual merge of research PR #618. This branch was created after a
 fast-forward pull. The original research source pin remains unchanged.
 
 Implementation progress: [S1 required inventory and verdict](13-required-inventory-s1.md)
-is implemented and locally tested on the later `omp2` base `374eb3a`.
-It is a pure policy contract, not the joined S4 verification milestone.
+is merged in PR #626. [S2 native capture/applicability](14-input-snapshots-s2.md)
+is implemented on the pulled `omp2` base
+`0b4a60064dddc9d29b3451422d841f0a80c04b01`; validation is recorded in its slice note.
+S2 requires host-admitted supplemental input identities and observes matching
+captures; it does not establish automatic dependency closure or an atomic live
+worktree. [S3 evidence storage](15-evidence-storage-s3.md) is implemented on
+the S2 branch at `e960c471555c19a3a67afb98a77e3a7d69035c73` while PR #646
+remains unmerged. It imports and retains the full evidence closure through the
+existing session journal/CAS and checks integrity and exact applicability;
+execution/provenance truth remains host-admitted. S4 remains the first joined
+verification milestone.
 
 ## What the research establishes
 
@@ -66,7 +75,7 @@ second demonstrated need; do not expand the ADW state machine just to house
 verification names. Keep host resources out of pure domain code and preserve
 `compose_kernel` as the production construction boundary.
 
-S1 does not imply a working verification engine: S4 is the first joined-path
+S1–S3 do not imply a working verification engine: S4 is the first joined-path
 milestone. No standalone pure reducer, unused interface or skill collection
 should be reported as completed autonomous verification.
 
