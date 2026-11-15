@@ -184,6 +184,20 @@ describe("TTSR regex sandbox", () => {
 		expect(performance.now() - started).toBeLessThan(100);
 		expect(warnings(warn, "moved to the regex sandbox")).toBe(1);
 	});
+
+	it("tests every judged rule's sandboxed prefilters in one child call", async () => {
+		const manager = new TtsrManager({ enabled: true }, SANDBOX);
+		const prefilters = ["(a+)+b", "(x+)+y", "(\\w)\\1z", "(?<=q)r", "(c|cc)+d"];
+		for (const [index, condition] of prefilters.entries()) {
+			manager.addRule({ ...rule(`judged-${index}`, condition), question: "Does it apply?" });
+		}
+		const spawn = vi.spyOn(Bun, "spawnSync");
+
+		const candidates = await manager.judgedCandidates("xxy qr aaa", TEXT);
+
+		expect(candidates.map(candidate => candidate.rule.name)).toEqual(["judged-1", "judged-3"]);
+		expect(spawn).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("regex sandbox deadline", () => {

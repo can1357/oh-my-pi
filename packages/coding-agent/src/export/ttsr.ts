@@ -1005,16 +1005,12 @@ export class TtsrManager {
 		return false;
 	}
 
-	/** Prefilter test of completed content; sandboxed conditions run in one child call, quarantined ones never. */
-	#matchesCondition(entry: TtsrEntry, content: string): boolean {
-		const isolated = entry.conditions.filter(
-			condition => this.#sandboxed.has(condition) && !this.#quarantined.has(condition),
-		);
-		const verdicts = isolated.length > 0 ? this.#evaluateInSandbox(content, isolated) : undefined;
+	/** Prefilter test of completed content: sandboxed conditions read `verdicts`, quarantined ones never run. */
+	#matchesCondition(entry: TtsrEntry, content: string, verdicts: ReadonlyMap<RegExp, SandboxVerdict>): boolean {
 		for (const condition of entry.conditions) {
 			if (this.#quarantined.has(condition)) continue;
 			if (this.#sandboxed.has(condition)) {
-				if (verdicts?.get(condition)?.matched) return true;
+				if (verdicts.get(condition)?.matched) return true;
 				continue;
 			}
 			if (testTimed(condition, content, this.#onSlow)) return true;
@@ -1330,27 +1326,42 @@ export class TtsrManager {
 		if (!this.hasJudgedRules()) {
 			return [];
 		}
-		const candidates: JudgedCandidate[] = [];
+		const eligible: { entry: TtsrEntry; question: string }[] = [];
+		const isolated: RegExp[] = [];
 		for (const entry of this.#rules.values()) {
 			if (
 				!entry.question ||
 				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
-				!this.#matchesGlobalPaths(entry, context) ||
-				!(await this.#passesPrefilter(entry, content, context))
+				!this.#matchesGlobalPaths(entry, context)
 			) {
 				continue;
 			}
-			candidates.push({ rule: entry.rule, question: entry.question });
+			eligible.push({ entry, question: entry.question });
+			for (const condition of entry.conditions) {
+				if (this.#sandboxed.has(condition) && !this.#quarantined.has(condition)) isolated.push(condition);
+			}
+		}
+		const verdicts = this.#evaluateInSandbox(content, isolated);
+		const candidates: JudgedCandidate[] = [];
+		for (const { entry, question } of eligible) {
+			if (await this.#passesPrefilter(entry, content, context, verdicts)) {
+				candidates.push({ rule: entry.rule, question });
+			}
 		}
 		return candidates;
 	}
 
-	async #passesPrefilter(entry: TtsrEntry, content: string, context: TtsrMatchContext): Promise<boolean> {
+	async #passesPrefilter(
+		entry: TtsrEntry,
+		content: string,
+		context: TtsrMatchContext,
+		verdicts: ReadonlyMap<RegExp, SandboxVerdict>,
+	): Promise<boolean> {
 		if (entry.conditions.length === 0 && entry.astConditions.length === 0) {
 			return true;
 		}
-		if (this.#matchesCondition(entry, content)) {
+		if (this.#matchesCondition(entry, content, verdicts)) {
 			return true;
 		}
 		const lang = context.source === "tool" ? this.#deriveLang(context.filePaths) : undefined;
@@ -1468,6 +1479,15 @@ export class TtsrManager {
 	resetBuffer(): void {
 		this.#buffers.clear();
 		this.#lastAstSnapshots.clear();
+	}
+
+	/**
+	 * Give quarantined conditions a fresh sandbox run. Called when the logical
+	 * session changes; a same-session rule rebuild keeps them. Slow-scan
+	 * demotions stay, because a demoted condition's in-process scan is unbounded.
+	 */
+	clearQuarantine(): void {
+		this.#quarantined.clear();
 	}
 
 	/** Clear only one tool stream's transient matcher state. */
