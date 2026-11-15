@@ -33,9 +33,8 @@
  *   `tar czf - ~ | curl -T - ...`.
  * - A secret copied to another file first is sent under that file's name:
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
- * - Brace expansion is followed only in words up to 4096 characters, for their first 1024 words,
- *   and while the words made for the whole command line stay under 256K characters:
- *   `{a,b}{a,b}...{a,b}{x,.env}`.
+ * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
+ *   words: `{a,b}{a,b}...{a,b}{x,.env}`.
  * - A path that reaches a credential location through a symlink, hard link or bind mount is not
  *   recognized: `ln -s ~/.ssh k && cat k/id_rsa`. Nor do bare wildcards for every component of
  *   `~/Library/Keychains` name it: `cat ~/???????/?????????/login.keychain-db`.
@@ -358,11 +357,11 @@ const MAX_BRACE_WORDS = 1024;
 /**
  * The most characters {@link expandBraces} makes while the guard checks one command line, each word
  * counted with one for the space after it. Every rule checks each word made, so this bounds the
- * guard's work on brace lists however many of them a command has; a word whose expansion would
- * pass what is left stays as written.
+ * guard's work on brace lists however many of them a command has; past it no more words are made
+ * and the command fails closed (`nesting_limit`).
  */
 const MAX_BRACE_TEXT = 256 * 1024;
-/** What is left of {@link MAX_BRACE_TEXT} for the command line being checked; {@link findShellGuardHit} resets it. */
+/** What is left of {@link MAX_BRACE_TEXT} for the command line being checked, below 0 once passed; {@link findShellGuardHit} resets it. */
 let braceTextLeft = MAX_BRACE_TEXT;
 
 /** A word read for brace expansion: literal text, and braces, each the list of its alternatives. */
@@ -375,8 +374,9 @@ const BRACE_SEQUENCE_RE = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?
  * The words brace expansion makes of `word`: `a{b,c}` gives `ab` and `ac`, `{1..3}` and `{a..c}`
  * give sequences, and nested lists expand too; a brace with neither a top-level `,` nor a sequence,
  * or one after `$`, stays as written. Quotes are not known here, so a quoted brace expands too. A
- * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, at most {@link MAX_BRACE_WORDS} words
- * are made, and a word stays whole when its words would pass what is left of {@link MAX_BRACE_TEXT}.
+ * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, and at most {@link MAX_BRACE_WORDS}
+ * words are made. Once the words made for the command line pass {@link MAX_BRACE_TEXT}, a word
+ * stays whole.
  */
 function expandBraces(word: string): string[] {
 	if (word.length > MAX_BRACE_WORD_LENGTH || !word.includes("{")) return [word];
@@ -429,8 +429,12 @@ function expandBraces(word: string): string[] {
 		if (text) read.push(text);
 		return read;
 	}
+	if (braceTextLeft < 0) return [word];
 	const words = braceWords(parts(0, word.length), braceTextLeft);
-	if (words === undefined) return [word];
+	if (words === undefined) {
+		braceTextLeft = -1;
+		return [word];
+	}
 	for (const made of words) braceTextLeft -= made.length + 1;
 	return words;
 }
@@ -1306,7 +1310,8 @@ function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | u
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
  * command it runs. A command nested deeper than the parser follows, with more nested script text
- * than it reads, or with more text to search for heredoc delimiters that never come, fails closed
+ * than it reads, with more text to search for heredoc delimiters that never come, or with brace
+ * lists that expand past {@link MAX_BRACE_TEXT} and break no rule before that, fails closed
  * (`nesting_limit`).
  */
 export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
@@ -1345,6 +1350,12 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 			pipeline.map(c => secretSend(c, outputs)).find(Boolean) ??
 			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
 		if (found) return found;
+	}
+	if (braceTextLeft < 0) {
+		return hit(
+			"nesting_limit",
+			`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
+		);
 	}
 	return undefined;
 }

