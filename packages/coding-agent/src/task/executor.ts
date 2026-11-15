@@ -4843,13 +4843,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					null)
 				: undefined;
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+			const resolvedModelRole = modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings);
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
-					? resolveSubagentInheritedRetryFallbackChain(
-							subagentSettings,
-							modelRegistry,
-							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
-						)
+					? resolveSubagentInheritedRetryFallbackChain(subagentSettings, modelRegistry, resolvedModelRole)
 					: undefined;
 			const {
 				model,
@@ -5071,6 +5068,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
+					modelRole: resolvedModelRole,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
@@ -5306,7 +5304,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				tools: persistedSubagentTools,
 				mountedTools: session.getMountedXdevToolNames(),
 				agent: agent.name,
-				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+				modelRole: resolvedModelRole,
 				resolvedModel: progress.resolvedModel,
 				...(perCallModelGrants
 					? {

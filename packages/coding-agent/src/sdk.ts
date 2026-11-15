@@ -3864,7 +3864,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoApprove: options.autoApprove ?? false,
 			spotlightShape,
 		});
-		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait);
+		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait, {
+			agentId: resolvedAgentId,
+			modelRole: options.modelRole,
+		});
 		toolSession.getToolContext = () => toolContextStore.getContext();
 		const setSessionActiveToolNames = (names: Iterable<string>): void => {
 			const snapshot = Array.from(names);

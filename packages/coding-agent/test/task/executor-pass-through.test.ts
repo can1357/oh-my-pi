@@ -171,6 +171,23 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.preloadedCustomToolPaths).toBe(preloadedCustomToolPaths);
 	});
 
+	it("forwards nested subagent identity and its authoritative model role to session creation", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "Parent.Child",
+			modelRole: "task",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]).toMatchObject({
+			agentId: "Parent.Child",
+			modelRole: "task",
+		});
+	});
+
 	it("forwards an exact credential resolver without replacing it", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

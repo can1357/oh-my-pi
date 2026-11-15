@@ -1119,11 +1119,19 @@ export type ToolApprovalDecision =
 	  };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
 
+/** Stable host-owned identity of the agent executing a tool call. */
+export interface AgentToolCaller {
+	readonly agentId?: string;
+	readonly modelRole?: string;
+}
+
 /**
  * Context passed to tool execution.
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
+	/** Host-owned caller identity. Absent when the session has no authoritative identity. */
+	readonly caller?: AgentToolCaller;
 	/**
 	 * Attach trusted, agent-authored instructions to the next provider request.
 	 * The host emits them after tool results with developer/system priority where
