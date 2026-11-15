@@ -11,9 +11,6 @@
 - Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
 - omp's WebKit browser engine now installs and updates to the newest stable ABKit release instead of the one each omp release pinned; the first WebKit open in a process checks for a newer one
 - omp keeps each ABKit version in `~/.o2/lib/abkit-versions/<version>` and links `~/.o2/lib/abkit` to the current one, so an engine update no longer waits for running browser hosts to exit
-
-### Changed
-
 - The `eval` tool description now always points the model to `judge_batch` (`judgeBatch` in JS) for about 20+ homogeneous items sharing one yes/no, bucket or score question, with the rubric fixed before reading the data; it reads only the items the judge flags, is unsure about or fails on, instead of scanning them all by hand ([#19052](https://github.com/can1357/oh-my-pi/pull/19052) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
