@@ -5,7 +5,7 @@
 ### Added
 
 - `spotlight.ranker` (**Spotlight Ranker**) lets the Spotlight experiment rank shaped tool output with the `judge` role instead of Stencil, one `noul` question per line over chunks of 48 items, so shaping has a ranker without a Stencil credential ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
-- `spotlight.ranker: auto` ranks with Spotlight and moves the whole call to the `judge` role when Spotlight cannot answer a chunk, instead of mixing the two rankers' scores in one ranking
+- `spotlight.ranker: auto` ranks with Spotlight and moves the whole call to the `judge` role when Spotlight cannot answer a chunk, instead of mixing the two rankers' scores in one ranking ([#19282](https://github.com/can1357/oh-my-pi/pull/19282) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.2] - 2026-11-14
 

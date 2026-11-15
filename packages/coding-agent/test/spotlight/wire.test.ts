@@ -15,6 +15,7 @@ import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import {
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
+	standaloneFindSpotlight,
 	startSpotlightExperiment,
 } from "@oh-my-pi/pi-coding-agent/spotlight/session";
 import { countTokens } from "@oh-my-pi/pi-coding-agent/spotlight/shape/shape";
@@ -200,10 +201,9 @@ describe("spotlight ranker", () => {
 		expect(scorer.scoreFree).toBeUndefined();
 	});
 
-	it("ranks standalone find with Spotlight under auto, and only skips it for judge", async () => {
+	it("ranks standalone find with Spotlight under auto, and only skips it for judge", () => {
 		const auto = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "auto" });
 		const judge = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
-		const { standaloneFindSpotlight } = await import("@oh-my-pi/pi-coding-agent/spotlight/session");
 		expect(standaloneFindSpotlight(auto)?.client).toBeDefined();
 		expect(standaloneFindSpotlight(judge)).toBeUndefined();
 	});
