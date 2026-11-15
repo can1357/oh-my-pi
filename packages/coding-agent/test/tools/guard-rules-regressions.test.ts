@@ -265,6 +265,17 @@ describe("guard rule regressions", () => {
 		expect(bashApproval(cwd, `git clean -fd "$PWD/missing.txt"`)).toBe("exec");
 	});
 
+	it("previews the whole directory for a `git clean` pathspec the shell brace-expands", async () => {
+		await dirtyRepo(cwd);
+		for (const dir of ["build", "dist", "out1", "out2"]) {
+			fs.mkdirSync(path.join(cwd, dir));
+			fs.writeFileSync(path.join(cwd, dir, "o"), "x\n");
+		}
+		for (const command of ["git clean -fd {build,dist}", "git clean -fd out{1..2}"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"runs no filter driver while checking, even one whose name contains `=`",
 		async () => {

@@ -575,6 +575,11 @@ function isLongOption(arg: string, name: string): boolean {
 
 /** A word the shell expands before git sees it: a variable, a substitution (its key), a leading `~`. */
 const SHELL_EXPANDED_RE = /[$\0]|^~/;
+/**
+ * A brace expansion, which can make one word several (`{build,dist}`, `out{1..3}`). A word records
+ * only that some part of it was quoted, not which, so a quoted one counts too.
+ */
+const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
 /** An expansion up front that makes a word an absolute path: `~`, `$HOME`, `$PWD`. */
 const ABSOLUTE_EXPANSION_RE = /^(?:~(?:\/|$)|\$\{?(?:HOME|PWD)\b)/;
 
@@ -583,8 +588,8 @@ const ABSOLUTE_EXPANSION_RE = /^(?:~(?:\/|$)|\$\{?(?:HOME|PWD)\b)/;
  * `-f`, git refuses to clean (by default), so checking it anyway only prompts for a call that fails.
  * `-q` and `-i` do not change what is deleted; a second `-f` adds untracked nested repositories. A
  * pathspec the shell expands is resolved like a path (`"$PWD"`, `~/repo`); when one cannot be
- * (another variable, a substitution), the whole directory is previewed. An exclude the shell
- * expands is dropped, which only widens the preview.
+ * (another variable, a substitution, a brace expansion), the whole directory is previewed. An
+ * exclude the shell expands is dropped, which only widens the preview.
  */
 function cleanCheck(rest: readonly string[], command: ShellCommand, scope: GuardScope): VcsDiscardCheck | undefined {
 	let force = 0;
@@ -627,6 +632,7 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 		}
 	}
 	const resolved = pathspecs.map(word => {
+		if (BRACE_EXPANSION_RE.test(word)) return undefined;
 		if (!SHELL_EXPANDED_RE.test(word)) return word;
 		return ABSOLUTE_EXPANSION_RE.test(word) ? resolveShellWordPath(word, command.cwd, scope.home) : undefined;
 	});
@@ -636,7 +642,7 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 		includeIgnored,
 		ignoredOnly,
 		nestedRepositories: force > 1,
-		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word)),
+		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word) && !BRACE_EXPANSION_RE.test(word)),
 		pathspecs: resolved.every((word): word is string => word !== undefined) ? resolved : [],
 	};
 }
