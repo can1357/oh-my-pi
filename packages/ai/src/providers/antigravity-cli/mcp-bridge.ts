@@ -65,16 +65,8 @@ export class McpBridge {
 	#unreferenced = false;
 
 	/** Start listening immediately on an ephemeral IPv4 loopback port. */
-	constructor(
-		tools: readonly McpToolDefinition[],
-		onCall: McpCallHandler,
-		onDisconnectOrOptions?: (() => void) | McpBridgeOptions,
-	) {
+	constructor(tools: readonly McpToolDefinition[], onCall: McpCallHandler, options: McpBridgeOptions = {}) {
 		const byName = validateMcpTools(tools);
-		const options: McpBridgeOptions =
-			typeof onDisconnectOrOptions === "function"
-				? { onDisconnect: onDisconnectOrOptions }
-				: (onDisconnectOrOptions ?? {});
 		this.#server = Bun.listen<Connection>({
 			hostname: "127.0.0.1",
 			port: 0,

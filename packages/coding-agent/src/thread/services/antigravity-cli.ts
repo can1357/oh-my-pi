@@ -7,8 +7,12 @@
  * use) so compatible sessions across the `omp` OS process share one `agy acp`
  * subprocess per account and tool set.
  */
-import { setSharedAgyWorkerBridge, type SharedAgyBridgeRequest } from "@oh-my-pi/pi-ai/providers/antigravity-cli-state";
-import type { AgyConnection } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
+import {
+	acquireMainThreadSharedAgyLease,
+	setSharedAgyWorkerBridge,
+	type SharedAgyBridgeLease,
+	type SharedAgyBridgeRequest,
+} from "@oh-my-pi/pi-ai/providers/antigravity-cli-state";
 import { logger } from "@oh-my-pi/pi-utils";
 import { RequestError } from "@oh-my-pi/pi-utils/acp";
 import type { ThreadId } from "../identity";
@@ -22,15 +26,19 @@ interface BridgedAgyLeaseRequest extends SharedAgyBridgeRequest {
 	onAborted: (reason: string) => void;
 }
 
+type BridgedConnection = SharedAgyBridgeLease["connection"];
+
 interface BridgedAgyLeaseHandle {
 	exited: Promise<number>;
-	initialize: AgyConnection["initialize"];
-	newSession: AgyConnection["newSession"];
-	loadSession: AgyConnection["loadSession"];
-	closeSession: AgyConnection["closeSession"];
-	setSessionConfigOption: AgyConnection["setSessionConfigOption"];
-	prompt: AgyConnection["prompt"];
-	cancel: AgyConnection["cancel"];
+	credentialVersion?: string;
+	credentialExpires?: number;
+	initialize: BridgedConnection["initialize"];
+	newSession: BridgedConnection["newSession"];
+	loadSession: BridgedConnection["loadSession"];
+	closeSession: BridgedConnection["closeSession"];
+	setSessionConfigOption: BridgedConnection["setSessionConfigOption"];
+	prompt: BridgedConnection["prompt"];
+	cancel: BridgedConnection["cancel"];
 	close: () => void;
 }
 
@@ -54,13 +62,10 @@ export const antigravityCliThreadService: ThreadService = {
 		exitedPeers.delete(peer.threadId);
 		return {
 			openSharedLease: async request => {
-				// Dynamic import: THREAD_SERVICES loads in every startup and worker realm,
-				// whereas provider transports stay lazy-loaded on the main thread until used.
-				const { acquireMainThreadSharedAgyLease } =
-					await import("@oh-my-pi/pi-ai/providers/antigravity-cli/shared-pool");
 				const lease = await acquireMainThreadSharedAgyLease({
 					geminiDir: request.geminiDir,
 					credentialVersion: request.credentialVersion,
+					credentialExpires: request.credentialExpires,
 					tools: request.tools,
 					signal: request.signal,
 					onCall: (name, args, conversationId) => request.onCall(name, args, conversationId),
@@ -84,6 +89,8 @@ export const antigravityCliThreadService: ThreadService = {
 				if (lease.connection.signal.aborted) notifyAbort();
 				return {
 					exited: lease.exited,
+					credentialVersion: lease.credentialVersion,
+					credentialExpires: lease.credentialExpires,
 					initialize: params => lease.connection.initialize(params),
 					newSession: params => lease.connection.newSession(params),
 					loadSession: params => lease.connection.loadSession(params),
@@ -128,6 +135,8 @@ export const antigravityCliThreadService: ThreadService = {
 					cancel: params => remote.cancel(params),
 				},
 				exited: remote.exited,
+				credentialVersion: remote.credentialVersion,
+				credentialExpires: remote.credentialExpires,
 				close: () => {
 					if (closed) return;
 					closed = true;

@@ -10,13 +10,11 @@ import { configureAntigravityCliIsolateWorkspace } from "@oh-my-pi/pi-ai/provide
 import {
 	AgyHost,
 	describeToolArguments,
-	type AgyConnection,
 	type AgyHostOptions,
-	type AgyScheduler,
 	type AgyStepOptions,
-	type AgyTransport,
 	type AgyTransportOptions,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
+import type { AgyConnection, AgyScheduler, AgyTransport } from "@oh-my-pi/pi-ai/providers/antigravity-cli/process";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";

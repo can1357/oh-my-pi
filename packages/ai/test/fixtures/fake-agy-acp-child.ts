@@ -8,7 +8,7 @@
  * and session lifecycle events without timers or mocked modules.
  */
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { connect, type Socket } from "node:net";
 import * as path from "node:path";
 
@@ -82,8 +82,8 @@ const telemetry: FakeAgyTelemetry = {
 };
 
 function flushTelemetry(): void {
-	mkdirSync(geminiDir, { recursive: true });
-	writeFileSync(telemetryPath, JSON.stringify(telemetry));
+	fs.mkdirSync(geminiDir, { recursive: true });
+	fs.writeFileSync(telemetryPath, JSON.stringify(telemetry));
 }
 
 function recordWireEvent(event: string): void {
@@ -103,7 +103,7 @@ function conversationDbPath(id: string): string {
 
 function ensureConversationDb(id: string): Database {
 	const dbFile = conversationDbPath(id);
-	mkdirSync(path.dirname(dbFile), { recursive: true });
+	fs.mkdirSync(path.dirname(dbFile), { recursive: true });
 	const db = new Database(dbFile);
 	db.run("PRAGMA journal_mode = WAL");
 	for (const table of ["steps", "gen_metadata", "executor_metadata", "parent_references"]) {
@@ -465,7 +465,7 @@ async function handleMessage(raw: string): Promise<void> {
 		case "session/load": {
 			const sessionId = String(params.sessionId ?? "");
 			const cwd = String(params.cwd ?? "");
-			if (!existsSync(conversationDbPath(sessionId))) {
+			if (!fs.existsSync(conversationDbPath(sessionId))) {
 				writeStdio({ id: msg.id, error: { code: -32602, message: `Unknown session ${sessionId}` } });
 				return;
 			}

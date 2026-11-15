@@ -6,13 +6,14 @@
  */
 import { $flag } from "@oh-my-pi/pi-utils";
 import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
-import type { AgyConnection } from "./antigravity-cli/host";
 import type { McpCallHandler, McpToolDefinition } from "./antigravity-cli/mcp-bridge";
+import type { AgyConnection } from "./antigravity-cli/process";
 
 /** Parameters required to acquire one shared ACP session lease. */
 export interface SharedAgyBridgeRequest {
 	geminiDir: string;
 	credentialVersion?: string;
+	credentialExpires?: number;
 	tools: readonly McpToolDefinition[];
 	signal: AbortSignal;
 	onCall: McpCallHandler;
@@ -23,15 +24,21 @@ export interface SharedAgyBridgeRequest {
 export interface SharedAgyBridgeLease {
 	connection: AgyConnection;
 	exited: Promise<number>;
+	credentialVersion?: string;
+	credentialExpires?: number;
 	close(): void;
 }
 
 /** Optional cross-thread bridge installed inside subagent worker realms. */
 export type SharedAgyWorkerBridge = (options: SharedAgyBridgeRequest) => Promise<SharedAgyBridgeLease>;
 
+/** Main-thread shared-pool lease acquirer registered lazily or when the pool loads. */
+export type SharedAgyMainThreadAcquirer = (options: SharedAgyBridgeRequest) => Promise<SharedAgyBridgeLease>;
+
 let configuredShareProcess = true;
 let configuredIsolateWorkspace = true;
 let workerBridge: SharedAgyWorkerBridge | undefined;
+let mainThreadAcquirer: SharedAgyMainThreadAcquirer | undefined;
 
 /**
  * Set the process-wide default for sharing `agy acp` processes across compatible sessions.
@@ -67,4 +74,21 @@ export function setSharedAgyWorkerBridge(bridge: SharedAgyWorkerBridge | undefin
 /** Active worker-thread bridge, if running inside a bridged subagent worker. */
 export function getSharedAgyWorkerBridge(): SharedAgyWorkerBridge | undefined {
 	return workerBridge;
+}
+
+/** Register or clear the main-thread shared-pool lease acquirer (`fallback` skips overwriting a loaded pool). */
+export function setSharedAgyMainThreadAcquirer(
+	acquirer: SharedAgyMainThreadAcquirer | undefined,
+	options?: { fallback?: boolean },
+): void {
+	if (options?.fallback && mainThreadAcquirer !== undefined) return;
+	mainThreadAcquirer = acquirer;
+}
+
+/** Acquire a lease from the registered main-thread shared `agy` pool. */
+export function acquireMainThreadSharedAgyLease(request: SharedAgyBridgeRequest): Promise<SharedAgyBridgeLease> {
+	if (!mainThreadAcquirer) {
+		throw new Error("Antigravity CLI main-thread shared pool is not registered");
+	}
+	return mainThreadAcquirer(request);
 }

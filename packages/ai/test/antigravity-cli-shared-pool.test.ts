@@ -5,12 +5,8 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
-import {
-	type AgyConnection,
-	AgyHost,
-	type AgyScheduler,
-	type AgySpawnedProcess,
-} from "../src/providers/antigravity-cli/host";
+import { AgyHost } from "../src/providers/antigravity-cli/host";
+import type { AgyConnection, AgyScheduler, AgySpawnedProcess } from "../src/providers/antigravity-cli/process";
 import { SharedAgyPool } from "../src/providers/antigravity-cli/shared-pool";
 import { StepWriter } from "../src/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "../src/types";
@@ -463,10 +459,11 @@ describe("SharedAgyPool deterministic seam contracts", () => {
 		expect(sessionV1.sessionId).toBeDefined();
 		expect(backendSeq).toBe(1);
 
-		// Rotate credentialVersion while leaseV1 is still open: starts backend #2 immediately, keeps #1 alive until leaseV1 closes.
+		// Rotate credentialVersion with a newer credentialExpires while leaseV1 is open: starts backend #2, keeps #1 alive until leaseV1 closes.
 		const leaseV2 = await pool.acquire({
 			geminiDir: root,
 			credentialVersion: "cred-2",
+			credentialExpires: 2_000,
 			tools: [],
 			signal: new AbortController().signal,
 			onCall: async () => ({ content: [] }),
@@ -474,6 +471,21 @@ describe("SharedAgyPool deterministic seam contracts", () => {
 		});
 		expect(backendSeq).toBe(2);
 		expect(closedBackends).toEqual([]);
+
+		// A concurrent caller holding a pre-refresh snapshot (older credentialExpires) reuses backend #2 instead of retiring it.
+		const staleCallerLease = await pool.acquire({
+			geminiDir: root,
+			credentialVersion: "cred-1",
+			credentialExpires: 1_000,
+			tools: [],
+			signal: new AbortController().signal,
+			onCall: async () => ({ content: [] }),
+			onUpdate: () => undefined,
+		});
+		expect(backendSeq).toBe(2);
+		expect(staleCallerLease.credentialVersion).toBe("cred-2");
+		expect(staleCallerLease.credentialExpires).toBe(2_000);
+		staleCallerLease.close();
 
 		leaseV1.close();
 		await leaseV1.exited;
