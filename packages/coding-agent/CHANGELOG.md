@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- ACP steering requests now wait for the client prompt's own run instead of being injected into an unrelated background run that happens to be streaming, so their answers are no longer dropped or attributed to the wrong prompt ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- ACP steering requests now wait for the client prompt's own run instead of being injected into an unrelated background run that happens to be streaming, so their answers are no longer dropped or attributed to the wrong prompt ([#19316](https://github.com/can1357/oh-my-pi/pull/19316) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.2] - 2026-11-14
 
