@@ -1,4 +1,5 @@
 One cell per call; top-level state persists, including across compaction.{{#if spawns}} Subagents have separate kernels.{{/if}}
+A cell without `timeout` stops after {{timeoutDefault}}s{{#if timeoutRaisable}}; pass a larger `timeout` for slow subprocesses, network calls or large scans{{/if}}.
 {{#if spawns}}
 {{#if eagerDelegation}}
 For 2+ independent items, use a named `workpool()`; results auto-deliver.

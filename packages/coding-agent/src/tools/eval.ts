@@ -123,12 +123,14 @@ const evalCellCommonFields = {
 
 function evalTimeoutSchema(maxTimeout?: number) {
 	const { min, max } = TOOL_TIMEOUTS.eval;
+	// The deadline an omitted `timeout` resolves to, after any configured ceiling.
+	const defaultTimeout = clampTimeout("eval", undefined, maxTimeout);
 	const configured =
 		maxTimeout !== undefined && maxTimeout > 0
 			? ` Configured tools.maxTimeout: ${maxTimeout}s (effective ceiling ${clampTimeout("eval", max, maxTimeout)}s).`
 			: "";
 	return type("number").describe(
-		`Cell deadline in seconds; nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
+		`Cell deadline in seconds (default ${defaultTimeout}); nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
 	);
 }
 
@@ -207,6 +209,8 @@ export interface EvalToolDescriptionOptions {
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	/** Canonical and wire names currently accepted by the session tool bridge. */
 	toolNames?: readonly string[];
+	/** Session `tools.maxTimeout`; the advertised default deadline is the one it actually caps to. */
+	maxTimeout?: number;
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -224,6 +228,10 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		autoProvision: options.autoProvision ?? true,
 		perCallModel: options.perCallModel ?? false,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
+		timeoutDefault: clampTimeout("eval", undefined, options.maxTimeout),
+		timeoutRaisable:
+			clampTimeout("eval", TOOL_TIMEOUTS.eval.max, options.maxTimeout) >
+			clampTimeout("eval", undefined, options.maxTimeout),
 	};
 }
 
@@ -407,6 +415,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			perCallModel,
 			perCallModelAdvertisement,
 			toolNames: session.getAdvertisedEvalToolNames?.(),
+			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};
 	}
 
