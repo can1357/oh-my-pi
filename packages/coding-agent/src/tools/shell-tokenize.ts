@@ -1167,18 +1167,8 @@ interface PendingHeredoc {
 	doc: ShellHeredoc;
 }
 
-/** Reserved words after which the next word starts a command. */
-const COMMAND_PREFIXES: Record<string, true> = {
-	"!": true,
-	"{": true,
-	if: true,
-	then: true,
-	else: true,
-	elif: true,
-	while: true,
-	until: true,
-	do: true,
-};
+/** Reserved words after which the next word starts a command (a list, not a record: `then` would make it thenable). */
+const COMMAND_PREFIXES: readonly string[] = ["!", "{", "if", "then", "else", "elif", "while", "until", "do"];
 
 /** Reserved words that open a compound command, and those that close one. */
 const COMPOUND_OPENERS: Record<string, true> = {
@@ -1467,7 +1457,7 @@ class PipelineStages {
 				if (word === "for" || word === "select" || word === "case") return;
 			} else if (Object.hasOwn(COMPOUND_CLOSERS, word)) {
 				this.#close();
-			} else if (!Object.hasOwn(COMMAND_PREFIXES, word)) {
+			} else if (!COMMAND_PREFIXES.includes(word)) {
 				return;
 			}
 		}
@@ -1631,7 +1621,7 @@ class ShellScriptParser {
 			const last = out.at(-1);
 			if (!last) return true;
 			if (last.operator) return !Object.hasOwn(SHELL_REDIRECTS, last.text);
-			return !last.quoted && Object.hasOwn(COMMAND_PREFIXES, last.text);
+			return !last.quoted && COMMAND_PREFIXES.includes(last.text);
 		};
 		// Moves the `case` being read past the word just ended, or starts one.
 		const caseWord = () => {
