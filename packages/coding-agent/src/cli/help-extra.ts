@@ -58,6 +58,7 @@ export function getExtraHelpText(): string {
   SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
   SCW_SECRET_KEY             - Scaleway Generative APIs models
+  ZRO_API_KEY                - Zro (MoonMath) open-weight coding models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
   OTARI_BASE_URL             - Otari self-hosted API root (e.g. https://host/api/v1)
 

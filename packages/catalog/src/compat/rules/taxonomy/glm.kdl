@@ -13,5 +13,7 @@ class "glm" {
     override id="abliteration-glm-5-3-family" provider="abliteration" model="abliterated-model-large-v2" class="glm" revision="5.3" rationale="Abliteration's Large V2 is an abliterated GLM 5.3 deployment" provenance="docs.abliteration.ai/models (2026-09)"
     override id="abliteration-glm-5-2-family" provider="abliteration" model="abliterated-model-large" class="glm" revision="5.2" rationale="Abliteration's Large is an abliterated GLM 5.2 deployment" provenance="docs.abliteration.ai/models (2026-09)"
     override id="abliteration-glm-base-family" provider="abliteration" model="abliterated-model" class="glm" rationale="Abliteration's base deployment is GLM-derived; the docs do not pin the revision" provenance="docs.abliteration.ai/models (2026-09)"
+    override id="zro-dolly1-glm-5-3-flash-family" provider="zro" model="dolly1-security" class="glm" revision="5.3" family="flash" rationale="Zro's Dolly 1 Security is an uncensored fine-tune of GLM-5.3 Flash" provenance="zro.moonmath.ai/docs/models/dolly1-security (2026-11)"
+    override id="zro-dolly2-glm-5-3-family" provider="zro" model="dolly2-security" class="glm" revision="5.3" rationale="Zro's Dolly 2 Security is an uncensored fine-tune of GLM-5.3" provenance="zro.moonmath.ai/docs/models/dolly2-security (2026-11)"
     revision prefix="glm-" anywhere=#true
 }

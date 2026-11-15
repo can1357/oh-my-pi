@@ -82,6 +82,7 @@ import {
 	yoloAutoModelManagerOptions,
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
+	zroModelManagerOptions,
 } from "./openai-compat";
 import {
 	cloudflareWorkersAiModelManagerOptions,
@@ -188,6 +189,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	zai: config => zaiModelManagerOptions(config),
 	zenmux: config => zenmuxModelManagerOptions(config),
 	"zhipu-coding-plan": config => zhipuCodingPlanModelManagerOptions(config),
+	zro: config => zroModelManagerOptions(config),
 };
 
 function isKnownProvider(id: string): id is KnownProvider {

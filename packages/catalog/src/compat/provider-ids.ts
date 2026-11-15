@@ -97,4 +97,5 @@ export type KnownProvider =
 	| "yolo-auto"
 	| "zai"
 	| "zenmux"
-	| "zhipu-coding-plan";
+	| "zhipu-coding-plan"
+	| "zro";
