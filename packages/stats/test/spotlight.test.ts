@@ -462,6 +462,28 @@ describe("Spotlight cut economics", () => {
 		);
 		expect(stats.clawback.turns).toBe(1);
 	});
+
+	it("charges a fetch-back turn that missed the prompt cache only what it added, not the context rewrite", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b); // context 500 + 10,000 + 500 = 11,000
+		// The dive's request lost the prompt cache: it rewrote 11,500 tokens though its context grew by only 2,000.
+		const [dive] = b.request({
+			cacheRead: 1000,
+			cacheWrite: 11_500,
+			calls: [{ name: "read", args: { path: "artifact://0:21-79" } }],
+		});
+		b.result(dive, { text: "x".repeat(400) });
+		await write("cache-miss.jsonl", b);
+
+		const stats = await dashboard();
+		// Input 500 × 5e-6 + output 200 × 25e-6 + reads 1,000 × 0.5e-6, the 2,000 new tokens written at 6.25e-6 and
+		// the 9,500 rewritten ones at the read rate: the next request would have paid that rewrite anyway.
+		const added = 0.0025 + 0.005 + 0.0005 + 2000 * 6.25e-6 + 9500 * 0.5e-6;
+		expect(stats.clawback.turns).toBe(1);
+		expect(stats.clawback.turnsUsd).toBeCloseTo(added, 12);
+		expect(stats.economics.find(e => e.tool === "read")?.turnUsd).toBeCloseTo(added, 12);
+	});
 });
 
 describe("Spotlight fetch-back gaps", () => {
