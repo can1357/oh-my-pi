@@ -21,7 +21,7 @@ use super::{
 	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
 	parser::{ParseFailure, parse_patch},
 	recovery::{RecoveryArgs, current_line_map, try_recover},
-	types::{ApplyResult, BlockOpKind, BlockResolution, Cursor, Edit, FileOp, PasteTarget},
+	types::{ApplyResult, BlockOpKind, BlockResolution, Edit, FileOp},
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
@@ -273,25 +273,6 @@ fn images_seen(maps: &[VersionMap], line: u32) -> bool {
 	})
 }
 
-/// True when `line` (current numbering) holds, at that same number, the row
-/// the newest retained version that displayed that number showed there: the
-/// model saw exactly this row where it still is, only under an earlier tag.
-/// Older versions never decide: once a newer tag displayed a different row
-/// at `line`, the model's latest view of that number is the other row.
-fn images_seen_unshifted(maps: &[VersionMap], line: u32) -> bool {
-	maps
-		.iter()
-		.find(|map| map.seen.contains(&line))
-		.is_some_and(|map| {
-			map.same_text
-				|| usize::try_from(line)
-					.ok()
-					.and_then(|n| n.checked_sub(1))
-					.and_then(|n| map.image.get(n).copied().flatten())
-					== Some(line)
-		})
-}
-
 /// Trimmed content of current line `line` when it is long enough to serve as
 /// evidence and occurs exactly once in the file. Repeated content cannot name
 /// which copy an anchor meant: a stale number could image a twin line.
@@ -363,15 +344,17 @@ fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) 
 /// content of both ends of the unseen span ([`body_targets`]). Stale-numbered
 /// anchors fail the payload check and stay rejected, as do anchors no retained
 /// version displayed, ends too short or repeated to identify a line, and pure
-/// inserts/cuts (no payload to evidence against; see
-/// [`rescue_unshifted_anchors`]).
+/// inserts/cuts (no payload to evidence against).
 fn rescue_shifted_anchors(
 	section: &PatchSection,
-	maps: &[VersionMap],
-	current_lines: &[&str],
+	store: &EditStore,
+	canonical: &Path,
+	current_text: &str,
 	unseen: &[u32],
 ) -> Result<Vec<u32>, EditError> {
 	let pending: BTreeSet<u32> = unseen.iter().copied().collect();
+	let current_lines: Vec<&str> = current_text.split('\n').collect();
+	let maps = version_maps(&store.versions(canonical), current_text);
 	let mut rescued = Vec::new();
 	for group in replace_groups(section)? {
 		let group_unseen: Vec<u32> = group
@@ -383,74 +366,13 @@ fn rescue_shifted_anchors(
 		let (Some(&first), Some(&last)) = (group_unseen.first(), group_unseen.last()) else {
 			continue;
 		};
-		if body_targets(&group.body, current_lines, first, last)
-			&& group_unseen.iter().all(|line| images_seen(maps, *line))
+		if body_targets(&group.body, &current_lines, first, last)
+			&& group_unseen.iter().all(|line| images_seen(&maps, *line))
 		{
 			rescued.extend(group_unseen);
 		}
 	}
 	Ok(rescued)
-}
-
-/// Lines an op overwrites with new content: replacement-payload anchors and
-/// the lines they consume, clipboard pastes over a span, and block
-/// replacements. Everything else the guard checks is an insertion point or a
-/// cut.
-fn replaced_lines(
-	section: &PatchSection,
-	blocks: &[BlockResolution],
-) -> Result<BTreeSet<u32>, EditError> {
-	let mut lines = BTreeSet::new();
-	// Payload line of the replacement op whose consumed-line deletes follow;
-	// a cut right after it shares no payload line and stays a cut.
-	let mut payload_op = None;
-	for edit in section.edits()? {
-		match edit {
-			Edit::Insert { cursor, replacement: true, line_num, .. } => {
-				payload_op = Some(*line_num);
-				if let Cursor::BeforeAnchor(anchor) | Cursor::AfterAnchor(anchor) = cursor {
-					lines.insert(anchor.line);
-				}
-			},
-			Edit::Delete { anchor, line_num, .. } if payload_op == Some(*line_num) => {
-				lines.insert(anchor.line);
-			},
-			Edit::Paste { at: PasteTarget::Span { range }, .. } => {
-				lines.extend(range.start.line..=range.end.line);
-			},
-			Edit::Block { anchor, mode: None, .. } => {
-				lines.insert(anchor.line);
-			},
-			_ => {},
-		}
-	}
-	for block in blocks {
-		if block.op == BlockOpKind::Replace {
-			lines.extend(block.start..=block.end);
-		}
-	}
-	Ok(lines)
-}
-
-/// Insertion and cut anchors the guard would reject that an earlier tag of
-/// the same file displayed at the same number with the same content: the
-/// rows have not moved since the model saw them, so `PUT <N`/`PUT >N` and
-/// `CUT` there land where the model meant. Lines that shifted since every
-/// display stay rejected (an insert or cut carries no payload to evidence the
-/// new number against), as do lines no retained version displayed and lines
-/// an op overwrites with new content.
-fn rescue_unshifted_anchors(
-	section: &PatchSection,
-	blocks: &[BlockResolution],
-	maps: &[VersionMap],
-	unseen: &[u32],
-) -> Result<Vec<u32>, EditError> {
-	let replaced = replaced_lines(section, blocks)?;
-	Ok(unseen
-		.iter()
-		.copied()
-		.filter(|line| !replaced.contains(line) && images_seen_unshifted(maps, *line))
-		.collect())
 }
 
 /// Lines the seen-line guard checks: the section's authored anchors plus every
@@ -541,16 +463,10 @@ fn assert_seen_lines(
 	// A follow-up edit below an earlier shifting edit anchors moved lines at
 	// their new numbers. When the payload carries the anchored content, the
 	// model targeted the lines as numbered — accept them instead of forcing a
-	// wasted reveal round-trip. Inserts and cuts on rows an earlier tag
-	// displayed where they still are need no payload evidence.
-	let current_lines: Vec<&str> = text.split('\n').collect();
-	let maps = version_maps(&store.versions(canonical), text);
-	let mut rescued: BTreeSet<u32> =
-		rescue_shifted_anchors(section, &maps, &current_lines, &unseen)?
-			.into_iter()
-			.collect();
-	rescued.extend(rescue_unshifted_anchors(section, blocks, &maps, &unseen)?);
+	// wasted reveal round-trip.
+	let rescued = rescue_shifted_anchors(section, store, canonical, text, &unseen)?;
 	if !rescued.is_empty() {
+		let rescued: BTreeSet<u32> = rescued.into_iter().collect();
 		unseen.retain(|line| !rescued.contains(line));
 		if unseen.is_empty() {
 			return Ok(());
@@ -1310,116 +1226,56 @@ mod lifecycle {
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
 	}
 
-	/// Full read, two lines inserted after 5, then the top two lines cut: every
-	/// row from the old line 6 on is back at the number the read showed it at,
-	/// but neither later tag displayed it. Returns the latest tag.
-	async fn shift_and_restore(ctx: &Lifecycle, file: &str) -> String {
-		let tag0 = ctx.read(file, &all_seen(30));
-		ctx.edit(&format!("[{file}#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
-			.await
-			.unwrap();
-		let tag1 = ctx.head_tag(file);
-		ctx.edit(&format!("[{file}#{tag1}]\nCUT 1.=2\n"))
-			.await
-			.unwrap();
-		ctx.head_tag(file)
-	}
-
-	/// An insert on a row an earlier tag displayed at the same number applies.
-	#[tokio::test]
-	async fn insert_on_unmoved_line_from_earlier_tag_applies() {
-		let ctx = Lifecycle::new("case-u1.ts", 30);
-		let tag = shift_and_restore(&ctx, "case-u1.ts").await;
-		ctx.edit(&format!(
-			"[case-u1.ts#{tag}]\nPUT >20:\n+// later insert\nPUT <22:\n+// before 22\n"
-		))
-		.await
-		.unwrap();
-		let text = ctx.text("case-u1.ts");
-		let lines: Vec<&str> = text.lines().collect();
-		assert_eq!(lines[19], "let v0020 = 20;");
-		assert_eq!(lines[20], "// later insert");
-		assert_eq!(lines[22], "// before 22");
-		assert_eq!(lines[23], "let v0022 = 22;");
-	}
-
-	/// A cut on a row an earlier tag displayed at the same number applies.
-	#[tokio::test]
-	async fn cut_on_unmoved_line_from_earlier_tag_applies() {
-		let ctx = Lifecycle::new("case-u2.ts", 30);
-		let tag = shift_and_restore(&ctx, "case-u2.ts").await;
-		ctx.edit(&format!("[case-u2.ts#{tag}]\nCUT 20.=21\n"))
-			.await
-			.unwrap();
-		let text = ctx.text("case-u2.ts");
-		assert!(!text.contains("let v0020 = 20;") && !text.contains("let v0021 = 21;"));
-		assert_eq!(text.lines().nth(19).unwrap(), "let v0022 = 22;");
-	}
-
-	/// Overwriting a row still needs payload evidence even where it has not
-	/// moved: only inserts and cuts are rescued on the earlier display alone.
-	#[tokio::test]
-	async fn replace_on_unmoved_line_without_evidence_stays_rejected() {
-		let ctx = Lifecycle::new("case-u3.ts", 30);
-		let tag = shift_and_restore(&ctx, "case-u3.ts").await;
-		let before = ctx.text("case-u3.ts");
-		let err = ctx
-			.edit(&format!("[case-u3.ts#{tag}]\nPUT 20.=20:\n+// rewritten\n"))
-			.await
-			.unwrap_err();
-		assert!(err.contains("never displayed"), "unexpected error: {err}");
-		assert_eq!(ctx.text("case-u3.ts"), before);
-	}
-
-	/// A row no retained version displayed stays rejected for inserts too.
-	#[tokio::test]
-	async fn insert_on_never_displayed_line_stays_rejected() {
-		let ctx = Lifecycle::new("case-u4.ts", 30);
-		let seen: Vec<u32> = (1..=10).collect();
-		let tag0 = ctx.read("case-u4.ts", &seen);
-		ctx.edit(&format!("[case-u4.ts#{tag0}]\nPUT >2:\n+// ins\n"))
-			.await
-			.unwrap();
-		ctx.edit(&format!("[case-u4.ts#{}]\nCUT 1.=1\n", ctx.head_tag("case-u4.ts")))
-			.await
-			.unwrap();
-		let tag = ctx.head_tag("case-u4.ts");
-		let err = ctx
-			.edit(&format!("[case-u4.ts#{tag}]\nPUT >25:\n+// blind\n"))
-			.await
-			.unwrap_err();
-		assert!(err.contains("never displayed"), "unexpected error: {err}");
-	}
-
-	/// A newer tag that displayed a different row at a number overrides an
-	/// older tag that showed the current row there: the model's latest view
-	/// of line 22 is v20, so inserts and cuts at 22 stay rejected even though
-	/// the first read showed v22 at 22. Each op gets a fresh history because
-	/// a rejection reveals the line and so makes it seen.
-	#[tokio::test]
-	async fn newer_display_of_another_row_overrides_older_unshifted_display() {
-		for op in ["CUT 22", "PUT <22:\n+// before 22", "PUT >22:\n+// after 22"] {
-			let ctx = Lifecycle::new("case-u5.ts", 30);
-			let tag0 = ctx.read("case-u5.ts", &all_seen(30));
-			ctx.edit(&format!("[case-u5.ts#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
+	/// Full read, two lines inserted after 5, then the top two lines cut: rows
+	/// from the old line 6 on are back at the numbers the read showed, but a
+	/// model that tracked only the insert numbers them two higher. Inserts and
+	/// cuts carry no payload to tell the two readings apart, so each op on a
+	/// restored row stays rejected and leaves the file unchanged. Each op gets
+	/// a fresh history because a rejection reveals the line.
+	async fn assert_restored_row_ops_rejected(file: &str, text: Option<&str>, line: u32) {
+		for op in [
+			format!("CUT {line}"),
+			format!("PUT <{line}:\n+// before"),
+			format!("PUT >{line}:\n+// after"),
+		] {
+			let ctx = Lifecycle::new(file, 30);
+			if let Some(text) = text {
+				ctx.write_text(file, text);
+			}
+			let count = ctx.text(file).lines().count();
+			let tag0 = ctx.read(file, &all_seen(count));
+			ctx.edit(&format!("[{file}#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
 				.await
 				.unwrap();
-			let seen: Vec<u32> = (15..=25).collect();
-			let tag1 = ctx.read("case-u5.ts", &seen);
-			assert_eq!(ctx.text("case-u5.ts").lines().nth(21).unwrap(), "let v0020 = 20;");
-			ctx.edit(&format!("[case-u5.ts#{tag1}]\nCUT 1.=2\n"))
+			let tag1 = ctx.head_tag(file);
+			ctx.edit(&format!("[{file}#{tag1}]\nCUT 1.=2\n"))
 				.await
 				.unwrap();
-			let tag = ctx.head_tag("case-u5.ts");
-			let before = ctx.text("case-u5.ts");
-			assert_eq!(before.lines().nth(21).unwrap(), "let v0022 = 22;");
+			let tag = ctx.head_tag(file);
+			let before = ctx.text(file);
 			let err = ctx
-				.edit(&format!("[case-u5.ts#{tag}]\n{op}\n"))
+				.edit(&format!("[{file}#{tag}]\n{op}\n"))
 				.await
-				.expect_err(op);
+				.expect_err(&op);
 			assert!(err.contains("never displayed"), "{op}: unexpected error: {err}");
-			assert_eq!(ctx.text("case-u5.ts"), before, "{op} changed the file");
+			assert_eq!(ctx.text(file), before, "{op} changed the file");
 		}
+	}
+
+	#[tokio::test]
+	async fn ops_on_restored_row_stay_rejected() {
+		assert_restored_row_ops_rejected("case-r1.ts", None, 22).await;
+	}
+
+	/// Repeated rows (`}`) line up with some copy under any alignment; they
+	/// stay rejected too.
+	#[tokio::test]
+	async fn ops_on_restored_repeated_row_stay_rejected() {
+		let text: String = (1..=30).fold(String::new(), |mut text, i| {
+			text.push_str(if i % 3 == 0 { "}\n" } else { "let v = 0;\n" });
+			text
+		});
+		assert_restored_row_ops_rejected("case-r2.ts", Some(&text), 21).await;
 	}
 
 	/// Body evidence alone is not enough: with no shifting edit in the
