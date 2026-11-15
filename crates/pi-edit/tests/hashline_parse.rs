@@ -773,7 +773,7 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 	let unknown = MismatchDetails { hash_recognized: false, ..stale };
 	let message = format_mismatch_message(&unknown);
 	assert!(message.contains("hash #1A2B is not from this session"));
-	assert!(message.contains("never invent the tag"));
+	assert!(message.contains("#3C4D"));
 	// When the unrecognized tag was actually issued earlier in this session
 	// for a different path, the rejection names that path so a relative
 	// worktree lane doesn't follow a wrong-tree suggestion.
@@ -791,7 +791,7 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 	assert!(
 		message.contains("Hash #1A2B was issued in this session for /build/x/wt/crates/a/mcp.rs.")
 	);
-	assert!(message.contains("never invent the tag"));
+	assert!(message.contains("#3C4D"));
 }
 
 #[test]

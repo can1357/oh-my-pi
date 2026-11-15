@@ -77,6 +77,7 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 		.path
 		.as_ref()
 		.map_or_default(|path| format!(" for {path}"));
+	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	let mut lines = if details.hash_recognized {
 		vec![
 			format!("Edit rejected{path}: file changed between read and edit."),
@@ -92,14 +93,6 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 			format!(
 				"Edit rejected{path}: the header needs this file's current tag, #{}.",
 				details.actual_file_hash
-			)
-		} else if details.tag_origin_paths.is_empty()
-			&& is_placeholder_tag(&details.expected_file_hash)
-		{
-			format!(
-				"Edit rejected{path}: hash #{} is not from this session: it is a placeholder, not a \
-				 tag, and no read or search output issues it.",
-				details.expected_file_hash
 			)
 		} else {
 			format!(
@@ -118,10 +111,9 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
-		lines.push(current_tag_advice(&details.actual_file_hash));
+		lines.push(current_tag_advice(&details.actual_file_hash, !context.is_empty()));
 		lines
 	};
-	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	if !context.is_empty() {
 		lines.push(String::new());
 		lines.extend(context);
@@ -129,21 +121,23 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 	lines.join("\n")
 }
 
-/// Where a current tag comes from. The only place a rejection says tags are
-/// never invented: an unissued tag may still be real, from a prior session.
-fn current_tag_advice(actual_file_hash: &str) -> String {
-	format!(
-		"The current file hashes to #{actual_file_hash}. Copy the [path#tag] header verbatim from \
-		 the latest read or search output for this file, or from the latest edit response for it; \
-		 re-read the file with `read` if neither is current, but never invent the tag and never \
-		 reuse one from a prior session."
-	)
-}
-
-/// An all-zero tag (`#0000`): the stand-in a model writes when it has no tag
-/// to copy. Only reached for tags this session never issued.
-fn is_placeholder_tag(tag: &str) -> bool {
-	!tag.is_empty() && tag.bytes().all(|byte| byte == b'0')
+/// What to do with an unknown tag. It may be real (a restart or store
+/// eviction forgets issued tags), so the advice offers the current tag for
+/// the rows shown instead of sending the model back to output it already
+/// copied from.
+fn current_tag_advice(actual_file_hash: &str, rows_shown: bool) -> String {
+	if rows_shown {
+		format!(
+			"The current file hashes to #{actual_file_hash}. If the rows below are the ones you \
+			 mean, resend the edit under #{actual_file_hash}; otherwise re-read the file with `read` \
+			 and copy its [path#tag] header verbatim."
+		)
+	} else {
+		format!(
+			"The current file hashes to #{actual_file_hash}. Re-read the file with `read` and copy \
+			 its [path#tag] header verbatim."
+		)
+	}
 }
 
 /// Diagnostic for input whose only content is a section header: no ops to
@@ -151,8 +145,8 @@ fn is_placeholder_tag(tag: &str) -> bool {
 pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String {
 	format!(
 		"Edit rejected for {path}: no ops follow the header; put them under this file's current \
-		 tag, #{actual_file_hash}.\n{}",
-		current_tag_advice(actual_file_hash)
+		 tag, #{actual_file_hash}.\nRe-read the file with `read` first if you have not seen its \
+		 current rows."
 	)
 }
 
