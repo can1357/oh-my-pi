@@ -55,6 +55,7 @@ import {
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
 	shellPositionalArgs,
+	type SucceededLink,
 } from "./shell-tokenize";
 
 /**
@@ -215,6 +216,11 @@ function sentSecret(command: ShellCommand, word: string, home: string): string |
 
 function args(command: ShellCommand): string[] {
 	return command.argv.slice(1);
+}
+
+/** The directory a command runs in, or `undefined` once a `cd` the parser could not resolve has moved it. */
+function commandDir(command: ShellCommand): string | undefined {
+	return command.unknownCwd ? undefined : command.cwd;
 }
 
 /** Commands that put a file's content on their output or in another file. */
@@ -898,7 +904,7 @@ interface GitTarget {
  */
 function gitInvocation(command: ShellCommand, home: string): { sub: string; rest: string[]; target?: GitTarget } {
 	const argv = args(command);
-	let where: string | undefined = command.cwd;
+	let where: string | undefined = commandDir(command);
 	const named: { gitDir?: string; workTree?: string } = {};
 	for (const assignment of command.assignments) {
 		const eq = assignment.indexOf("=");
@@ -917,8 +923,8 @@ function gitInvocation(command: ShellCommand, home: string): { sub: string; rest
 			else named.workTree = value;
 			i++;
 		} else if (Object.hasOwn(GIT_VALUE_OPTIONS, arg)) {
-			// Each `-C` is relative to the directory the one before it left.
-			if (arg === "-C" && where !== undefined && i + 1 < argv.length) {
+			// Each `-C` is relative to the directory the one before it left; an absolute one needs none.
+			if (arg === "-C" && i + 1 < argv.length) {
 				where = resolveCommandWordPath(command, argv[i + 1], where, home);
 			}
 			i += 2;
@@ -964,7 +970,7 @@ function resolvePathspecs(words: readonly string[], command: ShellCommand, scope
 		if (BRACE_EXPANSION_RE.test(word)) return undefined;
 		if (!SHELL_EXPANDED_RE.test(word)) return word;
 		return ABSOLUTE_EXPANSION_RE.test(word)
-			? resolveCommandWordPath(command, word, command.cwd, scope.home)
+			? resolveCommandWordPath(command, word, commandDir(command), scope.home)
 			: undefined;
 	});
 	return resolved.every((word): word is string => word !== undefined) ? resolved : [];
@@ -1085,7 +1091,9 @@ function discardProbe(
 		check,
 		what: `\`git ${sub}\` would discard uncommitted changes; commit or otherwise save them first`,
 	});
-	if (sub === "reset" && (has("--hard") || has("--merge"))) return tracked({});
+	// `--merge` reverts only staged changes (refusing while a path has both); `--hard` loses every change.
+	if (sub === "reset" && has("--hard")) return tracked({});
+	if (sub === "reset" && has("--merge")) return tracked({ merge: true });
 	if (sub === "checkout" || sub === "restore") {
 		const checkout = sub === "checkout";
 		const { named, paths } = gitOperands(rest, checkout ? CHECKOUT_VALUE_OPTIONS : RESTORE_VALUE_OPTIONS);
@@ -1183,31 +1191,56 @@ function stashSaves(rest: readonly string[]): Stashed | undefined {
 const STASH_RELEASES: Record<string, true> = { pop: true, drop: true, clear: true, branch: true };
 
 /**
- * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its
- * `&&` chain) saved where `target` points and still hold, or `undefined` for none. A later `pop`,
- * `drop`, `clear` or `branch`, wherever it runs, gives that up.
+ * What `git stash` saved for `target` once the chain link's command `earlier` has run: its own stash
+ * adds what it saved, and a later `pop`, `drop`, `clear` or `branch`, wherever it runs, gives it all up.
+ */
+function stashStep(
+	earlier: ShellCommand,
+	stashed: Stashed | undefined,
+	target: GitTarget,
+	scope: GuardScope,
+): Stashed | undefined {
+	if (earlier.argv[0] !== "git") return stashed;
+	const stash = gitInvocation(earlier, scope.home);
+	if (stash.sub !== "stash") return stashed;
+	if (stash.rest.length > 0 && Object.hasOwn(STASH_RELEASES, stash.rest[0])) return undefined;
+	const same =
+		stash.target?.where === target.where &&
+		stash.target.gitDir === target.gitDir &&
+		stash.target.workTree === target.workTree;
+	const saved = same ? stashSaves(stash.rest) : undefined;
+	if (!saved) return stashed;
+	return {
+		untracked: saved.untracked || (stashed?.untracked ?? false),
+		ignored: saved.ignored || (stashed?.ignored ?? false),
+	};
+}
+
+/** What each link of a `&&` chain left stashed, per target: a link is worked out once per target. */
+const stashMemo = new WeakMap<SucceededLink, Map<string, Stashed | null>>();
+
+/**
+ * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its `&&`
+ * chain) saved where `target` points and still hold, or `undefined` for none. Each link of the chain
+ * builds on the one before it, so a long chain costs one step per command, not a walk per command.
  */
 function stashedBefore(command: ShellCommand, target: GitTarget, scope: GuardScope): Stashed | undefined {
+	const key = JSON.stringify([target.where, target.gitDir ?? null, target.workTree ?? null]);
+	const pending: SucceededLink[] = [];
 	let stashed: Stashed | undefined;
-	for (const earlier of command.succeeded) {
-		if (earlier.argv[0] !== "git") continue;
-		const stash = gitInvocation(earlier, scope.home);
-		if (stash.sub !== "stash") continue;
-		if (stash.rest.length > 0 && Object.hasOwn(STASH_RELEASES, stash.rest[0])) {
-			stashed = undefined;
-			continue;
+	for (let link = command.succeeded; link; link = link.before) {
+		const known = stashMemo.get(link)?.get(key);
+		if (known !== undefined) {
+			stashed = known ?? undefined;
+			break;
 		}
-		const same =
-			stash.target?.where === target.where &&
-			stash.target.gitDir === target.gitDir &&
-			stash.target.workTree === target.workTree;
-		const saved = same ? stashSaves(stash.rest) : undefined;
-		if (saved) {
-			stashed = {
-				untracked: saved.untracked || (stashed?.untracked ?? false),
-				ignored: saved.ignored || (stashed?.ignored ?? false),
-			};
-		}
+		pending.push(link);
+	}
+	for (let i = pending.length - 1; i >= 0; i--) {
+		stashed = stashStep(pending[i].command, stashed, target, scope);
+		const memo = stashMemo.get(pending[i]) ?? new Map<string, Stashed | null>();
+		memo.set(key, stashed ?? null);
+		stashMemo.set(pending[i], memo);
 	}
 	return stashed;
 }
@@ -1225,7 +1258,7 @@ function discardChanges(command: ShellCommand, scope: GuardScope): GuardHit | un
 		if (!check.clean || stashed.ignored) return undefined;
 		if (stashed.untracked) {
 			if (!check.includeIgnored && !check.ignoredOnly) return undefined;
-			check = { ...check, includeIgnored: false, ignoredOnly: true };
+			check = { ...check, untrackedStashed: true };
 		}
 	}
 	const { where } = target;
@@ -1246,8 +1279,10 @@ function harnessLineage(): number[] {
 	return pids;
 }
 
-/** A signal given as an option (`-9`, `-KILL`); single capitals such as `-P` are matching options. */
-const SIGNAL_OPTION_RE = /^-(?:\d+|[A-Z][A-Z0-9+-]+)$/;
+/** Signal names `kill -l` lists, without their `SIG` prefix. */
+const SIGNAL_NAMES: ReadonlySet<string> = new Set(Object.keys(os.constants.signals).map(name => name.slice(3)));
+/** Linux keeps a process's name in 15 characters; psmisc `killall` matches a longer name whole. */
+const COMM_LENGTH = 15;
 /** psmisc `killall` short options that take a value: the rest of their bundle, or the next word. */
 const KILLALL_VALUE_LETTERS = "uoynZs";
 /** psmisc `killall` long options that take a value: after `=`, or the next word. */
@@ -1280,26 +1315,80 @@ function pgrepProbe(argv: string[]): KillProbe[] {
 }
 
 /**
- * The probes that list what a `pkill`/`killall` would signal. `pkill` takes `pgrep`'s options, so
- * its own are kept as they are (on the BSDs both spare their ancestors, so omp, unless given
- * `-a`). psmisc `killall` selects processes by exact name (`-r` a regular expression, `-I`
- * ignoring case), by the executable a name that contains a `/` resolves to, and by owner (`-u`,
- * every process of that user when it names none). BSD `killall` has no path names, and the
- * `pgrep` asking for it gets `-a`: the probe is a child of omp, so without it omp is never listed.
+ * The signal an option word of `pkill` or `killall` gives, without its dash, or `undefined` for an
+ * option that is no signal: a number (`-9`, `-0`), or a signal name in either case, with or without
+ * `SIG` (`-KILL`, `-kill`, `-SIGTERM`). `EXIT` is no signal `kill -l` lists, but `pkill` takes it.
+ */
+function signalOption(word: string): string | undefined {
+	const value = word.slice(1);
+	if (!word.startsWith("-") || value.length === 0) return undefined;
+	if (/^\d+$/.test(value)) return value;
+	const name = value.toUpperCase().replace(/^SIG/, "");
+	return SIGNAL_NAMES.has(name) || name === "EXIT" ? value : undefined;
+}
+
+/**
+ * The selection a `pkill` gives `pgrep`: its options without the ones `pgrep` lacks or answers
+ * differently. `-c` and `--count` (a count, not PIDs), `-e` and `--echo`, and `-H` go; `-q` and
+ * `--queue` go with the value they take. Every other option selects what `pkill` does.
+ */
+function pgrepSelection(kept: readonly string[]): string[] {
+	const out: string[] = [];
+	for (let i = 0; i < kept.length; i++) {
+		const arg = kept[i];
+		if (arg === "--") {
+			out.push(...kept.slice(i));
+			break;
+		}
+		if (arg === "--queue") i++;
+		else if (arg.startsWith("--")) {
+			if (arg !== "--count" && arg !== "--echo" && !arg.startsWith("--queue=")) out.push(arg);
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			let letters = "";
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				// `-q` takes the rest of its bundle, or the next word, as its value.
+				if (letter === "q") {
+					if (k === arg.length - 1) i++;
+					break;
+				}
+				if (!"cHe".includes(letter)) letters += letter;
+			}
+			if (letters.length > 0) out.push(`-${letters}`);
+		} else out.push(arg);
+	}
+	return out;
+}
+
+/**
+ * The probes that list what a `pkill`/`killall` would signal. A zero signal sends nothing, so it
+ * needs none. `pkill` takes `pgrep`'s selection options, without the ones `pgrep` lacks or answers
+ * differently (see {@link pgrepSelection}). psmisc `killall` selects processes by exact name (`-r` a
+ * regular expression, `-I` ignoring case), by the executable a name that contains a `/` resolves to,
+ * and by owner (`-u`, every process of that user when it names none). A name of 15 or more characters
+ * is probed by its first 15, the name the kernel keeps for the process. On the BSDs both spare their
+ * ancestors, so omp, unless given `-a`; BSD `killall` has no path names, and its `pgrep` gets `-a`:
+ * the probe is a child of omp, so without it omp is never listed.
  */
 function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] {
 	const name = command.argv[0];
-	const signalValues = name === "pkill" ? ["--signal"] : ["-s", "--signal"];
 	const kept: string[] = [];
+	let signal: string | undefined;
 	const argv = args(command);
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
-		if (signalValues.includes(arg)) i++;
-		else if (!(arg.startsWith("--signal=") || SIGNAL_OPTION_RE.test(arg) || arg === "-e" || arg === "--echo")) {
-			kept.push(arg);
-		}
+		const option = signalOption(arg);
+		if (name === "pkill" ? arg === "--signal" : arg === "-s" || arg === "--signal") signal = argv[++i];
+		else if (arg.startsWith("--signal=")) signal = arg.slice("--signal=".length);
+		else if (name === "killall" && /^-s./.test(arg)) signal = arg.slice(2);
+		else if (option !== undefined) signal = option;
+		else kept.push(arg);
 	}
-	if (name === "pkill") return kept.some(arg => !arg.startsWith("-")) ? pgrepProbe(["pgrep", ...kept]) : [];
+	if (signal !== undefined && (/^0+$/.test(signal) || /^(SIG)?EXIT$/i.test(signal))) return [];
+	if (name === "pkill") {
+		const selection = pgrepSelection(kept);
+		return selection.some(arg => !arg.startsWith("-")) ? pgrepProbe(["pgrep", ...selection]) : [];
+	}
 	const names: string[] = [];
 	let user: string | undefined;
 	let ignoreCase = false;
@@ -1337,9 +1426,12 @@ function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] 
 	if (names.length === 0) return user === undefined ? [] : pgrepProbe(["pgrep", ...select]);
 	const match = [...(ignoreCase ? ["-i"] : []), ...(regexp ? [] : ["-x"])];
 	return names.flatMap(processName => {
-		if (bsd || regexp || !processName.includes("/"))
-			return pgrepProbe(["pgrep", ...select, ...match, "--", processName]);
-		const executable = resolveCommandWordPath(command, processName, command.cwd, scope.home);
+		if (bsd || regexp || !processName.includes("/")) {
+			const probe =
+				!bsd && !regexp && processName.length >= COMM_LENGTH ? processName.slice(0, COMM_LENGTH) : processName;
+			return pgrepProbe(["pgrep", ...select, ...match, "--", probe]);
+		}
+		const executable = resolveCommandWordPath(command, processName, commandDir(command), scope.home);
 		if (executable === undefined) return [];
 		const run = () =>
 			Process.fromPath(fs.realpathSync(executable))
@@ -1349,6 +1441,12 @@ function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] 
 	});
 }
 
+/**
+ * The embedded shell runs `pkill` as its own builtin, which refuses to signal this process or its
+ * ancestors, so that builtin cannot reach omp. The rule still asks: a PTY or client-terminal backend
+ * runs the system `pkill`, and so does a `pkill` behind a wrapper such as `sudo` or `xargs`, or in a
+ * nested `bash -c`.
+ */
 function killsHarness(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
 	const name = command.argv[0];
 	if (name !== "pkill" && name !== "killall") return undefined;

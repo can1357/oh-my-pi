@@ -484,7 +484,7 @@ describe("guard rule regressions", () => {
 			"git stash push -- scratch.txt && git restore .",
 			"git stash -p && git switch -f main",
 			"git stash && git clean -f",
-			"git stash list && git reset --merge",
+			"git stash list && git reset --hard",
 		]) {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
 		}
@@ -540,5 +540,91 @@ describe("guard rule regressions", () => {
 			spawn.mockRestore();
 			clearGuardProbeCache();
 		}
+	});
+
+	it("parses a long `&&` chain in time linear in its length", () => {
+		// Each `&&` once copied the whole chain before it: quadratic, and seconds at this length.
+		const members = 15_000;
+		const parseTime = (joiner: string): number => {
+			const command = Array.from({ length: members }, () => "true").join(joiner);
+			const start = performance.now();
+			const parsed = parseShellScript(command, { cwd, home: os.homedir() });
+			const elapsed = performance.now() - start;
+			expect(parsed.pipelines.flat()).toHaveLength(members);
+			return elapsed;
+		};
+		const semicolons = parseTime("; ");
+		const chain = parseTime(" && ");
+		expect(chain).toBeLessThan(semicolons * 4 + 250);
+	});
+
+	it("answers a long `&&` chain of discarding commands without walking it once per command", async () => {
+		fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
+		await $`git init -q && git add a.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(cwd)
+			.quiet();
+		const command = Array.from({ length: 10_000 }, () => "git checkout .").join(" && ");
+		const start = performance.now();
+		expect(ruleOf(bashApproval(cwd, command))).toBeUndefined();
+		expect(performance.now() - start).toBeLessThan(1_000);
+	});
+
+	it("reads a `!` after a reserved word as negating the pipeline it opens", async () => {
+		await dirtyRepo(cwd);
+		for (const command of [
+			"if true; then ! git stash && git reset --hard; fi",
+			"while ! git stash && git reset --hard; do :; done",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
+	it("follows `cd -` and the pushd and popd stack to the directory a command runs in", async () => {
+		await dirtyRepo(cwd);
+		fs.mkdirSync(path.join(cwd, "sub"));
+		const elsewhere = TempDir.createSync("@omp-guard-elsewhere-");
+		try {
+			expect(ruleOf(bashApproval(cwd, "cd sub && ls && cd - && git reset --hard"))).toBe("discard_changes");
+			expect(ruleOf(bashApproval(cwd, "pushd sub >/dev/null; popd >/dev/null; git checkout ."))).toBe(
+				"discard_changes",
+			);
+			// `cd -` returns to the clean directory, where the reset destroys nothing.
+			expect(ruleOf(bashApproval(elsewhere.path(), `cd ${cwd} && cd - && git reset --hard`))).toBeUndefined();
+		} finally {
+			elsewhere.removeSync();
+		}
+	});
+
+	it("does not probe the session repository after a `cd` it cannot resolve", async () => {
+		await dirtyRepo(cwd);
+		// The reset runs in a repository the command makes, not in the session's.
+		for (const command of [
+			'd=$(mktemp -d) && cd "$d" && git init -q && git reset --hard',
+			'd=$(mktemp -d) && cd "$d" && cd sub && git reset --hard',
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+	});
+
+	it("counts only the staged changes `git reset --merge` reverts", async () => {
+		await dirtyRepo(cwd);
+		// Unstaged changes survive a merge reset.
+		expect(ruleOf(bashApproval(cwd, "git reset --merge"))).toBeUndefined();
+		await $`git add a.txt`.cwd(cwd).quiet();
+		clearGuardProbeCache();
+		expect(ruleOf(bashApproval(cwd, "git reset --merge"))).toBe("discard_changes");
+	});
+
+	it("counts only the ignored files a `git clean -x` deletes after a `git stash -u`", async () => {
+		fs.writeFileSync(path.join(cwd, ".gitignore"), "*.log\n");
+		await $`git init -q && git add .gitignore && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(cwd)
+			.quiet();
+		fs.writeFileSync(path.join(cwd, "build.log"), "x\n");
+		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");
+		// The stash keeps scratch.txt, and the exclude protects build.log.
+		expect(ruleOf(bashApproval(cwd, 'git stash -u && git clean -fdx -e "*.log"'))).toBeUndefined();
+		expect(ruleOf(bashApproval(cwd, "git stash -u && git clean -fdx"))).toBe("discard_changes");
+		expect(ruleOf(bashApproval(cwd, 'git stash -u && git clean -fdx -e "*.tmp"'))).toBe("discard_changes");
 	});
 });

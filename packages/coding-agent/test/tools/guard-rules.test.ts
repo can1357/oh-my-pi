@@ -370,6 +370,50 @@ describe.skipIf(process.platform === "win32")("kills_harness", () => {
 			spawn.mockRestore();
 		}
 	});
+
+	it("passes a zero signal, which sends nothing, whatever it selects", () => {
+		const cwd = process.cwd();
+		for (const command of [
+			`killall -0 ${ownName}`,
+			`killall -s 0 ${ownName}`,
+			`killall --signal=0 ${ownName}`,
+			`pkill -0 -P ${process.ppid}`,
+			`pkill --signal 0 -P ${process.ppid}`,
+			`pkill -EXIT -P ${process.ppid}`,
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+	});
+
+	it.skipIf(bsd)("reads pkill's signal and output options as pkill does, before pgrep sees them", () => {
+		// pgrep rejects a lower-case signal name and `-q`, and answers `-c` with a count.
+		for (const command of [
+			`pkill -kill -P ${process.ppid}`,
+			`pkill -term -P ${process.ppid}`,
+			`pkill -c -P ${process.ppid}`,
+			`pkill -q 5 -P ${process.ppid}`,
+			`pkill --queue 5 -P ${process.ppid}`,
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(process.cwd(), command)) }).toEqual({
+				command,
+				rule: "kills_harness",
+			});
+		}
+	});
+
+	it.skipIf(bsd)("probes a killall name of 15 or more characters by its first 15, the name the kernel keeps", () => {
+		const spawn = spyOn(Bun, "spawnSync").mockImplementation((argv: string[]) => {
+			// Only a process named by its first 15 characters exists.
+			const listed = argv.includes("omp-guard-long-");
+			return { success: listed, stdout: Buffer.from(listed ? `${process.pid}\n` : "") } as never;
+		});
+		try {
+			expect(ruleOf(bashApproval(process.cwd(), "killall omp-guard-long-name-x"))).toBe("kills_harness");
+			expect(spawn.mock.calls.at(-1)?.[0]).toEqual(["pgrep", "-x", "--", "omp-guard-long-"]);
+		} finally {
+			spawn.mockRestore();
+		}
+	});
 });
 
 describe("credential_read for file tools", () => {

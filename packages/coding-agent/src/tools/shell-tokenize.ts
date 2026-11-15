@@ -998,11 +998,16 @@ export interface ShellCommand {
 	/** Directory the command runs in, after the `cd`s that precede it in the script. */
 	cwd: string;
 	/**
-	 * Commands known to have succeeded by the time this one starts: the last command of each earlier
-	 * pipeline in its `&&` chain (none once an `||` makes them optional) and in the chains around the
-	 * `( )` group or nested script it is in, in order.
+	 * Whether {@link ShellCommand.cwd} is not the directory the command runs in: after a `cd`, `pushd`
+	 * or `popd` the parser cannot resolve, or a `cd -` with no earlier directory to return to.
 	 */
-	succeeded: readonly ShellCommand[];
+	unknownCwd: boolean;
+	/**
+	 * Commands known to have succeeded by the time this one starts, latest first (see
+	 * {@link SucceededLink}): the last command of each earlier pipeline in its `&&` chain (none once an
+	 * `||` makes them optional) and in the chains around the `( )` group or nested script it is in.
+	 */
+	succeeded: SucceededLink | undefined;
 	/**
 	 * Commands whose output can reach this one's input through pipes: the earlier stages of its
 	 * pipeline, where a compound command (`( )`, `{ }`, a loop, `if`, `case`) is one stage made of
@@ -1014,6 +1019,15 @@ export interface ShellCommand {
 	 * `\~/x`), so the shell does not expand it; a word the command also has with a bare `~` is not here.
 	 */
 	literalTildes: ReadonlySet<string>;
+}
+
+/**
+ * One command known to have succeeded before a command starts, and the links before it. Links are
+ * shared between commands, so a long `&&` chain costs one link per command.
+ */
+export interface SucceededLink {
+	readonly command: ShellCommand;
+	readonly before: SucceededLink | undefined;
 }
 
 /** A shell script broken into pipelines, nested scripts included. */
@@ -1038,14 +1052,16 @@ export interface ShellScriptScope {
 
 /**
  * The absolute path a shell word names, resolved lexically against `cwd`. `~`, `$HOME`, and `$PWD`
- * expand; any other expansion makes the path unknown (`undefined`).
+ * expand; any other expansion makes the path unknown (`undefined`). With `cwd` unknown (`undefined`),
+ * only a word that is absolute once expanded names a path.
  */
-export function resolveShellWordPath(word: string, cwd: string, home: string): string | undefined {
+export function resolveShellWordPath(word: string, cwd: string | undefined, home: string): string | undefined {
 	let expanded = word.replace(/\$(?:\{HOME\}|HOME\b)/g, () => home);
-	expanded = expanded.replace(/\$(?:\{PWD\}|PWD\b)/g, () => cwd);
+	if (cwd !== undefined) expanded = expanded.replace(/\$(?:\{PWD\}|PWD\b)/g, () => cwd);
 	if (expanded === "~" || expanded.startsWith("~/")) expanded = home + expanded.slice(1);
 	if (!expanded || expanded.includes("$") || expanded.includes("\0") || expanded.startsWith("~")) return undefined;
-	return path.resolve(cwd, expanded);
+	if (cwd === undefined && !path.isAbsolute(expanded)) return undefined;
+	return path.resolve(cwd ?? "", expanded);
 }
 
 /**
@@ -1055,7 +1071,7 @@ export function resolveShellWordPath(word: string, cwd: string, home: string): s
 export function resolveCommandWordPath(
 	command: ShellCommand,
 	word: string,
-	cwd: string,
+	cwd: string | undefined,
 	home: string,
 ): string | undefined {
 	return resolveShellWordPath(command.literalTildes.has(word) ? `./${word}` : word, cwd, home);
@@ -1228,10 +1244,10 @@ interface CaseReading {
 
 /** What text being read is nested in: where its substitutions run, and the map their keys go in. */
 interface ReadScope {
-	cwd: string;
+	dirs: WorkDirs;
 	depth: number;
 	subs: Map<string, ShellCommand[][]>;
-	succeeded: readonly ShellCommand[];
+	succeeded: SucceededLink | undefined;
 }
 
 /** A substitution's key in a word; it stands for the commands the substitution runs. */
@@ -1407,6 +1423,93 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 	return out;
 }
 
+/** A directory a script's commands run in, and whether the parser knows it is the one the shell is in. */
+interface ShellDir {
+	/** The absolute path, or the last one known before a directory change the parser could not resolve. */
+	path: string;
+	/** False after a `cd`, `pushd` or `popd` whose target the parser cannot resolve. */
+	known: boolean;
+}
+
+/**
+ * The `pushd` stack, latest first: `null` when empty, `undefined` when the parser has lost track of
+ * it (after a rotation such as `pushd +1`, or a `pushd` it could not resolve).
+ */
+type DirStack = { readonly dir: ShellDir; readonly below: DirStack } | null | undefined;
+
+/** The directories a script's commands run in: the current one, what `cd -` returns to, and the `pushd` stack. */
+interface WorkDirs {
+	readonly cwd: ShellDir;
+	/** The directory before the last change, which `cd -` returns to; `undefined` when unknown. */
+	readonly previous: ShellDir | undefined;
+	readonly stack: DirStack;
+}
+
+/**
+ * The directory `cd` goes to with `operand`, or `undefined` when the parser cannot tell: `cd` alone
+ * goes home, `cd -` and `cd ~-` return to the previous directory, and `cd ~+` stays where it is.
+ */
+function cdTarget(
+	command: ShellCommand,
+	operand: string | undefined,
+	dirs: WorkDirs,
+	home: string,
+): ShellDir | undefined {
+	if (operand === undefined) return { path: home, known: true };
+	if (operand === "-" || operand === "~-") return dirs.previous;
+	if (operand === "~+") return dirs.cwd.known ? dirs.cwd : undefined;
+	const dir = resolveCommandWordPath(command, operand, dirs.cwd.known ? dirs.cwd.path : undefined, home);
+	return dir === undefined ? undefined : { path: dir, known: true };
+}
+
+/**
+ * The directories after `command`, a pipeline on its own, when it is a `cd`, `pushd` or `popd`; any
+ * other command leaves them as they are. A change the parser cannot resolve leaves the directory
+ * unknown, and so does one it does not follow: a rotation, or an option of `pushd` or `popd`.
+ */
+function changeDirs(command: ShellCommand, dirs: WorkDirs, home: string): WorkDirs {
+	const { argv } = command;
+	const lost: ShellDir = { path: dirs.cwd.path, known: false };
+	const operands = argv.slice(1);
+	if (argv[0] === "cd") {
+		const to = cdTarget(command, shellPositionalArgs(argv)[0], dirs, home);
+		return to ? { ...dirs, cwd: to, previous: dirs.cwd } : { ...dirs, cwd: lost, previous: undefined };
+	}
+	if (argv[0] === "pushd") {
+		// A rotation (`+1`) or an option is not followed.
+		if (operands.some(arg => /^[-+]./.test(arg))) return { cwd: lost, previous: undefined, stack: undefined };
+		if (operands.length === 0) {
+			// Alone, `pushd` swaps the two top directories; with nothing on the stack it fails.
+			if (dirs.stack === undefined) return { cwd: lost, previous: undefined, stack: undefined };
+			if (dirs.stack === null) return dirs;
+			return { cwd: dirs.stack.dir, previous: dirs.cwd, stack: { dir: dirs.cwd, below: dirs.stack.below } };
+		}
+		const to = cdTarget(command, operands[0], dirs, home);
+		if (!to) return { cwd: lost, previous: undefined, stack: undefined };
+		const stack = dirs.stack === undefined ? undefined : { dir: dirs.cwd, below: dirs.stack };
+		return { cwd: to, previous: dirs.cwd, stack };
+	}
+	if (argv[0] === "popd") {
+		if (operands.length > 0 || dirs.stack === undefined) return { cwd: lost, previous: undefined, stack: undefined };
+		// With nothing on the stack `popd` fails and changes nothing.
+		if (dirs.stack === null) return dirs;
+		return { cwd: dirs.stack.dir, previous: dirs.cwd, stack: dirs.stack.below };
+	}
+	return dirs;
+}
+
+/**
+ * Whether a segment's words start a negated pipeline: a `!` after the reserved words that open the
+ * pipeline (`then ! cmd`, `while ! cmd`), as well as a `!` that starts it.
+ */
+function negatesPipeline(words: readonly string[], quoted: readonly boolean[]): boolean {
+	for (let k = 0; k < words.length && !quoted[k]; k++) {
+		if (words[k] === "!") return true;
+		if (!COMMAND_PREFIXES.includes(words[k]) && !Object.hasOwn(COMPOUND_OPENERS, words[k])) return false;
+	}
+	return false;
+}
+
 /**
  * Which commands are known to have succeeded before the next one starts, as a script runs: the
  * last command of each pipeline in the current `&&` chain, until an `||` makes earlier members
@@ -1414,21 +1517,21 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
  */
 class SucceededCommands {
 	/** Succeeded before the current and-or list started. */
-	#base: readonly ShellCommand[];
+	#base: SucceededLink | undefined;
 	/** `#base` plus the current list's `&&` members so far. */
-	#chain: readonly ShellCommand[];
+	#chain: SucceededLink | undefined;
 	/** An `||` in the current list: what follows may run without its earlier members. */
 	#optional = false;
-	/** The last pipeline, until the operator after it says whether it counts. */
-	#last: readonly ShellCommand[] = [];
-	readonly #groups: { base: readonly ShellCommand[]; chain: readonly ShellCommand[]; optional: boolean }[] = [];
+	/** The last pipeline's last command, until the operator after it says whether it counts. */
+	#last: ShellCommand | undefined;
+	readonly #groups: { base: SucceededLink | undefined; chain: SucceededLink | undefined; optional: boolean }[] = [];
 
-	constructor(initial: readonly ShellCommand[]) {
+	constructor(initial: SucceededLink | undefined) {
 		this.#base = initial;
 		this.#chain = initial;
 	}
 
-	get current(): readonly ShellCommand[] {
+	get current(): SucceededLink | undefined {
 		return this.#optional ? this.#base : this.#chain;
 	}
 
@@ -1437,22 +1540,22 @@ class SucceededCommands {
 	 * pipeline succeeds when its commands fail, so it counts as none.
 	 */
 	finish(pipeline: readonly ShellCommand[], negated: boolean): void {
-		this.#last = negated ? [] : pipeline.slice(-1);
+		this.#last = negated ? undefined : pipeline.at(-1);
 	}
 
 	operator(operator: string): void {
 		if (operator === "&&") {
-			if (!this.#optional) this.#chain = [...this.#chain, ...this.#last];
-			this.#last = [];
+			if (!this.#optional && this.#last) this.#chain = { command: this.#last, before: this.#chain };
+			this.#last = undefined;
 		} else if (operator === "||") {
 			this.#optional = true;
-			this.#last = [];
+			this.#last = undefined;
 		} else if (operator === "(") {
 			this.#groups.push({ base: this.#base, chain: this.#chain, optional: this.#optional });
 			this.#base = this.current;
 			this.#chain = this.#base;
 			this.#optional = false;
-			this.#last = [];
+			this.#last = undefined;
 		} else if (operator === ")") {
 			const group = this.#groups.pop();
 			if (!group) return;
@@ -1464,7 +1567,7 @@ class SucceededCommands {
 			// `;`, a newline, `&`, `;;`: a new and-or list, which runs whatever the last one did.
 			this.#chain = this.#base;
 			this.#optional = false;
-			this.#last = [];
+			this.#last = undefined;
 		}
 	}
 }
@@ -1560,9 +1663,10 @@ class ShellScriptParser {
 	/**
 	 * The pipelines `source` runs, nested ones after the top level. When a `'` in a double-quoted
 	 * `${ }` makes bash and POSIX shells read `source` differently, the commands of both readings.
-	 * `succeeded` is what had succeeded when it started.
+	 * `dirs` and `succeeded` are what the script starts with: the directories it runs in, and the
+	 * commands that had succeeded before it.
 	 */
-	parse(source: string, cwd: string, depth: number, succeeded: readonly ShellCommand[]): ShellCommand[][] {
+	parse(source: string, dirs: WorkDirs, depth: number, succeeded: SucceededLink | undefined): ShellCommand[][] {
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
 			this.truncated = true;
 			return [];
@@ -1572,10 +1676,10 @@ class ShellScriptParser {
 		const outer = { bashQuotes: this.#bashQuotes, ambiguous: this.#ambiguous };
 		this.#bashQuotes = false;
 		this.#ambiguous = false;
-		const pipelines = this.#read(source, cwd, depth, succeeded);
+		const pipelines = this.#read(source, dirs, depth, succeeded);
 		if (this.#ambiguous && this.#budget(source, depth)) {
 			this.#bashQuotes = true;
-			append(pipelines, this.#read(source, cwd, depth, succeeded));
+			append(pipelines, this.#read(source, dirs, depth, succeeded));
 		}
 		this.#bashQuotes = outer.bashQuotes;
 		this.#ambiguous = outer.ambiguous;
@@ -1591,17 +1695,17 @@ class ShellScriptParser {
 		return false;
 	}
 
-	#read(source: string, cwd: string, depth: number, succeeded: readonly ShellCommand[]): ShellCommand[][] {
-		const scope: ReadScope = { cwd, depth, subs: new Map(), succeeded };
+	#read(source: string, dirs: WorkDirs, depth: number, succeeded: SucceededLink | undefined): ShellCommand[][] {
+		const scope: ReadScope = { dirs, depth, subs: new Map(), succeeded };
 		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope);
 	}
 
 	/** The pipelines `tokens`, read in `scope`, run, nested ones after the top level. */
 	#pipelines(tokens: readonly ShellScriptToken[], scope: ReadScope): ShellCommand[][] {
 		const { depth, subs } = scope;
-		let cwd = scope.cwd;
-		// A `( )` subshell's `cd` ends with the group: the directory is restored at its `)`.
-		const subshellCwds: string[] = [];
+		let dirs = scope.dirs;
+		// A `( )` subshell's `cd` ends with the group: the directories are restored at its `)`.
+		const subshellDirs: WorkDirs[] = [];
 		const pipelines: ShellCommand[][] = [];
 		const nested: ShellCommand[][] = [];
 		const done = new SucceededCommands(scope.succeeded);
@@ -1611,30 +1715,27 @@ class ShellScriptParser {
 		let pipeline: ShellCommand[] = [];
 		let negated = false;
 		for (const segment of this.#segments(tokens)) {
-			if (pipeline.length === 0 && segment.words[0] === "!" && !segment.quoted[0]) negated = true;
+			if (pipeline.length === 0 && negatesPipeline(segment.words, segment.quoted)) negated = true;
 			stages.keywords(segment.words, segment.quoted);
-			const command = this.#command(segment, cwd, subs, depth, nested, done.current, stages.upstream);
+			const command = this.#command(segment, dirs, subs, depth, nested, done.current, stages.upstream);
 			if (command) {
 				pipeline.push(command);
 				stages.add(command);
-				this.#feedShell(command, segment, passed, depth, nested);
+				this.#feedShell(command, segment, passed, depth, nested, dirs);
 			}
 			stages.operator(segment.operator);
 			if (Object.hasOwn(SHELL_PIPES, segment.operator)) continue;
 			if (pipeline.length > 0) {
 				pipelines.push(pipeline);
-				const only = pipeline.length === 1 ? pipeline[0] : undefined;
-				if (only && (only.argv[0] === "cd" || only.argv[0] === "pushd")) {
-					const target = shellPositionalArgs(only.argv)[0];
-					cwd = target === undefined ? this.home : (resolveCommandWordPath(only, target, cwd, this.home) ?? cwd);
-				}
+				// Only a lone command changes the directories here: a stage of a longer pipeline runs in a subshell.
+				if (pipeline.length === 1) dirs = changeDirs(pipeline[0], dirs, this.home);
 				done.finish(pipeline, negated);
 				pipeline = [];
 				negated = false;
 			}
 			done.operator(segment.operator);
-			if (segment.operator === "(") subshellCwds.push(cwd);
-			else if (segment.operator === ")") cwd = subshellCwds.pop() ?? cwd;
+			if (segment.operator === "(") subshellDirs.push(dirs);
+			else if (segment.operator === ")") dirs = subshellDirs.pop() ?? dirs;
 		}
 		return [...pipelines, ...nested, ...[...subs.values()].flat()];
 	}
@@ -1652,8 +1753,9 @@ class ShellScriptParser {
 		passed: Map<ShellCommand, string[]>,
 		depth: number,
 		nested: ShellCommand[][],
+		dirs: WorkDirs,
 	): void {
-		const { argv, cwd, succeeded } = command;
+		const { argv, succeeded } = command;
 		const texts = new Set([...segment.heredocs.map(doc => doc.body), ...segment.herestrings]);
 		if (Object.hasOwn(SHELL_ECHOES, argv[0])) {
 			texts.add(argv.slice(1).join(" "));
@@ -1662,7 +1764,7 @@ class ShellScriptParser {
 		passed.set(command, [...texts]);
 		if (!Object.hasOwn(SCRIPT_SHELLS, argv[0]) || shellScriptSource(argv) !== "stdin") return;
 		for (const source of [...command.upstream, command]) {
-			for (const text of passed.get(source) ?? []) append(nested, this.parse(text, cwd, depth + 1, succeeded));
+			for (const text of passed.get(source) ?? []) append(nested, this.parse(text, dirs, depth + 1, succeeded));
 			passed.delete(source);
 		}
 	}
@@ -2034,7 +2136,7 @@ class ShellScriptParser {
 			let end = start + 1;
 			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
 			const body = text.slice(start + 1, end).replace(quoted ? QUOTED_BACKTICK_ESCAPE_RE : BACKTICK_ESCAPE_RE, "$1");
-			scope.subs.set(key, this.parse(body, scope.cwd, depth, scope.succeeded));
+			scope.subs.set(key, this.parse(body, scope.dirs, depth, scope.succeeded));
 			return { key, after: end + 1 };
 		}
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
@@ -2042,7 +2144,7 @@ class ShellScriptParser {
 			this.truncated = true;
 			return { key, after: text.length };
 		}
-		const inner: ReadScope = { cwd: scope.cwd, depth, subs: new Map(), succeeded: scope.succeeded };
+		const inner: ReadScope = { dirs: scope.dirs, depth, subs: new Map(), succeeded: scope.succeeded };
 		// `$(( ))` is arithmetic, or a command substitution that starts with a subshell: it is read as
 		// commands either way, but a `<<` in it is never a heredoc.
 		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
@@ -2117,11 +2219,11 @@ class ShellScriptParser {
 
 	#command(
 		segment: ShellScriptSegment,
-		cwd: string,
+		dirs: WorkDirs,
 		subs: Map<string, ShellCommand[][]>,
 		depth: number,
 		nested: ShellCommand[][],
-		succeeded: readonly ShellCommand[],
+		succeeded: SucceededLink | undefined,
 		upstream: readonly ShellCommand[],
 	): ShellCommand | undefined {
 		const { words, writes, reads } = segment;
@@ -2152,7 +2254,7 @@ class ShellScriptParser {
 			}
 		}
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
-		if (script !== undefined) append(nested, this.parse(script, cwd, depth + 1, succeeded));
+		if (script !== undefined) append(nested, this.parse(script, dirs, depth + 1, succeeded));
 		const assignments = words.slice(0, start).filter(word => SHELL_ASSIGNMENT.test(word));
 		return {
 			argv,
@@ -2162,7 +2264,8 @@ class ShellScriptParser {
 			assignments,
 			reads,
 			subs: used,
-			cwd,
+			cwd: dirs.cwd.path,
+			unknownCwd: !dirs.cwd.known,
 			succeeded,
 			upstream,
 			literalTildes: segment.literalTildes,
@@ -2184,6 +2287,7 @@ class ShellScriptParser {
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
-	const pipelines = parser.parse(command, scope.cwd, 0, []);
+	const start: WorkDirs = { cwd: { path: scope.cwd, known: true }, previous: undefined, stack: null };
+	const pipelines = parser.parse(command, start, 0, undefined);
 	return { pipelines, scripts: parser.scripts, truncated: parser.truncated };
 }
