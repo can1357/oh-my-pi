@@ -1879,7 +1879,8 @@ describe("InputController image paste into an ask form note", () => {
 		},
 	];
 
-	it.each(routes)("attaches $name to the open note", async ({ paste }) => {
+	/** An opted-in form focused in front of the main editor, with the controller's paste listeners installed. */
+	async function mountForm() {
 		const context = await createContext();
 		Object.assign(context.ctx, {
 			sessionManager: {
@@ -1911,6 +1912,11 @@ describe("InputController image paste into an ask form note", () => {
 		controller.setupKeyHandlers();
 		const listeners = registeredInputListeners(context.spies.addInputListener);
 		context.spies.addStartListener.mock.calls[0]?.[0]();
+		return { context, form, listeners, pngPath };
+	}
+
+	it.each(routes)("attaches $name to the open note", async ({ paste }) => {
+		const { context, form, listeners, pngPath } = await mountForm();
 
 		form.handleInput("n");
 		form.handleInput("why sqlite");
@@ -1925,6 +1931,25 @@ describe("InputController image paste into an ask form note", () => {
 		expect(note?.text).toMatch(/^why sqlite\s*\[Image #1, \d+x\d+\]$/);
 		expect(context.editor.pendingImages).toHaveLength(0);
 		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("refuses an enhanced image paste while no note is open", async () => {
+		const { context, form, listeners } = await mountForm();
+		const showStatus = context.ctx.showStatus as unknown as Mock<(message: string) => void>;
+		// Settle on either outcome, so a paste that lands in the main editor fails the assertions below.
+		const settled = Promise.withResolvers<void>();
+		showStatus.mockImplementation(() => settled.resolve());
+		(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>).mockImplementation(() =>
+			settled.resolve(),
+		);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		await settled.promise;
+
+		expect(showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(form.optionNotes()).toEqual([]);
 		form.dispose();
 	});
 });
