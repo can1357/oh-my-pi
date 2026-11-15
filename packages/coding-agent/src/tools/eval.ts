@@ -209,6 +209,8 @@ export interface EvalToolDescriptionOptions {
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	/** Canonical and wire names currently accepted by the session tool bridge. */
 	toolNames?: readonly string[];
+	/** Session `tools.maxTimeout`; the advertised default deadline is the one it actually caps to. */
+	maxTimeout?: number;
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -226,7 +228,10 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		autoProvision: options.autoProvision ?? true,
 		perCallModel: options.perCallModel ?? false,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
-		timeoutDefault: TOOL_TIMEOUTS.eval.default,
+		timeoutDefault: clampTimeout("eval", undefined, options.maxTimeout),
+		timeoutRaisable:
+			clampTimeout("eval", TOOL_TIMEOUTS.eval.max, options.maxTimeout) >
+			clampTimeout("eval", undefined, options.maxTimeout),
 	};
 }
 
@@ -410,6 +415,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			perCallModel,
 			perCallModelAdvertisement,
 			toolNames: session.getAdvertisedEvalToolNames?.(),
+			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};
 	}
 

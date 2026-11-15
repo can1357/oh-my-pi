@@ -100,9 +100,13 @@ describe("eval timeout admission contract", () => {
 		const { default: defaultTimeout } = TOOL_TIMEOUTS.eval;
 		expect(timeoutDescription()).toContain(`(default ${defaultTimeout})`);
 		expect(tool.description).toContain(`without \`timeout\` stops after ${defaultTimeout}s`);
-		// A configured ceiling below the default is the deadline an omitted timeout really gets.
+		expect(tool.description).toContain("pass a larger `timeout`");
+		// A configured ceiling below the default is the deadline an omitted timeout really gets,
+		// and nothing larger can be passed, so the prompt must not suggest it.
 		cfgToolsMaxTimeout.override(settings, 12);
 		expect(timeoutDescription()).toContain("(default 12)");
+		expect(tool.description).toContain("without `timeout` stops after 12s.");
+		expect(tool.description).not.toContain("pass a larger `timeout`");
 	});
 
 	it("keeps a background cell's deadline and notices fixed at its admitted value", async () => {
