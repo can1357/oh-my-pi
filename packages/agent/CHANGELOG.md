@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional run-owner tokens to `prompt()` and `continue()` and exposed the active run's token as `AgentState.runOwner`, so hosts can attribute continuations to their originating dispatch ([#19316](https://github.com/can1357/oh-my-pi/pull/19316) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

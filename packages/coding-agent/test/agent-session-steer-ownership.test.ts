@@ -108,21 +108,21 @@ describe("AgentSession steer run ownership", () => {
 
 	function waitForSessionEvent(match: (event: AgentSessionEvent) => boolean): Promise<void> {
 		if (!session) throw new Error("Session not created yet");
-		return new Promise(resolve => {
-			const unsubscribe = session!.subscribe(event => {
-				if (match(event)) {
-					unsubscribe();
-					resolve();
-				}
-			});
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (match(event)) {
+				unsubscribe();
+				resolve();
+			}
 		});
+		return promise;
 	}
 
 	/** Starts the client prompt and parks it inside dispatch setup at its gated
 	 *  key lookup: in flight (its bracket raised), its run not claimed yet. The
 	 *  gated key is the FIRST session-level key lookup; the drain's own lookups
 	 *  (later call numbers) resolve immediately. */
-	function parkClientPromptInSetup(clientSession: AgentSession, keyGate: Promise<void>, keyRequested: Promise<void>) {
+	function parkClientPromptInSetup(clientSession: AgentSession, keyRequested: Promise<void>) {
 		const promptDone = clientSession.prompt("client question");
 		void promptDone.catch(() => undefined);
 		return {
@@ -172,7 +172,7 @@ describe("AgentSession steer run ownership", () => {
 
 		// The client prompt enters dispatch setup and parks at its gated key
 		// lookup: in flight, its run not claimed yet.
-		const { promptDone, parked } = parkClientPromptInSetup(session, keyGate.promise, keyRequested.promise);
+		const { promptDone, parked } = parkClientPromptInSetup(session, keyRequested.promise);
 		await parked;
 
 		// A deferred hidden message starts its own turn (the queued-hidden
@@ -223,7 +223,7 @@ describe("AgentSession steer run ownership", () => {
 			},
 		);
 
-		const { promptDone, parked } = parkClientPromptInSetup(session, keyGate.promise, keyRequested.promise);
+		const { promptDone, parked } = parkClientPromptInSetup(session, keyRequested.promise);
 		await parked;
 		session.queueDeferredMessage(deferredBackgroundMessage());
 		await withTimeout(drainStarted.promise, 2_000, "Queued-hidden drain never streamed");
@@ -265,7 +265,7 @@ describe("AgentSession steer run ownership", () => {
 		);
 		const retryScheduled = waitForSessionEvent(event => event.type === "auto_retry_start");
 
-		const { promptDone, parked } = parkClientPromptInSetup(session, keyGate.promise, keyRequested.promise);
+		const { promptDone, parked } = parkClientPromptInSetup(session, keyRequested.promise);
 		await parked;
 
 		// The deferred drain turn fails retriablely; its automatic retry is an

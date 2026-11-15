@@ -385,6 +385,11 @@ export interface AgentPromptOptions {
 	owner?: unknown;
 }
 
+export interface AgentContinueOptions {
+	/** Opaque owner token recorded on `AgentState.runOwner` for this continuation. */
+	owner?: unknown;
+}
+
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
 interface CursorToolResultEntry {
 	toolResult: ToolResultMessage;
@@ -1809,12 +1814,12 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	continue(signal?: AbortSignal, owner?: unknown): Promise<void> {
+	continue(signal?: AbortSignal, options?: AgentContinueOptions): Promise<void> {
 		// Queued-message hooks run before the loop and are this agent's work too.
-		return this.#inLogContext(() => this.#continue(signal, owner));
+		return this.#inLogContext(() => this.#continue(signal, options));
 	}
 
-	async #continue(signal?: AbortSignal, owner?: unknown) {
+	async #continue(signal?: AbortSignal, options?: AgentContinueOptions) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -1826,7 +1831,7 @@ export class Agent {
 		this.#abortController = continuationAbortController;
 		// Claim: stamp the owner synchronously (before the first await below) so
 		// `state.runOwner` always names the live run — see AgentState.runOwner.
-		this.#state.runOwner = owner;
+		this.#state.runOwner = options?.owner;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -1931,9 +1936,9 @@ export class Agent {
 		const loopSignal = continuationSignal
 			? AbortSignal.any([loopAbortController.signal, continuationSignal])
 			: loopAbortController.signal;
-		if (!this.#state.isStreaming) {
+		if (!runStateClaimed) {
 			// First claim of this run (the prompt() path; #continue claims in its
-			// own synchronous prefix and arrives here already streaming): stamp the
+			// own synchronous prefix and passes runStateClaimed=true): stamp the
 			// claiming caller's owner. Every claim overwrites it, so a value read
 			// while streaming always names the live run.
 			this.#state.runOwner = options?.owner;

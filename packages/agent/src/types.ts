@@ -1050,7 +1050,7 @@ export interface AgentState {
 	isStreaming: boolean;
 	/**
 	 * Opaque owner token the claiming caller passed (`AgentPromptOptions.owner` /
-	 * `Agent.continue(signal, owner)`); `undefined` for autonomous claims. Every
+	 * `Agent.continue(signal, { owner })`); `undefined` for autonomous claims. Every
 	 * streaming claim overwrites it synchronously before its first await, so a
 	 * value read while `isStreaming` is true always names the live run's owner.
 	 */

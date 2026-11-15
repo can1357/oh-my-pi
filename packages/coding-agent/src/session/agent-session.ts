@@ -2792,6 +2792,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			promptSequence: () => this.#promptSequence,
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: signal => {
+				const owner = continuationOwnerScope.getStore();
+				const claimed = this.agent.continue(signal, { owner });
+				if (owner !== undefined) this.#wakeDispatchLiveWaiters();
+				return claimed;
+			},
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -5602,7 +5608,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// inherited owner is already on AgentState.runOwner by the time
 					// this line runs. Wake parked steers only for a client-owned
 					// retry — they admit into this run, never an autonomous one.
-					const claimed = this.agent.continue(signal, request.options.owner);
+					const claimed = this.agent.continue(signal, { owner: request.options.owner });
 					if (request.options.owner !== undefined) this.#wakeDispatchLiveWaiters();
 					await claimed;
 					return { status: "completed" };
@@ -9856,12 +9862,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// steering admission (`joinActiveTurn`) requires it, and the turn's
 			// recovery retries inherit it (see `#dispatchAgentEvent` /
 			// `#runAgentContinue`). Only the client-prompt call site sets it.
-			const agentPromptOptions = options?.runOwner
-				? options.toolChoice
+			const agentPromptOptions =
+				options?.toolChoice || options?.runOwner
 					? { toolChoice: options.toolChoice, owner: options.runOwner }
-					: { owner: options.runOwner }
-				: options?.toolChoice
-					? { toolChoice: options.toolChoice }
 					: undefined;
 			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
 			const contextWindow = this.model?.contextWindow ?? 0;
@@ -10527,10 +10530,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * run's first batch boundary. Fired from the client prompt's own
 	 * `agent.prompt` claim (the `onClaimed` hook in
 	 * `#promptAgentWithIdleRetry` — an autonomous run's streaming never
-	 * fires it), from `#runAgentContinue` when a retry that inherited the
-	 * client owner claims, and from `#endInFlight`/`#resetInFlight` when the
-	 * count drains without the client run ever going live (setup failure,
-	 * abort, disposal).
+	 * fires it), from `#runAgentContinue` or a stream-guard continuation when a
+	 * retry that inherited the client owner claims, and from
+	 * `#endInFlight`/`#resetInFlight` when the count drains without the client
+	 * run ever going live (setup failure, abort, disposal).
 	 */
 	#dispatchLiveWaiters = new Set<() => void>();
 
