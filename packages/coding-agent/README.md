@@ -15,6 +15,19 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Antigravity transport setup
+
+Source installs build the Antigravity Go helper with `bun run setup` at the
+repository root, or `bun run --cwd packages/ai build:agy-transport`. Compiled
+builds embed the target-specific helper. The `google-antigravity` provider
+remains paused by default; its risk warning and explicit opt-in are unchanged.
+The separate official `antigravity-cli` ACP provider is unchanged.
+
+For an explicitly enabled account, `/login google-antigravity` uses browser
+consent and a local callback without an unnecessary code-paste prompt. See the
+[AI transport notes](../ai/README.md#antigravity-transport-and-verification)
+for executable overrides, trusted CAs, lifecycle, and verification limits.
+
 ## Bash visualization
 
 Embedded-shell calls default to Python-like **Pseudo**; switch to **Raw** for the original command. Syntax appears incrementally as the shell compiles it. Active commands retain their colors while inactive code fades; only failures get `×`. Values appear beside each variable's latest observed setter.

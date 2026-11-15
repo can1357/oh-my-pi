@@ -5,6 +5,7 @@
  * credentials, scopes, endpoint constants, and project-discovery logic differ.
  */
 import * as AIError from "../../error";
+import type { FetchImpl } from "../../types";
 
 /**
  * Per-request timeout for the post-callback provisioning phase (token exchange,
@@ -24,6 +25,7 @@ export interface OAuthFetchOptions {
 	signal?: AbortSignal;
 	/** Override the per-request timeout (defaults to {@link OAUTH_REQUEST_TIMEOUT_MS}). */
 	timeoutMs?: number;
+	fetch?: FetchImpl;
 }
 
 /**
@@ -47,12 +49,12 @@ export function throwIfLoginCancelled(signal: AbortSignal | undefined): void {
 export async function oauthFetch(
 	url: string,
 	init: RequestInit,
-	{ provider, signal, timeoutMs = OAUTH_REQUEST_TIMEOUT_MS }: OAuthFetchOptions,
+	{ provider, signal, timeoutMs = OAUTH_REQUEST_TIMEOUT_MS, fetch: fetchImpl = fetch }: OAuthFetchOptions,
 ): Promise<Response> {
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
-		return await fetch(url, { ...init, signal: requestSignal });
+		return await fetchImpl(url, { ...init, signal: requestSignal });
 	} catch (err) {
 		if (signal?.aborted) {
 			throw new AIError.LoginCancelledError(`OAuth login cancelled: ${String(signal.reason)}`);

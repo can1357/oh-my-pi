@@ -72,6 +72,10 @@
       "default": "./native/index.js"
     },
     "./THIRD-PARTY-NOTICES.txt": "./THIRD-PARTY-NOTICES.txt",
+    "./loader-state": {
+      "types": "./native/loader-state.d.ts",
+      "import": "./native/loader-state.js"
+    },
     "./path": {
       "types": "./native/path.d.ts",
       "import": "./native/path.js",

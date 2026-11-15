@@ -1,6 +1,6 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
+import { getAgyHeaders } from "../providers/agy-fetch";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -443,7 +443,7 @@ async function fetchAntigravityEndpoint(
 				headers: {
 					Authorization: `Bearer ${request.accessToken}`,
 					"Content-Type": "application/json",
-					...getAntigravityHeaders(),
+					...getAgyHeaders(),
 				},
 				body: JSON.stringify({ project: request.projectId }),
 				signal: request.signal,

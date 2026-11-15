@@ -18,7 +18,7 @@ import type { KeyResolver, ProviderDefinition } from "./types";
 /** Request/model shaping a provider implements in TypeScript beside its KDL auth policy. */
 export type ProviderTransport = Pick<
 	ProviderDefinition,
-	"prepareModel" | "prepareRequest" | "mapSimpleOptions" | "prepareModelDiscovery"
+	"prepareModel" | "prepareRequest" | "mapSimpleOptions" | "prepareModelDiscovery" | "fetch"
 >;
 
 function envResolver(env: CompiledAuthProvider["env"]): KeyResolver | undefined {
@@ -54,8 +54,11 @@ export function buildProviderDefinition(
 	transport?: ProviderTransport,
 ): ProviderDefinition {
 	const envKeys = envResolver(policy.env);
-	const login = loginFor(policy);
-	const refreshToken = createRefresh(policy);
+	const rawLogin = loginFor(policy);
+	const fetcher = transport?.fetch;
+	const login =
+		rawLogin && fetcher ? (ctrl: OAuthController) => rawLogin({ ...ctrl, fetch: ctrl.fetch ?? fetcher }) : rawLogin;
+	const refreshToken = createRefresh(policy, fetcher);
 	return {
 		id: policy.id,
 		name: policy.name,

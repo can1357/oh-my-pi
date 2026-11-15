@@ -1,7 +1,10 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import * as providerRegistry from "@oh-my-pi/pi-ai/registry/registry";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ResponsesWebSocketConnection } from "../src/providers/responses-websocket-connection";
 
@@ -26,6 +29,55 @@ function createSseResponse(events: unknown[]): Response {
 }
 
 describe("StreamOptions.fetch override", () => {
+	it("uses a provider default through stream and streamSimple while explicit fetch overrides win", async () => {
+		const model = buildModel({
+			id: "gemini-2.5-flash",
+			name: "Gemini",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: "https://provider-fetch.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100000,
+			maxTokens: 1024,
+		});
+		const selected: string[] = [];
+		const responder =
+			(name: string): FetchImpl =>
+			async () => {
+				selected.push(name);
+				return createSseResponse([
+					{
+						response: {
+							candidates: [{ content: { role: "model", parts: [{ text: name }] }, finishReason: "STOP" }],
+						},
+					},
+				]);
+			};
+		const defaultFetch = responder("provider-default");
+		const override = responder("explicit-override");
+		const lookup = providerRegistry.getProviderDefinition;
+		const original = lookup(model.provider);
+		if (!original) throw new Error("Gemini CLI provider is not registered");
+		const definition = { ...original, fetch: defaultFetch };
+		const lookupSpy = spyOn(providerRegistry, "getProviderDefinition").mockImplementation(id =>
+			id === model.provider ? definition : lookup(id),
+		);
+		try {
+			const apiKey = JSON.stringify({ token: "fixture-only", projectId: "fixture-project" });
+			for (const send of [stream<"google-gemini-cli">, streamSimple<"google-gemini-cli">]) {
+				const fromDefault = await send(model, baseContext(), { apiKey }).result();
+				const fromOverride = await send(model, baseContext(), { apiKey, fetch: override }).result();
+				expect(fromDefault.content).toEqual([{ type: "text", text: "provider-default" }]);
+				expect(fromOverride.content).toEqual([{ type: "text", text: "explicit-override" }]);
+			}
+			expect(selected).toEqual(["provider-default", "explicit-override", "provider-default", "explicit-override"]);
+		} finally {
+			lookupSpy.mockRestore();
+		}
+	});
+
 	it("routes openai-completions requests through the override", async () => {
 		const calls: Array<{ url: string }> = [];
 

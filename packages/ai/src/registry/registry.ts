@@ -1,6 +1,7 @@
 import type { KnownProvider } from "@oh-my-pi/pi-catalog";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { AuthProviderId, LoginProviderId } from "@oh-my-pi/pi-catalog/compat/auth-ids";
+import { agyFetch } from "../providers/agy-fetch";
 import { amazonBedrockTransport } from "./amazon-bedrock";
 import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
@@ -17,6 +18,7 @@ import type { ProviderDefinition } from "./types";
 const TRANSPORTS: Record<string, ProviderTransport> = {
 	"amazon-bedrock": amazonBedrockTransport,
 	"bedrock-mantle": bedrockMantleTransport,
+	"google-antigravity": { fetch: agyFetch },
 	"cloudflare-ai-gateway": cloudflareAiGatewayTransport,
 	"muse-code": museCodeTransport,
 	snowflake: snowflakeTransport,

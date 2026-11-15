@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added offline `gen:models --snapshot-compat` regeneration without changing the bundled inventory.
+
+### Fixed
+
+- Antigravity discovery accepts an explicit client User-Agent, and browser-callback login no longer opens an unnecessary paste-code prompt; the provider remains paused by default.
+
+### Removed
+
+- Removed obsolete Antigravity Claude tool-mode and thinking-beta compatibility flags.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

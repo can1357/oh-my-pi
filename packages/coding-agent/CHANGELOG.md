@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Antigravity model discovery uses the provider transport while preserving explicit fetch overrides; source setup builds its helper and compiled builds embed it. The provider's default pause and warning remain unchanged.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

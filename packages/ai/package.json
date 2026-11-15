@@ -30,6 +30,7 @@
 	},
 	"files": [
 		"src",
+		"scripts/build-agy-transport.ts",
 		"README.md",
 		"CHANGELOG.md"
 	],
@@ -145,6 +146,7 @@
 		"./*.js": "./src/*.ts"
 	},
 	"scripts": {
+		"build:agy-transport": "bun scripts/build-agy-transport.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
 		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",

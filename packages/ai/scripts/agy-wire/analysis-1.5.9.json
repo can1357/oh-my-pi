@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "version": "1.5.9",
+  "platform": "linux-amd64",
+  "manifest": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json",
+  "archiveSha512": "d01eb13ba7750eed18907f1ae8860864371e0ad9064415e8d033d22b4bd7b9b4e4c7f962058520b452d67db1c33163d9a889d55a7dffa159596ec6cd91a87b79",
+  "binarySha256": "39816d49d5ab92229952987225c23ea3fed7580699dcb4a444e0388e0ac1ce43",
+  "addressConvention": "ELF RVA; runtime address = load bias + RVA",
+  "goresym": {"version":"3.4.1","result":"no valid pclntab found","fallback":"relocation-resolved pclntab; 189569 function entries"},
+  "goTextBase": {"rva":"0x6fed080","source":"R_X86_64_RELATIVE at .go.module + 0xb0; minpc cross-check at +0xa0"},
+  "observations": [
+    {"symbol":"codeassistclient.newCloudCodeTransport","rva":"0x95eedc0","finding":"Protocols HTTP1 only; empty TLSNextProto; MaxIdleConnsPerHost 100; ResponseHeaderTimeout 0","verification":"bounded disassembly, target type metadata, native consumer capture"},
+    {"symbol":"net/http.Protocols.HTTP1","rva":"0x7430640","finding":"bit 0; HTTP2 is bit 1 at 0x7430680"},
+    {"symbol":"codeassistclient.marshalCCPARequest","rva":"0x95e7f00","finding":"protojson; entire-request UseEnumNumbers enabled for request.generationConfig.thinkingConfig.thinkingLevel 5 EXTRA_HIGH or 6 MAX; XHIGH is 7 and does not enable it"},
+    {"symbol":"protojson.MarshalOptions.marshal","rva":"0x74d37e0","finding":"protobuf reflection serialization, not encoding/json"},
+    {"symbol":"json.appendString","rva":"0x748c040","finding":"no HTML escaping, valid U+2028/U+2029 preserved, invalid UTF-8 rejected"},
+    {"symbol":"json.Encoder.prepareNext","rva":"0x748cf20","finding":"optional comma-space controlled by process-global detrand seed bit; not independent per-comma randomization; captured build has compact commas"},
+    {"symbol":"codeassistclient.userAgent","rva":"0x95f03c0","finding":"ordered aidev_client, os_type, arch, conditional cl/auth_method/datacollection_opt_in/host_path/proxy_client/purpose attributes; captured consumer UA antigravity/cli/1.5.9 (aidev_client; os_type=linux; arch=amd64; cl=1021519450; auth_method=consumer)"},
+    {"symbol":"codeassistclient.CodeAssistClient.setHeaders","rva":"0x95f0f60","finding":"User-Agent; conditional X-Goog-Request-Reason; POST Content-Type application/json; auth-provider header hook; no explicit Accept"},
+    {"symbol":"codeassistclient.CLIAuthProvider.SetHTTPHeaders","rva":"0x95c6f80","finding":"auth-mode/project-gated X-Goog-User-Project; an explicitly configured quota project is distinct from the shared CCPA project, which must not automatically become this header"},
+    {"symbol":"codeassistclient.computeRequestID","rva":"0x95e73c0","finding":"caller-supplied 5-part or 4-part identity; absent trajectory uses prefix/random UUID; empty prefix becomes unknown"},
+    {"symbol":"codeassistclient.getSessionID","rva":"0x95e3960","finding":"FNV-1a 64 of caller-supplied bytes, signed decimal; inspected GetChatMessage caller supplies empty input, producing -3750763034362895579"},
+    {"symbol":"codeassistclient.CodeAssistClient.streamGenerateContentFromCCPA","rva":"0x95e7fe0","finding":"serialized bytes.Reader wrapped in io.NopCloser before NewRequestWithContext; unknown body length produces HTTP1 chunked framing; observed 20727-byte generation body, requestType agent"}
+  ],
+  "consumerFingerprints": {"ja3":"03117a8ed39ef02427ebbc39f121275c","ja4":"t13d1312h1_f57a46bbacb6_f50d94e863eb","akamaiHttp2":"not-applicable: consumer HTTP1"},
+  "updaterFingerprint": {"akamaiHttp2":"2:0;4:4194304;5:1048576;6:10485760|1073741824|0|a,m,p,s","scope":"updater only, never used as consumer reference"},
+  "verification": {"scope":"Historical captured fixtures and earlier live smoke runs; not a certification of the current implementation","nativeGenerationBodyBytes":20727,"nativeGenerationReserializationByteEqual":true,"sixRequestHttp1PlaintextBytes":23177,"sixRequestHttp1PlaintextSha256":"56a4fb76c91d9eff27dca06fae6bf2b6e1b5eb8989835b1151f625c7af8be70f","sixRequestHttp1ByteEqual":true,"clientHelloStructuralMatch":true,"tcp":"mismatch; SYN options/window/TTL matched, packet lifecycle differed","authenticatedGeneration":"Earlier official Windows CLI and independent transport runs both returned AGY_WIRE_OK","attestation":"unverified; authenticated generation is not evidence of a separate attestation check"},
+  "limits": ["No claim of complete AGY workflow, telemetry, continuation or identity equivalence", "Raw TLS and TCP bytes differ across sessions; exclusions are explicit and raw differences remain visible", "Fingerprint agreement is not attestation or proof of equal TLS implementation", "Kernel timing, segmentation and shutdown are reported, not fabricated as equal", "Further work is scoped to supported interoperability, not defeating client-authenticity checks"]
+}

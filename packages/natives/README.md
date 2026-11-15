@@ -73,6 +73,13 @@ The addon loads only when a helper is called on Windows; other platforms preserv
 the input path without loading it. These helpers change long/8.3 spellings without
 resolving symlinks or junctions.
 
+### Embedded resource extraction
+
+`@oh-my-pi/pi-natives/loader-state` exposes the shared extraction helpers for
+compiled resources. Call `prepareNativeVersionDir(targetDir)` before
+`extractEmbeddedAddons({ targetDir, files })`; the Antigravity transport uses this
+path for its embedded target-specific executable.
+
 ## Building
 
 ```bash

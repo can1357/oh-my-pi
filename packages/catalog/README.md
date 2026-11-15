@@ -28,6 +28,11 @@ bun run gen:compat   # src/compat/rules/**/*.kdl -> src/compat/rules.json
 bun run gen:models   # upstream sources + rules -> src/models.json
 ```
 
+For a wire-policy-only change, `bun run gen:models --snapshot-compat` recompiles
+`compat` from the existing inventory without network discovery or changing model
+pricing, limits, or membership. Add `--provider <id>` to select one provider.
+This is not a replacement for full generation when other model metadata changes.
+
 Model- or provider-conditional policy (identity, effort ladders, wire quirks, modality/limit/pricing corrections, API routing, roster exclusions) lives in the KDL tree — see `src/compat/rules/README.md` for the grammar and axis vocabulary. TypeScript changes are only for transport mechanics: provider entries in `provider-models/descriptors.ts`, discovery/request plumbing in `provider-models/openai-compat.ts`, and generator wiring in `scripts/generate-models.ts`. Commit `rules.json` (and a rebaked `models.json` when values change) alongside the `.kdl` edit.
 
 ## Install

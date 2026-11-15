@@ -293,10 +293,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
-	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),
 	"antigravity-usage-label": wire("antigravityUsageLabel", ["google"]),
 	"cca-legacy-parameters-schema": wire("ccaLegacyParametersSchema", ["google"]),
-	"claude-thinking-beta-header": wire("claudeThinkingBetaHeader", ["google"]),
 	"drop-unsigned-thinking": wire("dropUnsignedThinking", ["google"]),
 	"flash-stream-leak-workaround": wire("flashStreamLeakWorkaround", ["google"]),
 	"multimodal-function-response": wire("multimodalFunctionResponse", ["google"]),

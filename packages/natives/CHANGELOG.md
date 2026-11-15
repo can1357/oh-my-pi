@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported loader-state helpers for shared verified extraction of embedded executables.
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes

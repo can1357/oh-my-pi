@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import type { OAuthLoginController, OAuthLoginIdentity } from "@oh-my-pi/pi-ai/auth/types";
+import { loginRiskWarning, setUnpausedProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 	googleAntigravityProjectHook,
@@ -53,11 +54,9 @@ describe("Antigravity OAuth project discovery", () => {
 		for (const [url, init] of fetchSpy.mock.calls) {
 			expect(url).toBe(LOAD_CODE_ASSIST_URL);
 			expect(init?.method).toBe("POST");
-			expect(init?.headers).toEqual({
+			expect(init?.headers).toMatchObject({
 				Authorization: "Bearer access-token",
 				"Content-Type": "application/json",
-				"User-Agent": expect.stringMatching(/^antigravity\/hub\//),
-				"Accept-Encoding": "gzip",
 			});
 			expect(JSON.parse(String(init?.body))).toEqual({
 				metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
@@ -187,11 +186,9 @@ describe("Antigravity OAuth project discovery", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(4);
 		expect(fetchSpy.mock.calls[2]?.[0]).toBe(OPERATION_URL);
 		expect(fetchSpy.mock.calls[2]?.[1]?.method).toBe("GET");
-		expect(fetchSpy.mock.calls[2]?.[1]?.headers).toEqual({
+		expect(fetchSpy.mock.calls[2]?.[1]?.headers).toMatchObject({
 			Authorization: "Bearer access-token",
 			"Content-Type": "application/json",
-			"User-Agent": expect.stringMatching(/^antigravity\/hub\//),
-			"Accept-Encoding": "gzip",
 		});
 		expect(fetchSpy.mock.calls[2]?.[1]?.body).toBeUndefined();
 		expect(fetchSpy.mock.calls.filter(([url]) => url === ONBOARD_USER_URL)).toHaveLength(1);
@@ -230,7 +227,9 @@ describe("Antigravity OAuth login", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("registered login sends the native scopes and binds the PKCE verifier to the form token exchange", async () => {
+	it("completes loopback login without a paste prompt and keeps PKCE provisioning on the explicit transport", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		const callbackFetch = globalThis.fetch;
 		let tokenForm: URLSearchParams | undefined;
 		const stub = Object.assign(
 			async (input: string | URL | Request, init?: RequestInit) => {
@@ -253,25 +252,50 @@ describe("Antigravity OAuth login", () => {
 			},
 			{ preconnect: fetch.preconnect },
 		);
-		// Project discovery runs through the shared Google transport on the global fetch.
-		vi.spyOn(globalThis, "fetch").mockImplementation(stub);
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				() => {
+					throw new Error("OAuth escaped the explicit transport");
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		);
 		let authorize: URL | undefined;
-		const ctrl: OAuthController = {
+		let callbackWork: Promise<void> | undefined;
+		const riskWarning = loginRiskWarning("google-antigravity");
+		const ctrl: OAuthLoginController = {
 			onAuth: info => {
 				authorize = new URL(info.url);
-			},
-			onManualCodeInput: async () => {
-				const callback = new URL(authorize!.searchParams.get("redirect_uri")!);
+				const callback = new URL(authorize.searchParams.get("redirect_uri")!);
 				callback.searchParams.set("code", "auth-code");
-				callback.searchParams.set("state", authorize!.searchParams.get("state")!);
-				return callback.href;
+				callback.searchParams.set("state", authorize.searchParams.get("state")!);
+				callbackWork = callbackFetch(callback, { proxy: "" }).then(async response => {
+					expect(response.status).toBe(200);
+					await response.text();
+				});
+			},
+			onPrompt: async prompt => {
+				if (riskWarning !== undefined && prompt.message.includes(riskWarning)) return "yes";
+				throw new Error("Loopback login requested manual input");
 			},
 			fetch: stub,
 			signal: AbortSignal.timeout(5_000),
 		};
 
-		const credentials = await getProviderDefinition("google-antigravity")!.login!(ctrl);
-		if (typeof credentials === "string") throw new Error("Expected OAuth credentials");
+		let identity: OAuthLoginIdentity | undefined;
+		setUnpausedProviders(["google-antigravity"]);
+		try {
+			identity = await auth.oauth.login("google-antigravity", ctrl);
+			await callbackWork;
+			const stored = auth.credentials.list("google-antigravity");
+			expect(stored.map(row => row.credential)).toMatchObject([
+				{ type: "oauth", access: "access-token", refresh: "refresh-token", projectId: "project-123" },
+			]);
+		} finally {
+			setUnpausedProviders([]);
+			await callbackWork?.catch(() => {});
+			auth.close();
+		}
 
 		const params = authorize!.searchParams;
 		expect(params.get("response_type")).toBe("code");
@@ -292,6 +316,6 @@ describe("Antigravity OAuth login", () => {
 		expect(tokenForm?.get("client_secret")).toBeTruthy();
 		expect(tokenForm?.get("redirect_uri")).toBe(params.get("redirect_uri"));
 		expect(Bun.SHA256.hash(tokenForm!.get("code_verifier")!, "base64url")).toBe(params.get("code_challenge")!);
-		expect(credentials).toMatchObject({ access: "access-token", refresh: "refresh-token", projectId: "project-123" });
+		expect(identity).toMatchObject({ type: "oauth", email: "user@example.test" });
 	});
 });

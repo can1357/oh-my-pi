@@ -1,6 +1,7 @@
 import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
+import { getProviderDefinition } from "../registry/registry";
 import type { Api, FetchImpl, Model } from "../types";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
@@ -8,7 +9,11 @@ import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request
 /** Stamped on a fetch already built by {@link transportFetch}. */
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
 
-type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
+type TransportFetch = FetchImpl & {
+	[TRANSPORT_FETCH]?: true;
+	/** Native AGY fetches already resume segments and accumulate their usage. */
+	handlesGoogleContinuations?: true;
+};
 
 /**
  * The one fetch every inference request goes through. Per call it applies, in
@@ -31,8 +36,10 @@ export function transportFetch(
 ): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
-	const base =
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+	const base: TransportFetch =
+		given ??
+		getProviderDefinition(model.provider)?.fetch ??
+		(model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
@@ -49,6 +56,7 @@ export function transportFetch(
 		return session.wrapResponse(await base(input, init));
 	};
 	if (base.preconnect) fetch.preconnect = base.preconnect;
+	if (base.handlesGoogleContinuations) fetch.handlesGoogleContinuations = true;
 	fetch[TRANSPORT_FETCH] = true;
 	return fetch;
 }

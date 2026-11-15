@@ -1,10 +1,10 @@
 export interface EmbeddedAddonFile {
 	variant: "modern" | "baseline" | "default";
-	/** Basename of the extracted `.node` file. */
+	/** Basename of the extracted native binary. */
 	filename: string;
-	/** Decompressed addon size in bytes. */
+	/** Decompressed binary size in bytes. */
 	size: number;
-	/** Embedded zstd frame holding the addon bytes. */
+	/** Embedded zstd frame holding the binary bytes. */
 	zstdPath: string;
 }
 

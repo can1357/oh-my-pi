@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- When explicitly enabled, Google Antigravity uses a Go transport helper by default; source SDK installs must build it, while compiled CLI builds embed it. Explicit fetch overrides remain supported.
+
+### Added
+
+- Added observational AGY wire comparison tooling with explicit exclusions and missing-evidence reporting; matching fingerprints do not establish attestation.
+
+### Fixed
+
+- Antigravity continuations retain cumulative usage, avoid unsafe checkpoint replay, and surface next-leg HTTP failures.
+- Antigravity login uses its browser callback without an unnecessary paste-code prompt, and project discovery honors explicit fetch overrides.
+- Antigravity image streams surface provider errors, tool results use the serving model's role, and logical execution identity stays stable through tool turns.
+- Transport helpers support bodyless responses and stop without keeping idle hosts alive.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
