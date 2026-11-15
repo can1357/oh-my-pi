@@ -114,6 +114,37 @@ export function resolveAnthropicMetadataUserId(
 	return generateClaudeJsonUserId(sessionId, accountId);
 }
 
+/**
+ * Rebind a caller-supplied metadata user id to the account serving the request.
+ *
+ * A caller resolves metadata once per model call (`AgentLoop#metadataResolver`),
+ * but a credential rotation inside one stream swaps only the bearer. Without
+ * this, the retry after a rotation sends account B's token with account A's
+ * `account_uuid` and `device_id` — the same cross-account association a pooled
+ * setup must not create. The caller's `session_id` is kept so the conversation
+ * still looks continuous; only the account identity moves.
+ *
+ * Opaque and cloaking shapes are returned untouched: they are either a real
+ * client's own id or one this process did not mint, so rewriting them would be
+ * guessing at its contents.
+ */
+export function rebindAnthropicMetadataUserId(userId: unknown, accountId: string | undefined): unknown {
+	if (typeof userId !== "string" || accountId === undefined || accountId.length === 0) return userId;
+	if (!isClaudeJsonUserId(userId)) return userId;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(userId);
+	} catch {
+		return userId;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return userId;
+	const record = parsed as Record<string, unknown>;
+	if (record.account_uuid === accountId) return userId;
+	const sessionId =
+		typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
+	return generateClaudeJsonUserId(sessionId, accountId);
+}
+
 const ANTHROPIC_BUILTIN_TOOL_NAMES: Record<string, true> = {
 	web_search: true,
 	code_execution: true,

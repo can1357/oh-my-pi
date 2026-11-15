@@ -19,6 +19,8 @@ const JOURNAL_FILE = "changes.jsonl";
 const BLOB_DIR = "blobs";
 /** Larger snapshots are not stored; their file is treated as unrecorded. */
 const MAX_BLOB_BYTES = 8 * 1024 * 1024;
+/** Decodes snapshots byte for byte: a leading UTF-8 BOM stays part of the text, as it is on disk. */
+const UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /** Identity of the agent a record belongs to. */
 export interface JournalAgent {
@@ -99,8 +101,8 @@ export interface FileSnapshot {
 export async function readSnapshot(file: string): Promise<FileSnapshot | undefined> {
 	try {
 		const handle = Bun.file(file);
-		const [text, stat] = await Promise.all([handle.text(), handle.stat()]);
-		return { text, mtimeMs: stat.mtimeMs };
+		const [bytes, stat] = await Promise.all([handle.bytes(), handle.stat()]);
+		return { text: UTF8.decode(bytes), mtimeMs: stat.mtimeMs };
 	} catch (error) {
 		return isEnoent(error) ? { text: null } : undefined;
 	}
@@ -195,7 +197,7 @@ export class ChangeJournal {
 	async blob(key: string): Promise<string | undefined> {
 		try {
 			const bytes = await fs.readFile(path.join(this.dir, BLOB_DIR, key));
-			return new TextDecoder().decode(Bun.gunzipSync(bytes));
+			return UTF8.decode(Bun.gunzipSync(bytes));
 		} catch (error) {
 			if (isEnoent(error)) return undefined;
 			throw error;
