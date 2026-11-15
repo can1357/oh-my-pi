@@ -1,5 +1,4 @@
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import type { ServiceTier, Usage } from "@oh-my-pi/pi-ai";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -1333,13 +1332,17 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
  * {@link getDailyActivity} from the stored rows through a connection of its
  * own that never writes: no schema setup or one-time pass runs first, so
  * another process holding the write lock never delays or fails it (WAL
- * readers do not wait for writers). Returns null when no stats database
- * exists yet.
+ * readers do not wait for writers). Returns null when the stats database
+ * cannot be opened, as before one exists.
  */
 export function readDailyActivity(days = 371): DailyActivityPoint[] | null {
-	const dbPath = getStatsDbPath();
-	if (!existsSync(dbPath)) return null;
-	const reader = new Database(dbPath, { readwrite: true, create: false });
+	let reader: Database;
+	try {
+		reader = new Database(getStatsDbPath(), { readwrite: true, create: false });
+	} catch {
+		// `create: false` refuses to open a database that does not exist yet.
+		return null;
+	}
 	try {
 		reader.run("PRAGMA busy_timeout = 5000");
 		reader.run("PRAGMA query_only = 1");
