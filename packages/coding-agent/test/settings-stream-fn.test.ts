@@ -625,38 +625,54 @@ describe("createSettingsAwareStreamFn", () => {
 		const agyModel = { api: "antigravity-acp", provider: "antigravity-cli", id: "gemini-4-carbon" } as Model;
 
 		it("forwards per-session workspace isolation to antigravity-cli requests and omits it elsewhere", () => {
-			const defaultBase = captureBase();
-			createSettingsAwareStreamFn(Settings.isolated(), defaultBase.fn)(agyModel, stubContext);
-			expect(defaultBase.calls[0]!.options?.antigravityIsolateWorkspace).toBe(true);
-
-			const optedOut = Settings.isolated({ "providers.antigravity-cli.isolateWorkspace": false });
-			const other = Settings.isolated();
-			const release = bindEffects(other);
+			const previous = process.env.PI_AGY_ISOLATE_WORKSPACE;
+			delete process.env.PI_AGY_ISOLATE_WORKSPACE;
 			try {
-				expect(resolveAntigravityCliIsolateWorkspace()).toBe(true);
-				const optedOutBase = captureBase();
-				createSettingsAwareStreamFn(optedOut, optedOutBase.fn)(agyModel, stubContext);
-				expect(optedOutBase.calls[0]!.options?.antigravityIsolateWorkspace).toBe(false);
+				const defaultBase = captureBase();
+				createSettingsAwareStreamFn(Settings.isolated(), defaultBase.fn)(agyModel, stubContext);
+				expect(defaultBase.calls[0]!.options?.antigravityIsolateWorkspace).toBe(true);
 
-				const nonAgyBase = captureBase();
-				createSettingsAwareStreamFn(other, nonAgyBase.fn)(stubResponsesModel, stubContext);
-				expect(nonAgyBase.calls[0]!.options?.antigravityIsolateWorkspace).toBeUndefined();
+				const optedOut = Settings.isolated({ "providers.antigravity-cli.isolateWorkspace": false });
+				const other = Settings.isolated();
+				const releaseOther = bindEffects(other);
+				try {
+					const releaseOptedOut = bindEffects(optedOut);
+					try {
+						expect(resolveAntigravityCliIsolateWorkspace()).toBe(false);
+					} finally {
+						releaseOptedOut();
+					}
+					expect(resolveAntigravityCliIsolateWorkspace()).toBe(true);
+
+					const optedOutBase = captureBase();
+					createSettingsAwareStreamFn(optedOut, optedOutBase.fn)(agyModel, stubContext);
+					expect(optedOutBase.calls[0]!.options?.antigravityIsolateWorkspace).toBe(false);
+
+					const nonAgyBase = captureBase();
+					createSettingsAwareStreamFn(other, nonAgyBase.fn)(stubResponsesModel, stubContext);
+					expect(nonAgyBase.calls[0]!.options?.antigravityIsolateWorkspace).toBeUndefined();
+				} finally {
+					releaseOther();
+					configureAntigravityCliIsolateWorkspace(undefined);
+				}
 			} finally {
-				release();
-				configureAntigravityCliIsolateWorkspace(undefined);
+				if (previous === undefined) delete process.env.PI_AGY_ISOLATE_WORKSPACE;
+				else process.env.PI_AGY_ISOLATE_WORKSPACE = previous;
 			}
 		});
 
 		it("honors PI_AGY_ISOLATE_WORKSPACE over persisted settings", () => {
 			const settings = Settings.isolated();
 			cfgProvidersAntigravityCliIsolateWorkspace.set(settings, true);
+			const previous = process.env.PI_AGY_ISOLATE_WORKSPACE;
 			process.env.PI_AGY_ISOLATE_WORKSPACE = "0";
 			try {
 				const base = captureBase();
 				createSettingsAwareStreamFn(settings, base.fn)(agyModel, stubContext);
 				expect(base.calls[0]!.options?.antigravityIsolateWorkspace).toBe(false);
 			} finally {
-				delete process.env.PI_AGY_ISOLATE_WORKSPACE;
+				if (previous === undefined) delete process.env.PI_AGY_ISOLATE_WORKSPACE;
+				else process.env.PI_AGY_ISOLATE_WORKSPACE = previous;
 			}
 		});
 	});
