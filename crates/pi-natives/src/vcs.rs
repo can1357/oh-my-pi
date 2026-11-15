@@ -269,6 +269,12 @@ pub struct VcsDiscardCheck {
 	/// previews (the directory when empty), or where tracked changes count
 	/// (the whole work tree when empty).
 	pub pathspecs:           Option<Vec<String>>,
+	/// `git reset --merge`: count the staged changes it reverts (see
+	/// `TrackedCheck`), not the work tree's.
+	pub merge:               Option<bool>,
+	/// A `git stash -u` ran before the command: count only the ignored files
+	/// the untracked preview leaves, as the stash keeps the untracked ones.
+	pub untracked_stashed:   Option<bool>,
 	/// `--git-dir`: the repository, as an absolute path.
 	pub git_dir:             Option<String>,
 	/// `--work-tree`: the work tree, as an absolute path.
@@ -449,6 +455,7 @@ impl From<VcsDiscardCheck> for core::DiscardCheck {
 			return Self::Tracked(core::TrackedCheck {
 				worktree_only: v.worktree_only.unwrap_or(false),
 				pathspecs:     v.pathspecs.unwrap_or_default(),
+				merge:         v.merge.unwrap_or(false),
 			});
 		}
 		Self::Clean(core::CleanCheck {
@@ -458,6 +465,7 @@ impl From<VcsDiscardCheck> for core::DiscardCheck {
 			nested_repositories: v.nested_repositories.unwrap_or(false),
 			excludes:            v.excludes.unwrap_or_default(),
 			pathspecs:           v.pathspecs.unwrap_or_default(),
+			untracked_stashed:   v.untracked_stashed.unwrap_or(false),
 		})
 	}
 }

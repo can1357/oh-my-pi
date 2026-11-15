@@ -366,6 +366,10 @@ pub struct TrackedCheck {
 	/// Pathspecs the command restores, relative to the directory the check
 	/// runs in; empty for the whole work tree.
 	pub pathspecs:     Vec<String>,
+	/// `git reset --merge`: it reverts the staged changes, and refuses while a
+	/// path has changes both staged and in the work tree (then it loses
+	/// nothing). Counts the staged changes only; `worktree_only` does not apply.
+	pub merge:         bool,
 }
 
 /// The options of a `git clean` that [`DiscardCheck::Clean`] previews.
@@ -383,6 +387,10 @@ pub struct CleanCheck {
 	pub excludes:            Vec<String>,
 	/// Pathspecs, relative to the directory the check runs in.
 	pub pathspecs:           Vec<String>,
+	/// A `git stash -u` ran before the command: the untracked files it saved
+	/// are gone, so the preview counts only the ignored files the untracked
+	/// preview leaves (what `-x` or `-X` with the excludes adds to it).
+	pub untracked_stashed:   bool,
 }
 
 /// The repository and work tree a git command names with `--git-dir` and

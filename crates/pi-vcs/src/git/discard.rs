@@ -2,6 +2,7 @@
 //! before the command is approved.
 
 use std::{
+	collections::HashSet,
 	ffi::OsStr,
 	path::{Path, PathBuf},
 	time::{Duration, Instant},
@@ -57,6 +58,9 @@ pub fn discards_work(
 	let deadline = Instant::now() + DISCARD_CHECK_TIMEOUT;
 	let git = cli::InertGit::open(dir, &location, remaining(deadline))?;
 	match check {
+		DiscardCheck::Tracked(tracked) if tracked.merge => {
+			loses_staged_changes(&git, dir, tracked, deadline)
+		},
 		DiscardCheck::Tracked(tracked) => loses_tracked_changes(&git, dir, tracked, deadline),
 		DiscardCheck::Clean(clean) => deletes_untracked_files(&git, dir, clean, deadline),
 	}
@@ -86,12 +90,7 @@ fn loses_tracked_changes(
 	check: &TrackedCheck,
 	deadline: Instant,
 ) -> Result<bool> {
-	let mut args: Vec<String> =
-		["status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=all", "--"]
-			.map(str::to_owned)
-			.to_vec();
-	args.extend(check.pathspecs.iter().cloned());
-	let status = run_checked(git, dir, &args, &[], deadline)?;
+	let status = tracked_status(git, dir, &check.pathspecs, deadline)?;
 	if cli::is_truncated(&status) {
 		return Ok(true);
 	}
@@ -121,6 +120,53 @@ fn loses_tracked_changes(
 		return Ok(false);
 	}
 	changed_behind_filters(git, dir, &unsure, deadline)
+}
+
+/// `git status` of the tracked files `pathspecs` select (all of them when
+/// empty): NUL-separated `XY path` entries.
+fn tracked_status(
+	git: &cli::InertGit,
+	dir: &Path,
+	pathspecs: &[String],
+	deadline: Instant,
+) -> Result<String> {
+	let mut args: Vec<String> =
+		["status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=all", "--"]
+			.map(str::to_owned)
+			.to_vec();
+	args.extend(pathspecs.iter().cloned());
+	run_checked(git, dir, &args, &[], deadline)
+}
+
+/// Whether `git reset --merge` would lose a staged change. Git refuses, and
+/// loses nothing, while a path has changes both staged and in the work tree;
+/// otherwise it reverts the staged changes, which are then gone.
+fn loses_staged_changes(
+	git: &cli::InertGit,
+	dir: &Path,
+	check: &TrackedCheck,
+	deadline: Instant,
+) -> Result<bool> {
+	let status = tracked_status(git, dir, &check.pathspecs, deadline)?;
+	if cli::is_truncated(&status) {
+		return Ok(true);
+	}
+	let mut staged = false;
+	let mut fields = status.split('\0');
+	while let Some(entry) = fields.next() {
+		let (Some(&index), Some(&worktree)) = (entry.as_bytes().first(), entry.as_bytes().get(1))
+		else {
+			continue;
+		};
+		if matches!(index, b'R' | b'C') {
+			fields.next();
+		}
+		if index != b' ' && worktree != b' ' {
+			return Ok(false);
+		}
+		staged |= index != b' ';
+	}
+	Ok(staged)
 }
 
 /// Whether any of `paths` (relative to the top of the work tree), which git
@@ -190,13 +236,8 @@ fn changed_behind_filters(
 	}))
 }
 
-/// Whether the `git clean` `check` describes would delete anything.
-fn deletes_untracked_files(
-	git: &cli::InertGit,
-	dir: &Path,
-	check: &CleanCheck,
-	deadline: Instant,
-) -> Result<bool> {
+/// The arguments of the `git clean` dry run `check` describes.
+fn clean_preview_args(check: &CleanCheck) -> Vec<String> {
 	let mut args: Vec<String> = ["clean", "--dry-run"].map(str::to_owned).to_vec();
 	if check.directories {
 		args.push("-d".to_owned());
@@ -217,11 +258,46 @@ fn deletes_untracked_files(
 	}
 	args.push("--".to_owned());
 	args.extend(check.pathspecs.iter().cloned());
-	let output = run_checked(git, dir, &args, &[], deadline)?;
+	args
+}
+
+/// Whether the `git clean` `check` describes would delete anything.
+fn deletes_untracked_files(
+	git: &cli::InertGit,
+	dir: &Path,
+	check: &CleanCheck,
+	deadline: Instant,
+) -> Result<bool> {
+	let output = run_checked(git, dir, &clean_preview_args(check), &[], deadline)?;
+	if cli::is_truncated(&output) {
+		return Ok(true);
+	}
 	// A dry run also prints what it leaves ("Would skip repository", "Would
 	// refuse to remove current working directory"); only "Would remove" lines
 	// name a deletion. Messages are in the C locale ([`cli::InertGit`]).
-	Ok(cli::is_truncated(&output) || output.lines().any(|line| line.starts_with("Would remove ")))
+	let listed: Vec<&str> = output
+		.lines()
+		.filter_map(|line| line.strip_prefix("Would remove "))
+		.collect();
+	if listed.is_empty() || !check.untracked_stashed {
+		return Ok(!listed.is_empty());
+	}
+	// A `git stash -u` before the command saved the untracked files that the
+	// plain preview lists, so only what the preview lists beyond them is left.
+	let plain = CleanCheck {
+		directories: check.directories,
+		pathspecs: check.pathspecs.clone(),
+		..CleanCheck::default()
+	};
+	let plain_output = run_checked(git, dir, &clean_preview_args(&plain), &[], deadline)?;
+	if cli::is_truncated(&plain_output) {
+		return Ok(true);
+	}
+	let saved: HashSet<&str> = plain_output
+		.lines()
+		.filter_map(|line| line.strip_prefix("Would remove "))
+		.collect();
+	Ok(listed.iter().any(|path| !saved.contains(path)))
 }
 
 #[cfg(test)]
@@ -265,8 +341,11 @@ mod tests {
 	/// No `--git-dir` or `--work-tree`: git discovers the repository.
 	const DISCOVERED: RepositoryPaths = RepositoryPaths { git_dir: None, work_tree: None };
 	/// Every uncommitted change to a tracked file, as `git reset --hard` loses.
-	const HARD_RESET: DiscardCheck =
-		DiscardCheck::Tracked(TrackedCheck { worktree_only: false, pathspecs: Vec::new() });
+	const HARD_RESET: DiscardCheck = DiscardCheck::Tracked(TrackedCheck {
+		worktree_only: false,
+		pathspecs:     Vec::new(),
+		merge:         false,
+	});
 
 	/// Sets `path`'s modification time a minute ahead without changing its
 	/// content: git has to compare the content to tell whether it changed.
@@ -313,6 +392,7 @@ mod tests {
 			DiscardCheck::Tracked(TrackedCheck {
 				worktree_only: true,
 				pathspecs:     vec![pathspec.to_owned()],
+				merge:         false,
 			})
 		};
 
@@ -331,6 +411,7 @@ mod tests {
 		let from_head = DiscardCheck::Tracked(TrackedCheck {
 			worktree_only: false,
 			pathspecs:     vec![".".to_owned()],
+			merge:         false,
 		});
 		assert!(discards_work(root, &DISCOVERED, &from_head)?);
 		assert!(!discards_work(&docs, &DISCOVERED, &from_head)?);
@@ -509,6 +590,69 @@ mod tests {
 		fs::write(root.join(".git").join("HEAD"), format!("{}\n", "1".repeat(40)))?;
 		assert!(discards_work(root, &DISCOVERED, &HARD_RESET).is_err());
 		assert!(!marker.exists(), "a repository-configured program ran");
+		Ok(())
+	}
+
+	/// `git reset --merge` reverts the staged changes, and refuses while a path
+	/// has changes both staged and in the work tree, losing nothing. Unstaged
+	/// changes alone survive it.
+	#[test]
+	fn reset_merge_counts_only_the_staged_changes() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		let merge = DiscardCheck::Tracked(TrackedCheck { merge: true, ..TrackedCheck::default() });
+		fs::write(root.join("a.txt"), "two\n")?;
+		assert!(!discards_work(root, &DISCOVERED, &merge)?, "an unstaged change survives");
+		git(root, &["add", "a.txt"])?;
+		assert!(discards_work(root, &DISCOVERED, &merge)?, "a staged change is reverted");
+		fs::write(root.join("a.txt"), "three\n")?;
+		assert!(
+			!discards_work(root, &DISCOVERED, &merge)?,
+			"a path changed both ways makes git refuse"
+		);
+		Ok(())
+	}
+
+	/// After a `git stash -u` the untracked files are gone, so a `git clean -x`
+	/// deletes only the ignored files left, and an `-e` pattern still protects
+	/// the ignored files it names.
+	#[test]
+	fn stashed_untracked_files_leave_only_the_ignored_ones() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		fs::write(root.join(".gitignore"), "*.log\ncache/\n")?;
+		git(root, &["add", ".gitignore"])?;
+		git(root, &[
+			"-c",
+			"user.name=t",
+			"-c",
+			"user.email=t@example.com",
+			"commit",
+			"-qm",
+			"ignore",
+		])?;
+		fs::write(root.join("scratch.txt"), "x\n")?;
+		fs::write(root.join("build.log"), "x\n")?;
+		let stashed = |excludes: &[&str]| {
+			clean(CleanCheck {
+				directories: true,
+				include_ignored: true,
+				excludes: excludes
+					.iter()
+					.map(|pattern| (*pattern).to_owned())
+					.collect(),
+				untracked_stashed: true,
+				..CleanCheck::default()
+			})
+		};
+		// The stash keeps scratch.txt, and build.log is ignored but excluded.
+		assert!(!discards_work(root, &DISCOVERED, &stashed(&["*.log"]))?);
+		// Without the exclude, build.log goes.
+		assert!(discards_work(root, &DISCOVERED, &stashed(&[]))?);
+		// An ignored directory the exclude does not name goes.
+		fs::create_dir(root.join("cache"))?;
+		fs::write(root.join("cache").join("c.bin"), "x\n")?;
+		assert!(discards_work(root, &DISCOVERED, &stashed(&["*.log"]))?);
 		Ok(())
 	}
 }

@@ -4309,6 +4309,16 @@ export interface VcsDiscardCheck {
    * (the whole work tree when empty).
    */
   pathspecs?: Array<string>
+  /**
+   * `git reset --merge`: count the staged changes it reverts (see
+   * `TrackedCheck`), not the work tree's.
+   */
+  merge?: boolean
+  /**
+   * A `git stash -u` ran before the command: count only the ignored files
+   * the untracked preview leaves, as the stash keeps the untracked ones.
+   */
+  untrackedStashed?: boolean
   /** `--git-dir`: the repository, as an absolute path. */
   gitDir?: string
   /** `--work-tree`: the work tree, as an absolute path. */
@@ -4433,7 +4443,10 @@ export interface VcsStatusSummary {
 /** One blob or symlink of a tree listing. */
 export interface VcsTreeEntry {
   path: string
-  /** Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or `120000`. */
+  /**
+   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
+   * `120000`.
+   */
   mode: string
 }
 
