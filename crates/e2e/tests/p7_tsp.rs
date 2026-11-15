@@ -10,6 +10,7 @@
 #![cfg(unix)]
 
 use std::{
+	collections::HashMap,
 	fs,
 	io::Read as _,
 	os::fd::{self, AsFd as _},
@@ -31,6 +32,7 @@ use omp_core::Str;
 use omp_tui::tsp::{
 	doc::{Document, Rejected},
 	frame::{self, Incoming},
+	picker::{self, ItemProps, ListProps, OverlayAnchor, OverlayProps, PickerProps},
 	wire::{Close, Event, Frame, Hello, Kind, Mode, Node, Open, Query, Reply},
 };
 use serde_json::Value;
@@ -113,6 +115,14 @@ struct FakeTern {
 	da1_at:           Option<Instant>,
 	/// When the first close arrived.
 	first_close_at:   Option<Instant>,
+	/// Kinds the `hello` reply leaves out.
+	lacks:            &'static [&'static str],
+	/// Bodies of chunked messages still being joined, by chunk id.
+	chunks:           HashMap<String, Vec<u8>>,
+	/// How many messages arrived in more than one chunk.
+	chunked:          usize,
+	/// The largest body one APC string carried.
+	largest_body:     usize,
 }
 
 /// When the fake terminal answers the `hello` query.
@@ -139,6 +149,8 @@ struct Script {
 	da1:   Option<Duration>,
 	/// Whether frames are acknowledged as they are applied.
 	ack:   bool,
+	/// Kinds the `hello` reply leaves out: an older Tern.
+	lacks: &'static [&'static str],
 }
 
 impl Script {
@@ -153,6 +165,7 @@ impl Script {
 			hello: HelloTiming::AfterFirstFrame,
 			da1:   Some(Duration::from_millis(30)),
 			ack:   true,
+			lacks: &[],
 		}
 	}
 
@@ -173,6 +186,7 @@ impl Script {
 			hello: HelloTiming::Never,
 			da1:   Some(Duration::ZERO),
 			ack:   false,
+			lacks: &[],
 		}
 	}
 
@@ -199,6 +213,12 @@ impl Script {
 	/// Withholds every acknowledgement, so flow control blocks frames.
 	const fn without_acks(mut self) -> Self {
 		self.ack = false;
+		self
+	}
+
+	/// Answers a `hello` that leaves `kinds` out, as a Tern without them does.
+	const fn lacking(mut self, kinds: &'static [&'static str]) -> Self {
+		self.lacks = kinds;
 		self
 	}
 }
@@ -294,6 +314,10 @@ impl FakeTern {
 			first_frame_at: None,
 			da1_at: None,
 			first_close_at: None,
+			lacks: script.lacks,
+			chunks: HashMap::new(),
+			chunked: 0,
+			largest_body: 0,
 		}
 	}
 
@@ -330,10 +354,28 @@ impl FakeTern {
 			let Some(raw) = frame::split(&payload) else {
 				continue;
 			};
+			self.largest_body = self.largest_body.max(raw.body.len());
+			// A body over the `apc` limit arrives in chunks Tern joins byte for
+			// byte: `c=<id>` on each, `m=1` on every one but the last.
+			let body = match raw.param("c") {
+				Some(chunk) => {
+					self
+						.chunks
+						.entry(chunk.to_owned())
+						.or_default()
+						.extend_from_slice(raw.body);
+					if raw.param("m") == Some("1") {
+						continue;
+					}
+					self.chunked += 1;
+					self.chunks.remove(chunk).unwrap_or_default()
+				},
+				None => raw.body.to_vec(),
+			};
 			let message = match raw.verb {
 				"q" => {
 					self.queries += 1;
-					if let Ok(Query::Hello { features, .. }) = serde_json::from_slice(raw.body) {
+					if let Ok(Query::Hello { features, .. }) = serde_json::from_slice(&body) {
 						self.program_features = features
 							.iter()
 							.map(|feature| feature.as_str().to_owned())
@@ -342,14 +384,14 @@ impl FakeTern {
 					Outgoing::Other
 				},
 				"o" => {
-					let open: Open = serde_json::from_slice(raw.body).expect("open body");
+					let open: Open = serde_json::from_slice(&body).expect("open body");
 					if open.mode == Mode::Screen {
 						self.screen = Some(Document::open(&open));
 					}
 					Outgoing::Open(open)
 				},
 				"f" => {
-					let frame: Frame = serde_json::from_slice(raw.body).expect("frame body");
+					let frame: Frame = serde_json::from_slice(&body).expect("frame body");
 					if self.first_frame_at.is_none() {
 						self.first_frame_at = Some(Instant::now());
 						self.optimistic_start = self.hello_replies == 0 && !self.sent_da1;
@@ -368,7 +410,7 @@ impl FakeTern {
 					Outgoing::Frame(frame)
 				},
 				"x" => {
-					let close: Close = serde_json::from_slice(raw.body).expect("close body");
+					let close: Close = serde_json::from_slice(&body).expect("close body");
 					if self.first_close_at.is_none() {
 						self.first_close_at = Some(Instant::now());
 					}
@@ -392,7 +434,8 @@ impl FakeTern {
 	/// Sends the replies and acknowledgements the script owes.
 	fn answer(&mut self) {
 		if self.hello_replies < self.queries && self.hello_due() {
-			let hello = serde_json::to_vec(&Reply::Hello(tern_hello())).expect("hello reply");
+			let hello =
+				serde_json::to_vec(&Reply::Hello(tern_hello(self.lacks))).expect("hello reply");
 			self.write_apc(b"r", &hello);
 			self.hello_replies = self.queries;
 		}
@@ -639,16 +682,19 @@ impl Drop for FakeTern {
 	}
 }
 
-/// The capability reply a Tern that draws every v1 kind sends.
-fn tern_hello() -> Hello {
+/// The capability reply of a Tern drawing the kinds these proofs use, less
+/// `lacks`.
+fn tern_hello(lacks: &[&str]) -> Hello {
 	Hello {
 		v:             1,
 		term:          Str::new_static("tern"),
 		ver:           Some(Str::new_static("1.0-fake")),
 		kinds:         [
-			"col", "row", "card", "section", "md", "text", "rows", "editor", "tool", "el",
+			"col", "row", "card", "section", "md", "text", "rows", "editor", "tool", "el", "picker",
+			"overlay", "list", "item",
 		]
 		.into_iter()
+		.filter(|kind| !lacks.contains(kind))
 		.map(Str::new_static)
 		.collect(),
 		features:      ["settle", "adopt", "dock", "flow"]
@@ -755,6 +801,97 @@ fn edit(from: u32, to: u32, text: &str, cursor: u32, len: u32) -> Event {
 		cursor,
 		len,
 	}
+}
+
+/// Id of the native model picker
+/// (`omp_chat::overlays::models::MODEL_PICKER_ID`).
+const MODEL_PICKER: &str = "model-picker";
+/// Id of the model picker's preview text.
+const MODEL_PREVIEW_FACTS: &str = "model-picker-facts";
+/// Ids of the completion overlay at the caret and of its list
+/// (`omp_chat::composer::COMPLETION_ID`, `COMPLETION_LIST_ID`).
+const COMPLETION: &str = "completion";
+const COMPLETION_LIST: &str = "completion-list";
+/// The `apc` limit [`tern_hello`] announces.
+const APC_LIMIT: usize = 65_536;
+
+/// The model picker's props in the oracle document, while it is mounted.
+fn model_picker(tern: &FakeTern) -> Option<PickerProps> {
+	let node = tern.doc.get(MODEL_PICKER)?;
+	Some(picker::read(&node).unwrap_or_else(|error| panic!("picker props: {error}\n{node:?}")))
+}
+
+/// The model picker's preview text.
+fn model_preview(tern: &FakeTern) -> String {
+	prop(&tern.doc, MODEL_PREVIEW_FACTS, "text")
+		.and_then(|text| text.as_str().map(str::to_owned))
+		.unwrap_or_default()
+}
+
+/// Opens the model picker with Alt+M and returns its first props.
+fn open_model_picker(tern: &mut FakeTern) -> PickerProps {
+	tern.write(b"\x1bm");
+	tern.until("model picker sheet mounted with a selection", |tern| {
+		model_picker(tern).is_some_and(|props| props.selected.is_some())
+	});
+	model_picker(tern).expect("the picker is mounted")
+}
+
+/// A shown row of `props` other than its selected one and `not`, the last
+/// such, so the selection really moves.
+fn other_row(props: &PickerProps, not: Option<&str>) -> Str {
+	props
+		.order
+		.as_ref()
+		.expect("the picker sends what the list shows")
+		.iter()
+		.rev()
+		.find(|id| props.selected.as_ref() != Some(*id) && not != Some(id.as_str()))
+		.cloned()
+		.expect("a second shown row")
+}
+
+/// The label of picker row `id`.
+fn label_of(props: &PickerProps, id: &str) -> String {
+	props
+		.items
+		.iter()
+		.find(|item| item.id.as_str() == id)
+		.map_or_else(|| panic!("{id} is not an item"), |item| item.label.as_str().to_owned())
+}
+
+/// A `select` (or, with `activate`, an `activate`) on row `item` of node `id`.
+fn pointer(id: &str, item: &str, activate: bool) -> Event {
+	let (sf, id, item) = (Str::new_static(SURFACE), Str::new(id), Str::new(item));
+	if activate {
+		Event::Activate { sf, id, item, values: None }
+	} else {
+		Event::Select { sf, id, item, values: None }
+	}
+}
+
+/// An action-bar `action` of node `id`.
+fn action(id: &str, act: &'static str) -> Event {
+	Event::Action {
+		sf:     Str::new_static(SURFACE),
+		id:     Str::new(id),
+		act:    Str::new_static(act),
+		value:  None,
+		mods:   Vec::new(),
+		values: None,
+	}
+}
+
+/// The user `config.cfg`, where a model picked from Alt+M is saved.
+fn config(sandbox: &Sandbox) -> String {
+	fs::read_to_string(sandbox.config_dir().join("config.cfg")).unwrap_or_default()
+}
+
+/// Whether `config.cfg` names `key` as a whole value.
+fn saved(sandbox: &Sandbox, key: &str) -> bool {
+	config(sandbox)
+		.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '=' | ',' | '{' | '}'))
+		.any(|word| word == key)
 }
 
 /// A `send` event addressed to surface `sf` and node `id`.
@@ -1027,6 +1164,147 @@ fn tsp_native_edits_round_trip_through_utf16_offsets() {
 	tern.until("the stale edit is dropped and one undo restores the typed text and caret", |tern| {
 		composer(tern) == (typed.to_owned(), 10)
 	});
+	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
+	tern.quit();
+}
+
+/// The model picker is a data-first `picker` sheet (ADR 0041 phase 3): its
+/// rows are `items` keyed by catalog key and its children preview the
+/// selected one. A Tern `select` moves the selection and the preview and picks
+/// nothing; `activate`, or `select` then the `confirm` action, picks the row
+/// through the same command the cell picker's Enter runs, which saves it to
+/// `config.cfg`; `close` closes without picking.
+#[test]
+fn tsp_the_model_picker_previews_on_select_and_picks_on_activate_or_confirm() {
+	let sandbox = Sandbox::new();
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern());
+	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
+
+	let props = open_model_picker(&mut tern);
+	assert!(!tern.doc.suspended(), "a native picker keeps the surface live");
+	assert!(
+		tern
+			.doc
+			.get("layer")
+			.is_some_and(|layer| layer.c.iter().any(|node| node.id.as_str() == MODEL_PICKER)),
+		"the picker is a sheet in the layer region:\n{}",
+		tern.report()
+	);
+	let order = props
+		.order
+		.clone()
+		.expect("the picker sends what the list shows");
+	assert!(order.len() >= 2, "the sandbox catalogue lists two models: {order:?}");
+	for id in &order {
+		assert!(props.items.iter().any(|item| &item.id == id), "{id} is shown but is no item");
+	}
+	let first = props.selected.clone().expect("the cursor row is selected");
+	let target = other_row(&props, None);
+	let label = label_of(&props, &target);
+	assert!(!saved(&sandbox, &target), "{target} is not saved before it is picked");
+
+	tern.event(&pointer(MODEL_PICKER, &target, false));
+	tern.until("select moves the selection and the preview", |tern| {
+		model_picker(tern).is_some_and(|props| props.selected.as_ref() == Some(&target))
+			&& model_preview(tern).contains(&label)
+	});
+	tern.settle(Duration::from_millis(500));
+	assert!(model_picker(&tern).is_some(), "select only previews: the picker stays open");
+	assert!(!saved(&sandbox, &target), "select picked nothing:\n{}", config(&sandbox));
+	assert_ne!(first, target);
+
+	tern.event(&pointer(MODEL_PICKER, &target, true));
+	tern.until("activate picks the row and closes the picker", |tern| {
+		!tern.doc.contains(MODEL_PICKER) && saved(&sandbox, &target)
+	});
+
+	let props = open_model_picker(&mut tern);
+	let second = other_row(&props, Some(target.as_str()));
+	tern.event(&pointer(MODEL_PICKER, &second, false));
+	tern.until("select moves the selection", |tern| {
+		model_picker(tern).is_some_and(|props| props.selected.as_ref() == Some(&second))
+	});
+	tern.event(&action(MODEL_PICKER, "confirm"));
+	tern.until("confirm picks the selected row", |tern| {
+		!tern.doc.contains(MODEL_PICKER) && saved(&sandbox, &second)
+	});
+
+	open_model_picker(&mut tern);
+	let before = config(&sandbox);
+	tern.event(&action(MODEL_PICKER, "close"));
+	tern.until("close closes the picker", |tern| !tern.doc.contains(MODEL_PICKER));
+	tern.settle(Duration::from_millis(500));
+	assert_eq!(config(&sandbox), before, "close picks nothing");
+	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
+	assert!(
+		tern.largest_body <= APC_LIMIT,
+		"an APC string carried {} bytes, over the {APC_LIMIT} limit",
+		tern.largest_body
+	);
+	tern.quit();
+}
+
+/// A Tern whose `hello` lacks `picker` keeps the cell model picker: the
+/// surface is suspended while it is open and resumes when it closes.
+#[test]
+fn tsp_a_tern_without_picker_keeps_the_cell_model_picker() {
+	let sandbox = Sandbox::new();
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern().lacking(&["picker"]));
+	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
+	tern.write(b"\x1bm");
+	tern.until("the surface hands the screen to the cell picker", |tern| tern.doc.suspended());
+	assert!(!tern.doc.contains(MODEL_PICKER), "no picker is sent to a Tern without the kind");
+	tern.write(b"\x1b");
+	tern.until("the surface resumes when the picker closes", |tern| !tern.doc.suspended());
+	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
+	tern.quit();
+}
+
+/// The completion dropdown is an `overlay` anchored to the composer's caret
+/// around a `list` (v1 `Editor.describe`), and a Tern `activate` on one of its
+/// rows accepts that row as a click in the cell dropdown does.
+#[test]
+fn tsp_the_completion_list_sits_at_the_caret_and_accepts_a_row() {
+	let sandbox = Sandbox::new();
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern());
+	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
+	tern.write(b"/");
+	tern.until("the completion list opens", |tern| {
+		tern
+			.doc
+			.get(COMPLETION_LIST)
+			.is_some_and(|list| list.c.len() >= 2)
+	});
+	let overlay = tern.doc.get(COMPLETION).expect("the completion overlay");
+	assert_eq!(overlay.k, Kind::Overlay);
+	let props: OverlayProps = picker::read(&overlay).expect("overlay props");
+	assert_eq!(
+		props.anchor,
+		Some(OverlayAnchor::Caret { caret: Str::new_static("composer") }),
+		"the list follows the composer's caret"
+	);
+	assert!(
+		tern
+			.doc
+			.get("layer")
+			.is_some_and(|layer| layer.c.iter().any(|node| node.id.as_str() == COMPLETION)),
+		"the overlay sits in the layer region"
+	);
+	let list = tern.doc.get(COMPLETION_LIST).expect("the completion list");
+	let selected = picker::read::<ListProps>(&list)
+		.expect("list props")
+		.selected
+		.expect("the dropdown's selected row");
+	let row: &Node = list
+		.c
+		.iter()
+		.find(|item| item.id != selected)
+		.expect("a row besides the selected one");
+	let label = picker::read::<ItemProps>(row).expect("item props").label;
+
+	tern.event(&pointer(COMPLETION_LIST, row.id.as_str(), true));
+	let accepted = format!("/{label} ");
+	tern.until("the row is accepted into the composer", |tern| composer(tern).0 == accepted);
 	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
 	tern.quit();
 }

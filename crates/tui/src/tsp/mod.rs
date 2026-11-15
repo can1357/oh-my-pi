@@ -4,10 +4,11 @@
 //!
 //! This module owns the wire: typed messages ([`wire`]), framing and
 //! chunking ([`frame`]), a reference document applier used as the test
-//! oracle ([`doc`]), the JSONL recorder ([`record`]) and the `edit` event's
-//! UTF-16 offsets resolved for an editor ([`edit`]). Detection rides the
-//! startup probe: the `hello` query goes out just before the DA1 fence, and
-//! a reply that arrives before DA1 means the terminal speaks TSP
+//! oracle ([`doc`]), the JSONL recorder ([`record`]), the `edit` event's
+//! UTF-16 offsets resolved for an editor ([`edit`]) and the typed props and
+//! pointer gestures of pickers and completion lists ([`picker`]). Detection
+//! rides the startup probe: the `hello` query goes out just before the DA1
+//! fence, and a reply that arrives before DA1 means the terminal speaks TSP
 //! ([`crate::ProbeResults::tsp`]). Live replies and events reach the host
 //! through [`crate::Terminal::take_tsp`].
 //!
@@ -16,6 +17,7 @@
 pub mod doc;
 pub mod edit;
 pub mod frame;
+pub mod picker;
 pub mod record;
 pub mod wire;
 

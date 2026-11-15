@@ -38,6 +38,7 @@ use omp_tui::{
 	tsp::{
 		self,
 		frame::Incoming,
+		picker::Gesture,
 		wire::{Event as TspEvent, Reply},
 	},
 };
@@ -59,8 +60,8 @@ use crate::{
 	},
 	commands::CompactionMethod,
 	composer::{
-		Composer, ComposerAction, ComposerEscape, ComposerSettings, DoubleEscapeTarget, PasteOptions,
-		PasteOutcome, PrefixMode, SpaceHold, SpaceHoldEvent,
+		COMPLETION_LIST_ID, Composer, ComposerAction, ComposerEscape, ComposerSettings,
+		DoubleEscapeTarget, PasteOptions, PasteOutcome, PrefixMode, SpaceHold, SpaceHoldEvent,
 	},
 	extension_slots::{ExtensionSlot, ExtensionSlots, SlotPlacement},
 	extension_status::{ExtensionStatus, ExtensionStatuses},
@@ -76,9 +77,10 @@ use crate::{
 		voice::{SpeechSynth, Vocalizer},
 	},
 	overlays::{
-		HistoryPicker, ModelPicker, ModelRow, Overlay, Overlays, PanelAnchor, PanelCx, PanelEvent,
-		PanelNote, PanelOpener, PickerEvent, PickerRole, QuickRoleRow, RoleMark, Services,
-		models::resolve_role_selector,
+		HISTORY_PICKER_ID, HistoryPicker, ModelPicker, ModelRow, Overlay, Overlays, PanelAnchor,
+		PanelCx, PanelEvent, PanelNote, PanelOpener, PickerEvent, PickerRole, QuickRoleRow, RoleMark,
+		Services,
+		models::{MODEL_PICKER_ID, resolve_role_selector},
 		paste_menu::{PasteChoice, PasteMenu, save_paste_file, wrap_in_attachment_block},
 		services::ActiveUsageRequest,
 	},
@@ -100,7 +102,7 @@ use crate::{
 	},
 	status_line::{StatusLine, advisor_badge, director_mode},
 	transcript::Projection,
-	tsp::Surface,
+	tsp::{Sheet, Surface},
 	welcome::{WelcomeFacts, tip_seeded, welcome_seed},
 };
 
@@ -2448,6 +2450,15 @@ impl Presenter {
 		Ok(routed)
 	}
 
+	/// Accepts the completion row a Tern `select` or `activate` named, the way
+	/// a click on the row does in the cell UI (v1 `SelectList.clickItem`).
+	fn accept_tsp_completion(&mut self, item: &str) -> Result<Routed, HostError> {
+		let action = self.composer.accept_completion(item);
+		let routed = self.preview_composer_action(action)?;
+		self.sync_pending_input();
+		Ok(routed)
+	}
+
 	/// Validates a submission while its exact editor buffer and attachment
 	/// atoms remain staged, then commits only an accepted action.
 	fn preview_composer_action(&mut self, action: ComposerAction) -> Result<Routed, HostError> {
@@ -4703,6 +4714,11 @@ impl Host {
 
 	/// Applies native surface actions and form changes to existing authorities.
 	fn route_tsp_event(&mut self, event: TspEvent) {
+		if let Some((id, gesture)) = Gesture::of(&event)
+			&& self.route_tsp_gesture(id.as_str(), gesture)
+		{
+			return;
+		}
 		match event {
 			TspEvent::Action { act, .. } => {
 				let Some(approval) = self.presenter.overlays.approval().cloned() else {
@@ -4743,36 +4759,28 @@ impl Host {
 					self.presenter.sync_pending_input();
 				}
 			},
-			TspEvent::Select { id, item, .. } => {
-				match id.as_str() {
-					"model-picker" => {
-						// Parse the item index from "mp-N".
-						if let Some(idx) = item
-							.strip_prefix("mp-")
-							.and_then(|s| s.parse::<usize>().ok())
-						{
-							let _ = self.presenter.apply_picker_event(PickerEvent::Pick(idx));
-						}
-					},
-					"history-picker" => {
-						// Parse the item index from "hp-N".
-						if let Some(idx) = item
-							.strip_prefix("hp-")
-							.and_then(|s| s.parse::<usize>().ok())
-						{
-							if let Some(Overlay::History(picker)) = self.presenter.overlays.active() {
-								let recall = picker.entries().get(idx).map(|e| e.prompt.clone());
-								if let Some(text) = recall {
-									let _ = self.presenter.apply_picker_event(PickerEvent::Recall(text));
-								}
-							}
-						}
-					},
-					_ => {},
-				}
-			},
 			_ => {},
 		}
+	}
+
+	/// Routes a pointer gesture to the native sheet it addresses: the open
+	/// model or history picker, through the same picker events the cell
+	/// overlay's keys produce, or the composer's completion list. Returns
+	/// whether a sheet claimed it.
+	fn route_tsp_gesture(&mut self, id: &str, gesture: Gesture) -> bool {
+		let event = match self.presenter.overlays.active_mut() {
+			Some(Overlay::Models(picker)) if id == MODEL_PICKER_ID => picker.tsp_gesture(gesture),
+			Some(Overlay::History(picker)) if id == HISTORY_PICKER_ID => picker.tsp_gesture(gesture),
+			None if id == COMPLETION_LIST_ID => {
+				if let Gesture::Select(item) | Gesture::Activate(item) = gesture {
+					let _ = self.presenter.accept_tsp_completion(&item);
+				}
+				return true;
+			},
+			_ => return false,
+		};
+		let _ = self.presenter.apply_picker_event(event);
+		true
 	}
 
 	/// Submits a `send` event's prompt when `sf` and `id` name the live
@@ -5167,29 +5175,37 @@ impl Host {
 			.approval()
 			.map(|approval| (approval.id.clone(), approval.reason.clone()));
 		// A full-screen panel that describes itself natively covers the pane with a
-		// screen surface; pickers and the forms of smaller panels stay in the layer.
+		// screen surface; the forms of smaller panels stay in the layer.
 		let (form, cover) = match self.presenter.overlays.active() {
 			Some(Overlay::Panel(panel)) if panel.anchor() == PanelAnchor::Full => {
 				(None, panel.tsp_node())
 			},
 			Some(Overlay::Panel(panel)) => (panel.tsp_node(), None),
-			Some(Overlay::Models(picker)) => (Some(picker.tsp_node()), None),
-			Some(Overlay::History(picker)) => (Some(picker.tsp_node()), None),
 			_ => (None, None),
 		};
-		// The autocomplete dropdown is surfaced as a picker node when no modal
-		// overlay is open; it is sent alongside the composer, not over it.
-		let autocomplete = if overlay_open {
+		// The completion dropdown sits at the composer's caret while no overlay
+		// is open.
+		let completion = if overlay_open {
 			None
 		} else {
 			self.presenter.composer.autocomplete_node()
 		};
+		// The model and history pickers are data-first `picker` sheets.
+		let picker = match self.presenter.overlays.active_mut() {
+			Some(Overlay::Models(picker)) => Some(picker.tsp_node()),
+			Some(Overlay::History(picker)) => Some(picker.tsp_node()),
+			_ => None,
+		};
 		let Some(surface) = self.tsp_surface.as_mut() else {
 			return Ok(false);
 		};
-		// A view the terminal cannot draw leaves its overlay in cells.
+		// A view the terminal cannot draw, kind by kind, leaves its overlay in
+		// cells (`hello.kinds`).
 		let cover = cover.filter(|node| surface.draws(node));
-		let native_overlay = approval.is_some() || form.is_some() || cover.is_some();
+		let picker = picker.filter(|node| surface.draws(node));
+		let completion = completion.filter(|node| surface.draws(node));
+		let native_overlay =
+			approval.is_some() || form.is_some() || cover.is_some() || picker.is_some();
 		if overlay_open && !native_overlay {
 			surface.suspend(renderer.writer_mut())?;
 			return Ok(false);
@@ -5202,7 +5218,9 @@ impl Host {
 			approval.as_ref().map(|(id, _)| id.as_str()),
 			approval.as_ref().map(|(_, reason)| reason.as_str()),
 		)?;
-		surface.present_form(renderer.writer_mut(), form.or(autocomplete))?;
+		surface.present_form(renderer.writer_mut(), form)?;
+		surface.present_sheet(renderer.writer_mut(), Sheet::Picker, picker)?;
+		surface.present_sheet(renderer.writer_mut(), Sheet::Completion, completion.as_ref())?;
 		surface.present_cover(renderer.writer_mut(), cover.as_ref())?;
 		Ok(true)
 	}
