@@ -1243,6 +1243,18 @@ export const cfgPasteLargeMenuThreshold = register({
 	},
 });
 
+export const cfgStartupAllowHome = register({
+	id: "startup.allowHome",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Start in Home Directory",
+		description: "Start omp in your home directory instead of switching to a temporary one (same as --allow-home)",
+	},
+});
+
 export const cfgStartupQuiet = register({
 	id: "startup.quiet",
 	type: "boolean",

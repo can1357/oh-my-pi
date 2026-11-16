@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `startup.allowHome` to keep home-directory launches in place without passing `--allow-home` ([#19395](https://github.com/can1357/oh-my-pi/pull/19395) by [@Latinx](https://github.com/Latinx)).
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes

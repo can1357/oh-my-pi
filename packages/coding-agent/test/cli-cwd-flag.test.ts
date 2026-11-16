@@ -8,13 +8,63 @@ import * as utils from "@oh-my-pi/pi-utils";
 
 const originalProjectDir = utils.getProjectDir();
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+const scratchDirs: string[] = [];
 
 afterEach(() => {
 	vi.restoreAllMocks();
 	if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
 	utils.setProjectDir(originalProjectDir);
+	for (const dir of scratchDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 describe("parseArgs — --cwd flag", () => {
+	for (const scenario of [
+		{ name: "keeps home when enabled", config: "startup:\n  allowHome: true", args: [], home: true, target: "home" },
+		{ name: "relocates when disabled", config: "startup.allowHome: false", args: [], home: true, target: "tmp" },
+		{ name: "relocates when absent", config: "", args: [], home: true, target: "tmp" },
+		{ name: "honors flat setting keys", config: "startup.allowHome: true", args: [], home: true, target: "home" },
+		{
+			name: "lets --allow-home override false",
+			config: "startup.allowHome: false",
+			args: ["--allow-home"],
+			home: true,
+			target: "home",
+		},
+		{
+			name: "lets --cwd override true",
+			config: "startup.allowHome: true",
+			args: ["--cwd", "project"],
+			home: true,
+			target: "project",
+		},
+		{
+			name: "leaves non-home launches alone",
+			config: "startup.allowHome: false",
+			args: [],
+			home: false,
+			target: "project",
+		},
+	]) {
+		it(scenario.name, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-home-setting-"));
+			scratchDirs.push(root);
+			const home = path.join(root, "home");
+			const project = path.join(home, "project");
+			const tmp = path.join(home, "tmp");
+			const agent = path.join(root, "agent");
+			for (const dir of [project, tmp, agent]) fs.mkdirSync(dir, { recursive: true });
+			await Bun.write(path.join(agent, "config.yml"), scenario.config);
+			vi.spyOn(os, "homedir").mockReturnValue(home);
+			vi.spyOn(utils, "getAgentDir").mockReturnValue(agent);
+			utils.setProjectDir(scenario.home ? home : project);
+
+			await applyStartupCwd(parseArgs(scenario.args));
+
+			expect(utils.getProjectDir()).toBe(
+				scenario.target === "home" ? home : scenario.target === "tmp" ? tmp : project,
+			);
+		});
+	}
+
 	it("parses --cwd with a space-separated directory", () => {
 		const result = parseArgs(["--cwd", "/work/project", "hello"]);
 
