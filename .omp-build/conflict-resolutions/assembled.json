@@ -2,7 +2,7 @@
 	{
 		"path": "packages/coding-agent/src/modes/interactive-mode.ts",
 		"stages": [
-			{ "mode": "100644", "blob": "22ab0bd3c0735131042311f88099c482412fb068", "stage": 1 },
+			{ "mode": "100644", "blob": "928c3ba5d23dbb9972dea5477e7e88141236aeb8", "stage": 1 },
 			{ "mode": "100644", "blob": "01e11cfe30c2b7fc24f8bac2c44278e284d30060", "stage": 2 },
 			{ "mode": "100644", "blob": "919c7dcab2799d87f1b5a4e0946af6e3d02a8e3c", "stage": 3 }
 		],
