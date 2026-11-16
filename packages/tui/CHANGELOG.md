@@ -8,6 +8,7 @@
 - Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down ([#19488](https://github.com/can1357/oh-my-pi/pull/19488) by [@H4vC](https://github.com/H4vC))
 ### Added
 
+- Added `search` prop to ModelPickerComponent, allowing the search UI to be placed in the list head or list body
 - Added the native plan review document and dock: under a Tern that draws `doc`, `buttons` and `menu`, `PlanReviewOverlay` shows the plan as an editable, commentable `doc` (quote annotations, `onPlanEdited` on in-place edits) above an Approve split button, model chip, Save and Cancel. `NativeUiEvent` gained `docChange`, `comment`, `commentNote` and `uncomment`.
 - Added provider scopes and a thinking-level slider to `ModelPickerComponent`: `ModelPickerOptions.thinkingLevelFor` enables the slider, and `onPick` receives the chosen level as `meta.thinkingLevel`. The native picker sheet gained `anchor`, `scopeStyle`, and `level` props, and picker actions gained `head` and `icon` for icon buttons in the sheet head.
 
@@ -17,6 +18,11 @@
 
 ### Changed
 
+- Changed provider scopes to list only their models when no provider is active, and the active provider again restores all models
+- Changed thinking slider key bindings to use plain left/right arrows instead of Alt+left/right
+- Changed scope cycling to include the active provider toggling back to all models
+- Changed slider UI to include a brain icon alongside the label
+- Changed footer hint to omit the "alt+" prefix in the thinking level hint
 - Retitled `PlanSaveOverlay` "Save plan" with a Save button.
 
 ## [18.21.0] - 2026-11-16

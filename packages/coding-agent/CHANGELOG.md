@@ -25,7 +25,7 @@
 - Changed the plan review to offer **Refine plan** only while the plan has comments or other feedback, as the first, preselected option.
 - Plain executable reads now show Mach-O/ELF/PE metadata without opening databases or downloading a backend; request `:overview`, a function selector, or `dsm.open()` to start analysis.
 
-- The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (alt+←/→); in Tern it opens as a drop-up above the composer with a provider rail, a thinking slider, and a Task / Main toggle in its head instead of an action bar.
+- The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (←/→); in Tern it opens as a drop-up above the composer with the search in the list, a provider rail topped by a Task / Main toggle, and a thinking slider, without an action bar.
 
 ### Fixed
 

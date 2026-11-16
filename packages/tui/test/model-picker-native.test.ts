@@ -385,6 +385,7 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 	expect(p).toMatchObject({
 		size: "md",
 		anchor: "composer",
+		search: "list",
 		preview: "none",
 		scopeStyle: "rail",
 		scope: "all",
@@ -394,15 +395,15 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 	expect(p.title).toBeUndefined();
 	expect(p.subtitle).toBeUndefined();
 	expect(root.c ?? []).toEqual([]);
+	// The rail lists providers only: none active is all models.
 	expect(p.scopes).toEqual([
-		{ id: "all", label: "All models", icon: "list", count: 7 },
-		{ id: "provider:anthropic", label: "anthropic", mark: providerMark("anthropic"), group: "Providers", count: 2 },
-		{ id: "provider:demo", label: "demo", mark: providerMark("demo"), group: "Providers", count: 2 },
-		{ id: "provider:local", label: "local", mark: providerMark("local"), group: "Providers", count: 1 },
-		{ id: "provider:openai", label: "openai", mark: providerMark("openai"), group: "Providers", count: 2 },
+		{ id: "provider:anthropic", label: "anthropic", mark: providerMark("anthropic"), count: 2 },
+		{ id: "provider:demo", label: "demo", mark: providerMark("demo"), count: 2 },
+		{ id: "provider:local", label: "local", mark: providerMark("local"), count: 1 },
+		{ id: "provider:openai", label: "openai", mark: providerMark("openai"), count: 2 },
 	]);
 	expect(groups(p)).toEqual(["Recent", "All"]);
-	// No action bar: only the Task / Main toggle, drawn in the head.
+	// No action bar: only the Task / Main toggle, drawn atop the rail.
 	expect(p.actions).toEqual([
 		{ id: "task", label: "Task / Main", keys: ["alt", "p"], on: false, head: true, icon: "users" },
 	]);
@@ -418,7 +419,8 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 			{ id: "xhigh", label: "XHigh" },
 		],
 		value: "high",
-		keys: ["alt", "left", "right"],
+		icon: "brain",
+		keys: ["left", "right"],
 	});
 
 	// A model without reasoning freezes the slider at Off.
@@ -440,7 +442,7 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 	expect(picked).toEqual(["task:openai/gpt-5.6"]);
 });
 
-test("a provider scope lists only its models, Tab cycles scopes, and All restores the list", () => {
+test("a provider scope lists only its models, Tab cycles scopes, and the active provider again restores all", () => {
 	const picker = openQuickPicker([]);
 	const all = rowIds(props(picker.describe(withPicker)));
 	expect(all).toHaveLength(QUICK_MODELS.length);
@@ -456,7 +458,7 @@ test("a provider scope lists only its models, Tab cycles scopes, and All restore
 	expect(rowIds(props(picker.describe(withPicker)))).toEqual(["openai/gpt-5.6-mini"]);
 	quickAct(picker, "clear");
 
-	quickAct(picker, "scope", "all");
+	quickAct(picker, "scope", "provider:openai");
 	p = props(picker.describe(withPicker));
 	expect(p.scope).toBe("all");
 	expect(rowIds(p).toSorted()).toEqual(all.toSorted());
@@ -474,7 +476,7 @@ test("a provider scope lists only its models, Tab cycles scopes, and All restore
 	expect(props(picker.describe(withPicker)).scope).toBe("all");
 });
 
-test("alt+←/→ and the slider set the thinking level a pick applies, clamped to the picked model", () => {
+test("←/→ and the slider set the thinking level a pick applies, clamped to the picked model", () => {
 	const picked: string[] = [];
 	const picker = openQuickPicker(picked);
 	const level = () => props(picker.describe(withPicker)).level;
@@ -483,12 +485,12 @@ test("alt+←/→ and the slider set the thinking level a pick applies, clamped 
 	picker.handleInput("\r");
 	expect(picked).toEqual(["session:demo/demo"]);
 
-	picker.handleInput("\x1b[1;3C"); // alt+→
+	picker.handleInput("\x1b[C"); // →
 	expect(level()?.value).toBe("xhigh");
-	picker.handleInput("\x1b[1;3C"); // stops at the top step
+	picker.handleInput("\x1b[C"); // stops at the top step
 	expect(level()?.value).toBe("xhigh");
-	picker.handleInput("\x1b[1;3D"); // alt+←
-	picker.handleInput("\x1b[1;3D");
+	picker.handleInput("\x1b[D"); // ←
+	picker.handleInput("\x1b[D");
 	expect(level()?.value).toBe("medium");
 	quickAct(picker, "level", "low");
 	expect(level()?.value).toBe("low");

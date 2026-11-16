@@ -752,8 +752,10 @@ export interface TspPickerAction {
 
 /** A picker's stepped slider. */
 export interface TspPickerLevel {
-	/** What it sets ("Thinking"). */
+	/** What it sets ("Thinking"): shown, or with `icon` its tooltip and accessible name. */
 	label: string;
+	/** An icon drawn in place of the label. */
+	icon?: string;
 	/** Its steps, low to high: the terminal heats the track up the ladder (color, then motion). */
 	steps: readonly { id: string; label: string }[];
 	/** The current step's id. */
@@ -792,6 +794,11 @@ export interface TspPickerProps {
 	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
 	 */
 	anchor?: "composer";
+	/**
+	 * Where the search sits: the head (default), or `"list"`: no head row, the query leading the column heads' row
+	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
+	 */
+	search?: "head" | "list";
 	layout?: "rows" | "cards" | "timeline" | "tree";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;

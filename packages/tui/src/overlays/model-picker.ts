@@ -132,8 +132,8 @@ const FROZEN_THINKING_STEPS: readonly ConfiguredThinkingLevel[] = [
 	ThinkingLevel.Medium,
 	ThinkingLevel.High,
 ];
-/** Keycaps of the slider's step keys (alt+←/→). */
-const THINKING_KEYS = ["alt", "left", "right"];
+/** Keycaps of the slider's step keys (←/→). */
+const THINKING_KEYS = ["left", "right"];
 
 /** The thinking slider for one model: its steps low to high, the shown step, and why it is frozen. */
 interface ThinkingSlider {
@@ -179,7 +179,7 @@ function footerHint(mode: PickerMode, thinking: boolean): string {
 		case "task":
 			return `${upDown} models · ${enter} use for Task subagents · ${provider} · type to search · ${close}`;
 		default: {
-			const level = thinking ? ` · ${formatKeyHint("alt+left")}/${formatKeyHint("right")} thinking` : "";
+			const level = thinking ? ` · ${formatKeyHint("left")}/${formatKeyHint("right")} thinking` : "";
 			return `${upDown} models · ${enter} use for this session · ${provider}${level} · type to search · @ quick roles · ${close}`;
 		}
 	}
@@ -386,30 +386,32 @@ export class ModelPickerComponent implements Component {
 		return items;
 	}
 
-	/** All models, then one scope per provider with models, alphabetical. */
+	/** One scope per provider with models, alphabetical; none active lists them all. */
 	#pickerScopes(): TspPickerScope[] {
 		const source = this.#modelItems;
 		if (this.#scopes?.source === source) return this.#scopes.value;
 		const counts = new Map<string, number>();
 		for (const item of source) counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
-		const value: TspPickerScope[] = [{ id: ALL_SCOPE, label: "All models", icon: "list", count: source.length }];
-		for (const provider of [...counts.keys()].sort((a, b) => a.localeCompare(b))) {
-			value.push({
+		const value: TspPickerScope[] = [...counts.keys()]
+			.sort((a, b) => a.localeCompare(b))
+			.map(provider => ({
 				id: `${PROVIDER_SCOPE}${provider}`,
 				label: provider,
 				mark: providerMark(provider),
-				group: "Providers",
 				count: counts.get(provider),
-			});
-		}
+			}));
 		this.#scopes = { source, value };
 		return value;
 	}
 
-	/** Show scope `id`; the highlight stays on its model when the scope lists it, else falls back to the current model. */
-	#setScope(id: string): void {
+	/**
+	 * Show scope `id` ({@link ALL_SCOPE}, or a provider's; the active provider again goes back to all); the highlight
+	 * stays on its model when the scope lists it, else falls back to the current model.
+	 */
+	#setScope(picked: string): void {
+		const id = picked === this.#scope ? ALL_SCOPE : picked;
 		if (this.#roleMode || id === this.#scope) return;
-		if (!this.#pickerScopes().some(scope => scope.id === id)) return;
+		if (id !== ALL_SCOPE && !this.#pickerScopes().some(scope => scope.id === id)) return;
 		const before = this.#browser.pickerSelected;
 		this.#scope = id;
 		this.#syncItemsForQuery(this.#browser.query, true);
@@ -418,11 +420,12 @@ export class ModelPickerComponent implements Component {
 		this.#tui.requestRender();
 	}
 
+	/** Step through all models, then each provider, wrapping. */
 	#cycleScope(delta: -1 | 1): void {
-		const scopes = this.#pickerScopes();
-		const index = scopes.findIndex(scope => scope.id === this.#scope);
-		const next = scopes[(index + delta + scopes.length) % scopes.length];
-		if (next) this.#setScope(next.id);
+		const ids = [ALL_SCOPE, ...this.#pickerScopes().map(scope => scope.id)];
+		const index = ids.indexOf(this.#scope);
+		const next = ids[(index + delta + ids.length) % ids.length];
+		if (next) this.#setScope(next);
 	}
 
 	/** The thinking slider for the highlighted model; session mode only. */
@@ -486,14 +489,14 @@ export class ModelPickerComponent implements Component {
 				return;
 			}
 		}
-		// Alt+←/→ step the thinking slider; macOS terminals send ESC b / ESC f
-		// for Option+←/→, which parse as alt+b / alt+f (as in the model hub).
+		// ←/→ step the thinking slider; the search keeps ⌥←/→ and ⌃←/→ to
+		// move its caret by words.
 		if (this.#thinkingLevelFor && this.#mode() === "session") {
-			if (matchesKey(data, "alt+left") || matchesKey(data, "alt+b")) {
+			if (matchesKey(data, "left")) {
 				this.#stepThinking(-1);
 				return;
 			}
-			if (matchesKey(data, "alt+right") || matchesKey(data, "alt+f")) {
+			if (matchesKey(data, "right")) {
 				this.#stepThinking(1);
 				return;
 			}
@@ -617,6 +620,7 @@ export class ModelPickerComponent implements Component {
 			noun: mode === "role" ? "roles" : "models",
 			size: "md",
 			anchor: "composer",
+			search: "list",
 			layout: "rows",
 			preview: "none",
 			placeholder: mode === "task" ? "Search models for Task subagents…" : "Search models, @ for quick roles…",
@@ -653,6 +657,7 @@ export class ModelPickerComponent implements Component {
 			label: "Thinking",
 			steps: slider.steps.map(id => ({ id, label: THINKING_STEP_LABELS[id] ?? id })),
 			value: slider.value,
+			icon: "brain",
 			keys: THINKING_KEYS,
 			...(slider.disabled ? { disabled: slider.disabled } : {}),
 		};
