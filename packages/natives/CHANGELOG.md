@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.0] - 2026-11-16
+
 ### Breaking Changes
 
 - `TtyWriter` now requires a drain threshold and callback and only supports independently reopenable TTYs. Its pending UTF-8 byte bounds are reported conservatively.

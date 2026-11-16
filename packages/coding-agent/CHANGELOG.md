@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.0] - 2026-11-16
+
 ### Breaking Changes
 
 - Moved binary analysis from the standalone `ida` and `ghidra` tools into the backend-neutral `dsm` namespace (`xd://eval/dsm`).

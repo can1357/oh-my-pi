@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.0] - 2026-11-16
+
 ### Breaking Changes
 
 - Terminals that support output backpressure must now implement onOutputDrain(callback), which returns an unsubscribe function; terminals without backpressure can omit both pendingOutputBytes and onOutputDrain.
