@@ -26,7 +26,7 @@ import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
 import { ownsTerminal } from "./browser/terminal-owner";
 import { WebKitUnavailableError } from "./browser/webkit/host";
-import { ABKIT_VERSION, installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/install";
+import { installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/install";
 import { resolveWebKitKind, VIEWER_PLATFORMS } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
@@ -543,10 +543,10 @@ const failedWebKitUpdates = new Set<string>();
  * engine is downloaded for an open with `app: "webkit"`, or one that otherwise
  * ends at managed Chromium (headless, or visible where released engines ship a
  * viewer) while Chromium itself would first be downloaded: with no browser
- * installed, omp's own engine comes before Chrome for Testing. An outdated
- * engine is updated to {@link ABKIT_VERSION} before an open that would run it,
- * once per process. Like Chrome's download, it runs before the open's deadline
- * starts.
+ * installed, omp's own engine comes before Chrome for Testing. An installed
+ * engine is updated to ABKit's newest build before an open that would run it,
+ * checked once per process. Like Chrome's download, it runs before the open's
+ * deadline starts.
  *
  * Returns why an automatic download failed, for the open to go on to Chromium
  * saying so; for `app: "webkit"` a failed download throws. A failed update is
@@ -564,7 +564,7 @@ async function installWebKitForOpen(
 	});
 	if (pending === null) return undefined;
 	const { engineDir } = pending;
-	if (pending.outdated) {
+	if (pending.installed) {
 		if (failedWebKitUpdates.has(engineDir)) return undefined;
 		if (!explicit && resolveBrowserKind(params, session).kind !== "webkit") return undefined;
 		try {
@@ -574,7 +574,6 @@ async function installWebKitForOpen(
 			failedWebKitUpdates.add(engineDir);
 			logger.warn("Could not update omp's WebKit engine; running the installed one", {
 				engineDir,
-				version: ABKIT_VERSION,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}

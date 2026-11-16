@@ -428,8 +428,8 @@ effort rules as other session metadata.
 `isolated: true` marks an isolation-worktree child that cannot be cold-revived.
 `mountedTools` names the entries of `tools` presented as `xd://` devices rather than top-level
 tools; cold revival mounts them again, so the revived session sends the same tool list and tool
-inventory. Files without it revive every name in `tools` top-level, and a seance restore uses its
-own validated tool contract instead. Anonymized exports treat it like `tools`.
+inventory. Files without it revive every name in `tools` top-level. Anonymized exports treat it like
+`tools`.
 `systemPrompt` holds the base prompt blocks a model call was built from (never a per-turn
 `before_agent_start` override), and revival replays them unchanged. A session appends a newer
 `session_init` when a model call runs on a different base prompt or work-pool yield items

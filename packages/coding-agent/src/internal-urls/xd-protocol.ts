@@ -59,7 +59,7 @@ export class XdProtocolHandler implements ProtocolHandler {
 	readonly scheme = "xd";
 	readonly spec: SchemeSpec = {
 		backing: "device",
-		selectors: "none",
+		selectors: "lines",
 		immutable: true,
 		compactTranscript: true,
 		write: { via: "handler", payload: "text", scope: "device", tier: deviceWriteTier },
@@ -95,7 +95,7 @@ export class XdProtocolHandler implements ProtocolHandler {
 		if (!xdev) throw new ToolError(NOT_MOUNTED);
 		if (!name) throw new ToolError(`Cannot write to xd:// itself — pick a device:\n${xdevListing(xdev)}`);
 		const toolCall = context.toolCall;
-		if (!toolCall) throw new ToolError(`xd://${name} can only be written by the write tool.`);
+		if (!toolCall) throw new ToolError(`xd://${name} dispatches only from a tool call (write, or a bash redirect).`);
 		// The write tool's gate already resolved approval at this device's tier and
 		// under its canonical tool's `tools.approval` key (see `deviceWriteTier`) —
 		// record that key so a wrapped inner tool does not ask the same question

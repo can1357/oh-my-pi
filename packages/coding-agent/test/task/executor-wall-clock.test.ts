@@ -755,7 +755,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				listenerRef = listener;
 				return () => {};
 			},
-			hasPendingAsyncWork: () => false,
 			prompt: async () => {
 				for (let i = 0; i < 8; i++) {
 					listenerRef?.({
@@ -808,7 +807,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				listenerRef = listener;
 				return () => {};
 			},
-			hasPendingAsyncWork: () => false,
 			prompt: async () => {
 				listenerRef?.({
 					type: "tool_execution_end",
