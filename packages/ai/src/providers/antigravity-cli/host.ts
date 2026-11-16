@@ -15,6 +15,7 @@ import {
 	type SessionConfigOption,
 	type SessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
+import { ProviderHttpError } from "../../error/classes";
 import type {
 	AntigravityCliCheckpoint,
 	Context,
@@ -46,6 +47,9 @@ const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
+// agy streams its own retry attempts as a line of agent text; anchored so prose mentioning an API error stays text.
+const RETRY_NOTICE = /(?:^|\n)[^\S\n]*(?:⚠\uFE0F?[^\S\n]*)?API error \(attempt \d+\):[^\S\n]*([^\n]+)/;
+const QUOTA_EXHAUSTED = /\bRESOURCE_EXHAUSTED\b|\bcode 429\b/;
 
 /** Per-step request settings. */
 export interface AgyStepOptions {
@@ -699,11 +703,14 @@ export class AgyHost implements ProviderSessionState {
 		const writer = this.#step?.aborted ? undefined : this.#step?.writer;
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
-				if (update.content.type === "text") writer?.text(update.content.text);
+			case "agent_thought_chunk": {
+				if (update.content.type !== "text") return;
+				const exhausted = quotaRetryNotice(update.content.text);
+				if (exhausted) this.#rateLimited(exhausted);
+				else if (update.sessionUpdate === "agent_message_chunk") writer?.text(update.content.text);
+				else writer?.thinking(update.content.text);
 				return;
-			case "agent_thought_chunk":
-				if (update.content.type === "text") writer?.thinking(update.content.text);
-				return;
+			}
 			case "usage_update":
 				this.#contextTokens = update.used;
 				return;
@@ -716,6 +723,18 @@ export class AgyHost implements ProviderSessionState {
 				return;
 			}
 		}
+	}
+
+	/**
+	 * agy retries quota failures itself and only reports each attempt as message text.
+	 * Stop its retry loop and surface a 429 so omp can rotate credentials or fall back.
+	 */
+	#rateLimited(detail: string): void {
+		const error = new ProviderHttpError(`Antigravity CLI rate limited: ${detail}`, 429, {
+			code: "RESOURCE_EXHAUSTED",
+		});
+		const fail = () => this.#fail(error);
+		this.#cancelTurn().then(fail, fail);
 	}
 
 	#turnEnded(turn: Turn, response: PromptResponse): void {
@@ -871,6 +890,12 @@ function toMcpOutput(result: ToolResultMessage): McpToolOutput {
 
 function errorOutput(text: string): McpToolOutput {
 	return { content: [{ type: "text", text }], isError: true };
+}
+
+/** The quota detail of an agy retry notice, e.g. "⚠ API error (attempt 7): RESOURCE_EXHAUSTED (code 429): …". */
+function quotaRetryNotice(text: string): string | undefined {
+	const detail = RETRY_NOTICE.exec(text)?.[1]?.trim();
+	return detail && QUOTA_EXHAUSTED.test(detail) ? detail : undefined;
 }
 
 function mapAgyError(error: unknown): Error {
