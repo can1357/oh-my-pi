@@ -18,12 +18,10 @@
  * simply never sees those events (see `WIRE_AGENT_EVENT_TYPES` in
  * `collab/host.ts`).
  *
- * The `agent_end` shape mirrors the session's public-notification shape
- * (`#emitAgentEndNotification`): `messages` plus the continuation and async-wait
- * flags. The session-layer `isTerminal: false` marks a non-final settle, either
- * an automatic continuation or a background-job wait; the latter has
- * `awaitingAsyncWork: true`. Older hosts omit these flags and such settles
- * map without them, matching the pre-flag notification.
+ * Extensions keep one `agent_end` per stopped model loop: the session's
+ * `agent_pause` (a loop stop inside a run) maps to `agent_end` with
+ * `willContinue` (and `awaitingAsyncWork` when only outside work resumes the
+ * run), the session's `agent_end` (the run's end) to a plain `agent_end`.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -119,13 +117,15 @@ export function extensionEventFromSessionEvent(
 	switch (event.type) {
 		case "agent_start":
 			return { type: "agent_start" };
-		case "agent_end":
+		case "agent_pause":
 			return {
 				type: "agent_end",
 				messages: event.messages,
-				willContinue: event.isTerminal === false ? true : undefined,
-				...(event.isTerminal === false && event.awaitingAsyncWork === true ? { awaitingAsyncWork: true } : {}),
+				willContinue: true,
+				...(event.awaiting ? { awaitingAsyncWork: true } : {}),
 			};
+		case "agent_end":
+			return { type: "agent_end", messages: event.messages };
 		case "turn_start":
 			return { type: "turn_start", turnIndex, timestamp: Date.now() };
 		case "turn_end":
@@ -254,7 +254,7 @@ export function extensionEventFromSessionEvent(
 export class GuestLifecycleEmitter {
 	#turnIndex = 0;
 	#chain: Promise<void> = Promise.resolve();
-	/** True between a mirrored (or synthesized) `agent_start` and its `agent_end`. */
+	/** True between a mirrored (or synthesized) `agent_start` and the stop of that loop. */
 	#active = false;
 
 	get sawAgentStart(): boolean {
@@ -265,10 +265,11 @@ export class GuestLifecycleEmitter {
 		if (event.type === "agent_start") {
 			this.#turnIndex = 0;
 			this.#active = true;
-		} else if (event.type === "agent_end") {
+		} else if (event.type === "agent_end" || event.type === "agent_pause") {
 			this.#active = false;
 		}
-		if (event.type !== "agent_start" && !runner.hasHandlers(event.type)) return;
+		const handlerType = event.type === "agent_pause" ? "agent_end" : event.type;
+		if (handlerType !== "agent_start" && !runner.hasHandlers(handlerType)) return;
 		const mapped = extensionEventFromSessionEvent(event, this.#turnIndex);
 		if (!mapped) return;
 		if (event.type === "turn_end") this.#turnIndex++;
