@@ -384,7 +384,7 @@ describe("agy usage fallback", () => {
 		});
 	});
 
-	it("fails closed when a native turn cannot read the store cursor", async () => {
+	it("seeds an unknown cursor before the prompt and recovers the turn's new row", async () => {
 		const dir = await tempDir("agy-usage-cursor-");
 		const started = new Queue<FakeAgy>();
 		const host = new AgyHost(dir, {
@@ -420,12 +420,13 @@ describe("agy usage fallback", () => {
 
 		const second = begin(host, [...messages, first.writer.output, user("recovered")]);
 		const secondPrompt = await fake.prompts.next();
+		seedRow(store, 2, { input: 7, output: 3, cachedWrite: 0, cachedRead: 0, thought: 0 });
 		fake.text("Second answer.");
 		secondPrompt.response.resolve({ stopReason: "end_turn" });
 		await second.done;
-		expect(second.writer.output.usage).toMatchObject({ input: 0, output: 0, totalTokens: 0 });
+		expect(second.writer.output.usage).toMatchObject({ input: 7, output: 3, totalTokens: 10 });
 
-		seedRow(store, 2, { input: 7, output: 3, cachedWrite: 0, cachedRead: 0, thought: 0 });
+		seedRow(store, 3, { input: 2, output: 1, cachedWrite: 0, cachedRead: 0, thought: 0 });
 		const third = begin(host, [
 			...messages,
 			first.writer.output,
@@ -437,6 +438,6 @@ describe("agy usage fallback", () => {
 		fake.text("Third answer.");
 		thirdPrompt.response.resolve({ stopReason: "end_turn" });
 		await third.done;
-		expect(third.writer.output.usage).toMatchObject({ input: 7, output: 3, totalTokens: 10 });
+		expect(third.writer.output.usage).toMatchObject({ input: 2, output: 1, totalTokens: 3 });
 	});
 });

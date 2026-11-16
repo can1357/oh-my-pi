@@ -542,6 +542,7 @@ export class AgyHost implements ProviderSessionState {
 	#prompt(blocks: ContentBlock[]): void {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
+		if (conversation.usageCursor === undefined) conversation.usageCursor = this.#usageCursor(conversation.id);
 		const turn: Turn = {
 			conversationId: conversation.id,
 			response: Promise.withResolvers<PromptResponse>(),
