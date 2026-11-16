@@ -1,5 +1,3 @@
-[docs/adr/0045-envd-responsibility-boundaries.md (verbatim, 127 lines total)]
-[docs/adr/0045-envd-responsibility-boundaries.md (verbatim, 128 lines total)]
 # 0045. Proposed envd responsibility boundaries: preserve the authority core, shed the periphery
 
 Status: accepted 2026-10-28; Alternative F selected

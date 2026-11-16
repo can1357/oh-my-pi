@@ -226,6 +226,9 @@ Phase 5b's "discovery" (ADR 0046 item 5, foreign-config discovery providers unde
 
 **The Phase 1 exit is not met under the workspace setting:** `omp-exec-ssh` is above 300 there (363 distinct packages with `-e normal,build`, 308 with `-e normal`, Linux target) before and after this change, while `omp-exec-local` is below it (262 and 206). Under `selected` unification `omp-exec-ssh` is below 300 by distinct packages (273 with default edge kinds, 235 with `-e normal`) and above it by the recorded `sort -u` line count (371 with default edge kinds, 322 with `-e normal`, Linux target). The counting method is an open owner decision (ranked options and a recommendation are in the closure PR), so the exit stays recorded as open and the 300 budget is unchanged.
 
+
+**Owner decision (2026-11-16):** decide the counting method first and record both measures here; keep the 300 budget unchanged while the method is applied. Choose dependency-trimming options only afterwards.
+
 ### Phase 3 capability matrix
 
 `omp-app` defaults are `local`, `cap-ssh`, `cap-computer`, `cap-browser`, and `cap-media`. `omp-envd` defaults are empty. A cap that is off is missing from envd's construction table. It is not a runtime toggle. App still links `omp-audio` and `omp-ssh` directly, and `omp-ai`'s `realtime` feature (which app enables unconditionally) includes `speech`, so those crates can remain in the `omp-app` graph when the envd caps are off. The absence proof is the selected `omp-envd` tree.
@@ -241,16 +244,6 @@ Phase 5b's "discovery" (ADR 0046 item 5, foreign-config discovery providers unde
 
 Phase 4 `cap-forge` and `cap-ci` are DONE. Phase 4 PR1 landed the pure `omp-forge` contract only. Phase 4 PR2 landed the pure `omp-ci` contract only. Phase 4 PR3 landed the `omp-forge-delegated` host router. Phase 4 PR4 landed the `omp-ci-delegated` host router. Phase 4 PR5 wires `forge@1` and `ci@1` through those routers inside `omp-envd`: `GithubForgeAdapter` and `GithubCiAdapter` still call `GithubService`. `cap-forge` / `cap-ci` make `omp-forge` / `omp-ci` optional on `omp-tools` (modules, renderers, and chat cards follow the features) and make `omp-forge`, `omp-forge-delegated`, `omp-ci`, and `omp-ci-delegated` optional on `omp-envd` (default-on in `omp-app`, which also forwards chat/tools). `Family::Forge` / `Family::Ci` stay either way. Selected unification leaves all four packages out of the `omp-envd` graph when the caps are off; `just check-minimal-caps` asserts that with the Phase 3 set. `github@3` is gone. `run_watch`'s Actions poll loop stays inside `GithubService` and is not model-facing; `ci@1` `watch` polls status until terminal and then reads failed-job logs. Numbered `pr://` and `issue://` reads go through the forge `Delegated` router (`GithubForgeAdapter::view_change_request`, `view_issue`, unified diff, and comments). List URLs later moved onto `ForgeHost::search` via `ForgeResolver` (historically `GithubResolver`). `envd/src/github.rs` was deleted after GitLab/GitHub T2; `github_url.rs` was neutralized to `forge_url.rs`. The neutral contract is not stable until that second real host exists. With `cap-forge` off, app omits `ServiceState.forge` and `branch_change_request` returns `Ok(None)` so the status-band chip stays empty; with it on, `gitwatch` reads the checked-out branch's open change request through `CheckoutForge::view_branch` (`view_change_request` on that router) and does not spawn `gh`. The rebuildable forge cache is neutralized (`cache/src/forge_cache.rs`; historically `cache/src/github_cache.rs`). Execution vendor items in `omp-exec-reapi` and the orphan `omp-exec-buildbuddy` crate are removed (steps 1–3); DelegatedBackend remains open. The extensions home decision landed (in-repo `extensions/`); GitLab T2 (D2.8) is next. `cap-security` is optional hygiene and is not part of this exit.
 
-## Amendment (2026-11-10)
-
-
-
-
-Consequences of this amendment:
-
-ctx_search({queries:["","can"], source:"s1wu"}) searches the whole output (4990 B).**Recommended:** keep the 300 budget and decide the method explicitly.
-
-**Owner decision (2026-11-16):** decide counting method first and record both measures in ADR 0049; choose trimming options afterwards.
 ## Amendment (2026-11-10)
 
 **Owner decision (2026-11-10):** the first-party T2 extensions home may live **in the same git repository** as omp2 (as in early omp2 / can1357 upstream), not a separate GitHub repo. “Outside omp2” means **outside the Cargo workspace** (zero Cargo weight), not a separate remote.
