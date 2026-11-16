@@ -592,6 +592,54 @@ describe("AgentSession retry fallback", () => {
 		expect(session.agent.state.systemPrompt).toEqual(["edit:replace"]);
 	});
 
+	it("keeps apply_patch available through eval and xd without a fallback", async () => {
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		if (!model) throw new Error("Expected bundled test model to exist");
+		({ session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"edit.modelVariants": { [model.id]: "apply_patch" },
+				"eval.autoBackground.enabled": false,
+				"lsp.enabled": false,
+			}),
+			model,
+			toolNames: ["read", "write", "edit", "eval"],
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			cacheWarming: false,
+		}));
+		const edit = session.getToolByName("edit");
+		const read = session.getToolByName("read");
+		const evalTool = session.getToolByName("eval");
+		if (!edit || !read || !evalTool) throw new Error("Expected the session's edit, read and eval tools");
+
+		expect(session.getEvalBridgeToolNames()).toContain("apply_patch");
+		expect(session.getToolForEvalBridge("xd://apply_patch")).toBe(edit);
+		const canonicalDocs = await read.execute("read-edit-docs", { path: "xd://edit" });
+		const aliasDocs = await read.execute("read-apply-patch-docs", { path: "xd://apply_patch" });
+		expect(aliasDocs.content).toEqual(canonicalDocs.content);
+		const patch = {
+			input: "*** Begin Patch\n*** Add File: eval-apply-patch.txt\n+bridged patch\n*** End Patch",
+		};
+		const result = await evalTool.execute("eval-apply-patch", {
+			language: "js",
+			code: `await tool.apply_patch(${JSON.stringify(patch)})`,
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(path.join(tempDir.path(), "eval-apply-patch.txt")).text()).toBe("bridged patch\n");
+	});
+
 	it("keeps apply_patch callable after a retry fallback changes the edit mode", async () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
