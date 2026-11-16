@@ -69,4 +69,37 @@ describe("SectionsReport", () => {
 		expect(screen()).toContain("COMPONENT_SECTION");
 		expect(screen()).not.toContain("unused");
 	});
+
+	it("resets native scroll only on view transitions and keeps Esc available for back navigation", () => {
+		const { panel, closed } = mount();
+		const body = () => {
+			const node = panel.describe().c?.[0];
+			if (!node || !("k" in node)) throw new Error("Missing native report body");
+			return node;
+		};
+		expect(body().scroll).toBeUndefined();
+		panel.handleInput(DOWN);
+		expect(body().scroll).toBeUndefined();
+		panel.handleInput("\x1b[6~");
+		const paged = body().scroll;
+		expect(paged?.by).toBe("page-down");
+		panel.handleInput(ENTER);
+		const opened = body().scroll;
+		expect(opened).toEqual({ by: "start", n: (paged?.n ?? 0) + 1 });
+		expect(JSON.stringify(panel.describe())).not.toContain('"keys":["escape"]');
+		panel.handleInput("x");
+		expect(body().scroll).toBe(opened);
+		panel.handleInput("\x1b[6~");
+		const sectionPage = body().scroll;
+		panel.handleInput(ESCAPE);
+		const summary = body().scroll;
+		expect(summary).toEqual({ by: "start", n: (sectionPage?.n ?? 0) + 1 });
+		expect(JSON.stringify(panel.describe())).toContain('"keys":["escape"]');
+		expect(closed()).toBe(0);
+		panel.handleInput("missing");
+		panel.handleInput(ENTER);
+		expect(body().scroll).toBe(summary);
+		panel.handleInput(ESCAPE);
+		expect(closed()).toBe(1);
+	});
 });

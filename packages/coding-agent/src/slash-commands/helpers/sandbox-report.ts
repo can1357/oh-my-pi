@@ -358,7 +358,7 @@ function formatSandboxReport(report: SandboxReport): string {
 function formatSandboxSection(report: SandboxReport, section: SandboxReportSection): string {
 	const lines = [`${report.title} ─ ${section.title}`, "", ...rowLines(section.rows)];
 	const more = section.tree?.map(line => `${line.lead}${line.text}${line.tail}`) ?? [];
-	if (section.markdown) more.push(section.markdown);
+	if (section.markdown) more.push(shown(section.markdown));
 	if (more.length > 0) lines.push(...(section.rows.length > 0 ? [""] : []), ...more);
 	return lines.join("\n");
 }
@@ -403,7 +403,7 @@ function sectionBody(section: SandboxReportSection, heading?: string): Component
 		);
 		parts.push(new Text(replaceTabs(lines.join("\n")), 0, 0));
 	}
-	if (section.markdown) parts.push(new Markdown(replaceTabs(section.markdown), 0, 0, getMarkdownTheme()));
+	if (section.markdown) parts.push(new Markdown(replaceTabs(shown(section.markdown)), 0, 0, getMarkdownTheme()));
 	const body = new Container();
 	for (const [index, part] of parts.entries()) {
 		if (index > 0) body.addChild(new Spacer(1));

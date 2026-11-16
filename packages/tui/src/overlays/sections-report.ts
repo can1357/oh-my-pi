@@ -126,7 +126,9 @@ export class SectionsReport extends ReportPanel {
 	}
 
 	override handleInput(data: string): void {
+		const wasOpen = this.#body.open;
 		if (this.#body.handleInput(data)) {
+			if (wasOpen !== this.#body.open) this.resetScroll();
 			this.invalidate();
 			this.revealActiveRow();
 			return;

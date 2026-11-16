@@ -140,6 +140,13 @@ export class ReportPanel extends OverlayPanel {
 		this.#reveal = true;
 	}
 
+	/** A new report view starts at the top in both the native sheet and text-mode viewport. */
+	resetScroll(): void {
+		this.#scroll = { by: "start", n: (this.#scroll?.n ?? 0) + 1 };
+		this.#view.scrollToTop();
+		this.#native = undefined;
+	}
+
 	/** The body row a subclass keeps in view, such as its selection. */
 	activeRow(): number | undefined {
 		return undefined;

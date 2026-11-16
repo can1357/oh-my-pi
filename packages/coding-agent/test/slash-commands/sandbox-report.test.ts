@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import * as sandbox from "@oh-my-pi/pi-utils/sandbox";
 import type { SandboxLayer, SandboxStatus } from "@oh-my-pi/pi-utils/sandbox";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -183,6 +184,26 @@ describe("/sandbox report", () => {
 		}
 		const nono = view.sections?.sections.find(section => section.id === "nono");
 		expect(drawn(nono?.body)).toContain("blocked commands: rm");
+	});
+
+	it("shortens Markdown home paths in text and panel sections without changing the report's paths", () => {
+		const home = os.homedir();
+		const markdown = `| Path | Access |\n|---|---|\n| ${home}/project | readwrite |`;
+		const report = buildSandboxReport(
+			status({ layers: [{ ...NONO, details: [{ title: "Paths", markdown }] }] }),
+			CONTEXT,
+		);
+		expect(report.sections.find(section => section.key === "paths")?.markdown).toBe(markdown);
+		expect(sandboxReportText(report, "paths")).toContain("~/project");
+		expect(sandboxReportText(report, "paths")).not.toContain(home);
+		const view = sandboxReportView(report, "");
+		const section = view.sections?.sections.find(candidate => candidate.id === "paths");
+		for (const body of [section?.body, sandboxReportView(report, "paths").body]) {
+			const drawn = Bun.stripANSI(body?.render(200).join("\n") ?? "");
+			expect(drawn).toContain("~/project");
+			expect(drawn).not.toContain(home);
+		}
+		expect(section?.markdown).not.toContain(home);
 	});
 
 	it("draws a row as it is when its section opens from the list, markdown characters included", () => {

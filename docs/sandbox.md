@@ -22,6 +22,8 @@ Below the summary are the sections that hold the detail:
 
 In the TUI the report is a panel you step through: the summary rows sit above the list of sections, Up/Down picks a section, Enter opens it, Esc or Backspace returns to the summary, and Esc on the summary closes the panel. Typing filters the section list; the page keys and the wheel scroll. `/sandbox <section>` opens one section directly. RPC and ACP hosts get the same summary and sections as plain labelled lines; having no list to pick from, their summary ends with a `More:` line that names the sections.
 
+Opening a section starts at its top in text and native panels. Returning to the summary resets native scrolling and keeps the text-mode selection in view.
+
 For example, the text form under nono with a capability file that grants `~/src/app` read-write and home read-only, nono's proxy in `HTTPS_PROXY`, and omp started in `~/src/app`:
 
 ```text
@@ -36,6 +38,8 @@ More: /sandbox nono | policy-files | paths | network | namespaces | kernel | evi
 ```
 
 A policy-files section lists the files and directories a probe says hold its policy. omp looks each one up when the report is built: an absent or unreadable path is marked, and a directory lists its entries, sorted, with a count of the entries past the preview limit. In the TUI every path is a file link. nono's section lists the capability file `NONO_CAP_FILE` names and its user profile directory (`$XDG_CONFIG_HOME/nono/profiles`, `~/.config/nono/profiles` when unset).
+
+Home paths in rows, Markdown sections and policy-file labels are displayed as `~`.
 
 What a probe publishes is its sandbox's stated policy, not a test of what a write or a connection does.
 
