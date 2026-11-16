@@ -5,6 +5,125 @@
 ### Fixed
 
 - Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
+- With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Moved binary analysis from the standalone `ida` and `ghidra` tools into the backend-neutral `dsm` namespace (`xd://eval/dsm`).
+- Replaced the `ida.enabled`, `ida.maxOpen`, and `ida.idleCloseSec` settings with `disassembler.backend`, `disassembler.maxOpen`, and `disassembler.idleCloseSec`; shared disassembler database APIs are now available under `@oh-my-pi/pi-coding-agent/disasm`.
+
+### Added
+
+- Added Tern plan review editing and comments: double-click plans to edit them, select text to add Google Docs-style comments, and send comments to Refine.
+- Added Ghidra support with automatic setup of Ghidra, JDK, and PyGhidra when analysis is explicitly requested; Auto mode uses an installed IDA Pro when available and otherwise falls back to Ghidra.
+- Added support for sharing live analysis databases with child agents through `db.handle()` and `dsm.open(handle)`.
+- Added a `Force Remove` option to `worktree.onExit` that removes session-created worktrees without prompting, including worktrees with uncommitted changes; new commits remain on the worktree branch.
+
+### Changed
+
+- Updated Tern plan review with a single Approve control, comment-aware Refine option, model selection, and a Save action that writes the plan while keeping review open and plan mode active.
+- Plain executable reads now display Mach-O, ELF, and PE metadata without opening an analysis database or downloading a backend; request an overview, function details, or `dsm.open()` to begin analysis.
+- Improved the model switcher (`Alt+P` / `/switch`) with provider filtering and per-switch thinking-level selection. In Tern, it now opens above the composer with integrated search, provider and Task/Main filters, and a thinking-level slider.
+
+### Fixed
+
+- Deleting or moving large directory trees inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC)).
+- Reduced CPU and memory usage for long-running subagents as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC)).
+- Fixed `commit.draft()` incorrectly classifying files deleted or renamed through bash or eval as “Not yours”; they now appear under Review.
+
+### Removed
+
+- Removed the legacy standalone disassembler tools and their associated prompt instructions.
+- Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet; use selection copying and double-click editing instead.
+
+## [18.21.0] - 2026-11-16
+
+### Breaking Changes
+
+- Updated the `AgentSession` run lifecycle API: `agent_end` is emitted once when a run can no longer resume, and `agent_pause` reports runs that stop while awaiting work. Replaced `hasPendingAsyncWork()`, `settleAsyncWork()`, and `suppressAutoResumeUntilPrompt()` with `isRunActive`, `wakeSources`, and `waitForRunEnd()`. Calling `abort()` now also ends runs paused on background work; RPC, JSON print, collaboration, and extension streams retain their existing per-loop `agent_end` behavior.
+
+### Added
+
+- Added configurable automatic subagent prewalk through `task.agentPrewalkAuto`, allowing per-agent `on`/`off` settings or model patterns while preserving unconditional subagent prewalk.
+- Unknown custom and discovered models now automatically detect reasoning support and remember supported reasoning effort levels for future sessions.
+- Added inline image and web-page replies: supported terminals can display local, data, and HTTP(S) images and embedded pages, while other terminals receive linked fallbacks. Added `tui.renderEmbeds` to disable this rendering.
+- Added interactive embedded pages in Tern replies, including click-to-visit and Escape-to-return navigation; common host, path, and `file:` URL forms are accepted.
+- Bash redirects can now write to all writable internal URLs, including job cancellation endpoints and handler-backed `agent://`, `cfg://`, `ssh://`, and `xd://` URLs.
+- Added image pasting to `ask` form notes and `ui.formDialog` options via `acceptImages`; pasted images are returned with `[Image #N]` markers and described for text-only models. Unsupported prompts now clearly reject image pastes.
+
+### Changed
+
+- Changed the default local text-to-speech model to Phonon 31M for faster synthesis, smaller downloads, and additional voices. Existing Kokoro voice settings migrate automatically; speaking rates now range from 0.8× to 1.3×.
+- Tern `/btw` responses now appear as folded, interactive notes at the point where they were requested, with follow-up, copy, branch, inject, and stop actions; `/btw` without a prompt still opens the history view.
+- Overlapping Bash calls now share shell state, including variables, functions, aliases, options, and traps, and background jobs started by those calls continue running independently.
+- Extensions enabled or reconfigured through `extensions` or `disabledExtensions` now load into the active session without requiring a restart.
+- Rich-text pastes made during approval steering or in dialogs now preserve Markdown formatting and images when inserted into the chat editor.
+- Moving a task or resuming a session in another project now switches its agents, extensions, custom tools, and MCP servers to match the destination project without a restart.
+
+### Fixed
+
+- Fixed status indicators incorrectly showing the agent as idle while subagents or background work could still resume the run.
+- Fixed subagents and security scans completing while child agents were still running or queued peer messages remained.
+- Fixed conflict-region resolution when a selected side is empty or shares edge lines with surrounding code.
+- MCP stdio server failures before a response now report the process exit code or terminating signal instead of only reporting closed stdout.
+- Fixed prewalk handoffs so model and reasoning-effort changes are preserved, and automatic handoffs return to the planning model when automatic prewalk is changed or disabled.
+
+## [18.20.3] - 2026-11-16
+
+### Breaking Changes
+
+- Renamed the browser `tab.clickAt()` option from `clickCount` to `count`, matching `tab.click()`.
+- Browser viewport screenshot coordinates now use the displayed image coordinates when the screenshot is scaled for the model; pass `css: true` (or `{ x, y, css: true }` for drag points) to provide viewport CSS pixels explicitly.
+- Added opt-in `mnemopi.recallRelevance` (`off`, `auto`, or `on`; default `off`) to filter automatic memory recall for task relevance using the `judge` role.
+- Added path-scoped entries for `bash.patterns` and `bashInterceptor.patterns`, resolved per working directory. Project and `--config` overlays now prepend these rules to global rules instead of replacing them.
+- Added `bash.allowedEnvVars` and per-rule `env` lists to permit explicitly named environment-variable prefixes on matching `allow` rules.
+- Subagents now preserve `@upstream` provider pinning on inherited models.
+- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict auxiliary services to the active model's provider or disable cross-provider services.
+- Added per-rule TTSR `repeatMode` frontmatter (`once`, `after-gap`, or `always`) to override the global repeat policy.
+- Compound bash approval prompts now show each command segment separately, distinguishing allowed segments from those requiring approval.
+- Removed the `seance` agent, `/seance` command, and the task tool's `sourceSession` parameter.
+
+### Added
+
+- Added `mnemopi.embeddingQueryPrefix` and `mnemopi.embeddingInputType` configuration for asymmetric and instruction-tuned embedding models, including providers that require an `input_type`.
+
+### Changed
+
+- Browser screenshots are delivered to the model in CSS pixels up to the supported unscaled size, making viewport screenshot coordinates directly usable with browser actions; scaling guidance remains for scaled full-page and element captures.
+- Browser `waitForUrl`, `waitForResponse`, and `requests({ filter })` now support `*` glob patterns in URL strings, while other strings retain substring matching.
+- The WebKit browser engine now automatically installs and updates to the newest stable ABKit release, with versioned installations that allow updates without waiting for existing browser hosts to exit.
+- Improved browser responsiveness and recovery: unresponsive WebKit pages fail fast with actionable errors, navigation can recover busy pages, and browser operations provide clearer diagnostics for timeouts, closed tabs, unsupported event listeners, invalid routes, cookie data, and viewport changes.
+- Pressing Delete at the end of the Ctrl+R search field removes the selected prompt from history.
+- `/copy` now works while viewing a subagent and copies from that subagent's transcript.
+- `find` now returns unranked literal keyword matches when all judge requests fail.
+- `take()` and `drop()` now reject nonexistent hunk units with a clear error.
+- `edit` rejection messages now suggest the file's current tag, and edits made before conflict resolution carry over to the resolved file.
+- `/marketplace` and marketplace install/uninstall commands now report picker and catalog-load errors without exiting the session.
+- ACP sessions honor `mcp.startupTimeoutMs` for MCP servers declared by the client, and ACP form elicitations no longer repeat field labels unnecessarily.
+- Task progress from every `task.steps` subagent step is now preserved, rather than only the final step's report.
+- Pasting HTML into the composer now preserves spaces from whitespace-only inline elements and indentation inside `<pre>` blocks.
+- Queued follow-ups edited with Alt+Up are restored as queued messages instead of being sent into the active turn.
+
+### Fixed
+
+- Fixed `ida` `exec` output on IDA 9.5+ by suppressing helper deprecation warnings and preserving the updated function metadata API.
+- Expired Perplexity logins and cookies no longer return an error page as a search answer; the provider is reported as expired and the search chain continues.
+- Fixed browser WebMCP discovery and invocation on Chrome and Chromium 157 and later.
+- Private hosts written with a trailing dot are now correctly handled by Ask and `always-ask-cached` before file tools access them.
+- Fixed the TUI freezing when switching sessions from an open tool-approval prompt.
+- Fixed `/commit` and eval `commit` dropping UTF-8 BOMs or mishandling quoted and Unicode filenames during change tracking and selective commits.
+- Fixed misleading Wayland clipboard warnings when pasting an image or when the clipboard is empty.
+- Fixed JavaScript evaluation after an in-place Linux upgrade by keeping session workers tied to the session's build.
+- Deleting a session that cannot be removed no longer deletes its prompt history and statistics.
+- Fixed `read` and `write` handling of line selectors on `xd://` device URLs.
+- Fixed `eval wait()` rejecting or mishandling numeric delays; browser waits now direct users to the appropriate wait helpers.
+- Fixed browser `open` with an existing Arch Chromium profile, Tern navigation, closed external Tern blocks, and docked Tern viewport emulation.
+- Fixed Tern and WebKit browser calls that incorrectly exposed unsupported page event-listener APIs; errors now identify the supported alternatives.
+- Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
+- Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

@@ -135,6 +135,7 @@ describe("Helmcode provider support", () => {
 		expect(model).toBeDefined();
 		expect(model?.cost).toMatchObject({ input: 0, output: 0 });
 		expect(model?.contextWindow ?? null).toBeNull();
-		expect(model?.thinking?.efforts ?? []).not.toContain(Effort.XHigh);
+		// No reviewed ladder applies: the only dial is the provisional one a probe verifies.
+		expect(model?.thinking?.unverified).toBe(true);
 	});
 });

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added Modal as a hosted inference provider.
+
+### Changed
+
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
+
+### Fixed
+
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added publicly available image-sizing helpers for determining model-delivered image dimensions and fitting images to a specified long edge before coordinate mapping.
+
+### Fixed
+
+- Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
+- Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

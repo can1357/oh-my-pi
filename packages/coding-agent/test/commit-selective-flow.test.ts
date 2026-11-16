@@ -108,6 +108,22 @@ describe("selective commit flow", () => {
 		expect(await Bun.file(path.join(root, "CHANGELOG.md")).text()).toContain("- Fixed the theme flicker");
 	});
 
+	it("syncs the shared index once another git process lets go of its lock", async () => {
+		const { root, journal } = await sharedWorkspace();
+		// A `git status` elsewhere holds `index.lock` while the commit is made. The lock is a real
+		// file the native index writer refuses to take, so only a real delay releases it mid-commit.
+		const lock = path.join(root, ".git", "index.lock");
+		await Bun.write(lock, "");
+		const released = Bun.sleep(250).then(() => fs.rm(lock));
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(draft, { subject: "fix: locked" }, { journal, agent: { agent: "Main" } });
+		await released;
+
+		expect(outcome.indexNotes).toEqual([]);
+		expect((await git(root, ["diff", "--cached", "--name-only"])).trim()).toBe("b.ts");
+	});
+
 	it("commits only one subagent's changes when scoped to it", async () => {
 		const { root, journal } = await sharedWorkspace();
 
@@ -122,13 +138,14 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
 	});
 
-	it("commits modes, executable deletions, symlinks, and non-UTF-8 files exactly as in the worktree", async () => {
+	it("commits modes, executable deletions, symlinks, BOMs, and non-UTF-8 files exactly as in the worktree", async () => {
 		const { root, journal, write } = await emptyRepo();
 		const latin1 = (text: string) => Buffer.from(text, "latin1");
 		await Bun.write(path.join(root, "run.sh"), "#!/bin/sh\necho run\n");
 		await Bun.write(path.join(root, "tool.sh"), "#!/bin/sh\necho tool\n");
 		await Bun.write(path.join(root, "plain.txt"), "plain\n");
 		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\n"));
+		await Bun.write(path.join(root, "bom.ass"), "placeholder\n");
 		await fs.chmod(path.join(root, "run.sh"), 0o755);
 		await fs.chmod(path.join(root, "tool.sh"), 0o755);
 		await git(root, ["add", "."]);
@@ -139,6 +156,7 @@ describe("selective commit flow", () => {
 		await write("Main", undefined, "plain.txt", "plain\nmore\n");
 		await fs.chmod(path.join(root, "plain.txt"), 0o755);
 		await Bun.write(path.join(root, "latin1.txt"), latin1("caf\xe9\nna\xefve\n"));
+		await Bun.write(path.join(root, "bom.ass"), "\uFEFF[Script Info]\r\nTitle: d\r\n");
 		await fs.symlink("plain.txt", path.join(root, "link"));
 		await journal.flush();
 
@@ -157,7 +175,13 @@ describe("selective commit flow", () => {
 					return [file, meta.split(" ")[0]];
 				}),
 		);
-		expect(modes).toEqual({ "latin1.txt": "100644", link: "120000", "plain.txt": "100755", "run.sh": "100644" });
+		expect(modes).toEqual({
+			"bom.ass": "100644",
+			"latin1.txt": "100644",
+			link: "120000",
+			"plain.txt": "100755",
+			"run.sh": "100644",
+		});
 	});
 
 	it("makes the first commit of a repository without commits", async () => {
@@ -191,6 +215,56 @@ describe("selective commit flow", () => {
 		expect(draft.summary()).toContain("✓ notes.md  +1  [Main]");
 	});
 
+	it("lists files a call deleted or renamed under review and commits them once taken", async () => {
+		const { root, journal } = await emptyRepo();
+		for (const file of ["gone.ts", "old.ts", "legacy/a.ts", "keep/x.ts", "keep/y.ts", "user.ts"]) {
+			await Bun.write(path.join(root, file), `export const file = "${file}";\n`);
+		}
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		// `mv` keeps this mtime; only the ctime shows the rename landed inside the call.
+		const past = new Date(Date.now() - 3_600_000);
+		await fs.utimes(path.join(root, "old.ts"), past, past);
+		// The user's deletions: one never named, one under a directory the call names but did not remove.
+		await fs.rm(path.join(root, "user.ts"));
+		await fs.rm(path.join(root, "keep/y.ts"));
+
+		const start = Date.now();
+		await fs.rm(path.join(root, "gone.ts"));
+		await fs.rm(path.join(root, "legacy"), { recursive: true });
+		await fs.rename(path.join(root, "old.ts"), path.join(root, "new.ts"));
+		journal.recordCall({
+			agent: "Main",
+			tool: "bash",
+			start,
+			end: Date.now(),
+			label: "rm gone.ts",
+			script: `rm ${path.join(root, "gone.ts")} && rm -rf ./legacy/ && mv old.ts new.ts && bun test keep`,
+		});
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const review = draft
+			.summary()
+			.split("\n")
+			.flatMap(line => line.match(/^ {2}\? (\S+) {2}.*; no edit record; (deleted|modified)/)?.slice(1, 3) ?? []);
+		expect(review).toEqual([
+			"gone.ts",
+			"deleted",
+			"legacy/a.ts",
+			"deleted",
+			"new.ts",
+			"modified",
+			"old.ts",
+			"deleted",
+		]);
+
+		for (const file of ["gone.ts", "legacy/a.ts", "new.ts", "old.ts"]) draft.take({ path: file });
+		await commitSelection(draft, { subject: "refactor: moved files" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["ls-tree", "-r", "--name-only", "HEAD"])).toBe("keep/x.ts\nkeep/y.ts\nnew.ts\nuser.ts\n");
+		expect(await git(root, ["status", "--porcelain"])).toBe(" D keep/y.ts\n D user.ts\n");
+	});
+
 	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
 		const { root, journal } = await sharedWorkspace();
 		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
@@ -202,5 +276,79 @@ describe("selective commit flow", () => {
 		await expect(
 			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
+	});
+
+	it("rejects an unknown hunk unit id without changing the selection", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
+		await Bun.write(path.join(root, "b.ts"), "export const b = 1;\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await write("Main", undefined, "a.ts", "export const a = 2;\nexport const extra = 3;\n");
+		await write(
+			"Other",
+			undefined,
+			"a.ts",
+			"export const a = 2;\nexport const extra = 3;\nexport const foreign = 4;\n",
+		);
+		await write("Main", undefined, "b.ts", "export const b = 2;\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.diff();
+		expect(selected).toContain("export const a = 2");
+		expect(selected).not.toContain("foreign");
+
+		expect(() => draft.take({ path: "a.ts", units: ["1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		expect(() => draft.drop({ path: "a.ts", units: ["1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		// b.ts has hunk 1 but no unit 1b; the call must fail before a.ts's 1b is selected.
+		expect(() => draft.take({ path: "*.ts", units: ["1b"] })).toThrow(/has no unit "1b"/);
+		expect(() => draft.take({ path: "a.ts", units: ["1b", "1z"] })).toThrow(/a\.ts has no unit "1z"/);
+		expect(draft.diff()).toBe(selected);
+
+		expect(draft.take({ path: "a.ts", units: ["1b"] })).toBe("Selected 1 change line(s).");
+		expect(draft.diff()).toContain("+export const foreign = 4;");
+		expect(draft.drop({ path: "a.ts", units: ["1a"] })).toBe("Deselected 3 change line(s).");
+		expect(draft.diff()).not.toContain("export const extra = 3");
+
+		const byHunk = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(byHunk.take({ path: "a.ts", units: ["1"] })).toBe("Selected 1 change line(s).");
+		expect(byHunk.diff()).toContain("+export const foreign = 4;");
+		expect(byHunk.diff()).toContain("export const a = 2");
+	});
+
+	it.skipIf(process.platform === "win32")("commits a filename that requires a quoted diff header", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-quoted-"));
+		const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-artifacts-"));
+		tempDirs.push(root, artifacts);
+		await git(root, ["init", "-q", "-b", "main"]);
+		await git(root, ["config", "user.email", "test@example.com"]);
+		await git(root, ["config", "user.name", "Test"]);
+		await git(root, ["config", "commit.gpgSign", "false"]);
+		const filename = 'has"quote.txt';
+		const file = path.join(root, filename);
+		await Bun.write(file, "before\n");
+		await git(root, ["add", "--", filename]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await Bun.write(file, "after\n");
+		const journal = ChangeJournal.at(artifacts);
+		journal.recordChange({
+			agent: "Main",
+			tool: "edit",
+			path: file,
+			before: "before\n",
+			after: "after\n",
+		});
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: quoted filename" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		expect(outcome.paths).toEqual([filename]);
+		expect(await git(root, ["show", `HEAD:${filename}`])).toBe("after\n");
 	});
 });
