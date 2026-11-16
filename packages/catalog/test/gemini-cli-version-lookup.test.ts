@@ -15,7 +15,7 @@ const savedVersion = process.env.PI_AI_GEMINI_CLI_VERSION;
 function distTagsFetch(respond: () => Promise<Response>): { fetcher: FetchImpl; urls: string[] } {
 	const urls: string[] = [];
 	const fetcher = Object.assign(
-		(input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
+		(input: string | URL | Request, _init?: RequestInit) => {
 			urls.push(String(input));
 			return respond();
 		},
