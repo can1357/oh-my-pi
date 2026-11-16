@@ -53,12 +53,12 @@ describe("ModelDownloadActivity", () => {
 		vi.spyOn(Date, "now").mockReturnValue(1_000);
 		const recorder = record();
 		stop = recorder.stop;
-		const downloads = new ModelDownloadActivity(() => "Kokoro-82M");
+		const downloads = new ModelDownloadActivity(() => "Phonon 31M");
 
-		downloads.observe({ modelKey: "m", status: "initiate", name: "kokoro-js@1.2.1" });
+		downloads.observe({ modelKey: "m", status: "initiate", name: "onnxruntime-node@1.22.0" });
 		downloads.observe({ modelKey: "m", status: "error" }, "bun install exited 1");
 
-		expect(recorder.activities.at(0)?.detail).toBe("installing kokoro-js@1.2.1");
+		expect(recorder.activities.at(0)?.detail).toBe("installing onnxruntime-node@1.22.0");
 		expect(recorder.activities.at(-1)).toMatchObject({ state: "failed", error: "bun install exited 1" });
 	});
 
