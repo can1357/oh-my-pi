@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the Spotlight headline's holdout baseline mixing results plain showed whole with results plain truncated, whose cuts get fetched beyond plain's page anyway
+- Fixed the Spotlight headline's holdout baseline mixing results plain showed whole with results plain truncated, whose cuts get fetched beyond plain's page anyway ([#19380](https://github.com/can1357/oh-my-pi/pull/19380) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.1] - 2026-11-14
 
