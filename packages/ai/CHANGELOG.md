@@ -6,6 +6,12 @@
 
 - Added `JUDGMENT_PROTOCOLS` and `judgmentProtocol` (each judgment API's label, request path and root help, taken from its wire definition), `JUDGMENT_API_PATHS` (derived from them), `catalogJudgmentApis` and `nativeJudgeRootDefault` (default endpoint roots from the model, the catalog seed or the provider's chat root), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models, `timeoutMs` to `NativeJudgeConnection` so `createNativeJudge` callers can set the per-attempt timeout, and `detail` (the error body's message) to `JudgmentApiError`, whose `code` now falls back to the body's top-level `type` as Bifrost sends it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
