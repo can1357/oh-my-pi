@@ -44,10 +44,7 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 		.env("RPS1", "[%?]")
 		.env_remove("EDITOR")
 		.env_remove("VISUAL")
-		.rc_file(
-			".zshrc",
-			format!("{BINDS}{rc}\n. ~/{ZLE_SYNC_SCRIPT}\nprint -r -- RCDONE\n"),
-		)
+		.rc_file(".zshrc", format!("{BINDS}{rc}\n. ~/{ZLE_SYNC_SCRIPT}\nprint -r -- RCDONE\n"))
 		.zle_sync()
 		.size(24, 80)
 }

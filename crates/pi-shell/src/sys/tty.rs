@@ -617,7 +617,11 @@ mod unix {
 			let mut attempts = 0;
 			redrive_pty_open(|| {
 				attempts += 1;
-				if attempts < 3 { Err(io::Error::from_raw_os_error(-6)) } else { Ok(()) }
+				if attempts < 3 {
+					Err(io::Error::from_raw_os_error(-6))
+				} else {
+					Ok(())
+				}
 			})
 			.unwrap();
 			assert_eq!(attempts, 3);
