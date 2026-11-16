@@ -3,26 +3,17 @@ import { RpcSessionSettleWatcher } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 const agentStart: AgentSessionEvent = { type: "agent_start" };
-const terminalEnd: AgentSessionEvent = { type: "agent_end", messages: [], isTerminal: true };
+const yieldedPause: AgentSessionEvent = { type: "agent_pause", messages: [], yielded: true, awaiting: true };
+const agentEnd: AgentSessionEvent = { type: "agent_end", messages: [] };
 
-/** Session whose live-run and background-work state the test drives. */
+/** Session whose run and live-loop state the test drives. */
 function createSession() {
-	const backgroundDone = Promise.withResolvers<void>();
-	const session = {
+	return {
+		isRunActive: false,
 		isStreaming: false,
 		hasAdmittedSubmission: false,
 		queuedMessageCount: 0,
-		pendingAsyncWork: false,
-		settleCalls: 0,
-		hasPendingAsyncWork() {
-			return this.pendingAsyncWork;
-		},
-		async settleAsyncWork() {
-			this.settleCalls++;
-			await backgroundDone.promise;
-		},
 	};
-	return { session, finishBackgroundWork: backgroundDone.resolve };
 }
 
 async function settleLoop(): Promise<void> {
@@ -34,8 +25,8 @@ async function settleLoop(): Promise<void> {
 }
 
 describe("RpcSessionSettleWatcher", () => {
-	test("a yield with background work pending settles only after that work wakes and ends the session", async () => {
-		const { session, finishBackgroundWork } = createSession();
+	test("a paused run settles only at its agent_end", async () => {
+		const session = createSession();
 		const frames: object[] = [];
 		const watcher = new RpcSessionSettleWatcher(session, frame => frames.push(frame));
 
@@ -43,42 +34,43 @@ describe("RpcSessionSettleWatcher", () => {
 		await watcher.check();
 		expect(frames).toEqual([]);
 
-		session.pendingAsyncWork = true;
+		// The model yields while a background job can still resume the run.
+		session.isRunActive = true;
 		watcher.observe(agentStart);
-		watcher.observe(terminalEnd);
+		watcher.observe(yieldedPause);
+		await watcher.check();
 		await settleLoop();
 		expect(frames).toEqual([]);
-		expect(session.settleCalls).toBe(1);
 
-		// The background job delivers: a follow-up run starts, yields, and nothing remains.
-		session.pendingAsyncWork = false;
+		// The job result resumes the run; the follow-up loop ends it.
 		watcher.observe(agentStart);
-		watcher.observe(terminalEnd);
-		finishBackgroundWork();
-		await settleLoop();
+		session.isRunActive = false;
+		watcher.observe(agentEnd);
 		await settleLoop();
 
 		expect(frames).toEqual([{ type: "session_settled" }]);
 	});
 
-	test("does not settle while another run is live, then settles on that run's terminal end", async () => {
-		const { session } = createSession();
+	test("does not settle while another run is live, then settles on that run's end once", async () => {
+		const session = createSession();
 		const frames: object[] = [];
 		const watcher = new RpcSessionSettleWatcher(session, frame => frames.push(frame));
 
 		watcher.observe(agentStart);
+		session.isRunActive = true;
 		session.isStreaming = true;
-		watcher.observe(terminalEnd);
+		watcher.observe(agentEnd);
 		await settleLoop();
 		expect(frames).toEqual([]);
 
+		session.isRunActive = false;
 		session.isStreaming = false;
-		watcher.observe(terminalEnd);
+		watcher.observe(agentEnd);
 		await settleLoop();
-		watcher.observe(terminalEnd);
+		watcher.observe(agentEnd);
 		await settleLoop();
 
-		// One stretch of activity settles once, even with a repeated terminal end.
+		// One stretch of activity settles once, even with a repeated end.
 		expect(frames).toEqual([{ type: "session_settled" }]);
 	});
 });

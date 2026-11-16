@@ -5211,7 +5211,7 @@ export class SessionMaintenance {
 	 *
 	 * Every method, handoff included, runs to completion before this resolves,
 	 * so the result reports the continuation that was actually scheduled — the
-	 * `agent_end` settle derives `willContinue` from it.
+	 * loop-end routing decides from it whether the run pauses for that turn.
 	 *
 	 * @returns whether auto-compaction scheduled a follow-up turn.
 	 */
