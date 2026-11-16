@@ -36,7 +36,7 @@ function createContext(
 	};
 }
 
-const local = requireModel("local", "kokoro");
+const local = requireModel("local", "phonon-31m");
 const xai = requireModel("xai", "grok-tts");
 const deepInfra = requireModel("deepinfra", "hexgrad/Kokoro-82M");
 
@@ -69,7 +69,7 @@ describe("speech role candidate ordering", () => {
 
 	test("keeps an explicitly configured local candidate ahead of paid MP3 candidates", async () => {
 		await authStorage.credentials.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
-		const settings = Settings.isolated({ modelRoles: { speech: "local/kokoro" } });
+		const settings = Settings.isolated({ modelRoles: { speech: "local/phonon-31m" } });
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 
 		const candidates = resolveSpeechCandidates(settings, registry, true);
@@ -80,7 +80,7 @@ describe("speech role candidate ordering", () => {
 
 describe("tts speech chain execution", () => {
 	test("uses the default local model for WAV output at the configured speed", async () => {
-		const settings = Settings.isolated({ "tts.localSpeed": 1.5 });
+		const settings = Settings.isolated({ "tts.localSpeed": 1.2 });
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 		const localSynthesis = spyOn(ttsClient, "synthesize").mockResolvedValue({
 			pcm: new Float32Array([0, 0.25, -0.25]),
@@ -98,10 +98,10 @@ describe("tts speech chain execution", () => {
 		);
 
 		expect(result.isError).not.toBe(true);
-		expect(result.details).toMatchObject({ backend: "local-inference", voiceId: "kokoro/af_heart", codec: "wav" });
-		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Hello locally", {
-			voice: "af_heart",
-			speed: 1.5,
+		expect(result.details).toMatchObject({ backend: "local-inference", voiceId: "phonon-31m/harper", codec: "wav" });
+		expect(localSynthesis).toHaveBeenCalledWith("phonon-31m", "Hello locally", {
+			voice: "harper",
+			speed: 1.2,
 			signal: undefined,
 		});
 		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);
@@ -207,8 +207,8 @@ describe("tts speech chain execution", () => {
 
 		expect(result.isError).not.toBe(true);
 		expect(result.details).toMatchObject({ backend: "local-inference", codec: "wav" });
-		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Fall back locally", {
-			voice: "af_heart",
+		expect(localSynthesis).toHaveBeenCalledWith("phonon-31m", "Fall back locally", {
+			voice: "harper",
 			speed: 1,
 			signal: undefined,
 		});

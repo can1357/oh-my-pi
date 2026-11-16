@@ -99,22 +99,45 @@ it.skipIf(process.platform === "win32")("keeps state and options after a call th
 });
 
 it.skipIf(process.platform === "win32")(
-	"runs calls that overlap a backgrounded one in a copy of the session shell and leaves it intact",
+	"carries what calls overlapping a backgrounded one set back into the session shell",
 	async () => {
 		const tool = bashTool({ "bash.autoBackground.thresholdMs": 100 });
-		await run(tool, "PI_STATE_VAR=kept");
-		expect((await run(tool, "sleep 2")).async?.state).toBe("running");
+		await run(tool, "PI_STATE_VAR=kept; PI_BOTH_VAR=before");
+		expect((await run(tool, "PI_BOTH_VAR=owner; sleep 2")).async?.state).toBe("running");
 
-		const overlapping = await run(tool, 'printf "[%s]" "$PI_STATE_VAR"; PI_STATE_VAR=lost');
-		expect(overlapping.text).toStartWith("[kept]");
-		expect(overlapping.text).toContain("Ran in a copy of the busy session shell");
-		// An overlapping call that itself moves to the background says so in its start result.
-		const promoted = await run(tool, "sleep 0.5");
-		expect(promoted.async?.state).toBe("running");
-		expect(promoted.text).toContain("Ran in a copy of the busy session shell");
+		const overlapping = await run(
+			tool,
+			'printf "[%s]" "$PI_STATE_VAR"; PI_STATE_VAR=carried; PI_BOTH_VAR=fork; pi_fork_fn() { printf fn; }',
+		);
+		expect(overlapping.text).toBe("[kept]");
+		// The next overlapping call sees it before the backgrounded one ends.
+		expect((await run(tool, 'printf "%s:" "$PI_STATE_VAR"; pi_fork_fn')).text).toBe("carried:fn");
 
 		await manager.waitForAll();
-		expect((await run(tool, 'printf "%s" "$PI_STATE_VAR"')).text).toBe("kept");
+		// The backgrounded call ended last, so it keeps the name both set.
+		expect((await run(tool, 'printf "%s %s:" "$PI_STATE_VAR" "$PI_BOTH_VAR"; pi_fork_fn')).text).toBe(
+			"carried owner:fn",
+		);
+	},
+	10_000,
+);
+
+it.skipIf(process.platform === "win32")(
+	"keeps background jobs an overlapping call starts alive and says they stay in its copy",
+	async () => {
+		const tool = bashTool({ "bash.autoBackground.thresholdMs": 100 });
+		expect((await run(tool, "sleep 2")).async?.state).toBe("running");
+
+		const overlapping = await run(tool, "/bin/sleep 30 & printf %s $!");
+		expect(overlapping.text).toContain("Background jobs started here run in a copy of the busy session shell");
+		const pid = Number.parseInt(overlapping.text, 10);
+		try {
+			Bun.gc(true);
+			expect(() => process.kill(pid, 0)).not.toThrow();
+		} finally {
+			process.kill(pid, "SIGKILL");
+		}
+		await manager.waitForAll();
 	},
 	10_000,
 );
