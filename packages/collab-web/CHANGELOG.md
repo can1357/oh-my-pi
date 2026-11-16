@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Long streaming replies in the collab viewer no longer rebuild the whole message on every token
+- Long streaming replies in the collab viewer no longer rebuild the whole message on every token ([#19485](https://github.com/can1357/oh-my-pi/pull/19485) by [@H4vC](https://github.com/H4vC))
 
 ## [18.20.1] - 2026-11-14
 
