@@ -15,6 +15,10 @@
 ### Fixed
 
 - Fixed Windows computer keys and shortcuts typing the wrong characters when the receiving control, including an embedded editor on another UI thread, uses a different keyboard layout from omp ([#19025](https://github.com/can1357/oh-my-pi/pull/19025) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed the macOS `computer` tool failing a click or press on an Activity Monitor process row with `StaleRef` whenever the table refreshed since `ax()` read it: the ref now follows its row when exactly one row still reads as it did in every cell, a click is refused when the app has sorted another row into its place, and the error otherwise shows the row then and now ([#19048](https://github.com/can1357/oh-my-pi/pull/19048) by [@will-bogusz](https://github.com/will-bogusz))
+- Row-ref clicks on macOS check every takeover press and deeply nested row descendants; an off-screen activation primer does not count as a target press when reporting a moved row ([#19048](https://github.com/can1357/oh-my-pi/pull/19048) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
