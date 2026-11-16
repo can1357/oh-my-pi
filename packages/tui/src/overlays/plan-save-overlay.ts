@@ -52,6 +52,10 @@ export class PlanSaveOverlay implements Component, Focusable {
 		this.#input.handleInput(data);
 	}
 
+	handlePaste(text: string): void {
+		this.#input.handlePaste(text);
+	}
+
 	/** Routes enhanced clipboard pastes into the path input. */
 	pasteText(text: string): void {
 		this.#input.pasteText(text);

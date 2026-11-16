@@ -310,6 +310,99 @@ export declare class HighlightStream {
   push(chunk: string): string
 }
 
+/**
+ * The inline-image budget pi-tui components render against
+ * (`tui.imageBudget`).
+ *
+ * Attach it to the terminal engine (`TerminalEngine.attachImageBudget`) and
+ * the engine drains it on every paint and schedules the redraws it asks for.
+ */
+export declare class ImageBudget {
+  /** `cap` live images per frame (default 8); `0` disables budgeting. */
+  constructor(cap?: number | undefined | null)
+  get cap(): number
+  get enabled(): boolean
+  /**
+   * Change the cap; the attached engine schedules the redraw that applies
+   * it.
+   */
+  setCap(cap: number): void
+  /**
+   * Stable graphics id for a logical image. A non-empty `key` maps to the
+   * same id across re-creations (so repaints replace the placement); a
+   * missing key gets a fresh id every call.
+   */
+  acquireId(key?: string | undefined | null): number
+  /** Retire the graphic held under `key` as soon as no frame shows it. */
+  release(key: string): void
+  /** Retire the graphic `id` as soon as no frame shows it. */
+  releaseId(id: number): void
+  /**
+   * Begin a render pass; `stable` for a partial pass that is never ended,
+   * `altScreen` for a frame painted on the alternate buffer.
+   */
+  beginPass(stable?: boolean | undefined | null, altScreen?: boolean | undefined | null): void
+  /**
+   * Record an image in display order; true when it must render its text
+   * fallback this frame. `measuring`: an out-of-order measuring render
+   * (`measureRender`), which claims no display slot.
+   */
+  observe(imageId: number, measuring?: boolean | undefined | null): boolean
+  /**
+   * End a render pass; true when the pass must be repeated before its
+   * frame is emitted.
+   */
+  endPass(): boolean
+  /**
+   * Whether `imageId`'s data still needs to be transmitted to the surface
+   * the in-flight pass paints.
+   */
+  shouldTransmit(imageId: number): boolean
+  /** Ask the attached engine for a repaint (an off-thread encode landed). */
+  requestRender(): void
+}
+
+/**
+ * One inline image of a pi-tui `Image` component (or attachment chip): its
+ * base64 data, pixel size, budget id, and the render cache.
+ */
+export declare class InlineImage {
+  /**
+   * `data`: base64 image bytes. `dimensions`: the pixel size when the
+   * caller knows it; otherwise the header is sniffed, falling back to
+   * 800×600.
+   */
+  constructor(data: string, mimeType: string, dimensions?: ImageDimensions | undefined | null)
+  /**
+   * Render against `budget`: a stable graphics id for `key` (fresh when
+   * absent), observed in display order on every render, with Kitty data
+   * transmitted once through the budget. Returns the id.
+   */
+  useBudget(budget: ImageBudget, key?: string | undefined | null): number
+  get widthPx(): number
+  get heightPx(): number
+  /** The budget id, if the image renders against a budget. */
+  get imageId(): number | null
+  /** Whether the last render was demoted to text by the budget. */
+  get suppressed(): boolean
+  /**
+   * Retire the image's graphic as soon as no frame shows it: for an owner
+   * closing it for good.
+   */
+  release(): void
+  /**
+   * Render one pass: the image's rows, the text-fallback row count, or
+   * `null` when the rows the caller holds (`cached`) are still current.
+   *
+   * `onEncoded(backgroundRgb)` runs when an off-thread SIXEL encode this
+   * render starts lands while still the image's current request, so the
+   * image can repaint. It is held only while that encode runs: a callback
+   * kept for the image's lifetime would pin its owner through the native
+   * reference.
+   */
+  render(request: ImageRenderRequest, onEncoded?: ((arg: number) => void) | undefined | null): string[] | number | null
+}
+
 /** One accepted or dialed IPC connection. */
 export declare class IpcConnection {
   /**
@@ -727,6 +820,172 @@ export declare class ShellVisualization {
   present(options: ShellVizOptions): string
 }
 
+/** The terminal engine owned by a pi-tui `Terminal`. */
+export declare class TerminalEngine {
+  /**
+   * Create an engine for one terminal. `onWake` runs (on the JS thread,
+   * queued) when the output writer drains or fails, and when the stdin
+   * reader queued reads or stdin ended; answer with `tick`.
+   */
+  constructor(config: EngineConfig, onWake: () => void)
+  /**
+   * Take ownership of the terminal's output: a restarted engine reopens its
+   * output pump.
+   */
+  start(now: number): void
+  /**
+   * Take input: with process stdio, put stdin in raw mode and start its
+   * reader; then enable input modes and send the capability probes. Bytes
+   * a cooked tty line-buffered meanwhile are the first read (see the
+   * parser's cooked-typeahead Enter fix). A tty that refuses raw mode (a
+   * revoked pty that still claims to be a TTY) is a disconnect.
+   */
+  attachInput(now: number): void
+  /**
+   * Stdin bytes from the host (capture sinks). `loopStalled`: the event
+   * loop is stalled or just recovered, so an unmarked multiline burst is
+   * batched keystrokes.
+   */
+  input(now: number, data: Uint8Array, loopStalled: boolean): void
+  /** OS resize (SIGWINCH / `ConPTY`). */
+  resize(now: number, columns: number, rows: number): void
+  /**
+   * Capture sink: bytes the Node stream still holds after the host wrote
+   * output.
+   */
+  noteStreamBacklog(now: number, bytes: number): void
+  /**
+   * Fire every deadline that has come due. With `loopStalled` (the host's
+   * event-loop stall verdict), then feed the reads the stdin reader queued
+   * since, as separate reads.
+   */
+  tick(now: number, loopStalled?: boolean | undefined | null): void
+  /** The earliest clock reading at which `tick` has work, if any. */
+  nextDeadline(): number | null
+  /** Events queued since the last call, in order. */
+  takeEvents(): Array<EngineEvent>
+  /**
+   * Capture sink: encoded output to write to stdout, chunked between escape
+   * sequences. Always empty for the pump.
+   */
+  takeOutput(): Array<Buffer>
+  /**
+   * True when output is captured for the host to deliver (virtual
+   * terminals, test harnesses) instead of written to stdout.
+   */
+  get capturing(): boolean
+  /** Opaque output (images, TSP messages, out-of-band OSC sequences). */
+  write(text: string): void
+  setTitle(title: string): void
+  /** OSC 9;4 progress (with the keepalive some terminals need). */
+  setProgress(now: number, active: boolean): void
+  /** DECSCUSR code; deduped against the last shape written. */
+  setCursorShape(code: number): void
+  /** Hide the hardware cursor (`force` skips the dedupe). */
+  hideCursor(force: boolean): void
+  /** Show the hardware cursor (`force` skips the dedupe). */
+  showCursor(force: boolean): void
+  /** Start an explicit OSC 11 refresh; returns the accepted request token. */
+  refreshAppearance(now: number, token?: number | undefined | null): number | null
+  setShowHardwareCursor(enabled: boolean): void
+  /** Whether frames position a visible hardware cursor at the focused marker. */
+  get showHardwareCursor(): boolean
+  setResizeScrollback(mode: "append" | "rebuild" | "preserve"): void
+  /** How settled resizes refresh native scrollback. */
+  get resizeScrollback(): "append" | "rebuild" | "preserve"
+  /** Floor between ordinary frames (`tui.maxFps`). */
+  setFrameIntervalMs(ms: number): void
+  /** Whether a frame provider is installed and whether it can replay history. */
+  setFrameProvider(now: number, present: boolean, historyReplay: boolean): void
+  /** Texts whose presence in an emitted row raises a `frameText` event. */
+  setFrameTextWatches(texts: Array<string>): void
+  /**
+   * Share the host's inline-image budget: every paint drains its purges
+   * and transmits, alt-buffer entries reset its alternate surface, and
+   * the redraws it asks for are scheduled here (outside a frame, through
+   * `onWake`).
+   */
+  attachImageBudget(budget: ImageBudget): void
+  /**
+   * Delete every image the attached budget believes the terminal holds
+   * (dropping that tracking) and forget live placements.
+   */
+  clearInlineImages(): void
+  /**
+   * Debug: the row of the composed document the children fallback painted
+   * first.
+   */
+  setDebugWindowTop(top: number): void
+  /** Ask for a frame; the `render` event announces when it is due. */
+  requestRender(now: number, options?: EngineRenderRequest | undefined | null): void
+  /**
+   * Perform alt-screen/mouse transitions for the frame about to be
+   * composed and say what to compose. Drain events before composing.
+   */
+  beginFrame(now: number, view: EngineFrameView): "none" | "plan" | "alt" | "resize"
+  /**
+   * Paint a normal-buffer frame, with the visible overlays composited onto
+   * its viewport.
+   */
+  presentPlan(now: number, frame: EnginePlanFrame): EnginePresentResult
+  /**
+   * Paint a fullscreen-overlay frame on the alternate buffer: the visible
+   * overlays composited onto a blank screen. The normal transcript is never
+   * composited into the alternate buffer.
+   */
+  presentAlt(now: number, frame: EngineAltFrame): EnginePresentResult
+  /** Paint the transient resize buffer. */
+  presentResize(now: number, frame: EngineResizeFrame): void
+  /**
+   * Disable keyboard enhancements and wait for input to go idle; the
+   * `inputDrained` event ends it.
+   */
+  drainInput(now: number, maxMs: number, idleMs: number): void
+  /**
+   * First half of stop: leave resize transactions, the alternate screen,
+   * and mouse reporting, and drop a latched destructive reset, so the
+   * host's final history flush paints plain frames.
+   */
+  prepareStop(now: number): void
+  /**
+   * Hand the terminal back: stop reading stdin, park the shell prompt below
+   * the content, restore every mode the session changed, retire the output
+   * writer, and put stdin's terminal mode back.
+   *
+   * Throws when stdin's terminal mode cannot be restored, after everything
+   * else was handed back: a live terminal is left raw then, while a hung-up
+   * one has nothing left to restore (the host knows which).
+   */
+  stop(now: number): void
+  /** Effective columns (in-band report when active, else OS). */
+  get columns(): number
+  /** Effective rows (in-band report when active, else OS). */
+  get rows(): number
+  /** Output accepted but not yet delivered to the terminal. */
+  get pendingOutputBytes(): number
+  /** DEC 2026 wrappers are emitted around paints. */
+  get synchronizedOutput(): boolean
+  /** Cost of the most recent frame, compose included. */
+  get lastFrameCostMs(): number
+  get fullRedraws(): number
+  get kittyProtocolActive(): boolean
+  /** The last detected appearance (`true` = dark), if known. */
+  get appearanceDark(): boolean | null
+  /** The TSP hello awaits its reply or DA1 sentinel. */
+  get tspProbePending(): boolean
+  /**
+   * Mutable normal-buffer viewport from the last provider frame (inline click
+   * targets).
+   */
+  mutableViewport(): EngineViewport
+  /** History rows left on screen above a bottom-reaching viewport. */
+  filledHistoryRows(): number | null
+  /** Native history holds rows the provider committed since the last reset. */
+  hasProviderHistory(): boolean
+  /** The last painted viewport, for debug inspection. */
+  debugPaint(): EngineDebugPaint | null
+}
+
 /** One word-completion engine running on its own thread. */
 export declare class TextPredictor {
   /**
@@ -772,36 +1031,6 @@ export declare class TextPredictor {
    * Rejects when the engine failed to load or the state cannot be written.
    */
   persist(): Promise<void>
-}
-
-/**
- * Dedicated, cancellable terminal writer. The destination must be a TTY that
- * can be independently reopened; pipes and files are deliberately rejected.
- */
-export declare class TtyWriter {
-  /**
-   * Start an independently opened terminal writer. onDrain runs when the
-   * pending bound crosses from above drainThreshold to at/below it, and on
-   * fatal writes even below the threshold. It does not retain the event loop.
-   */
-  constructor(fd: number, drainThreshold: number, onDrain: () => void)
-  /**
-   * Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
-   * JS's thread. Returns a conservative pending UTF-8 byte upper bound.
-   */
-  write(data: string): number
-  /** Conservative UTF-8 bytes not yet written (tightened by the worker). */
-  pending(): number
-  /** True after a terminal write failed; all pending output is dropped. */
-  get dead(): boolean
-  /** Wait for queued output until the deadline. False on timeout or failure. */
-  flushSync(timeoutMs: number): boolean
-  /**
-   * Drain until the deadline, then cancel and join. Never detaches a writer
-   * or leaves old output running after return. Already queued JS callbacks
-   * may still run; callers must ignore callbacks from a stopped writer.
-   */
-  stop(flushTimeoutMs: number): void
 }
 
 /** In-process Git repository handle. */
@@ -1488,6 +1717,9 @@ export interface CaptureRegion {
   height: number
 }
 
+/** The multiplexer hosting the process, or `null` for a direct terminal. */
+export declare function classifyTerminalMultiplexer(env: Record<string, string | undefined>): "herdr" | "tmux" | "screen" | "zellij" | "cmux" | "wmux" | "orca" | null
+
 /** Clipboard image payload encoded as PNG bytes. */
 export interface ClipboardImage {
   /** PNG-encoded image bytes. */
@@ -1865,6 +2097,18 @@ export declare function desktopWindowRoster(): Array<DesktopRosterWindow>
  * Returns `"dark"` or `"light"` on macOS, `null` on other platforms.
  */
 export declare function detectMacOSAppearance(): MacOSAppearance | null
+
+/**
+ * Detect the terminal hosting the process and resolve its capabilities.
+ * Inside tmux this may query the tmux client (once per process).
+ */
+export declare function detectTerminalProfile(env: Record<string, string | undefined>, host: TerminalHostFacts): TerminalProfile
+
+/**
+ * Whether the detected terminal renders 24-bit color (Windows Terminal
+ * always does).
+ */
+export declare function detectTrueColor(env: Record<string, string | undefined>, testRuntime: boolean, platform?: string | undefined | null): boolean
 
 /**
  * Generate an Apple `DeviceCheck` attestation token.
@@ -2277,6 +2521,247 @@ export declare enum Encoding {
 }
 
 /**
+ * A fullscreen-overlay frame on the alternate buffer: the visible overlays
+ * composited onto a blank screen.
+ */
+export interface EngineAltFrame {
+  /** Visible overlays in stack order (later = on top). */
+  overlays: Array<EngineOverlay>
+  /**
+   * The focused component of the top overlay may position the hardware
+   * cursor.
+   */
+  cursor: boolean
+  wantPaint: boolean
+}
+
+/**
+ * Construction options: the output sink, geometry, the environment, and the
+ * facts only the JS host knows. The engine resolves every terminal and
+ * multiplexer fact from the environment itself (see `tui::profile`).
+ */
+export interface EngineConfig {
+  /**
+   * Own this process's stdio: stdout is written from a writer thread (no
+   * control output when it is not a terminal), and attaching input puts
+   * stdin in raw mode and reads it on a thread. False: output is captured
+   * for `takeOutput` and input arrives through `input`.
+   */
+  stdio: boolean
+  columns: number
+  rows: number
+  /** The process environment (`Bun.env`), or a test's replacement. */
+  env: Record<string, string | undefined>
+  /** Bun is running a test entrypoint (`isBunTestRuntime()`). */
+  testRuntime: boolean
+  /** `isTerminalHeadless()`. */
+  headless: boolean
+  stdinTty: boolean
+  stdoutTty: boolean
+  /** Force ConPTY-hosted behavior; defaults to win32 or WSL. */
+  conpty?: boolean
+  /** stdin is a native Windows console handle; defaults to win32. */
+  nativeWindowsConsole?: boolean
+  /** Force whether a TSP surface is expected (test harnesses). */
+  tspExpected?: boolean
+  tspHello: EngineTspHello
+  /** Floor between ordinary frames (`minFrameIntervalMs()`). */
+  frameIntervalMs: number
+}
+
+/** Hardware cursor of the last paint. */
+export interface EngineCursor {
+  x: number
+  y: number
+  visible: boolean
+}
+
+/** Last viewport written, for debug inspection. */
+export interface EngineDebugPaint {
+  lines: Array<string>
+  windowTop: number
+  altScreen: boolean
+  cursor?: EngineCursor
+}
+
+/**
+ * Engine → host notification. Fields beyond `kind` are set per kind:
+ * - `key`: `data`; `paste`: `data`, `enter`; `frameText`: `data` (the watched
+ *   text)
+ * - `appearance`: `dark`, `rgb`, `token`, `changed`
+ * - `privateMode`: `mode`, `supported`, `confirmed`, `status`
+ * - `imageProtocol`: `data` (`"sixel"`): the engine adopted the protocol and
+ *   forced a full repaint
+ * - `programStatus` / `glyph` / `osc99`: `supported`
+ * - `nativeSurface`: `live`; `data` (the `hello` reply JSON) when live on real
+ *   capabilities rather than assumed ones; `reason` when an unconfirmed
+ *   surface was revoked
+ * - `tspFallback`: `reason` (why a Tern pane keeps the classic renderer)
+ * - `keyboardProtocol`: `kitty`
+ * - `cellSize`: `widthPx`, `heightPx`; `disconnected`: `data` (reason)
+ */
+export interface EngineEvent {
+  kind: "key" | "paste" | "render" | "historyReplay" | "frameText" | "resize" | "appearance" | "privateMode" | "imageProtocol" | "programStatus" | "glyph" | "osc99" | "nativeSurface" | "tspFallback" | "keyboardProtocol" | "cellSize" | "inputDrained" | "disconnected"
+  data?: string
+  enter?: string
+  reason?: string
+  live?: boolean
+  dark?: boolean
+  rgb?: number
+  token?: number
+  changed?: boolean
+  mode?: number
+  supported?: boolean
+  confirmed?: boolean
+  status?: number
+  kitty?: boolean
+  widthPx?: number
+  heightPx?: number
+}
+
+/** Discriminant of an [`EngineEvent`]. */
+export declare enum EngineEventKind {
+  Key = 'key',
+  Paste = 'paste',
+  Render = 'render',
+  HistoryReplay = 'historyReplay',
+  FrameText = 'frameText',
+  Resize = 'resize',
+  Appearance = 'appearance',
+  PrivateMode = 'privateMode',
+  ImageProtocol = 'imageProtocol',
+  ProgramStatus = 'programStatus',
+  Glyph = 'glyph',
+  Osc99 = 'osc99',
+  NativeSurface = 'nativeSurface',
+  TspFallback = 'tspFallback',
+  KeyboardProtocol = 'keyboardProtocol',
+  CellSize = 'cellSize',
+  InputDrained = 'inputDrained',
+  Disconnected = 'disconnected'
+}
+
+/** What `beginFrame` asks the host to compose. */
+export declare enum EngineFrameKind {
+  None = 'none',
+  Plan = 'plan',
+  Alt = 'alt',
+  Resize = 'resize'
+}
+
+/** Host view of the next frame, for `beginFrame`. */
+export interface EngineFrameView {
+  /** The topmost visible overlay is fullscreen. */
+  alt: boolean
+  mouse: "off" | "inline" | "full"
+}
+
+/** History rows offered with a plan frame. */
+export interface EngineHistoryBatch {
+  id: number
+  rows: Array<string>
+  replay: boolean
+}
+
+/** Inline image protocol (`TERMINAL.imageProtocol`). */
+export declare enum EngineImageProtocol {
+  Kitty = 'kitty',
+  Iterm2 = 'iterm2',
+  Sixel = 'sixel'
+}
+
+/** Mouse reporting wanted for the next frame. */
+export declare enum EngineMouse {
+  Off = 'off',
+  Inline = 'inline',
+  Full = 'full'
+}
+
+/**
+ * One visible overlay, rendered by the host at its resolved width and
+ * already cut to its maximum height; the engine composites it.
+ */
+export interface EngineOverlay {
+  /** Screen row of the first line (rows outside the screen are skipped). */
+  row: number
+  col: number
+  width: number
+  lines: Array<string>
+}
+
+/** Rows a paint committed, for paint listeners. */
+export interface EnginePaint {
+  history: Array<string>
+  viewport: Array<string>
+  reset: boolean
+  alt: boolean
+  columns: number
+  rows: number
+}
+
+/** A normal-buffer frame. */
+export interface EnginePlanFrame {
+  history?: EngineHistoryBatch
+  viewport: Array<string>
+  /**
+   * Visible overlays in stack order (later = on top), composited onto the
+   * viewport padded to the screen height. Absent or empty: the viewport is
+   * painted as is.
+   */
+  overlays?: Array<EngineOverlay>
+  wantPaint: boolean
+}
+
+/** Outcome of presenting a frame. */
+export interface EnginePresentResult {
+  /** History batch ids to acknowledge to the frame provider, in order. */
+  acknowledged: Array<number>
+  paint?: EnginePaint
+}
+
+/** Options for `requestRender`. */
+export interface EngineRenderRequest {
+  /** Repaint the viewport even when the diff sees no change. */
+  force?: boolean
+  /** Erase native scrollback and replay history (destructive reset). */
+  clearScrollback?: boolean
+  /** Requested by terminal input: paced at the input cadence. */
+  input?: boolean
+  /** Ctrl+C/Escape: give the app's double-press window one frame first. */
+  inputGrace?: boolean
+  /** Paint now instead of on the next tick. */
+  immediate?: boolean
+}
+
+/** The transient resize-buffer frame. */
+export interface EngineResizeFrame {
+  rows: Array<string>
+}
+
+/** How a settled resize refreshes native scrollback. */
+export declare enum EngineResizeScrollback {
+  Append = 'append',
+  Rebuild = 'rebuild',
+  Preserve = 'preserve'
+}
+
+/** The host's Tern Surface Protocol `hello` query (pi-tui owns TSP encoding). */
+export interface EngineTspHello {
+  query: string
+  version: number
+}
+
+/** Mutable normal-buffer viewport from the last provider frame. */
+export interface EngineViewport {
+  /**
+   * Composer row of the viewport's first row; negative while prepended blanks
+   * outweigh replaced rows.
+   */
+  top: number
+  length: number
+}
+
+/**
  * Replace the current process image via `execvp(3)`.
  *
  * On success this never returns: the kernel tears down every other thread and
@@ -2659,6 +3144,12 @@ export declare function hashlineStripPrefixes(lines: Array<string>): Array<strin
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
 
 /**
+ * Whether an explicit session marker of `multiplexer` is present (TERM is
+ * not consulted).
+ */
+export declare function hasTerminalMultiplexerSession(multiplexer: "herdr" | "tmux" | "screen" | "zellij" | "cmux" | "wmux" | "orca", env: Record<string, string | undefined>): boolean
+
+/**
  * How `path` is held by this process: open through another descriptor and
  * locked. `null` when it is not, and always outside Linux.
  *
@@ -2760,6 +3251,61 @@ export interface HtmlToMarkdownOptions {
   hiddenContent?: string
 }
 
+/**
+ * Pixel size of base64 image `data` from its PNG/JPEG/GIF/WebP header;
+ * `null` for another type or a header that does not parse.
+ */
+export declare function imageDimensions(data: string, mimeType: string): ImageDimensions | null
+
+/** Image size in pixels. */
+export interface ImageDimensions {
+  widthPx: number
+  heightPx: number
+}
+
+/**
+ * One render pass of an [`InlineImage`]: its box and the terminal facts the
+ * rows depend on.
+ */
+export interface ImageRenderRequest {
+  /**
+   * Inline image protocol in use (`TERMINAL.imageProtocol`); absent
+   * renders the text fallback.
+   */
+  protocol?: "kitty" | "iterm2" | "sixel"
+  /** Widest the image may draw, in columns. */
+  maxColumns: number
+  /** Tallest the image may draw, in rows. */
+  maxRows?: number
+  /** Terminal cell size in pixels. */
+  cellWidthPx: number
+  cellHeightPx: number
+  /**
+   * Kitty images display through Unicode placeholders
+   * (`TERMINAL.kittyUnicodePlaceholders`).
+   */
+  kittyPlaceholders: boolean
+  /** Kitty commands ride tmux's passthrough envelope (`TERMINAL.tmux`). */
+  tmux: boolean
+  /** Background SIXEL compositing fills translucent pixels with, `0xRRGGBB`. */
+  backgroundRgb: number
+  /**
+   * The rows are bound for native scrollback, which is never repainted: a
+   * SIXEL encode cannot wait for the off-thread encoder.
+   */
+  scrollback: boolean
+  /**
+   * An out-of-order measuring render (`measureRender`), which claims no
+   * display slot in the budget.
+   */
+  measuring: boolean
+  /**
+   * The caller still holds the rows the previous render returned, so an
+   * unchanged image answers `null` instead of rebuilding them.
+   */
+  cached: boolean
+}
+
 /** One stray sloppy payload region inside prose (UTF-16 offsets). */
 export interface InlineSloppyRegion {
   start: number
@@ -2813,6 +3359,12 @@ export interface IpcListenOptions {
    */
   maxFrameBytes?: number
 }
+
+/** True when the classified multiplexer owns the screen grid. */
+export declare function isInsideTerminalMultiplexer(env: Record<string, string | undefined>): boolean
+
+/** Delivery suppressed by `PI_NOTIFICATIONS=off|0|false`. */
+export declare function isNotificationSuppressed(env: Record<string, string | undefined>): boolean
 
 /** Kind enum of the backend selected by default for this build target. */
 export declare function isoBackend(): IsoBackendKind
@@ -2920,6 +3472,18 @@ export declare function isoStart(kind: IsoBackendKind | undefined | null, lower:
 
 /** Tear down a previously started backend at `merged`. */
 export declare function isoStop(kind: IsoBackendKind | undefined | null, merged: string): Promise<void>
+
+/** Whether the process runs in an SSH session. */
+export declare function isSshSession(env: Record<string, string | undefined>): boolean
+
+/** Whether OSC 11 background replies are trusted on this platform. */
+export declare function isTerminalBackgroundQueryTrusted(env: Record<string, string | undefined>, platform?: string | undefined | null): boolean
+
+/**
+ * Whether the environment names a Tern Surface Protocol terminal and the
+ * `hello` probe will run.
+ */
+export declare function isTspExpected(env: Record<string, string | undefined>, headless: boolean, testRuntime: boolean): boolean
 
 /** Event types from Kitty keyboard protocol (flag 2). */
 export declare enum KeyEventType {
@@ -3262,6 +3826,18 @@ export declare function normalizePtyDimensions(cols: number, rows: number): PtyD
 
 /** Decode notebook JSON into the editable cell-marker text. */
 export declare function notebookToEditableText(json: string, displayPath: string): string
+
+/** Where a notification goes. */
+export interface NotificationTarget {
+  protocol: "bell" | "osc99" | "osc9"
+  /** The terminal confirmed OSC 99 support (rich notifications). */
+  osc99Confirmed: boolean
+  /** `isTerminalHeadless()`: delivery is suppressed. */
+  headless: boolean
+  env: Record<string, string | undefined>
+  /** `process.platform`; defaults to the compile target. */
+  platform?: string
+}
 
 /**
  * An opened application: its [`Application`] fields and the window it
@@ -3704,6 +4280,14 @@ export interface SearchResult {
   /** Error message, if any. */
   error?: string
 }
+
+/**
+ * Deliver a notification: multiplexer notifiers first (a pane or surface CLI
+ * is spawned detached, or the sequence is rewritten), then the terminal's
+ * own sequence, plus a Linux D-Bus toast beside a BEL. Returns the sequence
+ * the host must write through the active terminal, if any.
+ */
+export declare function sendTerminalNotification(message: string | TerminalNotification, target: NotificationTarget): string | null
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
@@ -4305,6 +4889,76 @@ export interface SvgCell {
   heightPx: number
 }
 
+/** Process facts JS knows and the environment does not. */
+export interface TerminalHostFacts {
+  /** Bun is running a test entrypoint (`isBunTestRuntime()`). */
+  testRuntime: boolean
+  /** `process.stdout.isTTY`. */
+  stdoutTty: boolean
+  /** `process.platform`; defaults to the compile target. */
+  platform?: string
+}
+
+/**
+ * Every environment variable multiplexer classification reads, including
+ * the TERM fallback.
+ */
+export declare function terminalMultiplexerEnvKeys(): Array<string>
+
+/**
+ * Structured terminal notification. Rich fields are honored only by OSC 99
+ * (Kitty) once support is confirmed; other protocols and the unconfirmed
+ * Kitty path collapse to a single `title: body` line.
+ */
+export interface TerminalNotification {
+  title?: string
+  body?: string
+  id?: string
+  type?: string | string[]
+  urgency?: "low" | "normal" | "critical"
+  iconName?: string
+  sound?: "silent" | "system" | "info" | "warning" | "error" | "question"
+  actions?: "focus" | "report" | "focus-report" | "none"
+  expiresMs?: number
+}
+
+/** The resolved terminal profile (`TERMINAL` in pi-tui). */
+export interface TerminalProfile {
+  id: "kitty" | "ghostty" | "wezterm" | "iterm2" | "vscode" | "alacritty" | "warp" | "orca" | "otty" | "rio" | "tern" | "monstar" | "rex" | "base" | "trueColor"
+  /** Active image protocol (`PI_FORCE_IMAGE_PROTOCOL` when set); absent: none. */
+  imageProtocol?: "kitty" | "iterm2" | "sixel"
+  /** `PI_FORCE_IMAGE_PROTOCOL` pins the protocol (its `off` switch included). */
+  imageProtocolForced: boolean
+  trueColor: boolean
+  /** OSC 8 hyperlinks enabled by default. */
+  hyperlinks: boolean
+  notifyProtocol: "bell" | "osc99" | "osc9"
+  /** DECCARA rectangular-SGR fills (off in the test runtime). */
+  deccara: boolean
+  supportsScreenToScrollback: boolean
+  /** Renders the Kitty OSC 66 text-sizing protocol. */
+  supportsTextSizing: boolean
+  /**
+   * Hangul Compatibility Jamo cell width (1 or 2); absent keeps the platform
+   * default.
+   */
+  hangulJamoWidth?: number
+  /** Colon-form curly underline plus SGR 58/59 underline color. */
+  styledUnderlines: boolean
+  /** Kitty images display through Unicode placeholders. */
+  kittyUnicodePlaceholders: boolean
+  ssh: boolean
+  /** The classified multiplexer, if any. */
+  multiplexer?: "herdr" | "tmux" | "screen" | "zellij" | "cmux" | "wmux" | "orca"
+  /** The classified multiplexer owns the screen grid. */
+  insideMultiplexer: boolean
+  /**
+   * Inside a tmux session: sequences for the outer terminal need the
+   * passthrough envelope.
+   */
+  tmux: boolean
+}
+
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {
   /** Engine: `ngram`, `smollm`, or `apple`. */
@@ -4654,3 +5308,6 @@ export interface WorkspaceDirectoryError {
  * Returns UTF-16 lines with active SGR codes carried across line boundaries.
  */
 export declare function wrapTextWithAnsi(text: string, width: number, tabWidth: number): Array<string>
+
+/** Wrap a control sequence in tmux's DCS passthrough envelope. */
+export declare function wrapTmuxPassthrough(payload: string): string

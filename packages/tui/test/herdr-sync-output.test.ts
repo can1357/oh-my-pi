@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { TUI } from "@oh-my-pi/pi-tui";
-import type { PrivateModeReportHandler } from "@oh-my-pi/pi-tui/terminal";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -24,14 +23,9 @@ const SYNC_OVERRIDE_KEYS = [
 ] as const;
 
 class ReportingTerminal extends VirtualTerminal {
-	#callbacks: PrivateModeReportHandler[] = [];
-
-	onPrivateModeReport(callback: PrivateModeReportHandler): void {
-		this.#callbacks.push(callback);
-	}
-
-	report(...args: Parameters<PrivateModeReportHandler>): void {
-		for (const callback of this.#callbacks) callback(...args);
+	/** Answer DECRQM the way the terminal would: a DECRPM report on stdin (`status` defaults to reset / permanently reset). */
+	report(mode: number, supported: boolean, _confirmed?: boolean, status?: number): void {
+		this.sendInput(`\x1b[?${mode};${status ?? (supported ? 2 : 4)}$y`);
 	}
 }
 

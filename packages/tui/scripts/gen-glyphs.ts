@@ -1,9 +1,10 @@
 /**
- * Generate `src/theme/glyph-bundle.json`: every private-use icon the TUI and
- * coding-agent emit, as Glyph Protocol `glyf` payloads pulled from a Nerd Font
- * Mono face. The bundle is what `glyph-protocol.ts` registers at startup on
- * terminals that implement the protocol, so the nerd symbol preset renders
- * without a patched font installed.
+ * Generate `crates/pi-natives/src/tui/profile/glyph-bundle.json`: every
+ * private-use icon the TUI and coding-agent emit, as Glyph Protocol `glyf`
+ * payloads pulled from a Nerd Font Mono face. The native terminal engine
+ * embeds the bundle and registers it at startup on terminals that implement
+ * the protocol, so the nerd symbol preset renders without a patched font
+ * installed.
  *
  * Usage: `bun run gen:glyphs [--font <path/to/NerdFontMono.ttf>]`
  *
@@ -27,7 +28,7 @@ const NERD_FONTS_MEMBER = "JetBrainsMonoNerdFontMono-Regular.ttf";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const SCAN_ROOTS = ["packages/tui/src", "packages/coding-agent/src"].map(dir => path.join(REPO_ROOT, dir));
-const OUTPUT = path.join(REPO_ROOT, "packages/tui/src/theme/glyph-bundle.json");
+const OUTPUT = path.join(REPO_ROOT, "crates/pi-natives/src/tui/profile/glyph-bundle.json");
 
 /** Powerline Symbols block: arrows and caps that must fill the cell edge to edge. */
 const POWERLINE_RANGE: readonly [number, number] = [0xe0b0, 0xe0d7];
@@ -48,7 +49,7 @@ async function collectCodepoints(): Promise<number[]> {
 	const found = new Set<number>();
 	for (const root of SCAN_ROOTS) {
 		for await (const rel of glob.scan({ cwd: root })) {
-			if (rel.endsWith(".test.ts") || rel.endsWith("glyph-bundle.json")) continue;
+			if (rel.endsWith(".test.ts")) continue;
 			const text = await Bun.file(path.join(root, rel)).text();
 			for (const ch of text) {
 				const cp = ch.codePointAt(0)!;

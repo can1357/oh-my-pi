@@ -2,8 +2,7 @@ import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as natives from "@oh-my-pi/pi-natives";
-import { DiffSide, DiffStream } from "@oh-my-pi/pi-natives";
+import { DiffSide, DiffStream, ImageBudget } from "@oh-my-pi/pi-natives";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import {
@@ -263,9 +262,12 @@ describe("git TUI asset previews", () => {
 		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
 		const originalProtocol = terminal.imageProtocol;
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
 		try {
-			const pane = new DiffPane();
+			const budget = new ImageBudget(8);
+			// A landed encode asks the budget for the repaint that shows it.
+			const landed = Promise.withResolvers<void>();
+			const requestRender = spyOn(budget, "requestRender").mockImplementation(() => landed.resolve());
+			const pane = new DiffPane(budget);
 			pane.setAsset(
 				"image.png",
 				{ kind: "empty" },
@@ -282,15 +284,15 @@ describe("git TUI asset previews", () => {
 					},
 				},
 			);
-			pane.render(80, 12);
-			await encodeSixel.mock.results[0]?.value;
-			pane.render(80, 12);
+			expect(pane.render(80, 12).join("")).not.toContain("\x1bP");
+			await landed.promise;
 			pane.render(80, 12);
 			// A fresh Image per render would start a new encode every frame and
 			// never show the one that landed.
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
+			expect(pane.render(80, 12).join("")).toContain("\x1bP");
+			await Bun.sleep(20);
+			expect(requestRender).toHaveBeenCalledTimes(1);
 		} finally {
-			encodeSixel.mockRestore();
 			terminal.imageProtocol = originalProtocol;
 		}
 	});

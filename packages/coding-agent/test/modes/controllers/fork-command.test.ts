@@ -2,7 +2,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { classifyTerminalMultiplexer, type TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-natives";
+import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";

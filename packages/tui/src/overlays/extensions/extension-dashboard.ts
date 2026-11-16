@@ -601,6 +601,16 @@ export class ExtensionDashboard implements Component {
 		this.#requestRender();
 	}
 
+	handlePaste(text: string): void {
+		this.#mainList.handlePaste(text);
+		const query = this.#mainList.getSearchQuery();
+		if (query !== this.#state.searchQuery) {
+			this.#state.searchQuery = query;
+			this.#state.searchFiltered = applyFilter(this.#state.tabFiltered, query);
+		}
+		this.#requestRender();
+	}
+
 	#close(): void {
 		this.dispose();
 		this.onClose?.();

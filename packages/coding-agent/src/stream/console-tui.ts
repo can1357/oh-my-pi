@@ -122,6 +122,11 @@ class StreamConsoleComponent implements Component, Focusable {
 		this.#ui.requestRender();
 	}
 
+	handlePaste(text: string): void {
+		this.#input.handlePaste(text);
+		this.#ui.requestRender();
+	}
+
 	/**
 	 * Native console: status and details lines, the log (the terminal scrolls
 	 * and keeps the tail), the chat input and the key hints.

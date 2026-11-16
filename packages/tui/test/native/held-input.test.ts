@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
 import type { Component } from "@oh-my-pi/pi-tui/tui";
 import { TspHarness } from "./tsp-harness";
 
@@ -118,7 +118,8 @@ describe("keystrokes during a Tern startup prepaint", () => {
 		h.flush();
 		h.tui.setFocus(dialog);
 		h.terminal.send("\r");
-		h.flush();
+		// A lone Enter leaves the stdin parser once its 10 ms raw-paste classification window closes.
+		h.flush(10);
 		expect(dialog.keys).toEqual(["\r"]);
 
 		h.tui.setFocus(editor);

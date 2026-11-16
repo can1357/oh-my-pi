@@ -14,7 +14,7 @@ import type { Token, Tokens } from "@oh-my-pi/pi-utils/marked";
 import { type ChartPlan, buildChart, planChart, shouldJudge, worthCharting } from "../charts/chart-plan";
 import { renderChartSvg } from "../charts/chart-svg";
 import { analyzeTable, type TableAnalysis } from "../charts/table-data";
-import type { ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import { lexDocument } from "../components/markdown";
 import type { Component } from "../tui";
 import { SvgFigure } from "./svg-figure";

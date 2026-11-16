@@ -9,8 +9,9 @@
 //! - truncateToWidth returns the original `JsString` when possible
 
 use std::{
+	borrow::Cow,
 	cell::RefCell,
-	sync::atomic::{AtomicU8, Ordering},
+	sync::atomic::{AtomicU8, AtomicU32, Ordering},
 };
 
 use napi::{JsString, bindgen_prelude::*};
@@ -415,20 +416,28 @@ fn write_u32_u16(out: &mut Vec<u16>, mut val: u32) {
 // ANSI Sequence Detection - UTF-16
 // ============================================================================
 
+/// Numeric value of one code unit: a UTF-16 unit of a JS string or a UTF-8
+/// byte of a Rust one. Every unit the escape grammar inspects is ASCII, so
+/// both encodings scan identically.
 #[inline]
-fn ansi_seq_len_u16(data: &[u16], pos: usize) -> Option<usize> {
-	if pos >= data.len() || data[pos] != ESC {
+fn unit_code<U: Into<u32>>(unit: U) -> u32 {
+	unit.into()
+}
+
+#[inline]
+fn ansi_seq_len<U: Copy + Into<u32>>(data: &[U], pos: usize) -> Option<usize> {
+	if pos >= data.len() || unit_code(data[pos]) != 0x1b {
 		return None;
 	}
 	if pos + 1 >= data.len() {
 		return None;
 	}
 
-	match data[pos + 1] {
+	match unit_code(data[pos + 1]) {
 		0x5b => {
 			// '[' CSI
-			for (i, b) in data[pos + 2..].iter().enumerate() {
-				if (0x40..=0x7e).contains(b) {
+			for (i, &u) in data[pos + 2..].iter().enumerate() {
+				if (0x40..=0x7e).contains(&unit_code(u)) {
 					return Some(i + 3);
 				}
 			}
@@ -436,11 +445,13 @@ fn ansi_seq_len_u16(data: &[u16], pos: usize) -> Option<usize> {
 		},
 		0x5d => {
 			// ']' OSC
-			for (i, &b) in data[pos + 2..].iter().enumerate() {
-				if b == 0x07 {
+			for (i, &u) in data[pos + 2..].iter().enumerate() {
+				let code = unit_code(u);
+				if code == 0x07 {
 					return Some(i + 3);
 				}
-				if b == ESC && data.get(pos + 2 + i + 1) == Some(&0x5c) {
+				if code == 0x1b && data.get(pos + 2 + i + 1).map(|&next| unit_code(next)) == Some(0x5c)
+				{
 					return Some(i + 4);
 				}
 			}
@@ -451,11 +462,13 @@ fn ansi_seq_len_u16(data: &[u16], pos: usize) -> Option<usize> {
 			// ST (`ESC \`) or, as most terminals also accept (like OSC), BEL.
 			// The TUI's cursor marker is a BEL-terminated APC, so BEL must
 			// close these too.
-			for (i, &b) in data[pos + 2..].iter().enumerate() {
-				if b == 0x07 {
+			for (i, &u) in data[pos + 2..].iter().enumerate() {
+				let code = unit_code(u);
+				if code == 0x07 {
 					return Some(i + 3);
 				}
-				if b == ESC && data.get(pos + 2 + i + 1) == Some(&0x5c) {
+				if code == 0x1b && data.get(pos + 2 + i + 1).map(|&next| unit_code(next)) == Some(0x5c)
+				{
 					return Some(i + 4);
 				}
 			}
@@ -463,8 +476,8 @@ fn ansi_seq_len_u16(data: &[u16], pos: usize) -> Option<usize> {
 		},
 		0x20..=0x2f => {
 			// ESC + intermediates + final byte
-			for (i, b) in data[pos + 2..].iter().enumerate() {
-				if (0x30..=0x7e).contains(b) {
+			for (i, &u) in data[pos + 2..].iter().enumerate() {
+				if (0x30..=0x7e).contains(&unit_code(u)) {
 					return Some(i + 3);
 				}
 			}
@@ -509,38 +522,42 @@ struct Osc66Info<'a> {
 }
 
 #[inline]
-fn parse_ascii_usize_u16(data: &[u16]) -> Option<usize> {
+fn parse_ascii_usize<U: Copy + Into<u32>>(data: &[U]) -> Option<usize> {
 	if data.is_empty() {
 		return None;
 	}
 
 	let mut value = 0usize;
 	for &u in data {
-		if !(b'0' as u16..=b'9' as u16).contains(&u) {
+		let code = unit_code(u);
+		if !(0x30..=0x39).contains(&code) {
 			return None;
 		}
 		value = value
 			.saturating_mul(10)
-			.saturating_add((u - b'0' as u16) as usize);
+			.saturating_add((code - 0x30) as usize);
 	}
 	Some(value)
 }
 
 #[inline]
-fn osc66_meta_payload_u16(seq: &[u16]) -> Option<(&[u16], &[u16])> {
+fn osc66_meta_payload<U: Copy + Into<u32>>(seq: &[U]) -> Option<(&[U], &[U])> {
 	if seq.len() < 7
-		|| seq[0] != ESC
-		|| seq[1] != b']' as u16
-		|| seq[2] != b'6' as u16
-		|| seq[3] != b'6' as u16
-		|| seq[4] != b';' as u16
+		|| unit_code(seq[0]) != 0x1b
+		|| unit_code(seq[1]) != u32::from(b']')
+		|| unit_code(seq[2]) != u32::from(b'6')
+		|| unit_code(seq[3]) != u32::from(b'6')
+		|| unit_code(seq[4]) != u32::from(b';')
 	{
 		return None;
 	}
 
-	let payload_end = if *seq.last()? == 0x07 {
+	let payload_end = if unit_code(*seq.last()?) == 0x07 {
 		seq.len() - 1
-	} else if seq.len() >= 8 && seq[seq.len() - 2] == ESC && seq[seq.len() - 1] == b'\\' as u16 {
+	} else if seq.len() >= 8
+		&& unit_code(seq[seq.len() - 2]) == 0x1b
+		&& unit_code(seq[seq.len() - 1]) == u32::from(b'\\')
+	{
 		seq.len() - 2
 	} else {
 		return None;
@@ -548,7 +565,7 @@ fn osc66_meta_payload_u16(seq: &[u16]) -> Option<(&[u16], &[u16])> {
 
 	let mut sep = 5usize;
 	while sep < payload_end {
-		if seq[sep] == b';' as u16 {
+		if unit_code(seq[sep]) == u32::from(b';') {
 			return Some((&seq[5..sep], &seq[sep + 1..payload_end]));
 		}
 		sep += 1;
@@ -558,27 +575,27 @@ fn osc66_meta_payload_u16(seq: &[u16]) -> Option<(&[u16], &[u16])> {
 }
 
 #[inline]
-fn parse_osc66_meta_u16(meta: &[u16]) -> (usize, Option<usize>) {
+fn parse_osc66_meta<U: Copy + Into<u32>>(meta: &[U]) -> (usize, Option<usize>) {
 	let mut scale = 1usize;
 	let mut explicit_width = None;
 	let mut part_start = 0usize;
 	let mut i = 0usize;
 
 	while i <= meta.len() {
-		if i == meta.len() || meta[i] == b':' as u16 {
+		if i == meta.len() || unit_code(meta[i]) == u32::from(b':') {
 			let part = &meta[part_start..i];
-			if let Some(eq) = part.iter().position(|&u| u == b'=' as u16) {
+			if let Some(eq) = part.iter().position(|&u| unit_code(u) == u32::from(b'=')) {
 				let key = &part[..eq];
 				let value = &part[eq + 1..];
 				if key.len() == 1 {
-					match key[0] {
+					match unit_code(key[0]) {
 						0x73
-							if let Some(parsed) = parse_ascii_usize_u16(value)
+							if let Some(parsed) = parse_ascii_usize(value)
 								&& (1..=7).contains(&parsed) =>
 						{
 							scale = parsed;
 						},
-						0x77 if let Some(parsed) = parse_ascii_usize_u16(value) => {
+						0x77 if let Some(parsed) = parse_ascii_usize(value) => {
 							explicit_width = Some(parsed);
 						},
 						_ => {},
@@ -595,8 +612,8 @@ fn parse_osc66_meta_u16(meta: &[u16]) -> (usize, Option<usize>) {
 
 #[inline]
 fn osc66_info_u16(seq: &[u16], tab_width: usize) -> Option<Osc66Info<'_>> {
-	let (meta, payload) = osc66_meta_payload_u16(seq)?;
-	let (scale, explicit_width) = parse_osc66_meta_u16(meta);
+	let (meta, payload) = osc66_meta_payload(seq)?;
+	let (scale, explicit_width) = parse_osc66_meta(meta);
 	let base_width = explicit_width.unwrap_or_else(|| visible_width_u16(payload, tab_width));
 	Some(Osc66Info { payload, scale, width: scale.saturating_mul(base_width) })
 }
@@ -672,9 +689,23 @@ const HANGUL_COMPAT_JAMO_NARROW_WIDTH: usize = 1;
 /// `set_hangul_compat_jamo_width_override`.
 static HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
+/// Monotonic epoch of the width-affecting runtime configuration. Any cache or
+/// carried-width sidecar derived from visible widths must be stamped with the
+/// epoch at computation time and discarded on mismatch, so a Hangul
+/// Compatibility Jamo width change invalidates every derived width.
+static WIDTH_CONFIG_EPOCH: AtomicU32 = AtomicU32::new(0);
+
 #[napi]
 pub fn set_hangul_compat_jamo_width_override(value: u8) {
-	HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.store(value, Ordering::Relaxed);
+	if HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.swap(value, Ordering::Relaxed) != value {
+		WIDTH_CONFIG_EPOCH.fetch_add(1, Ordering::Relaxed);
+	}
+}
+
+/// Current width-configuration epoch; it changes whenever
+/// [`set_hangul_compat_jamo_width_override`] changes the effective override.
+pub(crate) fn width_config_epoch() -> u32 {
+	WIDTH_CONFIG_EPOCH.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -824,7 +855,7 @@ fn visible_width_u16_up_to(data: &[u16], limit: usize, tab_width: usize) -> (usi
 
 	while i < len {
 		if data[i] == ESC {
-			if let Some(seq_len) = ansi_seq_len_u16(data, i) {
+			if let Some(seq_len) = ansi_seq_len(data, i) {
 				let seq = &data[i..i + seq_len];
 				if let Some(seq_width) = osc66_visible_width_u16(seq, tab_width) {
 					width = width.saturating_add(seq_width);
@@ -872,6 +903,67 @@ fn visible_width_u16_up_to(data: &[u16], limit: usize, tab_width: usize) -> (usi
 
 fn visible_width_u16(data: &[u16], tab_width: usize) -> usize {
 	visible_width_u16_up_to(data, usize::MAX, tab_width).0
+}
+
+/// Visible width of UTF-8 `text` in terminal cells: the same model as the
+/// JS-facing [`visible_width`] (escape sequences are zero cells, OSC 66
+/// payloads scale by `s=`/`w=`, tabs are `tab_width` cells, Hangul
+/// Compatibility Jamo follow the runtime override), measured without a
+/// UTF-16 round trip.
+pub(crate) fn visible_width_str(text: &str, tab_width: usize) -> usize {
+	let bytes = text.as_bytes();
+	let len = bytes.len();
+	let mut width = 0usize;
+	let mut i = 0usize;
+
+	while i < len {
+		if bytes[i] == 0x1b {
+			if let Some(seq_len) = ansi_seq_len(bytes, i) {
+				// ESC and every sequence terminator are ASCII, so the sequence
+				// lies on character boundaries.
+				if let Some(seq_width) = osc66_visible_width_str(&text[i..i + seq_len], tab_width) {
+					width = width.saturating_add(seq_width);
+				}
+				i += seq_len;
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+
+		let start = i;
+		let mut is_ascii = true;
+		while i < len && bytes[i] != 0x1b {
+			if bytes[i] > 0x7f {
+				is_ascii = false;
+			}
+			i += 1;
+		}
+
+		if is_ascii {
+			for &b in &bytes[start..i] {
+				width += ascii_cell_width_u16(u16::from(b), tab_width);
+			}
+		} else {
+			for g in xutf::graphemes_str(&text[start..i]) {
+				width += grapheme_width_str(g, tab_width);
+			}
+		}
+	}
+
+	width
+}
+
+fn osc66_visible_width_str(seq: &str, tab_width: usize) -> Option<usize> {
+	let (meta, payload) = osc66_meta_payload(seq.as_bytes())?;
+	let (scale, explicit_width) = parse_osc66_meta(meta);
+	let base_width = explicit_width.unwrap_or_else(|| {
+		// The payload sits between the ASCII `;` after the metadata and the
+		// ASCII terminator, so slicing `seq` there keeps character boundaries.
+		let start = 5 + meta.len() + 1;
+		visible_width_str(&seq[start..start + payload.len()], tab_width)
+	});
+	Some(scale.saturating_mul(base_width))
 }
 
 fn append_visible_range_plain_u16<F>(
@@ -1017,7 +1109,7 @@ fn update_state_from_text(data: &[u16], state: &mut WrapState) {
 	let mut i = 0usize;
 	while i < data.len() {
 		if data[i] == ESC
-			&& let Some(seq_len) = ansi_seq_len_u16(data, i)
+			&& let Some(seq_len) = ansi_seq_len(data, i)
 		{
 			state.apply_ansi_u16(&data[i..i + seq_len]);
 			i += seq_len;
@@ -1031,10 +1123,10 @@ fn token_is_whitespace(token: &[u16]) -> bool {
 	let mut i = 0usize;
 	while i < token.len() {
 		if token[i] == ESC
-			&& let Some(seq_len) = ansi_seq_len_u16(token, i)
+			&& let Some(seq_len) = ansi_seq_len(token, i)
 		{
 			let seq = &token[i..i + seq_len];
-			if let Some((_, payload)) = osc66_meta_payload_u16(seq)
+			if let Some((_, payload)) = osc66_meta_payload(seq)
 				&& payload.iter().any(|&u| u != b' ' as u16)
 			{
 				return false;
@@ -1245,7 +1337,7 @@ fn split_into_tokens_with_ansi(line: &[u16], tab_width: usize) -> LineTokens {
 
 	while i < line.len() {
 		if line[i] == ESC
-			&& let Some(seq_len) = ansi_seq_len_u16(line, i)
+			&& let Some(seq_len) = ansi_seq_len(line, i)
 		{
 			splitter.push_ansi(&line[i..i + seq_len]);
 			i += seq_len;
@@ -1256,7 +1348,7 @@ fn split_into_tokens_with_ansi(line: &[u16], tab_width: usize) -> LineTokens {
 		// the run as ordinary content.
 		let start = i;
 		let mut is_ascii = true;
-		while i < line.len() && !(line[i] == ESC && ansi_seq_len_u16(line, i).is_some()) {
+		while i < line.len() && !(line[i] == ESC && ansi_seq_len(line, i).is_some()) {
 			is_ascii &= line[i] <= 0x7f;
 			i += 1;
 		}
@@ -1291,7 +1383,7 @@ fn break_long_word(
 
 	while i < word.len() {
 		if word[i] == ESC
-			&& let Some(seq_len) = ansi_seq_len_u16(word, i)
+			&& let Some(seq_len) = ansi_seq_len(word, i)
 		{
 			let seq = &word[i..i + seq_len];
 			if let Some(seq_width) = osc66_visible_width_u16(seq, tab_width) {
@@ -1313,7 +1405,7 @@ fn break_long_word(
 		}
 
 		if word[i] == ESC {
-			// An ESC that ansi_seq_len_u16 could not classify (truncated or
+			// An ESC that ansi_seq_len could not classify (truncated or
 			// unknown sequence). Emit it as a zero-width byte and advance —
 			// otherwise the non-ESC scan below cannot move past it and the loop
 			// spins forever.
@@ -1523,23 +1615,59 @@ fn truncate_to_width_impl<'env>(
 	pad: bool,
 	tab_width: usize,
 ) -> Either<JsString<'env>, Utf16String> {
+	match truncate_to_width_u16(text, max_width, ellipsis_kind, pad, tab_width) {
+		Some(out) => Either::B(build_utf16_string(out)),
+		// Return original JsString handle: zero output allocation.
+		None => Either::A(original),
+	}
+}
+
+/// Truncate UTF-8 `text` to `max_width` visible cells, preserving ANSI codes;
+/// the `&str` twin of the JS-facing [`truncate_to_width`]. Text that already
+/// fits (and needs no padding) is returned borrowed.
+pub(crate) fn truncate_to_width_str(
+	text: &str,
+	max_width: usize,
+	ellipsis_kind: Ellipsis,
+	pad: bool,
+	tab_width: usize,
+) -> Cow<'_, str> {
+	if !pad && visible_width_str(text, tab_width) <= max_width {
+		return Cow::Borrowed(text);
+	}
+	// Only an over-wide (or padded) row pays for the UTF-16 round trip into
+	// the shared truncation engine.
+	let units: Vec<u16> = text.encode_utf16().collect();
+	match truncate_to_width_u16(&units, max_width, ellipsis_kind, pad, tab_width) {
+		Some(out) => Cow::Owned(String::from_utf16_lossy(&out)),
+		None => Cow::Borrowed(text),
+	}
+}
+
+/// The truncated (or padded) text, or `None` when `text` is returned as is.
+fn truncate_to_width_u16(
+	text: &[u16],
+	max_width: usize,
+	ellipsis_kind: Ellipsis,
+	pad: bool,
+	tab_width: usize,
+) -> Option<Vec<u16>> {
 	// Fast path: early-exit width check
 	let (text_w, exceeded) = visible_width_u16_up_to(text, max_width, tab_width);
 	if !exceeded {
 		if !pad {
-			// Return original JsString handle: zero output allocation.
-			return Either::A(original);
+			return None;
 		}
 
 		if text_w < max_width {
 			let mut out = Vec::with_capacity(text.len() + (max_width - text_w));
 			out.extend_from_slice(text);
 			out.resize(out.len() + (max_width - text_w), b' ' as u16);
-			return Either::B(build_utf16_string(out));
+			return Some(out);
 		}
 
-		// Exactly fits and padding requested: return original is still fine.
-		return Either::A(original);
+		// Exactly fits and padding requested: nothing to change.
+		return None;
 	}
 
 	// Map ellipsis kind to UTF-16 data and width
@@ -1571,7 +1699,7 @@ fn truncate_to_width_impl<'env>(
 		if pad && w < max_width {
 			out.resize(out.len() + (max_width - w), b' ' as u16);
 		}
-		return Either::B(build_utf16_string(out));
+		return Some(out);
 	}
 
 	// Main truncation
@@ -1584,7 +1712,7 @@ fn truncate_to_width_impl<'env>(
 
 	while i < text_len {
 		if text[i] == ESC {
-			if let Some(seq_len) = ansi_seq_len_u16(text, i) {
+			if let Some(seq_len) = ansi_seq_len(text, i) {
 				let seq = &text[i..i + seq_len];
 				if let Some(osc66) = osc66_info_u16(seq, tab_width) {
 					let span_end = w.saturating_add(osc66.width);
@@ -1675,7 +1803,7 @@ fn truncate_to_width_impl<'env>(
 		}
 	}
 
-	Either::B(build_utf16_string(out))
+	Some(out)
 }
 
 // ============================================================================
@@ -1703,7 +1831,7 @@ fn slice_with_width_impl(
 
 	while i < line_len && current_col < end_col {
 		if line[i] == ESC {
-			if let Some(seq_len) = ansi_seq_len_u16(line, i) {
+			if let Some(seq_len) = ansi_seq_len(line, i) {
 				let seq = &line[i..i + seq_len];
 				if let Some(osc66) = osc66_info_u16(seq, tab_width) {
 					let span_start = current_col;
@@ -1800,7 +1928,7 @@ fn slice_with_width_impl(
 	// follow
 	while i < line.len() {
 		if line[i] == ESC
-			&& let Some(len) = ansi_seq_len_u16(line, i)
+			&& let Some(len) = ansi_seq_len(line, i)
 		{
 			let seq = &line[i..i + len];
 			if osc66_visible_width_u16(seq, tab_width).is_none() {
@@ -1877,7 +2005,7 @@ fn extract_segments_impl(
 
 	while i < line_len && current_col < done_col {
 		if line[i] == ESC {
-			if let Some(seq_len) = ansi_seq_len_u16(line, i) {
+			if let Some(seq_len) = ansi_seq_len(line, i) {
 				let seq = &line[i..i + seq_len];
 				if let Some(osc66) = osc66_info_u16(seq, tab_width) {
 					let span_start = current_col;
@@ -2065,6 +2193,40 @@ pub fn extract_segments(
 	})
 }
 
+/// Slice visible columns from UTF-8 `line`: the `&str` twin of the JS-facing
+/// [`slice_with_width`]. Returns the slice and its width in cells.
+pub(crate) fn slice_with_width_str(
+	line: &str,
+	start_col: usize,
+	length: usize,
+	strict: bool,
+	tab_width: usize,
+) -> (String, usize) {
+	if length == 0 {
+		return (String::new(), 0);
+	}
+	let units: Vec<u16> = line.encode_utf16().collect();
+	let (out, width) = slice_with_width_impl(&units, start_col, length, strict, tab_width);
+	(String::from_utf16_lossy(&out), width)
+}
+
+/// The before/after slices of UTF-8 `line` around an overlay region: the
+/// `&str` twin of the JS-facing [`extract_segments`]. Returns `(before,
+/// before_width, after, after_width)`.
+pub(crate) fn extract_segments_str(
+	line: &str,
+	before_end: usize,
+	after_start: usize,
+	after_len: usize,
+	strict_after: bool,
+	tab_width: usize,
+) -> (String, usize, String, usize) {
+	let units: Vec<u16> = line.encode_utf16().collect();
+	let (before, before_width, after, after_width) =
+		extract_segments_impl(&units, before_end, after_start, after_len, strict_after, tab_width);
+	(String::from_utf16_lossy(&before), before_width, String::from_utf16_lossy(&after), after_width)
+}
+
 // ============================================================================
 // visibleWidth
 // ============================================================================
@@ -2201,8 +2363,8 @@ mod tests {
 	#[test]
 	fn test_ansi_detection() {
 		let data = to_u16("\x1b[31mred\x1b[0m");
-		assert_eq!(ansi_seq_len_u16(&data, 0), Some(5)); // \x1b[31m
-		assert_eq!(ansi_seq_len_u16(&data, 8), Some(4)); // \x1b[0m
+		assert_eq!(ansi_seq_len(&data, 0), Some(5)); // \x1b[31m
+		assert_eq!(ansi_seq_len(&data, 8), Some(4)); // \x1b[0m
 	}
 
 	#[test]
@@ -2358,7 +2520,7 @@ mod tests {
 
 	#[test]
 	fn test_wrap_text_with_ansi_unclassified_escape_in_long_word_terminates() {
-		// Defensive: an ESC `ansi_seq_len_u16` cannot classify (here `ESC 0x01`)
+		// Defensive: an ESC `ansi_seq_len` cannot classify (here `ESC 0x01`)
 		// inside an overflowing word must not spin the break loop.
 		let data = to_u16("aaaaaaaaaa\x1b\u{1}bbbbbbbbbb");
 		let lines = wrap_text_with_ansi_impl(&data, 4, DEFAULT_TAB_WIDTH);
@@ -2435,5 +2597,61 @@ mod tests {
 		assert_eq!(rows.len(), 2);
 		assert!(rows[0].starts_with("\x1b[31m一二三"));
 		assert!(rows[1].starts_with("\x1b[31m四五六"));
+	}
+
+	#[test]
+	fn test_visible_width_str_matches_the_utf16_engine() {
+		for text in [
+			"",
+			"hello",
+			"a\tb",
+			"\x1b[31mhello\x1b[0m",
+			"\x1b[38;5;196mred\x1b[0m │ 中文 \u{26A0}\u{FE0F}",
+			// BEL-terminated APC (the TUI cursor marker) and a Kitty graphics APC.
+			"ab\x1b_pi:c\x07cd\x1b_Ga=p,q=2\x1b\\",
+			// OSC 66: scaled payload, explicit width, and an unscaled span.
+			"\x1b]66;s=2;Title\x1b\\",
+			"x\x1b]66;s=3:w=2;ignored\x07y",
+			"\x1b]66;;中文\x1b\\",
+			"\x1b]8;;https://example.com\x07link\x1b]8;;\x07",
+			// Unterminated and unclassifiable escapes.
+			"a\x1b[31",
+			"a\x1b\x01b",
+			"한글 \u{3131}\u{3164}\u{314F}",
+			"e\u{301}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+		] {
+			assert_eq!(
+				visible_width_str(text, DEFAULT_TAB_WIDTH),
+				visible_width_u16(&to_u16(text), DEFAULT_TAB_WIDTH),
+				"{text:?}"
+			);
+		}
+		assert_eq!(visible_width_str("\x1b]66;s=2;Title\x1b\\", DEFAULT_TAB_WIDTH), 10);
+		assert_eq!(visible_width_str("ab\x1b_pi:c\x07cd", DEFAULT_TAB_WIDTH), 4);
+	}
+
+	#[test]
+	fn test_truncate_to_width_str() {
+		// Fits: the input comes back borrowed.
+		assert!(matches!(
+			truncate_to_width_str("\x1b[31mhello\x1b[0m", 5, Ellipsis::Omit, false, DEFAULT_TAB_WIDTH),
+			Cow::Borrowed("\x1b[31mhello\x1b[0m")
+		));
+		assert_eq!(
+			truncate_to_width_str(
+				"\x1b[31mhello world\x1b[0m",
+				5,
+				Ellipsis::Omit,
+				false,
+				DEFAULT_TAB_WIDTH
+			),
+			"\x1b[31mhello\x1b[0m"
+		);
+		assert_eq!(
+			truncate_to_width_str("中文字", 5, Ellipsis::Unicode, false, DEFAULT_TAB_WIDTH),
+			"中文…"
+		);
+		assert_eq!(truncate_to_width_str("ab", 4, Ellipsis::Omit, true, DEFAULT_TAB_WIDTH), "ab  ");
+		assert_eq!(truncate_to_width_str("abc", 0, Ellipsis::Omit, false, DEFAULT_TAB_WIDTH), "");
 	}
 }

@@ -24,7 +24,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
-import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-natives";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -1997,7 +1997,7 @@ export class CommandController {
 	 * their input. Returns the detach function.
 	 */
 	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
-		return this.ctx.ui.addInputListener(
+		const removeKeys = this.ctx.ui.addInputListener(
 			data => {
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
@@ -2007,6 +2007,20 @@ export class CommandController {
 			},
 			{ prepend: true },
 		);
+		// Pastes into the composer go to the command too, as a terminal would send them.
+		const removePastes = this.ctx.ui.addPasteListener(
+			text => {
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				const bytes = component.encodePtyPaste(text);
+				if (bytes) write(bytes);
+				return { consume: true };
+			},
+			{ prepend: true },
+		);
+		return () => {
+			removeKeys();
+			removePastes();
+		};
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<boolean> {

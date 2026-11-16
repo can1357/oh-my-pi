@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type TerminalFrameProvider, TUI } from "@oh-my-pi/pi-tui";
-import { emergencyTerminalRestore, ProcessTerminal, setAltScreenActive } from "@oh-my-pi/pi-tui/terminal";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { emergencyTerminalRestore, type ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import { ManualScheduler } from "./helpers/manual-scheduler";
+import { type FakeTty, fakeProcessTty, NOOP_HOST } from "./helpers/process-tty";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 // Regression coverage for the Windows shell-handoff corruption on exit:
 // `emergencyTerminalRestore()` used to write DECRST 1049 ("leave alternate
@@ -11,124 +13,140 @@ import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 // CursorRestoreState() for it — with no prior DECSC save the cursor jumps to
 // the viewport home. Since the restore runs from a postmortem cleanup callback
 // AFTER the TUI has already stopped and printed its exit hints, the parent
-// shell prompt then lands on top of the dead frame (Ctrl-C exit screenshot in
-// the report). The contract: `\x1b[?1049l` is emitted only when the alternate
-// screen is actually tracked as active.
+// shell prompt then lands on top of the dead frame. The contract: the restore
+// leaves the alternate screen only when the session entered it (a fullscreen
+// overlay), and nothing is written once output was handed back to the shell.
 
-const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
-// This suite asserts the real emergencyTerminalRestore() write path, so it opts
-// out of the test-default headless suppression, restoring it in afterEach.
-let previousHeadless = false;
-
-function restoreProperty(target: object, key: string, descriptor: PropertyDescriptor | undefined): void {
-	if (descriptor) {
-		Object.defineProperty(target, key, descriptor);
-		return;
-	}
-	delete (target as Record<string, unknown>)[key];
-}
-
-function startCapturedTerminal() {
-	const writes: string[] = [];
-	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-	Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
-	vi.spyOn(process, "kill").mockReturnValue(true);
-	vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
-	vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
-	vi.spyOn(process.stdin, "setEncoding").mockImplementation(() => process.stdin);
-	vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-		writes.push(typeof chunk === "string" ? chunk : chunk.toString());
-		return true;
-	});
-
-	// conpty: false keeps kitty flags at >5u regardless of ambient WSL env.
-	const terminal = new ProcessTerminal({ conpty: false });
-	terminal.start(
-		() => {},
-		() => {},
-	);
-	return { terminal, writes };
-}
+const ALT_ENTER = "\x1b[?1049h";
+const ALT_EXIT = "\x1b[?1049l";
+const KITTY_POP = "\x1b[<u";
+/** The terminal's answer to the kitty keyboard query: supported, no flags set. */
+const KITTY_REPLY = "\x1b[?0u";
+/** Long enough for any due frame (the frame cadence is ~33 ms). */
+const FRAME_MS = 100;
 
 describe("emergencyTerminalRestore alt-screen gating", () => {
+	withoutTerminalMultiplexer();
+
+	let tty: FakeTty;
+	const tuis: TUI[] = [];
+	const terminals: ProcessTerminal[] = [];
+
 	beforeEach(() => {
-		previousHeadless = setTerminalHeadless(false);
+		tty = fakeProcessTty();
 	});
 
 	afterEach(() => {
-		setAltScreenActive(false);
-		setTerminalHeadless(previousHeadless);
-		vi.restoreAllMocks();
-		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
-		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
-		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
+		for (const tui of tuis.splice(0)) tui.stop();
+		for (const terminal of terminals.splice(0)) terminal.stop();
+		tty.dispose();
 	});
 
-	it("never writes after graceful stop has handed output back to the shell", () => {
-		const { terminal, writes } = startCapturedTerminal();
-		terminal.stop();
-		expect(writes.join("")).toContain("\x1b[?25h");
+	function startTerminal(): ProcessTerminal {
+		// conpty: false keeps the keyboard negotiation hermetic regardless of an ambient WSL env.
+		const terminal = tty.terminal({ conpty: false });
+		terminals.push(terminal);
+		terminal.bind(NOOP_HOST);
+		terminal.start();
+		return terminal;
+	}
 
-		writes.length = 0;
+	function startTui(provider?: TerminalFrameProvider): { tui: TUI; scheduler: ManualScheduler } {
+		const scheduler = new ManualScheduler();
+		const tui = new TUI(tty.terminal({ conpty: false }), undefined, { renderScheduler: scheduler });
+		tuis.push(tui);
+		if (provider) tui.setFrameProvider(provider);
+		tui.start();
+		scheduler.advance(FRAME_MS);
+		return { tui, scheduler };
+	}
+
+	function showFullscreenOverlay(tui: TUI, scheduler: ManualScheduler) {
+		const overlay = tui.showOverlay(
+			{ render: () => ["session selector"] },
+			{ fullscreen: true, width: "100%", maxHeight: "100%" },
+		);
+		scheduler.advance(FRAME_MS);
+		expect(tty.output()).toContain(ALT_ENTER);
+		return overlay;
+	}
+
+	it("never writes after graceful stop has handed output back to the shell", () => {
+		const terminal = startTerminal();
+		terminal.stop();
+		expect(tty.output()).toContain("\x1b[?25h");
+
+		tty.clear();
 		emergencyTerminalRestore();
 		terminal.showCursor(true);
 		terminal.write("late frame");
 		terminal.stop();
-		expect(writes).toEqual([]);
-	});
-
-	it("does not regain output ownership from stale alt-screen state after stop", () => {
-		const { terminal, writes } = startCapturedTerminal();
-		terminal.stop();
-		setAltScreenActive(true);
-		writes.length = 0;
-		emergencyTerminalRestore();
-		expect(writes).toEqual([]);
+		expect(tty.writes).toEqual([]);
 	});
 
 	it("permits output again only after a new start", () => {
-		const { terminal, writes } = startCapturedTerminal();
+		const terminal = startTerminal();
 		terminal.stop();
-		terminal.start(
-			() => {},
-			() => {},
-			undefined,
-			{ deferInput: true },
-		);
-		try {
-			writes.length = 0;
-			terminal.write("new session");
-			expect(writes).toEqual(["new session"]);
-		} finally {
-			terminal.stop();
-		}
+		terminal.start({ deferInput: true });
+		tty.clear();
+
+		terminal.write("new session");
+		expect(tty.output()).toContain("new session");
 	});
 
-	it("emits DECRST 1049 on the live-terminal crash path only when the alt screen is tracked active", () => {
-		const inactive = startCapturedTerminal();
-		inactive.writes.length = 0;
-		emergencyTerminalRestore(); // activeTerminal set, alt screen never entered
-		const inactiveRestore = inactive.writes.join("");
-		expect(inactiveRestore).not.toContain("\x1b[?1049l");
-		expect(inactiveRestore).toContain("\x1b[?1006l");
-		expect(inactiveRestore).toContain("\x1b[?1003l");
-		expect(inactiveRestore).toContain("\x1b[?1000l");
+	it("leaves the alternate screen alone on the crash path when the session never entered it", () => {
+		startTerminal();
+		tty.clear();
 
-		const active = startCapturedTerminal();
-		setAltScreenActive(true);
-		active.writes.length = 0;
 		emergencyTerminalRestore();
-		const activeRestore = active.writes.join("");
-		expect(activeRestore).toContain("\x1b[?1049l");
-		expect(activeRestore).toContain("\x1b[?1006l");
-		expect(activeRestore).toContain("\x1b[?1003l");
-		expect(activeRestore).toContain("\x1b[?1000l");
+
+		const restore = tty.output();
+		expect(restore).not.toContain(ALT_EXIT);
+		// The unconditional resets still go out.
+		expect(restore).toContain("\x1b[?1006l");
+		expect(restore).toContain("\x1b[?1003l");
+		expect(restore).toContain("\x1b[?1000l");
+		expect(restore).toContain("\x1b[?25h");
 	});
-	it("restores the alternate screen when a deferred replacement paint throws", () => {
-		const { writes, terminal } = startCapturedTerminal();
+
+	it("leaves a fullscreen overlay's alternate screen on the crash path, popping keyboard frames on both screens", () => {
+		const { tui, scheduler } = startTui();
+		tty.type(KITTY_REPLY);
+		expect(tui.terminal.kittyProtocolActive).toBe(true);
+		showFullscreenOverlay(tui, scheduler);
+		tty.clear();
+
+		emergencyTerminalRestore();
+
+		const restored = tty.output();
+		const altPop = restored.indexOf(KITTY_POP);
+		const altExit = restored.indexOf(ALT_EXIT);
+		const mainPop = restored.indexOf(KITTY_POP, altExit + 1);
+		expect(altPop).toBeGreaterThanOrEqual(0);
+		expect(altPop).toBeLessThan(altExit);
+		expect(mainPop).toBeGreaterThan(altExit);
+		expect(tui.terminal.kittyProtocolActive).toBe(false);
+
+		// The restore handed output back: a second crash-path restore writes nothing.
+		tty.clear();
+		emergencyTerminalRestore();
+		expect(tty.writes).toEqual([]);
+	});
+
+	it("does not regain output ownership after a graceful stop from a fullscreen overlay", () => {
+		const { tui, scheduler } = startTui();
+		showFullscreenOverlay(tui, scheduler);
+		tty.clear();
+
+		tui.stop();
+		expect(tty.output()).toContain(ALT_EXIT);
+
+		tty.clear();
+		emergencyTerminalRestore();
+		expect(tty.writes).toEqual([]);
+	});
+
+	it("is back on the main screen after a crash in the paint that replaces a fullscreen overlay", () => {
 		let failReplacement = false;
 		const provider: TerminalFrameProvider = {
 			renderFrame: () => {
@@ -137,46 +155,19 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 			},
 			acknowledgeHistory: () => {},
 		};
-		const immediateScheduler = {
-			now: () => 0,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void) => {
-				callback();
-				return { cancel() {} };
-			},
-		};
-		const tui = new TUI(terminal, undefined, { renderScheduler: immediateScheduler });
-		tui.setFrameProvider(provider);
-		const overlay = tui.showOverlay(
-			{ render: () => ["session selector"] },
-			{ fullscreen: true, width: "100%", maxHeight: "100%" },
-		);
+		const { tui, scheduler } = startTui(provider);
+		const overlay = showFullscreenOverlay(tui, scheduler);
 		tui.requestRender(true, { clearScrollback: true });
+		scheduler.advance(FRAME_MS);
+
 		failReplacement = true;
-
-		expect(() => overlay.hide()).toThrow("replacement failed");
-		writes.length = 0;
+		overlay.hide();
+		expect(() => scheduler.advance(FRAME_MS)).toThrow("replacement failed");
 		emergencyTerminalRestore();
 
-		expect(writes.join("")).toContain("\x1b[?1049l");
-	});
-	it("pops keyboard enhancement frames on both screens when crashing from a fullscreen overlay", () => {
-		const { terminal, writes } = startCapturedTerminal();
-		process.stdin.emit("data", "\x1b[?0u");
-		expect(terminal.kittyEnableSequence).toBe("\x1b[>5u");
-
-		terminal.write(`\x1b[?1049h${terminal.kittyEnableSequence}`);
-		setAltScreenActive(true);
-		writes.length = 0;
-
-		emergencyTerminalRestore();
-
-		const restored = writes.join("");
-		const altPop = restored.indexOf("\x1b[<u");
-		const altExit = restored.indexOf("\x1b[?1049l");
-		const mainPop = restored.indexOf("\x1b[<u", altExit + 1);
-		expect(altPop).toBeGreaterThanOrEqual(0);
-		expect(altPop).toBeLessThan(altExit);
-		expect(mainPop).toBeGreaterThan(altExit);
+		const output = tty.output();
+		expect(output.lastIndexOf(ALT_EXIT)).toBeGreaterThan(output.lastIndexOf(ALT_ENTER));
+		// Let the teardown in afterEach compose its final frame.
+		failReplacement = false;
 	});
 });

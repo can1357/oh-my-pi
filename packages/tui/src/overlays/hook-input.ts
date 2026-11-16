@@ -108,8 +108,14 @@ export class HookInputComponent extends OverlayPanel {
 		this.#form.handleInput(keyData);
 	}
 
-	/** Route non-bracketed paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
-	 *  into the inner field, mirroring bracketed-paste semantics. Pasting counts as
+	/** A terminal paste lands in the field; like any keystroke it resets the timeout countdown. */
+	handlePaste(text: string): void {
+		this.#countdown?.reset();
+		this.#form.handlePaste(text);
+	}
+
+	/** Route other paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
+	 *  into the inner field, mirroring terminal-paste semantics. Pasting counts as
 	 *  interaction, so the timeout countdown resets like any keystroke. */
 	pasteText(text: string): void {
 		this.#countdown?.reset();

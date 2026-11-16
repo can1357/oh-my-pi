@@ -34,9 +34,9 @@ class Provider implements TerminalFrameProvider {
 class RecordingTerminal extends VirtualTerminal {
 	readonly writes: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.writes.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 }
 

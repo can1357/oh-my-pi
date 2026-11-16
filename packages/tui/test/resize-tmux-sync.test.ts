@@ -1,13 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { PtySession } from "@oh-my-pi/pi-natives";
+import { PtySession, terminalMultiplexerEnvKeys } from "@oh-my-pi/pi-natives";
 import { CURSOR_MARKER, Text, TUI, type TerminalFramePlan, type ViewportSize } from "@oh-my-pi/pi-tui";
-import { tmuxMultiplexer } from "@oh-my-pi/pi-tui/multiplexers/tmux";
-import type { PrivateModeReportHandler } from "@oh-my-pi/pi-tui/terminal";
-import * as capabilities from "@oh-my-pi/pi-tui/terminal-capabilities";
-import * as multiplexer from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { $ } from "bun";
 import { BackloggedTerminal } from "./backlogged-terminal";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
@@ -24,15 +20,14 @@ class RecordingTerminal extends BackloggedTerminal {
 	written: string[] = [];
 	/** False records writes without feeding them to the VT engine (multi-MiB replays). */
 	mirror = true;
-	report?: PrivateModeReportHandler;
-
-	onPrivateModeReport(callback: PrivateModeReportHandler): void {
-		this.report = callback;
+	/** Answer DECRQM the way the terminal would: a DECRPM report on stdin (`status` defaults to reset / permanently reset). */
+	report(mode: number, supported: boolean, _confirmed?: boolean, status?: number): void {
+		this.sendInput(`\x1b[?${mode};${status ?? (supported ? 2 : 4)}$y`);
 	}
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.written.push(data);
-		if (this.mirror) super.write(data);
+		if (this.mirror) super.receive(data);
 	}
 }
 
@@ -89,19 +84,38 @@ async function startLargeRig(columns = 80, rows = 24) {
 	return { terminal, scheduler, provider, tui };
 }
 
-/** Index of the settled replay write: the one carrying ED2+ED3. */
-function replayWriteIndex(written: readonly string[]): number {
-	return written.findIndex(data => data.includes("\x1b[2J\x1b[3J"));
-}
+/** Environment the tmux rig controls: multiplexer markers plus every synchronized-output signal. */
+const TMUX_ENV_KEYS = [
+	...terminalMultiplexerEnvKeys(),
+	"TMUX_PANE",
+	"TERM_PROGRAM",
+	"TERM_FEATURES",
+	"WT_SESSION",
+	"PI_NO_SYNC_OUTPUT",
+	"PI_FORCE_SYNC_OUTPUT",
+	"PI_TUI_SYNC_OUTPUT",
+	"PI_TUI_RESIZE_IN_PLACE",
+];
+const savedEnv = new Map<string, string | undefined>();
 
 describe("tmux synchronized rebuild", () => {
 	beforeEach(() => {
-		spyOn(multiplexer, "classifyTerminalMultiplexerModule").mockReturnValue(tmuxMultiplexer);
-		spyOn(capabilities, "isInsideTerminalMultiplexer").mockReturnValue(true);
-		spyOn(capabilities, "shouldEnableSynchronizedOutputByDefault").mockReturnValue(false);
-		spyOn(capabilities, "synchronizedOutputUserOverride").mockReturnValue(null);
+		// The engine resolves tmux hosting, and synchronized output starting off
+		// without a user override, from the environment.
+		for (const key of TMUX_ENV_KEYS) {
+			savedEnv.set(key, Bun.env[key]);
+			delete Bun.env[key];
+		}
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
 	});
-	afterEach(() => vi.restoreAllMocks());
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const [key, value] of savedEnv) {
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		savedEnv.clear();
+	});
 
 	it("keeps the screen untouched through the drag, then rebuilds once without flashing a notice", async () => {
 		const { terminal, scheduler, provider, tui } = await startRig(1000);
@@ -175,10 +189,21 @@ describe("tmux synchronized rebuild", () => {
 			expect(terminal.written).toEqual([]);
 			await scheduler.advance(terminal, 80);
 			expect(provider.resetCount).toBe(1);
-			const replay = replayWriteIndex(terminal.written);
-			expect(replay).toBeGreaterThan(0);
-			expect(Buffer.byteLength(terminal.written[replay]!)).toBeGreaterThanOrEqual(7 * 1024 * 1024);
-			const notice = terminal.written[replay - 1]!;
+			// Write boundaries are not observable through a PTY: the notice and the
+			// replay share one output batch, so split the byte stream instead. The
+			// notice is everything up to the last synchronized-update close before
+			// the replay's ED2+ED3; the replay is the rest.
+			const output = terminal.written.join("");
+			const erase = output.indexOf("\x1b[2J\x1b[3J");
+			expect(erase).toBeGreaterThan(0);
+			const noticeEnd = output.lastIndexOf(SYNC_END, erase) + SYNC_END.length;
+			expect(noticeEnd).toBeGreaterThan(SYNC_END.length);
+			const notice = output.slice(0, noticeEnd);
+			const replay = output.slice(noticeEnd);
+			expect(Buffer.byteLength(replay)).toBeGreaterThanOrEqual(7 * 1024 * 1024);
+			// The replay opens its own hold before erasing.
+			expect(replay.indexOf(SYNC_BEGIN)).toBeGreaterThanOrEqual(0);
+			expect(replay.indexOf(SYNC_BEGIN)).toBeLessThan(replay.indexOf("\x1b[2J\x1b[3J"));
 			// Closed before the replay opens tmux's hold, so tmux forwards it
 			// while it ingests the replay; the replay's ED2 then erases it.
 			expect(notice.split(SYNC_BEGIN)).toHaveLength(2);
@@ -187,7 +212,7 @@ describe("tmux synchronized rebuild", () => {
 			expect(notice).toContain(REBUILDING);
 			expect(notice).toContain("\x1b8");
 			expect(notice).not.toContain("\n");
-			expect(terminal.written.filter(data => data.includes(REBUILDING))).toHaveLength(1);
+			expect(output.split(REBUILDING)).toHaveLength(2);
 		} finally {
 			tui.stop();
 		}
@@ -370,7 +395,7 @@ describe("tmux synchronized rebuild", () => {
 	});
 
 	it("honors a synchronized-output opt-out even when tmux reports support", async () => {
-		spyOn(capabilities, "synchronizedOutputUserOverride").mockReturnValue(false);
+		Bun.env.PI_NO_SYNC_OUTPUT = "1";
 		const { terminal, scheduler, tui } = await startRig();
 		try {
 			terminal.resize(100, 30);

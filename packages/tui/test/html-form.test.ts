@@ -16,14 +16,9 @@ import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } 
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
-import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import {
-	getCellDimensions,
-	ImageProtocol,
-	setCellDimensions,
-	setTerminalImageProtocol,
-	TERMINAL,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { forceImageProtocol } from "./helpers/image-protocol";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -268,7 +263,7 @@ describe("html form", () => {
 			const { form } = dialog(DB_FORM);
 			const paste = Array.from({ length: 12 }, (_, line) => `line ${line}`).join("\n");
 			form.handleInput("n");
-			form.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			form.handlePaste(paste);
 			form.handleInput(ENTER);
 			form.handleInput(DOWN);
 			form.handleInput("n");
@@ -413,7 +408,6 @@ describe("html form", () => {
 		const NOTE_KEY = "\x1bn";
 		const HOME = "\x1b[H";
 		const DELETE = "\x1b[3~";
-		const paste = (text: string) => `\x1b[200~${text}\x1b[201~`;
 
 		function addImage(form: HtmlFormDialog): string {
 			const settle = form.beginPaste();
@@ -525,11 +519,11 @@ describe("html form", () => {
 			const onPasteImagePath = vi.fn();
 			const { form } = imageDialog({ onPasteImage, onPasteImagePath });
 			form.handleInput(NOTE_KEY);
-			form.handleInput(paste(""));
+			form.handlePaste("");
 			expect(onPasteImage).toHaveBeenCalledTimes(1);
-			form.handleInput(paste("/tmp/a.png /tmp/b.png"));
+			form.handlePaste("/tmp/a.png /tmp/b.png");
 			expect(onPasteImagePath.mock.calls).toEqual([["/tmp/a.png"], ["/tmp/b.png"]]);
-			form.handleInput(paste("plain words"));
+			form.handlePaste("plain words");
 			form.handleInput(ENTER);
 			expect(onPasteImage).toHaveBeenCalledTimes(1);
 			expect(onPasteImagePath).toHaveBeenCalledTimes(2);
@@ -540,8 +534,8 @@ describe("html form", () => {
 			const onPasteImage = vi.fn();
 			const { form } = dialog(DB_FORM, { onPasteImage });
 			form.handleInput(NOTE_KEY);
-			form.handleInput(paste(""));
-			form.handleInput(paste("/tmp/a.png"));
+			form.handlePaste("");
+			form.handlePaste("/tmp/a.png");
 			form.handleInput(ENTER);
 			expect(onPasteImage).not.toHaveBeenCalled();
 			expect(form.optionNotes()).toMatchObject([{ text: "/tmp/a.png" }]);
@@ -568,6 +562,7 @@ describe("html form", () => {
 				inputGuard: {
 					isBlocked: () => draft.length > 0,
 					handleInput: vi.fn(),
+					handlePaste: vi.fn(),
 					hint: "typing edits your prompt",
 					syncPresentation: (blocked: boolean) => presented.push(blocked),
 				},
@@ -753,18 +748,17 @@ describe("html form", () => {
 				const terminalId = TERMINAL as unknown as { id: string };
 				const original = {
 					id: terminalId.id,
-					protocol: TERMINAL.imageProtocol,
-					graphics: { ...getKittyGraphics() },
+					graphics: TERMINAL.kittyUnicodePlaceholders,
 					cells: { ...getCellDimensions() },
 				};
 				terminalId.id = "xterm";
-				setTerminalImageProtocol(ImageProtocol.Kitty);
-				setKittyGraphics({ unicodePlaceholders: false });
+				const restoreProtocol = forceImageProtocol(ImageProtocol.Kitty);
+				TERMINAL.kittyUnicodePlaceholders = false;
 				setCellDimensions({ widthPx: 10, heightPx: 10 });
 				const term = new VirtualTerminal(60, 30);
 				const writes: string[] = [];
-				const realWrite = term.write.bind(term);
-				vi.spyOn(term, "write").mockImplementation((data: string) => {
+				const realWrite = term.receive.bind(term);
+				vi.spyOn(term, "receive").mockImplementation((data: string) => {
 					writes.push(data);
 					realWrite(data);
 				});
@@ -791,8 +785,8 @@ describe("html form", () => {
 					if (!closed) form.dispose();
 					vi.restoreAllMocks();
 					terminalId.id = original.id;
-					setTerminalImageProtocol(original.protocol);
-					setKittyGraphics(original.graphics);
+					restoreProtocol();
+					TERMINAL.kittyUnicodePlaceholders = original.graphics;
 					setCellDimensions(original.cells);
 				});
 				const frame = async (): Promise<void> => {
@@ -1274,6 +1268,7 @@ describe("html form", () => {
 				inputGuard: {
 					isBlocked: () => true,
 					handleInput: (data: string) => typed.push(data),
+					handlePaste: (text: string) => typed.push(text),
 					hint: "typing edits your prompt",
 				},
 			});
@@ -1290,6 +1285,7 @@ describe("html form", () => {
 				inputGuard: {
 					isBlocked: () => true,
 					handleInput: (data: string) => typed.push(data),
+					handlePaste: (text: string) => typed.push(text),
 					hint: "typing edits your prompt",
 				},
 			});

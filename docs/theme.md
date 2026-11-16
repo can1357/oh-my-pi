@@ -166,7 +166,7 @@ Var reference behavior:
 Color mode detection (`detectColorMode` in `theme/color.ts`):
 
 - `WT_SESSION` => truecolor
-- otherwise uses `detectTerminalId()` and `getTerminalInfo()` from the shared terminal capability model, selecting truecolor only when `TerminalInfo.trueColor` is true
+- otherwise asks the native terminal profile (`detectTrueColor` in `@oh-my-pi/pi-natives`) whether the detected terminal renders 24-bit color
 
 Conversion behavior:
 

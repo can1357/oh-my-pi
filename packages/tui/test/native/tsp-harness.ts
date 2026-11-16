@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type TspApplyError, TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { splitTspMessage, type TspHello } from "@oh-my-pi/pi-tui/native/encode";
-import type { Terminal, TerminalAppearance, TerminalStartOptions, TspHelloHandler } from "@oh-my-pi/pi-tui/terminal";
+import { Terminal, type TerminalIo, type TerminalIoSink } from "@oh-my-pi/pi-tui/terminal";
 import { type RenderScheduler, type RenderTimer, TUI } from "@oh-my-pi/pi-tui/tui";
 import { TSP_KINDS, type TspEvent, type TspFrame, type TspNode } from "@oh-my-pi/pi-wire";
 
@@ -111,33 +111,81 @@ export class ManualScheduler implements RenderScheduler {
 	}
 }
 
-/** A terminal that speaks TSP (or not) and keeps the documents it was sent. */
-export class TspTestTerminal implements Terminal {
+const utf8Decoder = new TextDecoder();
+const utf8Encoder = new TextEncoder();
+
+/** Primary device attributes query (the engine's probe sentinel) and a plain VT answer to it. */
+const DA1_QUERY = /\x1b\[0?c/g;
+const DA1_REPLY = "\x1b[?62;22c";
+
+/** IO port of a {@link TspTestTerminal}: captured engine output in, queued terminal bytes out. */
+class TspIo implements TerminalIo {
+	readonly interactive = true;
+	readonly backlog = 0;
+	readonly columns: number;
+	readonly rows: number;
+	sink: TerminalIoSink | undefined;
+	consume: (data: string) => void = () => {};
+
+	constructor(columns: number, rows: number) {
+		this.columns = columns;
+		this.rows = rows;
+	}
+
+	open(sink: TerminalIoSink): void {
+		this.sink = sink;
+	}
+
+	write(chunks: readonly Uint8Array[]): void {
+		for (const chunk of chunks) this.consume(utf8Decoder.decode(chunk, { stream: true }));
+	}
+
+	close(): void {
+		this.sink = undefined;
+	}
+}
+
+/**
+ * A terminal that speaks TSP (or not) and keeps the documents it was sent.
+ *
+ * The production {@link Terminal} glue and native engine run unchanged: the
+ * engine sends the `hello` probe and its DA1 sentinels as bytes, and this fake
+ * answers them as bytes on stdin. DA1 queries are answered at once, except
+ * those behind an unanswered `hello` query: a terminal answers in order, so
+ * they wait for {@link TspTestTerminal.answerProbe}.
+ */
+export class TspTestTerminal extends Terminal {
+	readonly #io: TspIo;
 	readonly docs = new Map<string, TspDocument>();
 	readonly frames: TspFrame[] = [];
 	/** Every program → terminal message in order (chunks joined), with its JSON body (base64 text for `b`). */
 	readonly log: { verb: string; body: unknown }[] = [];
 	readonly errors: TspApplyError[] = [];
 	readonly blobs = new Map<string, Uint8Array>();
-	/** Non-TSP bytes written (row painting, cursor control). */
+	/** Non-TSP bytes written (capability probes, row painting, cursor control). */
 	rowBytes = "";
 	/** Id of the most recently opened surface still open. */
 	surface: string | undefined;
 	#options: TspHarnessOptions;
-	#cols: number;
-	#rows: number;
-	#onInput: ((data: string) => void) | undefined;
-	#helloCallbacks: TspHelloHandler[] = [];
-	#helloResult: TspHello | null | undefined;
+	/** A `hello` query arrived that {@link answerProbe} has not answered. */
 	#pending = false;
+	/** DA1 queries received behind the pending `hello` query. */
+	#heldSentinels = 0;
 	#inbox: string[] = [];
 	#chunks = new Map<string, string>();
 	#open: string[] = [];
 
 	constructor(options: TspHarnessOptions) {
+		const io = new TspIo(options.cols ?? 100, options.rows ?? 30);
+		super(io, {
+			tspExpected: options.expected === true,
+			// The test runtime skips the probe; this terminal is there to answer it.
+			// PI_TUI_NATIVE=1 forces it everywhere but tmux, whose marker is dropped.
+			env: { ...Bun.env, TMUX: undefined, PI_TUI_NATIVE: "1" },
+		});
+		this.#io = io;
 		this.#options = options;
-		this.#cols = options.cols ?? 100;
-		this.#rows = options.rows ?? 30;
+		io.consume = data => this.#consume(data);
 		for (const bytes of options.heldBlobs ?? []) this.blobs.set(blobId(bytes), bytes);
 	}
 
@@ -157,66 +205,12 @@ export class TspTestTerminal implements Terminal {
 		return true;
 	}
 
-	get columns(): number {
-		return this.#cols;
-	}
-
-	get rows(): number {
-		return this.#rows;
-	}
-
-	get kittyProtocolActive(): boolean {
-		return false;
-	}
-
-	get kittyEnableSequence(): string | null {
-		return null;
-	}
-
-	get appearance(): TerminalAppearance | undefined {
-		return "dark";
-	}
-
-	get tspProbePending(): boolean {
-		return this.#pending;
-	}
-
-	get tspExpected(): boolean {
-		return this.#options.expected === true;
-	}
-
 	/** Whether flushes answer the probe by themselves. */
 	get answersProbe(): boolean {
 		return this.#options.manualProbe !== true;
 	}
 
-	start(
-		onInput: (data: string) => void,
-		_onResize?: () => void,
-		_onDisconnect?: () => void,
-		options?: TerminalStartOptions,
-	): void {
-		this.#onInput = onInput;
-		this.#helloResult = undefined;
-		// A deferred start sends no probe until enableInput().
-		this.#pending = options?.deferInput !== true;
-	}
-
-	enableInput(): void {
-		if (this.#helloResult === undefined) this.#pending = true;
-	}
-
-	stop(): void {
-		this.#onInput = undefined;
-		this.#helloCallbacks = [];
-	}
-
-	async drainInput(): Promise<void> {}
-
-	onTspHello(callback: TspHelloHandler): void {
-		this.#helloCallbacks.push(callback);
-		if (this.#helloResult !== undefined) callback(this.#helloResult);
-	}
+	override async drainInput(): Promise<void> {}
 
 	/**
 	 * Resolve the probe the way a terminal answering (or ignoring) `hello` would;
@@ -236,14 +230,17 @@ export class TspTestTerminal implements Terminal {
 						features: this.#options.features ?? ["blobs", "settle", "adopt", "dock"],
 						apc: this.#options.apc,
 						credits: this.#options.credits,
-						cols: this.#cols,
+						cols: this.#io.columns,
 						dark: true,
 						reduceMotion: this.#options.reduceMotion === true,
 						hour12: this.#options.hour12,
 						...reply,
 					};
-		this.#helloResult = hello;
-		for (const callback of this.#helloCallbacks) callback(hello);
+		// A terminal answers in order: the reply (if it speaks TSP), then the
+		// sentinels queried behind it.
+		if (hello !== null) this.send(`\x1b_tsp;r;${JSON.stringify(hello)}\x1b\\`);
+		this.send(DA1_REPLY.repeat(Math.max(1, this.#heldSentinels)));
+		this.#heldSentinels = 0;
 		return true;
 	}
 
@@ -256,7 +253,7 @@ export class TspTestTerminal implements Terminal {
 	deliver(): boolean {
 		const data = this.#inbox.shift();
 		if (data === undefined) return false;
-		this.#onInput?.(data);
+		this.#io.sink?.input(utf8Encoder.encode(data));
 		return true;
 	}
 
@@ -267,18 +264,27 @@ export class TspTestTerminal implements Terminal {
 		for (const [sf, s] of last) this.send(tspEvent({ ev: "ack", sf, s }));
 	}
 
-	write(data: string): void {
+	#consume(data: string): void {
 		let at = 0;
 		for (;;) {
 			const start = data.indexOf("\x1b_tsp;", at);
 			if (start === -1) break;
 			const end = data.indexOf("\x1b\\", start);
 			if (end === -1) throw new Error("unterminated TSP message in one write");
-			this.rowBytes += data.slice(at, start);
+			this.#receiveRows(data.slice(at, start));
 			this.#receive(data.slice(start, end + 2));
 			at = end + 2;
 		}
-		this.rowBytes += data.slice(at);
+		this.#receiveRows(data.slice(at));
+	}
+
+	#receiveRows(data: string): void {
+		if (data.length === 0) return;
+		this.rowBytes += data;
+		const sentinels = data.match(DA1_QUERY)?.length ?? 0;
+		if (sentinels === 0) return;
+		if (this.#pending) this.#heldSentinels += sentinels;
+		else this.send(DA1_REPLY.repeat(sentinels));
 	}
 
 	#receive(sequence: string): void {
@@ -295,10 +301,17 @@ export class TspTestTerminal implements Terminal {
 			this.#chunks.delete(chunk);
 			body = joined;
 		}
-		this.log.push({ verb: raw.verb, body: raw.verb === "b" ? body : JSON.parse(body) });
+		const parsed: unknown = raw.verb === "b" ? body : JSON.parse(body);
+		// The `hello` probe belongs to the terminal session, not the renderer:
+		// it stays out of the log, which records what the surface backend sends.
+		if (raw.verb === "q" && typeof parsed === "object" && parsed !== null && "q" in parsed && parsed.q === "hello") {
+			this.#pending = true;
+			return;
+		}
+		this.log.push({ verb: raw.verb, body: parsed });
 		switch (raw.verb) {
 			case "q": {
-				const query = JSON.parse(body) as { q: string; ids?: string[] };
+				const query = parsed as { q: string; ids?: string[] };
 				if (query.q !== "blobs" || this.#options.answerBlobs === false) return;
 				const have = (query.ids ?? []).filter(id => this.#holdsBlob(id));
 				this.send(`\x1b_tsp;r;${JSON.stringify({ r: "blobs", have })}\x1b\\`);
@@ -344,16 +357,6 @@ export class TspTestTerminal implements Terminal {
 				return;
 		}
 	}
-
-	moveBy(): void {}
-	hideCursor(): void {}
-	showCursor(): void {}
-	clearLine(): void {}
-	clearFromCursor(): void {}
-	clearScreen(): void {}
-	setTitle(): void {}
-	setProgress(): void {}
-	onAppearanceChange(): void {}
 }
 
 /** Encode a terminal → program event. */

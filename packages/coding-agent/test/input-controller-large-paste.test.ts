@@ -99,14 +99,16 @@ describe("InputController.handleLargePaste gate", () => {
 			editor.onSubmit = submitted;
 			const payload = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
 
-			editor.handleInput(`\x1b[200~${payload}\x1b[201~${enter}`);
+			// The TUI hands the paste over with its Enter as a hint, then delivers the Enter.
+			editor.handlePaste(payload, enter);
+			editor.handleInput(enter);
 
 			expect(spies.showHookSelector).not.toHaveBeenCalled();
 			expect(submitted).toHaveBeenCalledWith(payload);
 		});
 	}
 
-	it("still presents the menu when a non-submit key shares the burst", () => {
+	it("still presents the menu when no submit follows the paste", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const { controller, spies } = createContext({ threshold: 100, editor });
 		editor.onLargePaste = (text, lineCount, options) => controller.handleLargePaste(text, lineCount, options);
@@ -114,7 +116,8 @@ describe("InputController.handleLargePaste gate", () => {
 		editor.onSubmit = submitted;
 		const payload = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
 
-		editor.handleInput(`\x1b[200~${payload}\x1b[201~x`);
+		editor.handlePaste(payload);
+		editor.handleInput("x");
 
 		expect(spies.showHookSelector).toHaveBeenCalledTimes(1);
 		expect(submitted).not.toHaveBeenCalled();

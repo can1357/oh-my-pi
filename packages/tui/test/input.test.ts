@@ -192,32 +192,17 @@ describe("Input component", () => {
 		setKittyProtocolActive(false);
 	});
 
-	it("normalizes tabs in buffered bracketed paste using the fixed display width", () => {
+	it("flattens a paste to one line, normalizing tabs with the fixed display width", () => {
 		const input = setupAtEnd("");
-
-		input.handleInput("\x1b[200~a\t");
-		expect(input.getValue()).toBe("");
-
-		input.handleInput("b\r\n");
-		expect(input.getValue()).toBe("");
-
-		input.handleInput("c\x1b[201~");
+		input.handlePaste("a\tb\r\nc");
 		expect(input.getValue()).toBe(`a${" ".repeat(DEFAULT_TAB_WIDTH)}bc`);
 	});
 
-	it("decodes tmux re-encoded control bytes in bracketed paste without leaking tails or storing raw C0", () => {
-		// Regression: kitty+tmux (extended-keys-format=xterm) re-encodes the newline
-		// (Ctrl+J) inside a paste as ESC[27;5;106~. For a single-line input the newline
-		// is stripped, but the escape tail "[27;5;106~" must never leak in as text.
+	it("strips control bytes from a paste instead of storing raw C0", () => {
+		// The engine decodes tmux's re-encoded Ctrl+A to 0x01; a single-line value never stores it.
 		const input = setupAtEnd("");
-		input.handleInput("\x1b[200~ab\x1b[27;5;106~cd\x1b[201~");
-		expect(input.getValue()).toBe("abcd");
-
-		// A non-newline re-encoded control (Ctrl+A → 0x01) must be stripped, not stored
-		// as a raw control byte in the single-line value.
-		const input2 = setupAtEnd("");
-		input2.handleInput("\x1b[200~x\x1b[27;5;97~y\x1b[201~");
-		expect(input2.getValue()).toBe("xy");
+		input.handlePaste("x\x01y\nz");
+		expect(input.getValue()).toBe("xyz");
 	});
 
 	it("never renders a line wider than the terminal width (wide chars)", () => {
@@ -292,7 +277,7 @@ describe("Input component", () => {
 		expect(nfdPath.length).toBeGreaterThan(nfcPath.length);
 
 		// Simulate macOS bracketed-paste drop of an NFD path.
-		input.handleInput(`\x1b[200~${nfdPath}\x1b[201~`);
+		input.handlePaste(nfdPath);
 
 		// Stored value must be NFC — no more NFD characters in the buffer.
 		expect(input.getValue()).toBe(nfcPath);
@@ -305,7 +290,7 @@ describe("Input component", () => {
 		const input = new Input();
 		input.focused = true;
 		const nfdPath = "/Users/leo/화면\\ 기록.mov".normalize("NFD");
-		input.handleInput(`\x1b[200~${nfdPath}\x1b[201~`);
+		input.handlePaste(nfdPath);
 
 		const [line] = input.render(120);
 		const markerIdx = line.indexOf(CURSOR_MARKER);

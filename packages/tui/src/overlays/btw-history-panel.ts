@@ -25,7 +25,6 @@ import { BtwInjectAnswer, type BtwInjectState, describeBtwInjectAnswer } from ".
 import { compactImageAttachments, formatVisionMarker } from "../prompt/composer-attachments";
 import { classifyImagePaste } from "../prompt/custom-editor";
 import { OrderedPastes } from "../prompt/ordered-pastes";
-import { BracketedPasteHandler } from "../bracketed-paste";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
 import {
@@ -189,7 +188,6 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#focused = false;
 	#useTerminalCursor = false;
 	#composer: FollowUpComposer | undefined;
-	readonly #pasteHandler = new BracketedPasteHandler();
 	#followUpPending = false;
 	#followLatest = false;
 	#turns: RenderedTurn[] = [];
@@ -496,14 +494,16 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 
-	/** A pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. */
-	#paste(content: string): void {
+	/** A terminal paste goes to the follow-up composer: a pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. */
+	handlePaste(text: string): void {
+		if (!this.#composer) return;
 		const { onPasteImage, onPasteImagePath } = this.#options;
-		const image = classifyImagePaste(content);
+		const image = classifyImagePaste(text);
 		if (image.kind === "clipboard" && onPasteImage) void onPasteImage();
 		else if (image.kind === "paths" && onPasteImagePath) {
 			for (const path of image.paths) void onPasteImagePath(path);
-		} else this.pasteText(content);
+		} else this.pasteText(text);
+		this.#options.requestRender();
 	}
 
 	handleInput(data: string): void {
@@ -512,15 +512,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 		// sheets follow it (and the composer would have typed the bytes).
 		if (routeSgrMouseInput(data, event => this.#routeWheel(event))) return;
 		if (this.#composer) {
-			const paste = this.#pasteHandler.process(data);
-			if (paste.handled) {
-				if (paste.pasteContent !== undefined) this.#paste(paste.pasteContent);
-				if (paste.remaining.length > 0) this.handleInput(paste.remaining);
-				this.#options.requestRender();
-				return;
-			}
-			// The input owns every key it handles, including panel shortcuts and
-			// pasted text; the line keys it ignores still scroll the answer above.
+			// The input owns every key it handles, including panel shortcuts; the
+			// line keys it ignores still scroll the answer above.
 			if (!this.#composer.input.handleInput(data)) this.#scrollDetail(data);
 			this.#options.requestRender();
 			return;

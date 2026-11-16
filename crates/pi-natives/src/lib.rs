@@ -76,12 +76,14 @@ pub mod pty;
 pub mod shell;
 pub mod summary;
 pub mod task;
+/// Terminal output device: typed ops, tracked terminal state, exit restore.
+pub(crate) mod term;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
 pub mod tts;
-pub mod tty_writer;
+pub mod tui;
 pub(crate) mod utils;
 pub mod vectors;
 pub mod workspace;

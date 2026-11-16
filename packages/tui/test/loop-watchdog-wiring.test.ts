@@ -36,8 +36,9 @@ describe("TUI loop-watchdog wiring", () => {
 	});
 
 	it("hands the terminal a stall probe backed by the watchdog", () => {
-		// ProcessTerminal consults this probe for every unmarked multiline burst
-		// once bracketed paste is confirmed. Without it a stall-batched burst of
+		// The terminal samples this probe with every stdin read, and the engine
+		// consults it for an unmarked multiline burst once bracketed paste is
+		// confirmed. Without it a stall-batched burst of
 		// typed lines would coalesce into one paste and swallow every Enter
 		// (#12540) while each unit test still passed.
 		const stalledSpy = vi.spyOn(LoopWatchdog.prototype, "isStalled").mockReturnValue(true);
@@ -47,7 +48,7 @@ describe("TUI loop-watchdog wiring", () => {
 
 		try {
 			tui.start();
-			const isLoopStalled = terminalStart.mock.calls[0]?.[3]?.isLoopStalled;
+			const isLoopStalled = terminalStart.mock.calls[0]?.[0]?.isLoopStalled;
 			expect(isLoopStalled?.()).toBe(true);
 			stalledSpy.mockReturnValue(false);
 			expect(isLoopStalled?.()).toBe(false);

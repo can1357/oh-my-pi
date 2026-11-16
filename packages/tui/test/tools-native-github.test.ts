@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { setKeyHintPlatform } from "@oh-my-pi/pi-tui/app-keybindings";
 import { visibleWidth } from "../src/index";
 import type { NativeChild, NativeNode } from "../src/native/node";
 import { getThemeByName } from "../src/theme";
@@ -69,6 +70,10 @@ function options(expanded: boolean): RenderResultOptions {
 }
 
 describe("GitHub run-watch renderer", () => {
+	// Modifier labels are platform-aware (⌃O on macOS): pin the PC spelling the hint assertions read.
+	beforeEach(() => setKeyHintPlatform("linux"));
+	afterEach(() => setKeyHintPlatform(undefined));
+
 	it("keeps collapsed progress compact and expands ordered, sanitized steps within the viewport", async () => {
 		const theme = await getThemeByName("dark");
 		if (!theme) throw new Error("theme unavailable");

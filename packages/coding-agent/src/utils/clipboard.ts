@@ -4,7 +4,7 @@ import {
 	readImageFromClipboard as nativeReadImageFromClipboard,
 	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
-import { isSshSession } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { isSshSession } from "@oh-my-pi/pi-natives";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";

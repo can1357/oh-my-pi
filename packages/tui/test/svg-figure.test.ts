@@ -2,17 +2,11 @@ import * as path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
-import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import {
-	type CellDimensions,
-	getCellDimensions,
-	ImageProtocol,
-	setCellDimensions,
-	setTerminalImageProtocol,
-	TERMINAL,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { type CellDimensions, getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TUI } from "@oh-my-pi/pi-tui/tui";
+import { forceImageProtocol } from "./helpers/image-protocol";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
@@ -54,23 +48,23 @@ function placement(svg: SvgFigure, width: number): { raster: string; box: string
 }
 
 describe("SvgFigure", () => {
-	const originalProtocol = TERMINAL.imageProtocol;
+	let restoreProtocol: () => void;
 	const originalCell = { ...getCellDimensions() };
-	const originalGraphics = { ...getKittyGraphics() };
+	const originalGraphics = TERMINAL.kittyUnicodePlaceholders;
 
 	beforeAll(async () => {
 		await initTheme(false);
 	});
 
 	beforeEach(() => {
-		setTerminalImageProtocol(ImageProtocol.Kitty);
+		restoreProtocol = forceImageProtocol(ImageProtocol.Kitty);
 		setCellDimensions(CELL);
 	});
 
 	afterEach(() => {
-		setTerminalImageProtocol(originalProtocol);
+		restoreProtocol();
 		setCellDimensions(originalCell);
-		setKittyGraphics(originalGraphics);
+		TERMINAL.kittyUnicodePlaceholders = originalGraphics;
 	});
 
 	// Regression: a 1886 px raster was placed over 117 cells (1872 px), so the
@@ -86,7 +80,7 @@ describe("SvgFigure", () => {
 	});
 
 	it("replaces an SVG raster without leaving either revision over subsequent prose", async () => {
-		setKittyGraphics({ unicodePlaceholders: false });
+		TERMINAL.kittyUnicodePlaceholders = false;
 		const term = new VirtualTerminal(100, 30);
 		const scheduler = new VirtualRenderScheduler();
 		const tui = new TUI(term, undefined, { renderScheduler: scheduler });

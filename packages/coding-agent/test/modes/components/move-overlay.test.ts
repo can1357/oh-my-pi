@@ -129,7 +129,7 @@ describe("MoveOverlay", () => {
 			},
 			moveDirectorySource,
 		);
-		overlay.handleInput("\x1b[200~new\nø\x1b[201~");
+		overlay.handlePaste("new\nø");
 		overlay.handleInput("\r");
 		expect(result).toBeDefined();
 		expect(result!.directory).toBe("newø");

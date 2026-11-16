@@ -7,7 +7,7 @@
  * `InputController.handleImagePaste` then dumped the clipboard text — the
  * file path — verbatim into the editor instead of attaching the image, so
  * the user saw "text pasted, image lost". The terminal-mediated `Cmd+V` path
- * (bracketed paste → `extractBracketedImagePastePaths` → `handleImagePathPaste`)
+ * (terminal paste → `classifyImagePaste` → `handleImagePathPaste`)
  * already attached the image, which produced the asymmetric "for image I need
  * control+v which is very odd" symptom.
  *
@@ -165,7 +165,7 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		// Cmd+C on multiple image files in Finder hands the AppleScript bridge
 		// back the whole `public.file-url` list. The controller MUST attach
 		// every image in the list, not stop after the first — matches the
-		// bracketed-paste handler in `CustomEditor.handleInput`.
+		// terminal-paste handler in `CustomEditor.handlePaste`.
 		const { ctx, spies } = createCtx();
 		const secondImg = path.join(tmpDir, "second.jpg");
 		const thirdImg = path.join(tmpDir, "third.png");

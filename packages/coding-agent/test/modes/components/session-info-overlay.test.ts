@@ -1,58 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type Component, type OverlayHandle, setKeybindings, TUI, visibleWidth } from "@oh-my-pi/pi-tui";
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { Settings } from "../../../src/config/settings";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
-
-class MinimalTerminal implements Terminal {
-	columns = 80;
-	rows = 24;
-	kittyProtocolActive = false;
-	kittyEnableSequence: string | null = null;
-	keyboardEnhancementEnterSequence: string | null = null;
-	keyboardEnhancementExitSequence: string | null = null;
-	appearance: TerminalAppearance | undefined;
-	#onInput: ((data: string) => void) | undefined;
-	output = "";
-
-	start(onInput: (data: string) => void, _onResize: () => void): void {
-		this.#onInput = onInput;
-	}
-
-	stop(): void {
-		this.#onInput = undefined;
-	}
-
-	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
-
-	write(data: string): void {
-		this.output += data;
-	}
-
-	moveBy(_lines: number): void {}
-
-	hideCursor(): void {}
-
-	showCursor(): void {}
-
-	clearLine(): void {}
-
-	clearFromCursor(): void {}
-
-	clearScreen(): void {}
-
-	setTitle(_title: string): void {}
-
-	setProgress(_active: boolean): void {}
-
-	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {}
-
-	sendInput(data: string): void {
-		this.#onInput?.(data);
-	}
-}
+import { VirtualRenderScheduler } from "../../../../tui/test/virtual-render-scheduler";
+import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
 
 class InputRecorder implements Component {
 	readonly inputs: string[] = [];
@@ -161,9 +114,10 @@ describe("SessionInfoOverlay", () => {
 		expect(onClose).toHaveBeenCalledTimes(2);
 	});
 
-	it("owns Escape through TUI focus and restores the editor without forwarding it", () => {
-		const terminal = new MinimalTerminal();
-		const tui = new TUI(terminal);
+	it("owns Escape through TUI focus and restores the editor without forwarding it", async () => {
+		const terminal = new VirtualTerminal();
+		const scheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
 		const editor = new InputRecorder("editor");
 		let handle: OverlayHandle | undefined;
 		const onClose = vi.fn(() => handle?.hide());
@@ -182,6 +136,8 @@ describe("SessionInfoOverlay", () => {
 
 			expect(tui.getFocused()).toBe(overlay);
 			terminal.sendInput("\x1b");
+			// A lone ESC leaves the stdin parser once its 50 ms escape timeout passes.
+			await scheduler.advance(terminal, 50);
 
 			expect(onClose).toHaveBeenCalledTimes(1);
 			expect(editor.inputs).toEqual([]);

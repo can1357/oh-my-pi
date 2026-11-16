@@ -988,6 +988,11 @@ export class MCPAddWizard extends OverlayPanel {
 		if (this.#stepKind === "input") this.#inputField?.pasteText(text);
 	}
 
+	/** Pastes reach the step only while it hosts a text field. */
+	handlePaste(text: string): void {
+		if (this.#inputField) this.#step?.handlePaste(text);
+	}
+
 	handleInput(keyData: string): void {
 		// While an OAuth callback is being awaited, Esc/Ctrl+C aborts the flow
 		// rather than stepping back through the form: the wizard advertises

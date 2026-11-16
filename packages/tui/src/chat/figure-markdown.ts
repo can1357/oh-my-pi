@@ -1,5 +1,5 @@
 import type { Tokens } from "@oh-my-pi/pi-utils/marked";
-import type { ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import { type Markdown, streamingMarkdownSource, type TableLocks } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { TERMINAL } from "../terminal-capabilities";

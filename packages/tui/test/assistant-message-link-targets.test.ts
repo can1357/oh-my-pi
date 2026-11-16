@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
-import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import {
 	type AssistantMessageHost,
 	assistantMessageLinkTargets,
@@ -57,7 +57,7 @@ describe("createAssistantMessageComponent", () => {
 			tableChartsVisible: true,
 			hideToolActivity: false,
 			toolOutputExpanded: false,
-			ui: { requestRender: () => {}, imageBudget: new ImageBudget(8, () => {}) },
+			ui: { requestRender: () => {}, imageBudget: new ImageBudget(8) },
 			resolveAssistantMessageLinkHrefs: async () => new Map(),
 		};
 		const component = createAssistantMessageComponent(host, assistant({ type: "text", text: "As written." }));

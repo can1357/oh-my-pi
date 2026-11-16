@@ -160,6 +160,7 @@ function createContext(): {
 		ui: {
 			requestRender,
 			resetDisplay,
+			addPasteListener: vi.fn(() => () => {}),
 			addInputListener: vi.fn(listener => {
 				inputListeners.push(listener as (data: string) => { consume?: boolean; data?: string } | undefined);
 				return () => {};

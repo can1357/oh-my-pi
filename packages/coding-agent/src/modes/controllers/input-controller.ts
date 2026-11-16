@@ -3,8 +3,6 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
-	BRACKETED_PASTE_END,
-	BRACKETED_PASTE_START,
 	type Component,
 	emergencyTerminalRestore,
 	isKeyRelease,
@@ -374,6 +372,11 @@ export class InputController {
 			this.#linkHintListenerInstalled = true;
 			// First, so a tag letter typed in link-hint mode reaches no other listener or the editor.
 			this.ctx.ui.addInputListener(data => this.#handleLinkHintInput(data));
+			// A paste cancels link-hint mode and still lands where it always does.
+			this.ctx.ui.addPasteListener(() => {
+				if (this.ctx.linkHintsActive) this.ctx.cancelLinkHints();
+				return undefined;
+			});
 		}
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
@@ -898,7 +901,7 @@ export class InputController {
 		}
 		if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
 		if (data.startsWith("\x1b[<")) return undefined;
-		if (matchesKey(data, "ctrl+c") || data.startsWith("\x1b[200~")) {
+		if (matchesKey(data, "ctrl+c")) {
 			this.ctx.cancelLinkHints();
 			return undefined;
 		}
@@ -2631,18 +2634,17 @@ export class InputController {
 	/**
 	 * Route enhanced-paste text to the currently focused component: through its `pasteText`
 	 * hook (modal Input prompts: OAuth API-key entry, Perplexity OTP, GitHub Enterprise URL,
-	 * manual redirect URL), else as the bracketed paste a terminal without enhanced paste sends
-	 * it (dialogs that keep their field inside: the agents hub's New agent, the /annotate note).
+	 * manual redirect URL), else as the terminal paste a terminal without enhanced paste sends
+	 * (dialogs that keep their field inside: the agents hub's New agent, the /annotate note).
 	 * Falling back to the main editor would bury the text in the detached editor while the
-	 * dialog has focus (#2127). The main editor takes it as a bracketed paste too, so a pasted
+	 * dialog has focus (#2127). The main editor takes it as a terminal paste too, so a pasted
 	 * or dropped image path attaches (#3506) instead of landing as text.
 	 */
 	#pasteTextIntoFocus(text: string): void {
 		const focused = this.ctx.ui.getFocused();
 		if (focused && focused !== this.ctx.editor && hasPasteText(focused)) focused.pasteText(text);
-		else if (focused && focused !== this.ctx.editor && focused.handleInput)
-			focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
-		else this.ctx.editor.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+		else if (focused && focused !== this.ctx.editor && focused.handleInput) focused.handlePaste?.(text);
+		else this.ctx.editor.handlePaste(text);
 		this.ctx.ui.requestRender();
 	}
 
@@ -2855,8 +2857,8 @@ export class InputController {
 			// (Finder selections, certain screenshot tools) where
 			// `arboard::get_image()` returns `ContentNotAvailable` and
 			// `pbpaste` is empty. Every image-shaped path routes through
-			// {@link #pasteImagePath}, matching the bracketed-paste
-			// handler in `CustomEditor.handleInput`; multi-image Finder
+			// {@link #pasteImagePath}, matching the terminal-paste
+			// handler in `CustomEditor.handlePaste`; multi-image Finder
 			// selections must not silently drop after the first attach.
 			// `readMacFileUrls` returns an empty list off Darwin, so on every
 			// other platform this is a no-op and the bitmap read below still

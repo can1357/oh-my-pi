@@ -1,62 +1,63 @@
 import { describe, expect, it } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { Terminal, type TerminalIo, type TerminalIoSink } from "@oh-my-pi/pi-tui/terminal";
 
 const TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
 
-class MinimalTerminal implements Terminal {
-	columns = 80;
-	rows = 24;
-	kittyProtocolActive = false;
-	kittyEnableSequence: string | null = null;
-	keyboardEnhancementEnterSequence: string | null = null;
-	keyboardEnhancementExitSequence: string | null = null;
-	appearance: TerminalAppearance | undefined;
-	#onInput: ((data: string) => void) | undefined;
-	#onResize: (() => void) | undefined;
-	output = "";
+const utf8Decoder = new TextDecoder();
+const utf8Encoder = new TextEncoder();
 
-	start(onInput: (data: string) => void, onResize: () => void): void {
-		this.#onInput = onInput;
-		this.#onResize = onResize;
+/** Byte-capturing IO port: engine output is recorded, nothing answers on stdin. */
+class CaptureIo implements TerminalIo {
+	readonly interactive = false;
+	readonly backlog = 0;
+	readonly writes: string[] = [];
+	sink: TerminalIoSink | undefined;
+
+	constructor(
+		readonly columns: number,
+		readonly rows: number,
+	) {}
+
+	open(sink: TerminalIoSink): void {
+		this.sink = sink;
 	}
 
-	stop(): void {
-		this.#onInput = undefined;
-		this.#onResize = undefined;
+	write(chunks: readonly Uint8Array[]): void {
+		for (const chunk of chunks) this.writes.push(utf8Decoder.decode(chunk, { stream: true }));
 	}
 
-	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+	close(): void {
+		this.sink = undefined;
+	}
+}
 
+class MinimalTerminal extends Terminal {
+	readonly #io: CaptureIo;
+
+	constructor() {
+		const io = new CaptureIo(80, 24);
+		super(io);
+		this.#io = io;
+	}
+
+	override async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+
+	/** Everything the engine wrote so far. */
+	get output(): string {
+		return this.#io.writes.join("");
+	}
+
+	/** Deliver stdin bytes through the engine's input parser. */
 	sendInput(data: string): void {
-		this.#onInput?.(data);
+		this.#io.sink?.input(utf8Encoder.encode(data));
 	}
 
+	/** Report the (unchanged) OS size again, as a SIGWINCH does. */
 	emitResize(): void {
-		this.#onResize?.();
+		this.#io.sink?.resize(this.#io.columns, this.#io.rows);
 	}
-	write(data: string): void {
-		this.output += data;
-	}
-
-	moveBy(_lines: number): void {}
-
-	hideCursor(): void {}
-
-	showCursor(): void {}
-
-	clearLine(): void {}
-
-	clearFromCursor(): void {}
-
-	clearScreen(): void {}
-
-	setTitle(_title: string): void {}
-
-	setProgress(_active: boolean): void {}
-
-	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {}
 }
 
 class StaticOverlay implements Component {

@@ -1,4 +1,4 @@
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { Terminal, type TerminalIo, type TerminalIoSink, type TerminalOptions } from "@oh-my-pi/pi-tui/terminal";
 import { CELL_U32, CellFlags, type GraphicsPlacement, KittyTerminal, loadModuleSync } from "kitty-vt-wasm";
 
 // ---------------------------------------------------------------------------
@@ -24,11 +24,14 @@ import { CELL_U32, CellFlags, type GraphicsPlacement, KittyTerminal, loadModuleS
 // allocator and grid state stay isolated across tests.
 const kittyModule = loadModuleSync(Bun.resolveSync("kitty-vt-wasm/kitty-vt.wasm", import.meta.dir));
 
+const utf8Decoder = new TextDecoder();
+const utf8Encoder = new TextEncoder();
+
 function createEngine(
 	columns: number,
 	rows: number,
 	scrollback: number,
-	onReply?: (data: string) => void,
+	onReply?: (bytes: Uint8Array) => void,
 ): KittyTerminal {
 	return KittyTerminal.createSync({
 		columns,
@@ -36,15 +39,15 @@ function createEngine(
 		scrollback,
 		wasm: kittyModule,
 		// Forward cursor-position reports (CSI row;col R) to the application like
-		// a real terminal answering DSR 6n; TUI's post-resize anchor probe relies
-		// on the round trip. Other query replies stay swallowed: tests assert on
-		// grid state, and unsolicited capability responses would leak into the
-		// focused component as junk keystrokes.
+		// a real terminal answering DSR 6n; the post-resize anchor probe relies on
+		// the round trip. Other query replies stay swallowed: the harness never
+		// attaches input, so no capability probe is outstanding, and the
+		// emulator's own answers (its cell size, keyboard protocol, DECRPM) would
+		// override what each test configures.
 		onOutput: onReply
 			? bytes => {
-					const reply = new TextDecoder().decode(bytes);
-					const match = reply.match(/\x1b\[\d+;\d+R/);
-					if (match) onReply(match[0]);
+					const match = utf8Decoder.decode(bytes).match(/\x1b\[\d+;\d+R/);
+					if (match) onReply(utf8Encoder.encode(match[0]));
 				}
 			: undefined,
 		// Swallow host events (title, bell, engine log lines); tests read the
@@ -70,9 +73,56 @@ const CELL_BG = 4;
 const CELL_FLAGS = 6;
 
 /**
+ * IO port of a {@link VirtualTerminal}: the terminal engine's captured output
+ * goes to the emulator, and injected bytes (typed input, emulator replies)
+ * come back as stdin.
+ */
+class VirtualIo implements TerminalIo {
+	// Input is never attached: no raw mode to set, and no capability probes go
+	// out. Injected bytes still reach the engine's input parser.
+	readonly interactive = false;
+	backlog = 0;
+	columns: number;
+	rows: number;
+	sink: TerminalIoSink | undefined;
+	/** The size changed while no sink was open; the next `open` reports it. */
+	resizedWhileClosed = false;
+	consume: (data: string) => void = () => {};
+
+	constructor(columns: number, rows: number) {
+		this.columns = columns;
+		this.rows = rows;
+	}
+
+	open(sink: TerminalIoSink): void {
+		this.sink = sink;
+		// Parity with ProcessIo.open, which raises SIGWINCH so the engine re-reads
+		// geometry at start: a resize made while not started reaches the engine.
+		if (!this.resizedWhileClosed) return;
+		this.resizedWhileClosed = false;
+		sink.resize(this.columns, this.rows);
+	}
+
+	write(chunks: readonly Uint8Array[]): void {
+		// Streaming: a ConPTY-sized chunk boundary may fall inside a code point.
+		for (const chunk of chunks) this.consume(utf8Decoder.decode(chunk, { stream: true }));
+	}
+
+	close(): void {
+		this.sink = undefined;
+	}
+}
+
+/**
  * Virtual terminal for testing, backed by kitty's WASM VT engine.
  *
- * The engine models the active screen grid plus a linear scrollback history and
+ * The production {@link Terminal} glue and native terminal engine run
+ * unchanged: the engine captures its output, which is fed to the emulator,
+ * and the emulator's replies plus test input are injected as stdin bytes, so
+ * capability negotiation, input parsing, painting, and resize handling are
+ * the real ones.
+ *
+ * The emulator models the active screen grid plus a linear scrollback history and
  * ships its own interactive viewport, but the harness relies on xterm-style
  * scroll bookkeeping (`baseY`/`viewportY`/`scrollLines`), so this wrapper keeps
  * emulating that window over `[history ++ active grid]`:
@@ -87,14 +137,11 @@ const CELL_FLAGS = 6;
  * baseY/viewportY/viewport/scrollBuffer across append, overflow, scroll, write-
  * while-scrolled, and resize sequences.
  */
-export class VirtualTerminal implements Terminal {
+export class VirtualTerminal extends Terminal {
+	readonly #io: VirtualIo;
 	#term: KittyTerminal;
-	#columns: number;
-	#rows: number;
 	#scrollbackCap: number;
 	#viewportY = 0;
-	#inputHandler?: (data: string) => void;
-	#resizeHandler?: () => void;
 	#pendingEngineResize = false;
 	// Memoized text of committed scrollback rows, keyed by absolute offset. A
 	// resize, clear, or bounded-history eviction renumbers offsets; those paths
@@ -102,118 +149,50 @@ export class VirtualTerminal implements Terminal {
 	// long streaming runs O(n²) in committed rows.
 	#historyTextCache: string[] = [];
 
-	constructor(columns = 80, rows = 24, scrollback?: number) {
-		this.#columns = columns;
-		this.#rows = rows;
+	constructor(columns = 80, rows = 24, scrollback?: number, options?: TerminalOptions) {
+		const io = new VirtualIo(columns, rows);
+		super(io, options);
+		this.#io = io;
 		this.#scrollbackCap = scrollback ?? DEFAULT_SCROLLBACK_LINES;
-		this.#term = createEngine(columns, rows, this.#scrollbackCap, reply => {
-			// Deliver asynchronously like a real PTY read loop; a synchronous
-			// callback would re-enter the TUI mid-write.
-			queueMicrotask(() => this.#inputHandler?.(reply));
-		});
+		this.#term = createEngine(columns, rows, this.#scrollbackCap, this.#reply);
+		io.consume = data => this.receive(data);
 	}
 
-	// --- Terminal interface --------------------------------------------------
+	// Deliver emulator replies asynchronously like a real PTY read loop; a
+	// synchronous callback would re-enter the terminal engine mid-write.
+	readonly #reply = (bytes: Uint8Array): void => {
+		queueMicrotask(() => this.#io.sink?.input(bytes));
+	};
 
-	start(onInput: (data: string) => void, onResize: () => void): void {
-		this.#inputHandler = onInput;
-		this.#resizeHandler = onResize;
-		// Enable bracketed paste mode for consistency with ProcessTerminal.
-		this.#engineWrite("\x1b[?2004h");
-	}
-
-	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {
-		// No-op for virtual terminal - no stdin to drain.
-	}
-
-	stop(): void {
-		this.#engineWrite("\x1b[?2004l\x1b[?5522l");
-		this.#inputHandler = undefined;
-		this.#resizeHandler = undefined;
-	}
-
-	write(data: string): void {
+	/**
+	 * The simulated terminal receives output bytes: everything the terminal
+	 * engine encodes (frames, probes, out-of-band writes) arrives here, in
+	 * order. Subclasses override this to record or rewrite what the emulator
+	 * sees, the way a multiplexer or console host sits in front of a terminal.
+	 */
+	receive(data: string): void {
 		this.#engineWrite(data);
 	}
 
-	get columns(): number {
-		return this.#columns;
-	}
-
-	get rows(): number {
-		return this.#rows;
-	}
-
-	get kittyProtocolActive(): boolean {
-		// Backed by kitty's real core: the Kitty keyboard protocol is genuinely
-		// supported, so tests can rely on it being active.
-		return true;
-	}
-
-	get kittyEnableSequence(): string | null {
-		return "\x1b[>1u";
-	}
-
-	get keyboardEnhancementEnterSequence(): string | null {
-		return "\x1b[>1u";
-	}
-
-	get keyboardEnhancementExitSequence(): string | null {
-		return "\x1b[<u";
-	}
-
-	get appearance(): TerminalAppearance | undefined {
-		return undefined;
-	}
-
-	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {
-		// No-op for virtual terminal.
-	}
-
-	moveBy(lines: number): void {
-		if (lines > 0) this.#engineWrite(`\x1b[${lines}B`);
-		else if (lines < 0) this.#engineWrite(`\x1b[${-lines}A`);
-	}
-
-	hideCursor(): void {
-		this.#engineWrite("\x1b[?25l");
-	}
-
-	showCursor(): void {
-		this.#engineWrite("\x1b[?25h");
-	}
-
-	clearLine(): void {
-		this.#engineWrite("\x1b[K");
-	}
-
-	clearFromCursor(): void {
-		this.#engineWrite("\x1b[J");
-	}
-
-	clearScreen(): void {
-		this.#engineWrite("\x1b[H\x1b[0J");
-	}
-
-	setTitle(title: string): void {
-		this.#engineWrite(`\x1b]0;${title}\x07`);
-	}
-
-	setProgress(active: boolean): void {
-		this.#engineWrite(active ? "\x1b]9;4;3\x07" : "\x1b]9;4;0;\x07");
+	override async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {
+		// No-op for virtual terminal - no stdin to drain.
 	}
 
 	resize(columns: number, rows: number): void {
 		const wasBottom = this.#atBottom();
-		this.#columns = columns;
-		this.#rows = rows;
-		if (this.#resizeHandler) {
+		this.#io.columns = columns;
+		this.#io.rows = rows;
+		const sink = this.#io.sink;
+		if (sink) {
+			// The emulator's grid follows on the next write, as a real terminal's
+			// does relative to the SIGWINCH the application reacts to.
 			this.#pendingEngineResize = true;
+			sink.resize(columns, rows);
 		} else {
+			this.#io.resizedWhileClosed = true;
 			this.#engineResize();
 			this.#refollowBottom(wasBottom);
 		}
-		this.#resizeHandler?.();
 	}
 
 	/** Return whether the virtual viewport is at the scrollback tail. */
@@ -222,6 +201,22 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	// --- Test-only helpers ---------------------------------------------------
+
+	/** Bytes the simulated output stream still holds (see {@link setOutputBacklog}). */
+	get outputBacklog(): number {
+		return this.#io.backlog;
+	}
+
+	/**
+	 * Simulate a slow consumer: the engine samples this as its output backlog
+	 * and defers frames while it is deep. Lowering it reports a stream drain,
+	 * as stdout's `drain` event does.
+	 */
+	setOutputBacklog(bytes: number): void {
+		const previous = this.#io.backlog;
+		this.#io.backlog = bytes;
+		if (bytes < previous) this.#io.sink?.drained();
+	}
 
 	/**
 	 * Wait for TUI's throttled render pipeline to settle (matches the ~33ms
@@ -241,9 +236,9 @@ export class VirtualTerminal implements Terminal {
 		await this.flush();
 	}
 
-	/** Simulate keyboard input. */
+	/** Simulate keyboard input: the bytes go through the engine's stdin parser. */
 	sendInput(data: string): void {
-		this.#inputHandler?.(data);
+		this.#io.sink?.input(utf8Encoder.encode(data));
 	}
 
 	/**
@@ -259,7 +254,11 @@ export class VirtualTerminal implements Terminal {
 		return { baseY: this.#cappedBaseY(), viewportY: this.#viewportY };
 	}
 
-	/** Engine writes are synchronous; nothing to drain. Yield a microtask for ordering. */
+	/**
+	 * Engine output reaches the emulator synchronously, so nothing is left to
+	 * drain; the returned promise only yields a microtask for tests that await
+	 * ordering (and for emulator replies queued behind the last write).
+	 */
 	async flush(): Promise<void> {
 		await Promise.resolve();
 	}
@@ -275,7 +274,7 @@ export class VirtualTerminal implements Terminal {
 		const capped = this.#cappedBaseY();
 		const historyLen = this.#term.scrollbackLength;
 		const lines: string[] = [];
-		for (let i = 0; i < this.#rows; i++) {
+		for (let i = 0; i < this.#io.rows; i++) {
 			const index = this.#viewportY + i;
 			lines.push(
 				index < capped ? this.#historyRowText(historyLen - capped + index) : this.#term.line(index - capped),
@@ -289,7 +288,7 @@ export class VirtualTerminal implements Terminal {
 		const capped = this.#cappedBaseY();
 		const historyLen = this.#term.scrollbackLength;
 		const lines: string[] = [];
-		const total = capped + this.#rows;
+		const total = capped + this.#io.rows;
 		for (let i = 0; i < total; i++) {
 			lines.push(i < capped ? this.#historyRowText(historyLen - capped + i) : this.#term.line(i - capped));
 		}
@@ -440,9 +439,9 @@ export class VirtualTerminal implements Terminal {
 	/** Apply the pending grid size to the engine, preserving xterm resize semantics. */
 	#engineResize(): void {
 		const prevRows = this.#term.rows;
-		this.#term.resize(this.#columns, this.#rows);
+		this.#term.resize(this.#io.columns, this.#io.rows);
 		this.#historyTextCache.length = 0; // engine rewraps scrollback on resize
-		const grown = this.#rows - prevRows;
+		const grown = this.#io.rows - prevRows;
 		if (grown > 0) {
 			// kitty leaves scrolled-out lines in history when the grid grows;
 			// xterm/tmux/ghostty pull them back onto the new blank rows. Emulate
@@ -455,9 +454,7 @@ export class VirtualTerminal implements Terminal {
 
 	#recreate(): void {
 		this.#term.dispose();
-		this.#term = createEngine(this.#columns, this.#rows, this.#scrollbackCap, reply => {
-			queueMicrotask(() => this.#inputHandler?.(reply));
-		});
+		this.#term = createEngine(this.#io.columns, this.#io.rows, this.#scrollbackCap, this.#reply);
 		this.#pendingEngineResize = false;
 		this.#viewportY = 0;
 		this.#historyTextCache.length = 0; // fresh engine: prior scrollback is gone
@@ -471,7 +468,7 @@ export class VirtualTerminal implements Terminal {
 			return this.#term.scrollbackLineCells(this.#term.scrollbackLength - capped + index);
 		}
 		const activeRow = index - capped;
-		if (activeRow < 0 || activeRow >= this.#rows) return null;
+		if (activeRow < 0 || activeRow >= this.#io.rows) return null;
 		return this.#term.lineCells(activeRow);
 	}
 

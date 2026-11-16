@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-natives";
 import { quotePosixArgument, quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
 import type {

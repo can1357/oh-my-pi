@@ -1,70 +1,73 @@
 import { describe, expect, it } from "bun:test";
 import { type Component, Container, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { Terminal, type TerminalIo, type TerminalIoSink } from "@oh-my-pi/pi-tui/terminal";
 
-class MinimalTerminal implements Terminal {
-	columns = 80;
-	rows = 24;
-	kittyProtocolActive = false;
-	kittyEnableSequence: string | null = null;
-	keyboardEnhancementEnterSequence: string | null = null;
-	keyboardEnhancementExitSequence: string | null = null;
-	appearance: TerminalAppearance | undefined;
-	#onInput: ((data: string) => void) | undefined;
-	#onResize: (() => void) | undefined;
-	output = "";
+const utf8Decoder = new TextDecoder();
+const utf8Encoder = new TextEncoder();
+
+/** Byte-capturing IO port: engine output is recorded, nothing answers on stdin. */
+class CaptureIo implements TerminalIo {
+	readonly interactive = false;
+	readonly backlog = 0;
+	readonly writes: string[] = [];
+	sink: TerminalIoSink | undefined;
+
+	constructor(
+		readonly columns: number,
+		readonly rows: number,
+	) {}
+
+	open(sink: TerminalIoSink): void {
+		this.sink = sink;
+	}
+
+	write(chunks: readonly Uint8Array[]): void {
+		for (const chunk of chunks) this.writes.push(utf8Decoder.decode(chunk, { stream: true }));
+	}
+
+	close(): void {
+		this.sink = undefined;
+	}
+}
+
+class MinimalTerminal extends Terminal {
+	readonly #io: CaptureIo;
 	cursorHidden = false;
 	cursorTransitions = 0;
 
-	start(onInput: (data: string) => void, onResize: () => void): void {
-		this.#onInput = onInput;
-		this.#onResize = onResize;
+	constructor() {
+		const io = new CaptureIo(80, 24);
+		super(io);
+		this.#io = io;
 	}
 
-	stop(): void {
-		this.#onInput = undefined;
-		this.#onResize = undefined;
+	override async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+
+	/** Everything the engine wrote so far. */
+	get output(): string {
+		return this.#io.writes.join("");
 	}
 
-	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
-
-	write(data: string): void {
-		this.output += data;
-		if (data.length === 0) this.output += "";
-	}
-
-	moveBy(_lines: number): void {}
-
-	hideCursor(): void {
+	override hideCursor(force?: boolean): void {
 		this.cursorHidden = true;
 		this.cursorTransitions += 1;
+		super.hideCursor(force);
 	}
 
-	showCursor(): void {
+	override showCursor(force?: boolean): void {
 		this.cursorHidden = false;
 		this.cursorTransitions += 1;
+		super.showCursor(force);
 	}
 
-	clearLine(): void {}
-
-	clearFromCursor(): void {}
-
-	clearScreen(): void {}
-
-	setTitle(_title: string): void {}
-
-	setProgress(_active: boolean): void {}
-
-	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {}
-
+	/** Deliver stdin bytes through the engine's input parser. */
 	sendInput(data: string): void {
-		const onInput = this.#onInput;
-		if (onInput) onInput(data);
+		this.#io.sink?.input(utf8Encoder.encode(data));
 	}
 
+	/** Report the (unchanged) OS size again, as a SIGWINCH does. */
 	emitResize(): void {
-		const onResize = this.#onResize;
-		if (onResize) onResize();
+		this.#io.sink?.resize(this.#io.columns, this.#io.rows);
 	}
 }
 
@@ -123,8 +126,9 @@ describe("TUI overlay focus", () => {
 			tui.showOverlay(sidebar);
 			terminal.sendInput("hello");
 
+			// The stdin parser delivers typed text one key at a time.
 			expect(tui.getFocused()).toBe(sidebar);
-			expect(editor.inputs).toEqual(["hello"]);
+			expect(editor.inputs).toEqual([..."hello"]);
 		} finally {
 			tui.stop();
 		}
@@ -257,14 +261,14 @@ describe("TUI overlay focus", () => {
 			terminal.sendInput("code");
 
 			expect(tui.getFocused()).toBe(authorizationCodeInput);
-			expect(authorizationCodeInput.inputs).toEqual(["code"]);
+			expect(authorizationCodeInput.inputs).toEqual([..."code"]);
 			expect(wizardOverlay.inputs).toEqual([]);
 
 			tui.setFocus(approvalPrompt);
 			terminal.sendInput("still-code");
 
 			expect(tui.getFocused()).toBe(authorizationCodeInput);
-			expect(authorizationCodeInput.inputs).toEqual(["code", "still-code"]);
+			expect(authorizationCodeInput.inputs).toEqual([..."code", ..."still-code"]);
 			expect(approvalPrompt.inputs).toEqual([]);
 		} finally {
 			tui.stop();
@@ -314,8 +318,9 @@ describe("TUI overlay focus", () => {
 
 			// The visible approval prompt now receives input. Pre-fix the
 			// hide()-only restore left focus on the stale editor.
-			terminal.sendInput("\x1b[B");
-			terminal.sendInput("\r");
+			// One stdin read: a lone break-bearing read is held for the 10 ms raw-paste
+			// classification window, while the arrow's ESC delivers both keys at once.
+			terminal.sendInput("\x1b[B\r");
 			expect(tui.getFocused()).toBe(approvalPrompt);
 			expect(approvalPrompt.inputs).toEqual(["\x1b[B", "\r"]);
 			expect(editor.inputs).toEqual([]);

@@ -32,12 +32,12 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatKeyHint } from "../app-keybindings";
-import { BracketedPasteHandler } from "../bracketed-paste";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
 import { Editor } from "../components/editor";
-import { Image, type ImageBudget, measureRender } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image, measureRender } from "../components/image";
 import { Input } from "../components/input";
 import { renderTableRow, type TableColumn } from "../components/table";
 import {
@@ -215,7 +215,6 @@ interface OpenNote {
 	/** Saved images of the option plus those pasted since the note opened. */
 	images: ImageContent[];
 	pastes: OrderedPastes;
-	pasteHandler: BracketedPasteHandler;
 }
 
 /** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
@@ -616,6 +615,43 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (confirm) {
 			if (!stop.field.multi) this.#toggle(stop.field, stop.option);
 			this.#moveField(1);
+		}
+	}
+
+	/**
+	 * A terminal paste goes where typed text would: the open note (an image path or an empty
+	 * clipboard-image paste attaches when images are accepted), the draft behind a blocking input
+	 * guard, or the focused text or Other field.
+	 */
+	handlePaste(text: string, enter?: string): void {
+		this.#resetCountdown();
+		this.#changed();
+		const note = this.#noteEditor;
+		if (note && !this.#hidden) {
+			if (this.#options.acceptImages) this.#notePaste(note, text);
+			else note.editor.handlePaste(text);
+			return;
+		}
+		if (this.#open) return;
+		if (this.#guardBlocks()) {
+			this.#options.inputGuard?.handlePaste(text, enter);
+			return;
+		}
+		if (this.#hidden) return;
+		// Focus on another page: keys there only bring it into view (see handleInput).
+		if (!isNativeRendering() && !this.#followFocus && this.#pages.length > 1) return;
+		const stop = this.#stops[this.#focus]!;
+		if (stop.kind === "text") {
+			const editor = this.#editors.get(stop.field);
+			const before = this.#textValue(stop.field);
+			if (editor) editor.handlePaste(text);
+			else this.#inputs.get(stop.field)!.handlePaste(text);
+			if (this.#textValue(stop.field) !== before) this.#errors.delete(stop.field);
+		} else if (stop.kind === "other") {
+			const input = this.#others.get(stop.field)!;
+			const before = input.getValue();
+			input.handlePaste(text);
+			if (input.getValue() !== before) this.#errors.delete(stop.field);
 		}
 	}
 
@@ -1040,7 +1076,6 @@ export class HtmlFormDialog implements Component, Focusable {
 			option,
 			editor,
 			images: [...(saved?.images ?? [])],
-			pasteHandler: new BracketedPasteHandler(),
 			pastes: new OrderedPastes({
 				deliver: text => editor.pasteText(text),
 				run: () => this.#saveNote(),
@@ -1080,14 +1115,6 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	#noteEditorInput(data: string): void {
 		const note = this.#noteEditor!;
-		if (this.#options.acceptImages) {
-			const paste = note.pasteHandler.process(data);
-			if (paste.handled) {
-				if (paste.pasteContent !== undefined) this.#notePaste(note, paste.pasteContent);
-				if (paste.remaining.length > 0) this.handleInput(paste.remaining);
-				return;
-			}
-		}
 		if (matchesSelectCancel(data)) this.#closeNote();
 		else if (getKeybindings().matches(data, "tui.input.submit")) this.#requestSave();
 		else note.editor.handleInput(data);

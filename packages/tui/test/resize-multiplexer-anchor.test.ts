@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { terminalMultiplexerEnvKeys } from "@oh-my-pi/pi-natives";
 import {
 	CURSOR_MARKER,
 	type TerminalFramePlan,
@@ -6,7 +7,6 @@ import {
 	TUI,
 	type ViewportSize,
 } from "@oh-my-pi/pi-tui";
-import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
 // Regression coverage for tmux pane zoom corrupting scrollback (duplication and
@@ -52,8 +52,8 @@ function startRig(markerRow?: number) {
 	const renderScheduler = new ResizeScheduler();
 	const tui = new TUI(terminal, undefined, { renderScheduler });
 	const writes: string[] = [];
-	const originalWrite = terminal.write.bind(terminal);
-	terminal.write = (data: string) => {
+	const originalWrite = terminal.receive.bind(terminal);
+	terminal.receive = (data: string) => {
 		writes.push(data);
 		originalWrite(data);
 	};
@@ -85,7 +85,7 @@ class ResizeScheduler {
 
 // Every signal multiplexer classification reads; the suite itself may run under
 // any recognized multiplexer, so direct-terminal tests must clear them all.
-const MUX_SIGNALS = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
+const MUX_SIGNALS = [...terminalMultiplexerEnvKeys(), "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
 
 function useDirectTerminalEnv() {
 	let saved: Record<string, string | undefined>;

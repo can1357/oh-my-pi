@@ -43,9 +43,9 @@ class FullscreenOverlay implements Component {
 class CountingTerminal extends VirtualTerminal {
 	readonly writes: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.writes.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 }
 
@@ -147,7 +147,7 @@ function plainBuffer(terminal: VirtualTerminal): string[] {
 /** Models tmux's preserved clear: a full-screen ED0/ED2 scrolls the live
  *  screen into pane history before blanking, unlike xterm-family discard. */
 class TmuxPreservedClearTerminal extends VirtualTerminal {
-	override write(data: string): void {
+	override receive(data: string): void {
 		const fullScreenClear = /\x1b\[1;1H\x1b\[J|\x1b\[2J/g;
 		let translated = "";
 		let last = 0;
@@ -157,7 +157,7 @@ class TmuxPreservedClearTerminal extends VirtualTerminal {
 			last = match.index + match[0].length;
 		}
 		translated += data.slice(last);
-		super.write(translated);
+		super.receive(translated);
 	}
 }
 /**
@@ -165,21 +165,21 @@ class TmuxPreservedClearTerminal extends VirtualTerminal {
  * an exact-width bottom-row repaint, as observed in issue #9783's PTY capture.
  */
 class ConptyPendingWrapTerminal extends VirtualTerminal {
-	override write(data: string): void {
+	override receive(data: string): void {
 		const cursorMove = /\x1b\[\d+;\d+H/g;
 		let offset = 0;
 		for (let match = cursorMove.exec(data); match; match = cursorMove.exec(data)) {
 			const beforeMove = data.slice(offset, match.index);
-			super.write(beforeMove);
+			super.receive(beforeMove);
 			const lastReturn = Math.max(beforeMove.lastIndexOf("\r"), beforeMove.lastIndexOf("\n"));
 			const trailingText = Bun.stripANSI(beforeMove.slice(lastReturn + 1));
 			if (trailingText.length >= this.columns && this.getCursor().row === this.rows - 1) {
-				super.write("\r\n");
+				super.receive("\r\n");
 			}
-			super.write(match[0]);
+			super.receive(match[0]);
 			offset = match.index + match[0].length;
 		}
-		super.write(data.slice(offset));
+		super.receive(data.slice(offset));
 	}
 }
 

@@ -1,143 +1,96 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { type FakeTty, fakeProcessTty, recordingHost } from "./helpers/process-tty";
 
 // Regression: a recycled terminal pane (Muxy's "terminal offline" sweep, a
-// dropped ssh session) revokes the pty. stdin EOFs, the disconnect path runs,
-// and stop() restores raw mode on an fd that is no longer a tty, so Bun's
-// node:tty shim throws ENOENT. That throw escaped stop() and
-// #markTerminalDisconnected(), preempting its own process.kill(SIGHUP), and the
-// process died with an uncaught exception instead of exiting 129. Teardown
-// against a dead terminal is best-effort; the exit must still happen.
+// dropped ssh session) revokes the pty. stdin ends, the disconnect path runs,
+// and stop() restores the stdin terminal mode on a descriptor that is no
+// longer a tty, which fails. That failure escaped stop() and the disconnect
+// handling, preempting its own process.kill(SIGHUP), and the process died
+// with an uncaught exception instead of exiting 129. Teardown against a dead
+// terminal is best-effort; the exit must still happen.
+//
+// Raw mode, its restore, and stdin ending are the engine's (Rust:
+// `term::stdin` PTY tests); a restore failure surfaces as `engine.stop`
+// throwing after everything else was handed back, simulated here.
 
-/** The error Bun's node:tty shim raises for an ioctl on a revoked pty. */
-const REVOKED_PTY = "setRawMode failed with errno: 2";
+/** What the engine throws when the stdin terminal mode cannot be restored. */
+const RESTORE_FAILED = "restoring the stdin terminal mode failed: Input/output error (os error 5)";
 
-const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
-
-function restoreProperty(target: object, key: string, descriptor: PropertyDescriptor | undefined): void {
-	if (descriptor) {
-		Object.defineProperty(target, key, descriptor);
-		return;
-	}
-	delete (target as Record<string, unknown>)[key];
+/** The pty is revoked after start: the engine's stop hands back what it can, then the mode restore fails. */
+function revokeAfterStart(terminal: ProcessTerminal): void {
+	const engine = terminal.engine;
+	const stop = engine.stop.bind(engine);
+	vi.spyOn(engine, "stop").mockImplementation(now => {
+		stop(now);
+		throw new Error(RESTORE_FAILED);
+	});
 }
 
 describe("ProcessTerminal disconnect with a revoked pty", () => {
-	let previousHeadless: boolean;
-	let signals: string[];
-
-	beforeEach(() => {
-		signals = [];
-		previousHeadless = setTerminalHeadless(false);
-		// SIGHUP is the POSIX disconnect exit; Windows calls postmortem.quit(129), which would end the test worker.
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-		vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal: string) => {
-			signals.push(signal);
-			return true;
-		}) as unknown as typeof process.kill);
-		vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin);
-		vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
-		vi.spyOn(process.stdin, "setEncoding").mockImplementation(() => process.stdin);
-		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-	});
+	let tty: FakeTty | undefined;
+	let terminal: ProcessTerminal | undefined;
 
 	afterEach(() => {
+		try {
+			terminal?.stop();
+		} catch {
+			// The revoked-pty fakes make a live stop throw by design.
+		}
+		terminal = undefined;
+		tty?.dispose();
+		tty = undefined;
 		vi.restoreAllMocks();
-		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
-		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
-		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
-		setTerminalHeadless(previousHeadless);
-		restoreProperty(process, "platform", platformDescriptor);
 	});
 
-	it("still signals SIGHUP when restoring raw mode throws on a revoked fd", () => {
-		// Raw mode goes on during start(); the pty is revoked after that, so the
-		// restore call inside stop() is the one that fails.
-		let started = false;
-		Object.defineProperty(process.stdin, "setRawMode", {
-			value: () => {
-				if (started) throw new Error(REVOKED_PTY);
-				started = true;
-				return process.stdin;
-			},
-			configurable: true,
-		});
+	// SIGHUP is the POSIX disconnect exit; Windows calls postmortem.quit(129), which would end the test worker.
+	function fakeLinuxTty(): FakeTty {
+		tty = fakeProcessTty({ platform: "linux" });
+		return tty;
+	}
 
-		const terminal = new ProcessTerminal();
-		terminal.start(
-			() => {},
-			() => {},
-			() => terminal.stop(), // what the app wires as onDisconnect
-		);
+	it("still signals SIGHUP when restoring the stdin mode fails on a revoked tty", () => {
+		const fake = fakeLinuxTty();
+		const live = fake.terminal();
+		terminal = live;
+		// What the app wires as its disconnect teardown.
+		const host = recordingHost(() => live.stop());
+		live.bind(host);
+		live.start();
+		revokeAfterStart(live);
 
-		expect(() => process.stdin.emit("end")).not.toThrow();
-		expect(signals).toContain("SIGHUP");
+		expect(() => fake.endInput()).not.toThrow();
+		expect(host.disconnects).toBe(1);
+		expect(fake.signals).toContain("SIGHUP");
 		// postmortem's SIGHUP handler skips the fd-2 report on this flag: the pty it
 		// would write to is the one that just died, and a full one blocks the write.
 		expect(postmortem.isTerminalDeclaredDead()).toBe(true);
 	});
 
-	it("treats an initial EIO enabling raw mode as a terminal disconnect", () => {
-		Object.defineProperty(process.stdin, "setRawMode", {
-			value: () => {
-				throw new Error("setRawMode failed with errno: 5");
-			},
-			configurable: true,
-		});
+	it("propagates a stdin mode restore failure while the terminal is still live", () => {
+		const fake = fakeLinuxTty();
+		const live = fake.terminal();
+		terminal = live;
+		live.bind(recordingHost());
+		live.start();
+		revokeAfterStart(live);
 
-		const terminal = new ProcessTerminal();
-		expect(() =>
-			terminal.start(
-				() => {},
-				() => {},
-				() => terminal.stop(),
-			),
-		).not.toThrow();
-		expect(signals).toContain("SIGHUP");
-	});
-
-	it("propagates a raw-mode restore failure while the terminal is still live", () => {
-		let started = false;
-		Object.defineProperty(process.stdin, "setRawMode", {
-			value: () => {
-				if (started) throw new Error(REVOKED_PTY);
-				started = true;
-				return process.stdin;
-			},
-			configurable: true,
-		});
-
-		const terminal = new ProcessTerminal();
-		terminal.start(
-			() => {},
-			() => {},
-			() => {},
-		);
-
-		expect(() => terminal.stop()).toThrow(REVOKED_PTY);
+		expect(() => live.stop()).toThrow(RESTORE_FAILED);
 	});
 
 	it("still signals SIGHUP when the disconnect handler itself throws", () => {
-		Object.defineProperty(process.stdin, "setRawMode", { value: () => process.stdin, configurable: true });
-
-		const terminal = new ProcessTerminal();
-		terminal.start(
-			() => {},
-			() => {},
-			() => {
+		const fake = fakeLinuxTty();
+		const live = fake.terminal();
+		terminal = live;
+		live.bind(
+			recordingHost(() => {
 				throw new Error("teardown blew up");
-			},
+			}),
 		);
+		live.start();
 
-		expect(() => process.stdin.emit("end")).not.toThrow();
-		expect(signals).toContain("SIGHUP");
-		terminal.stop();
+		expect(() => fake.endInput()).not.toThrow();
+		expect(fake.signals).toContain("SIGHUP");
 	});
 });

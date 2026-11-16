@@ -1456,6 +1456,16 @@ export class ModelBrowser implements Component {
 		}
 	}
 
+	handlePaste(text: string): void {
+		const before = this.#searchInput.getValue();
+		this.#searchInput.handlePaste(text);
+		const after = this.#searchInput.getValue();
+		if (after !== before) {
+			this.#applyQuery("reset-changed-prefix");
+			this.onQueryChange?.(after);
+		}
+	}
+
 	/** Cancel-key ladder: clear a non-empty query first, then bubble to the host. */
 	handleCancel(): void {
 		if (this.#searchInput.getValue().length > 0) {

@@ -115,7 +115,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		comp.handleInput("\n");
 		comp.handleInput("\x15");
-		comp.handleInput("\x1b[200~test-token-123\x1b[201~");
+		comp.handlePaste("test-token-123");
 		expect(comp.render(120).join("\n")).not.toContain("test-token-123");
 		comp.handleInput("\n");
 

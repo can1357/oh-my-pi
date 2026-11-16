@@ -134,6 +134,15 @@ export class MoveOverlay implements Component, Focusable {
 		}
 	}
 
+	handlePaste(text: string): void {
+		const before = this.#field.getValue();
+		this.#field.handlePaste(text);
+		if (this.#field.getValue() !== before) {
+			this.#selectedIndex = 0;
+			this.#updateResults();
+		}
+	}
+
 	render(width: number): readonly string[] {
 		const w = width;
 		const innerWidth = Math.max(1, w - 4);

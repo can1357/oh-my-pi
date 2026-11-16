@@ -1,11 +1,12 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
+import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { AttachmentChipsBand } from "@oh-my-pi/pi-tui/prompt/attachment-chips";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
-import { ImageBudget } from "@oh-my-pi/pi-tui";
-import { setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { getAvailableSymbolPresets, SYMBOL_PRESETS } from "@oh-my-pi/pi-tui/theme/symbols";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
@@ -98,7 +99,7 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 		const originalProtocol = TERMINAL.imageProtocol;
 		const originalCellDims = { ...getCellDimensions() };
 		mutable.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
+		TERMINAL.kittyUnicodePlaceholders = true;
 		setCellDimensions({ widthPx: 10, heightPx: 21 });
 		try {
 			// Real PNG header for 560x502 so the probe yields a >1-column grid.
@@ -123,7 +124,7 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 			}
 		} finally {
 			mutable.imageProtocol = originalProtocol;
-			setKittyGraphics({ unicodePlaceholders: false });
+			TERMINAL.kittyUnicodePlaceholders = false;
 			setCellDimensions(originalCellDims);
 		}
 	});
@@ -132,7 +133,7 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 		const originalProtocol = TERMINAL.imageProtocol;
 		const originalCellDims = { ...getCellDimensions() };
 		mutable.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
+		TERMINAL.kittyUnicodePlaceholders = true;
 		setCellDimensions({ widthPx: 10, heightPx: 21 });
 		try {
 			// Regression: pasted images are re-encoded JPEG/WebP; transmitting those raw
@@ -145,18 +146,20 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 			editor.pendingImages.push({ type: "image", data: jpeg, mimeType: "image/jpeg" });
 			editor.insertAtom(chipLabel("image", 1), "[Image #1, 2x2]");
 			// Conversion in flight: icon fallback, nothing transmitted yet.
-			band.render(80);
-			expect(budget.hasPendingTransmits()).toBe(false);
+			const rawId = budget.acquireId(`chip:image/jpeg:${jpeg.length}:${jpeg.slice(0, 32)}`);
+			expect(band.render(80).join("")).not.toContain("\x1b_Ga=p,U=1");
 			await repaint.promise;
-			const rows = band.render(80);
-			expect(rows.some(row => row.includes("\x1b_Ga=p,U=1"))).toBe(true);
-			const transmits = budget.takeTransmits();
-			expect(transmits).toHaveLength(1);
-			const payload = transmits[0]!.slice(transmits[0]!.indexOf(";") + 1);
-			expect(payload.startsWith("iVBOR")).toBe(true);
+			const rows = band.render(80).join("");
+			const placed = Number(/\x1b_Ga=p,U=1,q=2,i=(\d+)/.exec(rows)?.[1]);
+			// The transmitted image is the PNG conversion, keyed by its data; the raw JPEG never is.
+			const png = await convertImageToPng({ type: "image", data: jpeg, mimeType: "image/jpeg" });
+			expect(png.data.startsWith("iVBOR")).toBe(true);
+			expect(placed).toBe(budget.acquireId(`chip:image/png:${png.data.length}:${png.data.slice(0, 32)}`));
+			expect(budget.shouldTransmit(placed)).toBe(false);
+			expect(budget.shouldTransmit(rawId)).toBe(true);
 		} finally {
 			mutable.imageProtocol = originalProtocol;
-			setKittyGraphics({ unicodePlaceholders: false });
+			TERMINAL.kittyUnicodePlaceholders = false;
 			setCellDimensions(originalCellDims);
 		}
 	});

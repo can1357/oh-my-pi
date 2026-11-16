@@ -1,4 +1,4 @@
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-natives";
 import { quotePosixArgvAsciiSafe } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
 import type {

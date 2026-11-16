@@ -269,7 +269,7 @@ export interface ExtensionUIDialogOptions {
 	acceptImages?: boolean;
 }
 
-/** Raw terminal input listener for extensions. */
+/** Terminal key input listener for extensions (key sequences and typed text; pastes go to the focused component). */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
 export type WidgetPlacement = "aboveEditor" | "belowEditor";

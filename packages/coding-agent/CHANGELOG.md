@@ -37,10 +37,18 @@
 - When the browser relay hides another extension's frame in a tab omp drives (a password manager's inline menu or save card), the call that ran into it, or a later one on that tab, now names the frame's page, the extension's id and the page's own title, and says the frame is hidden for the user too ([#19001](https://github.com/can1357/oh-my-pi/pull/19001) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic web search now passes `site:`-scoped queries to Claude with the domain and path still in the text, and tells Claude to always search, so those lookups and queries it thought it could answer from memory no longer fail with "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic web search on models with a refusal fallback (Opus 5 and 5.5, Sonnet 5.5, Fable 5) has Anthropic retry a query the safety classifier declines on another Claude model, and reports a refusal or a failed search (`too_many_requests`, …) by name instead of "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Breaking Changes
+
+- Extension `onTerminalInput` handlers receive keys only; pastes go to the focused component's `handlePaste`.
 - Subagents without an output schema (including eval `agent()` calls without `schema`) no longer get a `yield` tool; their final message is the result.
 - A `yield` without `data` no longer uses the subagent's last message as the result; it only finalizes incremental sections that were already submitted.
 - A `computer` key press that opens a macOS popup button's or menu button's menu in the background now fails listing the items and naming the press or click that chooses one, instead of leaving the menu open with your keyboard ([#19179](https://github.com/can1357/oh-my-pi/pull/19179) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Claude not seeing the reasoning of earlier Codex, Kimi, Grok and other non-Claude turns after a model switch, including turns kept through a compaction; it now gets that reasoning as text. When Claude refuses a turn with `Refusal (reasoning_extraction)` because of that carried reasoning, the turn is retried once without it, and the session stops sending it to Claude ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Pasting while a `!` command reads from the composer sends the text bracketed only when the command enabled bracketed paste.
 
 ## [18.22.0] - 2026-11-16
 

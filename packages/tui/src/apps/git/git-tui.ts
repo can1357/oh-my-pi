@@ -735,6 +735,11 @@ class GitTuiComponent implements Component {
 		this.#sidebar.handleInput(data);
 	}
 
+	/** Pastes reach the sidebar's commit-form fields only while the sidebar has focus. */
+	handlePaste(text: string): void {
+		if (this.#focus === "sidebar") this.#sidebar.handlePaste(text);
+	}
+
 	#handleMouse(data: string): boolean {
 		if (!data.startsWith("\x1b[<")) return false;
 		return routeSgrMouseInput(data, event => {

@@ -3,15 +3,21 @@
 This document describes the core renderer contract. The relevant implementation
 lives in:
 
-- [`packages/tui/src/tui.ts`](../packages/tui/src/tui.ts) — frame planning,
-  history emission, viewport diffing, overlays, and cursor placement.
-- [`packages/tui/src/terminal.ts`](../packages/tui/src/terminal.ts) — terminal I/O,
-  capability probes, and private-CSI reassembly.
+- [`crates/pi-natives/src/tui/`](../crates/pi-natives/src/tui/) — the native
+  terminal engine: input parsing and private-CSI reassembly, capability probes,
+  history emission, viewport diffing, resize transactions, cursor placement,
+  and render pacing.
+- [`packages/tui/src/tui.ts`](../packages/tui/src/tui.ts) — the JS side: the
+  component model and tree, focus, overlays, input routing, the frame protocol,
+  and frame composition for the engine.
+- [`packages/tui/src/terminal.ts`](../packages/tui/src/terminal.ts) — stdio glue
+  around the engine.
 - [`packages/tui/src/utils.ts`](../packages/tui/src/utils.ts) — ANSI-aware width,
   slicing, truncation, and wrapping.
-- [`packages/tui/src/kitty-graphics.ts`](../packages/tui/src/kitty-graphics.ts) and
-  [`packages/tui/src/components/image.ts`](../packages/tui/src/components/image.ts)
-  — inline images and their memory budget.
+- [`packages/tui/src/components/image.ts`](../packages/tui/src/components/image.ts)
+  and [`crates/pi-natives/src/tui/graphics/`](../crates/pi-natives/src/tui/graphics/)
+  — inline images: the component, and the native `InlineImage` encoder that
+  renders Kitty/iTerm2/SIXEL rows against the image budget.
 
 Application code owns transcript lifecycle. The renderer does not inspect the
 component tree to guess which rows are final.
@@ -87,8 +93,11 @@ intermediate screen is the previous frame scrolled or shifted, never a row
 beside its stale copy or an erased band awaiting repaint. Frames with images or
 OSC 66 text keep the plain row-rewrite path.
 
-Visible overlays are screen-coordinate content. They composite over the
-viewport and never become history. Showing, updating, or closing an overlay
+Visible overlays are screen-coordinate content. The host renders each one at
+its resolved width and hands the rows plus placement (row, column, width) to
+the engine with the frame; the engine composites them over the viewport (or,
+for a fullscreen overlay, over a blank alternate screen) and they never become
+history. Showing, updating, or closing an overlay
 only repaints the viewport.
 
 ## 3. Reset and resize behavior
@@ -165,13 +174,18 @@ input. New probes need a typed sentinel owner and byte-by-byte split-reply
 coverage.
 
 SIXEL discovery accepts either a positive XTSMGRAPHICS geometry reply or DA1
-attribute 4. `ProcessTerminal.onSixelSupport` publishes and caches the DA1
-advertisement while consuming the reply bytes and preserving sentinel ownership.
+attribute 4. The engine consumes both replies (preserving sentinel ownership),
+applies the adoption policy itself, and reports an adoption through its
+`imageProtocol` event, which sets `TERMINAL.imageProtocol` and invalidates the
+TUI; the engine forces the repaint. The engine's protocol comes from its
+environment-resolved facts plus this adoption — the host never pushes one.
 A missing DA1 attribute does not reject support reported by XTSMGRAPHICS.
 Selecting SIXEL from DA1 does not end a pending XTSMGRAPHICS query: its input
 consumer remains until the graphics reply arrives or the probe times out.
-Explicit `PI_FORCE_IMAGE_PROTOCOL` choices, including `none`/`off`, take priority;
-native TSP surfaces keep their own image transport.
+Explicit `PI_FORCE_IMAGE_PROTOCOL` choices, including `none`/`off`, take priority,
+as does a protocol already in effect; inside tmux the DA1 attribute counts only
+when tmux draws SIXEL for the attached client; native TSP surfaces (live or
+expected) keep their own image transport.
 
 ### Native rendering (Tern Surface Protocol)
 
@@ -191,7 +205,11 @@ SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
 is live the nerd symbol preset is forced process-locally, and icon glyphs are
 sent as `icon` spans. The first row paint waits
 up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
-immediately and fall back to rows if the terminal does not confirm it. Such a
+immediately and fall back to rows if the terminal does not confirm it (no
+reply within 1 s, re-armed for 100 ms when the deadline fired after an
+event-loop stall; or a null/unsupported reply). The engine runs this handshake
+(`crates/pi-natives/src/tui/surface.rs`) and tells the host only the surface
+transitions; a reply that arrives after a fallback still opens a surface. Such a
 session needs raw input from the start, so a `deferInput` start does not leave
 the tty cooked. The kernel echo that shows typing on other terminals while the
 module graph loads comes from Tern instead: the composer's `editor` node
@@ -270,11 +288,16 @@ current draft rather than an explicit payload.
 
 ## 6. Inline images and memory
 
-Kitty images are transmit-once, place-many. `ImageBudget` retains only the most
+Kitty images are transmit-once, place-many. `ImageBudget` (a native class from
+`@oh-my-pi/pi-natives`, shared with the terminal engine) retains only the most
 recent images; demotion deletes image pixels by id and repaints the affected
 viewport rows with the height-preserving text fallback. It does not replay
 history. An image already retained in terminal history may lose its pixels when
-demoted because historical rows are immutable.
+demoted because historical rows are immutable. Components drive the budget
+while the TUI composes a frame (`beginPass`/`observe`/`endPass`, transmit
+queueing); the engine drains its purges and transmits into every paint, bounds
+graphics-store residency, resets its alternate surface on each `?1049h`, and
+schedules the redraws it asks for.
 
 Never retransmit full base64 image data on every frame. Kitty Unicode
 placeholders remain capability-gated and can be overridden with the existing

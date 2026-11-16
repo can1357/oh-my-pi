@@ -9,16 +9,12 @@
  * terminal without graphics.
  */
 import { sanitizeStatusText } from "../chrome/shared";
-import { Image, type ImageBudget } from "../components/image";
+import { type ImageBudget, type ImageDimensions, imageDimensions } from "@oh-my-pi/pi-natives";
+import { Image } from "../components/image";
 import { isSvgMedia } from "../media";
 import { fileHyperlink, isHyperlinkEnabled, uriHyperlink } from "../render/hyperlink";
-import {
-	getCellDimensions,
-	getImageDimensions,
-	type ImageDimensions,
-	ImageProtocol,
-	TERMINAL,
-} from "../terminal-capabilities";
+import { getCellDimensions } from "../inline-image";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { theme } from "../theme";
 import type { Component } from "../tui";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
@@ -264,7 +260,7 @@ async function loadPicture(embed: Embed): Promise<Loaded> {
 	if (TERMINAL.imageProtocol === ImageProtocol.Kitty && mime !== "image/png") {
 		({ data, mimeType: mime } = await convertImageToPngShared({ type: "image", data, mimeType: mime }));
 	}
-	const natural = getImageDimensions(data, mime);
+	const natural = imageDimensions(data, mime);
 	if (!natural) throw new Error("unreadable image size");
 	return { kind: "raster", data, mime, natural };
 }

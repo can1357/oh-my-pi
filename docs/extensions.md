@@ -1020,8 +1020,9 @@ supported provider set derive from canonical launch capabilities: tmux, Zellij,
 Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
 multiplexer taxonomy but are currently unsupported.
 
-Provider-specific session detection is centralized in
-`@oh-my-pi/pi-tui/terminal-multiplexer`, which registers one module per multiplexer.
+Provider-specific session detection is centralized in the native terminal profile
+(`@oh-my-pi/pi-natives`, `crates/pi-natives/src/tui/profile/multiplexer.rs`), which
+registers one module per multiplexer; every function takes the environment explicitly.
 `hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
 `classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
 markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as

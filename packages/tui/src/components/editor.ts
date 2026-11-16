@@ -11,7 +11,6 @@ import {
 	midPromptSkillTokenMatches,
 	SKILL_NAMESPACE,
 } from "../autocomplete";
-import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
@@ -913,9 +912,6 @@ export class Editor implements Component, Focusable {
 	atomicTokenPattern: RegExp | undefined;
 	#atomicTokenSource: string | undefined;
 	#atomicTokenRe: RegExp | undefined;
-
-	// Bracketed paste mode buffering
-	#pasteHandler = new BracketedPasteHandler();
 
 	// Prompt history for up/down navigation
 	#history: LocalHistoryEntry[] = [];
@@ -2017,37 +2013,62 @@ export class Editor implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
-		// Iterative, not recursive: the bytes trailing a completed bracketed
-		// paste (which may themselves contain further pastes) loop back here,
-		// so a fragmented paste stream can never grow the call stack.
-		let next: string | undefined = data;
-		while (next !== undefined && next.length > 0) {
-			const session = this.#vimSession;
-			const revision = this.#textRevision;
-			const line = this.#state.cursorLine;
-			const col = this.#state.cursorCol;
-			// A line-array copy is pointer-sized per line; the edit diff below skips unchanged lines whole.
-			const linesBefore =
-				session !== null && session.tracked && !session.replace ? this.#state.lines.slice() : undefined;
-			next = this.#handleInputChunk(next);
-			// A bare cursor move inside one Insert/Replace session splits it, like Vim's arrow keys.
-			if (
-				session !== null &&
-				session === this.#vimSession &&
-				this.#textRevision === revision &&
-				(line !== this.#state.cursorLine || col !== this.#state.cursorCol)
-			) {
-				this.#breakVimSession();
-			} else if (
-				session !== null &&
-				session === this.#vimSession &&
-				session.tracked &&
-				!session.replace &&
-				linesBefore !== undefined &&
-				this.#textRevision !== revision
-			) {
-				this.#trackVimSessionEdit(session, linesBefore);
+		if (data.length === 0) return;
+		this.#applyTracked(() => this.#handleInputChunk(data));
+	}
+
+	/**
+	 * A terminal paste: inserted as text even in Vim Normal mode, collapsed into a
+	 * `[Paste #N]` marker when large (see {@link onLargePaste}). A submit `enter`
+	 * that shared the paste's read tells a large-paste host the submit lands next.
+	 */
+	handlePaste(text: string, enter?: string): void {
+		const options: PasteOptions = enter !== undefined && this.#isSubmitKey(enter) ? { submitAfterPaste: true } : {};
+		this.#applyTracked(() => {
+			// Input wins over a pending provider lookup (see #handleInputChunk).
+			if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
+				this.#invalidateAutocompleteRequests();
 			}
+			// A paste is no jump target: it cancels a pending character jump.
+			this.#jumpMode = null;
+			this.#handlePaste(text, options);
+		});
+	}
+
+	/** Whether `data` is exactly one keypress the editor treats as submit. */
+	#isSubmitKey(data: string): boolean {
+		if (data === "\n") return true;
+		const key = parseKey(data);
+		return key !== undefined && getKeybindings().matchesCanonical(canonicalKeyId(key), "tui.input.submit");
+	}
+
+	/** Run one edit, folding its buffer change into the open Vim Insert/Replace session. */
+	#applyTracked(edit: () => void): void {
+		const session = this.#vimSession;
+		const revision = this.#textRevision;
+		const line = this.#state.cursorLine;
+		const col = this.#state.cursorCol;
+		// A line-array copy is pointer-sized per line; the edit diff below skips unchanged lines whole.
+		const linesBefore =
+			session !== null && session.tracked && !session.replace ? this.#state.lines.slice() : undefined;
+		edit();
+		// A bare cursor move inside one Insert/Replace session splits it, like Vim's arrow keys.
+		if (
+			session !== null &&
+			session === this.#vimSession &&
+			this.#textRevision === revision &&
+			(line !== this.#state.cursorLine || col !== this.#state.cursorCol)
+		) {
+			this.#breakVimSession();
+		} else if (
+			session !== null &&
+			session === this.#vimSession &&
+			session.tracked &&
+			!session.replace &&
+			linesBefore !== undefined &&
+			this.#textRevision !== revision
+		) {
+			this.#trackVimSessionEdit(session, linesBefore);
 		}
 	}
 
@@ -2080,8 +2101,8 @@ export class Editor implements Component, Focusable {
 		session.rightStart = session.rightStart - leftCut - typedCut + insLen;
 	}
 
-	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
-	#handleInputChunk(data: string): string | undefined {
+	/** Process one input chunk. */
+	#handleInputChunk(data: string): void {
 		const kb = getKeybindings();
 		// Parse the sequence once; every binding probe below is then a set
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
@@ -2116,21 +2137,9 @@ export class Editor implements Component, Focusable {
 			this.#jumpMode = null;
 		}
 
-		// Handle bracketed paste mode
-		const paste = this.#pasteHandler.process(data);
-		if (paste.handled) {
-			if (paste.pasteContent !== undefined) {
-				this.#handlePaste(paste.pasteContent);
-				if (paste.remaining.length > 0) {
-					return paste.remaining;
-				}
-			}
-			return;
-		}
-
-		// Vim modal editing. Placed after paste handling so bracketed pastes still land as text, and
-		// before the bulk fast path below because in Normal mode a multi-grapheme run is a sequence
-		// of commands, not something to insert.
+		// Vim modal editing. Placed before the bulk fast path below because in Normal mode a
+		// multi-grapheme run is a sequence of commands, not something to insert. Pastes bypass it
+		// (see handlePaste) and still land as text.
 		if (this.#vim !== null && this.#handleVimInput(data, canonical)) {
 			return;
 		}
@@ -3912,22 +3921,17 @@ export class Editor implements Component, Focusable {
 		});
 	}
 
-	/** Normalize raw pasted text: decode tmux re-encoded control bytes (both extended-keys formats),
-	 *  normalize CRLF and
-	 *  NFC (macOS NFD filename drag-drops), expand tabs, and strip control characters except newline. */
+	/** Normalize raw pasted text: normalize CRLF and NFC (macOS NFD filename drag-drops), expand
+	 *  tabs, and strip control characters except newline. The engine already decoded tmux's
+	 *  re-encoded control bytes (Ctrl+J → "\n") in terminal pastes. */
 	#sanitizePastedText(pastedText: string): string {
-		// Decode tmux's re-encoded control bytes (both extended-keys formats) back to
-		// their literal byte so the per-char filter below preserves newlines instead of
-		// stripping ESC and leaking the printable tail into the editor. See the decoder.
-		const decodedText = decodeReencodedPasteControls(pastedText);
-
 		// Clean the pasted text. NFC-normalize so macOS Finder drag-drops of
 		// Korean filenames (which arrive as NFD: e.g. `ᄒ`+`ᅪ` instead of `화`)
 		// land in the buffer as the same precomposed syllables a terminal
 		// renders — without this, cursor column accounting drifts by
 		// `(NFD cells − NFC cells)` and the visible glyph desyncs from the
 		// hardware cursor.
-		const cleanText = decodedText.replace(/\r\n?/g, "\n").normalize("NFC");
+		const cleanText = pastedText.replace(/\r\n?/g, "\n").normalize("NFC");
 
 		// Convert tabs to spaces (4 spaces per tab).
 		const tabExpandedText = cleanText.replace(/\t/g, "   ");

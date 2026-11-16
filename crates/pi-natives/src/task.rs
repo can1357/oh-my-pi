@@ -415,6 +415,21 @@ where
 	AsyncTask::new(Blocking { tag, cancel_token: cancel_token.into(), work: Some(Box::new(work)) })
 }
 
+/// Queue `work` on libuv's thread pool like [`blocking`], for native code
+/// that chains the settlement itself (`PromiseRaw::then`) on the JS thread
+/// instead of handing the promise to JavaScript.
+pub fn spawn_blocking<T, F>(
+	env: &Env,
+	tag: &'static str,
+	work: F,
+) -> Result<napi::AsyncWorkPromise<T>>
+where
+	F: FnOnce(CancelToken) -> Result<T> + Send + 'static,
+	T: ToNapiValue + TypeName + Send + 'static,
+{
+	env.spawn(Blocking { tag, cancel_token: CancelToken::default(), work: Some(Box::new(work)) })
+}
+
 /// Run synchronous filesystem work without occupying libuv's pool.
 ///
 /// Provider callbacks may need that pool for async I/O; cancellation interrupts

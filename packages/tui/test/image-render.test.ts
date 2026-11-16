@@ -1,17 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { Image, ImageBudget, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
-import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import {
-	type CellDimensions,
-	getCellDimensions,
-	ImageProtocol,
-	isWindowsTerminalPreviewSixelSupported,
-	renderImage,
-	setCellDimensions,
-	setTerminalBackgroundColor,
-	TERMINAL,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { ImageBudget, rasterizeSvg } from "@oh-my-pi/pi-natives";
+import { Image, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
+import { type CellDimensions, getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, setTerminalBackgroundColor, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { parseSixelPalettePercent } from "./helpers/sixel-palette";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
@@ -19,6 +10,7 @@ withoutTerminalMultiplexer();
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
+	kittyUnicodePlaceholders: boolean;
 };
 
 const terminal = TERMINAL as unknown as MutableTerminalInfo;
@@ -31,11 +23,6 @@ function parseKittyParam(sequence: string, key: "c" | "r"): number | null {
 	const match = sequence.match(new RegExp(`${key}=(\\d+)`));
 	if (!match) return null;
 	return Number.parseInt(match[1], 10);
-}
-
-function parseITermParam(sequence: string, key: "width" | "height"): string | null {
-	const match = sequence.match(new RegExp(`;${key}=([^;:]+)`));
-	return match?.[1] ?? null;
 }
 
 /** A uniform translucent image has one SIXEL palette color, in RGB percentages. */
@@ -66,33 +53,20 @@ async function translucentImage(requestRender: () => void): Promise<Image> {
 describe("terminal image rendering", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
 	let originalCellDims: CellDimensions;
-	const originalGraphics = { ...getKittyGraphics() };
+	const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 
 	beforeEach(() => {
 		originalCellDims = { ...getCellDimensions() };
 		setCellDimensions({ widthPx: 10, heightPx: 10 });
 		terminal.imageProtocol = null;
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 	});
 
 	afterEach(() => {
 		setTerminalBackgroundColor(undefined);
 		setCellDimensions(originalCellDims);
 		terminal.imageProtocol = originalProtocol;
-		setKittyGraphics(originalGraphics);
-	});
-
-	it("fits Kitty images within max width and max height while preserving aspect ratio", () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS, {
-			maxWidthCells: 10,
-			maxHeightCells: 2,
-		});
-
-		expect(result).not.toBeNull();
-		expect(result?.rows).toBe(2);
-		expect(parseKittyParam(result?.sequence ?? "", "c")).toBe(2);
-		expect(parseKittyParam(result?.sequence ?? "", "r")).toBe(2);
+		terminal.kittyUnicodePlaceholders = originalPlaceholders;
 	});
 
 	it("re-renders a cached fallback once an image protocol becomes available", () => {
@@ -134,8 +108,8 @@ describe("terminal image rendering", () => {
 
 	it("re-renders a cached Kitty image when Unicode placeholder support changes", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: false });
-		const budget = new ImageBudget(1, () => {});
+		terminal.kittyUnicodePlaceholders = false;
+		const budget = new ImageBudget(1);
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
 			"image/png",
@@ -147,7 +121,7 @@ describe("terminal image rendering", () => {
 		const direct = image.render(20).join("");
 		expect(direct).toContain("\x1b_Ga=p");
 
-		setKittyGraphics({ unicodePlaceholders: true });
+		terminal.kittyUnicodePlaceholders = true;
 		const placeholder = image.render(20).join("");
 
 		expect(placeholder).toContain("U=1");
@@ -167,11 +141,12 @@ describe("terminal image rendering", () => {
 
 		const first = image.render(20);
 		expect(first.join("")).toContain("\x1b_Ga=p");
-		expect(budget.takeTransmits()).toHaveLength(1);
+		// The data rides the budget's one-time transmit, never the rows.
+		expect(first.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
+		expect(budget.shouldTransmit(budget.acquireId("released-image"))).toBe(false);
 
 		image.releaseRenderCaches();
 		expect(image.render(20)).toEqual(first);
-		expect(budget.takeTransmits()).toEqual([]);
 	});
 
 	it("keeps a demoted image's drawn height only within a lowered row ceiling", () => {
@@ -207,83 +182,6 @@ describe("terminal image rendering", () => {
 		budget.endPass();
 		expect(demoted).toHaveLength(2);
 		expect(demoted.at(-1)).toContain("[Image:");
-	});
-
-	it("uses intrinsic image size when no bounds are provided", () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS);
-
-		expect(result).not.toBeNull();
-		expect(result?.rows).toBe(10);
-		expect(parseKittyParam(result?.sequence ?? "", "c")).toBe(10);
-		expect(parseKittyParam(result?.sequence ?? "", "r")).toBe(10);
-	});
-
-	it("transmits stable Kitty images in-band before placement", () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		const result = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, {
-			imageId: 42,
-			includeTransmit: true,
-		});
-
-		expect(result).not.toBeNull();
-		expect(result?.transmit).toBe(`\x1b_Ga=t,f=100,q=2,i=42;${BASE64_ONE_PIXEL_PNG}\x1b\\`);
-		expect(result?.transmit).not.toContain("t=t");
-	});
-
-	it("reduces iTerm2 width when max height is the limiting bound", () => {
-		terminal.imageProtocol = ImageProtocol.Iterm2;
-		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS, {
-			maxWidthCells: 10,
-			maxHeightCells: 2,
-		});
-
-		expect(result).not.toBeNull();
-		expect(result?.rows).toBe(2);
-		expect(parseITermParam(result?.sequence ?? "", "width")).toBe("2");
-		// An explicit height in rows: iTerm2 drops an `auto` height image written to a background tab.
-		expect(parseITermParam(result?.sequence ?? "", "height")).toBe(String(result?.rows));
-	});
-
-	it("encodes SIXEL at the cell box size and reserves rows while one is pending", () => {
-		terminal.imageProtocol = ImageProtocol.Sixel;
-		setCellDimensions({ widthPx: 10, heightPx: 20 });
-		const requested: Array<[number, number]> = [];
-		// A raster padded to 90x11 cells, as SvgFigure draws it: encoding it at
-		// any other size resamples every glyph. The encoder, not this size,
-		// drops the partial 6px band 220px ends in.
-		const pending = renderImage(
-			BASE64_ONE_PIXEL_PNG,
-			{ widthPx: 900, heightPx: 220 },
-			{
-				maxWidthCells: 90,
-				maxHeightCells: 11,
-				sixel: (widthPx, heightPx) => {
-					requested.push([widthPx, heightPx]);
-					return undefined;
-				},
-			},
-		);
-
-		expect(requested).toEqual([[900, 220]]);
-		expect(pending).toEqual({ sequence: undefined, rows: 11 });
-		const failed = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, {
-			maxWidthCells: 10,
-			maxHeightCells: 2,
-			sixel: () => null,
-		});
-		expect(failed).toBeNull();
-	});
-
-	it("encodes SIXEL synchronously when the caller supplies no provider", () => {
-		terminal.imageProtocol = ImageProtocol.Sixel;
-		const result = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, {
-			maxWidthCells: 10,
-			maxHeightCells: 2,
-		});
-
-		expect(result?.rows).toBe(2);
-		expect((result?.sequence ?? "").startsWith("\x1bP")).toBe(true);
 	});
 
 	it("recomposites a cached SIXEL using the latest background after rapid changes", async () => {
@@ -364,32 +262,6 @@ describe("terminal image rendering", () => {
 		expect(imageLine).not.toContain("\x1b[0A");
 		expect(imageLine).not.toContain("\x1b[0B");
 		expect(imageLine).not.toMatch(/\x1b\[\d+[AB]/);
-	});
-});
-
-describe("Windows Terminal Preview SIXEL detection", () => {
-	it("requires Windows platform, WT session, and known version 1.22+", () => {
-		expect(
-			isWindowsTerminalPreviewSixelSupported(
-				{ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal", TERM_PROGRAM_VERSION: "1.22.2362.0" },
-				"win32",
-			),
-		).toBe(true);
-		expect(
-			isWindowsTerminalPreviewSixelSupported(
-				{ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal", TERM_PROGRAM_VERSION: "1.21.0.0" },
-				"win32",
-			),
-		).toBe(false);
-		expect(
-			isWindowsTerminalPreviewSixelSupported({ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal" }, "win32"),
-		).toBe(false);
-		expect(
-			isWindowsTerminalPreviewSixelSupported(
-				{ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal", TERM_PROGRAM_VERSION: "1.22.2362.0" },
-				"linux",
-			),
-		).toBe(false);
 	});
 });
 

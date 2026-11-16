@@ -89,7 +89,7 @@ Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr around 
 
 `crates/pi-natives/src/lib.rs` registers the current modules:
 
-- platform/runtime: `appearance`, `clipboard`, `crash_handler`, `desktop`, `devicecheck`, `file_lock`, `oauth_callback`, `power`, `prof`, `ps`, `pty`, `shell`, `spelling`, `tty_writer`, `vcs`;
+- platform/runtime: `appearance`, `clipboard`, `crash_handler`, `desktop`, `devicecheck`, `file_lock`, `oauth_callback`, `power`, `prof`, `ps`, `pty`, `shell`, `spelling`, `term` (crate-internal terminal output device), `tui` (terminal engine), `vcs`;
 - media/live/model: `applefm`, `audio`, `live`, `predict`, `sixel`, `snapcompact`, `svg`;
 - code/data: `ast`, `block`, `diff`, `edit`, `fd`, `glob`, `grep`, `highlight`, `html`, `keys`, `mermaid`, `pdf`, `summary`, `text`, `tokens`, `utok`, `vectors`, `workspace`;
 - isolation/task support: `iso`, `task`, plus N-API boundary/conversion helpers (`js`, crate-private `utils`, test-only `testing`);

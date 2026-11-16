@@ -6,7 +6,7 @@
  * it never falls back to code: {@link FenceFigure.draws} turns down fences
  * this terminal shows as code, and an svg that does not rasterize stays blank.
  */
-import type { ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import { fencedCode, Markdown } from "../components/markdown";
 import { TERMINAL } from "../terminal-capabilities";
 import { getMarkdownTheme } from "../theme";

@@ -13,7 +13,8 @@
  * figureBox({ width }, { room: figureRoom(120), cell }); // { columns: 59, rows: … }
  */
 import { imageMaxColumns } from "../components/image";
-import type { CellDimensions, ImageDimensions } from "../terminal-capabilities";
+import type { ImageDimensions } from "@oh-my-pi/pi-natives";
+import type { CellDimensions } from "../inline-image";
 
 /** CSS px per terminal row; a 1000px-wide figure spans ~125 columns of 1:2 cells. */
 export const PX_PER_ROW = 16;

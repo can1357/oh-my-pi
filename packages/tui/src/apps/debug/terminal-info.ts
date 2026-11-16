@@ -6,15 +6,9 @@
  * scrollback/erase strategy, and the live geometry — the details that decide
  * which escape sequences the renderer emits.
  */
-import {
-	getCellDimensions,
-	ImageProtocol,
-	isOsc99Supported,
-	NotifyProtocol,
-	TERMINAL,
-	TERMINAL_ID,
-} from "../../terminal-capabilities";
-import { classifyTerminalMultiplexer } from "../../terminal-multiplexer";
+import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-natives";
+import { getCellDimensions } from "../../inline-image";
+import { ImageProtocol, isOsc99Supported, type NotifyProtocol, TERMINAL } from "../../terminal-capabilities";
 
 /** Live values the debug view reads off the running TUI, not the static capability table. */
 export interface TerminalRuntimeState {
@@ -50,9 +44,9 @@ const IMAGE_PROTOCOL_NAMES: Record<ImageProtocol, string> = {
 };
 
 const NOTIFY_PROTOCOL_NAMES: Record<NotifyProtocol, string> = {
-	[NotifyProtocol.Bell]: "BEL (\\a)",
-	[NotifyProtocol.Osc99]: "OSC 99 (kitty desktop notifications)",
-	[NotifyProtocol.Osc9]: "OSC 9 (iTerm2/WezTerm)",
+	bell: "BEL (\\a)",
+	osc99: "OSC 99 (kitty desktop notifications)",
+	osc9: "OSC 9 (iTerm2/WezTerm)",
 };
 
 /** Snapshot the active terminal capabilities and the live runtime geometry. */
@@ -60,7 +54,7 @@ export function collectTerminalState(runtime: TerminalRuntimeState): TerminalSta
 	const env = Bun.env;
 	const cell = getCellDimensions();
 	return {
-		detectedId: TERMINAL_ID,
+		detectedId: TERMINAL.id,
 		columns: runtime.columns,
 		rows: runtime.rows,
 		cellWidthPx: cell.widthPx,

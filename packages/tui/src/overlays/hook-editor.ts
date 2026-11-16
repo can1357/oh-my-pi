@@ -23,7 +23,6 @@ import {
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "../index";
-import { BracketedPasteHandler } from "../bracketed-paste";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } from "../keybinding-matchers";
 import { formTheme } from "../chrome/form-theme";
@@ -115,7 +114,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#externalEditor: HookEditorOptions["externalEditor"];
 	#onPasteImage: HookEditorOptions["onPasteImage"];
 	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
-	#pasteHandler = new BracketedPasteHandler();
 	#pastes = new OrderedPastes({
 		deliver: text => this.#editor.pasteText(text),
 		run: () => this.#submitCurrentText(true),
@@ -298,25 +296,23 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		return super.render(width);
 	}
 
+	/** A terminal paste: a clipboard image cue or image paths attach (when images are accepted), other text lands in the editor. */
+	handlePaste(text: string): void {
+		if (this.#disposed) return;
+		// Hosts reserve ordered delivery synchronously inside these callbacks, so the Enter the
+		// TUI delivers right after the paste still waits for the image.
+		const image = this.acceptsImages ? classifyImagePaste(text) : undefined;
+		if (image?.kind === "clipboard" && this.#onPasteImage) {
+			void this.#onPasteImage();
+		} else if (image?.kind === "paths" && this.#onPasteImagePath) {
+			for (const path of image.paths) void this.#onPasteImagePath(path);
+		} else {
+			this.pasteText(text);
+		}
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#disposed) return;
-		const paste = this.#pasteHandler.process(keyData);
-		if (paste.handled) {
-			if (paste.pasteContent === undefined) return;
-			// Hosts reserve ordered delivery synchronously inside these callbacks, so input
-			// that followed the paste in this chunk (e.g. Enter) still waits for the image.
-			const content = paste.pasteContent;
-			const image = this.acceptsImages ? classifyImagePaste(content) : undefined;
-			if (image?.kind === "clipboard" && this.#onPasteImage) {
-				void this.#onPasteImage();
-			} else if (image?.kind === "paths" && this.#onPasteImagePath) {
-				for (const path of image.paths) void this.#onPasteImagePath(path);
-			} else {
-				this.pasteText(content);
-			}
-			if (paste.remaining.length > 0) this.handleInput(paste.remaining);
-			return;
-		}
 		if (this.#promptStyle) {
 			this.#handlePromptStyleInput(keyData);
 		} else {
@@ -373,8 +369,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		else this.#onCancelCallback(text);
 	}
 
-	/** Route non-bracketed paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
-	 *  into the inner editor, mirroring bracketed-paste semantics. Without this hook,
+	/** Route other paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
+	 *  into the inner editor, mirroring terminal-paste semantics. Without this hook,
 	 *  enhanced-paste routing falls back to the main prompt editor hidden behind the
 	 *  dialog (#2127 routing contract). */
 	pasteText(text: string): void {

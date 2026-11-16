@@ -10,7 +10,7 @@
  */
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import { internalUrlSchemeSpec, internalUrlSchemeSpecs, splitUrlScheme } from "../tools/url-scheme-host";
 import { AssistantMessageComponent } from "./assistant-message";
 import type { ToolExecutionHandle, ToolResultFrame } from "./tool-execution";

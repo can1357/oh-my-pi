@@ -582,6 +582,12 @@ export class AgentTranscriptViewer implements Component {
 		}
 	}
 
+	handlePaste(text: string): void {
+		if (!this.#editor) return;
+		this.#editor.handlePaste(text);
+		this.#deps.requestRender();
+	}
+
 	/** Returns true when the key was a scroll command. The browser owns the offset. */
 	#handleScroll(data: string): boolean {
 		if (this.#browser.handleScrollKey(data)) {

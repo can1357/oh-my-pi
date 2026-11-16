@@ -1,7 +1,5 @@
 import * as url from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { BracketedPasteHandler } from "../bracketed-paste";
-import { BRACKETED_PASTE_END, BRACKETED_PASTE_START } from "../stdin-buffer";
 import {
 	Editor,
 	type EditorTextDecorationContext,
@@ -292,14 +290,14 @@ function splitPastedPathSegments(payload: string): string[] | undefined {
 }
 
 /**
- * Extract whitespace/quoted-separated path-like segments from `payload`.
- * Shared backend of {@link extractBracketedPastePaths} and {@link extractPastePathsFromText}.
- * Returns the segments only when EVERY segment looks like an anchored local
- * path or uses Windows separators; otherwise undefined so ambiguous relative
- * URL/path text falls back to a plain text paste.
+ * Extract whitespace/quoted-separated file paths from pasted text (a terminal
+ * paste, or clipboard text read directly via `pbpaste`/PowerShell). Returns the
+ * segments only when EVERY segment looks like an anchored local path or uses
+ * Windows separators; otherwise undefined so ambiguous relative URL/path text
+ * falls back to a plain text paste.
  */
-function extractExplicitPathSegments(payload: string): string[] | undefined {
-	const pasted = payload.trim();
+export function extractPastePathsFromText(text: string): string[] | undefined {
+	const pasted = text.trim();
 	if (!pasted) return undefined;
 
 	const segments = splitPastedPathSegments(pasted);
@@ -312,16 +310,6 @@ function extractExplicitPathSegments(payload: string): string[] | undefined {
 		paths.push(path);
 	}
 	return paths;
-}
-
-/**
- * Extract image-or-other file paths from plain (un-bracketed) clipboard text.
- * Mirrors {@link extractBracketedPastePaths} for terminals/handlers that
- * already stripped the `\x1b[200~`…`\x1b[201~` markers (e.g. clipboard text
- * read directly via `pbpaste`/PowerShell).
- */
-export function extractPastePathsFromText(text: string): string[] | undefined {
-	return extractExplicitPathSegments(text);
 }
 
 /**
@@ -351,10 +339,8 @@ function extractWholeTextAttachmentPath(text: string): string | undefined {
 }
 
 /**
- * Same shape as {@link extractBracketedImagePastePaths} but operates on a
- * payload that has already been stripped of the `\x1b[200~` / `\x1b[201~`
- * markers — used by the assembled-paste router in {@link CustomEditor.handleInput}
- * so split bracketed pastes get the same attachment-path detection as single-chunk ones.
+ * Image or video file paths in pasted text, when every path is previewable —
+ * used by {@link classifyImagePaste} for terminal pastes.
  *
  * When the segment splitter fails (an unescaped space in a real path breaks
  * its every-segment-is-a-path invariant), falls back to
@@ -369,38 +355,16 @@ export function extractImagePastePathsFromText(text: string): string[] | undefin
 	return wholePath ? [wholePath] : undefined;
 }
 
-/** What a bracketed paste into an image-accepting prompt means. */
+/** What a terminal paste into an image-accepting prompt means. */
 export type ImagePaste =
 	/** Empty: the terminal's cue that the clipboard holds an image. */
 	{ kind: "clipboard" } | { kind: "paths"; paths: string[] } | { kind: "text" };
 
-/** Classifies the content of a bracketed paste (markers already stripped). */
+/** Classifies the text of a terminal paste. */
 export function classifyImagePaste(content: string): ImagePaste {
 	if (content.length === 0) return { kind: "clipboard" };
 	const paths = extractImagePastePathsFromText(content);
 	return paths ? { kind: "paths", paths } : { kind: "text" };
-}
-
-function bracketedPastePayload(data: string): string | undefined {
-	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
-	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
-	if (endIndex === -1 || endIndex + BRACKETED_PASTE_END.length !== data.length) return undefined;
-	return data.slice(BRACKETED_PASTE_START.length, endIndex);
-}
-
-export function extractBracketedPastePaths(data: string): string[] | undefined {
-	const payload = bracketedPastePayload(data);
-	return payload === undefined ? undefined : extractExplicitPathSegments(payload);
-}
-
-export function extractBracketedImagePastePaths(data: string): string[] | undefined {
-	const payload = bracketedPastePayload(data);
-	return payload === undefined ? undefined : extractImagePastePathsFromText(payload);
-}
-
-export function extractBracketedImagePastePath(data: string): string | undefined {
-	const paths = extractBracketedImagePastePaths(data);
-	return paths?.length === 1 ? paths[0] : undefined;
 }
 
 /**
@@ -412,7 +376,7 @@ export function extractBracketedImagePastePath(data: string): string | undefined
  *
  * Two-stage detection:
  *
- * 1. Splitter pass (shared with the bracketed-paste handler) — handles
+ * 1. Splitter pass (shared with terminal pastes) — handles
  *    quoted paths, shell-escaped spaces, and unambiguous single tokens.
  *    Returns the single previewable path when it parses cleanly; explicitly
  *    returns `undefined` when the splitter found multiple segments (so
@@ -1542,7 +1506,7 @@ export class CustomEditor extends Editor {
 	onCopyPrompt?: () => void;
 	/** Called when the configured image-paste shortcut is pressed. */
 	onPasteImage?: () => Promise<boolean>;
-	/** Called when a bracketed paste contains one or more image or video file paths. */
+	/** Called when a terminal paste contains one or more image or video file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
@@ -1575,11 +1539,6 @@ export class CustomEditor extends Editor {
 	/** Custom key handlers from extensions and non-built-in app actions. */
 	#customKeyHandlers = new Map<KeyId, () => void>();
 	#customMatchKeys = new Map<string, () => void>();
-	/** Bracketed-paste assembler that runs ahead of the inherited handler so terminals which
-	 *  deliver `\x1b[200~` and `\x1b[201~` in separate stdin chunks still resolve to a single
-	 *  assembled payload here; the empty-paste / image-path branches must see the full content,
-	 *  not the raw single-chunk byte sequence. */
-	#pasteHandler = new BracketedPasteHandler();
 	/** Number of async pastes (clipboard-image reads / image-path attachments) currently in flight.
 	 *  While > 0, `handleInput` queues subsequent keystrokes into {@link #pendingInput} instead of
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
@@ -1588,7 +1547,12 @@ export class CustomEditor extends Editor {
 	/** Input chunks and explicit prompts deferred behind an in-flight paste,
 	 *  drained in FIFO order once the paste count returns to zero. A `draft` chunk
 	 *  arrived through {@link handleDraftEdit} and drains back through it. */
-	#pendingInput: (string | { draft: string } | Extract<NativeUiEvent, { type: "send" }>)[] = [];
+	#pendingInput: (
+		| string
+		| { draft: string }
+		| { paste: string; enter: string | undefined }
+		| Extract<NativeUiEvent, { type: "send" }>
+	)[] = [];
 	#actionKeys = new Map<ConfigurableEditorAction, KeyId[]>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [action as ConfigurableEditorAction, [...keys]]),
 	);
@@ -1620,13 +1584,6 @@ export class CustomEditor extends Editor {
 
 	#matchesAction(canonical: string | undefined, action: ConfigurableEditorAction): boolean {
 		return canonical !== undefined && (this.#actionMatchKeys.get(action)?.has(canonical) ?? false);
-	}
-
-	/** Whether `data` is exactly one keypress the base editor would treat as submit. */
-	#isSubmitKey(data: string): boolean {
-		if (data === "\n") return true;
-		const key = parseKey(data);
-		return key !== undefined && getKeybindings().matchesCanonical(canonicalKeyId(key), "tui.input.submit");
 	}
 
 	/**
@@ -1668,6 +1625,7 @@ export class CustomEditor extends Editor {
 		for (const input of drained) {
 			if (typeof input === "string") this.handleInput(input);
 			else if ("draft" in input) this.handleDraftEdit(input.draft);
+			else if ("paste" in input) this.handlePaste(input.paste, input.enter);
 			else this.handleNativeEvent(input);
 		}
 	}
@@ -1707,7 +1665,6 @@ export class CustomEditor extends Editor {
 			this.onCapsLock();
 			return;
 		}
-		if (this.#routeBracketedPaste(data, false)) return;
 
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
@@ -1951,35 +1908,28 @@ export class CustomEditor extends Editor {
 	}
 
 	/**
-	 * Bracketed-paste assembly. Some terminals fragment the start marker,
-	 * the payload, and the end marker across separate stdin chunks
-	 * (Windows Terminal under heavy load, certain SSH muxes, …); the
-	 * inherited handler then sees a zero-length payload and silently
-	 * drops it through the normal text-insert path. Running our own
-	 * `BracketedPasteHandler` ahead of `super.handleInput` lets us route
-	 * the assembled content regardless of chunk boundaries:
+	 * A terminal paste (also a draft guard's, see {@link handleDraftEdit}), routed
+	 * before the base editor inserts text:
 	 *  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
 	 *    image-only macOS pasteboard the terminal stripped to `""` first);
 	 *  - explicit image-file paths → `onPasteImagePath` (#3506);
-	 *  - anything else → the base editor's `pasteText` so `[Paste #N]`
-	 *    markers, autocomplete, and undo state stay intact.
-	 * True when `data` was consumed. `draft` queues trailing bytes back through
-	 * {@link handleDraftEdit} instead of {@link handleInput}.
+	 *  - anything else → the base editor's paste so `[Paste #N]` markers,
+	 *    autocomplete, and undo state stay intact. A submit `enter` that shared
+	 *    the read makes a large-paste host stage the paste synchronously instead
+	 *    of opening a menu the submit would land in.
+	 * The Enter the TUI delivers right after an image paste queues behind it
+	 * (see {@link handleInput}), so submit never runs against an empty
+	 * `pendingImages`. A paste arriving while another is still landing queues too.
 	 */
-	#routeBracketedPaste(data: string, draft: boolean): boolean {
-		const paste = this.#pasteHandler.process(data);
-		if (!paste.handled) return false;
-		if (paste.pasteContent === undefined) return true; // still buffering — wait for end marker
-		const content = paste.pasteContent;
-		const remaining = paste.remaining;
-		// Queue any trailing bytes from the same read (typically a follow-up keystroke such as
-		// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
-		// completes — fixes the race where submit runs against an empty `pendingImages`.
-		if (remaining.length > 0) this.#pendingInput.push(draft ? { draft: remaining } : remaining);
-		const image = classifyImagePaste(content);
+	override handlePaste(text: string, enter?: string): void {
+		if (this.#pasteInFlight > 0) {
+			this.#pendingInput.push({ paste: text, enter });
+			return;
+		}
+		const image = classifyImagePaste(text);
 		if (image.kind === "clipboard" && this.onPasteImage) {
 			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
-			return true;
+			return;
 		}
 		if (image.kind === "paths" && this.onPasteImagePath) {
 			this.#trackAsyncPaste(
@@ -1987,18 +1937,11 @@ export class CustomEditor extends Editor {
 					for (const p of image.paths) await this.onPasteImagePath?.(p);
 				})(),
 			);
-			return true;
+			return;
 		}
-		// A submit key that shared the read (see `StdinBuffer`'s paste event) is
-		// about to be drained below, so a large-paste host must stage the paste
-		// synchronously instead of opening a menu the submit would land in.
-		if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
-		else this.pasteText(content);
+		super.handlePaste(text, enter);
 		this.#collapseSkillTokens();
 		this.#collapseModelMentions();
-		// No async paste was started; drain the queued trailing bytes ourselves.
-		this.#drainPendingInput();
-		return true;
 	}
 
 	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
@@ -2028,7 +1971,6 @@ export class CustomEditor extends Editor {
 			this.#pendingInput.push({ draft: data });
 			return;
 		}
-		if (this.#routeBracketedPaste(data, true)) return;
 		// The base editor reserves Ctrl+C for parent handling and returns without
 		// touching the buffer, so the configured clear action must be dispatched
 		// explicitly here — otherwise the guard's "finish or clear the prompt"

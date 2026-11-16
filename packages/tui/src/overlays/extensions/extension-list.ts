@@ -910,6 +910,18 @@ export class ExtensionList implements Component {
 		}
 	}
 
+	/** Pastes edit the always-active search field. */
+	handlePaste(text: string): void {
+		const before = this.#search.getValue();
+		this.#search.handlePaste(text);
+		const after = this.#search.getValue();
+		if (after !== before) {
+			this.#menu.setQuery(after, false);
+			this.#scrollOffset = 0;
+			this.#notifySelectionChange();
+		}
+	}
+
 	#moveSelectionUp(): void {
 		if (this.#menu.move(-1, false)) {
 			this.#syncScroll();

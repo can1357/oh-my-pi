@@ -1,17 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
-import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import {
-	type CellDimensions,
-	encodeKittyPlacementLine,
-	getCellDimensions,
-	ImageProtocol,
-	parseKittyDirectPlacementLine,
-	setCellDimensions,
-	TERMINAL,
-	wrapTmuxPassthrough,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
+import { type CellDimensions, getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type HistoryBatch, TUI } from "@oh-my-pi/pi-tui/tui";
+import { forceImageProtocol } from "./helpers/image-protocol";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
@@ -30,29 +23,29 @@ const BASE64_ONE_PIXEL_PNG =
 // be re-used (Kitty replace semantics strip the old placement everywhere,
 // scrollback included — the permanently cropped images on WezTerm).
 
-const originalProtocol = TERMINAL.imageProtocol;
+let restoreProtocol: () => void;
 const originalTerminalId = terminal.id;
-const originalGraphics = { ...getKittyGraphics() };
+const originalGraphics = TERMINAL.kittyUnicodePlaceholders;
 let originalCellDims: CellDimensions;
 
 beforeEach(() => {
 	originalCellDims = getCellDimensions();
 	setCellDimensions({ widthPx: 10, heightPx: 10 });
-	terminal.imageProtocol = ImageProtocol.Kitty;
+	restoreProtocol = forceImageProtocol(ImageProtocol.Kitty);
 	terminal.id = "wezterm";
-	setKittyGraphics({ unicodePlaceholders: false });
+	TERMINAL.kittyUnicodePlaceholders = false;
 });
 
 afterEach(() => {
 	setCellDimensions(originalCellDims);
-	terminal.imageProtocol = originalProtocol;
+	restoreProtocol();
 	terminal.id = originalTerminalId;
-	setKittyGraphics(originalGraphics);
+	TERMINAL.kittyUnicodePlaceholders = originalGraphics;
 });
 
 describe("kitty direct-placement wire format", () => {
-	it("round-trips the exact line Image renders for a direct placement", () => {
-		const budget = new ImageBudget(8, () => {});
+	it("renders a direct placement as the exact last line the terminal engine parses", () => {
+		const budget = new ImageBudget(8);
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
 			"image/png",
@@ -65,37 +58,11 @@ describe("kitty direct-placement wire format", () => {
 		const lines = image.render(40);
 		budget.endPass();
 		expect(lines.length).toBe(6);
-		const parsed = parseKittyDirectPlacementLine(lines[lines.length - 1]!);
-		expect(parsed).toEqual({ imageId, placementId: imageId, columns: 4, rows: 6 });
-	});
-
-	it("rejects non-placement image lines", () => {
-		// Placeholder virtual placement (a=p,U=1 lead) is not a direct placement.
-		expect(parseKittyDirectPlacementLine("\x1b_Ga=p,U=1,q=2,i=5,p=5,c=4,r=4\x1b\\")).toBeNull();
-		// Transmit-and-display and plain text never match.
-		expect(parseKittyDirectPlacementLine("\x1b_Ga=T,f=100,q=2,C=1,c=4,r=4;AAAA\x1b\\")).toBeNull();
-		expect(parseKittyDirectPlacementLine("plain text")).toBeNull();
-	});
-
-	it("recognizes passthrough placements so tmux redraws can delete the old image", () => {
-		const line = `\x1b7\x1b[3A${wrapTmuxPassthrough("\x1b_Ga=p,q=2,C=1,i=5,p=5,c=4,r=4\x1b\\")}\x1b8`;
-		expect(parseKittyDirectPlacementLine(line)).toEqual({ imageId: 5, placementId: 5, columns: 4, rows: 4 });
-	});
-
-	it("encodes the anchored, clipped, and last-row-only placement forms", () => {
-		const base = { imageId: 7, columns: 4, rows: 6, imageHeightPx: 60 };
-		// Whole block visible (last line at viewport row 9): full anchored form.
-		expect(encodeKittyPlacementLine({ ...base, placementId: 1, screenRow: 9 })).toBe(
-			"\x1b7\x1b[5A\x1b_Ga=p,q=2,C=1,i=7,p=1,c=4,r=6\x1b\\\x1b8",
-		);
-		// Straddling (last line at row 3): two rows hidden above, four visible —
-		// the source slice starts at 60*2/6 = 20px.
-		expect(encodeKittyPlacementLine({ ...base, placementId: 2, screenRow: 3 })).toBe(
-			"\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=7,p=2,c=4,r=4,y=20,h=40\x1b\\\x1b8",
-		);
-		// Only the last row visible: no cursor movement, bottom slice only.
-		expect(encodeKittyPlacementLine({ ...base, placementId: 3, screenRow: 0 })).toBe(
-			"\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\",
+		// The native frame writer recognizes exactly this shape (cursor save, CUU(rows-1), the `a=p`
+		// command with image id, placement id, columns and rows, cursor restore) and rebuilds it for
+		// the row it is written at; any other shape is written verbatim, unclipped.
+		expect(lines[lines.length - 1]).toBe(
+			`\x1b7\x1b[5A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=6\x1b\\\x1b8`,
 		);
 	});
 });
@@ -225,7 +192,7 @@ describe("direct placement lifecycle", () => {
 describe("uncroppable image blocks", () => {
 	for (const protocol of [ImageProtocol.Iterm2, ImageProtocol.Kitty]) {
 		it(`does not draw a top-clipped ${protocol === ImageProtocol.Kitty ? "Kitty transmit-and-display" : "iTerm2"} image over following text`, async () => {
-			terminal.imageProtocol = protocol;
+			forceImageProtocol(protocol);
 			const term = new VirtualTerminal(40, 8);
 			const scheduler = new VirtualRenderScheduler();
 			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
@@ -253,8 +220,8 @@ describe("uncroppable image blocks", () => {
 				},
 			});
 			const writes: string[] = [];
-			const write = term.write.bind(term);
-			term.write = data => {
+			const write = term.receive.bind(term);
+			term.receive = data => {
 				writes.push(data);
 				write(data);
 			};

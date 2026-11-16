@@ -1,4 +1,5 @@
-import { getImageDimensions, TERMINAL } from "@oh-my-pi/pi-tui";
+import { imageDimensions } from "@oh-my-pi/pi-natives";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { Spacer } from "@oh-my-pi/pi-tui/components/spacer";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
@@ -21,7 +22,7 @@ try {
 }
 
 const base64Data = imageBuffer.toBase64();
-const dims = getImageDimensions(base64Data, "image/png");
+const dims = imageDimensions(base64Data, "image/png");
 
 console.log("Image dimensions:", dims);
 console.log("");

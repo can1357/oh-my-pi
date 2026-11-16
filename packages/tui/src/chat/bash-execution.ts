@@ -3,10 +3,12 @@
  */
 
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { imageDimensions } from "@oh-my-pi/pi-natives";
 import { Image } from "../components/image";
 import type { Loader } from "../components/loader";
 import { Text } from "../components/text";
-import { getImageDimensions, imageFallback, ImageProtocol, TERMINAL } from "../terminal-capabilities";
+import { imageFallback } from "../inline-image";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { Container, type TUI } from "../tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
@@ -16,7 +18,7 @@ import type { MinimizedMeta, TruncationMeta } from "../tools/output-meta";
 import { resolveImageOptions } from "../render/render-utils";
 import { OutputPane } from "../render/output-pane";
 import { loadXtermTerminal, readTerminalRows, styleTerminalRow } from "../tools/terminal-output";
-import { normalizeInputForPty } from "../tools/bash-interactive";
+import { encodePasteForPty, normalizeInputForPty } from "../tools/bash-interactive";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import {
 	buildExecutionFrame,
@@ -187,7 +189,7 @@ export class BashExecutionComponent extends Container {
 					? this.#nativeImages.get(`img${index}`, image.data, image.mimeType)
 					: text([
 							linkedImageSpan(
-								imageFallback(image.mimeType, getImageDimensions(image.data, image.mimeType) ?? undefined),
+								imageFallback(image.mimeType, imageDimensions(image.data, image.mimeType) ?? undefined),
 								image,
 								undefined,
 								"muted",
@@ -295,6 +297,11 @@ export class BashExecutionComponent extends Container {
 	/** Bytes a terminal would send for a key event, honoring the command's cursor-key mode; "" for key releases. */
 	encodePtyInput(data: string): string {
 		return normalizeInputForPty(data, this.#ptyTerminal?.modes.applicationCursorKeysMode ?? false);
+	}
+
+	/** Bytes a terminal would send for a paste, bracketed when the command enabled bracketed paste. */
+	encodePtyPaste(text: string): string {
+		return encodePasteForPty(text, this.#ptyTerminal?.modes.bracketedPasteMode ?? false);
 	}
 
 	#drainPtyQueue(): void {
@@ -446,7 +453,7 @@ export class BashExecutionComponent extends Container {
 					),
 				);
 			} else {
-				const dimensions = getImageDimensions(image.data, image.mimeType) ?? undefined;
+				const dimensions = imageDimensions(image.data, image.mimeType) ?? undefined;
 				this.#contentContainer.addChild(
 					new Text(theme.fg("muted", linkedImageText(imageFallback(image.mimeType, dimensions), image)), 1, 0),
 				);

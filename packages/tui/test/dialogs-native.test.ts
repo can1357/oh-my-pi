@@ -243,6 +243,7 @@ describe("dialogs under a native surface", () => {
 				inputGuard: {
 					isBlocked: () => draft.length > 0,
 					handleInput: key => routed.push(key),
+					handlePaste: text => routed.push(text),
 					hint: "typing edits your prompt",
 				},
 			},
@@ -398,7 +399,11 @@ describe("dialogs under a native surface", () => {
 			"Allow tool: bash\nCommand: ls",
 			{ onApprove: vi.fn(), onDeny: vi.fn() },
 			{
-				draft: { hasDraft: () => draft.length > 0, handleInput: key => (draft += key) },
+				draft: {
+					hasDraft: () => draft.length > 0,
+					handleInput: key => (draft += key),
+					handlePaste: text => (draft += text),
+				},
 			},
 		);
 		const highlighted = () =>
@@ -426,6 +431,10 @@ describe("dialogs under a native surface", () => {
 				handleInput: key => {
 					routed.push(key);
 					if (key.length === 1 && key >= " ") draft += key;
+				},
+				handlePaste: text => {
+					routed.push(text);
+					draft += text;
 				},
 			},
 		});
@@ -526,7 +535,11 @@ describe("dialogs under a native surface", () => {
 			{ onApprove: vi.fn(), onDeny: vi.fn() },
 			{
 				fullPrompt: `Allow tool: bash\n${command}`,
-				draft: { hasDraft: () => true, handleInput: key => routed.push(key) },
+				draft: {
+					hasDraft: () => true,
+					handleInput: key => routed.push(key),
+					handlePaste: text => routed.push(text),
+				},
 			},
 		);
 		const body = () => stripVTControlCharacters(dialog.render(60).join("\n")).replace(/[│\s]+/g, "");

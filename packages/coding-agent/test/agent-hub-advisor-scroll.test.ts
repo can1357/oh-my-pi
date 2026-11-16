@@ -8,6 +8,7 @@ import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub
  * visible window.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,15 +18,7 @@ import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcrip
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import {
-	getKittyGraphics,
-	ImageBudget,
-	ImageProtocol,
-	setKittyGraphics,
-	setTerminalImageProtocol,
-	TERMINAL,
-	type TUI,
-} from "@oh-my-pi/pi-tui";
+import { ImageProtocol, setTerminalImageProtocol, TERMINAL, type TUI } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -373,10 +366,10 @@ describe("AgentTranscriptViewer", () => {
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, buildImageJsonl());
 		const previousProtocol = TERMINAL.imageProtocol;
-		const previousGraphics = getKittyGraphics();
+		const previousGraphics = TERMINAL.kittyUnicodePlaceholders;
 		setTerminalImageProtocol(ImageProtocol.Kitty);
-		setKittyGraphics({ unicodePlaceholders: true });
-		const imageBudget = new ImageBudget(8, () => {});
+		TERMINAL.kittyUnicodePlaceholders = true;
+		const imageBudget = new ImageBudget(8);
 		const ui = {
 			imageBudget,
 			requestRender: () => {},
@@ -389,11 +382,13 @@ describe("AgentTranscriptViewer", () => {
 			imageBudget.endPass();
 			expect(rendered).toContain("a=p,U=1");
 			expect(rendered).toContain("\u{10eeee}");
-			expect(imageBudget.takeTransmits().join("")).toContain("a=t");
+			// The image data is queued once in the budget (`a=t`), keyed by the placement's id.
+			const imageId = Number(/a=p,U=1,q=2,i=(\d+)/.exec(rendered)?.[1]);
+			expect(imageBudget.shouldTransmit(imageId)).toBe(false);
 		} finally {
 			viewer.dispose();
 			cfgTerminalShowImages.clearOverride(Settings.instance);
-			setKittyGraphics(previousGraphics);
+			TERMINAL.kittyUnicodePlaceholders = previousGraphics;
 			setTerminalImageProtocol(previousProtocol);
 			removeSyncWithRetries(dir);
 		}

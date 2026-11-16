@@ -2098,6 +2098,30 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	/** Pastes follow typed text: the name strip, else the catalog search (jumping to "all" from Roles/locked views). */
+	handlePaste(text: string): void {
+		this.#nativeVersion++;
+		if (this.#assignmentPending) return;
+		const strip = this.#strip;
+		if (strip) {
+			if (strip.kind !== "name") return;
+			strip.input.handlePaste(text);
+			if (strip.purpose === "compaction") strip.error = undefined;
+			return;
+		}
+		const entry = this.#activeEntry();
+		const rolesView = entry.kind === "roles" && this.#assigning === null;
+		const lockedView = entry.kind === "provider" && entry.locked && this.#assigning === null;
+		if (rolesView || lockedView) {
+			const typed = text.trim().length > 0;
+			const editsQuery = rolesView && this.#browser.query.length > 0;
+			if (!(typed && (lockedView || this.#focus === "scope")) && !editsQuery) return;
+			this.#setActiveEntry("all");
+		}
+		this.#focus = "list";
+		this.#browser.handlePaste(text);
+	}
+
 	/** The cancel key's ladder: close a strip, leave assign mode, clear the query, then close the hub. */
 	#cancel(): void {
 		if (this.#assignmentPending) {

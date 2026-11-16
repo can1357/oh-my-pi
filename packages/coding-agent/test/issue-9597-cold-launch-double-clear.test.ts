@@ -32,9 +32,9 @@ const ERASE_SCROLLBACK = "\x1b[3J";
 /** VirtualTerminal that also records every raw byte the TUI writes. */
 class CapturingTerminal extends VirtualTerminal {
 	readonly raw: string[] = [];
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.raw.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 	countResets(): number {
 		const all = this.raw.join("");

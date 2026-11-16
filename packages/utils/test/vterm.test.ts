@@ -219,6 +219,15 @@ describe("vterm xterm-compatible golden streams", () => {
 		expect(terminal.buffer.active.getLine(0)!.getCell(0)!.isBold()).toBe(1);
 	});
 
+	test("tracks the program's bracketed paste mode (DECSET 2004)", async () => {
+		const terminal = new Terminal({ cols: 8, rows: 3 });
+		expect(terminal.modes.bracketedPasteMode).toBe(false);
+		await write(terminal, "\x1b[?2004h");
+		expect(terminal.modes.bracketedPasteMode).toBe(true);
+		await write(terminal, "\x1b[?2004l");
+		expect(terminal.modes.bracketedPasteMode).toBe(false);
+	});
+
 	test("keeps ASCII bases joined to combining marks and keycap sequences", async () => {
 		const terminal = new Terminal({ cols: 8, rows: 2 });
 		await write(terminal, "xa\u0301y1\uFE0F\u20E3z");

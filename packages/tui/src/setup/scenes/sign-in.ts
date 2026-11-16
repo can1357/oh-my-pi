@@ -4,7 +4,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
-import { Container } from "../../tui";
+import { type Component, Container } from "../../tui";
 import { Spacer } from "../../components/spacer";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
@@ -104,6 +104,11 @@ export class SignInScene implements SetupSceneController {
 			return;
 		}
 		this.#selector.handleInput(data);
+	}
+
+	handlePaste(text: string): void {
+		const target: Component = this.#dialog ?? this.#selector;
+		target.handlePaste?.(text);
 	}
 
 	/** Forward mouse to the provider selector; the login dialog takes keys only. */

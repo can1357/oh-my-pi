@@ -592,6 +592,11 @@ export class SettingsList implements Component {
 		return this.#items.length > this.#maxVisible || this.#filterQuery.length > 0;
 	}
 
+	/** Routes a paste to an open submenu; type-to-search takes typed keys only. */
+	handlePaste(text: string): void {
+		this.#submenuComponent?.handlePaste?.(text);
+	}
+
 	#handleSearchInput(data: string): boolean {
 		if (this.#options.typeToSearch === false) return false;
 		if (this.#items.length === 0) return false;

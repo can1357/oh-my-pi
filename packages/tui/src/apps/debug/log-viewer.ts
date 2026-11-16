@@ -796,6 +796,17 @@ export class DebugLogViewerComponent implements Component {
 		}
 	}
 
+	/** Pastes into the filter field, refiltering when the text changed. */
+	handlePaste(text: string): void {
+		const before = this.#filter.getValue();
+		this.#filter.handlePaste(text);
+		const after = this.#filter.getValue();
+		if (after !== before) {
+			this.#statusMessage = undefined;
+			this.#model.setFilterQuery(after);
+		}
+	}
+
 	#handleMouse(event: SgrMouseEvent): boolean {
 		if (event.wheel !== null && this.#frame.isBodyFrameRow(event.row)) {
 			this.#statusMessage = undefined;

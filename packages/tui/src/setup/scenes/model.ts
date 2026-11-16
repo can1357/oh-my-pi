@@ -19,6 +19,7 @@ import { col, node, span, text } from "../../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../../native/node";
 import { Memo } from "../../native/memo";
 import { dockedPicker, PICKER_KEY, pickerAction, pickerEvent } from "../../native/picker";
+import type { Component } from "../../tui";
 import {
 	SETUP_SHEET_ROLE,
 	type SetupScene,
@@ -85,6 +86,12 @@ class ModelSceneController implements SetupSceneController {
 		}
 		if (this.#step) this.#step.handleInput(data);
 		else this.#browser.handleInput(data);
+	}
+
+	handlePaste(text: string): void {
+		if (this.#saving !== undefined) return;
+		const target: Component = this.#step ?? this.#browser;
+		target.handlePaste?.(text);
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {

@@ -161,7 +161,7 @@ describe("HookEditorComponent default (hook) mode", () => {
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel);
 		const pasted = largePasteText();
 
-		component.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		component.handlePaste(pasted);
 
 		expect(renderText(component)).toContain("[Paste #1, +11 lines]");
 
@@ -172,11 +172,12 @@ describe("HookEditorComponent default (hook) mode", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 	});
 
-	it("treats Enter bundled after a bracketed paste as a newline in hook mode", () => {
+	it("treats Enter bundled after a paste as a newline in hook mode", () => {
 		const onSubmit = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn());
 
-		component.handleInput("\x1b[200~first\nsecond\x1b[201~\r");
+		component.handlePaste("first\nsecond");
+		component.handleInput("\r");
 		expect(onSubmit).not.toHaveBeenCalled();
 		component.handleInput("last");
 		component.handleInput("\x11");
@@ -318,7 +319,8 @@ describe("HookEditorComponent prompt-style mode", () => {
 			},
 		});
 
-		component.handleInput("\x1b[200~\x1b[201~\r");
+		component.handlePaste("");
+		component.handleInput("\r");
 		expect(onSubmit).not.toHaveBeenCalled();
 		finishPaste?.(component.attachImage(image));
 
@@ -352,7 +354,9 @@ describe("HookEditorComponent prompt-style mode", () => {
 			onPasteImage,
 			onPasteImagePath: otherPathHandler,
 		});
-		plain.handleInput("\x1b[200~\x1b[201~\x1b[200~/tmp/shot.png\x1b[201~\r");
+		plain.handlePaste("");
+		plain.handlePaste("/tmp/shot.png");
+		plain.handleInput("\r");
 		expect(onPasteImage).not.toHaveBeenCalled();
 		expect(otherPathHandler).not.toHaveBeenCalled();
 		expect(onSubmit).toHaveBeenCalledWith("/tmp/shot.png");
@@ -365,25 +369,11 @@ describe("HookEditorComponent prompt-style mode", () => {
 		});
 		const pasted = largePasteText();
 
-		component.handleInput(`\x1b[200~${pasted}\x1b[201~\r`);
+		component.handlePaste(pasted);
+		component.handleInput("\r");
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit).toHaveBeenCalledWith(pasted);
-	});
-
-	it("submits only after a fragmented paste closes with a bundled Enter", () => {
-		const onSubmit = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
-			promptStyle: true,
-		});
-
-		component.handleInput("\x1b[200~first\n");
-		component.handleInput("second\x1b[20");
-		expect(onSubmit).not.toHaveBeenCalled();
-		component.handleInput("1~\r");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("first\nsecond");
 	});
 
 	it("submits on alternate Enter encodings recognized by the key matcher", () => {
@@ -447,7 +437,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 		});
 		const pasted = largePasteText();
 
-		component.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		component.handlePaste(pasted);
 
 		expect(renderText(component)).toContain("[Paste #1, +11 lines]");
 

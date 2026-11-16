@@ -1,16 +1,13 @@
 import { vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { type Component, TUI, type TUIStartOptions } from "@oh-my-pi/pi-tui";
-import { ProcessTerminal, type ProcessTerminalOptions } from "@oh-my-pi/pi-tui/terminal";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import type { ProcessTerminal, ProcessTerminalOptions } from "@oh-my-pi/pi-tui/terminal";
+import { fakeProcessTty } from "./helpers/process-tty";
 
 // Pristine descriptors, captured once at module load. Every dispose() restores
 // to these so the harness is full-suite safe across repeated create/dispose
-// cycles (no leaked mutation of process.stdin/stdout globals).
-const PRISTINE: Array<[NodeJS.Process["stdin"] | NodeJS.Process["stdout"], string, PropertyDescriptor | undefined]> = [
-	[process.stdin, "isTTY", Object.getOwnPropertyDescriptor(process.stdin, "isTTY")],
-	[process.stdout, "isTTY", Object.getOwnPropertyDescriptor(process.stdout, "isTTY")],
-	[process.stdin, "setRawMode", Object.getOwnPropertyDescriptor(process.stdin, "setRawMode")],
+// cycles (no leaked mutation of process.stdout globals).
+const PRISTINE: Array<[NodeJS.Process["stdout"], string, PropertyDescriptor | undefined]> = [
 	[process.stdout, "columns", Object.getOwnPropertyDescriptor(process.stdout, "columns")],
 	[process.stdout, "rows", Object.getOwnPropertyDescriptor(process.stdout, "rows")],
 ];
@@ -41,17 +38,19 @@ export interface ProcessTerminalRenderHarness {
 	readonly terminal: ProcessTerminal;
 	readonly tui: TUI;
 	readonly probe: WidthProbe;
-	/** Raw bytes the TUI wrote to stdout, in order. */
+	/** Decoded output the TUI wrote to the terminal, in order. */
 	readonly writes: string[];
-	/** Signals the terminal requested from the host process, in order. */
-	readonly signals: Array<{ pid: number; signal: string | number | undefined }>;
+	/** Signals the process sent itself, in order. */
+	readonly signals: Array<string | number | undefined>;
 	/** Let {@link SETTLE_MS} of virtual time pass, flushing any pending paint. */
 	settle(): Promise<void>;
 	/** Simulate an OS resize (SIGWINCH / ConPTY): refresh stdout dims, fire `resize`. */
 	osResize(columns: number, rows: number): Promise<void>;
 	/** Feed a complete DEC 2048 in-band resize report (`CSI 48 ; rows ; cols ; yPx ; xPx t`). */
 	inBand(rows: number, columns: number, yPixels?: number, xPixels?: number): Promise<void>;
-	/** Feed raw byte chunks through the real stdin pipeline (StdinBuffer reassembly included). */
+	/** Deliver `data` as one stdin read, synchronously (no settle). */
+	type(data: string): void;
+	/** Feed raw byte chunks as stdin reads, through the engine's input parser. */
 	feed(...chunks: string[]): Promise<void>;
 	/** End stdin as a terminal host does when its pane disappears. */
 	endInput(): Promise<void>;
@@ -80,10 +79,9 @@ export function createProcessTerminalRenderHarness(
 	startOptions?: TUIStartOptions,
 	observeInput?: (data: string) => void,
 ): ProcessTerminalRenderHarness {
-	// This harness exercises the real ProcessTerminal I/O pipeline, so it opts
-	// out of the test-default headless suppression and restores the prior value
-	// on dispose.
-	const previousHeadless = setTerminalHeadless(false);
+	// This harness exercises the real ProcessTerminal glue on a fake TTY, so it
+	// opts out of the test-default headless suppression; dispose restores it.
+	const tty = fakeProcessTty();
 	// Every clock the terminal and renderer read (`setTimeout`, `Date.now`,
 	// `performance.now`) runs on fake time, so settles cost no wall time and a
 	// loaded machine cannot stretch a wait past a probe or flush deadline. A test
@@ -91,44 +89,39 @@ export function createProcessTerminalRenderHarness(
 	// its pending timers) and restores real timers itself.
 	const ownsClock = !vi.isFakeTimers();
 	if (ownsClock) vi.useFakeTimers();
-	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-	Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 	Object.defineProperty(process.stdout, "columns", { value: initialColumns, configurable: true });
 	Object.defineProperty(process.stdout, "rows", { value: initialRows, configurable: true });
+	const restore = (): void => {
+		tty.dispose();
+		if (ownsClock) vi.useRealTimers();
+		for (const [target, key, descriptor] of PRISTINE) {
+			// A piped test run has no own `columns`/`rows` descriptor, so the
+			// captured pristine value is `undefined`. Deleting the forced property
+			// restores that absent state.
+			if (descriptor) Object.defineProperty(target, key, descriptor);
+			else Reflect.deleteProperty(target, key);
+		}
+	};
 
-	const writes: string[] = [];
-	const signals: Array<{ pid: number; signal: string | number | undefined }> = [];
-	const spies = [
-		vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
-			signals.push({ pid, signal });
-			return true;
-		}),
-		vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin),
-		vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin),
-		vi.spyOn(process.stdin, "setEncoding").mockImplementation(() => process.stdin),
-		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
-			return true;
-		}),
-	];
-
-	// Default to non-ConPTY behavior so kitty-flag and write-chunking assertions
-	// are hermetic: the ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not
-	// change what the suite observes. See ProcessTerminalOptions.
-	const terminal = new ProcessTerminal(terminalOptions);
-	const start = terminal.start.bind(terminal);
-	const startSpy =
+	// Default to non-ConPTY behavior so kitty-flag assertions are hermetic: the
+	// ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not change what the
+	// suite observes. See ProcessTerminalOptions.
+	const terminal = tty.terminal(terminalOptions);
+	// The TUI binds itself as the terminal's host at construction; wrapping
+	// `bind` lets the test observe every input event the engine delivers.
+	const bind = terminal.bind.bind(terminal);
+	const bindSpy =
 		observeInput &&
-		vi.spyOn(terminal, "start").mockImplementation((onInput, onResize, onDisconnect, options) =>
-			start(
-				data => {
-					observeInput(data);
-					onInput(data);
+		vi.spyOn(terminal, "bind").mockImplementation((host, scheduler) =>
+			bind(
+				{
+					...host,
+					input: data => {
+						observeInput(data);
+						host.input(data);
+					},
 				},
-				onResize,
-				onDisconnect,
-				options,
+				scheduler,
 			),
 		);
 	const tui = new TUI(terminal);
@@ -138,8 +131,8 @@ export function createProcessTerminalRenderHarness(
 		tui.start(startOptions);
 	} catch (err) {
 		// A start() regression must not poison the worker with headless=false.
-		setTerminalHeadless(previousHeadless);
-		if (ownsClock) vi.useRealTimers();
+		bindSpy?.mockRestore();
+		restore();
 		throw err;
 	}
 
@@ -159,8 +152,8 @@ export function createProcessTerminalRenderHarness(
 		terminal,
 		tui,
 		probe,
-		writes,
-		signals,
+		writes: tty.writes,
+		signals: tty.signals,
 		settle,
 		async osResize(columns, rows) {
 			Object.defineProperty(process.stdout, "columns", { value: columns, configurable: true });
@@ -169,34 +162,28 @@ export function createProcessTerminalRenderHarness(
 			await settle();
 		},
 		async inBand(rows, columns, yPixels = 0, xPixels = 0) {
-			process.stdin.emit("data", `\x1b[48;${rows};${columns};${yPixels};${xPixels}t`);
+			tty.type(`\x1b[48;${rows};${columns};${yPixels};${xPixels}t`);
 			await settle();
 		},
+		type: tty.type,
 		async feed(...chunks) {
-			for (const chunk of chunks) process.stdin.emit("data", chunk);
+			for (const chunk of chunks) tty.type(chunk);
 			await settle();
 		},
 		async endInput() {
-			process.stdin.emit("end");
+			tty.endInput();
 			await settle();
 		},
 		async failOutput() {
-			process.stdout.emit("error", new Error("terminal revoked"));
+			tty.failOutput(new Error("terminal revoked"));
 			await settle();
 		},
 		dispose() {
-			tui.stop();
-			setTerminalHeadless(previousHeadless);
-			if (ownsClock) vi.useRealTimers();
-			for (const spy of spies) spy.mockRestore();
-			if (startSpy) startSpy.mockRestore();
-			for (const [target, key, descriptor] of PRISTINE) {
-				// A piped test run has no own `isTTY`/`columns`/`rows` descriptor, so
-				// the captured pristine value is `undefined`. Deleting the forced
-				// property restores that absent state — skipping it would leak
-				// `isTTY = true` and poison TTY-gated code (e.g. mermaid color auto-detect).
-				if (descriptor) Object.defineProperty(target, key, descriptor);
-				else Reflect.deleteProperty(target, key);
+			try {
+				tui.stop();
+			} finally {
+				bindSpy?.mockRestore();
+				restore();
 			}
 		},
 	};

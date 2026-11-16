@@ -17,10 +17,11 @@ import { hsvToRgb } from "@oh-my-pi/pi-utils/color";
 import * as zlib from "node:zlib";
 import { type Component, Container } from "../../tui";
 import { encodeTextSized, type TextSizingScale } from "../../utils";
-import { Image, type ImageBudget } from "../../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image } from "../../components/image";
 import { Spacer } from "../../components/spacer";
 import { Text } from "../../components/text";
-import { ImageProtocol, NotifyProtocol, TERMINAL } from "../../terminal-capabilities";
+import { ImageProtocol, TERMINAL } from "../../terminal-capabilities";
 import { DynamicBorder } from "../../chrome/dynamic-border";
 import { theme } from "../../theme/theme";
 import { ansi } from "../../native/describe";
@@ -125,9 +126,9 @@ function truecolorBar(cells: number): string {
 
 function notifyProtocolLabel(): string {
 	switch (TERMINAL.notifyProtocol) {
-		case NotifyProtocol.Osc99:
+		case "osc99":
 			return "OSC 99 (kitty)";
-		case NotifyProtocol.Osc9:
+		case "osc9":
 			return "OSC 9 (iTerm2/WezTerm)";
 		default:
 			return "BEL";

@@ -6,13 +6,16 @@
  *
  * The mini-frame (a {@link SRC_FRAME_PX}px page) is upscaled with
  * nearest-neighbor so the glyph pixels stay crisp when the terminal scales the
- * placement box. Graphics display requires the Kitty unicode-placeholder path —
- * `renderImage` returning `lines` is the gate — because the bordered settings
- * frame re-fits every row, which direct cursor-positioned placements (iTerm2,
+ * placement box. Graphics display requires the Kitty unicode-placeholder path
+ * because the bordered settings frame re-fits every row, which direct
+ * cursor-positioned placements (iTerm2,
  * Sixel, Kitty `a=p`) do not survive. Everything else falls back to the stats
  * line plus a dim notice.
  */
-import { type Component, type ImageBudget, renderImage, TERMINAL } from "../index";
+import { type ImageBudget, InlineImage } from "@oh-my-pi/pi-natives";
+import { type Component, ImageProtocol, TERMINAL } from "../index";
+import { inlineImagePass } from "../components/image";
+import { inlineImageRequest } from "../inline-image";
 import {
 	DIM_OFF,
 	DIM_ON,
@@ -52,12 +55,13 @@ type PreviewEntry =
 	| { state: "failed" }
 	| {
 			state: "ready";
-			data: string;
-			/** The PNG `data` decodes to; a native `image` blob. */
+			/** The sample PNG; a native `image` blob. */
 			bytes: Uint8Array;
 			edgePx: number;
-			imageId: number;
-			transmitted: boolean;
+			/** Native encoder of the sample, rendering against the TUI image budget. */
+			image: InlineImage;
+			/** Placeholder rows the last render returned. */
+			rows?: string[];
 	  };
 
 export interface SnapcompactShapePreviewOptions {
@@ -148,27 +152,26 @@ export class SnapcompactShapePreview implements Component {
 			return lines;
 		}
 
-		const result = renderImage(
-			entry.data,
-			{ widthPx: entry.edgePx, heightPx: entry.edgePx },
-			{
-				maxWidthCells: Math.max(8, Math.min(MAX_IMAGE_COLS, width - 4)),
-				maxHeightCells: MAX_IMAGE_ROWS,
-				imageId: entry.imageId,
-				includeTransmit: !entry.transmitted,
-			},
-		);
-		// Only the unicode-placeholder path returns text-cell `lines`; cursor-moving
+		// Only the unicode-placeholder path renders text-cell rows; cursor-moving
 		// placements would corrupt the bordered settings frame, so skip them.
-		if (!result?.lines) {
+		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty || !TERMINAL.kittyUnicodePlaceholders) {
 			lines.push(theme.fg("dim", "  (graphic sample needs Kitty unicode-placeholder graphics)"));
 			return lines;
 		}
-		if (result.transmit) {
-			this.#budget.enqueueTransmit(entry.imageId, result.transmit);
-			entry.transmitted = true;
+		// The data is transmitted once through the budget; repaints re-emit only the placement.
+		const result = entry.image.render(
+			inlineImageRequest(
+				Math.max(8, Math.min(MAX_IMAGE_COLS, width - 4)),
+				MAX_IMAGE_ROWS,
+				inlineImagePass(true, entry.rows !== undefined),
+			),
+		);
+		if (result !== null) entry.rows = typeof result === "number" ? undefined : result;
+		if (!entry.rows) {
+			lines.push(theme.fg("dim", "  (graphic sample over the inline image limit)"));
+			return lines;
 		}
-		for (const line of result.lines) {
+		for (const line of entry.rows) {
 			lines.push(`  ${line}`);
 		}
 		return lines;
@@ -199,16 +202,11 @@ export class SnapcompactShapePreview implements Component {
 				.resize(edgePx, edgePx, { filter: "nearest" })
 				.png()
 				.bytes();
-			this.#entries.set(name, {
-				state: "ready",
-				data: zoomed.toBase64(),
-				bytes: zoomed,
-				edgePx,
-				// Keyed id: reopening settings reuses the id, so data already in the
-				// terminal store is never re-transmitted (enqueueTransmit no-ops).
-				imageId: this.#budget?.acquireId(`snapshape:${name}:${edgePx}`) ?? 0,
-				transmitted: false,
-			});
+			const image = new InlineImage(zoomed.toBase64(), "image/png", { widthPx: edgePx, heightPx: edgePx });
+			// Keyed id: reopening settings reuses the id, so data already in the
+			// terminal store is never re-transmitted.
+			if (this.#budget) image.useBudget(this.#budget, `snapshape:${name}:${edgePx}`);
+			this.#entries.set(name, { state: "ready", bytes: zoomed, edgePx, image });
 		} catch {
 			this.#entries.set(name, { state: "failed" });
 		}

@@ -104,6 +104,10 @@ class StandaloneSelect implements Component {
 		this.#form.handleInput(data);
 	}
 
+	handlePaste(text: string): void {
+		this.#form.handlePaste(text);
+	}
+
 	render(width: number): readonly string[] {
 		return this.#form.render(width);
 	}

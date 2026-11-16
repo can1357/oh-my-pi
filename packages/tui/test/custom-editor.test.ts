@@ -14,8 +14,6 @@ import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import {
 	CustomEditor,
-	extractBracketedImagePastePaths,
-	extractBracketedPastePaths,
 	extractImagePastePathsFromText,
 	extractImagePathFromText,
 	extractPastePathsFromText,
@@ -43,13 +41,6 @@ function makeEditor(holdEnabled = true) {
 const REPEAT_GAP_MS = 30;
 /** A gap above the threshold — looks like a deliberate keypress. */
 const TAP_GAP_MS = SPACE_REPEAT_MAX_GAP_MS + 80;
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
-
-function bracketedPaste(text: string): string {
-	return `${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`;
-}
-
 /** Feed `count` spaces `gapMs` apart on the fake clock. The first space of a run has no prior
  *  space, so its gap is effectively infinite and it always reads as a deliberate tap. */
 function feedSpaces(editor: CustomEditor, count: number, gapMs: number): void {
@@ -206,7 +197,7 @@ describe("CustomEditor queue shorthand decoration", () => {
 
 describe("CustomEditor bracketed path paste", () => {
 	it("leaves a pasted bare .png filename on the normal text path", () => {
-		expect(extractBracketedImagePastePaths(bracketedPaste("icon-photo-default.png"))).toBeUndefined();
+		expect(extractImagePastePathsFromText("icon-photo-default.png")).toBeUndefined();
 	});
 
 	it("inserts a relative .png API address as text instead of treating it as a local image", () => {
@@ -215,7 +206,7 @@ describe("CustomEditor bracketed path paste", () => {
 		const onPasteImagePath = vi.fn();
 		editor.onPasteImagePath = onPasteImagePath;
 
-		editor.handleInput(bracketedPaste(address));
+		editor.handlePaste(address);
 
 		expect(editor.getText()).toBe(address);
 		expect(onPasteImagePath).not.toHaveBeenCalled();
@@ -223,13 +214,11 @@ describe("CustomEditor bracketed path paste", () => {
 	});
 
 	it("extracts explicit local image paths for attachment", () => {
-		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/icon-photo-default.png"))).toEqual([
-			"/tmp/icon-photo-default.png",
-		]);
-		expect(extractBracketedImagePastePaths(bracketedPaste("C:\\Users\\me\\icon-photo-default.png"))).toEqual([
+		expect(extractImagePastePathsFromText("/tmp/icon-photo-default.png")).toEqual(["/tmp/icon-photo-default.png"]);
+		expect(extractImagePastePathsFromText("C:\\Users\\me\\icon-photo-default.png")).toEqual([
 			"C:\\Users\\me\\icon-photo-default.png",
 		]);
-		expect(extractBracketedImagePastePaths(bracketedPaste("./images/icon-photo-default.png"))).toEqual([
+		expect(extractImagePastePathsFromText("./images/icon-photo-default.png")).toEqual([
 			"./images/icon-photo-default.png",
 		]);
 	});
@@ -245,7 +234,7 @@ describe("CustomEditor bracketed path paste", () => {
 				attached.push(path);
 			};
 
-			editor.handleInput(bracketedPaste(pasted));
+			editor.handlePaste(pasted);
 
 			expect(attached).toEqual([imagePath]);
 			expect(editor.getText()).toBe("");
@@ -261,9 +250,9 @@ describe("CustomEditor bracketed path paste", () => {
 			pasted.push(path);
 		};
 
-		editor.handleInput(bracketedPaste(video));
+		editor.handlePaste(video);
 
-		expect(extractBracketedImagePastePaths(bracketedPaste(video))).toEqual([video]);
+		expect(extractImagePastePathsFromText(video)).toEqual([video]);
 		expect(pasted).toEqual([video]);
 		expect(editor.getText()).toBe("");
 	});
@@ -489,7 +478,7 @@ describe("CustomEditor bracketed path paste", () => {
 
 		it("collapses completed selectors after bracketed paste", () => {
 			const editor = makeModelEditor();
-			editor.handleInput(bracketedPaste("paste ^c/z "));
+			editor.handlePaste("paste ^c/z ");
 
 			const chip = modelMentionChipLabel("Zed");
 			expect(editor.getText()).toBe(`paste ${chip} `);
@@ -539,20 +528,20 @@ describe("CustomEditor bracketed path paste", () => {
 		// `public.file-url` representation when the user does Finder→Copy
 		// then Cmd+V. Without decoding, `loadImageInput` would try to read a
 		// literal `file:///…` path and fail.
-		expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/Pictures/photo.png"))).toEqual([
+		expect(extractImagePastePathsFromText("file:///Users/me/Pictures/photo.png")).toEqual([
 			"/Users/me/Pictures/photo.png",
 		]);
 	});
 
 	it("percent-decodes spaces inside `file://` URLs", () => {
-		expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/My%20Pictures/photo.png"))).toEqual([
+		expect(extractImagePastePathsFromText("file:///Users/me/My%20Pictures/photo.png")).toEqual([
 			"/Users/me/My Pictures/photo.png",
 		]);
 	});
 
 	it("extracts explicit non-image paths without classifying them as image paths", () => {
-		expect(extractBracketedPastePaths(bracketedPaste("/tmp/report.csv"))).toEqual(["/tmp/report.csv"]);
-		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/report.csv"))).toBeUndefined();
+		expect(extractPastePathsFromText("/tmp/report.csv")).toEqual(["/tmp/report.csv"]);
+		expect(extractImagePastePathsFromText("/tmp/report.csv")).toBeUndefined();
 	});
 
 	it("inserts non-image path pastes as literal text instead of attaching them", () => {
@@ -562,7 +551,7 @@ describe("CustomEditor bracketed path paste", () => {
 			imagePathCalls++;
 		};
 
-		editor.handleInput(bracketedPaste("/tmp/report.csv"));
+		editor.handlePaste("/tmp/report.csv");
 
 		expect(editor.getText()).toBe("/tmp/report.csv");
 		expect(imagePathCalls).toBe(0);
@@ -579,7 +568,7 @@ describe("CustomEditor bracketed path paste", () => {
 			pasted.push(path);
 		};
 
-		editor.handleInput(bracketedPaste(screenshot));
+		editor.handlePaste(screenshot);
 
 		expect(pasted).toEqual([screenshot]);
 		expect(editor.getText()).toBe("");
@@ -599,7 +588,7 @@ describe("CustomEditor bracketed path paste", () => {
 			pasted.push(path);
 		};
 
-		editor.handleInput(bracketedPaste(dropped));
+		editor.handlePaste(dropped);
 
 		expect(pasted).toEqual([]);
 		expect(editor.getText()).toBe(dropped);
@@ -812,9 +801,8 @@ describe("extractImagePastePathsFromText (issue #6578)", () => {
 	];
 
 	for (const { name, text, expected } of cases) {
-		it(`${expected ? "recovers" : "rejects"} ${name} on both paste routes`, () => {
+		it(`${expected ? "recovers" : "rejects"} ${name}`, () => {
 			expect(extractImagePastePathsFromText(text)).toEqual(expected);
-			expect(extractBracketedImagePastePaths(bracketedPaste(text))).toEqual(expected);
 		});
 	}
 });

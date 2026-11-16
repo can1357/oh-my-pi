@@ -1,5 +1,6 @@
+import { detectTrueColor } from "@oh-my-pi/pi-natives";
 import { colorLuma, mixHex, paletteToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
-import { detectTerminalId, getTerminalInfo } from "../terminal-capabilities";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import type { ColorMode, ColorValue } from "./schema";
 
 /** SGR reset for the foreground color only, leaving other attributes intact. */
@@ -13,9 +14,7 @@ export const BG_RESET = "\x1b[49m";
 
 /** Resolve theme color depth from the shared terminal capability model. */
 export function detectColorMode(env: NodeJS.ProcessEnv = Bun.env): ColorMode {
-	if (env.WT_SESSION) return "truecolor";
-	const terminal = getTerminalInfo(detectTerminalId(env), process.platform, env);
-	return terminal.trueColor ? "truecolor" : "256color";
+	return detectTrueColor(env, isBunTestRuntime(), process.platform) ? "truecolor" : "256color";
 }
 
 const ANSI_COLOR_CACHE_LIMIT = 256;

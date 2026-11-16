@@ -1,28 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as natives from "@oh-my-pi/pi-natives";
+import { ImageBudget, wrapTmuxPassthrough } from "@oh-my-pi/pi-natives";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import {
-	encodeKittyVirtualPlacement,
-	getKittyGraphics,
-	KITTY_PLACEHOLDER,
-	setKittyGraphics,
-} from "@oh-my-pi/pi-tui/kitty-graphics";
-import {
 	type CellDimensions,
-	encodeKitty,
-	encodeKittyDeleteImage,
-	encodeKittyPlacement,
-	encodeKittyTransmit,
 	getCellDimensions,
 	imageFallback,
-	ImageProtocol,
 	setCellDimensions,
-	TERMINAL,
-	wrapTmuxPassthrough,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+} from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { forceImageProtocol } from "./helpers/image-protocol";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 withoutTerminalMultiplexer();
@@ -30,8 +19,36 @@ withoutTerminalMultiplexer();
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
-type MutableTerminalInfo = { id: string; imageProtocol: ImageProtocol | null };
+type MutableTerminalInfo = {
+	id: string;
+	imageProtocol: ImageProtocol | null;
+	kittyUnicodePlaceholders: boolean;
+	tmux: boolean;
+};
 const terminal = TERMINAL as unknown as MutableTerminalInfo;
+
+/** Kitty Unicode placeholder (U+10EEEE), the cell of a virtual placement grid. */
+const KITTY_PLACEHOLDER = "\u{10eeee}";
+
+/**
+ * A `requestRender` for an image whose SIXEL encode runs off the JS thread:
+ * `landed` resolves on the repaint request its settled encode makes.
+ */
+function encodeLanding(): { requestRender: () => void; landed: () => Promise<void>; repaints: () => number } {
+	let repaints = 0;
+	let signal = Promise.withResolvers<void>();
+	return {
+		requestRender: () => {
+			repaints++;
+			signal.resolve();
+		},
+		landed: async () => {
+			await signal.promise;
+			signal = Promise.withResolvers<void>();
+		},
+		repaints: () => repaints,
+	};
+}
 
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
@@ -42,7 +59,10 @@ const ORIGINAL_HERDR_PANE_ID = Bun.env.HERDR_PANE_ID;
 const ORIGINAL_HERDR_TAB_ID = Bun.env.HERDR_TAB_ID;
 const ORIGINAL_HERDR_WORKSPACE_ID = Bun.env.HERDR_WORKSPACE_ID;
 
+const ORIGINAL_TMUX_PASSTHROUGH = TERMINAL.tmux;
+
 beforeEach(() => {
+	terminal.tmux = false;
 	delete Bun.env.TMUX;
 	delete Bun.env.HERDR_ENV;
 	delete Bun.env.HERDR_PANE_ID;
@@ -51,6 +71,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	terminal.tmux = ORIGINAL_TMUX_PASSTHROUGH;
 	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
@@ -63,355 +84,30 @@ afterEach(() => {
 	else Bun.env.HERDR_WORKSPACE_ID = ORIGINAL_HERDR_WORKSPACE_ID;
 });
 
-/** Drive one render pass against the budget with `count` images (ids 1..count, stable across passes). */
-function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; retry: boolean; purge: readonly number[] } {
-	budget.beginPass();
-	const suppressed: boolean[] = [];
-	for (let i = 0; i < count; i++) suppressed.push(budget.observe(i + 1));
-	const retry = budget.endPass();
-	const purge = [...budget.takePurgeIds()];
-	return { suppressed, retry, purge };
-}
-
-describe("ImageBudget", () => {
-	it("keeps every image live while at or under the cap", () => {
-		const budget = new ImageBudget(3, () => {});
-		const first = pass(budget, 2);
-		expect(first.suppressed).toEqual([false, false]);
-		expect(first.retry).toBe(false);
-
-		const second = pass(budget, 3);
-		expect(second.suppressed).toEqual([false, false, false]);
-		expect(second.retry).toBe(false);
-		expect(second.purge).toEqual([]);
-	});
-
-	it("repeats an over-cap pass before emission and purges the oldest graphics id", () => {
-		let renders = 0;
-		const budget = new ImageBudget(2, () => {
-			renders += 1;
-		});
-
-		// At cap: nothing demoted.
-		expect(pass(budget, 2).suppressed).toEqual([false, false]);
-
-		// Discovery identifies the stricter split and requires a retry before emit.
-		const overflow = pass(budget, 3);
-		expect(overflow.suppressed).toEqual([false, false, false]);
-		expect(overflow.retry).toBe(true);
-		expect(renders).toBe(1);
-
-		// The retry demotes the oldest image and purges its id (1).
-		const demote = pass(budget, 3);
-		expect(demote.suppressed).toEqual([true, false, false]);
-		expect(demote.retry).toBe(false);
-		expect(demote.purge).toEqual([1]);
-
-		// Steady state: no further retries while the count is unchanged.
-		const steady = pass(budget, 3);
-		expect(steady.suppressed).toEqual([true, false, false]);
-		expect(steady.retry).toBe(false);
-		expect(steady.purge).toEqual([]);
-	});
-
-	it("keeps exactly `cap` images live as more arrive", () => {
-		const budget = new ImageBudget(2, () => {});
-		// Walk up to 5 images; each addition settles in a pre-emission retry.
-		for (let count = 3; count <= 5; count++) {
-			pass(budget, count); // discovery pass requests a retry
-			pass(budget, count); // retry applies the demotion
-		}
-		const settled = pass(budget, 5);
-		// Newest 2 live, oldest 3 demoted.
-		expect(settled.suppressed).toEqual([true, true, true, false, false]);
-	});
-
-	it("treats cap <= 0 as unlimited: never demotes, never schedules a redraw", () => {
-		let renders = 0;
-		const budget = new ImageBudget(0, () => {
-			renders += 1;
-		});
-		expect(budget.enabled).toBe(false);
-		const result = pass(budget, 6);
-		expect(result.suppressed).toEqual([false, false, false, false, false, false]);
-		expect(result.retry).toBe(false);
-		expect(result.purge).toEqual([]);
-		expect(renders).toBe(0);
-	});
-
-	it("restores demoted images once the count settles back within the cap", () => {
-		const budget = new ImageBudget(2, () => {});
-		pass(budget, 3); // overflow
-		pass(budget, 3); // demote oldest
-		expect(pass(budget, 3).suppressed).toEqual([true, false, false]);
-
-		// Drop back to 2 images; after the threshold settles nothing is demoted.
-		pass(budget, 2);
-		const restored = pass(budget, 2);
-		expect(restored.suppressed).toEqual([false, false]);
-		expect(restored.retry).toBe(false);
-		expect(restored.purge).toEqual([]);
-	});
-
-	it("hands back a stable graphics id per key and fresh ids without one", () => {
-		const budget = new ImageBudget(3, () => {});
-		const a1 = budget.acquireId("tool:0");
-		const a2 = budget.acquireId("tool:0");
-		const b = budget.acquireId("tool:1");
-		expect(a1).toBe(a2);
-		expect(b).not.toBe(a1);
-		expect(budget.acquireId()).not.toBe(budget.acquireId());
-	});
-
-	it("initializes separate budgets with different starting IDs", () => {
-		const budget1 = new ImageBudget();
-		const budget2 = new ImageBudget();
-		expect(budget1.acquireId()).not.toBe(budget2.acquireId());
-	});
-	it("evicts demoted IDs from the key map so a returned key gets a fresh ID", () => {
-		const budget = new ImageBudget(2, () => {});
-		const id1 = budget.acquireId("keyA");
-		const id2 = budget.acquireId("keyB");
-		const id3 = budget.acquireId("keyC");
-
-		// At cap: only 2 images.
-		budget.beginPass();
-		budget.observe(id1);
-		budget.observe(id2);
-		budget.endPass();
-
-		// acquireId should return the same IDs.
-		expect(budget.acquireId("keyA")).toBe(id1);
-		expect(budget.acquireId("keyB")).toBe(id2);
-
-		// Overflow: observe 3 images.
-		budget.beginPass();
-		budget.observe(id1);
-		budget.observe(id2);
-		budget.observe(id3);
-		budget.endPass(); // schedules demotion of id1
-
-		// The key map still holds id1 until the retry applies the demotion.
-		expect(budget.acquireId("keyA")).toBe(id1);
-
-		// Retry pass: applies the purge of id1 without requiring another pass.
-		budget.beginPass();
-		budget.observe(id1);
-		budget.observe(id2);
-		budget.observe(id3);
-		const retry = budget.endPass();
-		expect(retry).toBe(false);
-
-		// id1 was purged. Acquiring "keyA" now yields a fresh ID.
-		const id1Fresh = budget.acquireId("keyA");
-		expect(id1Fresh).not.toBe(id1);
-
-		// The other keys are still intact.
-		expect(budget.acquireId("keyB")).toBe(id2);
-		expect(budget.acquireId("keyC")).toBe(id3);
-	});
-
-	it("evicts keys reacquired for images that remain suppressed", () => {
-		const budget = new ImageBudget(2, () => {});
-		const oldId = budget.acquireId("keyA");
-		const id2 = budget.acquireId("keyB");
-		const id3 = budget.acquireId("keyC");
-
-		budget.beginPass();
-		budget.observe(oldId);
-		budget.observe(id2);
-		budget.observe(id3);
-		budget.endPass();
-
-		budget.beginPass();
-		budget.observe(oldId);
-		budget.observe(id2);
-		budget.observe(id3);
-		expect(budget.endPass()).toBe(false);
-		expect([...budget.takePurgeIds()]).toEqual([oldId]);
-
-		const suppressedId = budget.acquireId("keyA");
-		expect(suppressedId).not.toBe(oldId);
-
-		budget.beginPass();
-		expect(budget.observe(suppressedId)).toBe(true);
-		expect(budget.observe(id2)).toBe(false);
-		expect(budget.observe(id3)).toBe(false);
-		expect(budget.endPass()).toBe(false);
-		expect([...budget.takePurgeIds()]).toEqual([]);
-
-		expect(budget.acquireId("keyA")).not.toBe(suppressedId);
-	});
-
-	it("clears all keys from the map on takeAllTransmittedIds", () => {
-		const budget = new ImageBudget(3, () => {});
-		const id1 = budget.acquireId("keyA");
-		const id2 = budget.acquireId("keyB");
-
-		// ensure they're in the transmit tracking
-		budget.enqueueTransmit(id1, "TX1");
-		budget.enqueueTransmit(id2, "TX2");
-
-		budget.takeAllTransmittedIds();
-
-		// The keys must yield fresh IDs now.
-		expect(budget.acquireId("keyA")).not.toBe(id1);
-		expect(budget.acquireId("keyB")).not.toBe(id2);
-	});
-
-	it("setCap(0) clears a previously applied demotion threshold", () => {
-		const budget = new ImageBudget(2, () => {});
-		pass(budget, 3);
-		pass(budget, 3);
-		expect(pass(budget, 3).suppressed).toEqual([true, false, false]);
-
-		budget.setCap(0);
-		const result = pass(budget, 3);
-		expect(result.suppressed).toEqual([false, false, false]);
-	});
-
-	it("replaces suppression snapshots independently across surfaces and empty passes", () => {
-		const budget = new ImageBudget(1);
-		const observePass = (ids: number[], altScreen = false): boolean => {
-			budget.beginPass(false, altScreen);
-			for (const id of ids) budget.observe(id);
-			return budget.endPass();
-		};
-
-		expect(observePass([1, 2, 3])).toBe(true);
-		expect(observePass([1, 2, 3])).toBe(false);
-		budget.beginAltScreenLifecycle();
-		expect(observePass([4, 5], true)).toBe(true);
-		expect(observePass([4, 5], true)).toBe(false);
-
-		// Replacing and shrinking the screen prefix must neither retain old ids
-		// nor mutate the independently committed alternate-buffer prefix.
-		expect(observePass([6, 7])).toBe(false);
-		budget.beginPass(true);
-		expect([1, 2, 6, 7].map(id => budget.observe(id))).toEqual([false, false, true, false]);
-		budget.beginPass(true, true);
-		expect([4, 5, 6].map(id => budget.observe(id))).toEqual([true, false, false]);
-
-		budget.beginAltScreenLifecycle();
-		budget.beginPass(true, true);
-		expect(budget.observe(4)).toBe(false);
-		budget.beginPass(true);
-		expect(budget.observe(6)).toBe(true);
-
-		expect(observePass([])).toBe(false);
-		budget.beginPass(true);
-		expect(budget.observe(6)).toBe(false);
-	});
-
-	it("replaces live snapshots without losing the other surface's retirement protection", () => {
-		const budget = new ImageBudget(1);
-		const observePass = (ids: number[], altScreen = false): boolean => {
-			budget.beginPass(false, altScreen);
-			for (const id of ids) {
-				if (!budget.observe(id)) budget.enqueueTransmit(id, `TX${id}`);
-			}
-			const retry = budget.endPass();
-			if (!retry) budget.limitResidentImages();
-			return retry;
-		};
-
-		expect(observePass([1])).toBe(false);
-		expect(budget.takeTransmits()).toEqual(["TX1"]);
-		budget.beginAltScreenLifecycle();
-		expect(observePass([1, 2], true)).toBe(true);
-		expect(observePass([1, 2], true)).toBe(false);
-		expect(budget.takePurgeIds()).toEqual([]);
-		expect(budget.takeTransmits()).toEqual(["TX1", "TX2"]);
-
-		// The first pass relaxes the old threshold; the next transmits id 3.
-		expect(observePass([3], true)).toBe(false);
-		expect(observePass([3], true)).toBe(false);
-		expect(budget.takePurgeIds()).toEqual([2]);
-		expect(budget.takeTransmits()).toEqual(["TX3"]);
-		expect(budget.shouldTransmit(1)).toBe(false);
-
-		// Removing the screen frame releases its protection. The next alternate
-		// pass may retire id 1, but must keep its own current graphic, id 3.
-		expect(observePass([])).toBe(false);
-		expect(observePass([3], true)).toBe(false);
-		expect(budget.takePurgeIds()).toEqual([1]);
-		expect(budget.shouldTransmit(1)).toBe(true);
-		expect(budget.shouldTransmit(3)).toBe(false);
-	});
-
-	it("replays the committed live/text split by id during a stable (partial) pass", () => {
-		const budget = new ImageBudget(2, () => {});
-		// Settle to the steady split for 4 images at cap 2: oldest two (ids 1,2)
-		// demoted to text, newest two (ids 3,4) live.
-		pass(budget, 4); // threshold rises to 2
-		pass(budget, 4); // applies the demotion of ids 1,2
-		expect(pass(budget, 4).suppressed).toEqual([true, true, false, false]);
-
-		// The resize fast path observes the visible tail bottom-up and only a
-		// subset of images. A stable pass must therefore decide live/text by the
-		// committed per-id split, NOT by call order: observing the newest images
-		// first (4, then 3) must still report them live, and the oldest text —
-		// the index-based path would wrongly suppress whichever arrives first.
-		budget.beginPass(true);
-		expect(budget.observe(4)).toBe(false); // newest, stays live
-		expect(budget.observe(3)).toBe(false); // stays live
-		expect(budget.observe(2)).toBe(true); // committed text
-		expect(budget.observe(1)).toBe(true); // committed text
-		// An id with no committed state (a brand-new image) defaults to live.
-		expect(budget.observe(99)).toBe(false);
-
-		// The stable pass left the ledger untouched: the next full pass reports
-		// the same split and schedules no purge or redraw.
-		const after = pass(budget, 4);
-		expect(after.suppressed).toEqual([true, true, false, false]);
-		expect(after.retry).toBe(false);
-		expect(after.purge).toEqual([]);
-	});
-});
-
-describe("encodeKittyDeleteImage", () => {
-	it("emits an APC delete-by-id that frees the image and suppresses the reply", () => {
-		expect(encodeKittyDeleteImage(42)).toBe("\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
-	});
-});
-
 describe("tmux Kitty graphics passthrough", () => {
-	beforeEach(() => {
-		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
+	const originalProtocol = TERMINAL.imageProtocol;
+	const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
+	afterEach(() => {
+		terminal.imageProtocol = originalProtocol;
+		terminal.kittyUnicodePlaceholders = originalPlaceholders;
 	});
 
-	it("wraps every Kitty graphics command in a tmux DCS envelope", () => {
-		const expected = (payload: string) => `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
-
-		expect(encodeKitty("AA==", { columns: 1, rows: 1 })).toBe(expected("\x1b_Ga=T,f=100,q=2,C=1,c=1,r=1;AA==\x1b\\"));
-		expect(encodeKittyTransmit("AA==", 9)).toBe(expected("\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\"));
-		expect(encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 })).toBe(
-			expected("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\"),
-		);
-		expect(encodeKittyVirtualPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 })).toBe(
-			expected("\x1b_Ga=p,U=1,q=2,i=9,p=9,c=3,r=2\x1b\\"),
-		);
-		expect(encodeKittyDeleteImage(9)).toBe(expected("\x1b_Ga=d,d=I,i=9,q=2\x1b\\"));
-	});
-
-	it("wraps each quiet chunk of a multi-part Kitty transmission separately", () => {
-		const sequence = encodeKittyTransmit("A".repeat(4097), 9);
-		expect(sequence.match(/\x1bPtmux;/gu)).toHaveLength(2);
-		expect(sequence.match(/\x1b\x1b_G/gu)).toHaveLength(2);
-		expect(sequence.match(/\x1b\x1b\\\x1b\\/gu)).toHaveLength(2);
-		expect(sequence).toContain("\x1b\x1b_Gq=2,m=0;");
-	});
-
-	it("leaves Kitty graphics commands bare outside tmux", () => {
-		delete Bun.env.TMUX;
-		expect(encodeKittyTransmit("AA==", 9)).toBe("\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\");
+	it("wraps an image's Kitty commands in a tmux DCS envelope inside tmux only", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		terminal.kittyUnicodePlaceholders = false;
+		const image = () =>
+			new Image("AA==", "image/png", { fallbackColor: t => t }, { maxWidthCells: 1 }, { widthPx: 1, heightPx: 1 });
+		terminal.tmux = true;
+		expect(image().render(20)).toEqual([wrapTmuxPassthrough("\x1b_Ga=T,f=100,q=2,C=1,c=1,r=1;AA==\x1b\\")]);
+		terminal.tmux = false;
+		expect(image().render(20)).toEqual(["\x1b_Ga=T,f=100,q=2,C=1,c=1,r=1;AA==\x1b\\"]);
 		expect(wrapTmuxPassthrough("\x1b_Gpayload\x1b\\")).toBe("\x1bPtmux;\x1b\x1b_Gpayload\x1b\x1b\\\x1b\\");
 	});
 });
 
 describe("Image budget integration", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
-	const originalGraphics = { ...getKittyGraphics() };
+	const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 	let originalCellDims: CellDimensions;
 
 	beforeEach(() => {
@@ -419,17 +115,17 @@ describe("Image budget integration", () => {
 		setCellDimensions({ widthPx: 10, heightPx: 10 });
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		// These tests pin the direct `a=p` placement contract.
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 	});
 
 	afterEach(() => {
 		setCellDimensions(originalCellDims);
 		terminal.imageProtocol = originalProtocol;
-		setKittyGraphics(originalGraphics);
+		terminal.kittyUnicodePlaceholders = originalPlaceholders;
 	});
 
 	it("transmits the base64 once via the budget and renders only a placement line", () => {
-		const budget = new ImageBudget(3, () => {});
+		const budget = new ImageBudget(3);
 		const id = budget.acquireId("k");
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
@@ -438,173 +134,148 @@ describe("Image budget integration", () => {
 			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
 		);
 
+		expect(budget.shouldTransmit(id)).toBe(true);
 		budget.beginPass();
 		const lines = image.render(20);
 		budget.endPass();
 
-		// One transmit, carrying the base64 data, keyed by the image id.
-		const transmits = [...budget.takeTransmits()];
-		expect(transmits).toHaveLength(1);
-		expect(transmits[0]).toContain("\x1b_Ga=t");
-		expect(transmits[0]).toContain(`i=${id}`);
-		expect(transmits[0]).toContain(BASE64_ONE_PIXEL_PNG);
+		// The data transmit is queued in the budget, keyed by the image id.
+		expect(budget.shouldTransmit(id)).toBe(false);
 		// The render line is a placement (`a=p`) without the base64.
 		const last = lines.at(-1) ?? "";
-		expect(last).toContain("\x1b_Ga=p");
-		expect(last).not.toContain(BASE64_ONE_PIXEL_PNG);
+		expect(last).toContain(`\x1b_Ga=p,q=2,C=1,i=${id},p=${id}`);
+		expect(lines.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
 
-		// A second render (cache hit) does not re-enqueue the data.
+		// A second render keeps the rows and re-queues nothing.
 		budget.beginPass();
-		image.render(20);
+		expect(image.render(20)).toBe(lines);
 		budget.endPass();
-		expect([...budget.takeTransmits()]).toEqual([]);
+		expect(budget.shouldTransmit(id)).toBe(false);
 	});
 
 	it("encodes a budgeted SIXEL image once, off the render pass, and repaints when it lands", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			let repaints = 0;
-			const budget = new ImageBudget(3, () => {
-				repaints++;
-			});
-			const image = new Image(
-				BASE64_ONE_PIXEL_PNG,
-				"image/png",
-				{ fallbackColor: t => t },
-				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
-			);
-			const render = (): readonly string[] => {
-				budget.beginPass();
-				const lines = image.render(20);
-				budget.endPass();
-				return lines;
-			};
+		const budget = new ImageBudget(3);
+		// The budget's repaint wakes the engine it is attached to.
+		const landing = encodeLanding();
+		const requestRender = spyOn(budget, "requestRender").mockImplementation(landing.requestRender);
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+		);
+		const render = (): readonly string[] => {
+			budget.beginPass();
+			const lines = image.render(20);
+			budget.endPass();
+			return lines;
+		};
 
-			// The first pass reserves the image's rows while the encode runs.
-			const pending = render();
-			expect(pending.join("")).not.toContain("\x1bP");
-			const repaintsBefore = repaints;
-			await encodeSixel.mock.results[0]?.value;
-			expect(repaints).toBe(repaintsBefore + 1);
+		// The first pass reserves the image's rows while the encode runs.
+		const pending = render();
+		expect(pending.join("")).not.toContain("\x1bP");
+		await landing.landed();
+		expect(requestRender).toHaveBeenCalledTimes(1);
 
-			const frames = [render(), render()];
-			// SIXEL carries the image inside the line and never registers a
-			// transmit; each extra encode would be a full re-encode per frame.
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-			expect(frames[0]?.at(-1)).toContain("\x1bP");
-			expect(frames[0]).toHaveLength(pending.length);
-			expect(frames[1]).toEqual(frames[0]!);
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		const frames = [render(), render()];
+		// SIXEL carries the image inside the line and never registers a
+		// transmit; an extra encode would be a full re-encode per frame,
+		// and would land as another repaint request.
+		expect(frames[0]?.at(-1)).toContain("\x1bP");
+		expect(frames[0]).toHaveLength(pending.length);
+		expect(frames[1]).toBe(frames[0]!);
+		await Bun.sleep(20);
+		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	it("repaints a budget-less SIXEL image through its requestRender once the encode lands", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			let repaints = 0;
-			const image = new Image(
-				BASE64_ONE_PIXEL_PNG,
-				"image/png",
-				{ fallbackColor: t => t },
-				{
-					maxWidthCells: 4,
-					maxHeightCells: 4,
-					requestRender: () => {
-						repaints++;
-					},
-				},
-			);
+		const landing = encodeLanding();
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 4, requestRender: landing.requestRender },
+		);
 
-			expect(image.render(20).join("")).not.toContain("\x1bP");
-			await encodeSixel.mock.results[0]?.value;
-			expect(repaints).toBe(1);
-			expect(image.render(20).at(-1)).toContain("\x1bP");
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		expect(image.render(20).join("")).not.toContain("\x1bP");
+		await landing.landed();
+		expect(landing.repaints()).toBe(1);
+		expect(image.render(20).at(-1)).toContain("\x1bP");
 	});
 
 	it("commits a SIXEL image to scrollback with its sequence while the off-thread encode is pending", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			const transcript = new TranscriptContainer();
-			transcript.addChild(
-				new Image(
-					BASE64_ONE_PIXEL_PNG,
-					"image/png",
-					{ fallbackColor: t => t },
-					{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
-					// Several rows, so the pending block is reserved rows rather than one empty line.
-					{ widthPx: 40, heightPx: 40 },
-				),
-			);
+		const landing = encodeLanding();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, requestRender: landing.requestRender },
+				// Several rows, so the pending block is reserved rows rather than one empty line.
+				{ widthPx: 40, heightPx: 40 },
+			),
+		);
 
-			// The live frame starts the encode and reserves the image's rows.
-			expect(transcript.renderViewport(80, 10, { tick: 0, now: 0 }).join("")).not.toContain("\x1bP");
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-			// Pressure retires the block before the encode lands; nothing can
-			// repaint those rows once they reach native scrollback.
-			const retired = transcript.peekFinalizedBatch(80, 0);
-			expect(retired?.rows.join("")).toContain("\x1bP");
-			await encodeSixel.mock.results[0]?.value;
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		// The live frame starts the encode and reserves the image's rows.
+		expect(transcript.renderViewport(80, 10, { tick: 0, now: 0 }).join("")).not.toContain("\x1bP");
+		// Pressure retires the block before the encode lands; nothing can
+		// repaint those rows once they reach native scrollback.
+		const retired = transcript.peekFinalizedBatch(80, 0);
+		expect(retired?.rows.join("")).toContain("\x1bP");
+		// The synchronous encode replaced the request: the off-thread one settles stale.
+		await Bun.sleep(20);
+		expect(landing.repaints()).toBe(0);
 	});
+
 	it("commits a straddling SIXEL image exactly once while its off-thread encode is pending", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			const transcript = new TranscriptContainer();
-			// Prose above and below the image, so the split commits the image
-			// rows themselves while the encode is still pending.
-			const block = new Container();
-			block.addChild(new Text("AAA-prose-above", 0, 0));
-			block.addChild(
-				new Image(
-					BASE64_ONE_PIXEL_PNG,
-					"image/png",
-					{ fallbackColor: t => t },
-					{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
-					// Several rows, so the pending block straddles the viewport top.
-					{ widthPx: 40, heightPx: 40 },
-				),
-			);
-			block.addChild(new Text("ZZZ-prose-below", 0, 0));
-			transcript.addChild(block);
-			transcript.addChild(new Text("tail", 0, 0));
+		const landing = encodeLanding();
+		const transcript = new TranscriptContainer();
+		// Prose above and below the image, so the split commits the image
+		// rows themselves while the encode is still pending.
+		const block = new Container();
+		block.addChild(new Text("AAA-prose-above", 0, 0));
+		block.addChild(
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, requestRender: landing.requestRender },
+				// Several rows, so the pending block straddles the viewport top.
+				{ widthPx: 40, heightPx: 40 },
+			),
+		);
+		block.addChild(new Text("ZZZ-prose-below", 0, 0));
+		transcript.addChild(block);
+		transcript.addChild(new Text("tail", 0, 0));
 
-			// The live frame starts the encode and reserves the image's rows.
-			const live = transcript.renderViewport(80, 3, { tick: 0, now: 0 });
-			expect(live.join("")).not.toContain("\x1bP");
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-			// Pressure splits the block while the encode is pending; the image
-			// rows reach scrollback with the sequence, encoded synchronously.
-			const head = transcript.peekFinalizedBatch(80, 3)!;
-			expect(head.rows.join("")).toContain("\x1bP");
-			transcript.acknowledgeFinalizedBatch(head.id);
-			// The split fingerprint covers the committed bytes, so the seam
-			// still locates once the async encode lands and re-renders the
-			// tail: the sequence must not repeat below the committed prefix.
-			await encodeSixel.mock.results[0]?.value;
-			transcript.renderViewport(80, 3, { tick: 1, now: 1 });
-			const rest = transcript.peekFlushBatch(80)!.rows;
-			expect(rest.join("")).not.toContain("\x1bP");
-			expect(rest.join("")).toContain("ZZZ-prose-below");
-			expect(rest.join("")).toContain("tail");
-			const sequences = [...head.rows, ...rest].join("").split("\x1bP").length - 1;
-			expect(sequences).toBe(1);
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		// The live frame starts the encode and reserves the image's rows.
+		const live = transcript.renderViewport(80, 3, { tick: 0, now: 0 });
+		expect(live.join("")).not.toContain("\x1bP");
+		// Pressure splits the block while the encode is pending; the image
+		// rows reach scrollback with the sequence, encoded synchronously.
+		const head = transcript.peekFinalizedBatch(80, 3)!;
+		expect(head.rows.join("")).toContain("\x1bP");
+		transcript.acknowledgeFinalizedBatch(head.id);
+		// The split fingerprint covers the committed bytes, so the seam
+		// still locates once the async encode lands and re-renders the
+		// tail: the sequence must not repeat below the committed prefix.
+		await Bun.sleep(20);
+		transcript.renderViewport(80, 3, { tick: 1, now: 1 });
+		const rest = transcript.peekFlushBatch(80)!.rows;
+		expect(rest.join("")).not.toContain("\x1bP");
+		expect(rest.join("")).toContain("ZZZ-prose-below");
+		expect(rest.join("")).toContain("tail");
+		const sequences = [...head.rows, ...rest].join("").split("\x1bP").length - 1;
+		expect(sequences).toBe(1);
 	});
 
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
-		const budget = new ImageBudget(3, () => {});
+		const budget = new ImageBudget(3);
 		const id = budget.acquireId("k");
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
@@ -631,7 +302,7 @@ describe("Image budget integration", () => {
 	});
 
 	it("does not move the cursor around single-row direct Kitty placements", () => {
-		const budget = new ImageBudget(3, () => {});
+		const budget = new ImageBudget(3);
 		const id = budget.acquireId("k");
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
@@ -657,7 +328,7 @@ describe("Image budget integration", () => {
 	});
 
 	it("renders an over-budget image as its text fallback instead of graphics", () => {
-		const budget = new ImageBudget(1, () => {});
+		const budget = new ImageBudget(1);
 		const older = new Image(
 			BASE64_ONE_PIXEL_PNG,
 			"image/png",
@@ -688,7 +359,7 @@ describe("Image budget integration", () => {
 	});
 
 	it("demotes the oldest transcript images when the viewport measures blocks newest-first (#16660)", () => {
-		const budget = new ImageBudget(2, () => {});
+		const budget = new ImageBudget(2);
 		const transcript = new TranscriptContainer();
 		// A text block at the frontier: the retirement peek renders it before
 		// walking the live tail newest-first.
@@ -725,24 +396,24 @@ describe("Image budget integration", () => {
 
 describe("Image budget + Unicode placeholders", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
-	const originalGraphics = { ...getKittyGraphics() };
+	const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 	let originalCellDims: CellDimensions;
 
 	beforeEach(() => {
 		originalCellDims = { ...getCellDimensions() };
 		setCellDimensions({ widthPx: 10, heightPx: 10 });
 		terminal.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
+		terminal.kittyUnicodePlaceholders = true;
 	});
 
 	afterEach(() => {
 		setCellDimensions(originalCellDims);
 		terminal.imageProtocol = originalProtocol;
-		setKittyGraphics(originalGraphics);
+		terminal.kittyUnicodePlaceholders = originalPlaceholders;
 	});
 
 	it("renders a transmitted image as a virtual-placement placeholder grid", () => {
-		const budget = new ImageBudget(3, () => {});
+		const budget = new ImageBudget(3);
 		const id = budget.acquireId("k");
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
@@ -764,14 +435,11 @@ describe("Image budget + Unicode placeholders", () => {
 		expect(lines[0]).toContain(`38;2;${(id >> 16) & 0xff};${(id >> 8) & 0xff};${id & 0xff}m`);
 		// Render lines never carry the base64 — data goes via the one-time transmit.
 		expect(lines.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
-		const transmits = [...budget.takeTransmits()];
-		expect(transmits).toHaveLength(1);
-		expect(transmits[0]).toContain("\x1b_Ga=t");
-		expect(transmits[0]).toContain(`i=${id}`);
+		expect(budget.shouldTransmit(id)).toBe(false);
 	});
 
 	it("re-emits the virtual placement (not base64) on a fresh render after cache invalidation", () => {
-		const budget = new ImageBudget(3, () => {});
+		const budget = new ImageBudget(3);
 		const id = budget.acquireId("k");
 		const image = new Image(
 			BASE64_ONE_PIXEL_PNG,
@@ -782,20 +450,21 @@ describe("Image budget + Unicode placeholders", () => {
 		budget.beginPass();
 		image.render(20);
 		budget.endPass();
-		expect([...budget.takeTransmits()]).toHaveLength(1);
+		expect(budget.shouldTransmit(id)).toBe(false);
 
 		// A repaint after invalidation re-emits the placement but never the data.
 		image.invalidate();
 		budget.beginPass();
 		const lines = image.render(20);
 		budget.endPass();
-		expect(lines[0]).toContain(encodeKittyVirtualPlacement({ imageId: id, placementId: id, columns: 4, rows: 4 }));
-		expect([...budget.takeTransmits()]).toEqual([]);
+		expect(lines[0]).toStartWith(`\x1b_Ga=p,U=1,q=2,i=${id},p=${id},c=4,r=4\x1b\\`);
+		expect(lines.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
+		expect(budget.shouldTransmit(id)).toBe(false);
 	});
 });
 
 describe("TUI inline-image budget", () => {
-	const originalProtocol = TERMINAL.imageProtocol;
+	let restoreProtocol: () => void;
 	const originalTerminalId = terminal.id;
 	let originalCellDims: CellDimensions;
 	const scheduler = new VirtualRenderScheduler();
@@ -803,7 +472,7 @@ describe("TUI inline-image budget", () => {
 	beforeEach(() => {
 		originalCellDims = { ...getCellDimensions() };
 		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		terminal.imageProtocol = ImageProtocol.Kitty;
+		restoreProtocol = forceImageProtocol(ImageProtocol.Kitty);
 		// Pin a non-Ghostty id by default so the Ghostty one-shot image re-submit
 		// (which re-sends `a=t` data) never fires in the generic budget tests; the
 		// dedicated Ghostty tests opt in by setting `terminal.id = "ghostty"`.
@@ -814,7 +483,7 @@ describe("TUI inline-image budget", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		setCellDimensions(originalCellDims);
-		terminal.imageProtocol = originalProtocol;
+		restoreProtocol();
 		terminal.id = originalTerminalId;
 	});
 
@@ -832,16 +501,16 @@ describe("TUI inline-image budget", () => {
 	}
 
 	it("renders following text below a multi-row direct Kitty placement", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.addChild(
 			new Image(
@@ -867,22 +536,22 @@ describe("TUI inline-image budget", () => {
 			expect(viewport.slice(0, 4).some(line => line.includes("after-image"))).toBe(false);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("clips a direct Kitty placement during an in-place width repaint", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
 		const term = new VirtualTerminal(40, 6);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
 		const tui = createTui(term);
 		tui.addChild(
@@ -909,7 +578,7 @@ describe("TUI inline-image budget", () => {
 			expect(output).toContain("c=4,r=3,y=10,h=30");
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
 			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
 		}
@@ -920,8 +589,8 @@ describe("TUI inline-image budget", () => {
 			const term = new VirtualTerminal(40, 12);
 			const resident = new Set<number>();
 			let peak = 0;
-			const realWrite = term.write.bind(term);
-			vi.spyOn(term, "write").mockImplementation(data => {
+			const realWrite = term.receive.bind(term);
+			vi.spyOn(term, "receive").mockImplementation(data => {
 				for (const match of data.matchAll(/\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
 					const fields = new Map(match[1]!.split(",").map(field => field.split("=") as [string, string]));
 					const id = Number(fields.get("i"));
@@ -1024,8 +693,8 @@ describe("TUI inline-image budget", () => {
 		let active = screen;
 		const deleted: number[] = [];
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			for (const match of data.matchAll(/\x1b\[\?1049([hl])|\x1b\[2J|\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
 				if (match[1] === "h") {
@@ -1083,11 +752,11 @@ describe("TUI inline-image budget", () => {
 	}
 
 	it("keeps normal-buffer placements visible across a fullscreen overlay pass", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { resident, placed, alt } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
@@ -1124,16 +793,16 @@ describe("TUI inline-image budget", () => {
 			expect([...resident].sort(ascending)).toEqual([...behindIds].sort(ascending));
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("keeps a shared image placed when an over-cap fullscreen overlay demotes it", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { resident, placed } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = makeImage(tui.imageBudget, "behind");
@@ -1170,16 +839,16 @@ describe("TUI inline-image budget", () => {
 			expect(resident.has(sharedId)).toBe(true);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("spares a screen image whose suppression the reconcile undercut", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { placed, resident, deleted } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(1);
 		const older = makeImage(tui.imageBudget, "older");
@@ -1220,16 +889,16 @@ describe("TUI inline-image budget", () => {
 			expect([...resident]).toEqual([keptId]);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("names forgotten placeholder images in a reset's own deletions", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { writes } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: true });
+		terminal.kittyUnicodePlaceholders = true;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(3);
 		const gone = makeImage(tui.imageBudget, "gone");
@@ -1260,16 +929,16 @@ describe("TUI inline-image budget", () => {
 			expect(output).toContain(`\x1b_Ga=d,d=I,i=${goneId}`);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("holds a reset's deletions until the repaint that restores them", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { placed, deleted } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(3);
 		const transcript = makeImage(tui.imageBudget, "transcript");
@@ -1297,7 +966,7 @@ describe("TUI inline-image budget", () => {
 			expect(deleted).not.toContain(transcriptId);
 			expect(placed.has(transcriptId)).toBe(true);
 		} finally {
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
@@ -1329,11 +998,11 @@ describe("TUI inline-image budget", () => {
 
 	for (const placeholders of [false, true]) {
 		it(`keeps a ${placeholders ? "placeholder" : "direct"} image placed through a rebuild-mode resize`, () => {
-			const originalGraphics = { ...getKittyGraphics() };
+			const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 			const term = new VirtualTerminal(40, 8);
 			const { writes, placed, alt } = trackKittyGraphics(term);
 
-			setKittyGraphics({ unicodePlaceholders: placeholders });
+			terminal.kittyUnicodePlaceholders = placeholders;
 			const scheduler = new StepScheduler();
 			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 			tui.setMaxInlineImages(2);
@@ -1376,17 +1045,17 @@ describe("TUI inline-image budget", () => {
 				expect(placed.has(shownId)).toBe(true);
 			} finally {
 				tui.stop();
-				setKittyGraphics(originalGraphics);
+				terminal.kittyUnicodePlaceholders = originalPlaceholders;
 			}
 		});
 	}
 
 	it("releases a demoted image's key once its graphic is actually retired", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 20);
 		trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const transcript = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `row-${i}`));
@@ -1406,16 +1075,16 @@ describe("TUI inline-image budget", () => {
 			expect(tui.imageBudget.acquireId("row-2")).toBe(tui.imageBudget.acquireId("row-2"));
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("keeps a shared image's key when the overlay's demotion is refused", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { placed, deleted } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const other = makeImage(tui.imageBudget, "other");
@@ -1459,16 +1128,16 @@ describe("TUI inline-image budget", () => {
 			expect(placed.has(sharedId)).toBe(true);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("starts each alternate-buffer lifecycle without the previous overlay's split", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { writes } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		tui.setFrameProvider({
@@ -1508,16 +1177,16 @@ describe("TUI inline-image budget", () => {
 			second.hide();
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("keeps transcript placements when the shutdown flush runs under a fullscreen overlay", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { placed, deleted } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
@@ -1561,16 +1230,16 @@ describe("TUI inline-image budget", () => {
 			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
 		} finally {
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("does not demote transcript images under a closing overlay's suppression threshold", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { placed, deleted, writes } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
@@ -1609,16 +1278,16 @@ describe("TUI inline-image budget", () => {
 			expect(writes.join("")).not.toContain(imageFallback("image/png", { widthPx: 1, heightPx: 1 }));
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("keeps a non-fullscreen overlay image placed while the provider frame fills the cap", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { resident, placed } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
@@ -1644,16 +1313,16 @@ describe("TUI inline-image budget", () => {
 			expect(resident.has(modalId)).toBe(true);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("holds the cap over a provider frame plus its non-fullscreen overlay", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const { resident, placed } = trackKittyGraphics(term);
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(2);
 		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
@@ -1691,15 +1360,15 @@ describe("TUI inline-image budget", () => {
 			expect(resident.size).toBe(2);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("applies the image budget before emitting the first frame", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
@@ -1726,8 +1395,8 @@ describe("TUI inline-image budget", () => {
 	it("purges demoted image graphics and repaints the fallback without a destructive replay", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
@@ -1752,7 +1421,7 @@ describe("TUI inline-image budget", () => {
 			expect(writes.join("")).not.toContain("\x1b[2J");
 			expect(writes.join("")).not.toContain("\x1b[3J");
 			// ...purges the now-hidden image's graphics by id...
-			expect(writes.join("")).toContain(encodeKittyDeleteImage(oldId));
+			expect(writes.join("")).toContain(`\x1b_Ga=d,d=I,i=${oldId},q=2\x1b\\`);
 			// ...and the oldest image is now shown as text, with one image still live.
 			const viewport = term.getViewport().map(l => l.trimEnd());
 			const fallbackCount = viewport.filter(l => l.includes("[Image:")).length;
@@ -1765,8 +1434,8 @@ describe("TUI inline-image budget", () => {
 	it("deletes every tracked Kitty image during live cleanup", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
@@ -1785,10 +1454,10 @@ describe("TUI inline-image budget", () => {
 			tui.clearInlineImages();
 
 			const output = writes.join("");
-			expect(output).toContain(encodeKittyDeleteImage(firstId));
-			expect(output).toContain(encodeKittyDeleteImage(secondId));
+			expect(output).toContain(`\x1b_Ga=d,d=I,i=${firstId},q=2\x1b\\`);
+			expect(output).toContain(`\x1b_Ga=d,d=I,i=${secondId},q=2\x1b\\`);
 			expect(tui.imageBudget.shouldTransmit(firstId)).toBe(true);
-			expect([...tui.imageBudget.takeAllTransmittedIds()]).toEqual([]);
+			expect(tui.imageBudget.shouldTransmit(secondId)).toBe(true);
 		} finally {
 			tui.stop();
 		}
@@ -1796,8 +1465,8 @@ describe("TUI inline-image budget", () => {
 	it("leaves transmitted images in the terminal store on stop so scrollback keeps them", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
@@ -1817,16 +1486,16 @@ describe("TUI inline-image budget", () => {
 	});
 
 	it("lets a full-width non-fullscreen overlay replace Unicode image placeholder rows", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
 
-		setKittyGraphics({ unicodePlaceholders: true });
+		terminal.kittyUnicodePlaceholders = true;
 		const tui = createTui(term);
 		tui.addChild(makeImage(tui.imageBudget, "behind-modal"));
 		try {
@@ -1854,15 +1523,15 @@ describe("TUI inline-image budget", () => {
 			expect(term.getViewport().join("\n")).toContain(KITTY_PLACEHOLDER);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
 	});
 
 	it("retransmits current images after a destructive redraw", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
@@ -1893,16 +1562,16 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 	it("deletes every kitty image on a destructive display reset", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalPlaceholders = TERMINAL.kittyUnicodePlaceholders;
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
+		const realWrite = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation((data: string) => {
 			writes.push(data);
 			realWrite(data);
 		});
 
-		setKittyGraphics({ unicodePlaceholders: false });
+		terminal.kittyUnicodePlaceholders = false;
 		const tui = createTui(term);
 		tui.setMaxInlineImages(3);
 		tui.addChild(makeImage(tui.imageBudget, "only"));
@@ -1927,54 +1596,7 @@ describe("TUI inline-image budget", () => {
 			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
+			terminal.kittyUnicodePlaceholders = originalPlaceholders;
 		}
-	});
-});
-
-describe("kitty transmit / placement encoding", () => {
-	it("encodeKittyPlacement displays a transmitted image by id with a stable placement id", () => {
-		const seq = encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 });
-		expect(seq).toBe("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\");
-		expect(seq).not.toContain(BASE64_ONE_PIXEL_PNG);
-	});
-});
-
-describe("ImageBudget transmit tracking", () => {
-	it("transmits an id once and clears the queue when drained", () => {
-		const budget = new ImageBudget(3, () => {});
-		expect(budget.shouldTransmit(1)).toBe(true);
-		budget.enqueueTransmit(1, "TX1");
-		expect(budget.shouldTransmit(1)).toBe(false);
-		budget.enqueueTransmit(1, "TX1-dup"); // already transmitted => no-op
-		expect([...budget.takeTransmits()]).toEqual(["TX1"]);
-		expect([...budget.takeTransmits()]).toEqual([]);
-	});
-
-	it("purges all transmitted ids for terminal-session cleanup", () => {
-		const budget = new ImageBudget(3, () => {});
-		budget.enqueueTransmit(1, "TX1");
-		budget.enqueueTransmit(2, "TX2");
-		expect(budget.shouldTransmit(1)).toBe(false);
-
-		expect([...budget.takeAllTransmittedIds()]).toEqual([1, 2]);
-		expect([...budget.takeTransmits()]).toEqual([]);
-		expect(budget.shouldTransmit(1)).toBe(true);
-		expect([...budget.takeAllTransmittedIds()]).toEqual([]);
-	});
-
-	it("re-transmits an image after a purge frees its data", () => {
-		const budget = new ImageBudget(2, () => {});
-		budget.enqueueTransmit(1, "TX1");
-		expect([...budget.takeTransmits()]).toEqual(["TX1"]);
-		expect(budget.shouldTransmit(1)).toBe(false);
-
-		// Push past the cap so the oldest image (id 1) is demoted and purged.
-		pass(budget, 3); // discovery pass requests a retry
-		const demote = pass(budget, 3); // retry purges id 1
-		expect(demote.purge).toEqual([1]);
-
-		// d=I freed the data, so the image must transmit again if it returns.
-		expect(budget.shouldTransmit(1)).toBe(true);
 	});
 });

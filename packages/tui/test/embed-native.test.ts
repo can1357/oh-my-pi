@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { setEmbedHost } from "@oh-my-pi/pi-tui/chat/embed-host";
-import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import {
@@ -50,7 +50,7 @@ const HOST: AssistantMessageHost = {
 	tableChartsVisible: true,
 	hideToolActivity: false,
 	toolOutputExpanded: false,
-	ui: { requestRender: () => {}, imageBudget: new ImageBudget(8, () => {}) },
+	ui: { requestRender: () => {}, imageBudget: new ImageBudget(8) },
 	resolveAssistantMessageLinkHrefs: async () => new Map(),
 };
 

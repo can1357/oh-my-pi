@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { ImageBudget, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";

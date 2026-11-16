@@ -53,6 +53,7 @@ type FakeEditor = {
 	spaceHold: SpaceHoldGesture;
 	pasteText(text: string): void;
 	handleInput?(data: string): void;
+	handlePaste?(text: string): void;
 	imageLinks?: (string | undefined)[];
 	insertAtom(label: string, expansion: string): void;
 	pendingImages: ImageContent[];
@@ -109,6 +110,7 @@ async function createContext() {
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
 	});
+	const addPasteListener = vi.fn(() => () => {});
 	const addStartListener = vi.fn();
 	const terminalWrite = vi.fn();
 	const refreshAppearance = vi.fn();
@@ -187,6 +189,7 @@ async function createContext() {
 			resetDisplay,
 			clearInlineImages,
 			addInputListener,
+			addPasteListener,
 			addStartListener,
 			getFocused: vi.fn(() => focused),
 			hasOverlay: vi.fn(() => overlayVisible),
@@ -298,6 +301,7 @@ async function createContext() {
 			handleBtwBranchKey,
 			addStartListener,
 			addInputListener,
+			addPasteListener,
 			canBranchBtw,
 			hasActiveBtw,
 			handlesBtwBranchKey,
@@ -586,33 +590,33 @@ describe("InputController keybinding setup", () => {
 		expect(focusedPasteText).toHaveBeenCalledWith("sk-test-key");
 	});
 
-	it("delivers an enhanced text paste to a focused dialog without pasteText as a bracketed paste", async () => {
+	it("delivers an enhanced text paste to a focused dialog without pasteText as a terminal paste", async () => {
 		const { promise: received, resolve: resolveReceived } = Promise.withResolvers<string>();
-		const handleInput = vi.fn((data: string) => {
-			resolveReceived(data);
+		const handlePaste = vi.fn((text: string) => {
+			resolveReceived(text);
 		});
 		const { InputController, ctx, editor, setFocused, spies } = await createContext();
-		setFocused({ handleInput });
+		setFocused({ handleInput: vi.fn(), handlePaste });
 		new InputController(ctx).setupKeyHandlers();
 
 		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), "sk-test-key");
 
-		expect(await received).toBe("\x1b[200~sk-test-key\x1b[201~");
+		expect(await received).toBe("sk-test-key");
 		expect(editor.getText()).toBe("");
 	});
 
-	it("delivers an enhanced text paste to the main editor as a bracketed paste so image paths attach", async () => {
+	it("delivers an enhanced text paste to the main editor as a terminal paste so image paths attach", async () => {
 		const { promise: received, resolve: resolveReceived } = Promise.withResolvers<string>();
 		const { InputController, ctx, editor, spies } = await createContext();
-		editor.handleInput = vi.fn((data: string) => {
-			resolveReceived(data);
+		editor.handlePaste = vi.fn((text: string) => {
+			resolveReceived(text);
 		});
 		new InputController(ctx).setupKeyHandlers();
 
 		const path = "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png";
 		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), path);
 
-		expect(await received).toBe(`\x1b[200~${path}\x1b[201~`);
+		expect(await received).toBe(path);
 		expect(editor.getText()).toBe("");
 	});
 
@@ -1175,7 +1179,8 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		});
 		context.setFocused(prompt);
 
-		prompt.handleInput(`\x1b[200~${imagePath}\x1b[201~\r`);
+		prompt.handlePaste(imagePath);
+		prompt.handleInput("\r");
 		expect(onSubmit).not.toHaveBeenCalled();
 		await Promise.all(pasted);
 
@@ -1385,7 +1390,8 @@ describe("InputController image paste into an image-accepting prompt", () => {
 	/** A focused dialog with no `pasteText`, as the approval and ask dialogs are. */
 	function createPlainDialog() {
 		const handleInput = vi.fn<(data: string) => void>();
-		return { dialog: { handleInput, render: () => [] } satisfies Component, handleInput };
+		const handlePaste = vi.fn<(text: string) => void>();
+		return { dialog: { handleInput, handlePaste, render: () => [] } satisfies Component, handleInput, handlePaste };
 	}
 
 	function startEnhancedPaste(context: {
@@ -1444,7 +1450,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const html = `<p>see</p><img src="data:image/png;base64,${TINY_PNG}">`;
 		for (const owns of [true, false]) {
 			const context = await createPromptContext();
-			const { dialog, handleInput } = createPlainDialog();
+			const { dialog, handlePaste } = createPlainDialog();
 			mountComposerOwner(context, dialog, { component: dialog, owns: () => owns });
 			const listeners = startEnhancedPaste(context);
 			const written = context.ctx.ui.terminal.write as Mock<(data: string) => void>;
@@ -1463,7 +1469,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 				expect(context.editor.pendingImages).toHaveLength(1);
 			} else {
 				deliverEnhancedPaste(listeners, mime, "see");
-				expect(handleInput).toHaveBeenCalledWith("\x1b[200~see\x1b[201~");
+				expect(handlePaste).toHaveBeenCalledWith("see");
 			}
 		}
 	});
@@ -1498,9 +1504,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
-	it("delivers clipboard text to a focused dialog without pasteText as a bracketed paste", async () => {
+	it("delivers clipboard text to a focused dialog without pasteText as a terminal paste", async () => {
 		const context = await createPromptContext();
-		const { dialog, handleInput } = createPlainDialog();
+		const { dialog, handlePaste } = createPlainDialog();
 		context.setFocused(dialog);
 		const controller = new InputController(context.ctx, {
 			readImage: async () => null,
@@ -1510,7 +1516,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 		expect(await controller.handleImagePaste()).toBe(true);
 
-		expect(handleInput).toHaveBeenCalledWith("\x1b[200~sk-test-key\x1b[201~");
+		expect(handlePaste).toHaveBeenCalledWith("sk-test-key");
 		expect(context.editor.getText()).toBe("");
 	});
 });
@@ -1866,9 +1872,9 @@ describe("InputController image paste into an ask form note", () => {
 			},
 		},
 		{
-			name: "a bracketed image-file path",
+			name: "a terminal-pasted image-file path",
 			paste: (form: HtmlFormDialog, png: string) => {
-				form.handleInput(`\x1b[200~${png}\x1b[201~`);
+				form.handlePaste(png);
 			},
 		},
 	];

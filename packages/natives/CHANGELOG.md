@@ -41,12 +41,22 @@
 ### Removed
 
 - Removed the `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES`, which only existed to pass it ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- Added `InlineImage` and `imageDimensions`: inline-image encoding (Kitty transmits, direct and Unicode-placeholder placements, iTerm2 inline images, SIXEL encodes on the blocking pool) and PNG/JPEG/GIF/WebP header sniffing. `ImageBudget.enqueueTransmit` and `ImageBudget.registerPlacementHeight` were removed; an `InlineImage` rendering against the budget queues its transmit and placement height natively.
+- `TerminalEngine` resolves terminal identity, multiplexer hosting, env overrides, and its capability probes from the environment itself (`tui::profile`): `EngineConfig` takes `env`, `testRuntime`, `headless`, `stdinTty`, `stdoutTty`, `tspHello` and `frameIntervalMs` (plus the `conpty`/`nativeWindowsConsole`/`tspExpected` overrides) instead of resolved facts. The engine applies tmux pane APC-title changes itself (the `tmuxApcTitles` event was removed), withholds a DA1 SIXEL advertisement under `PI_FORCE_IMAGE_PROTOCOL` or a tmux client without `Sxl`, embeds the Glyph Protocol bundle, and exposes `ternPane`.
+- Added the terminal profile functions `detectTerminalProfile`, `detectTrueColor`, `classifyTerminalMultiplexer`, `hasTerminalMultiplexerSession`, `isInsideTerminalMultiplexer`, `isTerminalBackgroundQueryTrusted`, `isSshSession`, `isTspExpected`, `terminalMultiplexerEnvKeys`, `wrapTmuxPassthrough`, `isNotificationSuppressed`, and `sendTerminalNotification` (OSC 9/99 formatting, multiplexer notifiers, D-Bus fan-out; returns the sequence to write).
+- `TerminalEngine` runs the Tern Surface Protocol handshake itself (optimistic start, the 1 s confirm deadline with its stall grace, the first-paint hold, revoke, later adoption): `setNativeSurface` and `setNativeProbeHold` were removed and the `tspHello` event was replaced by `nativeSurface` (`live`, `data` = hello JSON, `reason`) and `tspFallback` (`reason`) events.
+- `TerminalEngine` applies the SIXEL adoption policy itself: the `sixel` event and `setImageProtocol` were removed; an adoption raises the `imageProtocol` event (`data`: `"sixel"`) and forces a repaint. `EngineEvent.graphics` was removed and `EngineEvent.live` added.
+- `TerminalEngine` composites overlays: `presentPlan` frames take `overlays` (`{ row, col, width, lines }`), and `presentAlt` frames take `overlays` instead of `rows`.
+- `TerminalEngine` owns process stdio when `EngineConfig.stdio` is set (replacing `fd` and the capture chunk cap): stdout is written from a writer thread on every platform (the unix TTY pump; a Windows console writer with 16 KiB writes cut between escape sequences; nothing when stdout is not a terminal), and `attachInput(now)` puts stdin in raw mode (termios / console mode with VT input, restored exactly by `stop`) and reads it on a cancellable thread whose wake-up keeps the event loop alive while input is attached. `tick(now, loopStalled?)` feeds the queued reads; stdin ending or failing is a `disconnected` event, and `stop` throws when the stdin terminal mode cannot be restored.
+- Added the `ImageBudget` class (the inline-image budget formerly in pi-tui) and `TerminalEngine.attachImageBudget`/`clearInlineImages`. Frames no longer carry `images`, `beginFrame` views no longer carry `pendingImageTransmits`, and `purgeImages`, `resetPending`, and the `altImageLifecycle` event were removed: the engine reads the attached budget directly.
 
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
 
-- `TtyWriter` now requires a drain threshold and callback and only supports independently reopenable TTYs. Its pending UTF-8 byte bounds are reported conservatively.
+- Replaced `TtyWriter` with `TerminalEngine`, which owns the terminal end to end: stdin parsing, capability negotiation, terminal modes and their exit restore, frame painting and diffing, resize handling, and render scheduling. The host passes its clock and stdin bytes in and drains events; output goes through an off-thread pump for TTYs or is captured, chunked between escape sequences, for Windows, pipes, and tests.
 
 ### Changed
 
