@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Gemma tool calls with large arguments no longer slow down as they stream
+- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
 
 ## [18.21.0] - 2026-11-16
 
