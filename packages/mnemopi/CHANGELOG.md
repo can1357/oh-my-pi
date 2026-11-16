@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Mnemopi embedding requests failing with HTTP 413 on llama.cpp embedding servers whose physical batch is smaller than the model context: inputs are now capped by a token budget derived from the character cap, and context-length rejections are retried with smaller inputs ([#19389](https://github.com/can1357/oh-my-pi/pull/19389) by [@GBLMX](https://github.com/GBLMX))
+
 ## [18.20.3] - 2026-11-16
 
 ### Added
