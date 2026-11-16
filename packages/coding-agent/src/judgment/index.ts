@@ -496,8 +496,11 @@ export class ChainJudge implements Judge {
 			}
 		}
 		checkBoxQuestions(request);
-		return this.#withCandidate(
+		// Candidates handed the request: one that failed before the one that answered may have reached its provider.
+		let attempts = 0;
+		const judged = await this.#withCandidate(
 			async (candidateJudge, _kind, _model, prepared) => {
+				attempts++;
 				if (!prepared) return candidateJudge.judge(request, options);
 				const result = await candidateJudge.judge({ ...request, images: prepared.images }, options);
 				return prepared.fitted ? sourceBoxes(request.questions, result, prepared.fitted) : result;
@@ -515,6 +518,9 @@ export class ChainJudge implements Judge {
 						return { images, fitted };
 					},
 		);
+		if (attempts === 1 || !judged.cached) return judged;
+		const { cached: _cached, ...sent } = judged;
+		return sent;
 	}
 
 	/**

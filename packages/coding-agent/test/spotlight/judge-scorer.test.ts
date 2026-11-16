@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from "bun:test";
-import type { JudgmentRequest, JudgmentResult, NoulQuestion, Questions } from "@oh-my-pi/pi-ai";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import type { Api, JudgmentRequest, JudgmentResult, Model, NoulQuestion, Questions } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ChainJudge, JudgmentCache } from "@oh-my-pi/pi-coding-agent/judgment";
 import {
 	JUDGE_CHUNK_ITEMS,
 	JudgeScorer,
@@ -10,7 +12,13 @@ import {
 	lineKey,
 } from "@oh-my-pi/pi-coding-agent/spotlight/judge-scorer";
 import type { CallContext } from "@oh-my-pi/pi-coding-agent/spotlight/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { asGlobalFetch } from "../helpers/fetch-mock";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function context(): CallContext {
 	return { task: "Fix the service.", said: "", intent: "", commands: [], source: "read src/a.ts" };
@@ -85,33 +93,57 @@ describe("judge scorer", () => {
 	});
 
 	it("counts chunks the judgment cache answered whole apart from the requests it sent", async () => {
-		let n = 0;
-		const judge = {
-			label: "fake/judge",
-			async judge<Q extends Questions>(request: JudgmentRequest<Q>): Promise<JudgmentResult<Q>> {
-				const answers: Record<string, unknown> = {};
-				for (const key of Object.keys(request.questions)) answers[key] = { type: "noul", noul: 0.5 };
-				// The second chunk comes from the cache: nothing sent, nothing billed.
-				const cached = n++ === 1;
-				const usage = cached ? { input: 0, cost: { total: 0 } } : { input: 100, cost: { total: 0.001 } };
-				return {
-					answers,
-					usage,
-					api: "fake",
-					provider: "fake",
-					model: "fake",
-					...(cached ? { cached: true } : {}),
-				} as unknown as JudgmentResult<Q>;
-			},
-		};
-		const scorer = new JudgeScorer(judge, 5_000);
-		await scorer.score(
-			Array.from({ length: 120 }, (_, i) => `line ${i}`),
-			context(),
-		);
-		expect(scorer.usage.calls).toBe(3);
-		expect(scorer.usage.cached).toBe(1);
-		expect(scorer.usage.tokens).toBe(200);
+		using tempDir = TempDir.createSync("@omp-spotlight-judge-cache-");
+		const cache = JudgmentCache.open(path.join(tempDir.path(), "judgment-cache.db"));
+		try {
+			const model = {
+				id: "jev-preview",
+				name: "JEV Preview",
+				api: "typesafe",
+				provider: "typesafe",
+				baseUrl: "https://judge.example.test/",
+				kind: "judge",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 4096,
+			} as Model<Api>;
+			const authStorage = createInMemoryAuthStorage();
+			authStorage.keys.setRuntime("typesafe", "ts-key");
+			const registry = new ModelRegistry(authStorage, "/nonexistent/spotlight-judge-models.yml");
+			vi.spyOn(registry, "getAvailable").mockReturnValue([model]);
+			let sent = 0;
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async (_url, init) => {
+					sent++;
+					const body = JSON.parse(String(init?.body)) as { questions: Record<string, NoulQuestion> };
+					const answers: Record<string, { type: "noul"; noul: number }> = {};
+					for (const id in body.questions) answers[id] = { type: "noul", noul: 0.5 };
+					return Response.json({ model: "jev-1.13.0", answers, usage: { input_tokens: 100 } });
+				}),
+			);
+			const judge = new ChainJudge({
+				settings: Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } }),
+				registry,
+				purpose: "spotlight",
+				cache,
+			});
+			const lines = Array.from({ length: 120 }, (_, i) => `line ${i}`);
+			// An earlier result ranked the first chunk's lines, so the cache holds every answer for that chunk.
+			await new JudgeScorer(judge, 5_000).score(lines.slice(0, JUDGE_CHUNK_ITEMS), context());
+			sent = 0;
+
+			const scorer = new JudgeScorer(judge, 5_000);
+			expect(await scorer.score(lines, context())).toHaveLength(120);
+
+			expect(sent).toBe(2);
+			expect(scorer.usage.calls).toBe(3);
+			expect(scorer.usage.cached).toBe(1);
+			expect(scorer.usage.tokens).toBe(200);
+		} finally {
+			cache.close();
+		}
 	});
 
 	it("asks one noul question per line over a state whose keys are sorted", async () => {

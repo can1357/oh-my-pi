@@ -79,10 +79,13 @@ export interface ScorerUsage {
 	calls: number;
 	/** Of the calls, judge chunks the judgment cache answered whole: no provider request, nothing billed. */
 	cached?: number;
-	/** Rankings that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
+	/**
+	 * Failed Spotlight requests, or failed judge rankings (one per ranking, however many of its chunks failed); the
+	 * caller fell back to unranked rules.
+	 */
 	failures: number;
 	/**
-	 * Failed requests by cause, e.g. Spotlight's `no_credential`, `timeout`, `transport`, `bad_reply`, or the judge's
+	 * Failures by cause, e.g. Spotlight's `no_credential`, `timeout`, `transport`, `bad_reply`, or the judge's
 	 * `no_judge`, `refused`, `provider`; absent while none failed.
 	 */
 	failureCauses?: Record<string, number>;
