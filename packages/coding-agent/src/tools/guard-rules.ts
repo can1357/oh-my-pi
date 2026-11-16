@@ -522,7 +522,8 @@ export function credentialLocation(absPath: string, home: string): string | unde
 		// Bare wildcards for every component (`~/*/*/package.json`) name any folder, not this one.
 		if (!folderNames.some((_, k) => /[^*?]/.test(rest[k]))) continue;
 		const name = foldsCase() ? rest.at(-1)!.toLowerCase() : rest.at(-1)!;
-		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
+		// A public file of this folder; a pattern can still name a secret of a later one (`~/.*/config`).
+		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) continue;
 		return `~/${folder}`;
 	}
 	return undefined;
