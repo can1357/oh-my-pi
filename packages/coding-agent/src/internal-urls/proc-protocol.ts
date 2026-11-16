@@ -310,12 +310,14 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			);
 		if (action === "mode") {
 			if (!service) throw new Error(`Service not found: ${id}`);
-			if (content !== "persist" && content !== "session" && content !== "detached")
+			// Trimmed so `echo persist > proc://<id>/mode` works like the bare word.
+			const mode = content.trim();
+			if (mode !== "persist" && mode !== "session" && mode !== "detached")
 				throw new Error("Service mode must be persist, session, or detached");
-			const updated = await modeService(session, id, content, context?.signal);
+			const updated = await modeService(session, id, mode, context?.signal);
 			return {
-				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
-				details: { proc: { action: "mode", daemon: updated, mode: content }, touchesNoFiles: true },
+				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${mode}` }],
+				details: { proc: { action: "mode", daemon: updated, mode }, touchesNoFiles: true },
 			};
 		}
 		if (action === "stdin") {
