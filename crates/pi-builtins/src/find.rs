@@ -1708,10 +1708,10 @@ pub mod matchers {
 
 		use std::io::Write;
 
-		use chrono::DateTime;
+		use jiff::tz::TimeZone;
 		use pi_vfs::{File, Metadata};
 
-		use super::{Matcher, MatcherIO, WalkEntry, write_output};
+		use super::{Matcher, MatcherIO, WalkEntry, format_time_in_zone, write_output};
 
 		/// Formats mode bits as `-ls` does: directory/regular/other type marker
 		/// followed by the nine rwx permission bits.
@@ -1813,11 +1813,12 @@ pub mod matchers {
 
 		pub struct Ls {
 			output_file: Option<File>,
+			time_zone: TimeZone,
 		}
 
 		impl Ls {
-			pub fn new(output_file: Option<File>) -> Self {
-				Self { output_file }
+			pub fn new(output_file: Option<File>, time_zone: TimeZone) -> Self {
+				Self { output_file, time_zone }
 			}
 
 			async fn print(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO<'_>) {
@@ -1851,13 +1852,9 @@ pub mod matchers {
 						number_of_blocks + (4 - (remainder))
 					}
 				};
-				let last_modified = metadata.modified().map_or_else(
-					|_| "?".to_string(),
-					|system_time| {
-						let now_utc: DateTime<chrono::Utc> = system_time.into();
-						now_utc.format("%b %e %H:%M").to_string()
-					},
-				);
+				let last_modified = metadata.modified().ok()
+					.and_then(|time| format_time_in_zone(time, &self.time_zone, "%b %e %H:%M").ok())
+					.unwrap_or_else(|| "?".to_string());
 				let path = file_info.display_path().to_string_lossy();
 
 				let line = format!(
@@ -2225,10 +2222,11 @@ pub mod matchers {
 			time::SystemTime,
 		};
 
-		use chrono::{DateTime, Local, format::StrftimeItems};
+		use chrono::format::StrftimeItems;
+		use jiff::tz::TimeZone;
 		use pi_vfs::{File, Metadata};
 
-		use super::{FileType, Matcher, MatcherIO, WalkEntry, WalkError, fs, write_output};
+		use super::{FileType, Matcher, MatcherIO, WalkEntry, WalkError, format_time_in_zone, fs, write_output};
 
 		/// A directive failure that can cross `.await` points.
 		type DynError = Box<dyn Error + Send + Sync>;
@@ -2265,7 +2263,7 @@ pub mod matchers {
 		}
 
 		impl TimeFormat {
-			fn apply(&self, time: SystemTime) -> Result<Cow<'static, str>, DynError> {
+			fn apply(&self, time: SystemTime, time_zone: &TimeZone) -> Result<Cow<'static, str>, DynError> {
 				let formatted = match self {
 					Self::SinceEpoch => {
 						let duration = time.duration_since(SystemTime::UNIX_EPOCH)?;
@@ -2274,16 +2272,12 @@ pub mod matchers {
 					Self::Ctime => {
 						const CTIME_FORMAT: &str = "%a %b %d %H:%M:%S.%f0 %Y";
 
-						DateTime::<Local>::from(time)
-							.format(CTIME_FORMAT)
-							.to_string()
+						format_time_in_zone(time, time_zone, CTIME_FORMAT)?
 					},
 					Self::Strftime(format) => {
 						// Handle a special case
 						let custom_format = format.replace("%+", "%Y-%m-%d+%H:%M:%S%.f0");
-						DateTime::<Local>::from(time)
-							.format(&custom_format)
-							.to_string()
+						format_time_in_zone(time, time_zone, &custom_format)?
 					},
 				};
 
@@ -2588,6 +2582,7 @@ pub mod matchers {
 			file_info: &'entry WalkEntry,
 			directive: &FormatDirective,
 			fs_cache: &fs::Cache,
+			time_zone: &TimeZone,
 		) -> Result<Cow<'entry, str>, DynError> {
 			if !matches!(
 				directive,
@@ -2610,7 +2605,7 @@ pub mod matchers {
 			// still done at all).
 
 			let res: Cow<'entry, str> = match directive {
-				FormatDirective::AccessTime(tf) => tf.apply(meta()?.accessed()?)?,
+				FormatDirective::AccessTime(tf) => tf.apply(meta()?.accessed()?, time_zone)?,
 
 				FormatDirective::Basename => file_info.file_name().to_string_lossy().into_owned().into(),
 
@@ -2631,7 +2626,7 @@ pub mod matchers {
 					.into()
 				},
 
-				FormatDirective::ChangeTime(tf) => tf.apply(meta()?.changed()?)?,
+				FormatDirective::ChangeTime(tf) => tf.apply(meta()?.changed()?, time_zone)?,
 
 				FormatDirective::Depth => file_info.depth().to_string().into(),
 
@@ -2698,7 +2693,7 @@ pub mod matchers {
 				.to_string()
 				.into(),
 
-				FormatDirective::ModificationTime(tf) => tf.apply(meta()?.modified()?)?,
+				FormatDirective::ModificationTime(tf) => tf.apply(meta()?.modified()?, time_zone)?,
 
 				FormatDirective::Path { strip_starting_point } => file_info
 					.display_path()
@@ -2799,6 +2794,7 @@ pub mod matchers {
 			format:      FormatString,
 			output_file: Option<File>,
 			fs_cache:    fs::Cache,
+			time_zone:   TimeZone,
 		}
 
 		/// Why [`Printf::print`] stopped a line.
@@ -2816,8 +2812,8 @@ pub mod matchers {
 		}
 
 		impl Printf {
-			pub fn new(format: &str, output_file: Option<File>) -> Result<Self, Box<dyn Error>> {
-				Ok(Self { format: FormatString::parse(format)?, output_file, fs_cache: fs::Cache::default() })
+			pub fn new(format: &str, output_file: Option<File>, time_zone: TimeZone) -> Result<Self, Box<dyn Error>> {
+				Ok(Self { format: FormatString::parse(format)?, output_file, fs_cache: fs::Cache::default(), time_zone })
 			}
 
 			/// Prints the format for `file_info`; a directive that cannot be
@@ -2839,7 +2835,7 @@ pub mod matchers {
 							buffer.clear();
 						},
 						FormatComponent::Directive { directive, width, justify } => {
-							match format_directive(file_info, directive, &self.fs_cache).await {
+							match format_directive(file_info, directive, &self.fs_cache, &self.time_zone).await {
 								Ok(content) => {
 									let text = if let Some(width) = width {
 										match justify {
@@ -3934,7 +3930,20 @@ pub mod matchers {
 		user::{NoUserMatcher, UserMatcher},
 	};
 	use super::{Config, Dependencies};
-	use crate::host::Host;
+	use crate::{host::Host, time_zone::shell_time_zone};
+
+	/// Keep chrono's time directives while selecting the shell's time zone.
+	fn format_time_in_zone(
+		time: SystemTime,
+		time_zone: &jiff::tz::TimeZone,
+		format: &str,
+	) -> Result<String, Box<dyn Error + Send + Sync>> {
+		let offset = time_zone.to_offset(jiff::Timestamp::try_from(time)?);
+		let offset = chrono::FixedOffset::east_opt(offset.seconds())
+			.ok_or("time zone offset is out of range")?;
+		let datetime = DateTime::<Utc>::from(time).with_timezone(&offset);
+		Ok(datetime.format(format).to_string())
+	}
 
 	/// Symlink following mode.
 	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4412,7 +4421,7 @@ pub mod matchers {
 						return Err(From::from(format!("missing argument to {}", args[i])));
 					}
 					i += 1;
-					Some(Printf::new(args[i], None)?.into_box())
+					Some(Printf::new(args[i], None, shell_time_zone(host))?.into_box())
 				},
 				"-fprint" => {
 					if i >= args.len() - 1 {
@@ -4434,7 +4443,7 @@ pub mod matchers {
 					i += 1;
 					let file = get_or_create_file(args[i], config, host).await?;
 					i += 1;
-					Some(Printf::new(args[i], Some(file))?.into_box())
+					Some(Printf::new(args[i], Some(file), shell_time_zone(host))?.into_box())
 				},
 				"-fprint0" => {
 					if i >= args.len() - 1 {
@@ -4445,7 +4454,7 @@ pub mod matchers {
 					let file = get_or_create_file(args[i], config, host).await?;
 					Some(Printer::new(PrintDelimiter::Null, Some(file)).into_box())
 				},
-				"-ls" => Some(Ls::new(None).into_box()),
+				"-ls" => Some(Ls::new(None, shell_time_zone(host)).into_box()),
 				"-fls" => {
 					if i >= args.len() - 1 {
 						return Err(From::from(format!("missing argument to {}", args[i])));
@@ -4453,7 +4462,7 @@ pub mod matchers {
 					i += 1;
 
 					let file = get_or_create_file(args[i], config, host).await?;
-					Some(Ls::new(Some(file)).into_box())
+					Some(Ls::new(Some(file), shell_time_zone(host)).into_box())
 				},
 				"-true" => Some(TrueMatcher.into_box()),
 				"-false" => Some(FalseMatcher.into_box()),
@@ -5486,10 +5495,12 @@ impl AsyncUtility for Find {
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::PathBuf};
+	use std::{fs, path::{Path, PathBuf}, time::{Duration, UNIX_EPOCH}};
+
+	use clap::Parser as _;
 
 	use super::Find;
-	use crate::host::run_async_util;
+	use crate::host::{AsyncUtility, Capture, Host, run_async_util};
 
 	fn fixture() -> (tempfile::TempDir, PathBuf) {
 		let dir = tempfile::tempdir().unwrap();
@@ -5503,6 +5514,48 @@ mod tests {
 	async fn run(root: &PathBuf, args: &[String]) -> (i32, crate::host::Capture) {
 		let args: Vec<&str> = args.iter().map(String::as_str).collect();
 		run_async_util::<Find>(&args, "", root).await
+	}
+
+	async fn run_in_time_zone(root: &Path, args: &[&str], time_zone: &str) -> (i32, Capture) {
+		let (mut host, capture) = Host::for_test_async("find", "", root);
+		host.set_test_var("TZ", time_zone);
+		let parsed = Find::try_parse_from(std::iter::once("find").chain(args.iter().copied())).unwrap();
+		let code = parsed.run(&mut host).await;
+		(code, capture)
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn printf_times_use_the_shell_time_zone() {
+		let (_dir, root) = fixture();
+		let time = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+		fs::File::options().write(true).open(root.join("a.txt")).unwrap()
+			.set_times(fs::FileTimes::new().set_accessed(time).set_modified(time)).unwrap();
+
+		let format = "%TH:%TM %Tz %TZ|%AH:%AM %Az|%t|%a|%T@|%A@";
+		let (code, capture) = run_in_time_zone(&root, &["a.txt", "-printf", format], "Asia/Tokyo").await;
+		assert_eq!((code, capture.err().as_str()), (0, ""));
+		assert_eq!(
+			capture.out(),
+			"07:13 +0900 +09:00|07:13 +0900|Wed Nov 15 07:13:20.0000000000 2023|Wed Nov 15 07:13:20.0000000000 2023|1700000000.0000000000|1700000000.0000000000",
+		);
+		#[cfg(unix)]
+		{
+			// Native status-change time is unavailable on non-Unix hosts.
+			let (code, capture) = run_in_time_zone(&root, &["a.txt", "-printf", "%Cz"], "Asia/Tokyo").await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "+0900", ""));
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ls_uses_the_shell_time_zone() {
+		let (_dir, root) = fixture();
+		fs::File::options().write(true).open(root.join("a.txt")).unwrap()
+			.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000))).unwrap();
+
+		let (code, capture) = run_in_time_zone(&root, &["a.txt", "-ls"], "Asia/Tokyo").await;
+		assert_eq!((code, capture.err().as_str()), (0, ""));
+		let stdout = capture.out();
+		assert!(stdout.contains(" Nov 15 07:13 a.txt\n"), "got: {stdout}");
 	}
 
 	/// A chain as deep as path syscalls reach must be walked, in both visit
