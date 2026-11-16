@@ -199,6 +199,41 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 }
 
+function bindProviderConfig(config: ProviderConfig, runtime: IExtensionRuntime, extension: Extension): ProviderConfig {
+	const bind =
+		<TArgs extends unknown[], TResult>(callback: (...args: TArgs) => TResult) =>
+		(...args: TArgs): TResult =>
+			runWithExtensionRequestIdentity(runtime, extension, () => callback(...args));
+	const oauth = config.oauth;
+	const usage = config.usage;
+	return {
+		...config,
+		...(config.streamSimple ? { streamSimple: bind(config.streamSimple) } : {}),
+		...(config.fetchDynamicModels ? { fetchDynamicModels: bind(config.fetchDynamicModels) } : {}),
+		...(oauth
+			? {
+					oauth: {
+						...oauth,
+						login: bind(oauth.login),
+						...(oauth.refreshToken ? { refreshToken: bind(oauth.refreshToken) } : {}),
+						...(oauth.getApiKey ? { getApiKey: bind(oauth.getApiKey) } : {}),
+						...(oauth.modifyModels ? { modifyModels: bind(oauth.modifyModels) } : {}),
+					},
+				}
+			: {}),
+		...(usage
+			? {
+					usage: {
+						...usage,
+						fetchUsage: bind(usage.fetchUsage),
+						...(usage.parseRateLimitHeaders ? { parseRateLimitHeaders: bind(usage.parseRateLimitHeaders) } : {}),
+						...(usage.supports ? { supports: bind(usage.supports) } : {}),
+					},
+				}
+			: {}),
+	};
+}
+
 /**
  * ExtensionAPI implementation for an extension.
  * Registration methods write to the extension object.
@@ -443,7 +478,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	registerProvider(name: string, config: ProviderConfig): void {
 		this.#extension.registersProviders = true;
-		this.#runtime.registerProvider(name, config, this.#extension.path);
+		this.#runtime.registerProvider(
+			name,
+			bindProviderConfig(config, this.#runtime, this.#extension),
+			this.#extension.path,
+		);
 	}
 
 	unregisterProvider(name: string): void {

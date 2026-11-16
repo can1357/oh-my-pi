@@ -619,7 +619,7 @@ export default function(pi) {
 		]);
 	}, 30_000);
 
-	it("attaches registry identity to extension tool approvals, confirmations, and command dialogs", async () => {
+	it("attaches registry identity to extension tools, commands, and provider callbacks", async () => {
 		await using temp = await TempDir.create("@rpc-extension-tool-identity-");
 		const extensionPath = temp.join("identity-tool.ts");
 		await Bun.write(
@@ -627,6 +627,10 @@ export default function(pi) {
 			`
 import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
 export default function(pi) {
+  let savedContext;
+  pi.on("session_start", (_event, ctx) => {
+    savedContext = ctx;
+  });
   pi.registerTool({
     name: "identity_tool",
     label: "Same display",
@@ -657,6 +661,7 @@ export default function(pi) {
       maxTokens: 512,
     }],
     streamSimple: (model, context) => {
+      void savedContext?.ui.confirm("Provider callback", "Provider-owned dialog");
       const stream = createAssistantMessageEventStream();
       const message = {
         role: "assistant",
@@ -757,13 +762,16 @@ export default function(pi) {
 		expect(promptResult, await stderr).toBeDefined();
 		expect(approvalRequests).toHaveLength(1);
 		expect(approvalRequests[0]).toMatchObject({ method: "select", extensionId: expectedIdentity });
-		expect(confirmRequests).toHaveLength(2);
+		expect(confirmRequests).toHaveLength(4);
 		expect(confirmRequests).toContainEqual(
 			expect.objectContaining({ method: "confirm", title: "Same title", extensionId: expectedIdentity }),
 		);
 		expect(confirmRequests).toContainEqual(
 			expect.objectContaining({ method: "confirm", title: "Command title", extensionId: expectedIdentity }),
 		);
+		const providerRequests = confirmRequests.filter(request => request.title === "Provider callback");
+		expect(providerRequests).toHaveLength(2);
+		expect(providerRequests.every(request => request.extensionId === expectedIdentity)).toBe(true);
 		expect(commandResponse).toMatchObject({ type: "response", id: "command", success: true });
 	}, 60_000);
 
