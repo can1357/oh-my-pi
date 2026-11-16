@@ -916,6 +916,8 @@ describe("Antigravity CLI error text", () => {
 		expect(redactSensitiveText(colonOnly)).toBe(colonOnly);
 		const missingPassword = `https://${"a".repeat(50_000)}@`;
 		expect(redactSensitiveText(missingPassword)).toBe(missingPassword);
+		const colonsOnly = `https://${":".repeat(50_000)}`;
+		expect(redactSensitiveText(colonsOnly)).toBe(colonsOnly);
 	});
 
 	it("masks sensitive query parameters in URL fragments", () => {

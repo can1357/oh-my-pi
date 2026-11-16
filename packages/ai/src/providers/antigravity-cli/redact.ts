@@ -29,7 +29,7 @@ const OAUTH_PAIR_KEYS = [
 	"id_token",
 ] as const;
 
-const URL_USERINFO = /(:\/\/)[^/?#\s@]*:[^/?#\s@]*@/gi;
+const URL_USERINFO = /(:\/\/)[^:/?#\s@]*:[^/?#\s@]*@/gi;
 const SCHEME_CHARACTER = /[a-z0-9+.-]/i;
 const SENSITIVE_QUERY_PARAM = new RegExp(`([?#&](?:${SENSITIVE_QUERY_KEYS.join("|")})=)([^&#\\s"']*)`, "gi");
 const QUOTED_OAUTH_PAIR = new RegExp(
