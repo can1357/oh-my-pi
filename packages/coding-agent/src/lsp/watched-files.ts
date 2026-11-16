@@ -134,6 +134,10 @@ interface DirectoryTree {
 	covers(dir: string): boolean;
 	/** Stop watching `dir` and everything below it. */
 	remove(dir: string): void;
+	/** Reconcile watches after registrations change without closing the tree root. */
+	refresh(): Promise<void>;
+	/** Registration snapshot the tree last walked. */
+	specs: readonly WatchSpec[];
 }
 
 interface Watch {
@@ -419,6 +423,12 @@ export class WatchedFilesForwarder {
 				.filter(([key]) => !this.#watches.has(key) && !this.#failed.has(key))
 				.map(([key, target]) => this.#open(key, target.dir, target.recursive)),
 		);
+		for (const [key] of wanted) {
+			const tree = this.#watches.get(key)?.tree;
+			if (!tree || tree.specs === specs) continue;
+			await tree.refresh();
+			tree.specs = specs;
+		}
 		if (this.#closed) return;
 		// A base that appeared since the last pass was watched only through an
 		// ancestor until now; now that its own watch is armed, report what was
@@ -577,6 +587,19 @@ export class WatchedFilesForwarder {
 			remove: dir => {
 				for (const [key, watcher] of watchers) {
 					if (relativeWithin(dir, key) === undefined) continue;
+					watcher.close();
+					watchers.delete(key);
+				}
+			},
+			specs: this.#specs,
+			refresh: async () => {
+				const wanted = new Set<string>();
+				await this.#walk(root, true, dir => {
+					wanted.add(foldCase(dir));
+					watchOne(dir);
+				});
+				for (const [key, watcher] of watchers) {
+					if (wanted.has(key)) continue;
 					watcher.close();
 					watchers.delete(key);
 				}
