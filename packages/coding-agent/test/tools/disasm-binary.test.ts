@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDisasmBackend } from "@oh-my-pi/pi-coding-agent/disasm/active";
 import { ghidraHostSupported } from "@oh-my-pi/pi-coding-agent/ghidra/platform";
-import { resolveBuiltinToolPlan, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isExecutableHeader, parseFatSlices, selectSlice, splitSliceRef } from "@oh-my-pi/pi-coding-agent/disasm/store";
 import { type BinaryView, parseBinaryView } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
 
@@ -96,6 +95,7 @@ describe("universal Mach-O slices", () => {
 describe("parseBinaryView", () => {
 	const cases: Array<[string, BinaryView]> = [
 		["", { kind: "overview" }],
+		["overview", { kind: "overview" }],
 		["imports", { kind: "imports" }],
 		["main:asm", { kind: "asm", target: "main" }],
 		["xrefs:0x401000", { kind: "xrefs", target: "0x401000" }],
@@ -129,10 +129,9 @@ describe("disassembler backend selection", () => {
 		await fs.rm(withoutIdalib, { recursive: true, force: true });
 	});
 
-	it("prefers an idalib install and allows only the IDA tool", async () => {
+	it("prefers an idalib install", () => {
 		const settings = Settings.isolated({ "ida.installDir": withIdalib });
 		expect(cfgDisasmBackend.get(settings)).toBe("ida");
-		expect(await allowedBackends(settings)).toEqual(["ida"]);
 	});
 
 	it("disables both backends even with an idalib install", () => {
@@ -147,10 +146,9 @@ describe("disassembler backend selection", () => {
 		).toBeUndefined();
 	});
 
-	it("falls back to Ghidra without idalib and allows only its tool on supported hosts", async () => {
+	it("falls back to Ghidra without idalib on supported hosts", () => {
 		const settings = Settings.isolated({ "ida.installDir": withoutIdalib });
 		expect(cfgDisasmBackend.get(settings)).toBe(ghidraHostSupported() ? "ghidra" : undefined);
-		expect(await allowedBackends(settings)).toEqual(ghidraHostSupported() ? ["ghidra"] : []);
 	});
 
 	it("honors explicit Ghidra selection despite an idalib install", () => {
@@ -159,16 +157,3 @@ describe("disassembler backend selection", () => {
 		).toBe(ghidraHostSupported() ? "ghidra" : undefined);
 	});
 });
-
-async function allowedBackends(settings: Settings): Promise<string[]> {
-	const session: ToolSession = {
-		cwd: "/tmp",
-		hasUI: true,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-		settings,
-		skipPythonPreflight: true,
-	};
-	const plan = await resolveBuiltinToolPlan(session);
-	return ["ida", "ghidra"].filter(name => plan.isAllowed(name));
-}

@@ -32,13 +32,7 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
-import {
-	cfgDisasmBackend,
-	DISASM_BACKENDS,
-	EXECUTABLE_SNIFF_BYTES,
-	isExecutableFile,
-	isExecutableHeader,
-} from "../disasm";
+import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
@@ -2505,6 +2499,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			media.path = absolutePath;
 		}
 
+		// Metadata inspection precedes whole-file snapshots and never starts analysis.
+		// Raw/image and speculative reads retain their existing safety/fallback routes.
+		if (
+			question === undefined &&
+			!isRawSelector(parsed) &&
+			parsed.kind !== "image" &&
+			lexicalAbsolutePath === undefined &&
+			(DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath)))
+		) {
+			const backend = cfgDisasmBackend.get(this.session.settings);
+			return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);
+		}
+
 		const ext = path.extname(renderAbsolutePath).toLowerCase();
 		// Buffer once for every consumer below: the image sniff, the binary sniff,
 		// the structural summary, the rendered window, bracket context, and the
@@ -2657,21 +2664,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				(wholeFileBytes
 					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
 					: await isProbablyBinary(absolutePath));
-			// Executables and backend databases open in a disassembler instead of being refused. Speculative
-			// reads (lexicalAbsolutePath set) never launch a disassembler; they fall back to an
-			// ordinary execution that does.
-			const backend = cfgDisasmBackend.get(this.session.settings);
-			if (
-				looksBinary &&
-				lexicalAbsolutePath === undefined &&
-				backend !== undefined &&
-				(DISASM_BACKENDS[backend].isDatabasePath(absolutePath) ||
-					(wholeFileBytes
-						? isExecutableHeader(wholeFileBytes.subarray(0, EXECUTABLE_SNIFF_BYTES))
-						: await isExecutableFile(absolutePath)))
-			) {
-				return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);
-			}
 			if (looksBinary) {
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 					.text(

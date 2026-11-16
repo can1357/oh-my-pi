@@ -15,6 +15,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { DISASM_BACKENDS } from "./backend";
 import {
 	errorMessage,
+	formatDatabaseHandle,
 	DISASM_HOST_CONFIG_ENV,
 	type HostConfig,
 	type HostRequest,
@@ -33,6 +34,10 @@ const FLUSH_TIMEOUT_MS = 120_000;
 
 class DisasmHost {
 	readonly #config: HostConfig;
+	readonly #reference: string;
+	readonly #references = new Set<string>();
+	#saveOnRelease = false;
+	#closing: Promise<void> | undefined;
 	readonly #startedAt = Date.now();
 	readonly #opening: Promise<DisasmWorker>;
 	readonly #connections = new Set<IpcConnection>();
@@ -45,6 +50,12 @@ class DisasmHost {
 
 	constructor(config: HostConfig) {
 		this.#config = config;
+		this.#reference = formatDatabaseHandle({
+			backend: config.backend,
+			id: config.loc.id,
+			instance: crypto.randomUUID(),
+			project: config.projectDir,
+		});
 		this.#opening = this.#open();
 		// Failures are answered per request and reported by `run`.
 		this.#opening.catch(() => undefined);
@@ -130,6 +141,8 @@ class DisasmHost {
 			return {
 				id: loc.id,
 				ref: databaseRef(loc),
+				handle: this.#reference,
+				references: this.#references.size,
 				fat: loc.fat,
 				idbPath: loc.openPath,
 				info: { module: "", format: "", arch: "", bitness: 0 },
@@ -143,6 +156,8 @@ class DisasmHost {
 		return {
 			id: loc.id,
 			ref: worker.ref,
+			handle: this.#reference,
+			references: this.#references.size,
 			fat: loc.fat,
 			idbPath: worker.idbPath,
 			info: worker.info,
@@ -158,6 +173,7 @@ class DisasmHost {
 		this.#connections.add(conn);
 		// This connection's pending `call`s, aborted by `cancel` or when the connection drops.
 		const calls = new Map<number, AbortController>();
+		const leases = new Set<string>();
 		const onLine = (line: string): void => {
 			let request: HostRequest;
 			try {
@@ -172,7 +188,7 @@ class DisasmHost {
 				calls.get(request.target)?.abort();
 				return;
 			}
-			const handled = this.#handle(request, calls).then(
+			const handled = this.#handle(request, calls, conn, leases).then(
 				result => {
 					conn.send(JSON.stringify({ id: request.id, ok: true, result }));
 				},
@@ -187,12 +203,23 @@ class DisasmHost {
 			if (reason) logger.debug(`${DISASM_BACKENDS[this.#config.backend].label} host connection closed`, { reason });
 			this.#connections.delete(conn);
 			for (const controller of calls.values()) controller.abort();
+			if (leases.size > 0) {
+				for (const lease of leases) this.#references.delete(lease);
+				leases.clear();
+				this.#saveOnRelease = true;
+				this.#worker?.setReferenceCount(this.#references.size);
+				void this.#closeUnreferenced()?.catch(error => {
+					logger.warn("Disassembler orphaned-reference close failed", { id: this.#config.loc.id, error: errorMessage(error) });
+				});
+			}
 		});
 	}
 
 	async #handle(
 		request: Exclude<HostRequest, { op: "cancel" }>,
 		calls: Map<number, AbortController>,
+		conn: IpcConnection,
+		leases: Set<string>,
 	): Promise<unknown> {
 		switch (request.op) {
 			case "ping":
@@ -202,6 +229,25 @@ class DisasmHost {
 			case "open":
 				await this.#opening;
 				return this.#status();
+			case "retain": {
+				const worker = await this.#liveWorker();
+				if (!this.#connections.has(conn)) throw new ToolError("Disassembler connection closed before retain completed");
+				if (request.handle !== this.#reference) throw new ToolError("dsm handle has expired; the original database is no longer open");
+				const lease = crypto.randomUUID();
+				leases.add(lease);
+				this.#references.add(lease);
+				worker.setReferenceCount(this.#references.size);
+				return { lease, handle: this.#reference, references: this.#references.size };
+			}
+			case "release": {
+				const worker = await this.#liveWorker();
+				if (!leases.delete(request.lease)) throw new ToolError("Database reference is not owned by this connection or was already released");
+				this.#references.delete(request.lease);
+				this.#saveOnRelease ||= request.save;
+				worker.setReferenceCount(this.#references.size);
+				await this.#closeUnreferenced();
+				return { references: this.#references.size };
+			}
 			case "call": {
 				const worker = await this.#liveWorker();
 				const controller = new AbortController();
@@ -222,17 +268,28 @@ class DisasmHost {
 				return { saved: true };
 			}
 			case "close": {
-				const worker = await this.#liveWorker();
-				await worker.close({ save: request.save });
+				await this.#liveWorker();
+				if (this.#references.size > 0) {
+					throw new ToolError(`Database has ${this.#references.size} active dsm references; each owner must close its own handle`);
+				}
+				this.#saveOnRelease ||= request.save;
+				await this.#closeUnreferenced();
 				return { closed: true };
 			}
 		}
 	}
 
+	/** The zero-reference transition starts closing synchronously, before another retain can enter. */
+	#closeUnreferenced(): Promise<void> | undefined {
+		if (this.#references.size > 0 || !this.#worker || this.#stopping) return undefined;
+		this.#closing ??= this.#worker.close({ save: this.#saveOnRelease });
+		return this.#closing;
+	}
+
 	async #liveWorker(): Promise<DisasmWorker> {
 		await this.#opening;
 		const worker = this.#worker;
-		if (!worker || this.#stopping)
+		if (!worker || this.#stopping || this.#closing)
 			throw new ToolError(
 				`${DISASM_BACKENDS[this.#config.backend].label} database ${this.#config.loc.id} is closing`,
 			);

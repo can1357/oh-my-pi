@@ -46,6 +46,7 @@ import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
+import { DSM_REFERENCES, type DsmReferenceOwner } from "../disasm/reference-owner";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
@@ -224,6 +225,8 @@ export interface FileChangeReport {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Agent-owned database references, released independently from other sessions. */
+	[DSM_REFERENCES]?: DsmReferenceOwner;
 	/** Cost gate of the session tree, forwarded to subagents. */
 	costGate?: CostGateApi;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */

@@ -2,14 +2,9 @@ import * as fs from "node:fs/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import {
-	acquireDatabase,
-	cfgDisasmBackend,
-	DISASM_BACKENDS,
-	type DisasmBackendId,
-	isExecutableFile,
-	SLICE_SEPARATOR,
-} from "../disasm";
+import { cfgDisasmBackend, DISASM_BACKENDS, type DisasmBackendId, isExecutableFile, SLICE_SEPARATOR } from "../disasm";
+import { acquireDatabase } from "../disasm/client";
+import { readBinaryMetadata } from "../disasm/metadata";
 import type { ToolSession } from "../sdk";
 import { formatPathRelativeToCwd, resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult } from "./read-format";
@@ -23,22 +18,28 @@ export type BinaryView = { kind: BinaryViewKind; target?: string };
 
 /** An executable or IDB on disk plus the unparsed view suffix after it. */
 export interface BinaryViewTarget {
-	backend: DisasmBackendId;
+	backend?: DisasmBackendId;
 	absolutePath: string;
 	view: string;
 	/** Universal-binary slice from a leading `@<arch>` view segment; default slice when absent. */
 	arch?: string;
 }
 
-const RESERVED_VIEWS: Record<string, BinaryViewKind> = { imports: "imports", exports: "exports", strings: "strings" };
+const RESERVED_VIEWS: Record<string, BinaryViewKind> = {
+	overview: "overview",
+	imports: "imports",
+	exports: "exports",
+	strings: "strings",
+};
 const SLICE_PREFIX = "@";
 const XREFS_PREFIX = "xrefs:";
 const ASM_SUFFIX = ":asm";
 const VIEW_TIMEOUT_MS = 120_000;
 
 /**
- * Parse the view suffix of a binary read. Reserved words (`imports`, `exports`,
- * `strings`) win over same-named functions, which stay reachable by `0x` address.
+ * Parse the view suffix of a binary read. Reserved words (`overview`, `imports`,
+ * `exports`, `strings`) win over same-named functions, which stay reachable by `0x` address.
+ * Empty suffixes are metadata-only in readBinary, not requests for this overview.
  */
 export function parseBinaryView(view: string): BinaryView {
 	if (view === "") return { kind: "overview" };
@@ -63,18 +64,17 @@ async function isFile(absolutePath: string): Promise<boolean> {
 
 /**
  * Split `readPath` into an executable/IDB file and an disassembler view suffix. Returns
- * null when disassembly is disabled, the path has no `:`, the whole path is an existing
+ * null when the path has no `:`, the whole path is an existing
  * file, or no `:`-delimited prefix names an executable or IDB.
  */
 export async function resolveBinaryViewPath(session: ToolSession, readPath: string): Promise<BinaryViewTarget | null> {
 	const backend = cfgDisasmBackend.get(session.settings);
-	if (backend === undefined) return null;
 	if (!readPath.includes(":")) return null;
 	if (await isFile(resolveReadPath(readPath, session.cwd))) return null;
 	for (let i = readPath.lastIndexOf(":"); i > 0; i = readPath.lastIndexOf(":", i - 1)) {
 		const absolutePath = resolveReadPath(readPath.slice(0, i), session.cwd);
 		if (!(await isFile(absolutePath))) continue;
-		if (DISASM_BACKENDS[backend].isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath))) {
+		if (DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath))) {
 			return { backend, absolutePath, ...splitSliceView(readPath.slice(i + 1)) };
 		}
 	}
@@ -90,13 +90,41 @@ function splitSliceView(view: string): { view: string; arch?: string } {
 	return { arch, view: end < 0 ? "" : view.slice(end + 1) };
 }
 
-/** Render an disassembler view of an executable or IDB, opening (or creating) its database on first use. */
+/** Empty views inspect on-disk metadata only; nonempty views explicitly opt into analysis. */
 export async function readBinary(
 	session: ToolSession,
 	target: BinaryViewTarget,
 	parsed: ParsedSelector,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
+	if (target.view === "") {
+		const metadata = await readBinaryMetadata(target.absolutePath, target.arch);
+		const bin = formatPathRelativeToCwd(target.absolutePath, session.cwd);
+		const p = metadata.fat ? `${bin}${SLICE_SEPARATOR}${metadata.fat.slice.arch}` : bin;
+		const guidance =
+			target.backend === undefined
+				? "Analysis disabled: set disassembler.backend to auto, ida, or ghidra to enable explicit analysis views and dsm."
+				: `Analysis (explicit opt-in): ${p}:overview, ${p}:<func|0xaddr>, ${p}:<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>. Use the dsm namespace at xd://eval/dsm for scripting or dsm.open.`;
+		const slices = metadata.fat
+			? `\nPick a universal slice with ${bin}${SLICE_SEPARATOR}<arch> (metadata only until a view is added).`
+			: "";
+		return buildInMemorySelectorResult(session, `${metadata.text}\n${guidance}${slices}`, parsed, {
+			details: { resolvedPath: target.absolutePath },
+			sourcePath: target.absolutePath,
+			entityLabel: "binary metadata",
+			immutable: true,
+		});
+	}
+	if (target.backend === undefined) {
+		throw new ToolError(
+			"Binary analysis is disabled or unavailable; set disassembler.backend to auto, ida, or ghidra. Read the bare binary path for on-disk metadata.",
+		);
+	}
+	if (DISASM_BACKENDS.ida.isDatabasePath(target.absolutePath) && target.backend !== "ida") {
+		throw new ToolError(
+			"IDA databases require disassembler.backend=ida and an IDA installation. Read the bare database path for metadata.",
+		);
+	}
 	const view = parseBinaryView(target.view);
 	const db = await acquireDatabase(session, target.backend, target.absolutePath, { arch: target.arch, signal });
 	const { text } = await db.request<{ text: string }>("view", view, { signal, timeoutMs: VIEW_TIMEOUT_MS });

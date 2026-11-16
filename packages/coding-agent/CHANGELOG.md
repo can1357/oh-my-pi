@@ -8,15 +8,18 @@
 - Long-running subagents use less CPU and memory per update as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC))
 ### Breaking Changes
 
+- Moved binary analysis from standalone `ida`/`ghidra` tools into eval's backend-neutral `dsm` namespace (`xd://eval/dsm`).
 - Replaced `ida.enabled`, `ida.maxOpen`, and `ida.idleCloseSec` with `disassembler.backend`, `disassembler.maxOpen`, and `disassembler.idleCloseSec`; shared database APIs now live under `@oh-my-pi/pi-coding-agent/disasm`.
 
 ### Added
 
-- Added Ghidra executable views and `xd://ghidra` scripting with automatic Ghidra, JDK, and PyGhidra setup; Auto prefers an installed IDA Pro, otherwise Ghidra.
+- Added Ghidra analysis with automatic Ghidra, JDK, and PyGhidra setup on explicit analysis; Auto prefers an installed IDA Pro, otherwise Ghidra.
 
 - Added a `Force Remove` option to `worktree.onExit` that removes worktrees created during the session on exit without asking, even when they have uncommitted changes; new commits stay on the worktree's branch.
 
 ### Changed
+
+- Plain executable reads now show Mach-O/ELF/PE metadata without opening databases or downloading a backend; request `:overview`, a function selector, or `dsm.open()` to start analysis.
 
 - The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (alt+←/→); in Tern it opens as a drop-up above the composer with a provider rail, a thinking slider, and a Task / Main toggle in its head instead of an action bar.
 

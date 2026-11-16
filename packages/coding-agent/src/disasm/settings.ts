@@ -44,7 +44,7 @@ export const cfgDisasmMaxOpen = register({
 		group: "Disassembler",
 		label: "Max Open Databases",
 		description:
-			"Most databases (omp.ida.* / omp.ghidra.* daemons in omp ps) open at once per project; opening another saves and closes the least recently used idle one",
+			"Most databases (omp.ida.* / omp.ghidra.* daemons in omp ps) open at once per project; opening another evicts an unreferenced idle one. Close retained dsm handles when done",
 		options: [
 			{ value: "2", label: "2" },
 			{ value: "4", label: "4" },
@@ -54,7 +54,7 @@ export const cfgDisasmMaxOpen = register({
 	},
 });
 
-/** Idle seconds before a database saves and closes; zero keeps it open. */
+/** Unreferenced idle seconds before a database saves and closes; zero disables idle-close. */
 export const cfgDisasmIdleCloseSec = register({
 	id: "disassembler.idleCloseSec",
 	type: "number",
@@ -64,7 +64,7 @@ export const cfgDisasmIdleCloseSec = register({
 		group: "Disassembler",
 		label: "Idle Close Timeout",
 		description:
-			"Save and close databases idle longer than this many seconds (0 = never); the exec namespace resets on reopen",
+			"Save and close unreferenced databases idle longer than this many seconds (0 = never); retained dsm handles stay open. The exec namespace resets on reopen",
 		options: [
 			{ value: "0", label: "Never" },
 			{ value: "300", label: "5 minutes" },

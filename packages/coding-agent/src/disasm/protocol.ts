@@ -5,8 +5,10 @@
  * broker (so it shows up in `omp ps`). The daemon is an omp worker (`host.ts`) that owns the
  * database lock and one Python worker, and serves NDJSON requests on {@link hostEndpoint}.
  */
+import * as path from "node:path";
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { DisasmBackendId } from "./backend";
 export { DISASM_HOST_WORKER_ARG } from "../cli/worker-selectors";
 
@@ -58,6 +60,44 @@ export function hostEndpoint(runtimeDir: string, daemonName: string): string {
 	return ipcEndpoint(runtimeDir, `disasm-${hash16(daemonName)}`);
 }
 
+/** Portable reference to one live database incarnation, safe to pass to a child in the same project. */
+export interface DatabaseHandle {
+	backend: DisasmBackendId;
+	id: string;
+	instance: string;
+	project: string;
+}
+
+/** Encode a live host's identity without exposing its socket or process-local reference tokens. */
+export function formatDatabaseHandle(handle: DatabaseHandle): string {
+	const url = new URL(`dsm://${handle.backend}/${handle.id}/${handle.instance}`);
+	url.searchParams.set("project", handle.project);
+	return url.href;
+}
+
+/** Decode a portable reference; ordinary binary paths return undefined and malformed dsm references throw. */
+export function parseDatabaseHandle(value: string): DatabaseHandle | undefined {
+	if (!value.startsWith("dsm:")) return undefined;
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		throw new ToolError("Invalid dsm handle; pass the string returned by db.handle().");
+	}
+	const parts = url.pathname.split("/");
+	const project = url.searchParams.get("project");
+	if (
+		(url.hostname !== "ida" && url.hostname !== "ghidra") ||
+		url.username || url.password || url.port || url.hash ||
+		parts.length !== 3 || !/^[A-Za-z0-9._-]+$/.test(parts[1]) ||
+		!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(parts[2]) ||
+		project === null || !path.isAbsolute(project) || url.searchParams.size !== 1
+	) {
+		throw new ToolError("Invalid dsm handle; pass the string returned by db.handle().");
+	}
+	return { backend: url.hostname, id: parts[1], instance: parts[2], project };
+}
+
 /** RPC methods an omp process may forward to the worker through `call`. */
 export const HOST_CALL_METHODS = ["view", "exec", "rename", "comment", "set_type", "make_function", "save"] as const;
 
@@ -72,6 +112,8 @@ const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' |
 		params: "object",
 		"timeoutMs?": "number",
 	})
+	.or({ id: "number", op: "'retain'", handle: "string" })
+	.or({ id: "number", op: "'release'", lease: "string", save: "boolean" })
 	.or({ id: "number", op: "'cancel'", target: "number" })
 	.or({ id: "number", op: "'close'", save: "boolean" });
 
@@ -82,8 +124,10 @@ const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' |
  * - `status`: current {@link HostStatus} without waiting.
  * - `call`: forward one worker request; `timeoutMs` covers the queue wait too.
  * - `cancel`: abort the caller's own pending `call` `target` (no answer).
+ * - `retain`: pin this incarnation and return a reference token owned by the calling connection.
+ * - `release`: release that connection's token; the last reference closes the database.
  * - `flush`: save when there are unsaved changes; answers `{ saved }`.
- * - `close`: save (when `save`) and close; the host exits after answering.
+ * - `close`: close an unreferenced database for eviction; retained databases reject it.
  */
 export type HostRequest = typeof hostRequestSchema.infer;
 
@@ -112,6 +156,8 @@ const fatSchema = type({ slice: sliceSchema, slices: sliceSchema.array() });
 const hostStatusSchema = type({
 	id: "string",
 	ref: "string",
+	handle: "string",
+	references: "number",
 	"fat?": fatSchema,
 	idbPath: "string",
 	info: { module: "string", format: "string", arch: "string", bitness: "number" },
@@ -124,7 +170,8 @@ const hostStatusSchema = type({
 
 /**
  * A host's database as reported by `open`/`status`. `busy` counts queued and running requests
- * from every omp process; `lastUsed` drives LRU eviction; `dirty` means a close would save.
+ * from every omp process; `references` pins against idle/LRU close; `handle` identifies this
+ * host incarnation; `lastUsed` drives eviction; `dirty` means a close would save.
  */
 export type HostStatus = typeof hostStatusSchema.infer;
 
@@ -133,8 +180,19 @@ export function parseHostStatus(value: unknown): HostStatus {
 	return hostStatusSchema.assert(value);
 }
 
+const retainedReferenceSchema = type({ lease: "string", handle: "string", references: "number" });
+
+/** One connection-owned reference acquired with retain. */
+export type RetainedReference = typeof retainedReferenceSchema.infer;
+
+/** Validate a retain response before storing its lifetime token. */
+export function parseRetainedReference(value: unknown): RetainedReference {
+	return retainedReferenceSchema.assert(value);
+}
+
 const hostConfigSchema = type({
 	backend: "'ida' | 'ghidra'",
+	projectDir: "string",
 	endpoint: "string",
 	loc: {
 		id: "string",

@@ -131,6 +131,7 @@ export class DisasmWorker {
 	#lastUsed = Date.now();
 	/** Idle time after which the database is saved and closed; 0 disables. */
 	readonly #idleCloseMs: number;
+	#references = 0;
 	#autosaveTimer: Timer | undefined;
 	#idleTimer: Timer | undefined;
 
@@ -254,6 +255,12 @@ export class DisasmWorker {
 		return this.#active > 0;
 	}
 
+	/** Pin idle-close while host-owned database references exist; autosave stays enabled. */
+	setReferenceCount(count: number): void {
+		this.#references = count;
+		this.#scheduleIdleWork();
+	}
+
 	/** The request the worker is executing now, if any. */
 	get current(): RunningRequest | null {
 		return this.#current;
@@ -328,9 +335,9 @@ export class DisasmWorker {
 			}, AUTOSAVE_IDLE_MS);
 			this.#autosaveTimer.unref();
 		}
-		if (this.#idleCloseMs > 0) {
+		if (this.#idleCloseMs > 0 && this.#references === 0) {
 			this.#idleTimer = setTimeout(() => {
-				if (this.#active > 0 || this.#closing) return;
+				if (this.#active > 0 || this.#closing || this.#references > 0) return;
 				this.close({ save: true }).catch(error => {
 					logger.warn(`${this.#backend.label} idle close failed`, { id: this.id, error: errorMessage(error) });
 				});

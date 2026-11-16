@@ -36,6 +36,10 @@ import {
 	hostEndpoint as databaseHostEndpoint,
 	parseHostResponse,
 	parseHostStatus,
+	formatDatabaseHandle,
+	type DatabaseHandle,
+	parseRetainedReference,
+	type RetainedReference,
 } from "./protocol";
 import { installStatus, resolveWorkerRuntime } from "./runtime";
 import { cfgDisasmIdleCloseSec, cfgDisasmMaxOpen } from "./settings";
@@ -176,7 +180,7 @@ export class DisasmDatabase {
 		if (!socket) return undefined;
 		let db: DisasmDatabase | undefined;
 		const conn = new HostConnection(name, socket, () => {
-			if (db && handles.get(name) === db) handles.delete(name);
+			if (db && handles.get(endpoint) === db) handles.delete(endpoint);
 		});
 		try {
 			const status = parseHostStatus(await conn.call({ id: conn.nextId(), op }));
@@ -196,6 +200,11 @@ export class DisasmDatabase {
 	/** Reference `read` and the backend tool resolve back to this database (see `databaseRef`). */
 	get ref(): string {
 		return this.#status.ref;
+	}
+
+	/** Portable reference to this live incarnation; opening it never creates another database. */
+	get handle(): string {
+		return this.#status.handle;
 	}
 
 	/** For universal binaries: the analyzed slice and its siblings. */
@@ -253,20 +262,32 @@ export class DisasmDatabase {
 		await this.#conn.call({ id: this.#conn.nextId(), op: "flush" });
 	}
 
-	/** Close the database (saving first when `save`); its host exits afterwards. */
+	/** Acquire a connection-owned reference; an expected handle rejects stale or foreign incarnations. */
+	async retain(expected = this.handle): Promise<RetainedReference> {
+		const retained = parseRetainedReference(await this.#conn.call({ id: this.#conn.nextId(), op: "retain", handle: expected }));
+		this.#status.references = retained.references;
+		return retained;
+	}
+
+	/** Release one owned reference; the last release closes, honoring any owner's request to save. */
+	async release(lease: string, options: { save: boolean }): Promise<void> {
+		await this.#conn.call({ id: this.#conn.nextId(), op: "release", lease, save: options.save });
+	}
+
+	/** Close an unreferenced database for eviction; active owned references reject this operation. */
 	async close(options: { save: boolean }): Promise<void> {
 		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save });
 	}
 
-	/** Drop this process's connection; the host keeps running. */
+	/** Drop this process's connection and its owned references; other owners keep the host alive. */
 	disconnect(): void {
 		this.#conn.close();
 	}
 }
 
-/** Attached hosts by daemon name. */
+/** Attached hosts by project-scoped endpoint; identical daemon names in different projects never alias. */
 const handles = new Map<string, DisasmDatabase>();
-/** In-flight opens by backend-qualified daemon name, shared by concurrent callers in this process. */
+/** In-flight opens by project-scoped endpoint, shared by concurrent callers in this process. */
 const pending = new Map<string, Promise<DisasmDatabase>>();
 let cleanupRegistered = false;
 
@@ -280,20 +301,21 @@ async function attachHost(
 	name: string,
 	op: "open" | "status",
 ): Promise<DisasmDatabase | undefined> {
-	const cached = handles.get(name);
+	const endpoint = hostEndpoint(broker, name);
+	const cached = handles.get(endpoint);
 	if (cached?.connected) {
 		await cached.refresh(op);
 		return cached;
 	}
-	const db = await DisasmDatabase.attach(name, hostEndpoint(broker, name), op);
+	const db = await DisasmDatabase.attach(name, endpoint, op);
 	if (!db) return undefined;
 	// A concurrent attach won; keep one connection per host.
-	const winner = handles.get(name);
+	const winner = handles.get(endpoint);
 	if (winner?.connected) {
 		db.disconnect();
 		return winner;
 	}
-	handles.set(name, db);
+	handles.set(endpoint, db);
 	if (!cleanupRegistered) {
 		cleanupRegistered = true;
 		postmortem.register("disasm-release", releaseDatabases);
@@ -329,11 +351,11 @@ async function makeRoom(session: ToolSession, broker: DaemonBrokerClient, name: 
 		const others = (await liveHostNames(broker)).filter(other => other !== name);
 		if (others.length < maxOpen) return;
 		const victim = (await attachAll(broker, others))
-			.filter(db => db.status.state === "open" && !db.status.busy)
+			.filter(db => db.status.state === "open" && !db.status.busy && db.status.references === 0)
 			.sort((a, b) => a.status.lastUsed - b.status.lastUsed)[0];
 		if (!victim) {
 			throw new ToolError(
-				`Disassembler database limit reached (${maxOpen} open, all busy: ${others.join(", ")}); close one with ida/ghidra close or raise disassembler.maxOpen`,
+				`Disassembler database limit reached (${maxOpen} open, all busy or retained: ${others.join(", ")}); release a dsm reference or raise disassembler.maxOpen`,
 			);
 		}
 		await victim.close({ save: true });
@@ -353,6 +375,7 @@ async function startHost(
 ): Promise<void> {
 	const config: HostConfig = {
 		backend,
+		projectDir: broker.projectDir,
 		endpoint: hostEndpoint(broker, name),
 		loc,
 		runtime: await resolveWorkerRuntime(session, backend),
@@ -395,8 +418,8 @@ async function openDatabase(
 	session: ToolSession,
 	backend: DisasmBackendId,
 	loc: DatabaseLocation,
+	broker: DaemonBrokerClient,
 ): Promise<DisasmDatabase> {
-	const broker = await daemonClientForProject(session.cwd);
 	// The broker connection doubles as the presence lease keeping the host alive.
 	await broker.request({ op: "ping" });
 	const name = daemonName(backend, loc.id);
@@ -445,11 +468,13 @@ export async function acquireDatabase(
 	const { signal, arch } = options;
 	const loc = await locateDatabase(DISASM_BACKENDS[backend], sourcePath, { arch });
 	const name = daemonName(backend, loc.id);
-	const cached = handles.get(name);
+	const broker = await daemonClientForProject(session.cwd);
+	const endpoint = hostEndpoint(broker, name);
+	const cached = handles.get(endpoint);
 	if (cached?.connected && cached.status.state === "open") return cached;
-	let opening = pending.get(name);
+	let opening = pending.get(endpoint);
 	if (!opening) {
-		opening = openDatabase(session, backend, loc).finally(() => pending.delete(name));
+		opening = openDatabase(session, backend, loc, broker).finally(() => pending.delete(endpoint));
 		// Every caller may have stopped waiting; remaining ones still receive the failure.
 		opening.catch(error =>
 			logger.debug(`${DISASM_BACKENDS[backend].label} database open failed`, {
@@ -457,7 +482,7 @@ export async function acquireDatabase(
 				error: errorMessage(error),
 			}),
 		);
-		pending.set(name, opening);
+		pending.set(endpoint, opening);
 	}
 	const deadline = AbortSignal.timeout(OPEN_WAIT_MS);
 	try {
@@ -499,10 +524,27 @@ export async function findOpenDatabase(
 	backend: DisasmBackendId,
 	ref: string,
 ): Promise<DisasmDatabase | undefined> {
-	const broker = await daemonClientForProject(session.cwd);
+	return findOpenDatabaseAt(session.cwd, backend, ref);
+}
+
+async function findOpenDatabaseAt(
+	project: string,
+	backend: DisasmBackendId,
+	ref: string,
+): Promise<DisasmDatabase | undefined> {
+	const broker = await daemonClientForProject(project);
 	const name = ref.startsWith(daemonPrefix(backend)) ? ref : daemonName(backend, ref);
 	const db = await attachHost(broker, name, "status").catch(() => undefined);
 	return db?.status.state === "open" ? db : undefined;
+}
+
+/** Find a portable reference in its originating project, rejecting a stopped or replaced host. */
+export async function findDatabaseHandle(handle: DatabaseHandle): Promise<DisasmDatabase> {
+	const db = await findOpenDatabaseAt(handle.project, handle.backend, handle.id);
+	if (!db || db.handle !== formatDatabaseHandle(handle)) {
+		throw new ToolError("dsm handle has expired; the original database is no longer open. Ask its owner for a live handle.");
+	}
+	return db;
 }
 
 /** Every database hosted in this project, including ones other omp processes opened. */
@@ -541,6 +583,7 @@ export async function smokeTestDisasmHost(): Promise<void> {
 	// A missing source makes the open fail after the host listens; `ping` still answers.
 	const config: HostConfig = {
 		backend: "ida",
+		projectDir: dir,
 		endpoint,
 		loc: {
 			id: "smoke",
