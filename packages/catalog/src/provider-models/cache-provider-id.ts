@@ -42,6 +42,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// A Modal proxy token is workspace-scoped and the roster is the endpoints it
 	// may call, so a shared namespace would serve one workspace's ids to another.
 	modal: true,
+	verda: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -72,6 +73,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "verda":
+			return "https://inference.verda.com/v1";
 		default:
 			return undefined;
 	}
@@ -169,7 +172,8 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		// Per-key rosters (Otari: one workspace's enabled models) behind a
 		// configurable endpoint: scope by both so switching either re-runs discovery.
 		case "muse-code":
-		case "otari": {
+		case "otari":
+		case "verda": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;

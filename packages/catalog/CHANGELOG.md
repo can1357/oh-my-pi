@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Verda Inference provider: `/login verda` or `VERDA_INFERENCE_API_KEY`, with Kimi K3.1 Pro and DeepSeek V4.1 Flash 1017 ([#19496](https://github.com/can1357/oh-my-pi/pull/19496) by [@EzgiTastan](https://github.com/EzgiTastan))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
