@@ -2,19 +2,22 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
 ### Added
 
-- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+- Added Modal as a hosted inference provider.
 
 ### Changed
 
-- Changed the local speech model `kokoro` to `phonon-31m`
-- Unknown reasoning capabilities now retain an unverified thinking ladder and can load endpoint-scoped probe results from `models.db`.
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
 
 ### Fixed
 
 - Fixed Gemini CLI requests reporting a stale client version; the current `@google/gemini-cli` release is now looked up from npm ([#19254](https://github.com/can1357/oh-my-pi/pull/19254) by [@Xytronix](https://github.com/Xytronix))
 - Fixed xAI Grok OAuth `grok-composer-2.5-fast` being listed as non-reasoning; thinking levels from minimal through xhigh are now available.
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
 ## [18.20.3] - 2026-11-16
 
