@@ -3328,10 +3328,10 @@ pub mod matchers {
 		use std::{
 			error::Error,
 			io::Write,
-			time::{Duration, SystemTime, UNIX_EPOCH},
+			time::{SystemTime, UNIX_EPOCH},
 		};
 
-		use chrono::{DateTime, Local, Timelike};
+		use jiff::{Timestamp, tz::TimeZone};
 		use pi_vfs::Metadata;
 
 		use super::{ComparableValue, Follow, Matcher, MatcherIO, WalkEntry};
@@ -3339,17 +3339,11 @@ pub mod matchers {
 
 		const SECONDS_PER_DAY: i64 = 60 * 60 * 24;
 
-		fn get_time(matcher_io: &mut MatcherIO, today_start: bool) -> SystemTime {
+		fn get_time(matcher_io: &mut MatcherIO, today_start: bool, time_zone: &TimeZone) -> SystemTime {
 			if today_start {
-				// the time at 00:00:00 of today
-				let duration_since_unix_epoch = matcher_io.now().duration_since(UNIX_EPOCH).unwrap();
-				let seconds_since_unix_epoch = duration_since_unix_epoch.as_secs();
-				let utc_time = DateTime::from_timestamp(seconds_since_unix_epoch as i64, 0).unwrap();
-				let local_time = utc_time.with_timezone(&Local);
-				let seconds_since_last_midnight = local_time.num_seconds_from_midnight();
-				let local_midnight_seconds = local_time.timestamp() - seconds_since_last_midnight as i64;
-
-				UNIX_EPOCH + Duration::from_secs(local_midnight_seconds as u64)
+				// Resolve midnight in the shell's zone, including offset transitions.
+				Timestamp::try_from(matcher_io.now()).unwrap()
+					.to_zoned(time_zone.clone()).start_of_day().unwrap().timestamp().into()
 			} else {
 				matcher_io.now()
 			}
@@ -3566,12 +3560,13 @@ pub mod matchers {
 			days:           ComparableValue,
 			file_time_type: FileTimeType,
 			today_start:    bool,
+			time_zone:      TimeZone,
 		}
 
 		#[async_trait::async_trait]
 		impl Matcher for FileTimeMatcher {
 			async fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
-				let start_time = get_time(matcher_io, self.today_start);
+				let start_time = get_time(matcher_io, self.today_start, &self.time_zone);
 				match self.matches_impl(file_info, start_time).await {
 					Err(e) => {
 						let _ = writeln!(
@@ -3628,8 +3623,8 @@ pub mod matchers {
 				Ok(self.days.imatches(age_in_days))
 			}
 
-			pub fn new(file_time_type: FileTimeType, days: ComparableValue, today_start: bool) -> Self {
-				Self { days, file_time_type, today_start }
+			pub fn new(file_time_type: FileTimeType, days: ComparableValue, today_start: bool, time_zone: TimeZone) -> Self {
+				Self { days, file_time_type, today_start, time_zone }
 			}
 		}
 
@@ -3637,12 +3632,13 @@ pub mod matchers {
 			minutes:        ComparableValue,
 			file_time_type: FileTimeType,
 			today_start:    bool,
+			time_zone:      TimeZone,
 		}
 
 		#[async_trait::async_trait]
 		impl Matcher for FileAgeRangeMatcher {
 			async fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
-				let start_time = get_time(matcher_io, self.today_start);
+				let start_time = get_time(matcher_io, self.today_start, &self.time_zone);
 				match self.matches_impl(file_info, start_time).await {
 					Err(e) => {
 						let _ = writeln!(
@@ -3681,8 +3677,8 @@ pub mod matchers {
 				Ok(self.minutes.imatches(age_in_minutes))
 			}
 
-			pub fn new(file_time_type: FileTimeType, minutes: ComparableValue, today_start: bool) -> Self {
-				Self { minutes, file_time_type, today_start }
+			pub fn new(file_time_type: FileTimeType, minutes: ComparableValue, today_start: bool, time_zone: TimeZone) -> Self {
+				Self { minutes, file_time_type, today_start, time_zone }
 			}
 		}
 	}
@@ -3894,7 +3890,7 @@ pub mod matchers {
 	};
 
 	use ::regex::Regex;
-	use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+	use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Timelike, Utc};
 	pub use entry::{FileType, WalkEntry, WalkError};
 	use pi_vfs::{File, Metadata};
 	use fs::FileSystemMatcher;
@@ -3938,11 +3934,79 @@ pub mod matchers {
 		time_zone: &jiff::tz::TimeZone,
 		format: &str,
 	) -> Result<String, Box<dyn Error + Send + Sync>> {
-		let offset = time_zone.to_offset(jiff::Timestamp::try_from(time)?);
-		let offset = chrono::FixedOffset::east_opt(offset.seconds())
+		// Chrono can format years outside jiff's range; use UTC for those
+		// rather than failing -printf or replacing -ls timestamps with '?'.
+		let offset = jiff::Timestamp::try_from(time)
+			.map_or(0, |timestamp| time_zone.to_offset(timestamp).seconds());
+		let offset = chrono::FixedOffset::east_opt(offset)
 			.ok_or("time zone offset is out of range")?;
 		let datetime = DateTime::<Utc>::from(time).with_timezone(&offset);
 		Ok(datetime.format(format).to_string())
+	}
+
+	#[cfg(test)]
+	mod time_format_tests {
+		use std::{fs, time::{Duration, SystemTime}};
+
+		use chrono::TimeZone as _;
+		use clap::Parser as _;
+
+		use super::format_time_in_zone;
+		use crate::{find::Find, host::{AsyncUtility, Host}};
+
+		async fn assert_out_of_range_timestamps(printf: bool) {
+			for (year, year_text) in [(10000, "+10000"), (-10000, "-10000")] {
+				let dir = tempfile::tempdir().unwrap();
+				let file = fs::File::create(dir.path().join("dated")).unwrap();
+				let time = SystemTime::from(chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap())
+					+ Duration::from_nanos(123_456_700);
+				let stored = match file.set_times(fs::FileTimes::new().set_modified(time)) {
+					Ok(()) if file.metadata().unwrap().modified().unwrap() == time => true,
+					Ok(()) => {
+						eprintln!("year {year}: filesystem clamped mtime; checking formatting helper");
+						false
+					},
+					Err(error) => {
+						eprintln!("year {year}: File::set_times failed ({error}); checking formatting helper");
+						false
+					},
+				};
+				let time_zone = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
+				let (format, expected) = if printf {
+					("%Y %H:%M %z", format!("{year_text} 00:00 +0000"))
+				} else {
+					("%b %e %H:%M", "Jan  1 00:00".to_string())
+				};
+				assert_eq!(format_time_in_zone(time, &time_zone, format).unwrap(), expected);
+				if stored {
+					let (mut host, capture) = Host::for_test_async("find", "", dir.path());
+					host.set_test_var("TZ", "Asia/Tokyo");
+					let args = if printf {
+						vec!["find", "dated", "-printf", "%TY %TH:%TM %Tz"]
+					} else {
+						vec!["find", "dated", "-ls"]
+					};
+					let parsed = Find::try_parse_from(args).unwrap();
+					assert_eq!(parsed.run(&mut host).await, 0, "{}", capture.err());
+					assert_eq!(capture.err(), "");
+					if printf {
+						assert_eq!(capture.out(), expected);
+					} else {
+						assert!(capture.out().contains(&format!(" {expected} dated\n")), "{}", capture.out());
+					}
+				}
+			}
+		}
+
+		#[tokio::test(flavor = "multi_thread")]
+		async fn printf_keeps_out_of_range_timestamps() {
+			assert_out_of_range_timestamps(true).await;
+		}
+
+		#[tokio::test(flavor = "multi_thread")]
+		async fn ls_keeps_out_of_range_timestamps() {
+			assert_out_of_range_timestamps(false).await;
+		}
 	}
 
 	/// Symlink following mode.
@@ -4289,10 +4353,10 @@ pub mod matchers {
 	///   "2026-01-01T00:00:00Z"
 	/// - ISO-style naive dates/datetimes ("2026-01-01",
 	///   "2026-01-01 12:30[:45]", with ` ` or `T` separators), interpreted in
-	///   local time like GNU find
+	///   the shell's time zone like GNU find
 	/// - "(month abbreviation) (date), (year) (time)" strings, e.g.
 	///   "jan 01, 2025 00:00:01" (time defaults to 00:00:00)
-	fn parse_date_str_to_timestamps(date_str: &str) -> Option<i64> {
+	fn parse_date_str_to_timestamps(date_str: &str, time_zone: &jiff::tz::TimeZone) -> Option<i64> {
 		if let Some(epoch) = date_str.strip_prefix('@')
 			&& let Ok(seconds) = epoch.parse::<f64>()
 		{
@@ -4310,31 +4374,44 @@ pub mod matchers {
 			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S").ok())
 			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M").ok())
 			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M").ok());
-		if let Some(naive) = naive {
-			return Some(Local.from_local_datetime(&naive).earliest()?.timestamp_millis());
-		}
-
-		let regex_pattern =
-			r"^(?P<month_day>\w{3} \d{2})?(?:, (?P<year>\d{4}))?(?: (?P<time>\d{2}:\d{2}:\d{2}))?$";
-		let re = Regex::new(regex_pattern);
-
-		if let Some(captures) = re.ok()?.captures(date_str) {
-			let now = Utc::now();
+		let naive = if let Some(naive) = naive {
+			naive
+		} else {
+			let regex_pattern =
+				r"^(?P<month_day>\w{3} \d{2})?(?:, (?P<year>\d{4}))?(?: (?P<time>\d{2}:\d{2}:\d{2}))?$";
+			let re = Regex::new(regex_pattern).ok()?;
+			let captures = re.captures(date_str)?;
+			let now = jiff::Timestamp::now().to_zoned(time_zone.clone());
 			let month_day = captures
 				.get(1)
-				.map_or(format!("{} {}", now.format("%b"), now.format("%d")), |m| m.as_str().to_string());
+				.map_or_else(|| now.strftime("%b %d").to_string(), |m| m.as_str().to_string());
 			// If no year input.
 			let year = captures
 				.get(2)
-				.map_or(now.year(), |m| m.as_str().parse().unwrap());
+				.map_or(i32::from(now.year()), |m| m.as_str().parse().unwrap());
 			// If the user does not enter a specific time, it will be filled with 0
 			let time_str = captures.get(3).map_or("00:00:00", |m| m.as_str());
 			let date_time_str = format!("{month_day}, {year} {time_str}");
-			let datetime = NaiveDateTime::parse_from_str(&date_time_str, "%b %d, %Y %H:%M:%S").ok()?;
-			let utc_datetime = DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc);
-			Some(utc_datetime.timestamp_millis())
-		} else {
+			NaiveDateTime::parse_from_str(&date_time_str, "%b %d, %Y %H:%M:%S").ok()?
+		};
+		if !(-9999..=9999).contains(&naive.year()) {
+			return Some(naive.and_utc().timestamp_millis());
+		}
+		let datetime = jiff::civil::DateTime::new(
+			naive.year() as i16,
+			naive.month() as i8,
+			naive.day() as i8,
+			naive.hour() as i8,
+			naive.minute() as i8,
+			naive.second() as i8,
+			0,
+		).ok()?;
+		let timestamp = time_zone.to_ambiguous_timestamp(datetime);
+		// Preserve chrono's earliest-fold choice and rejection of nonexistent times.
+		if matches!(timestamp.offset(), jiff::tz::AmbiguousOffset::Gap { .. }) {
 			None
+		} else {
+			Some(timestamp.earlier().ok()?.as_millisecond())
 		}
 	}
 
@@ -4557,7 +4634,7 @@ pub mod matchers {
 					};
 					let days = convert_arg_to_comparable_value(args[i], args[i + 1])?;
 					i += 1;
-					Some(FileTimeMatcher::new(file_time_type, days, config.today_start).into_box())
+					Some(FileTimeMatcher::new(file_time_type, days, config.today_start, shell_time_zone(host)).into_box())
 				},
 				"-amin" | "-cmin" | "-mmin" => {
 					if i >= args.len() - 1 {
@@ -4571,7 +4648,7 @@ pub mod matchers {
 					};
 					let minutes = convert_arg_to_comparable_value(args[i], args[i + 1])?;
 					i += 1;
-					Some(FileAgeRangeMatcher::new(file_time_type, minutes, config.today_start).into_box())
+					Some(FileAgeRangeMatcher::new(file_time_type, minutes, config.today_start, shell_time_zone(host)).into_box())
 				},
 				"-size" => {
 					if i >= args.len() - 1 {
@@ -4867,7 +4944,7 @@ pub mod matchers {
 								let time = args[i + 1];
 								let newer_time_type = NewerOptionType::from_str(x_option.as_str());
 								// Convert args to unix timestamps. (expressed in numeric types)
-								let Some(comparable_time) = parse_date_str_to_timestamps(time) else {
+								let Some(comparable_time) = parse_date_str_to_timestamps(time, &shell_time_zone(host)) else {
 									return Err(From::from(format!(
 										"find: I cannot figure out how to interpret ‘{}’ as a date or time",
 										args[i + 1]
@@ -5556,6 +5633,68 @@ mod tests {
 		assert_eq!((code, capture.err().as_str()), (0, ""));
 		let stdout = capture.out();
 		assert!(stdout.contains(" Nov 15 07:13 a.txt\n"), "got: {stdout}");
+	}
+
+	async fn assert_daystart_uses_the_shell_time_zone(predicate: &str, age: &str) {
+		let (_dir, root) = fixture();
+		// 2023-11-13 12:00 UTC: 27 hours before Tokyo midnight,
+		// but only 12 hours before UTC midnight on the pinned date.
+		fs::File::options().write(true).open(root.join("a.txt")).unwrap()
+			.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_699_876_800))).unwrap();
+		let (mut host, capture) = Host::for_test_async("find", "", &root);
+		host.set_test_var("TZ", "Asia/Tokyo");
+		let parsed = super::parse_args(&["a.txt", "-daystart", predicate, age], &mut host).await.unwrap();
+		let deps = super::StandardDependencies {
+			now: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+			..super::StandardDependencies::new(&host)
+		};
+		let code = super::run_find(parsed.matcher.as_ref(), &parsed.paths, &parsed.config, &deps, &mut host).await;
+		// Calling run_find directly bypasses AsyncUtility::run's final drain.
+		host.flush_output().await.unwrap();
+		assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "a.txt\n", ""));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn daystart_days_use_the_shell_time_zone() {
+		assert_daystart_uses_the_shell_time_zone("-mtime", "1").await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn daystart_minutes_use_the_shell_time_zone() {
+		assert_daystart_uses_the_shell_time_zone("-mmin", "1620").await;
+	}
+
+	async fn assert_newermt_uses_the_shell_time_zone(dates: &[&str]) {
+		let (_dir, root) = fixture();
+		fs::File::options().write(true).open(root.join("a.txt")).unwrap()
+			.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000))).unwrap();
+		for date in dates {
+			let (code, capture) = run_in_time_zone(&root, &["a.txt", "-newermt", date], "Asia/Tokyo").await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "a.txt\n", ""), "date: {date}");
+		}
+		// An explicit offset or epoch is absolute, regardless of the shell zone.
+		for (date, expected) in [
+			("2023-11-15T07:00:00+09:00", "a.txt\n"),
+			("2023-11-15T00:00:00Z", ""),
+			("@1699999999", "a.txt\n"),
+			("@1700000001", ""),
+		] {
+			let (code, capture) = run_in_time_zone(&root, &["a.txt", "-newermt", date], "Asia/Tokyo").await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, expected, ""), "date: {date}");
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn newermt_naive_dates_use_the_shell_time_zone() {
+		assert_newermt_uses_the_shell_time_zone(&[
+			"2023-11-15", "2023-11-15 07:00", "2023-11-15T07:00",
+			"2023-11-15 07:00:00", "2023-11-15T07:00:00",
+		]).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn newermt_named_dates_use_the_shell_time_zone() {
+		assert_newermt_uses_the_shell_time_zone(&["Nov 15, 2023", "Nov 15, 2023 07:00:00"]).await;
 	}
 
 	/// A chain as deep as path syscalls reach must be walked, in both visit
