@@ -318,6 +318,7 @@ import type {
 	AsyncJobTree,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
+	DequeuedMessage,
 	DroppedPrompt,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
@@ -11495,11 +11496,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Pop the last queued message (steering first, then follow-up).
+	 * Pop the last queued message (steering first, then follow-up), tagged with its queue.
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
 	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).
 	 */
-	popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	popLastQueuedMessage(): DequeuedMessage | undefined {
 		const steering = this.agent.peekSteeringQueue();
 		const followUp = this.agent.peekFollowUpQueue();
 		const lastUserIndex = (queue: readonly AgentMessage[]): number => {
@@ -11513,14 +11514,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const removed = steering[fromSteer];
 			this.agent.replaceQueues(this.#withoutQueuedUserMessage(steering, fromSteer), followUp.slice());
 			this.#reconcileQueuedMessageDrain();
-			return toRestoredQueuedMessage(removed);
+			return { ...toRestoredQueuedMessage(removed), queue: "steering" };
 		}
 		const fromFollowUp = lastUserIndex(followUp);
 		if (fromFollowUp >= 0) {
 			const removed = followUp[fromFollowUp];
 			this.agent.replaceQueues(steering.slice(), this.#withoutQueuedUserMessage(followUp, fromFollowUp));
 			this.#reconcileQueuedMessageDrain();
-			return toRestoredQueuedMessage(removed);
+			return { ...toRestoredQueuedMessage(removed), queue: "followUp" };
 		}
 		return undefined;
 	}

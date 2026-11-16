@@ -263,7 +263,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 							try {
 								await clickElement(handle, label, signal, {
 									button: options?.button,
-									clickCount: options?.count,
+									count: options?.count,
 								});
 							} finally {
 								await handle.dispose().catch(() => undefined);
