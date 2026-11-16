@@ -10,7 +10,7 @@
  */
 import { sanitizeStatusText } from "../chrome/shared";
 import { Image, type ImageBudget } from "../components/image";
-import { isSvgMedia, mediaPath } from "../media";
+import { isSvgMedia } from "../media";
 import { fileHyperlink, isHyperlinkEnabled, uriHyperlink } from "../render/hyperlink";
 import {
 	getCellDimensions,
@@ -22,8 +22,9 @@ import {
 import { theme } from "../theme";
 import type { Component } from "../tui";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
-import { embedHost, embedPageUrl, loadEmbed } from "./embed-host";
+import { embedHost, loadEmbed } from "./embed-host";
 import { type Embed, sameEmbed } from "./embed-source";
+import { type EmbedTarget, embedTargetUrl, resolveEmbedSource } from "./embed-target";
 import { figureBox, figureRoom } from "./figure-size";
 import { convertImageToPngShared } from "./image-loading";
 import { SvgFigure } from "./svg-figure";
@@ -62,6 +63,8 @@ export class EmbedFigure implements Component {
 	readonly #options: EmbedFigureOptions;
 	readonly #id = nextEmbedId++;
 	#embed: Embed | undefined;
+	/** What the embed's `src` names, read once per embed; undefined when it names nothing showable. */
+	#target: EmbedTarget | undefined;
 	/** Counts embeds shown; a load landing for an earlier one is dropped. */
 	#revision = 0;
 	#load: Load | undefined;
@@ -78,6 +81,7 @@ export class EmbedFigure implements Component {
 		if (this.#embed && sameEmbed(this.#embed, embed)) return;
 		this.#retire();
 		this.#embed = embed;
+		this.#target = resolveEmbedSource(embed.src, embedHost()?.cwd() ?? process.cwd());
 		this.#revision++;
 		if (this.#drawsPictures()) this.#start(embed);
 	}
@@ -192,15 +196,14 @@ export class EmbedFigure implements Component {
 			figure.update(loaded.source, true);
 			return { kind: "svg", figure };
 		}
-		const cwd = embedHost()?.cwd();
-		const local = embed.kind === "img" && cwd !== undefined && !/^(?:https?|data):/i.test(embed.src);
+		const target = this.#target;
 		const image = new Image(
 			loaded.data,
 			loaded.mime,
 			{ fallbackColor: text => theme.fg("dim", text) },
 			{
 				filename: sanitizeStatusText(embed.label) || undefined,
-				sourcePath: local ? mediaPath(embed.src, cwd) : undefined,
+				sourcePath: embed.kind === "img" && target?.kind === "file" ? target.path : undefined,
 				budget,
 				imageKey: `embed${this.#id}:${this.#revision}`,
 				requestRender: onChange,
@@ -234,13 +237,13 @@ export class EmbedFigure implements Component {
 		if (load?.state === "loading") text += page ? " — capturing…" : " — loading…";
 		else if (load?.state === "failed")
 			text += ` — couldn't ${page ? "capture" : "load"}: ${sanitizeStatusText(load.reason)}`;
-		const cwd = embedHost()?.cwd() ?? process.cwd();
+		const target = this.#target;
 		if (!page) {
 			const row = theme.fg("dim", truncateToWidth(text, width - 1, Ellipsis.Unicode));
-			if (/^data:/i.test(embed.src)) return ` ${row}`;
-			return ` ${/^https?:/i.test(embed.src) ? uriHyperlink(embed.src, row) : fileHyperlink(mediaPath(embed.src, cwd), row)}`;
+			if (target?.kind === "url") return ` ${uriHyperlink(target.url, row)}`;
+			return ` ${target?.kind === "file" ? fileHyperlink(target.path, row) : row}`;
 		}
-		const url = embedPageUrl(embed.src, cwd);
+		const url = target && embedTargetUrl(target);
 		if (!url) return ` ${theme.fg("dim", truncateToWidth(text, width - 1, Ellipsis.Unicode))}`;
 		if (!isHyperlinkEnabled()) {
 			// No link to click: the address itself, once.

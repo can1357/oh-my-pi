@@ -89,7 +89,7 @@ async function readSource(src: string, options: MediaOptions): Promise<Uint8Arra
 }
 
 /** The local file `src` names: a `file:` URL, or a path (`~/`-relative, absolute, or relative to `cwd`). */
-export function mediaPath(src: string, cwd: string): string {
+function mediaPath(src: string, cwd: string): string {
 	if (/^file:/i.test(src)) return Bun.fileURLToPath(src);
 	if (src === "~" || src.startsWith("~/")) return path.join(os.homedir(), src.slice(1));
 	return path.resolve(cwd, src);

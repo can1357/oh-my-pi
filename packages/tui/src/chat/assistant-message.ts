@@ -42,8 +42,10 @@ import { type ServedModelMismatch, ServedModelMarkerComponent } from "./served-m
 import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
 import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
-import { embedHost, embedPageUrl, loadEmbed } from "./embed-host";
-import { type Embed, type EmbedSegment, hasEmbed, splitEmbeds } from "./embed-source";
+import { embedHost, loadEmbed } from "./embed-host";
+import { type Embed, type EmbedSegment, hasEmbed, imgTag, splitEmbeds } from "./embed-source";
+import { embedTargetUrl, resolveEmbedSource } from "./embed-target";
+import { formatFigureLength } from "./figure-size";
 import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
@@ -60,6 +62,36 @@ const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
 /** Text renderers that threw once; each failure is logged once per renderer, not per frame. */
 const failedTextRenderers = new WeakSet<AssistantTextRenderer>();
+
+/**
+ * `source` as the runs a native terminal gets: prose, in which every `<img>`
+ * line names a source the terminal can load (an absolute path or URL, see
+ * {@link resolveEmbedSource}; it draws the tag itself), split around the
+ * `<iframe>` lines, which it does not draw.
+ */
+function nativeEmbedRuns(source: string, streaming: boolean): EmbedSegment[] {
+	const cwd = embedHost()?.cwd() ?? process.cwd();
+	const runs: EmbedSegment[] = [];
+	let prose = "";
+	const flush = (): void => {
+		if (prose.trim()) runs.push({ kind: "markdown", text: prose });
+		prose = "";
+	};
+	for (const segment of splitEmbeds(source, { streaming })) {
+		if (segment.kind === "markdown") {
+			prose += segment.text;
+		} else if (segment.embed.kind === "iframe") {
+			flush();
+			runs.push(segment);
+		} else {
+			const target = resolveEmbedSource(segment.embed.src, cwd);
+			const src = target?.kind === "url" ? target.url : target?.kind === "file" ? target.path : segment.embed.src;
+			prose += `${prose && !prose.endsWith("\n") ? "\n" : ""}${imgTag(segment.embed, src)}\n`;
+		}
+	}
+	flush();
+	return runs;
+}
 
 /** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
 function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
@@ -911,6 +943,7 @@ export class AssistantMessageComponent extends Container {
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const media = cx?.supports("media") === true;
+		const web = cx?.supports("web") === true;
 		const tail = this.#answerMessage ? this.#thinkingTailIndex(this.#answerMessage) : undefined;
 		const rate =
 			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
@@ -926,9 +959,10 @@ export class AssistantMessageComponent extends Container {
 			this.#nativeViewVersion,
 			rate,
 			media,
+			web,
 			getThemeEpoch(),
 		];
-		return this.#native.get(key, () => this.#describeMessage(tail, rate, media));
+		return this.#native.get(key, () => this.#describeMessage(tail, rate, { media, web }));
 	}
 
 	/**
@@ -954,7 +988,11 @@ export class AssistantMessageComponent extends Container {
 		this.#nativeViewVersion++;
 	}
 
-	#describeMessage(thinkingTail: number | undefined, rate: number, media: boolean): NativeNode {
+	#describeMessage(
+		thinkingTail: number | undefined,
+		rate: number,
+		{ media, web }: { media: boolean; web: boolean },
+	): NativeNode {
 		const message = this.#displayedMessage;
 		const previousParts = this.#nativeParts;
 		const parts = new Map<string, { text: string; stream: boolean; node: NativeNode }>();
@@ -1013,17 +1051,15 @@ export class AssistantMessageComponent extends Container {
 						this.#nativeLinkSources.set(text, resolved);
 						return resolved;
 					};
-					// The terminal draws an `<img>` itself but shows an `<iframe>` as source: the
-					// prose splits around each one, which becomes its page's screenshot and a link.
 					const runs: EmbedSegment[] =
-						embedHost() && hasEmbed(source, { iframesOnly: true })
-							? splitEmbeds(source, { streaming, iframesOnly: true })
+						embedHost() && hasEmbed(source)
+							? nativeEmbedRuns(source, streaming)
 							: [{ kind: "markdown", text: source }];
 					let parts = 0;
 					const nextSlot = (): string => (parts++ === 0 ? `t${index}` : `t${index}.${parts - 1}`);
 					runs.forEach((run, at) => {
 						if (run.kind === "embed") {
-							children.push(...this.#describePage(run.embed, nextSlot()));
+							children.push(...this.#describePage(run.embed, nextSlot(), web));
 							return;
 						}
 						const text = run.text.trim();
@@ -1586,13 +1622,26 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * An `<iframe>` for a native terminal: its page's screenshot, once captured,
-	 * over a row naming the page and linking to it.
+	 * An `<iframe>` for a native terminal: a live `web` page where the terminal
+	 * has one, else its page's screenshot, once captured, over a row naming the
+	 * page and linking to it.
 	 */
-	#describePage(embed: Embed, slot: string): NativeNode[] {
+	#describePage(embed: Embed, slot: string, web: boolean): NativeNode[] {
+		const target = resolveEmbedSource(embed.src, embedHost()?.cwd() ?? process.cwd());
+		const url = target && embedTargetUrl(target);
+		if (web && url && this.#showImages) {
+			const { width, height } = embed.size;
+			const props = {
+				url,
+				title: sanitizeStatusText(embed.label) || undefined,
+				w: width && formatFigureLength(width),
+				h: height && formatFigureLength(height),
+			};
+			return [node("web", props, undefined, slot)];
+		}
 		const nodes: NativeNode[] = [];
 		let label = `▣ ${sanitizeStatusText(embed.label || embed.src)}`;
-		if (this.#showImages) {
+		if (this.#showImages && url) {
 			const shot = this.#pageShots.get(embed.src);
 			if (shot) nodes.push(this.#nativeImages.get(slot, shot, "image/png"));
 			else if (shot === undefined) {
@@ -1600,7 +1649,6 @@ export class AssistantMessageComponent extends Container {
 				this.#awaitPageShot(embed);
 			}
 		}
-		const url = embedPageUrl(embed.src, embedHost()?.cwd() ?? process.cwd());
 		const spans = [span(label, "muted")];
 		if (url?.startsWith("file:")) spans.push(span(" "), fileLinkSpan(Bun.fileURLToPath(url), "Visit", "link"));
 		else if (url) spans.push(span(" "), urlLinkSpan(url, "Visit"));

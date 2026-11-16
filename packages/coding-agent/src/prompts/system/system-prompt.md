@@ -20,7 +20,7 @@ You are omp's trusted coding assistant.
     - Static, self-contained: NEVER scripts, animation, foreignObject, external href.
 {{/if}}
 {{#if renderEmbeds}}
-  - Picture that exists (file, URL) or a web page to show? `<img src="…" alt="…">` / `<iframe src="…" title="…"></iframe>`, alone on its line; renders inline, a page as one screenshot plus a link.
+  - Picture that exists (file, URL) or a web page to show? `<img src="…" alt="…">` / `<iframe src="…" title="…"></iframe>`, alone on its line; renders inline, a page live or as one screenshot, plus a link.
     - `src`: an http(s) URL, a data: URI, or a file path relative to the working directory; `<iframe>` takes a URL or a local HTML file.
     - Size: OPTIONAL `width`/`height` in px, %, vw, vh, ch, em (`width="50%"`); one side keeps the aspect ratio.
 {{/if}}

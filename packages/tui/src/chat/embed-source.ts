@@ -9,7 +9,7 @@
  * // [markdown "Before\n", embed { kind: "img", src: "shot.png", label: "Shot", … }, markdown "After"]
  */
 import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
-import { type FigureSize, parseFigureLength } from "./figure-size";
+import { type FigureSize, formatFigureLength, parseFigureLength } from "./figure-size";
 import { closesFence, fenceMarker } from "./svg-source";
 
 /** One `<img>` or `<iframe>` tag of a reply. */
@@ -31,21 +31,29 @@ export type EmbedSegment =
 export interface SplitEmbedOptions {
 	/** The text may still grow: its last line stays prose until its line break arrives. */
 	streaming?: boolean;
-	/** Lift only lines of `<iframe>` tags, for a terminal that draws `<img>` itself. */
-	iframesOnly?: boolean;
 }
 
 /** A top-level (≤3-space indent) line opening with an embed tag. */
 const EMBED_LINE = /^ {0,3}<(?:img|iframe)\b/im;
-const IFRAME_LINE = /^ {0,3}<iframe\b/im;
 /** One embed tag, with its closing tag when written; a quoted attribute value may hold `>`. */
 const EMBED_TAG = /<(img|iframe)\b((?:"[^"]*"|'[^']*'|[^'">])*)>(?:\s*<\/\1\s*>)?/giy;
 /** `name`, `name=value` or a quoted value; an unquoted one runs to the next space and may hold `=`, as browsers read it. */
 const ATTRIBUTE = /([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+)))?/g;
 
 /** Whether `markdown` may hold a line {@link splitEmbeds} would lift. */
-export function hasEmbed(markdown: string, options: Pick<SplitEmbedOptions, "iframesOnly"> = {}): boolean {
-	return (options.iframesOnly ? IFRAME_LINE : EMBED_LINE).test(markdown);
+export function hasEmbed(markdown: string): boolean {
+	return EMBED_LINE.test(markdown);
+}
+
+/**
+ * `embed` as an `<img>` tag loading from `src`, for a terminal that draws
+ * the tag itself and needs a source it can load (see `resolveEmbedSource`).
+ */
+export function imgTag(embed: Embed, src: string): string {
+	const { width, height } = embed.size;
+	const attribute = (name: string, value: string | undefined): string =>
+		value ? ` ${name}="${value.replace(/[&"<>]/g, char => `&#${char.charCodeAt(0)};`)}"` : "";
+	return `<img${attribute("src", src)}${attribute("alt", embed.label)}${attribute("width", width && formatFigureLength(width))}${attribute("height", height && formatFigureLength(height))}>`;
 }
 
 /** Whether `a` and `b` load and draw the same thing. */
@@ -81,7 +89,7 @@ export function splitEmbeds(markdown: string, options: SplitEmbedOptions = {}): 
 		} else {
 			fence = fenceMarker(line);
 			const embeds = fence === undefined && !(options.streaming && newline < 0) ? embedsOn(line) : undefined;
-			if (embeds && (!options.iframesOnly || embeds.every(embed => embed.kind === "iframe"))) {
+			if (embeds) {
 				const prose = markdown.slice(proseStart, lineStart);
 				if (prose.trim()) segments.push({ kind: "markdown", text: prose });
 				for (const embed of embeds) segments.push({ kind: "embed", embed });

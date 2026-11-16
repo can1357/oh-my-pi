@@ -68,6 +68,11 @@ export function parseFigureLength(text: string): FigureLength | undefined {
 	return value > 0 && unit ? { value, unit } : undefined;
 }
 
+/** `length` as the attribute value {@link parseFigureLength} reads back. */
+export function formatFigureLength(length: FigureLength): string {
+	return `${length.value}${length.unit}`;
+}
+
 /** Whether `size` states a side, so the figure is fitted to it rather than drawn at its natural size. */
 export function isSized(size: FigureSize | undefined): boolean {
 	return size?.width !== undefined || size?.height !== undefined;

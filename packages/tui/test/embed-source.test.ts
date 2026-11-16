@@ -69,16 +69,6 @@ describe("splitEmbeds", () => {
 			"embed",
 		]);
 	});
-
-	it("lifts only iframe lines for a terminal that draws img tags itself", () => {
-		const markdown = `<img src="a.png">\n<iframe src="https://example.com"></iframe>\n<img src="b.png"> <iframe src="https://example.com"></iframe>`;
-		const segments = splitEmbeds(markdown, { iframesOnly: true });
-		expect(segments.map(segment => (segment.kind === "embed" ? segment.embed.kind : segment.text))).toEqual([
-			`<img src="a.png">\n`,
-			"iframe",
-			`<img src="b.png"> <iframe src="https://example.com"></iframe>`,
-		]);
-	});
 });
 
 describe("parseFigureLength", () => {

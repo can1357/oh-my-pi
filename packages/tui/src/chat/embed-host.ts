@@ -6,8 +6,9 @@
  * included, so rebuilding a transcript neither fetches nor captures again;
  * local files are read every time, so a regenerated file shows as it is now.
  */
-import { loadMedia, type Media, mediaPath } from "../media";
+import { loadMedia, type Media } from "../media";
 import type { Embed } from "./embed-source";
+import { embedTargetUrl, resolveEmbedSource } from "./embed-target";
 
 /** What the application lends embeds; unset, replies keep their tags as Markdown. */
 export interface EmbedHost {
@@ -38,35 +39,26 @@ export function embedHost(): EmbedHost | undefined {
 }
 
 /**
- * The address an `<iframe src>` opens: an http(s) URL as written, or the
- * `file:` URL of a local page (resolved like a picture's path). Undefined for
- * any other scheme.
- */
-export function embedPageUrl(src: string, cwd: string): string | undefined {
-	if (/^https?:\/\//i.test(src)) return URL.canParse(src) ? src : undefined;
-	// A one-letter scheme is a Windows drive.
-	if (/^[a-z][a-z0-9+.-]+:/i.test(src) && !/^file:/i.test(src)) return undefined;
-	return Bun.pathToFileURL(mediaPath(src, cwd)).href;
-}
-
-/**
  * Load `embed`'s picture: an `<img>`'s source, or a screenshot of an
  * `<iframe>`'s page.
  *
- * Rejects when no {@link EmbedHost} is installed, the source cannot be read
- * or is no picture (see `loadMedia`), the page's address is neither http(s)
- * nor a file, or its capture fails or exceeds {@link CAPTURE_TIMEOUT_MS}.
+ * Rejects when no {@link EmbedHost} is installed, the source names neither
+ * a web address nor a file (see {@link resolveEmbedSource}), it cannot be
+ * read or is no picture (see `loadMedia`), or the page's capture fails or
+ * exceeds {@link CAPTURE_TIMEOUT_MS}.
  */
 export function loadEmbed(embed: Embed): Promise<Media> {
 	const current = host;
 	if (!current) return Promise.reject(new Error("embeds are off"));
 	const cwd = current.cwd();
+	const target = resolveEmbedSource(embed.src, cwd);
+	if (!target) return Promise.reject(new Error("not a web address or a file"));
 	if (embed.kind === "img") {
-		if (!/^https?:\/\//i.test(embed.src)) return loadMedia(embed.src, { cwd });
-		return cached(`img ${embed.src}`, () => loadMedia(embed.src, { cwd }));
+		if (target.kind === "url") return cached(`img ${target.url}`, () => loadMedia(target.url, { cwd }));
+		return loadMedia(target.kind === "file" ? target.path : target.uri, { cwd });
 	}
-	const url = embedPageUrl(embed.src, cwd);
-	if (!url) return Promise.reject(new Error("not an http(s) or file address"));
+	const url = embedTargetUrl(target);
+	if (!url) return Promise.reject(new Error("not a web address or a file"));
 	return cached(`page ${url}`, () => {
 		const capture = captures.then(() => current.capturePage(url, AbortSignal.timeout(CAPTURE_TIMEOUT_MS)));
 		captures = capture.catch(() => undefined);
