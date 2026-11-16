@@ -108,6 +108,30 @@ describe("selective commit flow", () => {
 		expect(await Bun.file(path.join(root, "CHANGELOG.md")).text()).toContain("- Fixed the theme flicker");
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"runs hooks without reporting sparse-checkout paths as unstaged deletions",
+		async () => {
+			const { root, journal, write } = await emptyRepo();
+			await Bun.write(path.join(root, "kept/inside"), "before\n");
+			await Bun.write(path.join(root, "away/deep/outside"), "outside\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-q", "-m", "seed"]);
+			await git(root, ["sparse-checkout", "init", "--cone", "--sparse-index"]);
+			await git(root, ["sparse-checkout", "set", "kept"]);
+			const hook = path.join(root, ".git/hooks/pre-commit");
+			await Bun.write(hook, '#!/bin/sh\n[ -z "$(git diff --name-only)" ]\n');
+			await fs.chmod(hook, 0o755);
+
+			await write("Main", undefined, "kept/inside", "after\n");
+			await journal.flush();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			await commitSelection(draft, { subject: "fix: sparse commit" }, { journal, agent: { agent: "Main" } });
+
+			expect(await git(root, ["show", "HEAD:kept/inside"])).toBe("after\n");
+			expect(await git(root, ["show", "HEAD:away/deep/outside"])).toBe("outside\n");
+		},
+	);
+
 	it("commits only one subagent's changes when scoped to it", async () => {
 		const { root, journal } = await sharedWorkspace();
 

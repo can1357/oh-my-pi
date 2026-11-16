@@ -1298,6 +1298,20 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Read a tree into a private index while preserving sparse-checkout
+	/// exclusions.
+	#[napi]
+	pub fn read_tree_keeping_sparse(
+		&self,
+		treeish: String,
+		index_path: String,
+		signal: Option<Unknown>,
+	) -> Promise<()> {
+		blocking("vcs.readTreeKeepingSparse", self.inner.clone(), signal, move |r| {
+			r.read_tree_keeping_sparse(&treeish, Path::new(&index_path))
+		})
+	}
+
 	/// Write index tree.
 	#[napi]
 	pub fn write_tree(
