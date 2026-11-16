@@ -2554,4 +2554,108 @@ mod tests {
 			Err(UsageFetchError::Protocol),
 		));
 	}
+
+	struct SettledDispatcher {
+		calls: AtomicU64,
+		reply: JsonValue,
+	}
+
+	#[async_trait::async_trait]
+	impl CallbackDispatcher for SettledDispatcher {
+		async fn dispatch(
+			&self,
+			_target: Arc<ControlConnectionIdentity>,
+			_dispatch: ControlDispatch,
+		) -> Result<JsonValue, ControlProtocolError> {
+			self.calls.fetch_add(1, Ordering::SeqCst);
+			Ok(self.reply.clone())
+		}
+	}
+
+	fn settled_factory(reply: JsonValue) -> (Arc<HookControlFactory>, Arc<SettledDispatcher>) {
+		let dispatcher = Arc::new(SettledDispatcher { calls: AtomicU64::new(0), reply });
+		let hooks = HookControlFactory::new(
+			RegistryControlFactory::new(BTreeMap::new()),
+			Arc::clone(&dispatcher) as Arc<dyn CallbackDispatcher>,
+			BTreeMap::new(),
+			BTreeMap::new(),
+			time::Duration::from_secs(1),
+		);
+		(hooks, dispatcher)
+	}
+
+	fn settled_row(revision: u16) -> HookSubscription {
+		let identity = Arc::new(ControlConnectionIdentity {
+			extension:          sf!("ext"),
+			principal:          omp_core::Principal::new(sf!("test"), sf!("Test")),
+			artifact_digest:    sf!("sha256:test"),
+			layer:              sf!("project"),
+			tier:               sf!("trusted"),
+			trust:              sf!("trusted"),
+			host_generation:    1,
+			session_generation: 1,
+			capabilities:       Arc::new(BTreeSet::new()),
+		});
+		HookSubscription {
+			identity,
+			session: sf!("s1"),
+			event: sf!("agent_settled"),
+			phase: sf!("domain"),
+			name: sf!("ext/0"),
+			order: 0,
+			on_failure: None,
+			timeout: None,
+			concurrency: CallbackConcurrency::Serialized,
+			providers: None,
+			servers: None,
+			method_globs: Box::new([]),
+			event_policy: HookEventPolicy {
+				revision,
+				timeout: time::Duration::from_secs(1),
+				on_failure: HookFailurePolicy::Defer,
+				default: json!({}),
+				composition: BTreeMap::new(),
+			},
+		}
+	}
+
+	fn install(hooks: &HookControlFactory, row: HookSubscription) {
+		let key = connection_key(&row.identity);
+		hooks.subscriptions.write().insert(key, vec![row]);
+	}
+
+	fn current_revision() -> u16 {
+		u16::try_from(<omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV).unwrap()
+	}
+
+	#[tokio::test]
+	async fn no_python_rows_defers() {
+		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
+		let reply = hooks.dispatch_agent_settled(&sf!("s1"), 1, &json!({})).await;
+		assert_eq!(reply, omp_contract::NativeReply::default());
+		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 0);
+	}
+
+	#[tokio::test]
+	async fn stale_revision_row_is_skipped() {
+		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
+		install(&hooks, settled_row(current_revision() + 1));
+		let reply = hooks.dispatch_agent_settled(&sf!("s1"), 1, &json!({})).await;
+		assert_eq!(reply, omp_contract::NativeReply::default());
+		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 0);
+	}
+
+	#[tokio::test]
+	async fn session_gate_has_the_settled_host() {
+		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
+		install(&hooks, settled_row(current_revision()));
+		super::super::settled::AgentSettledHost::attach(&hooks, sf!("s1"), 1);
+		let settled = omp_contract::LifecycleHooks::new(hooks.admission_gate())
+			.agent_settled(json!({}))
+			.await;
+		assert_eq!(settled.decision, omp_contract::AgentSettled::Continue);
+		assert_eq!(settled.context.len(), 1);
+		assert_eq!(settled.context[0].body, "x");
+		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
+	}
 }
