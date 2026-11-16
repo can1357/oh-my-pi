@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Block edits (`PUT N*`, `CUT N*`) anchored on the first `#[...]` attribute or `///` doc comment of a Rust item now cover the item, instead of failing as a single-line block.
+- Block edits (`PUT N*`, `CUT N*`) anchored on the first `#[...]` attribute or `///` doc comment of a Rust item now cover the item, instead of failing as a single-line block ([#19464](https://github.com/can1357/oh-my-pi/pull/19464) by [@acfrazier](https://github.com/acfrazier))
 
 ## [18.21.0] - 2026-11-16
 
