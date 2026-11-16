@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { Diagnostics } from "@oh-my-pi/pi-ai/providers/antigravity-cli/diagnostics";
 import {
 	AgyHost,
 	describeToolArguments,
@@ -20,6 +21,7 @@ import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-write
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
@@ -897,5 +899,84 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost diagnostics", () => {
+	it("records the startup, session, prompt and step stages when enabled", async () => {
+		const diagnostics = new Diagnostics(true);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const summary = diagnostics.summary();
+		expect(summary.enabled).toBe(true);
+		expect(summary.stages["process.start"]?.count).toBe(1);
+		expect(summary.stages["session.new"]?.count).toBe(1);
+		expect(summary.stages.prompt?.count).toBe(1);
+		expect(summary.stages["step.total"]?.count).toBe(1);
+		expect(summary.stages["session.load"]).toBeUndefined();
+		for (const stats of Object.values(summary.stages)) {
+			expect(stats.maxMs).toBeGreaterThanOrEqual(0);
+			expect(Number.isFinite(stats.medianMs)).toBe(true);
+		}
+	});
+
+	it("records nothing when diagnostics are disabled", async () => {
+		const diagnostics = new Diagnostics(false);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(diagnostics.summary().samples).toBe(0);
+	});
+
+	it("logs one debug rollup when the host closes", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+			expect(rollups[0][1]).toEqual(diagnostics.summary());
+			expect(diagnostics.summary().stages["step.total"]?.count).toBe(1);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("enables diagnostics from OMP_ACP_DIAGNOSTICS=1 without an injected seam", async () => {
+		const previous = Bun.env.OMP_ACP_DIAGNOSTICS;
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			Bun.env.OMP_ACP_DIAGNOSTICS = "1";
+			const state = await fixture();
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+		} finally {
+			debug.mockRestore();
+			if (previous === undefined) delete Bun.env.OMP_ACP_DIAGNOSTICS;
+			else Bun.env.OMP_ACP_DIAGNOSTICS = previous;
+		}
 	});
 });
