@@ -37,6 +37,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
+import { quotaExhaustion } from "./quota";
 import type { StepWriter } from "./step-writer";
 
 const AGENT_NAME = "bridge";
@@ -650,6 +651,12 @@ export class AgyHost implements ProviderSessionState {
 			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
+		const visible = step.writer.output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+		const quota = quotaExhaustion(visible);
+		if (quota) {
+			this.#fail(new Error(`Antigravity quota exceeded${quota.resetAt ? `; reset at ${quota.resetAt}` : ""}`));
+			return errorOutput("Antigravity quota exceeded; no tool was executed.");
+		}
 		const validation = validateJsonSchemaValue(tool.inputSchema, args);
 		if (!validation.success) return errorOutput(describeToolArguments(tool, args, validation));
 		if (!isRecord(args)) return errorOutput(describeToolArguments(tool, args));
@@ -736,6 +743,12 @@ export class AgyHost implements ProviderSessionState {
 			)
 		) {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
+			return;
+		}
+		const text = writer.output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+		const quota = quotaExhaustion(text);
+		if (quota) {
+			this.#fail(new Error(`Antigravity quota exceeded${quota.resetAt ? `; reset at ${quota.resetAt}` : ""}`));
 			return;
 		}
 		writer.usage(this.#contextTokens, response.usage);

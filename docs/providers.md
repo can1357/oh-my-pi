@@ -28,6 +28,8 @@ The transport retains agy's conversation between model steps, including while om
 
 The bundled roster follows agy 1.5.9's model picker; availability still depends on the signed-in account. ACP supports model and thinking-level selection, but not caller-specified temperature, stop sequences or output-token caps. Token totals arrive at native turn end; intermediate steps report occupied context rather than invented per-step billing. Google's account-policy warning is shown before sign-in.
 
+A turn that ends with the official quota notice is reported as a quota error with the reset time, so retry and fallback can react instead of treating the notice as the answer.
+
 ## Factory Droid
 
 The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.

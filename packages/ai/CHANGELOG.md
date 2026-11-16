@@ -62,6 +62,9 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+### Fixed
+
+- Antigravity CLI turns that end with the official quota notice now fail with a quota error and the reset time instead of being delivered as a normal assistant reply.
 
 ## [18.20.3] - 2026-11-16
 

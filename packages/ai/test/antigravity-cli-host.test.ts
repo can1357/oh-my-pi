@@ -300,6 +300,33 @@ describe("AgyHost stateful steps", () => {
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
 	});
+	it("fails a turn that ends with the official quota notice", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text(
+			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
+		);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await expect(run.done).rejects.toThrow(/quota exceeded.*reset at/);
+		expect(fake.closed).toBe(true);
+	});
+	it("rejects a tool call after the official quota notice", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("read")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text(
+			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
+		);
+		const output = await fake.call("read", { path: "a" }, fake.currentId);
+		expect(output.isError).toBe(true);
+		expect(textOf(output.content)).toContain("quota exceeded");
+		await expect(run.done).rejects.toThrow(/quota exceeded.*reset at/);
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(fake.closed).toBe(true);
+	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
 		let released = false;
