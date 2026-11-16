@@ -64,6 +64,12 @@
 - Fixed conflict-region resolution when a selected side is empty or shares edge lines with surrounding code.
 - MCP stdio server failures before a response now report the process exit code or terminating signal instead of only reporting closed stdout.
 - Fixed prewalk handoffs so model and reasoning-effort changes are preserved, and automatic handoffs return to the planning model when automatic prewalk is changed or disabled.
+- The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
+- Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
+- `/move` and resuming a session from another project now switch task agents, project extensions, custom tools, and MCP servers to the destination project without a restart ([#19416](https://github.com/can1357/oh-my-pi/pull/19416) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed resolving a `conflict://` region to an empty side (`@ours`, `@theirs` or `@both` with no lines) leaving a stray blank line, and a chosen side whose edge lines repeat the surrounding code losing those lines ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
+- Fixed MCP stdio servers that exit or are killed before responding being reported only as "closed stdout"; the error now names the exit code or signal ([#16482](https://github.com/can1357/oh-my-pi/pull/16482) by [@adi-IL](https://github.com/adi-IL))
+- After an Anthropic refusal, later turns no longer resend the refusal text with the tool calls it stopped: those calls now replay as "not executed" only, so one `reasoning_extraction` refusal stops making every following turn of the session likely to be refused too
 
 ## [18.20.3] - 2026-11-16
 
