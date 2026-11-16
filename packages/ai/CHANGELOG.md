@@ -63,6 +63,7 @@
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 - Added `/usage` quota reporting for the `antigravity-cli` provider through the official `agy /usage` command.
+- Added `/usage` quota reporting for the `antigravity-cli` provider through the official `agy /usage` command. ([#19414](https://github.com/can1357/oh-my-pi/pull/19414) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
