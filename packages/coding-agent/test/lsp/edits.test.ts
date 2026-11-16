@@ -62,7 +62,7 @@ describe("workspace edit recorder", () => {
 	let dir: string;
 
 	beforeEach(async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "edits-journal-"));
+		dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "edits-journal-")));
 	});
 
 	afterEach(async () => {
@@ -108,7 +108,67 @@ describe("workspace edit recorder", () => {
 		},
 	);
 
-	it("reports creates, overwrites, folder moves and recursive deletes to the recorder", async () => {
+	it.each(["changes", "documentChanges"] as const)(
+		"attributes symlink text edits to the written target outside cwd for %s",
+		async format => {
+			const workspace = path.join(dir, "workspace");
+			const target = path.join(dir, "target.ts");
+			const link = path.join(workspace, "link.ts");
+			const before = "const oldName = 1;\n";
+			await Bun.write(target, before);
+			await fs.mkdir(workspace);
+			await fs.symlink("../target.ts", link);
+			const beforeMtimeMs = (await fs.stat(target)).mtimeMs;
+			const edits: TextEdit[] = [
+				{
+					range: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } },
+					newText: "newName",
+				},
+			];
+			const uri = fileToUri(link);
+			const edit: WorkspaceEdit =
+				format === "changes"
+					? { changes: { [uri]: edits } }
+					: { documentChanges: [{ textDocument: { uri, version: null }, edits }] };
+			const recorded: WorkspaceFileChange[] = [];
+
+			await applyWorkspaceEdit(edit, workspace, undefined, change => recorded.push(change));
+
+			expect(await fs.readFile(target, "utf8")).toBe("const newName = 1;\n");
+			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			expect(await fs.readlink(link)).toBe("../target.ts");
+			expect(recorded).toEqual([{ path: target, before, after: "const newName = 1;\n", beforeMtimeMs }]);
+		},
+	);
+
+	it.each(["changes", "documentChanges"] as const)(
+		"records the on-disk BOM before text edits and the BOM-free bytes written for %s",
+		async format => {
+			const file = path.join(dir, "bom.ts");
+			const before = "\uFEFFconst oldName = 1;\n";
+			await Bun.write(file, before);
+			const beforeMtimeMs = (await fs.stat(file)).mtimeMs;
+			const edits: TextEdit[] = [
+				{
+					range: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } },
+					newText: "newName",
+				},
+			];
+			const uri = fileToUri(file);
+			const edit: WorkspaceEdit =
+				format === "changes"
+					? { changes: { [uri]: edits } }
+					: { documentChanges: [{ textDocument: { uri, version: null }, edits }] };
+			const recorded: WorkspaceFileChange[] = [];
+
+			await applyWorkspaceEdit(edit, dir, undefined, change => recorded.push(change));
+
+			expect(await fs.readFile(file, "utf8")).toBe("const newName = 1;\n");
+			expect(recorded).toEqual([{ path: file, before, after: await fs.readFile(file, "utf8"), beforeMtimeMs }]);
+		},
+	);
+
+	it("leaves creates, overwrites, folder moves and recursive deletes unjournaled", async () => {
 		const created = path.join(dir, "created.ts");
 		const overwritten = path.join(dir, "overwritten.ts");
 		const source = path.join(dir, "source", "child.ts");
@@ -120,13 +180,6 @@ describe("workspace edit recorder", () => {
 		await Bun.write(destination, "old destination\n");
 		await Bun.write(displaced, "remove me\n");
 		await Bun.write(deleted, "delete me\n");
-		const mtimes = new Map(
-			await Promise.all(
-				[overwritten, source, destination, displaced, deleted].map(
-					async file => [file, (await fs.stat(file)).mtimeMs] as const,
-				),
-			),
-		);
 		const recorded: WorkspaceFileChange[] = [];
 
 		await applyWorkspaceEdit(
@@ -154,21 +207,7 @@ describe("workspace edit recorder", () => {
 		expect(await Bun.file(destination).text()).toBe("move me\n");
 		expect(await Bun.file(displaced).exists()).toBe(false);
 		expect(await Bun.file(deleted).exists()).toBe(false);
-		expect(recorded.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual(
-			[
-				{ path: created, before: null, after: "", beforeMtimeMs: undefined },
-				{ path: overwritten, before: "overwrite me\n", after: "", beforeMtimeMs: mtimes.get(overwritten) },
-				{ path: source, before: "move me\n", after: null, beforeMtimeMs: mtimes.get(source) },
-				{
-					path: destination,
-					before: "old destination\n",
-					after: "move me\n",
-					beforeMtimeMs: mtimes.get(destination),
-				},
-				{ path: displaced, before: "remove me\n", after: null, beforeMtimeMs: mtimes.get(displaced) },
-				{ path: deleted, before: "delete me\n", after: null, beforeMtimeMs: mtimes.get(deleted) },
-			].toSorted((a, b) => a.path.localeCompare(b.path)),
-		);
+		expect(recorded).toEqual([]);
 	});
 
 	it("keeps the executed prefix in the recorder but omits skipped and failed operations", async () => {

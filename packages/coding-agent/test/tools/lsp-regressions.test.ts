@@ -996,7 +996,9 @@ describe("lsp regressions", () => {
 				apply: true,
 			});
 			expect(await Bun.file(targetPath).text()).toBe("organized\n");
-			expect(recorded).toEqual([{ path: targetPath, tool: "lsp", before, after: "organized\n", beforeMtimeMs }]);
+			expect(recorded).toEqual([
+				{ path: await fsp.realpath(targetPath), tool: "lsp", before, after: "organized\n", beforeMtimeMs },
+			]);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -4223,7 +4225,7 @@ describe("lsp regressions", () => {
 			expect(await Bun.file(filePath).text()).toContain("NewName");
 			expect(recorded).toEqual([
 				{
-					path: filePath,
+					path: await fsp.realpath(filePath),
 					tool: "lsp",
 					before: "package main\nfunc OldName() {}\n",
 					after: "package main\nfunc NewName() {}\n",
