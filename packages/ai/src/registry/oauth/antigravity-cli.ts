@@ -126,7 +126,13 @@ export async function cleanupAbandonedLoginDirectories(
 			try {
 				await options.afterClaim?.(claimed);
 				if (await Bun.file(path.join(claimed, LOGIN_TOKEN_FILE)).exists()) {
-					await fs.rename(claimed, directory).catch(() => {});
+					try {
+						await fs.rename(claimed, directory);
+					} catch {
+						await fs
+							.rename(claimed, path.join(root, `${LOGIN_DIRECTORY_PREFIX}${crypto.randomUUID()}`))
+							.catch(() => {});
+					}
 					continue;
 				}
 				await fs.rm(claimed, { recursive: true, force: true });

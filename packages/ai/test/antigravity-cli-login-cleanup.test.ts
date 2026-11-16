@@ -62,6 +62,32 @@ describe("cleanupAbandonedLoginDirectories", () => {
 		expect(await Bun.file(path.join(directory, "antigravity-cli", "antigravity-oauth-token")).exists()).toBe(true);
 	});
 
+	it("preserves a claimed credential when the original directory was recreated", async () => {
+		using temp = TempDir.createSync("@omp-agy-login-cleanup-collision-");
+		const root = temp.join("logins");
+		const directory = path.join(root, "login-collision");
+		const now = Date.parse("2026-11-16T12:00:00Z");
+		const old = new Date(now - 25 * 60 * 60 * 1000);
+		await fs.mkdir(directory, { recursive: true });
+		await fs.utimes(directory, old, old);
+
+		const removed = await cleanupAbandonedLoginDirectories(root, now, {
+			afterClaim: async claimed => {
+				await Bun.write(path.join(claimed, "antigravity-cli", "antigravity-oauth-token"), "{}");
+				await fs.mkdir(directory, { recursive: true });
+				await Bun.write(path.join(directory, "active"), "x");
+			},
+		});
+
+		expect(removed).toBe(0);
+		expect(await exists(directory)).toBe(true);
+		const preserved = (await fs.readdir(root)).find(name => name.startsWith("login-") && name !== "login-collision");
+		expect(preserved).toBeDefined();
+		expect(await Bun.file(path.join(root, preserved!, "antigravity-cli", "antigravity-oauth-token")).exists()).toBe(
+			true,
+		);
+	});
+
 	it("returns zero for a missing root", async () => {
 		using temp = TempDir.createSync("@omp-agy-login-cleanup-");
 		expect(await cleanupAbandonedLoginDirectories(temp.join("missing"))).toBe(0);
