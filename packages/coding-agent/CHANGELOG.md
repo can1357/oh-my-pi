@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Subagents no longer open browser tabs in your Chrome (with `browser.relay` on) or over your Tern or cmux pane unless the open asks with `app: "relay"` or `app: "tern"`; they use `browser.cdpUrl` or omp's own Chromium ([#18789](https://github.com/can1357/oh-my-pi/pull/18789) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
@@ -36,10 +40,6 @@
 
 - Removed the legacy standalone disassembler tools and their associated prompt instructions.
 - Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet; use selection copying and double-click editing instead.
-
-### Changed
-
-- Subagents no longer open browser tabs in your Chrome (with `browser.relay` on) or over your Tern or cmux pane unless the open asks with `app.relay: true` or `app.tern: true`; they use `browser.cdpUrl` or omp's own Chromium ([#18789](https://github.com/can1357/oh-my-pi/pull/18789) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.21.0] - 2026-11-16
 
