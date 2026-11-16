@@ -1487,7 +1487,7 @@ export class SessionTools {
 		const editMode = retainedEdit ? this.resolveActiveEditMode() : undefined;
 		if (retainedEdit && editMode !== "apply_patch" && editMode !== "none") {
 			if (!this.#toolRegistry.has("apply_patch")) {
-				const tool = this.#wrapRuntimeTool(retainedEdit.createApplyPatchTool());
+				const tool = this.#wrapRuntimeTool(retainedEdit.createApplyPatchTool() as AgentTool);
 				this.#toolRegistry.set(tool.name, tool);
 				this.#builtInToolNames.add(tool.name);
 			}
