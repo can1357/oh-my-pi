@@ -192,9 +192,9 @@ describe("selective commit flow", () => {
 
 		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
 		expect(draft.summary()).toContain("✓ first.txt  +1  [Main]");
-		const report = draft.only(["first.txt", "docs/**"]);
+		const report = draft.only(["first.txt", "docs/**", "missing.txt"]);
 		expect(report).toContain("Deselected 1 path(s)");
-		expect(report).toContain("Unmatched: docs/**");
+		expect(report).toContain("Unmatched: docs/**, missing.txt");
 		expect(draft.selection().map(change => change.path)).toEqual(["first.txt"]);
 		const outcome = await commitSelection(draft, { subject: "feat: first" }, { journal, agent: { agent: "Main" } });
 
@@ -204,18 +204,21 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["status", "--porcelain"])).toBe("?? second.txt\n");
 	});
 
-	it("deselects everything and reports every unmatched keep target", async () => {
+	it("rejects all-unmatched keep targets without changing a curated selection", async () => {
 		const { root, journal, write } = await emptyRepo();
 		await write("Main", undefined, "first.txt", "first\n");
 		await write("Main", undefined, "second.txt", "second\n");
 		await journal.flush();
 
 		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
-		const report = draft.only(["missing.txt", "docs/**"]);
+		draft.drop({ path: "second.txt" });
+		const selected = draft.selection();
+		expect(selected.map(change => change.path)).toEqual(["first.txt"]);
 
-		expect(report).toContain("Deselected 2 path(s)");
-		expect(report).toContain("Unmatched: missing.txt, docs/**");
-		expect(draft.selection()).toEqual([]);
+		expect(() => draft.only(["missing.txt", "docs/**"])).toThrow(
+			/No changed path matches .*missing\.txt.*docs\/\*\*/,
+		);
+		expect(draft.selection()).toEqual(selected);
 	});
 
 	it("rejects unmatched take, drop, and show targets without changing the selection", async () => {
