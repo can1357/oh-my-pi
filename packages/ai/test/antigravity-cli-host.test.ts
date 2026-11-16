@@ -748,7 +748,28 @@ describe("AgyHost quota retry notices", () => {
 			expect(run.writer.output.content).toEqual([]);
 			expect(fake.closed).toBe(true);
 		});
+
+		it(`detects a quota notice split across ${kind} chunks`, async () => {
+			const { fake, run, error } = await quotaFailure((fake, text) => {
+				for (const chunk of text.split("|")) notify(fake, chunk);
+			}, "⚠ API |error (attempt 1): |RESOURCE_|EXHAUSTED (code 429): Resource has been exhausted.");
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(run.writer.output.content).toEqual([]);
+		});
 	}
+
+	it("streams lines before a split notice and still fails with a 429", async () => {
+		const { fake, run, error } = await quotaFailure((fake, text) => {
+			for (const chunk of text.split("|")) fake.text(chunk);
+		}, "Working on it.\n⚠ API error (attempt 1): |RESOURCE_EXHAUSTED (code 429): quota.");
+		await fake.cancellations.next();
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(result.status).toBe(429);
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Working on it.\n" }]);
+	});
 
 	it("carries agy's reset window as a retry hint for the credential block", async () => {
 		const { error } = await quotaFailure(
@@ -767,7 +788,10 @@ describe("AgyHost quota retry notices", () => {
 		const prose = [
 			"An API error (attempt 3): RESOURCE_EXHAUSTED means the quota ran out.",
 			"\nRetry when you see code 429.",
-			"\nAPI error (attempt 1): UNAVAILABLE (code 503): try again.",
+			"\nAPI error (attempt 1): UNAVAILABLE ",
+			"(code 503): try again.",
+			"\nAPI",
+			" errors are rare.",
 		];
 		for (const chunk of prose) fake.text(chunk);
 		prompt.response.resolve({ stopReason: "end_turn" });
