@@ -60,6 +60,14 @@ export type ConfigSchemaSource =
 	| { readonly kind: "eager"; readonly schema: Type }
 	| { readonly kind: "deferred"; readonly resolve: () => Type };
 
+/**
+ * Rewrites the parsed file content before schema validation. A file may spell
+ * something the schema cannot express (an enum value the schema does not know
+ * yet), and a normalizer may drop it and report what it dropped so the file
+ * still loads instead of failing the whole config.
+ */
+export type ConfigNormalizer = (value: unknown, report: (message: string) => void) => unknown;
+
 export interface IConfigFile<T> {
 	readonly id: string;
 	readonly schema: Type;
@@ -125,7 +133,7 @@ export type LoadStatus = "ok" | "error" | "not-found";
 
 export type LoadResult<T> =
 	| { value?: null; error: ConfigError; status: "error" }
-	| { value: T; error?: undefined; status: "ok" }
+	| { value: T; warnings: readonly string[]; error?: undefined; status: "ok" }
 	| { value?: null; error?: unknown; status: "not-found" };
 
 export class ConfigFile<T> implements IConfigFile<T> {
@@ -136,6 +144,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	#resolvedSchema?: Type;
 	#cache?: LoadResult<T>;
 	#auxValidate?: (value: T) => void;
+	#normalize?: ConfigNormalizer;
 
 	constructor(
 		readonly id: string,
@@ -182,6 +191,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		if (!configPath || configPath === this.#basePath) return this;
 		const result = new ConfigFile<T>(this.id, this.#schemaSource, configPath);
 		result.#auxValidate = this.#auxValidate;
+		result.#normalize = this.#normalize;
 		result.#resolvedSchema = this.#resolvedSchema;
 		result.#ensureMigrated();
 		return result;
@@ -219,6 +229,27 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		return this;
 	}
 
+	/**
+	 * Normalize the parsed file before schema validation. The normalizer may
+	 * rewrite the value — a file may spell something the schema cannot express
+	 * — and report what it dropped, so the file still loads instead of failing
+	 * the whole config. A successful {@link LoadResult} carries those findings.
+	 * A failed parse carries none: the findings never leave the parse that
+	 * produced them.
+	 */
+	withNormalization(name: string, normalize: ConfigNormalizer): this {
+		const prev = this.#normalize;
+		this.#normalize = (value: unknown, report: (message: string) => void) => {
+			const normalized = prev ? prev(value, report) : value;
+			try {
+				return normalize(normalized, report);
+			} catch (error) {
+				throw new ConfigError(this.id, undefined, { err: error, stage: `Normalize(${name})` });
+			}
+		};
+		return this;
+	}
+
 	createDefault(): T {
 		const parsed = this.schema({});
 		if (!(parsed instanceof Error)) return parsed as T;
@@ -236,6 +267,11 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	}
 
 	#parseContent(content: string): LoadResult<T> {
+		// Findings belong to this parse. They are attached only when it
+		// succeeds and stored on the cached result, so a later reader of the
+		// same load sees them. A file that reports `video` and then fails the
+		// schema never publishes that `video` warning.
+		const warnings: string[] = [];
 		try {
 			let parsed: unknown;
 			const readPath = this.#resolveReadPath();
@@ -245,6 +281,18 @@ export class ConfigFile<T> implements IConfigFile<T> {
 				parsed = YAML.parse(content);
 			} else {
 				throw new Error(`Invalid config file path: ${readPath}`);
+			}
+
+			if (this.#normalize) {
+				try {
+					parsed = this.#normalize(parsed, message => warnings.push(message));
+				} catch (error) {
+					const wrapped =
+						error instanceof ConfigError
+							? error
+							: new ConfigError(this.id, undefined, { err: error, stage: "Normalize" });
+					return this.#storeCache({ error: wrapped, status: "error" });
+				}
 			}
 
 			const checked = this.schema(parsed);
@@ -267,7 +315,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 						: new ConfigError(this.id, undefined, { err: error, stage: "AuxValidate" });
 				return this.#storeCache({ error: wrapped, status: "error" });
 			}
-			return this.#storeCache({ value, status: "ok" });
+			return this.#storeCache({ value, warnings, status: "ok" });
 		} catch (error) {
 			logger.warn("Failed to parse config file", { path: this.path(), error });
 			return this.#storeCache({

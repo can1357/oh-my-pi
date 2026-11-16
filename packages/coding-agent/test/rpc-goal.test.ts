@@ -413,7 +413,7 @@ describe("RPC goal command", () => {
 });
 
 describe("RpcGoalController continuation gate", () => {
-	const agentEnd = { type: "agent_end", messages: [], isTerminal: true } as unknown as AgentSessionEvent;
+	const agentEnd = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
 	const hostInput = { type: "message_start", message: { role: "user", content: [] } } as unknown as AgentSessionEvent;
 
 	function fakeSession(admit: (customType: string) => Promise<boolean>) {
@@ -471,8 +471,7 @@ describe("RpcGoalController continuation gate", () => {
 			isStreaming: false,
 			hasAdmittedSubmission: false,
 			queuedMessageCount: 0,
-			hasPendingAsyncWork: () => false,
-			settleAsyncWork: async () => {},
+			isRunActive: false,
 			getPlanModeState: () => undefined,
 			getGoalModeState: () => goalState,
 			setGoalModeState: (state: GoalModeState | undefined) => {
@@ -574,7 +573,6 @@ describe("RpcGoalController continuation gate", () => {
 		});
 		const toolTurnEnd = {
 			type: "agent_end",
-			isTerminal: true,
 			messages: [
 				{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }] },
 				{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "x" }], isError: false },
@@ -872,7 +870,7 @@ describe("RpcGoalController continuation gate", () => {
 		await nextMacrotask();
 		expect(admitted).toEqual(["goal-continuation"]);
 
-		// A reload reopens the same transcript and detaches that turn: its terminal agent_end never comes.
+		// A reload reopens the same transcript and detaches that turn: its agent_end never comes.
 		await controller.beginSessionChange();
 		await controller.endSessionChange({ detachedRun: true });
 		await nextMacrotask();

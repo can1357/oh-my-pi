@@ -364,8 +364,98 @@ install_binary() {
     # Check if in PATH
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) echo "Run 'omp' to get started!" ;;
-        *) echo "Add ${INSTALL_DIR} to your PATH, then run 'omp'" ;;
+        *) print_path_hint ;;
     esac
+}
+
+# Print $1 in single quotes, so POSIX shells read it literally.
+sh_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Print $1 in double quotes, so fish reads it literally. fish expands only $
+# inside them and treats \ as an escape, so escape \, " and $.
+fish_quote() {
+    printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"$]/\\&/g')"
+}
+
+# Print path $1 for the user to paste: ~/<rest> when it is in the home
+# directory and has no characters a shell treats specially, otherwise quoted
+# with the quoting function $2.
+display_path() {
+    case "$1" in
+        "$HOME"/*)
+            rest="${1#"$HOME"/}"
+            case "$rest" in
+                *[!A-Za-z0-9._/+-]*) ;;
+                *)
+                    printf '%s/%s' "~" "$rest"
+                    return
+                    ;;
+            esac
+            ;;
+    esac
+    "$2" "$1"
+}
+
+# Tell the user that INSTALL_DIR is not on PATH and print one command, for
+# their login shell, that adds it to the shell's startup file and loads it.
+print_path_hint() {
+    # The startup file each shell reads, and the command that loads it into
+    # the current shell. fish needs no file: fish_add_path saves the change.
+    rc_file=""
+    load_cmd="source"
+    case "$(basename "${SHELL:-sh}")" in
+        zsh) rc_file="${ZDOTDIR:-$HOME}/.zshrc" ;;
+        bash)
+            if [ "$(uname -s)" = "Darwin" ]; then
+                # Terminals on macOS start bash as a login shell, which reads
+                # only the first of these files that exists. Creating
+                # ~/.bash_profile would hide an existing ~/.profile.
+                rc_file="$HOME/.bash_profile"
+                for login_file in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+                    if [ -f "$login_file" ]; then
+                        rc_file="$login_file"
+                        break
+                    fi
+                done
+            else
+                rc_file="$HOME/.bashrc"
+            fi
+            ;;
+        fish) ;;
+        *)
+            rc_file="$HOME/.profile"
+            load_cmd="."
+            ;;
+    esac
+
+    if [ -z "$rc_file" ]; then
+        path_cmd="fish_add_path $(display_path "$INSTALL_DIR" fish_quote)"
+    else
+        # Write $HOME instead of the expanded home directory so the line stays
+        # correct if the home directory moves. The startup file reads the path
+        # inside double quotes, so escape the characters those quotes expand.
+        case "$INSTALL_DIR" in
+            "$HOME"/*) dir_base="\$HOME/" dir_rest="${INSTALL_DIR#"$HOME"/}" ;;
+            *) dir_base="" dir_rest="$INSTALL_DIR" ;;
+        esac
+        dir_rest="$(printf '%s' "$dir_rest" | sed 's/[\\"$`]/\\&/g')"
+        rc_line="export PATH=\"${dir_base}${dir_rest}:\$PATH\""
+        # zsh's and dash's echo turn backslashes into escape sequences.
+        case "$rc_line" in
+            *\\*) write_cmd="printf '%s\\n'" ;;
+            *) write_cmd="echo" ;;
+        esac
+        rc_shown="$(display_path "$rc_file" sh_quote)"
+        path_cmd="${write_cmd} $(sh_quote "$rc_line") >> ${rc_shown} && ${load_cmd} ${rc_shown}"
+    fi
+
+    # printf, not echo: the echo of macOS /bin/sh turns \n in a path into a
+    # line break.
+    printf '\n%s is not in your PATH. To add it, run:\n\n' "$INSTALL_DIR"
+    printf '  %s\n\n' "$path_cmd"
+    echo "Then run 'omp' to get started!"
 }
 
 # Main logic

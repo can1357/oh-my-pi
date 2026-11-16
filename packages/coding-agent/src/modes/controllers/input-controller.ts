@@ -49,7 +49,7 @@ import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensib
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
-import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
@@ -70,6 +70,7 @@ import {
 } from "../../utils/clipboard";
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
+import { htmlToPaste } from "../../utils/html-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
@@ -185,6 +186,7 @@ const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	btw: () => true,
+	copy: () => true,
 	effort: () => true,
 	export: () => true,
 	jobs: args => {
@@ -631,8 +633,9 @@ export class InputController {
 				this.#restoreYieldCompactionOnStop();
 				return;
 			}
-			// The turn is over and only background jobs can resume it; its row
-			// stays mounted, so this is checked before the loader's abort.
+			// The run is paused and only outside work (background jobs, child agents,
+			// peer messages) can resume it; its row stays mounted, so this is checked
+			// before the loader's abort.
 			const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
 			if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
@@ -649,8 +652,8 @@ export class InputController {
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (awaitingAsyncWork) {
-				// End the wait. The jobs keep running; their results land in context
-				// for the next prompt instead of starting a turn.
+				// End the wait: the run ends now. The jobs keep running; their results
+				// land in context for the next prompt instead of starting a turn.
 				void this.ctx.eventController.stopAwaitingAsyncWork();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();
@@ -1024,25 +1027,15 @@ export class InputController {
 
 		this.#enhancedPaste = new EnhancedPasteController({
 			write: data => this.ctx.ui.terminal.write(data),
-			pasteText: text => {
-				// Route enhanced-paste text to the currently focused component: through
-				// its `pasteText` hook (modal Input prompts: OAuth API-key entry,
-				// Perplexity OTP, GitHub Enterprise URL, manual redirect URL), else as
-				// the bracketed paste a terminal without enhanced paste sends it
-				// (dialogs that keep their field inside: the agents hub's New agent,
-				// the /annotate note). Falling back to the main editor would bury the
-				// text in the detached editor while the dialog has focus (#2127). The
-				// main editor takes it as a bracketed paste too, so a pasted or dropped
-				// image path attaches (#3506) instead of landing as text.
-				const focused = this.ctx.ui.getFocused();
-				if (focused && focused !== this.ctx.editor && hasPasteText(focused)) focused.pasteText(text);
-				else if (focused && focused !== this.ctx.editor && focused.handleInput)
-					focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
-				else this.ctx.editor.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
-				this.ctx.ui.requestRender();
-			},
+			pasteText: text => this.#pasteTextIntoFocus(text),
 			pasteImage: image =>
 				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
+			// Styled text goes where images do: the composer, or a prompt that takes them.
+			acceptsHtml: () => {
+				const focused = this.ctx.ui.getFocused();
+				return !focused || focused === this.ctx.editor || (hasPasteText(focused) && focused.acceptsImages === true);
+			},
+			pasteHtml: html => this.#pasteHtml(html),
 			showStatus: message => this.ctx.showStatus(message),
 			pasteNative: () => {
 				if (!this.#clipboardIsTerminalLocal()) return false;
@@ -1663,10 +1656,10 @@ export class InputController {
 			const parsed = parseSlashCommand(text);
 			const name = parsed && lookupBuiltinSlashCommand(parsed.name)?.name;
 			if (parsed && name && FOCUSED_VIEW_COMMANDS[name]?.(parsed.args)) {
-				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /jobs lists the focused agent's jobs
-				// without a way to cancel them, /usage reports account-wide limits, and
-				// /model, /switch, /effort change the focused agent's model and thinking.
+				// Viewer-scoped commands: /btw asks about the focused transcript, /copy picks
+				// from it, /export writes it (with its own subagents), /jobs lists the focused
+				// agent's jobs without a way to cancel them, /usage reports account-wide limits,
+				// and /model, /switch, /effort change the focused agent's model and thinking.
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
@@ -1861,8 +1854,22 @@ export class InputController {
 		// left in the queue keep theirs so their delivery echo is still recognized
 		// as local and does not blank the editor the dequeue just restored to.
 		this.ctx.locallySubmittedUserSignatures.delete(`${popped.text}\u0000${popped.images?.length ?? 0}`);
-		this.#restoreEntriesToEditor([popped]);
+		this.#restoreEntriesToEditor([popped], { queued: this.#restoresAsQueued(popped) });
 		this.ctx.showStatus("Restored last queued message to editor");
+	}
+
+	/**
+	 * Whether a dequeued entry returns as `=>` queue shorthand, so Enter queues it behind the turn
+	 * again instead of steering it in. Only the main composer parses the shorthand, and it queues
+	 * text verbatim: a skill invocation or builtin command (a queued `/compact`) returns as typed.
+	 */
+	#restoresAsQueued(popped: DequeuedMessage): boolean {
+		return (
+			popped.queue === "followUp" &&
+			!this.ctx.focusedAgentId &&
+			!this.#matchesBuiltinSlashCommand(popped.text) &&
+			!isKnownSkillCommand(this.ctx, popped.text)
+		);
 	}
 
 	/**
@@ -1870,7 +1877,7 @@ export class InputController {
 	 * Only the main session owns the separate compaction queue; focused views
 	 * must not restore its messages into a subagent's composer.
 	 */
-	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	#popLastQueuedMessage(): DequeuedMessage | undefined {
 		const yieldCompaction = this.ctx.focusedAgentId ? undefined : this.ctx.yieldCompaction;
 		// Steering pops first, as in `AgentSession.popLastQueuedMessage`. Behind a yield compaction,
 		// the session's follow-ups are older than it: the follow-ups it holds go next, then the request.
@@ -1884,11 +1891,11 @@ export class InputController {
 		if (compaction.length > 0) {
 			const last = compaction[compaction.length - 1];
 			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
-			return { text: last.text, images: last.images };
+			return { text: last.text, images: last.images, queue: last.mode === "steer" ? "steering" : "followUp" };
 		}
 		if (yieldCompaction) {
 			this.ctx.yieldCompaction = undefined;
-			return { text: yieldCompaction.text };
+			return { text: yieldCompaction.text, queue: "followUp" };
 		}
 		return undefined;
 	}
@@ -2308,7 +2315,7 @@ export class InputController {
 			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
 			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
 		];
-		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
+		const restored = this.#restoreEntriesToEditor(allQueued, { currentText: options?.currentText });
 		if (options?.abort) {
 			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
@@ -2372,9 +2379,14 @@ export class InputController {
 	 * Merge queued entries (oldest→newest) ahead of the current draft, folding
 	 * their images back into the pending-image buffer and refreshing the pending
 	 * bar. Shared by the Alt+Up dequeue (one entry) and the Esc restore-all path.
-	 * Returns the number of entries restored.
+	 * `queued` restores the entries as one `=>` queue message: ahead of an empty
+	 * draft, or as the first item of a draft already in that form; any other draft
+	 * keeps the plain merge. Returns the number of entries restored.
 	 */
-	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
+	#restoreEntriesToEditor(
+		entries: RestoredQueuedMessage[],
+		options?: { currentText?: string; queued?: boolean },
+	): number {
 		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
@@ -2402,8 +2414,12 @@ export class InputController {
 		} else {
 			queuedText = entries.map(e => e.text).join("\n\n");
 		}
-		const current = currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
+		const current = options?.currentText ?? this.ctx.editor.getText();
+		const queuedDraft = options?.queued ? (current.trim() ? parseQueueShorthand(current) : "") : undefined;
+		const combinedText =
+			queuedDraft === undefined
+				? [queuedText, current].filter(t => t.trim()).join("\n\n")
+				: formatQueueShorthand([queuedText, ...splitQueuedMessages(queuedDraft)]);
 		// Hand queued images back to the pending-image buffer first (links are
 		// re-materialized lazily), then set the text: setCollapsedText folds the
 		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
@@ -2588,6 +2604,46 @@ export class InputController {
 			}
 			throw error;
 		}
+	}
+
+	/**
+	 * Route enhanced-paste text to the currently focused component: through its `pasteText`
+	 * hook (modal Input prompts: OAuth API-key entry, Perplexity OTP, GitHub Enterprise URL,
+	 * manual redirect URL), else as the bracketed paste a terminal without enhanced paste sends
+	 * it (dialogs that keep their field inside: the agents hub's New agent, the /annotate note).
+	 * Falling back to the main editor would bury the text in the detached editor while the
+	 * dialog has focus (#2127). The main editor takes it as a bracketed paste too, so a pasted
+	 * or dropped image path attaches (#3506) instead of landing as text.
+	 */
+	#pasteTextIntoFocus(text: string): void {
+		const focused = this.ctx.ui.getFocused();
+		if (focused && focused !== this.ctx.editor && hasPasteText(focused)) focused.pasteText(text);
+		else if (focused && focused !== this.ctx.editor && focused.handleInput)
+			focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+		else this.ctx.editor.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Paste clipboard HTML as Markdown: text alone as a text paste, else its text and images
+	 * in order through the focused image destination, each image attached where it stood.
+	 */
+	async #pasteHtml(html: string): Promise<void> {
+		const parts = htmlToPaste(html);
+		if (!parts) {
+			this.ctx.showStatus("Clipboard paste was empty");
+			return;
+		}
+		if (parts.every(part => typeof part === "string")) {
+			this.#pasteTextIntoFocus(parts.join(""));
+			return;
+		}
+		await this.#pasteImageIntoFocus(async sink => {
+			for (const part of parts) {
+				if (typeof part === "string") sink.pasteText(part);
+				else await sink.attach(part, `Unsupported pasted image format: ${part.mimeType}`);
+			}
+		});
 	}
 
 	/**
@@ -3012,7 +3068,6 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
-					seanceSourceArtifactsDir: manager.getSeanceSourceArtifactsDir() ?? undefined,
 				};
 			},
 			keybindings: this.ctx.keybindings,

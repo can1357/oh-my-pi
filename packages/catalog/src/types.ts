@@ -23,6 +23,7 @@ export type KnownApi =
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
+	| "antigravity-acp"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
@@ -1572,7 +1573,7 @@ export interface AntigravityModelWireProfile {
 	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
 	maxOutputTokens?: number;
 	/** SKU thinking level; the native client sends it in preference to a budget. */
-	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
+	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
 	thinkingBudget?: number;
 }

@@ -1533,8 +1533,11 @@ provider "factory-droid" {
 		reasoning-disable-mode "omit"
 		responses-cache-retention #false
 		responses-parallel-tool-calls #true
+		// Bedrock's and Snowflake's Responses endpoints reject `configuration_update`
+		// input items, so GPT-6 effort changes stay on the request level there.
 		on-upstream "bedrock_openai" "snowflake" {
 			reasoning-disable-mode "none-effort"
+			supports-configuration-update #false
 		}
 	}
 	// GPT models whose ladder has an Off/None rung send the literal `none`

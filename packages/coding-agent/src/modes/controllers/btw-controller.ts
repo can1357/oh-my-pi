@@ -135,10 +135,15 @@ export class BtwController {
 		return this.#branchUnavailableReason() === undefined;
 	}
 
+	/** The answer lives in the inline panel, or in Tern's open history sheet. */
+	#answerShown(): boolean {
+		return this.#visible || (this.ctx.ui.nativeRendering && this.#historyOverlay !== undefined);
+	}
+
 	/** Whether plain `b` is currently reserved for a completed or pending branch action. */
 	handlesBranchKey(): boolean {
 		if (this.#branchInFlight) return true;
-		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return false;
+		if (!this.#answerShown() || this.#activeRequest?.component.isBranchable() !== true) return false;
 		// Branch promotion rewrites the main session; focused-subagent answers stay side-only.
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId) return false;
 		return (
@@ -154,7 +159,8 @@ export class BtwController {
 		if (this.#branchInFlight) return "a branch is already in progress";
 		if ([...this.#injects.values()].includes("sending")) return "a /btw prompt is still sending";
 		if (this.#transitionCount > 0) return "a session operation is in progress";
-		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return "the answer is not ready";
+		if (!this.#answerShown() || this.#activeRequest?.component.isBranchable() !== true)
+			return "the answer is not ready";
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId)
 			return "only main-session answers can be branched";
 		// Inline branch promotion carries one pair; do not drop earlier side turns.
@@ -707,6 +713,11 @@ export class BtwController {
 			},
 			onCancel: record => {
 				if (this.#activeRequest?.record.id === record.id) this.handleCancel();
+			},
+			canBranch: record => record.id === this.#activeRequest?.record.id && this.canBranch(),
+			onBranch: record => {
+				if (record.id !== this.#activeRequest?.record.id) return;
+				void this.handleBranch();
 			},
 			canFollowUp: record =>
 				!this.#starting &&

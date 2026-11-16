@@ -65,6 +65,11 @@ function readableRowClause(table: string): string {
 	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
 }
 
+/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
+function ftsTokens(term: string): string[] {
+	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
+}
+
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
 function escapeLikePattern(text: string): string {
@@ -146,6 +151,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(prompt, content='histo
 
 CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
 	INSERT INTO history_fts(rowid, prompt) VALUES (new.id, new.prompt);
+END;
+CREATE TRIGGER IF NOT EXISTS history_ad AFTER DELETE ON history BEGIN
+	INSERT INTO history_fts(history_fts, rowid, prompt) VALUES ('delete', old.id, old.prompt);
 END;
 		`);
 
@@ -284,6 +292,11 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
+	/** Deletes a stored prompt and its search index entry. */
+	delete(id: number): void {
+		this.#db.query("DELETE FROM history WHERE id = ?").run(id);
+	}
+
 	/** Returns unique prompts ordered by their most recent submission. */
 	getRecent(limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
@@ -298,18 +311,19 @@ ON CONFLICT(prompt) DO UPDATE SET
 		}
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
+	/** Finds unique prompts matching every whitespace-delimited query term, newest first. */
 	search(query: string, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		const tokens = this.#tokenize(query);
-		if (tokens.length === 0) return [];
+		const terms = this.#terms(query);
+		if (terms.length === 0) return [];
 
-		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
-		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
-		//    indexed the stored text, so "git-commit" -> "git"* "commit"*.
-		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
+		// 1. FTS5 prefix match (term AND). Each term is one phrase of its letter
+		//    and digit runs, split the way the unicode61 tokenizer indexed the
+		//    stored text, so "git-commit" -> "git commit"*: the runs must be
+		//    adjacent tokens, not two words anywhere in the prompt.
+		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
 			ftsRows = this.#searchStmt.all(
@@ -323,12 +337,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
 		}
 
-		// 2. Substring fallback (token-AND LIKE). Catches infix matches FTS5's
-		//    prefix-only wildcard cannot reach (e.g. "mit" -> "commit"). Bounded
-		//    by safeLimit, ordered by recency - no full-table load into JS.
+		// 2. Substring fallback (term-AND LIKE, each term literal). Catches infix
+		//    matches FTS5's prefix-only wildcard cannot reach (e.g. "mit" ->
+		//    "commit"). Bounded by safeLimit, ordered by recency - no full-table
+		//    load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit, filter);
+			subRows = this.#searchSubstring(terms, safeLimit, filter);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -536,20 +551,19 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Split on non-alphanumeric runs, mirroring FTS5's `unicode61` tokenizer so
-	 * query tokens align with how stored prompts were indexed. Lowercases for
-	 * stable substring matching.
+	 * Whitespace-delimited query terms, lowercased for stable substring matching.
+	 * A term without a letter or digit matches nothing and is dropped.
 	 */
-	#tokenize(query: string): string[] {
+	#terms(query: string): string[] {
 		return query
 			.toLowerCase()
-			.split(/[^\p{L}\p{N}]+/u)
-			.filter(tok => tok.length > 0);
+			.split(/\s+/u)
+			.filter(term => /[\p{L}\p{N}]/u.test(term));
 	}
 
-	#searchSubstring(tokens: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+	#searchSubstring(terms: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
+		const stmt = this.#getSubstringStmt(terms.length);
+		const params: SQLQueryBindings[] = terms.map(term => `%${escapeLikePattern(term)}%`);
 		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
 		return stmt.all(...params) as HistoryRow[];
 	}

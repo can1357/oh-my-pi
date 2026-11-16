@@ -55,7 +55,7 @@ export class RpcGoalController {
 	readonly #session: RpcGoalSession;
 	/** Active tool set before goal mode added `goal`; restored when the goal ends. */
 	#previousTools: string[] | undefined;
-	/** Continuation turns submitted whose terminal `agent_end` has not arrived. */
+	/** Continuation turns submitted whose run has not reached its `agent_end`. */
 	#pendingContinuationTurns = 0;
 	#previousContinuationActivity: string | undefined;
 	/** A continuation turn made no new progress; wait for the host before continuing. */
@@ -166,7 +166,7 @@ export class RpcGoalController {
 	 * running goal untouched and resumes continuation.
 	 *
 	 * `detachedRun`: the change stopped the running agent (new, switch, reload). A
-	 * detached continuation turn never reaches its terminal `agent_end`, so it no
+	 * detached continuation turn never reaches its `agent_end`, so it no
 	 * longer counts as pending. Never throws; settlement is re-checked afterwards.
 	 */
 	async endSessionChange(options?: { detachedRun?: boolean }): Promise<void> {
@@ -374,7 +374,7 @@ export class RpcGoalController {
 			}
 			return;
 		}
-		if (event.type !== "agent_end" || event.isTerminal === false) return;
+		if (event.type !== "agent_end") return;
 		if (this.#pendingContinuationTurns > 0) {
 			this.#pendingContinuationTurns--;
 			const activity = goalContinuationActivity(event.messages);

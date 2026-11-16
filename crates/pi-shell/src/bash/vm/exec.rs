@@ -736,6 +736,9 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		let mode = run.mode;
 		super::mode::set_mode(&mut k.root, cx.store, vp, mode);
 	}
+	if vp.parent.is_none() {
+		k.note_prior_jobs(vp);
+	}
 	let run = vp.runs.front_mut().expect("present");
 	if vp.image.is_none() {
 		if let Some(args) = run.args.take() {
