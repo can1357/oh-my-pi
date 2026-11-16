@@ -171,14 +171,18 @@ the list cannot disable them.
 
 ### Live source changes
 
-In the main session, changes to `extensions` or `disabledExtensions` suspend or
-resume already-loaded, settings-governed sources: their handlers, commands,
-tools, renderers, shortcuts, flags, and file fallbacks stop or resume
-participating. A suspended override of a built-in tool restores the native tool.
-Modules are not unloaded or re-evaluated, and newly enabled modules that were
-not imported at startup require a restart. Inline and caller-preloaded sources
-outside the governed discovery set are left alone. Explicit-only sessions ignore
-these settings changes.
+In the main session, changes to `extensions` or `disabledExtensions`, and a
+change of the session's working directory (`/move`, resuming a session from
+another project), re-scope settings-governed sources. Sources that leave the
+discovered set are suspended: their handlers, commands, tools, renderers,
+shortcuts, flags, and file fallbacks stop participating, and subagents spawned
+afterwards no longer inherit them. Returning sources resume, and newly
+discovered sources are imported and join the live session (their `session_start`
+handlers run then). A suspended override of a built-in tool restores the native
+tool. Modules are never unloaded or re-evaluated. Governed sources include those
+discovered from every directory the session was scoped to. Inline and
+caller-preloaded sources outside the governed discovery set are left alone.
+Explicit-only sessions ignore these settings and directory changes.
 
 ### Disable specific items of other capabilities
 

@@ -82,9 +82,9 @@ export interface SlashCommandRuntime {
 	refreshCommands: () => Promise<void> | void;
 	/**
 	 * Reload plugin state (caches, skills, slash command registry, project
-	 * registries) and re-emit available commands. Used by `/reload-plugins`,
-	 * `/move`, and `/marketplace`/`/plugins` mutations so the session sees a
-	 * consistent view after plugin or project-scope changes.
+	 * registries) and re-emit available commands. Used by `/reload-plugins`
+	 * and `/marketplace`/`/plugins` mutations so the session sees a consistent
+	 * view after plugin changes. `/move` re-scopes through `rescopeSessionToCwd`.
 	 */
 	reloadPlugins: () => Promise<void>;
 	/**
