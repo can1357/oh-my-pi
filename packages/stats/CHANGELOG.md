@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The stats Gain tab counts the context snapcompact compactions free, beside imaged tool results, so sessions that compact with snapcompact no longer show zero savings; the first sync after upgrading re-reads transcripts written since 2026-08-20 once to fill in that history ([#19120](https://github.com/can1357/oh-my-pi/pull/19120) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed
@@ -10,9 +14,6 @@
 - Fixed per-model message counts on the Frustration page to include all answered messages.
 - Improved dashboard responsiveness by keeping other pages and Live status available while Spotlight rebuilds.
 - Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
-### Fixed
-
-- The stats Gain tab counts the context snapcompact compactions free, beside imaged tool results, so sessions that compact with snapcompact no longer show zero savings; the first sync after upgrading re-reads transcripts written since 2026-08-20 once to fill in that history ([#19120](https://github.com/can1357/oh-my-pi/pull/19120) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.20.0] - 2026-11-12
 
