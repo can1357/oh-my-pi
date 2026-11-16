@@ -1,11 +1,13 @@
 # S4: deterministic native checks and opt-in gates
 
-Status: implementation under validation, 2026-11-15. Implementation branch:
+Status: implemented in [PR #658](https://github.com/blyzer/oh-my-pi/pull/658),
+review-ready with scoped local validation and disclosed CI gaps, 2026-11-16.
+Implementation branch:
 `feat/verification-native-checks`, initially based on `omp2` at
 `868e20edb5e676a9a842835b9f06668e4cb62ef9`, then fast-forwarded to current
 `omp2` at `bf873e3` before final validation. This note describes this slice's
 contract and source boundaries. The validation record below distinguishes
-executed checks from pending joined-runtime proof.
+executed checks from remaining validation and unsupported platform coverage.
 
 ## Scope and decision
 
@@ -18,6 +20,14 @@ and the doctest half of the repository's package test contract. It does not
 claim all A1 syntax/format objectives or all regression coverage are satisfied.
 Commands use the selected packages' default Cargo feature selection; this is
 neither an all-features check nor an implicit workspace-wide test run.
+The first closed-input provider requires Linux Bubblewrap. Other backends
+return INCONCLUSIVE: scoped filesystem reads alone do not establish scoped
+native execution on Seatbelt. macOS needs an execution-fencing contract and
+native proof before this provider may admit PASS there.
+The inspected [Seatbelt policy](https://github.com/blyzer/oh-my-pi/blob/bf873e3f53b4bf539cf77563fd67b9d52c540381/crates/sandbox/src/backends/seatbelt.rs#L248-L258)
+explains why read-denied native images can still execute unless explicitly
+denied. This is a source finding, not a measured macOS exploit or a claim that
+the new provider ran successfully on macOS.
 
 The driver composes verification; EnvD owns filesystem and process effects.
 The existing session journal/CAS retains evidence and the existing ADW phase
@@ -157,9 +167,11 @@ does not become a passing observation.
   worktree environment. Git metadata and ignored inputs absent from capture are
   not silently admitted; unsupported or unresolved inputs prevent a durable
   passing conclusion.
-- This adapter composes local environments. It does not add remote execution
-  support or automatically admit helper installations whose symlinks leave the
-  declared tool/dependency roots; those cases remain inconclusive.
+- This adapter composes local Bubblewrap environments. It does not add remote
+  execution or macOS verification admission. Symlink spelling is fingerprinted
+  without following links or expanding permissions: an escaping target remains
+  absent from the sealed sparse namespace unless independently admitted or part
+  of the trusted OS runtime. Readable non-OS roots remain byte-fenced.
   Inventories cover admitted roots conservatively, with a 4-GiB/200,000-entry
   bound per inventory. An oversized shared Cargo cache can therefore prevent
   admission even for a small selected package. Dependency-closure narrowing is
@@ -181,10 +193,89 @@ does not become a passing observation.
 
 ## Validation record
 
-Compilation and joined-runtime validation are **pending coordinator results**.
-This document records no successful end-to-end gate, sandbox availability proof,
-full-driver suite, macOS run or hosted CI outcome. Source review and passing
-parser/unit tests alone must not be reported as a joined verification proof.
+Native implementation source: `c70ea7c` on
+[`feat/verification-native-checks`](https://github.com/blyzer/oh-my-pi/pull/658),
+based on `omp2@bf873e3f53b4bf539cf77563fd67b9d52c540381`.
+Executed on Linux with the pinned toolchain, nextest 0.9.146 and available
+Bubblewrap. No full-driver suite, macOS execution or green hosted CI outcome is
+claimed.
+The sandbox and exec rows were executed before `c70ea7c`; their owning source
+did not change afterward. The seven-case native and 28-case driver runs tested
+`c70ea7c`.
+
+| Executed command | Result |
+| --- | --- |
+| `CARGO_BUILD_JOBS=1 cargo nextest run -p omp-driver --test verification_native --test-threads 1 --success-output immediate --no-tests fail --locked` | 7 passed, 0 skipped; 155.148 s test execution (one slow case) |
+| `cargo nextest run -p omp-sandbox --test bubblewrap -E 'not test(wrapper_prefix_executes_and_filters_environment_names) and not test(live_bubblewrap_confines_reads_writes_socket_and_preserves_fd_63)' --no-tests fail --locked` | 19 passed; 2 explicitly filtered existing live tests |
+| `cargo nextest run -p omp-exec --lib --no-tests fail --locked` | 32 passed, 0 skipped |
+| `CARGO_BUILD_JOBS=1 cargo nextest run -p omp-driver --lib -E 'test(verification::) or test(adw::definition::) or test(adw::production::native_) or test(a_reviewer_that_did_not_say_accept) or test(a_retry_brief_carries)' --no-tests fail --locked` | 28 passed, 561 filtered; source `c70ea7c` |
+| `CARGO_BUILD_JOBS=1 cargo nextest run -p omp-envd --lib -E 'test(resource_materializer::tests::) or test(verification::tests::)' --no-tests fail --locked` | 16 passed, 1195 filtered; source unchanged by remote app-only merge `5e669c1` |
+
+The supported-host cases actually executed: a native PASS, four retained
+receipts and journal reload, real compiler/test failures, zero/ignored-test and
+forged-recipe rejection, source drift after a frozen test marker, and cancellation
+after a frozen C1 test starts. Cancellation settles within the asserted bound,
+removes the lease and cannot publish passing C1/freshness receipts; this relies
+on the existing process-tree shutdown contract rather than independently proving
+every descendant PID exited. The
+passing fixture also requires its build script's attempted control writes,
+unlinks, replacements, Cargo-home move and ancestor-config creation to fail.
+The unavailable-host test's opposite-platform branch was not applicable on this
+host; the supported execution cases did not report a skip.
+
+The complete Bubblewrap target was also attempted. Two existing live contracts
+are unresolved in this environment: the wrapper harness lacks same-executable
+sandbox-child dispatch, and the live socket test requests Unix-socket path
+enforcement that this backend rejects. These are not reported as passing or
+silently counted as coverage. The two new mount-plan regressions and the native
+joined protection proof passed.
+
+Local capacity constraints required serial compilation, moving generated build
+caches, and `strip --strip-unneeded` on the generated native test executable.
+The final seven-case run used the unstripped executable while doctest compilation
+ran concurrently; its duration is not a performance comparison. The source/test
+backend remained LLVM. Earlier attempts failed during fixture
+setup, host admission, resource exhaustion and protocol integration; their
+fixes were rerun rather than counted as successful evidence. Raw local logs are
+`/tmp/omp2-s4-native-final.log`, `/tmp/omp2-s4-bubblewrap-focused.log` and
+`/tmp/omp2-s4-exec-tests.log`; temporary logs are not committed artifacts.
+`just fmt-check-rust`, `just proto-fmt-check`, `just proto-lint` and
+`just proto-breaking` passed. Direct lintx checks of the five new Rust files
+passed; 37 research-directory relative links resolve and experiment JSON parses.
+
+The combined `CARGO_BUILD_JOBS=1 cargo test --doc -p omp-exec -p omp-env
+-p omp-sandbox -p omp-envd -p omp-driver --locked` attempt failed at the driver's
+verification module example: rustdoc reported `omp_tools` unavailable in rlib
+format. A separate host attempt passed `omp-env`'s empty doctest inventory, then
+failed at EnvD because its expected `omp_tools` rlib path did not exist. Neither
+attempt established complete doctest coverage. Local logs are
+`/tmp/omp2-s4-doctests-final.log` and `/tmp/omp2-s4-host-doctests-final.log`.
+
+The final combined retry passed for all five owning crates after explicitly
+adding the existing tools rlib search directory. Exact command:
+
+```sh
+RUSTDOCFLAGS='-L dependency=/workspace/oh-my-pi/target/debug/build/omp-tools/0e705635f3fdf9da/out' \
+  CARGO_BUILD_JOBS=1 cargo test --doc -p omp-exec -p omp-env -p omp-sandbox \
+  -p omp-envd -p omp-driver --locked
+```
+
+Result: driver 1 passed, exec 1 passed, env/EnvD/sandbox each 0 doctests;
+all five commands' crate stages completed successfully. The absolute cache path
+is local to this build and is a workaround, not a new repository requirement.
+The log is `/tmp/omp2-s4-all-doctests-retry.log`. A separate driver retry with
+the same search path and an unmodified leaf-crate doctest run also passed.
+The earlier failures remain recorded rather than presented as successful runs.
+
+Hosted checks on `b3f8919` included passing Linux/macOS lint, formatting,
+protobuf and several acceptance jobs, but the workspace job was cancelled and
+BuildBuddy failed (exit 100). Fetching its detailed job log returned HTTP 403;
+the failure cause is unverified. This does not establish green CI, and no
+workflow or BuildBuddy configuration was changed. Independent source review at
+`c70ea7c` found no new concrete blocker, with the cancellation-test scope caveat
+above. The PR was marked ready for review at the owner's request; this is not a
+claim that merge prerequisites passed. The code is not merged. The remote
+app-only merge `ef0f06f` was preserved in merge `5e669c1` without overwriting it.
 
 A coordinator-run dependency-free fixture against nextest 0.9.146 exercised one
 passing case and one default-ignored case: both listing and execution exited

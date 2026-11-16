@@ -1,6 +1,6 @@
 # Implementation execution plan
 
-Status: ordered work queue; S1–S3 landed, S4 implementation under validation.
+Status: ordered work queue; S1–S3 landed, S4 implemented in PR #658, ready for review.
 Updated: 2026-11-15.
 S4 implementation base: `omp2` at
 `868e20edb5e676a9a842835b9f06668e4cb62ef9`.
@@ -18,8 +18,11 @@ It imports and retains the full evidence closure through the
 existing session journal/CAS and checks integrity and exact applicability;
 execution/provenance truth remains host-admitted. [S4 native checks](16-native-checks-s4.md)
 connects explicit deterministic A1/C1 execution to retained evidence and opt-in
-ADW acceptance. Its compilation and joined-runtime validation are tracked in that
-note; source presence alone is not completion.
+ADW acceptance on the admitted Linux Bubblewrap profile. Its compilation and
+joined-runtime validation are tracked in that note; PR #658 is not yet merged.
+macOS needs scoped native execution enforcement and a joined proof before this
+provider may admit PASS there. Conservative impact analysis and focused review
+remain the subsequent S5 work, rather than implicit coverage of this slice.
 
 ## What the research establishes
 
