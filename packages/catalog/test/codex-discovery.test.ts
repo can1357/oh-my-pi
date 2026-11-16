@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { shouldSendServiceTier } from "@oh-my-pi/pi-ai/types";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { fetchCodexModels } from "@oh-my-pi/pi-catalog/discovery/codex";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -519,11 +520,72 @@ describe("Codex model discovery", () => {
 				"online",
 			);
 
-			expect(result.models.map(model => model.id)).toEqual(["gpt-5.3-codex-spark"]);
-			expect(result.models[0]).toMatchObject({
+			const ids = result.models.map(model => model.id);
+			// Chat ids absent from /codex/models are pruned; authored seeds are local labels and stay.
+			expect(ids).toEqual(["gpt-5.3-codex-spark", ...seedModels("openai-codex").map(seed => seed.id)]);
+			expect(result.models.find(model => model.id === "gpt-5.3-codex-spark")).toMatchObject({
 				contextWindow: 128_000,
 				maxTokens: 128_000,
 			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps authored seeds after successful authoritative discovery", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-seeds-"));
+		const absentChat: ModelSpec<"openai-codex-responses"> = {
+			id: "retired-chat",
+			name: "Retired chat",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		};
+		const seeds = seedModels("openai-codex");
+		const discoveredSeed = seeds.find(seed => seed.api === "openai-codex-responses");
+		if (!discoveredSeed) throw new Error("openai-codex has no Responses seed");
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					models: [
+						{ slug: "gpt-5.5", display_name: "GPT-5.5", supported_in_api: true, input_modalities: ["text"] },
+						{
+							slug: discoveredSeed.id,
+							display_name: "Discovered authored seed",
+							supported_in_api: true,
+							input_modalities: ["text", "image"],
+							context_window: 42_000,
+						},
+					],
+				}),
+			{ preconnect() {} },
+		);
+		try {
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [{ accessToken: "test-token" }],
+						fetch: fetchFn,
+					}),
+					staticModels: [absentChat],
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+			const ids = result.models.map(model => model.id);
+			expect(ids).toContain("gpt-5.5");
+			expect(ids).not.toContain("retired-chat");
+			for (const seed of seeds) {
+				expect(result.models.find(model => model.id === seed.id)?.api).toBe(seed.api);
+			}
+			const retained = result.models.filter(model => model.id === discoveredSeed.id);
+			expect(retained).toHaveLength(1);
+			expect(retained[0]).toMatchObject({ name: "Discovered authored seed", contextWindow: 42_000 });
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -787,7 +849,10 @@ describe("Codex model discovery", () => {
 				"online",
 			);
 
-			expect(result.models.map(model => model.id)).toEqual(["gpt-6-astra"]);
+			expect(result.models.map(model => model.id)).toEqual([
+				"gpt-6-astra",
+				...seedModels("openai-codex").map(seed => seed.id),
+			]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

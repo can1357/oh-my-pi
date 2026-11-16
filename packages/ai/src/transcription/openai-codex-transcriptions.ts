@@ -31,6 +31,7 @@ const DECODABLE_EXTENSIONS: Readonly<Record<string, true>> = {
 
 /** MIME spellings browsers report for containers the table names differently. */
 const MIME_ALIASES: Readonly<Record<string, string>> = {
+	"audio/aac": "audio/mp4",
 	"audio/m4a": "audio/mp4",
 	"audio/mp3": "audio/mpeg",
 	"audio/opus": "audio/ogg",
@@ -63,7 +64,9 @@ function uploadFileName(request: TranscriptionRequest): string {
 	) {
 		return name;
 	}
-	const container = declared ?? containerExtension(TRANSCRIPTION_AUDIO_MIME_TYPES[extension]);
+	const extensionMime = TRANSCRIPTION_AUDIO_MIME_TYPES[extension];
+	const normalizedExtensionMime = extensionMime ? (MIME_ALIASES[extensionMime] ?? extensionMime) : undefined;
+	const container = declared ?? containerExtension(normalizedExtensionMime);
 	return container ? `audio.${container}` : name;
 }
 

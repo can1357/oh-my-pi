@@ -101,6 +101,11 @@ describe("openai-codex-transcriptions transport", () => {
 		// Browser MIME aliases name their container: `audio/x-m4a` is M4A, `audio/mp3` and `audio/x-mp3` are MP3.
 		expect(await upload("blob", "audio/x-m4a")).toBe("audio.m4a");
 		expect(await upload("blob", "audio/mp3")).toBe("audio.mp3");
+		// AAC is a supported container, but the endpoint decodes it only from an MP4-style suffix.
+		expect(await upload("audio.aac", "audio/aac")).toBe("audio.m4a");
+		expect(await upload("blob", "audio/aac")).toBe("audio.m4a");
+		expect(await upload("blob", "audio/x-aac")).toBe("audio.m4a");
+		expect(await upload("voice.aac", "application/octet-stream")).toBe("audio.m4a");
 		expect(await upload("blob", "audio/x-mp3")).toBe("audio.mp3");
 		// A generic or missing MIME type leaves the container to a known suffix.
 		expect(await upload("voice.oga", "application/octet-stream")).toBe("audio.ogg");

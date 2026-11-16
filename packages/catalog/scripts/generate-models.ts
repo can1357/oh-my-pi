@@ -570,7 +570,12 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 		return [];
 	}
 	console.log(`Fetched ${models.length} models from Codex API`);
-	return [...models];
+	// Authored seeds are bundled from KDL, not evidence that /models returned a non-empty chat catalog.
+	const seedIds = new Set(seedModels("openai-codex").map(seed => seed.id));
+	return models.filter(
+		(model): model is ModelSpec<"openai-codex-responses"> =>
+			model.api === "openai-codex-responses" && !seedIds.has(model.id),
+	);
 }
 
 async function generateModels(selectedProvider?: string) {

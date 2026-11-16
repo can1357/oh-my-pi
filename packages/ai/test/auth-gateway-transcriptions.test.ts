@@ -216,6 +216,21 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 		expect(harness.upstream[0]?.audio).toEqual(AUDIO);
 	});
 
+	it("sends AAC JSON audio upstream with an MP4-style multipart suffix", async () => {
+		harness = await boot();
+		const response = await fetch(`${harness.url}/v1/audio/transcriptions`, {
+			method: "POST",
+			headers: gatewayHeaders("application/json"),
+			body: JSON.stringify({
+				model: "openai-codex/codex-transcribe",
+				input_audio: { data: AUDIO.toBase64(), format: "aac" },
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(harness.upstream[0]?.fileName).toBe("audio.m4a");
+	});
+
 	it("passes verbose transcript fields and timestamp controls through", async () => {
 		harness = await boot();
 		const form = new FormData();
