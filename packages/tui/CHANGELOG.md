@@ -15,6 +15,7 @@
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -59,6 +60,11 @@
 - Fixed table chart unit display and change-factor calculations for measurements with scaled units.
 - Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
 - Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
+- Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
+- Enter on a checkbox group with nothing checked checks the focused box before moving on
+
 
 ## [18.22.2] - 2026-11-18
 
@@ -152,14 +158,6 @@
 - Improved working-row animation while waiting for tools or models on terminals without synchronized output, including tmux 3.6.
 - Fixed expanded IRC tool cards to show complete soft-wrapped output and added an expand hint to collapsed cards containing hidden text.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the middle of the list.
-- Fixed asynchronous Bash commands switching to the raw command line instead of remaining visible in the interpreted shell view.
-- Improved rendering when switching to a subagent, resuming a session, or rebuilding a long transcript so the newest messages appear immediately without transient placeholder blocks.
-- Fixed Markdown task lists so completed and open items display distinct checkboxes in transcripts.
-- Fixed DEC 2048 in-band resize reports inserting terminal resize data into the composer on iTerm2.
-- Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
-- Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
-- Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
-- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
