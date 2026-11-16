@@ -624,6 +624,20 @@ Silent endpoints can inherit bundled-reference limits, reasoning, and input moda
 use 128,000 context and 32,768 output as generic chat defaults. Output caps are bounded by the resolved context;
 Anthropic-routed models use an 8,192-token fallback output cap.
 
+When neither configuration, discovery nor the catalog establishes reasoning support, thinking is
+**unverified**, not disabled. The first request with a thinking level (including the session default)
+runs small, separate capability probes before sending your turn. The requested level is tried first;
+all six levels are tested in parallel. If that format fails, alternate effort, toggle or token-budget
+formats are tried for the API. Probes contain only a fixed arithmetic question, never your conversation
+or tools. They add requests and latency on the first use of an unknown model.
+
+Accepted levels, request format and observed reasoning are saved in `models.db`, scoped to provider,
+API, endpoint and wire model ID. Later turns reuse the result and clamp unsupported levels. Positive
+results expire after 30 days; results with no reasoning controls expire after one day. Auth failures,
+rate limits, outages and timeouts are inconclusive and are not saved as lack of support. Parameter
+acceptance counts even if the provider returns no visible reasoning. Explicit capability settings,
+including `reasoning: false`, take precedence over probing.
+
 A row advertising only image output becomes an image-generation runner; embedding-only output
 becomes an embedding runner. `speech` as the only output becomes a `tts` runner on `openai-speech`,
 and `transcription` an `stt` runner on `openai-transcriptions`. Outputs come from the row's

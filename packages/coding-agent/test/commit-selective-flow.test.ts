@@ -108,6 +108,22 @@ describe("selective commit flow", () => {
 		expect(await Bun.file(path.join(root, "CHANGELOG.md")).text()).toContain("- Fixed the theme flicker");
 	});
 
+	it("syncs the shared index once another git process lets go of its lock", async () => {
+		const { root, journal } = await sharedWorkspace();
+		// A `git status` elsewhere holds `index.lock` while the commit is made. The lock is a real
+		// file the native index writer refuses to take, so only a real delay releases it mid-commit.
+		const lock = path.join(root, ".git", "index.lock");
+		await Bun.write(lock, "");
+		const released = Bun.sleep(250).then(() => fs.rm(lock));
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(draft, { subject: "fix: locked" }, { journal, agent: { agent: "Main" } });
+		await released;
+
+		expect(outcome.indexNotes).toEqual([]);
+		expect((await git(root, ["diff", "--cached", "--name-only"])).trim()).toBe("b.ts");
+	});
+
 	it("commits only one subagent's changes when scoped to it", async () => {
 		const { root, journal } = await sharedWorkspace();
 
