@@ -2,9 +2,38 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- SDK: `AgentSession` emits `agent_end` once per run (when nothing can resume it) and the new `agent_pause` event for a loop that stops mid-run; `hasPendingAsyncWork()`, `settleAsyncWork()` and `suppressAutoResumeUntilPrompt()` are replaced by `isRunActive`, `wakeSources` and `waitForRunEnd()`, and a user-interrupt `abort()` also ends a run paused on background work. The RPC and JSON print streams, the collab wire and extension `agent_end` keep their per-loop flagged shape
+
 ### Added
 
+- Added `task.agentPrewalkAuto` (agent name -> `on` / `off` / model pattern): the native judge decides per assignment at spawn whether a subagent arms prewalk, handing off to `prewalk.autoTarget` or the given target; unconditional subagent prewalk still wins ([#18913](https://github.com/can1357/oh-my-pi/pull/18913) by [@1vivy](https://github.com/1vivy))
+- Unknown custom and discovered models automatically probe reasoning support before the first thinking request and remember supported effort levels for future sessions.
+- An `<iframe>` in a reply is a live page in Tern (click to use it, Esc to return to the chat), and embed sources are read leniently: `localhost:3000`, `example.com/docs`, a bare or `~/` path, or a `file:` URL with the wrong slashes all load
+- The agent can show pictures and web pages in its replies: an `<img src>` line (a file, a `data:` URI or an http(s) URL) draws inline on terminals that show graphics, sized by `width`/`height` in px, %, vw, vh, ch or em, and an `<iframe src>` line shows one screenshot of the page with a `[Visit]` link; other terminals get a one-row linked note. `tui.renderEmbeds` turns it off
+- Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
+- `ask` form notes take pasted screenshots again: with a note open, `Ctrl+V` (`Alt+V` on Windows) or the terminal's own paste attaches the image, and it reaches the model after the answers as `[Image #N]`, described for text-only models ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+- `ui.formDialog` accepts `acceptImages`: option notes then take pasted images, returned in `OptionNote.images` with their `[Image #N]` markers ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
 - Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- Changed the default local text-to-speech model to Phonon 31M: faster synthesis, a smaller download, and new voices (Kokoro voice settings migrate automatically); the speaking-rate range is now 0.8–1.3×, and old Kokoro caches are removed after the first Phonon install
+- In Tern, `/btw` answers in a note in the transcript where you asked it instead of opening the BTW history sheet: click the note to send the composer's drafts to it as follow-ups (Esc returns to the chat), right-click it to copy, branch, inject or stop, and fold it to one line with its ×; notes come back folded when the transcript is rebuilt or the session resumed. `/btw` alone still opens the history
+- Bash calls that overlap a running or backgrounded call now carry the variables, functions, aliases, options and traps they set into the session's shell (the call that ends last wins a name both set), instead of discarding them with a "Ran in a copy of the busy session shell" notice on every overlapping call; background jobs they start are no longer killed when that copy is garbage-collected
+- Newly enabled extensions now load into the running session when `extensions` or `disabledExtensions` changes, instead of requiring a restart
+
+### Fixed
+
+- The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
+- Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
+- `/move` and resuming a session from another project now switch task agents, project extensions, custom tools, and MCP servers to the destination project without a restart ([#19416](https://github.com/can1357/oh-my-pi/pull/19416) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed resolving a `conflict://` region to an empty side (`@ours`, `@theirs` or `@both` with no lines) leaving a stray blank line, and a chosen side whose edge lines repeat the surrounding code losing those lines ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
+- Fixed MCP stdio servers that exit or are killed before responding being reported only as "closed stdout"; the error now names the exit code or signal ([#16482](https://github.com/can1357/oh-my-pi/pull/16482) by [@adi-IL](https://github.com/adi-IL))
+- Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
+- Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
+- Fixed prewalk handoffs overriding model or effort choices made mid-switch, and auto handoffs not returning to the planning model after `prewalk.auto` changed or `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 
 ## [18.20.3] - 2026-11-16
 
