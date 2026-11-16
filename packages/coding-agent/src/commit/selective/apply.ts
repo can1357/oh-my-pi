@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { ptree } from "@oh-my-pi/pi-utils";
 import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
@@ -71,20 +72,48 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
 		: repo.diffText({ base: head, files: [change.path], binary: true });
 }
 
+async function assertNoOperation(repo: VcsGitRepo, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
+	const { gitDir, repoRoot } = repo.info();
+	const entries = await fs.readdir(gitDir);
+	const operation = [
+		"MERGE_HEAD",
+		"CHERRY_PICK_HEAD",
+		"REVERT_HEAD",
+		"rebase-merge",
+		"rebase-apply",
+		"sequencer",
+	].find(name => entries.includes(name));
+	if (operation) {
+		throw new Error(
+			`Selective commits cannot run during an unfinished Git operation (${operation}); finish or abort it first.`,
+		);
+	}
+	const { stdout } = await ptree.exec(
+		["git", "--git-dir", gitDir, "--work-tree", repoRoot, "ls-files", "--unmerged", "-z"],
+		{ env: { ...process.env, GIT_INDEX_FILE: path.join(gitDir, "index") }, signal },
+	);
+	if (stdout) {
+		throw new Error("Selective commits cannot run with unmerged entries in the shared index; resolve them first.");
+	}
+}
+
 /**
  * Commit the draft's selection on top of the current HEAD.
- * @throws when nothing is selected; on `amend` when HEAD is not a selective commit of this
- * session; when HEAD moved onto changes that conflict with the selection; or when a hook fails.
+ * @throws during an unfinished Git operation or with an unmerged shared index; when nothing
+ * is selected; on `amend` when HEAD is not a selective commit of this session; when HEAD moved
+ * onto changes that conflict with the selection; or when a hook fails.
  */
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
+	const repo = vcs.requireGit(draft.root);
+	await assertNoOperation(repo, context.signal);
 	const message = composeMessage(request);
 	const changes = draft.selection();
 	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");
-	const repo = vcs.requireGit(draft.root);
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {
 		const patch = await patchFor(repo, draft.head, change);
@@ -108,6 +137,7 @@ export async function commitSelection(
 	try {
 		for (let attempt = 1; sha === undefined; attempt++) {
 			context.signal?.throwIfAborted();
+			if (attempt > 1) await assertNoOperation(repo, context.signal);
 			const head = (await repo.headSha(context.signal)) ?? null;
 			if (ownCommits && (head === null || !ownCommits.has(head))) {
 				throw new Error(`HEAD ${shortSha(head)} was not made by this session's commit flow; refusing to amend it.`);
@@ -127,6 +157,7 @@ export async function commitSelection(
 					`HEAD moved from ${shortSha(draft.head)} to ${shortSha(head)}, which changed ${blocked.join(", ") || "selected paths"}; build a new draft.`,
 				);
 			}
+			await assertNoOperation(repo, context.signal);
 			try {
 				sha = await repo.commitCreate(
 					message,

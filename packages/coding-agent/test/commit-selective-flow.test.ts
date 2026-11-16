@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -79,7 +79,93 @@ async function sharedWorkspace() {
 	return { root, journal, head };
 }
 
+async function operationWorkspace(linked: boolean) {
+	const { root, journal } = await emptyRepo();
+	await Bun.write(path.join(root, "conflicted.txt"), "base\n");
+	await git(root, ["add", "."]);
+	await git(root, ["commit", "-q", "-m", "base"]);
+	await git(root, ["checkout", "-q", "-b", "side"]);
+	await Bun.write(path.join(root, "conflicted.txt"), "side\n");
+	await git(root, ["commit", "-q", "-am", "side"]);
+	await git(root, ["checkout", "-q", "main"]);
+	await Bun.write(path.join(root, "conflicted.txt"), "main\n");
+	await git(root, ["commit", "-q", "-am", "main"]);
+	let checkout = root;
+	if (linked) {
+		checkout = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-linked-"));
+		tempDirs.push(checkout);
+		await git(root, ["worktree", "add", "-q", "-b", "linked", checkout, "main"]);
+	}
+	const selected = path.join(checkout, "selected.txt");
+	await Bun.write(selected, "selected\n");
+	journal.recordChange({ agent: "Main", tool: "write", path: selected, before: null, after: "selected\n" });
+	await journal.flush();
+	const draft = await createDraft({ cwd: checkout, journal, caller: "Main" });
+	return { root: checkout, journal, draft };
+}
+
 describe("selective commit flow", () => {
+	for (const scenario of [
+		{ name: "conflicted merge", args: ["merge", "side"], linked: false, resolved: false, orphan: false },
+		{ name: "resolved but uncommitted merge", args: ["merge", "side"], linked: false, resolved: true, orphan: false },
+		{ name: "linked worktree merge", args: ["merge", "side"], linked: true, resolved: false, orphan: false },
+		{ name: "orphan unmerged index", args: ["merge", "side"], linked: false, resolved: false, orphan: true },
+		{ name: "active rebase", args: ["rebase", "side"], linked: false, resolved: true, orphan: false },
+		{ name: "active cherry-pick", args: ["cherry-pick", "side"], linked: false, resolved: true, orphan: false },
+		{ name: "active revert", args: ["revert", "--no-edit", "side"], linked: false, resolved: true, orphan: false },
+	]) {
+		it(`refuses commits during a ${scenario.name} without changing state or running hooks`, async () => {
+			const { root, journal, draft } = await operationWorkspace(scenario.linked);
+			await expect(git(root, scenario.args)).rejects.toThrow(/failed \(1\)/);
+			expect(await git(root, ["ls-files", "--unmerged"])).toContain("conflicted.txt");
+			const gitDir = (await git(root, ["rev-parse", "--absolute-git-dir"])).trim();
+			if (scenario.resolved) {
+				await Bun.write(path.join(root, "conflicted.txt"), "resolved\n");
+				await git(root, ["add", "conflicted.txt"]);
+				expect(await git(root, ["ls-files", "--unmerged"])).toBe("");
+			}
+			if (scenario.orphan) await fs.rm(path.join(gitDir, "MERGE_HEAD"));
+			const hooks = path.join(journal.dir, "hooks");
+			const hookMarker = path.join(journal.dir, "hook-ran");
+			await fs.mkdir(hooks);
+			await git(root, ["config", "core.hooksPath", hooks]);
+			for (const hook of ["pre-commit", "commit-msg", "post-commit"]) {
+				const hookPath = path.join(hooks, hook);
+				await fs.writeFile(hookPath, `#!/bin/sh\nprintf '%s\\n' '${hook}' >> '${hookMarker}'\n`, { mode: 0o755 });
+			}
+			const headBefore = await git(root, ["rev-parse", "HEAD"]);
+			const indexBefore = await fs.readFile(path.join(gitDir, "index"));
+			const mergeHeadBefore = await fs.readFile(path.join(gitDir, "MERGE_HEAD")).catch(() => null);
+			const metadataBefore = (await fs.readdir(gitDir)).sort();
+			const worktreeBefore = await Promise.all(
+				["conflicted.txt", "selected.txt"].map(file => fs.readFile(path.join(root, file))),
+			);
+			const journalPath = path.join(journal.dir, "changes.jsonl");
+			const journalBefore = await fs.readFile(journalPath);
+			const selection = spyOn(draft, "selection");
+			const recordCommit = spyOn(journal, "recordCommit");
+			try {
+				await expect(
+					commitSelection(draft, { subject: "fix: selected" }, { journal, agent: { agent: "Main" } }),
+				).rejects.toThrow(scenario.orphan ? /unmerged entries in the shared index/ : /unfinished Git operation/);
+				expect(selection).not.toHaveBeenCalled();
+				expect(recordCommit).not.toHaveBeenCalled();
+			} finally {
+				selection.mockRestore();
+				recordCommit.mockRestore();
+			}
+			expect(await git(root, ["rev-parse", "HEAD"])).toBe(headBefore);
+			expect(await fs.readFile(path.join(gitDir, "index"))).toEqual(indexBefore);
+			expect(await fs.readFile(path.join(gitDir, "MERGE_HEAD")).catch(() => null)).toEqual(mergeHeadBefore);
+			expect((await fs.readdir(gitDir)).sort()).toEqual(metadataBefore);
+			expect(
+				await Promise.all(["conflicted.txt", "selected.txt"].map(file => fs.readFile(path.join(root, file)))),
+			).toEqual(worktreeBefore);
+			expect(await fs.readFile(journalPath)).toEqual(journalBefore);
+			expect(await Bun.file(hookMarker).exists()).toBe(false);
+		});
+	}
+
 	it("commits the agent tree's lines and leaves the user's staged and unstaged work alone", async () => {
 		const { root, journal, head } = await sharedWorkspace();
 		const worktreeBefore = await git(root, ["diff", "HEAD"]);
@@ -106,6 +192,24 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["diff", "--name-only"])).toBe("CHANGELOG.md\n");
 		expect(worktreeBefore).toContain("Fixed the theme flicker");
 		expect(await Bun.file(path.join(root, "CHANGELOG.md")).text()).toContain("- Fixed the theme flicker");
+	});
+
+	it("amends a session's selective commit without consuming other staged changes", async () => {
+		const { root, journal, head } = await sharedWorkspace();
+		const first = await createDraft({ cwd: root, journal, caller: "Main" });
+		await commitSelection(first, { subject: "fix: first" }, { journal, agent: { agent: "Main" } });
+		const file = path.join(root, "a.ts");
+		const before = await Bun.file(file).text();
+		const after = "export const a = 3;\n";
+		await Bun.write(file, after);
+		journal.recordChange({ agent: "Main", tool: "edit", path: file, before, after });
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await commitSelection(draft, { subject: "fix: amended", amend: true }, { journal, agent: { agent: "Main" } });
+		expect((await git(root, ["rev-parse", "HEAD^"])).trim()).toBe(head);
+		expect(await git(root, ["show", "HEAD:a.ts"])).toBe(after);
+		expect(await git(root, ["show", ":b.ts"])).toBe("export const b = 2;\n");
+		expect((await git(root, ["diff", "--cached", "--name-only"])).trim()).toBe("b.ts");
 	});
 
 	it("commits only one subagent's changes when scoped to it", async () => {
