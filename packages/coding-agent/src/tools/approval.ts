@@ -868,16 +868,23 @@ function approvalGrantChoices(
  * keeps its room), else a select with the full prompt (RPC, ACP, extension hosts). `appendix`
  * lines follow the prompt on both. With a `sessionSubject`, both also offer to approve that
  * subject for the rest of the session; with `grants`, both offer the `always-ask-cached` grants
- * the call can record, and the prompt lists the folder a directory grant would cover. Anything
- * but an explicit approval is `deny`.
+ * the call can record, and the prompt lists the folder a directory grant would cover. `signal`
+ * (the call's abort signal) closes the prompt, so aborting the turn never waits on a prompt
+ * nobody can see or answer. Anything but an explicit approval is `deny`.
  */
 export async function requestApproval(
 	ui: Pick<ExtensionUIContext, "select" | "approve">,
 	tool: ApprovalSubject,
 	args: unknown,
-	options: { reason?: string; appendix?: readonly string[]; sessionSubject?: string; grants?: boolean } = {},
+	options: {
+		reason?: string;
+		appendix?: readonly string[];
+		sessionSubject?: string;
+		grants?: boolean;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<ExtensionApprovalAnswer> {
-	const { reason, appendix = [], sessionSubject } = options;
+	const { reason, appendix = [], sessionSubject, signal } = options;
 	const header = approvalHeader(tool, reason);
 	const details = approvalDetails(tool, args);
 	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
@@ -887,6 +894,7 @@ export async function requestApproval(
 	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
 	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
 	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
+	const dialogOptions = signal ? { signal } : undefined;
 	if (ui.approve) {
 		const summary = approvalSummary(details);
 		const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
@@ -896,12 +904,15 @@ export async function requestApproval(
 			...(compactBlock ? [compactBlock] : []),
 			...appendix,
 		].join("\n");
-		const answer = await ui.approve({
-			full,
-			compact,
-			...(session ? { session } : {}),
-			...(grants.length > 0 ? { grants } : {}),
-		});
+		const answer = await ui.approve(
+			{
+				full,
+				compact,
+				...(session ? { session } : {}),
+				...(grants.length > 0 ? { grants } : {}),
+			},
+			dialogOptions,
+		);
 		if (answer === "once" || (answer === "session" && session)) return answer;
 		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
 			return { grant: answer.grant, always: answer.always === true };
@@ -909,7 +920,7 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
+	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices), dialogOptions));
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */
