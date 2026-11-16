@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Ending a goal now keeps extension tools registered or enabled while the goal was active.
+
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes

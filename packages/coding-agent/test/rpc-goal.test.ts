@@ -504,6 +504,21 @@ describe("RpcGoalController continuation gate", () => {
 						updatedAt: 0,
 					},
 				}),
+				pauseGoal: async () => {
+					if (goalState)
+						goalState = { ...goalState, enabled: false, goal: { ...goalState.goal, status: "paused" } };
+				},
+				resumeGoal: async () => {
+					if (!goalState) throw new Error("No goal");
+					return { ...goalState, enabled: true, goal: { ...goalState.goal, status: "active" as const } };
+				},
+				dropGoal: async () => {
+					goalState = undefined;
+					controller.observe({
+						type: "goal_updated",
+						state: { goal: { status: "dropped" } },
+					} as AgentSessionEvent);
+				},
 			},
 			promptCustomMessage: (message: { customType: string }) => admit(message.customType),
 			waitForIdle: () => idle.promise,
@@ -535,6 +550,85 @@ describe("RpcGoalController continuation gate", () => {
 			release: () => idle.resolve(),
 		};
 	}
+
+	test("completion removes only controller-added goal and retains a late-enabled tool", async () => {
+		const f = fakeSession(async () => true);
+		f.session.setGoalModeState(undefined);
+		await f.controller.handle({ op: "create", objective: "finish" });
+		expect(f.tools()).toEqual(["read", "goal"]);
+		await f.session.setActiveToolsByName(["read", "goal", "extension"]);
+		const current = f.session.getGoalModeState();
+		f.session.setGoalModeState(current && { ...current, enabled: false, mode: "exiting", reason: "completed" });
+		f.controller.observe(agentEnd);
+		await f.controller.settled();
+		expect(f.tools()).toEqual(["read", "extension"]);
+	});
+
+	test("pause and drop retain late-enabled tools, including across resume", async () => {
+		const f = fakeSession(async () => true);
+		f.session.setGoalModeState(undefined);
+		await f.controller.handle({ op: "create", objective: "finish" });
+		await f.session.setActiveToolsByName(["read", "goal", "extension"]);
+		await f.controller.handle({ op: "pause" });
+		expect(f.tools()).toEqual(["read", "extension"]);
+		await f.controller.handle({ op: "resume" });
+		expect(f.tools()).toEqual(["read", "extension", "goal"]);
+		await f.controller.handle({ op: "drop" });
+		expect(f.tools()).toEqual(["read", "extension"]);
+	});
+
+	test("a goal already enabled by the host survives completion, pause, drop, and reattach", async () => {
+		const f = fakeSession(async () => true);
+		await f.session.setActiveToolsByName(["read", "goal"]);
+		f.session.setGoalModeState(undefined);
+		await f.controller.handle({ op: "create", objective: "finish" });
+		await f.session.setActiveToolsByName(["read", "goal", "extension"]);
+		await f.controller.handle({ op: "pause" });
+		expect(f.tools()).toEqual(["read", "goal", "extension"]);
+		await f.controller.handle({ op: "resume" });
+		await f.controller.handle({ op: "drop" });
+		expect(f.tools()).toEqual(["read", "goal", "extension"]);
+		await f.controller.handle({ op: "create", objective: "again" });
+		const current = f.session.getGoalModeState();
+		f.session.setGoalModeState(current && { ...current, enabled: false, mode: "exiting", reason: "completed" });
+		f.controller.observe(agentEnd);
+		await f.controller.settled();
+		expect(f.tools()).toEqual(["read", "goal", "extension"]);
+		f.journalGoal();
+		await f.controller.reconcile();
+		expect(f.tools()).toEqual(["read", "goal", "extension"]);
+		await f.controller.beginSessionChange();
+		f.transcript.id = "t2";
+		await f.controller.endSessionChange();
+		await f.controller.settled();
+		expect(f.tools()).toEqual(["read", "goal", "extension"]);
+	});
+
+	test("reattach removes an owned goal without resetting extension tools", async () => {
+		const f = fakeSession(async () => true);
+		f.session.setGoalModeState(undefined);
+		await f.controller.handle({ op: "create", objective: "finish" });
+		await f.session.setActiveToolsByName(["read", "goal", "extension"]);
+		await f.controller.beginSessionChange();
+		f.transcript.id = "t2";
+		await f.controller.endSessionChange();
+		await f.controller.settled();
+		expect(f.tools()).toEqual(["read", "extension"]);
+	});
+
+	test("an agent-created goal does not claim an already enabled goal tool", async () => {
+		const f = fakeSession(async () => true);
+		await f.session.setActiveToolsByName(["read", "goal", "extension"]);
+		f.controller.observe({
+			type: "goal_updated",
+			state: f.goalState(),
+		} as AgentSessionEvent);
+		const current = f.session.getGoalModeState();
+		f.session.setGoalModeState(current && { ...current, enabled: false, mode: "exiting", reason: "completed" });
+		f.controller.observe(agentEnd);
+		await f.controller.settled();
+		expect(f.tools()).toEqual(["read", "goal", "extension"]);
+	});
 
 	test("a continuation decided before the session closes is never admitted after it", async () => {
 		const admitted: string[] = [];

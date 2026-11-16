@@ -207,6 +207,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 
 		await harness.mode.handleGoalModeCommand("Ship the release");
+		expect(harness.session.getEnabledToolNames()).not.toContain("todo");
 
 		expect(harness.mode.goalModeEnabled).toBe(true);
 		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
@@ -219,6 +220,49 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModePaused).toBe(true);
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("paused");
 		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(harness.session.getEnabledToolNames()).not.toContain("todo");
+	});
+
+	it("does not disable a goal tool already enabled before goal entry", async () => {
+		await harness.session.setActiveToolsByName(["read", "goal"]);
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue("Pause");
+
+		await harness.mode.handleGoalModeCommand();
+
+		expect(harness.session.getEnabledToolNames()).toContain("goal");
+		expect(harness.session.getEnabledToolNames()).not.toContain("todo");
+	});
+
+	it("keeps a tool enabled after it registers during a goal and the goal pauses", async () => {
+		const lateTool = harness.toolRegistry.get("todo");
+		if (!lateTool) throw new Error("expected todo tool");
+		harness.toolRegistry.delete("todo");
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.toolRegistry.set("todo", lateTool);
+		await harness.session.setActiveToolsByName([...harness.session.getEnabledToolNames(), "todo"]);
+		expect(harness.session.getEnabledToolNames()).toContain("todo");
+
+		vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue("Pause");
+		await harness.mode.handleGoalModeCommand();
+
+		expect(harness.session.getEnabledToolNames()).toContain("todo");
+		expect(harness.session.getEnabledToolNames()).not.toContain("goal");
+		expect(harness.session.getToolForEvalBridge("todo")).toBeDefined();
+	});
+
+	it("preserves tools enabled or disabled during a goal when it is dropped", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		await harness.session.setActiveToolsByName(["goal", "todo"]);
+		expect(harness.session.getEnabledToolNames()).toContain("todo");
+		expect(harness.session.getEnabledToolNames()).not.toContain("read");
+
+		vi.spyOn(harness.mode, "showHookConfirm").mockResolvedValue(true);
+		await harness.mode.handleGoalModeCommand("drop");
+
+		expect(harness.session.getEnabledToolNames()).toContain("todo");
+		expect(harness.session.getEnabledToolNames()).not.toContain("read");
+		expect(harness.session.getEnabledToolNames()).not.toContain("goal");
 	});
 
 	it("replaces the active goal via /goal set", async () => {
@@ -702,6 +746,7 @@ describe("InteractiveMode goal mode integration", () => {
 	it("returns the completion report from the goal tool and exits goal mode before the next turn rebuild", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		await harness.mode.handleGoalModeCommand("budget 50");
+		await harness.session.setActiveToolsByName([...harness.session.getEnabledToolNames(), "todo"]);
 		const appendCustomEntry = vi.spyOn(harness.session.sessionManager, "appendCustomEntry");
 		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
 			tool => tool.name === "goal",
@@ -735,6 +780,8 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModePaused).toBe(false);
 		expect(harness.session.getGoalModeState()).toBeUndefined();
 		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(harness.session.getEnabledToolNames()).toContain("todo");
+		expect(harness.session.getToolForEvalBridge("todo")).toBeDefined();
 		expect(appendCustomEntry).toHaveBeenCalledWith(
 			"goal-completed",
 			expect.objectContaining({

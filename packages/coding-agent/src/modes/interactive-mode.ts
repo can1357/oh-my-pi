@@ -1816,7 +1816,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Header components below the config warnings + welcome (the startup changelog), retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
-	#goalModePreviousTools: string[] | undefined;
+	#goalModeAddedTool: boolean | undefined;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
 	// tool use means it was abandoned for real work), the kickoff fails, or the
@@ -5720,7 +5720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (event.type === "goal_updated") {
 			if (event.state) this.#guidedGoalInterviewActive = false;
 			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
-			// still restore the previous tool set while the flag is true.
+			// remove the goal tool while the flag is still true.
 			if (event.state?.goal?.status === "dropped") {
 				await this.#exitGoalMode({ reason: "dropped", silent: true });
 				return;
@@ -5886,13 +5886,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
+			if (this.#goalModeAddedTool) {
+				await this.session.setActiveToolsByName(this.session.getEnabledToolNames().filter(name => name !== "goal"));
 			}
 			this.session.setGoalModeState(undefined);
 			this.goalModeEnabled = false;
 			this.goalModePaused = false;
-			this.#goalModePreviousTools = undefined;
+			this.#goalModeAddedTool = undefined;
 			this.#pendingGoalContinuationTurns = 0;
 			this.#previousGoalContinuationActivity = undefined;
 			this.#goalSuppressNextContinuation = false;
@@ -5978,9 +5978,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
 			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
-				this.#goalModePreviousTools = previousTools;
-				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+				const enabledTools = this.session.getEnabledToolNames();
+				this.#goalModeAddedTool = !enabledTools.includes("goal");
+				if (this.#goalModeAddedTool) await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
 			this.#updateGoalModeStatus();
 			return;
@@ -6293,9 +6293,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
-		const goalTools = [...new Set([...previousTools, "goal"])];
-		this.#goalModePreviousTools = previousTools;
+		const enabledTools = this.session.getEnabledToolNames();
+		const addedTool = this.#goalModeAddedTool ?? !enabledTools.includes("goal");
+		const previousAddedTool = this.#goalModeAddedTool;
+		this.#goalModeAddedTool = addedTool;
 		let state: GoalModeState | undefined;
 		try {
 			state = options.resume
@@ -6304,9 +6305,12 @@ export class InteractiveMode implements InteractiveModeContext {
 						objective: options.objective ?? "",
 						tokenBudget: options.tokenBudget,
 					});
-			await this.session.setActiveToolsByName(goalTools);
+			const currentTools = this.session.getEnabledToolNames();
+			if (addedTool && !currentTools.includes("goal")) {
+				await this.session.setActiveToolsByName([...currentTools, "goal"]);
+			}
 		} catch (error) {
-			this.#goalModePreviousTools = undefined;
+			this.#goalModeAddedTool = previousAddedTool;
 			// The runtime already journaled the goal; without its tool it must not
 			// stay active, or every later entry is refused against a stuck goal.
 			if (state) {
@@ -6336,11 +6340,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
 		using _hold = this.#holdModeChanges();
-		const previousTools = this.#goalModePreviousTools;
 		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
 		// before this runs, which used to leave the goal tool active.
-		if (previousTools) {
-			await this.session.setActiveToolsByName(previousTools);
+		if (this.#goalModeAddedTool) {
+			await this.session.setActiveToolsByName(this.session.getEnabledToolNames().filter(name => name !== "goal"));
 		}
 		const currentState = this.session.getGoalModeState();
 		if (options?.reason === "completed") {
@@ -6355,7 +6358,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.goalModeEnabled = false;
 		this.goalModePaused = options?.paused ?? false;
-		this.#goalModePreviousTools = undefined;
+		this.#goalModeAddedTool = undefined;
 		this.#pendingGoalContinuationTurns = 0;
 		this.#previousGoalContinuationActivity = undefined;
 		this.#goalSuppressNextContinuation = false;
@@ -7420,12 +7423,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
+			// calling `goal create`. Keep ownership through the tool-driven create.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
-			if (!enabledTools.includes("goal")) {
+			this.#goalModeAddedTool = !enabledTools.includes("goal");
+			if (this.#goalModeAddedTool) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
 			this.#guidedGoalInterviewActive = true;

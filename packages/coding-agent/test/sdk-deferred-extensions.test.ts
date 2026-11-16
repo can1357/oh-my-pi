@@ -4,21 +4,23 @@
  * tests pin the two halves of that contract: which sources may defer, and that
  * a deferred source ends up as live as an eagerly loaded one.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
 	partitionStartupExtensions,
 	recordStartupVerdicts,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/startup-deferral";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -30,6 +32,7 @@ const DEFERRED_TOOL_EXTENSION = (logPath: string) => `
 			name: "deferred_probe",
 			label: "Deferred probe",
 			description: "Registered by a startup-deferred extension.",
+			loadMode: "essential",
 			parameters: Type.Object({}),
 			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
 		});
@@ -41,15 +44,19 @@ describe("startup-deferred extensions", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		resetSettingsForTest();
 		tempDir = TempDir.createSync("@omp-deferred-ext-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = createInMemoryAuthStorage();
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		AgentStorage.close();
 		authStorage.close();
 		tempDir.removeSync();
+		resetSettingsForTest();
 	});
 
 	it("defers only sources whose recorded verdict matches their current file", async () => {
@@ -95,7 +102,7 @@ describe("startup-deferred extensions", () => {
 		});
 	});
 
-	it("binds a deferred extension into the live session and replays session_start to it alone", async () => {
+	it("keeps a deferred essential extension tool dispatchable after a startup goal pauses", async () => {
 		const logPath = path.join(tempDir.path(), "session-start.log");
 		const eagerPath = path.join(tempDir.path(), "eager.ts");
 		const deferredPath = path.join(tempDir.path(), "deferred.ts");
@@ -115,7 +122,7 @@ describe("startup-deferred extensions", () => {
 			agentDir: tempDir.path(),
 			sessionManager: SessionManager.inMemory(),
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "goal.enabled": true }),
 			eventBus,
 			preloadedExtensions: preloaded,
 			deferredExtensionPaths: [deferredPath],
@@ -131,20 +138,28 @@ describe("startup-deferred extensions", () => {
 			toolNames: ["read"],
 		});
 
+		initTheme();
+		const mode = new InteractiveMode(session, "test");
 		try {
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("expected an extension runner");
 			await runner.emit({ type: "session_start" });
 			expect(session.getAllToolNames()).not.toContain("deferred_probe");
-
+			vi.spyOn(session, "prompt").mockResolvedValue(true);
+			await mode.startGoalAtStartup("Inspect the importer");
 			await session.loadDeferredExtensions();
-
 			expect(session.getAllToolNames()).toContain("deferred_probe");
 			expect(session.getEnabledToolNames()).toContain("deferred_probe");
 			expect(fs.readFileSync(logPath, "utf8")).toBe("eager\ndeferred\n");
-			// Subagents and forks inherit the deferred source like an eager one.
 			expect(session.extensionPaths).toContain(deferredPath);
+			await mode.handleGoalModeCommand("pause");
+			expect(session.getEnabledToolNames()).not.toContain("goal");
+			expect(session.getEnabledToolNames()).toContain("deferred_probe");
+			const tool = session.getToolForEvalBridge("deferred_probe");
+			if (!tool) throw new Error("deferred extension tool is no longer dispatchable");
+			expect((await tool.execute("call-1", {})).content).toEqual([{ type: "text", text: "ok" }]);
 		} finally {
+			mode.stop();
 			await session.dispose();
 		}
 	});
