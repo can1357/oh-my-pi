@@ -2,12 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
+
 ## [18.22.0] - 2026-11-16
 
 ### Fixed
 
-- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
-- Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
 - Fixed slow streaming of Gemma tool calls with large arguments.
 
 ## [18.21.0] - 2026-11-16
