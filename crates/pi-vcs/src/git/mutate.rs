@@ -637,6 +637,19 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git write blob", err))
 	}
 
+	/// Store the bytes of a regular worktree file at `path` as the blob
+	/// `git add` would. Clean filters run on `bytes`. The file at `path` is
+	/// not opened, so a later edit of the worktree cannot change the result.
+	pub fn write_worktree_blob(&self, path: &str, bytes: &[u8]) -> Result<String> {
+		let repo = self.gix()?;
+		let mut filter = WorktreeFilter::staging(&repo, "git write worktree blob")?;
+		let stored = filter.worktree_to_git(path, bytes.to_vec())?;
+		repo
+			.write_blob(&stored)
+			.map(|id| id.detach().to_hex().to_string())
+			.map_err(|err| Error::backend("git write worktree blob", err))
+	}
+
 	/// Write an index as a tree object and return its object id.
 	pub fn write_tree(&self, index_path: Option<&Path>) -> Result<String> {
 		let repo = self.gix()?;

@@ -1076,7 +1076,25 @@ impl VcsGitRepo {
 	/// Write bytes as a blob and return its full object id.
 	#[napi]
 	pub fn write_blob(&self, data: Uint8Array, signal: Option<Unknown>) -> Promise<String> {
+		// Copied on this thread: the worker must not read the caller's buffer.
+		let data = data.to_vec();
 		blocking("vcs.writeBlob", self.inner.clone(), signal, move |r| r.write_blob(&data))
+	}
+
+	/// Store regular-file worktree bytes as the blob `git add` would.
+	/// Clean filters run on `data`; the worktree file is not read.
+	#[napi]
+	pub fn write_worktree_blob(
+		&self,
+		path: String,
+		data: Uint8Array,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		// Copied on this thread: the worker must not read the caller's buffer.
+		let data = data.to_vec();
+		blocking("vcs.writeWorktreeBlob", self.inner.clone(), signal, move |repo| {
+			repo.write_worktree_blob(&path, &data)
+		})
 	}
 
 	/// Read commit and patch bytes.

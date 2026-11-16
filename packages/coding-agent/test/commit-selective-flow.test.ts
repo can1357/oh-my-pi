@@ -1,8 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { commitSelection } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
@@ -15,9 +14,14 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
-async function git(cwd: string, args: string[]): Promise<string> {
+async function git(cwd: string, args: string[], input?: Uint8Array): Promise<string> {
 	const env = { ...process.env, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
-	const proc = Bun.spawn(["git", "-C", cwd, ...args], { env, stdout: "pipe", stderr: "pipe" });
+	const proc = Bun.spawn(["git", "-C", cwd, ...args], {
+		env,
+		...(input === undefined ? {} : { stdin: input }),
+		stdout: "pipe",
+		stderr: "pipe",
+	});
 	const [out, err, code] = await Promise.all([
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
@@ -348,26 +352,52 @@ describe("selective commit flow", () => {
 		expect([...(await gitBlob(root, "HEAD:added.bin"))]).toEqual([0, 1, 2]);
 	});
 
-	it("does not render patches for whole files while drafting", async () => {
+	it("commits clean-filtered whole files from the bytes captured at draft time", async () => {
 		const { root, journal } = await emptyRepo();
-		await Bun.write(path.join(root, "seed.txt"), "seed\n");
+		const scriptDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clean-filter-"));
+		tempDirs.push(scriptDir);
+		const script = path.join(scriptDir, "clean.sh");
+		// logo.bin stands in for a Git LFS file: the clean filter turns captured bytes into a pointer.
+		// wide.dat is not valid UTF-8, so it is committed whole, and its attribute turns CRLF into LF.
+		await Bun.write(script, "#!/bin/sh\nprintf 'pointer:'\ncat\n");
+		await git(root, ["config", "filter.asset.clean", `sh ${script}`]);
+		await git(root, ["config", "filter.asset.required", "true"]);
+		await Bun.write(path.join(root, ".gitattributes"), "*.bin filter=asset\nwide.dat text eol=lf\n");
+		await Bun.write(path.join(root, "logo.bin"), Buffer.from([0, 1]));
+		await Bun.write(
+			path.join(root, "wide.dat"),
+			Buffer.concat([Buffer.from("a\r\nb\r\n"), Buffer.from([0xff])]),
+		);
 		await git(root, ["add", "."]);
 		await git(root, ["commit", "-q", "-m", "seed"]);
-		await Bun.write(path.join(root, "selected.bin"), Buffer.from([0, 1]));
-		await Bun.write(path.join(root, "unselected.bin"), Buffer.from([0, 2]));
 
-		const diffText = vi.spyOn(VcsGitRepo.prototype, "diffText");
-		const diffNoIndex = vi.spyOn(VcsGitRepo.prototype, "diffNoIndex");
-		try {
-			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
-			draft.take({ path: "selected.bin" });
-			// Untracked whole files used to be rendered in full here, including the
-			// unselected one. Drafting must only snapshot their bytes.
-			expect(diffText).not.toHaveBeenCalled();
-			expect(diffNoIndex).not.toHaveBeenCalled();
-		} finally {
-			vi.restoreAllMocks();
-		}
+		const draftedLogo = Buffer.from([0, 2, 2, 2]);
+		const draftedWide = Buffer.concat([Buffer.from("c\r\nd\r\n"), Buffer.from([0xff])]);
+		await Bun.write(path.join(root, "logo.bin"), draftedLogo);
+		await Bun.write(path.join(root, "wide.dat"), draftedWide);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "logo.bin" });
+		draft.take({ path: "wide.dat" });
+
+		const laterLogo = Buffer.from([0, 9, 9, 9, 9]);
+		const laterWide = Buffer.concat([Buffer.from("z\r\nz\r\n"), Buffer.from([0xff])]);
+		await Bun.write(path.join(root, "logo.bin"), laterLogo);
+		await Bun.write(path.join(root, "wide.dat"), laterWide);
+
+		const outcome = await commitSelection(draft, { subject: "chore: assets" }, { journal, agent: { agent: "Main" } });
+
+		const stored = async (file: string) => (await git(root, ["rev-parse", `HEAD:${file}`])).trim();
+		const filtered = async (file: string, bytes: Buffer) =>
+			(await git(root, ["hash-object", `--path=${file}`, "--stdin"], bytes)).trim();
+		const raw = async (bytes: Buffer) => (await git(root, ["hash-object", "--stdin"], bytes)).trim();
+		const filteredLogo = await filtered("logo.bin", draftedLogo);
+		const filteredWide = await filtered("wide.dat", draftedWide);
+		expect(filteredLogo).not.toBe(await raw(draftedLogo));
+		expect(filteredWide).not.toBe(await raw(draftedWide));
+		expect(await filtered("logo.bin", laterLogo)).not.toBe(filteredLogo);
+		expect(await filtered("wide.dat", laterWide)).not.toBe(filteredWide);
+		expect(outcome.paths).toEqual(["logo.bin", "wide.dat"]);
+		expect([await stored("logo.bin"), await stored("wide.dat")]).toEqual([filteredLogo, filteredWide]);
 	});
 
 	it("refuses a whole-file commit when a newer commit changed that file", async () => {

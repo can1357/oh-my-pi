@@ -417,6 +417,8 @@ async function loadFile(
 	};
 	// Freeze the bytes just read, not a rendered patch: drafts retain only a blob id,
 	// and selected paths render from the object database when the commit is built.
+	// Regular files are stored as `git add` would store them. Clean filters run on
+	// these bytes and the worktree file is not read again. Symlink targets stay literal.
 	const whole = async (reason: WholeReason): Promise<FileChange> => {
 		let before: WholeFileState | null = null;
 		if (head.sha !== null && head.mode !== null) {
@@ -427,7 +429,11 @@ async function loadFile(
 		let after: WholeFileState | null = null;
 		if (mode !== null) {
 			if (workBytes === null) throw new Error(`Could not capture ${file} for the draft.`);
-			after = { id: await repo.writeBlob(workBytes, signal), mode };
+			const id =
+				mode === SYMLINK_MODE
+					? await repo.writeBlob(workBytes, signal)
+					: await repo.writeWorktreeBlob(file, workBytes, signal);
+			after = { id, mode };
 		}
 		return {
 			...base,

@@ -859,6 +859,11 @@ export declare class VcsGitRepo {
   showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
   /** Write bytes as a blob and return its full object id. */
   writeBlob(data: Uint8Array, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Store regular-file worktree bytes as the blob `git add` would.
+   * Clean filters run on `data`; the worktree file is not read.
+   */
+  writeWorktreeBlob(path: string, data: Uint8Array, signal?: unknown | undefined | null): Promise<string>
   /** Read commit and patch bytes. */
   showCommit(rev: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
   /** Local LFS media directory. */
