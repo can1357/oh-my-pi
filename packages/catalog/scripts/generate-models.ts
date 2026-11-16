@@ -96,9 +96,10 @@ const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova", "otari", "mod
  * Providers whose authored seed is the complete documented fallback
  * catalog: their previous-snapshot rows are never resurrected, so an id
  * the host retired (e.g. CoralBricks' GLM 5.3 Flash, 2026-10-07) cannot
- * return as a previous-snapshot zombie.
+ * return as a previous-snapshot zombie. `local` lists exactly the on-device
+ * workers this build ships, so a replaced one (Kokoro → Phonon) drops out.
  */
-const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
+const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks", "local"]);
 
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PhononTts` binding for on-device Phonon text-to-speech
+
 ## [18.20.3] - 2026-11-16
 
 ### Fixed

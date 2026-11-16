@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the default local text-to-speech model to Phonon 31M: faster synthesis, a smaller download, and new voices (Kokoro voice settings migrate automatically); the speaking-rate range is now 0.8–1.3×, and old Kokoro caches are removed after the first Phonon install
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
