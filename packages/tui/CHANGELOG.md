@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `formSubmission` for validated HTML form answers and inactivity countdown controls on `HtmlFormDialog` ([#19499](https://github.com/can1357/oh-my-pi/pull/19499) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
