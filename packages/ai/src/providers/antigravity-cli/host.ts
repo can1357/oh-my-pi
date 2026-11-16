@@ -210,6 +210,7 @@ export class AgyHost implements ProviderSessionState {
 	/** Emit one assistant step, parking at a tool call or finishing at the ACP turn end. */
 	async step(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
+		this.#assertRelayControlName(context.tools ?? []);
 		this.#relay.beginTurn();
 		const step: ActiveStep = {
 			writer,
@@ -344,6 +345,8 @@ export class AgyHost implements ProviderSessionState {
 					this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
 				} else {
 					pending?.expiry?.cancel();
+					// The result is in hand: stop the relay countdown so steering cannot turn it into a notice.
+					if (plan.toolResult) this.#relay.hold(pending?.id);
 					if (plan.input.length > 0) {
 						const previous = this.#turn;
 						this.#prompt(plan.input.flatMap(inputBlocks));
@@ -413,6 +416,16 @@ export class AgyHost implements ProviderSessionState {
 	#requireProcess(): AgyProcess {
 		if (!this.#process) throw new Error("Antigravity CLI process is unavailable");
 		return this.#process;
+	}
+
+	/** The control tool shares agy's bridge, so a user tool with its name would collide there. */
+	#assertRelayControlName(tools: readonly Tool[]): void {
+		if (!this.#relay.enabled) return;
+		if (!tools.some(tool => tool.name === RELAY_CONTROL_NAME)) return;
+		throw new Error(
+			`Antigravity CLI tool name "${RELAY_CONTROL_NAME}" collides with the tool relay control tool; ` +
+				"rename the tool or set OMP_ACP_TOOL_RELAY_MS=0 to disable relay",
+		);
 	}
 
 	async #startProcess(

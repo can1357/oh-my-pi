@@ -170,6 +170,14 @@ export class ToolRelay {
 		return (this.#records.get(callId)?.awaiters ?? 0) > 0;
 	}
 
+	/** Stop the threshold countdown for a call whose result is already in hand. */
+	hold(callId: string | undefined): void {
+		const record = callId === undefined ? undefined : this.#records.get(callId);
+		if (!record) return;
+		for (const timer of record.timers) this.clock.clearTimeout(timer);
+		record.timers.clear();
+	}
+
 	/** Notice for an identical call already outstanding in this turn, so it never runs twice. */
 	duplicateNotice(name: string, args: Record<string, unknown>): McpToolOutput | undefined {
 		if (!this.config.enabled) return undefined;

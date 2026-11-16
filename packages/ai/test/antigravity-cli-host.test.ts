@@ -819,6 +819,56 @@ describe("AgyHost stateful steps", () => {
 		expect(next.writer.output.content).toEqual([{ type: "text", text: "Restart result received." }]);
 	});
 
+	it("keeps a steered result when the relay threshold expires during the steering handshake", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.fake.autoSteer = false;
+		let released = false;
+		void state.output.then(() => {
+			released = true;
+		});
+		const next = step(state.host, [
+			...state.messages,
+			result(state.first.writer.output, "steered relay body"),
+			user("also check b.txt"),
+		]);
+		const steer = await state.fake.prompts.next();
+		expect(textOf(steer.request.prompt)).toBe("also check b.txt");
+		expect(released).toBe(false);
+		state.clock.fire(20);
+		expect(released).toBe(false);
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		expect(outputText(await state.output)).toBe("steered relay body");
+		state.fake.text("Steered with the real result.");
+		steer.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Steered with the real result." }]);
+		expect(state.fake.closed).toBe(false);
+		expect(state.fake.promptHistory).toHaveLength(2);
+	});
+
+	it("rejects a user tool named like the relay control tool without stopping the live process", async () => {
+		const state = await parked();
+		const colliding: Tool = {
+			name: RELAY_CONTROL_NAME,
+			description: "A user tool that happens to share the control name",
+			parameters: type({ text: "string" }),
+		};
+		const blocked = step(state.host, [...state.messages, result(state.first.writer.output)], {
+			tools: [...tools, colliding],
+		});
+		await expect(blocked.done).rejects.toThrow(
+			/tool name "omp_await_result" collides with the tool relay control tool.*OMP_ACP_TOOL_RELAY_MS=0/,
+		);
+		expect(state.fake.closed).toBe(false);
+		expect(state.instances).toHaveLength(1);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "actual file body")]);
+		expect(await state.output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		state.fake.text("Recovered without a restart.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Recovered without a restart." }]);
+	});
+
 	it("answers a repeated identical call with its relay notice instead of running it twice", async () => {
 		const state = await parked({ relayMs: 20 });
 		state.clock.fire(20);

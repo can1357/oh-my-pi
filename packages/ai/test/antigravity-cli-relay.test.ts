@@ -184,6 +184,15 @@ describe("ToolRelay", () => {
 		expect(await relay.awaitResult("call-1")).toEqual(body);
 	});
 
+	it("disarms the threshold for a call whose result is already in hand", async () => {
+		const { clock, relay, result, parked } = relayed();
+		relay.hold("call-1");
+		expect(clock.timers.size).toBe(0);
+		clock.fire(20);
+		result.resolve(body);
+		expect(await parked).toEqual(body);
+	});
+
 	it("advertises a control tool omp never projects", () => {
 		expect(RELAY_CONTROL_TOOL.name).toBe("omp_await_result");
 		expect(validateJsonSchemaValue(RELAY_CONTROL_TOOL.inputSchema, { call_id: "call-1" }).success).toBe(true);
