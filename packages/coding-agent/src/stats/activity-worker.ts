@@ -8,18 +8,20 @@
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { getDailyActivity, readDailyActivity } from "@oh-my-pi/omp-stats/db";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { StatsActivityTransport, StatsActivityWorkerInbound } from "./activity-protocol";
 
 /**
  * The stored rows, read through a connection that never writes so another
  * process mid-write cannot hold back or fail the heatmap. Null when nothing is
- * readable yet: a database whose schema predates this build fails the read,
- * and the sync's own open migrates it before the paint that follows.
+ * readable yet (no database, or a read that fails on a schema this build does
+ * not know); the sync's own open migrates it before the paint that follows.
  */
 function readStoredActivity(): DailyActivityPoint[] | null {
 	try {
 		return readDailyActivity();
-	} catch {
+	} catch (error) {
+		logger.debug("stats activity cached paint skipped", { error });
 		return null;
 	}
 }
