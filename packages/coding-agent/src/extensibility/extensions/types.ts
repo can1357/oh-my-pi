@@ -229,7 +229,11 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	timeout?: number;
-	/** `formDialog` only: the `ask` tool call this form answers. Makes it visible to `ctx.getPendingAsks` and answerable with `ctx.resolveAsk`. */
+	/**
+	 * `formDialog` only: the `ask` tool call this form answers. Makes it visible to `ctx.getPendingAsks` and
+	 * answerable with `ctx.resolveAsk`. An id names one pending form: a form given an id that is still
+	 * pending is shown untracked, and the first keeps the id.
+	 */
 	toolCallId?: string;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
@@ -851,6 +855,9 @@ export interface ExtensionContext {
 	getPendingAsks(): PendingAsk[];
 	/**
 	 * Answer an open interactive ask form as if the operator submitted it.
+	 * `data` is the whole answer, not a change to the form's defaults: a field left out is unanswered,
+	 * so start from `defaultFormData(form)` to keep what the form prefills and preselects. It replaces
+	 * whatever the mounted dialog held, edits in progress included.
 	 * `{ ok: true }` means this answer is the one the tool returns; the first answer wins.
 	 * `not_pending` means it already closed, the id is unknown, or the mode has no interactive forms.
 	 * `invalid` reports every field error, leaving the form and its countdown unchanged.

@@ -61,15 +61,24 @@ export interface FormDataError {
 	message: string;
 }
 
-/** An option's plain label, as the dialog reports it, without terminal control bytes. */
-export function optionText(option: ChoiceOption): string {
-	return replaceTabs(spansText(option.label))
-		.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "")
-		.replace(/\s+/g, " ")
-		.trim();
+/** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
+export function sanitize(text: string): string {
+	return replaceTabs(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
 }
 
-/** `data` and `notes` as the form's dialog would submit them, or why it never would. */
+/** An option's plain label, as the dialog reports it, without terminal control bytes. */
+export function optionText(option: ChoiceOption): string {
+	return sanitize(spansText(option.label)).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * `data` and `notes` as the form's dialog would submit them, or why it never would.
+ *
+ * `data` is the whole answer, not a change to the form's defaults: a named field left out is
+ * unanswered (a text field blank, a group empty, a single choice not chosen), so a caller can
+ * leave a preselected option unanswered. Start from {@link defaultFormData} to keep what the
+ * form prefills and preselects.
+ */
 export function formSubmission(
 	form: HtmlForm,
 	data: HtmlFormData,

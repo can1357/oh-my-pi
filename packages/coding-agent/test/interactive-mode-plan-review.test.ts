@@ -358,6 +358,27 @@ describe("InteractiveMode plan review rendering", () => {
 		).toEqual(["first", "second"]);
 	});
 
+	it("keeps a pending id with the first form: a second form given it is shown untracked", async () => {
+		const { ctx, resolved } = await loadAskRecorder();
+		const first = ctx.ui.formDialog!('<form><input name="first"></form>', { toolCallId: "same" });
+		const second = ctx.ui.formDialog!('<form><input name="second"></form>', { toolCallId: "same" });
+		expect(ctx.getPendingAsks().map(ask => ask.html)).toEqual(['<form><input name="first"></form>']);
+		// The id still answers the first form, and only with that form's own fields.
+		expect(ctx.resolveAsk("same", { data: { second: "two" } })).toEqual({
+			ok: false,
+			reason: "invalid",
+			errors: [{ name: "second", message: "Unknown field" }],
+		});
+		expect(ctx.resolveAsk("same", { data: { first: "one" } })).toEqual({ ok: true });
+		expect(await first).toEqual({ data: { first: "one" } });
+		expect(ctx.getPendingAsks()).toEqual([]);
+		// The untracked form is now mounted as an ordinary form: no id reaches it.
+		expect(ctx.resolveAsk("same", { data: { second: "two" } })).toEqual({ ok: false, reason: "not_pending" });
+		mountedForm().handleInput("\x1b");
+		expect(await second).toBeUndefined();
+		await resolved;
+	});
+
 	it.each(["submit", "cancel", "abort"] as const)(
 		"reports a local ask %s once and refuses later answers",
 		async action => {

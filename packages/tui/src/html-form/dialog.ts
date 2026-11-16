@@ -70,7 +70,7 @@ import { wrapPrefixedLine } from "../render/hanging-wrap";
 import { getEditorTheme, type ThemeColor, theme } from "../theme/theme";
 import { optionMarker } from "../tools/ask";
 import type { Component, Focusable } from "../tui";
-import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
+import { Ellipsis, padding, truncateToWidth, visibleWidth } from "../utils";
 import {
 	choiceValue,
 	fieldError,
@@ -81,6 +81,7 @@ import {
 	type OptionNote,
 	optionText,
 	OTHER_LABEL,
+	sanitize,
 	textValue,
 } from "./data";
 import { BreakRank, type Page, type PageAtom, pageHeight, paginate } from "./paginate";
@@ -216,11 +217,6 @@ interface OpenNote {
 	images: ImageContent[];
 	pastes: OrderedPastes;
 	pasteHandler: BracketedPasteHandler;
-}
-
-/** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
-function sanitize(text: string): string {
-	return replaceTabs(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
 }
 
 /** A single select draws as a one-row dropdown; multi-selects keep option rows. */

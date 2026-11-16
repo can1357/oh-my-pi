@@ -763,6 +763,28 @@ describe("html form", () => {
 			});
 		});
 
+		it("takes data as the whole answer: a field left out is unanswered, not the form's default", () => {
+			const form = parseHtmlForm(
+				'<form><label>Title<input name="title" value="draft"></label>' +
+					'<label><input type="radio" name="db" value="pg" checked>Postgres</label>' +
+					'<label><input type="radio" name="db" value="sqlite">SQLite</label>' +
+					'<label><input type="checkbox" name="extras" value="ci" checked>CI</label>' +
+					'<label><input type="checkbox" name="extras" value="docker">Docker</label>' +
+					'<label>Note<input name="note"></label></form>',
+			);
+			expect(defaultFormData(form)).toEqual({ title: "draft", db: "pg", extras: ["ci"], note: "" });
+			// Left out: the prefilled text is blank, the preselected radio is not chosen, the group is empty.
+			expect(formSubmission(form, { note: "x" })).toEqual({
+				data: { title: "", extras: [], note: "x" },
+				notes: [],
+			});
+			// A caller that wants the form's defaults starts from them.
+			expect(formSubmission(form, { ...defaultFormData(form), note: "x" })).toEqual({
+				data: { title: "draft", db: "pg", extras: ["ci"], note: "x" },
+				notes: [],
+			});
+		});
+
 		it("agrees with existing dialog fixtures, including Other answers and selected notes", () => {
 			for (const html of [
 				DB_FORM,

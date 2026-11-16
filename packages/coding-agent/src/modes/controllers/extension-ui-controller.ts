@@ -861,7 +861,8 @@ export class ExtensionUiController {
 				(host, signal) => this.#runGuestForm(host, form, signal),
 			);
 		const toolCallId = dialogOptions?.toolCallId;
-		if (toolCallId === undefined) return show(dialogOptions);
+		// An id names one pending form: a second form given the same id is shown untracked, and the first keeps it.
+		if (toolCallId === undefined || this.#pendingAsks.has(toolCallId)) return show(dialogOptions);
 
 		const { promise, resolve, reject } = Promise.withResolvers<ExtensionFormDialogResult | undefined>();
 		const requestDelivered = Promise.withResolvers<void>();
@@ -884,7 +885,7 @@ export class ExtensionUiController {
 			settle: (result, by) => {
 				if (settled) return false;
 				settled = true;
-				if (this.#pendingAsks.get(toolCallId) === pending) this.#pendingAsks.delete(toolCallId);
+				this.#pendingAsks.delete(toolCallId);
 				signal.removeEventListener("abort", onAbort);
 				// End both the mounted dialog (or its queue slot) and the guest mirror.
 				abort.abort();
