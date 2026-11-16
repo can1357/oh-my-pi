@@ -1331,6 +1331,7 @@ describe("wave 3 commands", () => {
 		let repoDir: string;
 		let git: (...args: string[]) => Promise<string>;
 		let disposeRepo: (() => Promise<void>) | undefined;
+		let savedDotenvOnly: string | undefined;
 		const installHook = async (script: string) => {
 			const hookPath = path.join(repoDir, ".git", "hooks", "post-checkout");
 			await Bun.write(hookPath, `#!/bin/sh\n${script}\n`);
@@ -1339,12 +1340,13 @@ describe("wave 3 commands", () => {
 
 		beforeEach(async () => {
 			({ root, repoDir, git, dispose: disposeRepo } = await createWtRepo());
+			savedDotenvOnly = process.env.OMP_WT_CLEAN_DOTENV_ONLY;
 		});
 
 		afterEach(async () => {
 			procmgr.__resetShellConfigCacheForTests();
 			__resetProjectDirCacheForTests();
-			delete process.env.OMP_WT_CLEAN_DOTENV_ONLY;
+			restoreEnvValue("OMP_WT_CLEAN_DOTENV_ONLY", savedDotenvOnly);
 			await disposeRepo?.();
 		});
 
