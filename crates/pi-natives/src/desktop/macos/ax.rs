@@ -2271,12 +2271,13 @@ fn write_number<F: NumberField>(field: &mut F, target: NumberTarget) -> CoreResu
 			return field.confirm();
 		}
 		if field.now() >= deadline {
-			let readback = number_readback(
-				target,
-				actual.as_deref(),
-				field.bound("AXMinValue").as_deref(),
-				field.bound("AXMaxValue").as_deref(),
-			);
+			// A value that did not answer leaves no reading for a range bound
+			// to explain, so the bounds are not read.
+			let (min, max) = match actual {
+				Some(_) => (field.bound("AXMinValue"), field.bound("AXMaxValue")),
+				None => (None, None),
+			};
+			let readback = number_readback(target, actual.as_deref(), min.as_deref(), max.as_deref());
 			return Err(if unanswered {
 				DesktopError::ax_unconfirmed(format!(
 					"the app did not answer the number write in time (CannotComplete) and may still \
@@ -2319,11 +2320,20 @@ impl NumberTarget {
 	/// [`number_reached`].
 	fn reached(self, actual: &CFNumber) -> bool {
 		match self {
-			Self::Whole(value) if actual.is_float_type() => actual.as_f64().is_some_and(|read| {
-				read.fract() == 0.0 && read.abs() < 2f64.powi(63) && read as i64 == value
-			}),
+			Self::Whole(value) if actual.is_float_type() => {
+				actual.as_f64().and_then(whole_f64) == Some(value)
+			},
 			Self::Whole(value) => exact_i64(actual) == Some(value),
 			Self::Real(value) => number_reached(value, actual),
+		}
+	}
+
+	/// The number in decimal, every digit it holds: an `f64` as its shortest
+	/// text that reads back as it, which Rust never prints with an exponent.
+	fn spelled(self) -> String {
+		match self {
+			Self::Whole(value) => value.to_string(),
+			Self::Real(value) => value.to_string(),
 		}
 	}
 }
@@ -2361,7 +2371,10 @@ fn plain_decimal(text: &str) -> Option<bool> {
 }
 
 /// The number `text` names, as [`NumberTarget`] by the kind `current` is, or
-/// the refusal naming what the control reads; the text is never quoted.
+/// the refusal naming what the control reads; the text is never quoted. The
+/// number written must spell the text back, so no digit is lost to the
+/// parse: an `f64` keeps any decimal of at most 15 significant digits, and
+/// spells some longer ones back (0.30000000000000004) but not all.
 fn parse_number(text: &str, current: &CFNumber) -> CoreResult<NumberTarget> {
 	let refusal = |reason: &str| {
 		DesktopError::ax_failed(format!(
@@ -2376,31 +2389,58 @@ fn parse_number(text: &str, current: &CFNumber) -> CoreResult<NumberTarget> {
 		)
 	};
 	let whole = plain_decimal(text).ok_or_else(not_one)?;
-	if whole && !current.is_float_type() {
+	let target = if whole && !current.is_float_type() {
 		let integer = text.split_once('.').map_or(text, |(integer, _)| integer);
-		return integer.parse().map(NumberTarget::Whole).map_err(|_| {
+		integer.parse().map(NumberTarget::Whole).map_err(|_| {
 			refusal("AXValue is a whole number and the number given is past the 64-bit integer range")
-		});
+		})?
+	} else {
+		text
+			.parse()
+			.map(NumberTarget::Real)
+			.map_err(|_| not_one())?
+	};
+	if decimal_value(text) != decimal_value(&target.spelled()) {
+		return Err(refusal(
+			"AXValue is a number and the text given has more digits than it holds: write at most 15 \
+			 significant digits",
+		));
 	}
-	text.parse().map(NumberTarget::Real).map_err(|_| not_one())
+	Ok(target)
+}
+
+/// Plain decimal `text` reduced to what decides its value: whether it is
+/// negative, its integer digits without leading zeros, and its fraction
+/// without trailing zeros. Zero is never negative.
+fn decimal_value(text: &str) -> (bool, &str, &str) {
+	let (negative, unsigned) = match text.strip_prefix('-') {
+		Some(unsigned) => (true, unsigned),
+		None => (false, text.strip_prefix('+').unwrap_or(text)),
+	};
+	let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+	let integer = integer.trim_start_matches('0');
+	let fraction = fraction.trim_end_matches('0');
+	(negative && !(integer.is_empty() && fraction.is_empty()), integer, fraction)
 }
 
 /// Whether `actual` holds `target`. An integer read-back must be `target`
-/// exactly. A floating-point one may be within a few `f64` ulps of it, for an
-/// app's own arithmetic, but never a quarter away, so a whole number apart
-/// never passes; and with no absolute floor, so an unchanged 0 never passes
-/// for 5e-8. Or it may be `target` rounded to `f32`, which is what a control
+/// exactly, compared as an integer so that one past 2^53 does not round onto
+/// it. A floating-point one may be within a few `f64` ulps of it, for an
+/// app's own arithmetic, which never spans two decimals of 15 significant
+/// digits, but never a quarter away, so a whole number apart never passes
+/// this way; and with no absolute floor, so an unchanged 0 never passes for
+/// 5e-8. Or it may be `target` rounded to `f32`, which is what a control
 /// keeping its value in a `Float` reads back (0.3 as 0.30000001192092896)
 /// whether it publishes a `float` or a `double`, where that `f32` still reads
 /// as `target`: a clamp or step that lands on a coarser `f32` (100 for
 /// 100.000001, 16777216 for 16777217, 0 for 1e-50) does not pass for it.
 fn number_reached(target: f64, actual: &CFNumber) -> bool {
+	if !actual.is_float_type() {
+		return exact_i64(actual).is_some_and(|read| whole_f64(target) == Some(read));
+	}
 	let Some(read) = actual.as_f64() else {
 		return false;
 	};
-	if !actual.is_float_type() {
-		return read == target;
-	}
 	let rounded = target as f32;
 	(read - target).abs() <= (target.abs() * 4.0 * f64::EPSILON).min(0.25)
 		|| (read == f64::from(rounded) && rounded.to_string().parse() == Ok(target))
@@ -2455,6 +2495,13 @@ fn exact_i64(number: &CFNumber) -> Option<i64> {
 	number
 		.as_i64()
 		.filter(|value| *value as f64 == approximate_f64(number))
+}
+
+/// The `i64` that `value` is exactly, when it is one: -2^63 is, and 2^63,
+/// which a cast would saturate to `i64::MAX`, is not.
+fn whole_f64(value: f64) -> Option<i64> {
+	(value.fract() == 0.0 && (-(2f64.powi(63))..2f64.powi(63)).contains(&value))
+		.then_some(value as i64)
 }
 
 /// Sets `AXFocused` on `element`; the caller holds the background guard.
@@ -3299,12 +3346,12 @@ mod tests {
 	};
 
 	use super::{
-		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
-		KeyDestination, KeyFocus, NUMBER_POLL, NUMBER_SETTLE, NodeRead, NodeValues, NumberField,
-		NumberTarget, ROLE, TITLE, TextField, TextSurface, VALUE, ValueKind, WindowContent,
-		ax_result, content_owner, create_system_wide, element_action_result, focused_window,
-		is_outside_windows, may_borrow_focus, menu_window, not_settable, number_reached,
-		number_readback, parse_number, perform_choosing, replace_utf16_selection,
+		AX_TIMEOUT_SECONDS, AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED,
+		FocusedWindow, KeyDestination, KeyFocus, NUMBER_POLL, NUMBER_SETTLE, NodeRead, NodeValues,
+		NumberField, NumberTarget, ROLE, TITLE, TextField, TextSurface, VALUE, ValueKind,
+		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
+		focused_window, is_outside_windows, may_borrow_focus, menu_window, not_settable,
+		number_reached, number_readback, parse_number, perform_choosing, replace_utf16_selection,
 		replace_whole_value, required_string, secure_subrole, select_attached,
 		standard_window_subrole, stringify_number, stringify_value, takes_inserted_text,
 		target_window, value_kind, window_records_of, write_number,
@@ -3924,11 +3971,8 @@ mod tests {
 		assert_eq!(parse_number("75", &real).unwrap(), NumberTarget::Real(75.0));
 		assert_eq!(parse_number("-2.5", &real).unwrap(), NumberTarget::Real(-2.5));
 		assert_eq!(parse_number("+0.30", &real).unwrap(), NumberTarget::Real(0.3));
-		// A float control holds the nearest double; an integer one the integer.
-		assert_eq!(
-			parse_number("9007199254740993", &real).unwrap(),
-			NumberTarget::Real(9_007_199_254_740_992.0)
-		);
+		// Whole text an integer control holds as the integer; a float control
+		// holds only text that its double spells back.
 		let whole = CFNumber::new_i64(3);
 		assert_eq!(
 			parse_number("9007199254740993", &whole).unwrap(),
@@ -3942,11 +3986,48 @@ mod tests {
 		assert_eq!(parse_number("-0.000", &whole).unwrap(), NumberTarget::Whole(0));
 		assert_eq!(parse_number("-7", &whole).unwrap(), NumberTarget::Whole(-7));
 		assert_eq!(parse_number("42.5", &whole).unwrap(), NumberTarget::Real(42.5));
-		// The longest text a control takes, as small and as large as it gets.
+		// The longest text a control takes, as small as it gets.
 		let smallest = format!("0.{}1", "0".repeat(29));
 		assert_eq!(parse_number(&smallest, &real).unwrap(), NumberTarget::Real(1e-30));
 		let largest = "9".repeat(32);
-		assert_eq!(parse_number(&largest, &real).unwrap(), NumberTarget::Real(1e32));
+		// What it spells is written: leading and trailing zeros, a sign and -0
+		// change no digit.
+		for (text, number) in [
+			("075", 75.0),
+			("75.0", 75.0),
+			("0.50", 0.5),
+			("0.3", 0.3),
+			("-0", 0.0),
+			("-0.0", 0.0),
+			("100.000001", 100.000_001),
+			("0.30000000000000004", 0.300_000_000_000_000_04),
+			("123456789.012345", 123_456_789.012_345),
+			("9007199254740992", 9_007_199_254_740_992.0),
+		] {
+			assert_eq!(parse_number(text, &real).unwrap(), NumberTarget::Real(number), "{text}");
+		}
+		assert_eq!(parse_number("075", &whole).unwrap(), NumberTarget::Whole(75));
+		// A digit the written number would drop is refused, whatever the control.
+		for (text, current) in [
+			("1.0000000000000001", &real),
+			("1.0000000000000001", &whole),
+			("9007199254740993.5", &whole),
+			("9007199254740993", &real),
+			("9007199254740993.0", &real),
+			(largest.as_str(), &real),
+			("0.10000000000000000555", &real),
+		] {
+			let error = parse_number(text, current).unwrap_err();
+			assert_eq!(
+				error.message,
+				format!(
+					"AXValue is a number and the text given has more digits than it holds: write at \
+					 most 15 significant digits; it reads {} now; nothing was written",
+					stringify_number(current)
+				),
+				"{text}"
+			);
+		}
 		let past_i64 = parse_number(&largest, &whole).unwrap_err();
 		assert_eq!(
 			past_i64.message,
@@ -4010,6 +4091,11 @@ mod tests {
 		assert!(!number_reached(5e-8, &CFNumber::new_i64(0)));
 		assert!(!number_reached(1e9, &CFNumber::new_f64(1e9 + 100.0)));
 		assert!(number_reached(0.0, &CFNumber::new_i64(0)));
+		// An integer read-back past 2^53 is compared as an integer, not
+		// rounded onto the target.
+		assert!(!number_reached(9_007_199_254_740_992.0, &CFNumber::new_i64(9_007_199_254_740_993)));
+		assert!(number_reached(9_007_199_254_740_992.0, &CFNumber::new_i64(9_007_199_254_740_992)));
+		assert!(!number_reached(2f64.powi(63), &CFNumber::new_i64(i64::MAX)));
 		assert!(!number_reached(0.0, &CFNumber::new_f64(1e-300)));
 		// f32 rounding counts only where f32 can hold the target: a float
 		// control left at 0 for 1e-50 missed, and 1e39 rounds to infinity.
@@ -4047,6 +4133,9 @@ mod tests {
 		assert!(NumberTarget::Whole(75).reached(&CFNumber::new_f64(75.0)));
 		assert!(NumberTarget::Whole(-3).reached(&CFNumber::new_f32(-3.0)));
 		assert!(!NumberTarget::Whole(i64::MAX).reached(&CFNumber::new_f64(f64::INFINITY)));
+		// -2^63 is an i64 and +2^63 is not.
+		assert!(NumberTarget::Whole(i64::MIN).reached(&CFNumber::new_f64(-(2f64.powi(63)))));
+		assert!(!NumberTarget::Whole(i64::MAX).reached(&CFNumber::new_f64(2f64.powi(63))));
 	}
 
 	#[test]
@@ -4063,17 +4152,19 @@ mod tests {
 	}
 
 	/// A number control that reads back `reads` in turn (the last one from
-	/// then on), on a clock that each wait moves by [`NUMBER_POLL`] and the
-	/// write by `write_takes`.
+	/// then on), on a clock that each wait moves by [`NUMBER_POLL`], the write
+	/// by `write_takes` and a read that does not answer by `unread_takes`.
 	struct FakeNumber {
-		write_error: AXError,
-		write_takes: Duration,
-		written:     RefCell<Vec<String>>,
-		reads:       Vec<Option<CFRetained<CFNumber>>>,
-		read:        Cell<usize>,
-		clock:       Cell<Instant>,
-		confirm:     Option<&'static str>,
-		confirmed:   Cell<usize>,
+		write_error:  AXError,
+		write_takes:  Duration,
+		unread_takes: Duration,
+		written:      RefCell<Vec<String>>,
+		reads:        Vec<Option<CFRetained<CFNumber>>>,
+		read:         Cell<usize>,
+		bounds_read:  Cell<usize>,
+		clock:        Cell<Instant>,
+		confirm:      Option<&'static str>,
+		confirmed:    Cell<usize>,
 	}
 
 	impl FakeNumber {
@@ -4081,9 +4172,11 @@ mod tests {
 			Self {
 				write_error: AXError::Success,
 				write_takes: Duration::ZERO,
+				unread_takes: Duration::ZERO,
 				written: RefCell::default(),
 				reads,
 				read: Cell::new(0),
+				bounds_read: Cell::new(0),
 				clock: Cell::new(Instant::now()),
 				confirm: None,
 				confirmed: Cell::new(0),
@@ -4101,10 +4194,15 @@ mod tests {
 		fn value(&self) -> Option<CFRetained<CFNumber>> {
 			let at = self.read.get();
 			self.read.set(at + 1);
-			self.reads[at.min(self.reads.len() - 1)].clone()
+			let read = self.reads[at.min(self.reads.len() - 1)].clone();
+			if read.is_none() {
+				self.clock.set(self.clock.get() + self.unread_takes);
+			}
+			read
 		}
 
 		fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
+			self.bounds_read.set(self.bounds_read.get() + 1);
 			Some(CFNumber::new_f64(if attribute == "AXMinValue" {
 				0.0
 			} else {
@@ -4194,6 +4292,28 @@ mod tests {
 			 it; wrote 75; the control now reads 0. The app may have clamped, rounded or not taken \
 			 it: inspect the target before writing again"
 		);
+	}
+
+	#[test]
+	fn a_value_that_did_not_answer_reads_no_range_bound() {
+		// An app that stops answering after the setter: the setter and the
+		// first read-back each take the whole messaging timeout, and the call
+		// ends there, without reading the bounds.
+		let timeout = Duration::from_secs_f32(AX_TIMEOUT_SECONDS);
+		let mut hung = FakeNumber::reading(vec![None]);
+		hung.write_error = AXError::CannotComplete;
+		hung.write_takes = timeout;
+		hung.unread_takes = timeout;
+		let started = hung.now();
+		let error = write_number(&mut hung, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("could not be read back"), "{}", error.message);
+		assert_eq!((hung.read.get(), hung.bounds_read.get(), hung.confirmed.get()), (1, 0, 0));
+		assert_eq!(hung.now() - started, timeout * 2);
+		// A value that answered is explained by the bounds, read once each.
+		let mut missed = FakeNumber::reading(numbers(&[150.0]));
+		write_number(&mut missed, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(missed.bounds_read.get(), 2);
 	}
 
 	#[test]
