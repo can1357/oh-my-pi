@@ -16086,9 +16086,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Get text content of last assistant message.
-	 * Consumed by the `/copy` command and by the yield tool's empty-last-turn
-	 * guard (a data-less `useLastTurn` finalize is rejected when this is
-	 * undefined, so a thinking-only turn cannot become a null-data run failure).
+	 * Consumed by the `/copy` command and the RPC `get_last_assistant_text` request.
 	 * @returns Trimmed text content, or undefined if no assistant message has text
 	 */
 	getLastAssistantText(): string | undefined {

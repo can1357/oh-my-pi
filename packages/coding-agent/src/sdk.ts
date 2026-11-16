@@ -341,7 +341,6 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
-import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
 	createModelJobWidgetAuthor,
@@ -2797,8 +2796,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
-			getLastAssistantText: () => session?.getLastAssistantText(),
-			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			getCallContext: (toolCallId, source) => {
 				const messages = session?.messages ?? [];
