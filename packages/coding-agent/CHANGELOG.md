@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed git reads such as the `/commit` and eval `commit` status scan hanging until they timed out when a background child of git (such as the fsmonitor daemon that `git status` starts in a fresh worktree with `core.fsmonitor=true`) kept the output pipe open after git exited; they now return git's output at most a second after git exits ([#19478](https://github.com/can1357/oh-my-pi/pull/19478) by [@alphastorm](https://github.com/alphastorm))
+- Fixed git reads such as `/commit`'s status scan hanging when a background git process kept the output pipe open ([#19478](https://github.com/can1357/oh-my-pi/pull/19478) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.21.0] - 2026-11-16
 
