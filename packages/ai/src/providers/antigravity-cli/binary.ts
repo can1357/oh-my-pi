@@ -20,6 +20,8 @@ const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Releases run to hundreds of MB, so only silence aborts a download; a total deadline would exclude slow links. */
 const DOWNLOAD_STALL_MS = 60_000;
 const MINIMUM_AGY_VERSION = "1.5.9";
+const AGY_VERSION =
+	/^(\d+\.\d+\.\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?=\s|$)/u;
 const VERSION_PROBE_TIMEOUT_MS = 5_000;
 const operations = new Map<string, Promise<string>>();
 const versionChecks = new Map<string, Promise<boolean>>();
@@ -51,7 +53,9 @@ export interface ResolveAgyOptions {
 export async function resolveAgyBinary(fetchImpl: FetchImpl = fetch, options: ResolveAgyOptions = {}): Promise<string> {
 	const override = $env.PI_AGY_PATH;
 	if (override) return override;
-	const installed = (options.which ?? (command => $which(command, { cache: WhichCachePolicy.Bypass })))("agy");
+	const installed = (
+		options.which ?? (command => $which(command, { cache: WhichCachePolicy.Bypass, requireAbsolutePaths: true }))
+	)("agy");
 	if (installed && (await installedAgyCompatible(installed, options.probe))) return installed;
 	return ensureAgyInstalled(options.directory ?? path.join(getAntigravityCliDir(), "bin"), fetchImpl);
 }
@@ -72,8 +76,9 @@ function installedAgyCompatible(
 }
 
 function compatibleAgyVersion(version: string | undefined): boolean {
-	const match = /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/u.exec(version ?? "");
-	return match !== null && compareVersions(match[1]!, MINIMUM_AGY_VERSION) >= 0;
+	const match = AGY_VERSION.exec(version ?? "");
+	if (match === null || match[2] !== undefined) return false;
+	return compareVersions(match[1]!, MINIMUM_AGY_VERSION) >= 0;
 }
 
 async function probeAgyVersion(binary: string): Promise<string | undefined> {

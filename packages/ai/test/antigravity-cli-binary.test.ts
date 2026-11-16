@@ -1,5 +1,4 @@
 import { afterEach, expect, it, vi } from "bun:test";
-import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -70,6 +69,7 @@ async function trickle(gapMs: number, silentAfter = Infinity): Promise<{ fetch: 
 afterEach(() => {
 	vi.useRealTimers();
 });
+
 function managedBinary(directory: string, version = "1.5.9"): string {
 	return path.join(directory, version, process.platform === "win32" ? "agy.exe" : "agy");
 }
@@ -131,7 +131,7 @@ it("a download that stops sending fails as a stalled download and installs nothi
 	vi.advanceTimersByTime(60_000);
 	await expect(install).rejects.toThrow(/Antigravity CLI download stalled: no data for 60s after .+ of /);
 	expect(await Bun.file(path.join(directory, "install.json")).exists()).toBe(false);
-	});
+});
 it("uses a compatible agy from PATH without downloading the managed release", async () => {
 	using temp = TempDir.createSync("@omp-agy-path-");
 	const requests: string[] = [];
@@ -254,7 +254,10 @@ it("accepts a newer CLI and rejects prerelease or malformed versions", async () 
 	const remote = await release("1.5.9", "managed executable");
 	for (const [version, compatible] of [
 		["1.5.10", true],
+		["1.5.10+abc.def", true],
 		["1.5.9-rc.1", false],
+		["1.6.0-rc.1", false],
+		["1.5.10+.", false],
 		["1.5.9junk", false],
 	] as const) {
 		const binary = await resolveAgyBinary(remote.fetch, {
@@ -263,5 +266,22 @@ it("accepts a newer CLI and rejects prerelease or malformed versions", async () 
 			probe: async () => version,
 		});
 		expect(binary).toBe(compatible ? "/opt/agy/bin/agy" : managedBinary(directory));
+	}
+});
+
+it.skipIf(process.platform === "win32")("ignores relative PATH entries during discovery", async () => {
+	using temp = TempDir.createSync("@omp-agy-relative-");
+	const bin = temp.join("bin");
+	await executable(path.join(bin, "agy"), "#!/bin/sh\nprintf '1.5.9\\n'\n");
+	const directory = temp.join("managed");
+	const remote = await release("1.5.9", "managed executable");
+	const previous = process.env.PATH;
+	process.env.PATH = path.relative(process.cwd(), bin);
+	try {
+		const binary = await resolveAgyBinary(remote.fetch, { directory });
+		expect(binary).toBe(managedBinary(directory));
+	} finally {
+		if (previous === undefined) delete process.env.PATH;
+		else process.env.PATH = previous;
 	}
 });
