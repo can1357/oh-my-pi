@@ -15,6 +15,7 @@
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- The Agent Hub footer names both section keys (`1:agents` / `2:activity`) in both section views, and a footer too narrow for the symbol preset's spelled-out key names drops hints instead of cutting off its tail ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#18618](https://github.com/can1357/oh-my-pi/pull/18618) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -59,6 +60,11 @@
 - Fixed table chart unit display and change-factor calculations for measurements with scaled units.
 - Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
 - Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
+- Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
+- Enter on a checkbox group with nothing checked checks the focused box before moving on
+
 
 ## [18.22.2] - 2026-11-18
 
@@ -259,9 +265,6 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 - Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
-
-- The Agent Hub footer names both section keys (`1:agents` / `2:activity`) in both section views, and a footer too narrow for the symbol preset's spelled-out key names drops hints instead of cutting off its tail ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#18618](https://github.com/can1357/oh-my-pi/pull/18618) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 
 ## [18.18.3] - 2026-11-09
 
