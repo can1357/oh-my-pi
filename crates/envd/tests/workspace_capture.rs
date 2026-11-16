@@ -274,6 +274,53 @@ async fn untracked_symlinks_are_skipped_and_counted_tracked_ones_refuse() {
 	assert_eq!(reply.excluded_symlinks, 0);
 }
 
+/// ADR 0073 (ADR 0071 O4): the isolated view omits an empty directory and a
+/// symlink that stays inside the workspace, because the snapshot walk keeps
+/// regular files only. Ignored until S2 replays both into the view (ADR
+/// 0073 D3-D5); S2 removes the attribute. Unix only (ADR 0073 D9).
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "ADR 0073 S2: the view does not replay links or leaf directories yet"]
+async fn isolated_view_keeps_empty_directories_and_in_root_symlinks() {
+	use std::os::unix::fs::symlink;
+
+	use omp_proto::env::v1::CreateWorktree;
+
+	let fixture = Fixture::new().await;
+	fixture.write("src/a.txt", b"a\n");
+	fs::create_dir(fixture.path().join("empty")).expect("empty directory");
+	symlink("src/a.txt", fixture.path().join("link")).expect("in-root symlink");
+
+	let created = fixture
+		.operations
+		.create_worktree(
+			&CreateWorktree { name: "view".to_owned(), ..Default::default() },
+			&CancellationToken::new(),
+		)
+		.expect("create worktree");
+	let view = url::Url::parse(&created.root_uri)
+		.expect("worktree root URI")
+		.to_file_path()
+		.expect("worktree file URI");
+
+	// Holds today: regular files are cloned, so only the gap below can fail.
+	assert_eq!(fs::read(view.join("src/a.txt")).expect("cloned file"), b"a\n");
+
+	let mut missing = Vec::new();
+	let is_directory = fs::symlink_metadata(view.join("empty")).is_ok_and(|meta| meta.is_dir());
+	if !is_directory {
+		missing.push("empty/ (directory)");
+	}
+	let target = fs::read_link(view.join("link")).ok();
+	if target.as_deref() != Some(Path::new("src/a.txt")) {
+		missing.push("link -> src/a.txt (symlink)");
+	}
+	assert!(
+		missing.is_empty(),
+		"isolated view dropped entries the live workspace has: {missing:?} (ADR 0073)"
+	);
+}
+
 #[tokio::test]
 async fn manifest_digest_is_deterministic_and_content_sensitive() {
 	let fixture = Fixture::new().await;
