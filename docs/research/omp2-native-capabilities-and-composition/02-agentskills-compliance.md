@@ -47,7 +47,7 @@ OMP-specific fields already present: `enabled`, `hide`/`hidden`, `disable-model-
 | **REUSE** | `ActiveSkills`, `SkillResolver`, progressive disclosure, containment, convar policy |
 | **EXTEND** | Optionally retain `license`, `compatibility`, string `metadata` on `Skill` / prompt facts |
 | **EXTEND** or document | Align default naming with Agent Skills, or record intentional divergence |
-| **IMPLEMENT** only if product wants it | Wire `allowed-tools` into a real admission surface — do not claim compliance while parse-only |
+| **REJECT** as cohesive default (EGM F1) | Do not wire `allowed-tools` into admission without an ADR proving intersect-only (skill never expands authority); **document** parse-only until then |
 | **DEFER** | Soften plugin `deny_unknown_fields` toward “ignore unknown” (owner/plugin-compat decision) |
 | **DEFER** | E2E skill proof until a product gate requires it |
 | **REJECT** | Parallel skill loader / second registry |

@@ -51,14 +51,14 @@ Claude plugin `omitClaudeMd`.
 | [06-expert-package-composition.md](06-expert-package-composition.md) | Stream D |
 | [07-unified-capability-matrix.md](07-unified-capability-matrix.md) | Cross-stream matrix |
 | [08-architecture-alternatives.md](08-architecture-alternatives.md) | Alternatives |
-| [09-egm-design-review.md](09-egm-design-review.md) | Goldfish findings |
-| [10-decisions-and-rationale.md](10-decisions-and-rationale.md) | Owner-facing decisions |
-| [11-p0-p1-p2-roadmap.md](11-p0-p1-p2-roadmap.md) | Roadmap |
+| [09-egm-design-review.md](09-egm-design-review.md) | Goldfish findings (F1–F9) |
+| [10-decisions-and-rationale.md](10-decisions-and-rationale.md) | Owner-facing decisions (proposed) |
+| [11-p0-p1-p2-roadmap.md](11-p0-p1-p2-roadmap.md) | Roadmap (unauthorized until Q7) |
 | [12-security-and-trust.md](12-security-and-trust.md) | Trust |
-| [13-conformance-and-test-plan.md](13-conformance-and-test-plan.md) | Tests |
-| [14-benchmark-results.md](14-benchmark-results.md) | Benchmarks (measured only) |
-| [15-implementation-results.md](15-implementation-results.md) | Landed slices |
-| [16-open-questions.md](16-open-questions.md) | Unresolved |
+| [13-conformance-and-test-plan.md](13-conformance-and-test-plan.md) | Tests — **stub pending** |
+| [14-benchmark-results.md](14-benchmark-results.md) | Benchmarks — **NOT MEASURED** |
+| [15-implementation-results.md](15-implementation-results.md) | Landed slices — none (research-only) |
+| [16-open-questions.md](16-open-questions.md) | Unresolved (owner Q1–Q7) |
 
 ## Streams
 

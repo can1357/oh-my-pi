@@ -39,7 +39,8 @@ Zero matches for `expert package` / `ExpertPackage` at the pin. ADR 0061 already
 | Directors for cross-turn control | **REUSE** |
 | Skill-only extension packs | **EXTEND** (ADR 0061 D4), not a new abstraction |
 | Skills declaring required tools/workflows | **DEFER** until Agent Skills compliance (stream A) forces metadata design |
-| Unify ADW with soft `workflow@1` | **REJECT** merge; use ADW for durable expert pipelines |
+| Unify ADW with soft `workflow@1` | **REJECT** merge; durable gated experts → **ADW only**; `omp.workflows` = optional long-tail extension, **not** the expert packaging story (EGM F3) |
+| Skill-only packs (ADR 0061) | **Proposed** packaging direction — not a landed load-path capability (EGM F8) |
 | PR push webhooks → expert pipeline | **EXTEND** ingress or schedule/poll recipes; pull/poll already **REUSE** |
 
 ## PR-monitoring example

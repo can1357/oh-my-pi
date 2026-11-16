@@ -49,9 +49,9 @@ Ordering: native hosts before extensions; transform by `(order, host, id)`; deny
 | Turn/session lifecycle | **IV** | Live |
 | `retry_tool_tail` replay | **II** | Intentionally skips re-admission for journal fidelity |
 
-## vs Pluggy/Bub (conceptual)
+## vs Pluggy/Bub (conceptual; EGM F5)
 
-Typical middleware needs (ordered chain, multi-subscriber, short-circuit, timeout, error policy, lifecycle points) are already covered **plus** typed phases, approval tickets, domain returns, dual native/extension hosts, and bitmap fast-path.
+Typical middleware needs (ordered chain, multi-subscriber, short-circuit, timeout, error policy, lifecycle points) have **native analogues** in HookGate **plus** typed phases, approval tickets, domain returns, dual hosts, and bitmap fast-path. That supports **REJECT a second stack (YAGNI)** and **REUSE HookGate for tool/session admission** — it does **not** prove full Bub/Pluggy lifecycle parity. Uncovered seams (e.g. catalog-only `user_input`) remain product gaps.
 
 Genuine gaps relative to that *shape* (not missing frameworks):
 

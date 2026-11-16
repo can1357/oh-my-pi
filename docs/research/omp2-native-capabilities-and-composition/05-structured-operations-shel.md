@@ -48,7 +48,7 @@ Domain mismatch: OMP2’s hazard is bash/sandbox under ADR 0028; sHEL’s docume
 
 | Option | Tentative |
 |---|---|
-| A. Existing OMP2 sufficient | **Recommended default** for JSON/filter workloads |
+| A. Existing OMP2 (bash+jq) | **Default absent a measured gap** — not a proof of “sHEL workload coverage” |
 | B. Improve native Rust builtins | **EXTEND** only for proven gaps (bounds, missing filters) |
 | C. Small structured transform tool | **DEFER** |
 | D. Optional external sHEL | **DEFER** comparison baseline only; do not productize without measurement |

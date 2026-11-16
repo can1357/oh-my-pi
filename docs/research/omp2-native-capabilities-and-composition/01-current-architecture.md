@@ -41,10 +41,10 @@ Libraries never build a second production stack. Driver composes; app presents.
 
 | Stream | Doc | Verdict so far |
 |---|---|---|
-| A Skills | [02](02-agentskills-compliance.md), [03](03-model-tool-requirements.md) | **REUSE** discovery; **EXTEND** optional field retention; **REJECT** second registry |
-| B Hooks | [04](04-native-hooks-and-pluggy.md) | Auditor in flight |
-| C Structured / sHEL | [05](05-structured-operations-shel.md) | Auditor in flight; native `jq` builtin exists |
-| D Experts | [06](06-expert-package-composition.md) | **REJECT** ExpertPackage runtime |
+| A Skills | [02](02-agentskills-compliance.md), [03](03-model-tool-requirements.md) | **REUSE** discovery; **EXTEND** retention (not gates); **REJECT** second registry / skill-YAML preflight |
+| B Hooks | [04](04-native-hooks-and-pluggy.md) | **REUSE** HookGate; **REJECT** second middleware / Bub firstresult |
+| C Structured / sHEL | [05](05-structured-operations-shel.md) | **REUSE** jq; **REJECT** sHEL embed (unmeasured; wrong domain) |
+| D Experts | [06](06-expert-package-composition.md) | **REJECT** ExpertPackage; durable experts → ADW only |
 
 ## Non-goals (architecture)
 

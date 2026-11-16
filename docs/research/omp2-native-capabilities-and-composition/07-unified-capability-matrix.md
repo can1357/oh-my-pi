@@ -2,33 +2,34 @@
 
 Pin: `a8762fd997ca754b30ea7d3344cbd5c656aa5dff`.  
 Sources: streams [A](02-agentskills-compliance.md)–[D](06-expert-package-composition.md).  
-EGM design review of recommendations: pending ([09](09-egm-design-review.md)).
+EGM: [09-egm-design-review.md](09-egm-design-review.md) (F1–F9 applied below).
 
-Recommendation classes: **REUSE** · **EXTEND** · **IMPLEMENT** · **DEFER** · **REJECT**.
+Evidence column: **SI** = source-inventoried (tests not re-run). Recommendation classes: **REUSE** · **EXTEND** · **IMPLEMENT** · **DEFER** · **REJECT**.
 
 | Capability | Current owner | Status | Gap | Existing alternative | Standard impact | Security | Complexity | Evidence | Recommendation |
 |---|---|---|---|---|---|---|---|---|---|
-| Skill discovery + progressive disclosure | `driver/discovery/skills.rs` | Implemented | — | — | Portable | Containment OK | Low | Stream A | **REUSE** |
-| Retain Agent Skills optional fields | same + `Skill` shape | Partial | license/compatibility/metadata dropped | Document divergence | Portability | Low | Low | Stream A | **EXTEND** |
-| Align default name rules with spec | default vs plugin parsers | Partial | Dual regimes | Plugin path already strict | Spec conformance | Low | Low | Stream A | **EXTEND** or document |
-| Enforce `allowed-tools` | parse-only on plugins | Absent | No admission wire | ApprovalBook + roster | Experimental field | Must not grant | Med | Stream A | **IMPLEMENT** only if product wants; else document non-enforcement |
-| Second skill registry | — | Absent | — | ActiveSkills | Breaks single owner | High risk of split brain | High | Stream A | **REJECT** |
-| Model/tool reqs via metadata/sidecar | advisory only | Proposed | No typed preflight from skills | catalog + `omp-ai` + envd | Prefer string metadata | Skills must not authorize | Med | `03` | **EXTEND** B+D direction pending owner |
-| Five-phase HookGate | `contract/hooks.rs`, envd compose | Implemented | — | — | N/A | Phase legality | Med | Stream B | **REUSE** |
-| Parallel Pluggy middleware stack | — | Absent | Shape differs by design | HookGate phases | N/A | Would widen attack surface | High | Stream B | **REJECT** |
-| Emit `user_input` family | catalog only | Partial | No Rust emit | `before_agent_start` | N/A | Prompt gate | Med | Stream B | **EXTEND** if product needs |
-| Replay re-admission | `retry_tool_tail` | Partial | Skips tool_call gate | Intentional for journal fidelity | N/A | Policy vs replay | Med | Stream B | **EXTEND** only if policy requires |
-| Parallel Precheck/Review | docs claim | Partial | Sequential impl | Sequential compose | N/A | Perf only | Med | Stream B | **DEFER** |
-| `agent_settled` rev mismatch | catalog vs payload | Partial | rev 2 vs 1 | TASKS.md open | N/A | Schema drift | Low | Stream B | **EXTEND** before schema work |
-| In-process `jq` (jaq) | `shell-builtins/jq.rs` | Implemented | — | — | N/A | PathPolicy | Low | Stream C | **REUSE** |
-| Embed sHEL / second interpreter | — | Absent | Wrong domain (cmd.exe workstation; AGPL) | bash+jq+spill | N/A | New trust + license surface | High | Stream C (×2) | **REJECT** |
-| Nested-eval tool hook emission | envd/kernel | Partial | Nested path skips tool hooks | Documented gap | N/A | Policy blind spot | Med | Stream B | **EXTEND** if policy requires |
-| Bub firstresult prompt/model replace | — | Absent | — | Core-owned prompt/inference | N/A | Would invert authority | High | Stream B | **REJECT** (Locked Deviation) |
-| Live jq minimizer in envd | minimizer crate | Partial | cargo-only live | Spill/projection | N/A | Token vs fidelity | Low | Stream C | **DEFER** |
-| yq-like YAML/CSV transform | — | Absent | No builtin | serde for config only | N/A | Path/injection | Med | Stream C | **DEFER** |
-| ExpertPackage runtime | — | Absent | Composition desire | skills+ADW+ext+classes | Would fork standards story | Authority confusion | High | Stream D | **REJECT** |
-| Skill-only extension packs | ADR 0061 | Proposed | Packaging | Extensions | Compatible | Trust grants stay native | Med | Stream D | **EXTEND** (existing ADR) |
-| PR webhook → expert pipeline | forge/ci Dyn | Partial | No push webhook subscriber | poll/watch + schedules | N/A | Ingress auth | Med | Stream D | **EXTEND** ingress/recipes only |
+| Skill discovery + progressive disclosure | `driver/discovery/skills.rs` | Implemented | — | — | Portable | Containment OK | Low | SI A | **REUSE** |
+| Retain Agent Skills optional fields | same + `Skill` shape | Partial | fields dropped | Document divergence | Portability | Low | Low | SI A | **EXTEND** retention only (not a gate) |
+| Align default name rules with spec | dual parsers | Partial | Dual regimes | Plugin path strict | Spec conformance | Low | Low | SI A | **EXTEND** or **document** (Q2) |
+| Enforce `allowed-tools` | parse-only plugins | Absent | unused | ApprovalBook + roster | Experimental | Skill must not grant | Med | SI A | **REJECT** as cohesive default; **document** parse-only (Q3); ADR required before any intersect-only wire |
+| Second skill registry | — | Absent | — | ActiveSkills | Breaks owner | Split brain | High | SI A | **REJECT** |
+| Model/tool reqs from skill metadata | advisory | Proposed | — | catalog + `omp-ai` + envd | Nonstandard if gated | Skills must not authorize | Med | SI `03` | **REUSE** native enforcement (D); **DEFER** sidecar; no skill-YAML preflight runtime |
+| Five-phase HookGate | `contract/hooks.rs`, envd | Implemented | — | — | N/A | Phase legality | Med | SI B | **REUSE** (tool/session admission) |
+| Parallel Pluggy middleware stack | — | Absent | — | HookGate | N/A | Attack surface | High | SI B | **REJECT** (YAGNI; not “parity achieved”) |
+| Emit `user_input` family | catalog only | Partial | No Rust emit | `before_agent_start` | N/A | Prompt gate | Med | SI B | **EXTEND** if product needs |
+| Replay re-admission | `retry_tool_tail` | Partial | Skips gate | Journal fidelity | N/A | Policy vs replay | Med | SI B | **EXTEND** only if policy requires |
+| Parallel Precheck/Review | docs claim | Partial | Sequential | Sequential compose | N/A | Perf | Med | SI B | **DEFER** or fix docs |
+| `agent_settled` rev mismatch | catalog vs payload | Partial | rev 2 vs 1 | TASKS.md | N/A | Schema drift | Low | SI B | **EXTEND** before schema work |
+| Nested-eval tool hooks | envd/kernel | Partial | Nested skips | Documented | N/A | Policy blind spot | Med | SI B | **EXTEND** if policy requires |
+| Bub firstresult prompt/model | — | Absent | — | Core-owned | N/A | Authority invert | High | SI B | **REJECT** |
+| In-process `jq` (jaq) | `shell-builtins/jq.rs` | Implemented | — | — | N/A | PathPolicy | Low | SI C | **REUSE** |
+| Embed sHEL | — | Absent | Wrong domain | bash+jq+spill | N/A | Trust + AGPL | High | SI C | **REJECT**; native default = absent measured gap |
+| Live jq minimizer | minimizer / envd | Partial | cargo-only | Spill | N/A | Token vs fidelity | Low | SI C | **DEFER** |
+| yq-like YAML/CSV | — | Absent | — | config serde | N/A | Injection | Med | SI C | **DEFER** |
+| ExpertPackage runtime | — | Absent | — | skills+ADW+ext+classes | Fork story | Authority | High | SI D | **REJECT** |
+| Soft `omp.workflows` DAG | extension device | Implemented (II) | Second DAG vs ADW | ADW for durable experts | N/A | Resume confusion | Med | SI D | **REUSE** as optional long-tail only; **not** expert packaging |
+| Skill-only extension packs | ADR 0061 | Proposed | O8 open | Extensions | Compatible | Trust native | Med | SI D | **DEFER**/proposed packaging — not landed |
+| PR webhook → expert pipeline | forge/ci | Partial | No push webhook | poll/schedules | N/A | Ingress | Med | SI D | **EXTEND** ingress/recipes only |
 
 ## Cross-stream dependencies
 
@@ -38,9 +39,10 @@ Recommendation classes: **REUSE** · **EXTEND** · **IMPLEMENT** · **DEFER** ·
 4. Expert packages (D) **REJECT** removes a large false dependency on A–C.  
 5. Owner gate required before any production EXTEND/IMPLEMENT.
 
-## Cohesive architecture (Elephant draft, pre-Goldfish)
+## Cohesive architecture (Elephant draft, post–Goldfish F1–F9)
 
-- **Portable layer:** Agent Skills as standardized; optional string `metadata` / `compatibility`.  
-- **Native enforcement:** catalogs, routing, HookGate, ApprovalBook, envd — never skill YAML.  
-- **Composition:** skills + agent classes + extensions + ADW (no ExpertPackage).  
-- **Structured data:** bash + in-process `jq` + spill; no sHEL.  
+- **Portable layer:** Agent Skills as standardized prose; optional field **retention** for portability (Q1) — not gates.  
+- **Native enforcement only:** catalogs, routing, HookGate, ApprovalBook, envd — skill YAML never expands authority.  
+- **Composition:** skills + agent classes + extensions + **ADW for durable gated experts**; `omp.workflows` optional long-tail, not the expert story; no ExpertPackage.  
+- **Structured data:** bash + in-process `jq` + spill; no sHEL embed.  
+- **Hooks:** REUSE HookGate; REJECT second stack without claiming Pluggy parity.  

@@ -16,13 +16,13 @@ Depends on [02-agentskills-compliance.md](02-agentskills-compliance.md).
 
 ## Alternatives (from program brief)
 
-| Option | Tentative |
+| Option | Tentative (post–EGM F2) |
 |---|---|
-| A. Spec-only | **REUSE** baseline; insufficient for typed preflight |
-| B. Namespaced `metadata` strings | **EXTEND** preferred for portability |
-| C. Requirements sidecar | **DEFER** until B is insufficient |
-| D. Native capability registries only | **REUSE** for enforcement; skills stay advisory |
+| A. Spec-only | **REUSE** baseline for portable prose |
+| B. Namespaced `metadata` strings | **EXTEND** only for **retention/portability** (Q1) — not a gate |
+| C. Requirements sidecar | **DEFER** until a measured native gap exists |
+| D. Native capability registries only | **Recommended for enforcement** (catalog + `omp-ai` + envd) |
 | E. Expert packages | **REJECT** as new runtime (see stream D) |
-| F. Combine B+D | **Recommended direction** pending review |
+| F. Combine B+D as typed skill preflight | **REJECT** as cohesive default — conflates advisory YAML with authority |
 
-Full decision waits on streams B–C synthesis and EGM review.
+Skills may *describe* preferences in portable text; **preflight and admission stay native**.
