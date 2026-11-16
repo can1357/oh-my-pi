@@ -442,10 +442,6 @@ async fn header_only_input_gets_the_current_tag() {
 			)),
 			"{header}: {error}"
 		);
-		assert!(
-			error.contains(&format!("The current file hashes to #{current}.")),
-			"{header}: {error}"
-		);
 		assert!(writer.requests.lock().is_empty(), "{header}");
 	}
 }

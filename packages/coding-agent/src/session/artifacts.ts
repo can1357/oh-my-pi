@@ -104,21 +104,16 @@ export class ArtifactManager implements ArtifactManagerApi {
 	#dirCreated = false;
 	#initPromise: Promise<void> | null = null;
 	readonly #ready: Promise<void> | undefined;
-	readonly #reservedIdsDir: string | undefined;
 
 	/**
 	 * @param dir Directory that will hold artifact files. Created lazily on first save.
 	 * @param ready Settles once `dir` is seeded (a session move copying the previous
 	 *   session's artifacts in the background). Id scans and lookups wait for it,
 	 *   so new ids never collide with copied ones. Must not reject.
-	 * @param reservedIdsDir Read-only directory whose ids stay reserved: a seance
-	 *   fork allocates past its source's ids so `artifact://<n>` from the inherited
-	 *   transcript keeps naming the source artifact.
 	 */
-	constructor(dir: string, ready?: Promise<void>, reservedIdsDir?: string) {
+	constructor(dir: string, ready?: Promise<void>) {
 		this.#dir = dir;
 		this.#ready = ready;
-		this.#reservedIdsDir = reservedIdsDir;
 	}
 
 	/**
@@ -148,13 +143,6 @@ export class ArtifactManager implements ArtifactManagerApi {
 	 */
 	async #scanExistingIds(): Promise<void> {
 		const files = await this.listFiles();
-		if (this.#reservedIdsDir) {
-			try {
-				files.push(...(await fs.readdir(this.#reservedIdsDir)));
-			} catch {
-				// A missing source artifacts dir reserves nothing.
-			}
-		}
 		let maxId = -1;
 		for (const file of files) {
 			// Files are named: {id}.{toolType}.log

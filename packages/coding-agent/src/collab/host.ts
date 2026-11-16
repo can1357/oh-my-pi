@@ -25,6 +25,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { toWireEvent } from "../session/loop-end-wire";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
@@ -69,6 +70,7 @@ import {
 /** Events that change the footer state guests render. */
 const STATE_TRIGGER_EVENTS: Record<string, true> = {
 	agent_start: true,
+	agent_pause: true,
 	agent_end: true,
 	message_end: true,
 	tool_execution_end: true,
@@ -535,7 +537,9 @@ export class CollabHost {
 		// peer); a joining guest's welcome snapshot covers everything before that.
 		// The local registry work below is independent of this.
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcastEvent(event);
+			// Guests speak the per-loop `agent_end` wire shape (see loop-end-wire.ts).
+			const wireEvent = toWireEvent(event);
+			if (isWireAgentEvent(wireEvent)) this.#broadcastEvent(wireEvent);
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at

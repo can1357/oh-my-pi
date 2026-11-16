@@ -92,13 +92,6 @@ export interface BashExecutorOptions {
 	 */
 	onStart?: (pids: () => readonly number[]) => void;
 	/**
-	 * Invoked before the run when the session's persistent shell is busy with
-	 * another command, so this one runs in a fork of it instead: it sees the
-	 * session's shell state as of before that command, and the state it sets
-	 * is discarded.
-	 */
-	onSessionShellBusy?: () => void;
-	/**
 	 * Asked once the run settles: `false` means the agent session that owns
 	 * `sessionKey` was left (new, fork, switch, branch) while the command ran,
 	 * so the persistent shell it used is dropped instead of kept for a next call.
@@ -151,6 +144,24 @@ export interface BashResult extends OutputSummary {
 	workingDir?: string;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
+	/**
+	 * Set when the command overlapped another one on the session's persistent
+	 * shell and so ran in a fork of it, which saw the shell's state as of before
+	 * that command.
+	 */
+	fork?: ShellForkOutcome;
+}
+
+/** How a command that ran in a fork of the busy persistent shell ({@link BashResult.fork}) left the session. */
+export interface ShellForkOutcome {
+	/**
+	 * What it set (variables, functions, aliases, options, traps) carried back into
+	 * the session's shell, a name both set keeping the value of the command that
+	 * ended last; `false`: it stayed in the fork.
+	 */
+	carried: boolean;
+	/** It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them. */
+	jobs: boolean;
 }
 
 /** POSIX-safe variable name — gates which direnv unsets we inject into the
@@ -331,14 +342,15 @@ export async function drainAbortedShells(agentSessionKey: string | undefined): P
 	await Promise.all(pending);
 }
 
-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
+/** Keeps `shell` alive while it has live background jobs; whether it had any. */
+async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean> {
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
 	} catch {
-		return;
+		return false;
 	}
-	if (live <= 0) return;
+	if (live <= 0) return false;
 	retainedShells.add(shell);
 	const interval = setInterval(() => {
 		void shell
@@ -354,6 +366,7 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 			});
 	}, RETAIN_REAP_INTERVAL_MS);
 	interval.unref?.();
+	return true;
 }
 
 /**
@@ -844,8 +857,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// mutex-guarded queue and `abort()` kills every in-flight run on it). When
 	// parallel bash calls overlap on the same key, the first one owns the
 	// persistent session; the rest run in one-shot forks of it, which start
-	// from the session's state before the owner's command. A cancelled command
-	// keeps owning the session until its native run settles.
+	// from the session's state before the owner's command and carry what they
+	// set back into it once they end. A cancelled command keeps owning the
+	// session until its native run settles.
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
 	let shellSession = sessionBusy ? undefined : shellSessions.get(sessionKey);
 	if (!shellSession && !sessionBusy) {
@@ -857,7 +871,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (shellSession) {
 		shellSessionsInUse.add(sessionKey);
 	}
-	if (sessionBusy) options?.onSessionShellBusy?.();
+	// A fork's run settled: carry what it set into the session's shell, and keep
+	// the fork alive while background jobs it started run (dropping it kills them).
+	const settleFork = async (): Promise<{ fork?: ShellForkOutcome }> => {
+		if (!sessionBusy) return {};
+		const carried = busyShell?.adopt(executionShell) ?? false;
+		const jobs = await retainShellWithLiveBackgroundJobs(executionShell);
+		return { fork: { carried, jobs } };
+	};
 	const userSignal = options?.signal;
 	const runAbortController = new AbortController();
 	let abortCleanupPromise: Promise<void> | undefined;
@@ -949,7 +970,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (shellSession) {
 				unsettled = { run: runPromise, cleanup: cleanupPromise };
 			} else {
-				void Promise.allSettled([runPromise, cleanupPromise]);
+				void Promise.allSettled([runPromise, cleanupPromise]).then(settleFork);
 			}
 			if (winner.kind === "abort") {
 				trackAbortedShell(options?.sessionKey, runPromise, cleanupPromise);
@@ -988,6 +1009,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				cancelled: true,
 				timedOut: true,
 				...settleTrace(),
+				...(await settleFork()),
 				...(await dump(annotation)),
 			};
 		}
@@ -998,6 +1020,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				...settleTrace(),
+				...(await settleFork()),
 				...(await dump("Command cancelled")),
 			};
 		}
@@ -1040,6 +1063,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			workingDir: winner.result.workingDir,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
+			...(await settleFork()),
 			...(await dump()),
 		};
 	} catch (err) {

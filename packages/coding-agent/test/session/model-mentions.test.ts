@@ -282,7 +282,7 @@ describe("model mentions", () => {
 		});
 		const { dir, skill } = await createTaggedSkill();
 		const results = new RpcPromptResults(
-			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, isRunActive: false },
 			() => {},
 		);
 		try {

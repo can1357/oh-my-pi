@@ -60,6 +60,7 @@ pi-predict.workspace = true
 pi-shell.workspace = true
 pi-vfs.workspace = true
 pi-voice.workspace = true
+ptts.workspace = true
 portable-pty.workspace = true
 png.workspace = true
 rayon.workspace = true
