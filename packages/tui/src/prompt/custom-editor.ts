@@ -650,6 +650,7 @@ export class CustomEditor extends Editor {
 				),
 				selector => this.#mentionChipFor(selector),
 				register,
+				selector => this.resolveModelMention(selector) !== undefined,
 			),
 		);
 		this.#syncComposerTokenPattern();
@@ -730,7 +731,11 @@ export class CustomEditor extends Editor {
 					const start = match.index + match[1].length;
 					const end = match.index + match[0].length;
 					if (end === line.length && i === lines.length - 1) break;
-					const mention = resolveModelMentionToken(selector, candidate => this.#mentionChipFor(candidate));
+					const mention = resolveModelMentionToken(
+						selector,
+						candidate => this.#mentionChipFor(candidate),
+						candidate => this.resolveModelMention(candidate) !== undefined,
+					);
 					if (!mention) continue;
 					this.collapseToAtom(
 						i,

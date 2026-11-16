@@ -16,9 +16,13 @@ export const MODEL_MENTION_RE = /(^|\s)\^([^\s^]+)(?=\s|$)/g;
 export function resolveModelMentionToken<T>(
 	token: string,
 	resolve: (selector: string) => T | undefined,
+	isKnown?: (selector: string) => boolean,
 ): { value: T; suffix: string } | undefined {
 	const value = resolve(token);
 	if (value !== undefined) return { value, suffix: "" };
+	// A known exact selector whose chip label is taken must stay literal;
+	// stripping punctuation here would collapse a different model's chip.
+	if (isKnown?.(token)) return undefined;
 	let end = token.length;
 	while (end > 0 && ".,;:!?".includes(token[end - 1]!)) {
 		end--;

@@ -89,11 +89,12 @@ export function collapseModelMentions(
 	text: string,
 	chipFor: (selector: string) => { label: string; selector: string } | undefined,
 	register: (label: string, expansion: string) => void,
+	isKnown?: (selector: string) => boolean,
 ): string {
 	if (!text.includes("^") || !allowsModelMentions(text)) return text;
 	MODEL_MENTION_RE.lastIndex = 0;
 	return text.replace(MODEL_MENTION_RE, (match, delimiter: string, selector: string) => {
-		const mention = resolveModelMentionToken(selector, chipFor);
+		const mention = resolveModelMentionToken(selector, chipFor, isKnown);
 		if (!mention) return match;
 		register(mention.value.label, modelMentionToken(mention.value.selector));
 		return `${delimiter}${mention.value.label}${mention.suffix}`;

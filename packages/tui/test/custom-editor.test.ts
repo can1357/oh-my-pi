@@ -498,6 +498,17 @@ describe("CustomEditor bracketed path paste", () => {
 			expect(submitted).toBe("^a/x then ^b/y");
 		});
 
+		it("keeps a colliding exact selector with trailing punctuation literal", () => {
+			const editor = makeModelEditor();
+			editor.resolveModelMention = selector =>
+				selector === "a/x" || selector === "a/x,"
+					? { label: modelMentionChipLabel("X One"), selector }
+					: undefined;
+			for (const ch of "^a/x then ^a/x, ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`${modelMentionChipLabel("X One")} then ^a/x, `);
+			expect(editor.getExpandedText()).toBe("^a/x then ^a/x, ");
+		});
+
 		it("keeps local execution literal while allowing mentions in slash prompts and shell interpolation text", () => {
 			for (const local of ["!echo ^a/x ", "  !echo ^a/x ", "$ ^a/x ", "$$ ^a/x "]) {
 				const editor = makeModelEditor();
