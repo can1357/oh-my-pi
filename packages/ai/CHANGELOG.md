@@ -64,7 +64,7 @@
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 ### Fixed
 
-- Fixed Antigravity CLI context occupancy so it is measured against omp's configured context window instead of the server's reported window, keeping the server count when either window is unknown ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511))
+- Fixed Antigravity CLI context occupancy so it is measured against omp's configured context window instead of the server's reported window, keeping the server count when either window is unknown ([#19426](https://github.com/can1357/oh-my-pi/pull/19426) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
