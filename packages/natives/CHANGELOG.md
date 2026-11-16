@@ -28,6 +28,13 @@
 ### Fixed
 
 - macOS `ax()` now shows a toggle in a SwiftUI settings form with the label beside it, and `find({ title })` matches that label, instead of leaving the control unnamed ([#19061](https://github.com/can1357/oh-my-pi/pull/19061) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- `DesktopFocusReturn.keyboard` says what a macOS takeover did with the user's keyboard (`handedBack`, `leftAsChosen`, `kept`, `frontOnly`, `notSent`) ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed macOS `computer` input leaving your window inactive after putting your app back in front, both after a takeover and after background input whose target brought itself forward: the title bar stayed inactive and web pages saw a blur until you clicked, while a takeover reported focus returned ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
