@@ -1,6 +1,7 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
+import { ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA } from "../registry/oauth/google-antigravity";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -72,9 +73,11 @@ interface AntigravityQuotaSummaryResponse {
 interface AntigravityEndpointRequest {
 	endpoints: readonly string[];
 	path: string;
-	projectId: string;
+	projectId?: string;
 	accessToken: string;
 	signal?: AbortSignal;
+	/** Overrides the default `{ project }` body (used by `loadCodeAssist`). */
+	body?: Record<string, unknown>;
 }
 
 interface AntigravityEndpointResult {
@@ -85,6 +88,7 @@ interface AntigravityEndpointResult {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
+const LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist";
 /** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
 const QUOTA_SUMMARY_SOURCE = "quota-summary";
 
@@ -445,7 +449,7 @@ async function fetchAntigravityEndpoint(
 					"Content-Type": "application/json",
 					...getAntigravityHeaders(),
 				},
-				body: JSON.stringify({ project: request.projectId }),
+				body: JSON.stringify(request.body ?? { project: request.projectId }),
 				signal: request.signal,
 			});
 		} catch (error) {
@@ -475,20 +479,60 @@ function resolveAccessToken(params: UsageFetchParams): string | undefined {
 	return credential.accessToken;
 }
 
-async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
-	const credential = params.credential;
-	if (!credential.projectId) return null;
+/**
+ * Resolve the Cloud Code project for a credential that has none stored. This is
+ * a read-only `loadCodeAssist` probe: no onboarding or free-tier provisioning is
+ * attempted, so an account that was never provisioned simply reports no usage.
+ */
+async function resolveAntigravityProjectId(
+	request: Omit<AntigravityEndpointRequest, "path" | "projectId" | "body">,
+	ctx: UsageFetchContext,
+): Promise<string | undefined> {
+	const result = await fetchAntigravityEndpoint(
+		{ ...request, path: LOAD_CODE_ASSIST_PATH, body: { metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA } },
+		ctx,
+	);
+	if (!result.response?.ok) {
+		ctx.logger?.warn("Antigravity project discovery failed", {
+			status: result.response?.status ?? 0,
+			statusText: result.response?.statusText ?? "unknown",
+		});
+		return undefined;
+	}
+	try {
+		const payload = (await result.response.json()) as { cloudaicompanionProject?: unknown };
+		const projectId = payload.cloudaicompanionProject;
+		return typeof projectId === "string" && projectId.length > 0 ? projectId : undefined;
+	} catch {
+		// A non-JSON body means the token exposes no project.
+		return undefined;
+	}
+}
+
+async function fetchAntigravityUsage(input: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
+	const credential = input.credential;
 
 	const nowMs = Date.now();
 
-	const accessToken = resolveAccessToken(params);
+	const accessToken = resolveAccessToken(input);
 	if (!accessToken) return null;
 
-	const baseUrl = params.baseUrl?.replace(/\/+$/, "");
+	// `antigravity-cli` models carry the ACP transport URL (`https://antigravity.google`)
+	// as their baseUrl, so honoring it would send `loadCodeAssist` and the quota
+	// requests to a host that does not serve them. Quota stays on Cloud Code.
+	const baseUrl = input.provider === "antigravity-cli" ? undefined : input.baseUrl?.replace(/\/+$/, "");
 	const endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT, "https://daily-cloudcode-pa.sandbox.googleapis.com"];
+	// `antigravity-cli` credentials hold only the agy OAuth grant, so the Cloud
+	// Code project has to be discovered before the quota endpoints can be used.
+	const projectId =
+		credential.projectId ??
+		(await resolveAntigravityProjectId({ endpoints, accessToken, signal: input.signal }, ctx));
+	if (!projectId) return null;
+	const params: UsageFetchParams =
+		projectId === credential.projectId ? input : { ...input, credential: { ...credential, projectId } };
 	const endpointRequest = {
 		endpoints,
-		projectId: credential.projectId,
+		projectId,
 		accessToken,
 		signal: params.signal,
 	};
@@ -625,8 +669,8 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 			label,
 			scope: {
 				provider: params.provider,
-				accountId: credential.accountId,
-				projectId: credential.projectId,
+				accountId: params.credential.accountId,
+				projectId: params.credential.projectId,
 				tier: entry.tier,
 				windowId: entry.windowId,
 			},
@@ -644,10 +688,10 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 	const metadata: UsageReport["metadata"] = {
 		endpoint: successfulEndpoint,
-		projectId: credential.projectId,
+		projectId: params.credential.projectId,
 	};
-	if (credential.email) metadata.email = credential.email;
-	if (credential.accountId) metadata.accountId = credential.accountId;
+	if (params.credential.email) metadata.email = params.credential.email;
+	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
 
 	const report: UsageReport = {
 		provider: params.provider,
@@ -665,6 +709,17 @@ export const antigravityUsageProvider: UsageProvider = {
 	cacheVersion: 3,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
+};
+
+/**
+ * Same quota surface for the ACP route (`agy acp`). The credential carries no
+ * `projectId`, so the fetcher discovers it from `loadCodeAssist` on first use.
+ */
+export const antigravityCliUsageProvider: UsageProvider = {
+	id: "antigravity-cli",
+	cacheVersion: 3,
+	fetchUsage: fetchAntigravityUsage,
+	supports: params => params.provider === "antigravity-cli",
 };
 
 /** Map an Antigravity model id to its backend quota-counter key. */

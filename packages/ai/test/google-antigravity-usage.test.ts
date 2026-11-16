@@ -7,7 +7,9 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams, UsageLimit } from "@oh-my-pi/pi-ai/usage";
+import { defaultUsageProvider } from "@oh-my-pi/pi-ai/usage/registry";
 import {
+	antigravityCliUsageProvider,
 	antigravityRankingStrategy,
 	antigravityUsageProvider,
 	scopeAntigravityLimitsForModel,
@@ -644,5 +646,160 @@ describe("antigravity ranking strategy", () => {
 		const { primary, secondary } = antigravityRankingStrategy.findWindowLimits(report);
 		expect(primary).toBeUndefined();
 		expect(secondary).toBeUndefined();
+	});
+});
+
+// ── antigravity-cli (ACP route) ──────────────────────────────────────
+//
+// The `antigravity-cli` credential holds only the agy OAuth grant, so the
+// Cloud Code project has to be discovered from `loadCodeAssist` before the
+// quota endpoints can be used.
+
+const antigravityCliCredential = () =>
+	makeCredential({ projectId: undefined, email: undefined, accountId: undefined });
+
+function routedFetch(routes: Record<string, unknown>) {
+	const calls: { url: string; path: string; body: string }[] = [];
+	const fetchImpl: FetchImpl = async (url, init) => {
+		const body = String(init?.body ?? "");
+		calls.push({ url, path: new URL(url).pathname, body });
+		const key = Object.keys(routes).find(path => new URL(url).pathname.endsWith(path));
+		if (key === undefined) return new Response("not found", { status: 404 });
+		return new Response(JSON.stringify(routes[key]), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	};
+	return { calls, fetchImpl };
+}
+
+const quotaSummaryFixture = {
+	groups: [
+		{
+			displayName: "Gemini Models",
+			buckets: [{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.5 }],
+		},
+	],
+};
+
+describe("antigravity-cli usage", () => {
+	it("registers a provider for the ACP provider id", () => {
+		// Goes through the registry so a missing DEFAULT_USAGE_PROVIDERS entry fails here.
+		expect(defaultUsageProvider("antigravity-cli")).toBe(antigravityCliUsageProvider);
+		expect(defaultUsageProvider("google-antigravity")).toBe(antigravityUsageProvider);
+		expect(antigravityCliUsageProvider.id).toBe("antigravity-cli");
+		expect(antigravityCliUsageProvider.supports?.({ provider: "antigravity-cli" } as UsageFetchParams)).toBe(true);
+		expect(antigravityCliUsageProvider.supports?.({ provider: "google-antigravity" } as UsageFetchParams)).toBe(false);
+	});
+
+	it("discovers the project, then fetches quota with it", async () => {
+		const { calls, fetchImpl } = routedFetch({
+			":loadCodeAssist": { cloudaicompanionProject: "resolved-project" },
+			":retrieveUserQuotaSummary": quotaSummaryFixture,
+		});
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{ provider: "antigravity-cli", credential: antigravityCliCredential() },
+			makeCtx(fetchImpl),
+		);
+
+		expect(calls.map(call => call.path)).toEqual([
+			"/v1internal:loadCodeAssist",
+			"/v1internal:retrieveUserQuotaSummary",
+		]);
+		expect(calls[0]!.body).toBe(JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }));
+		expect(calls[1]!.body).toBe(JSON.stringify({ project: "resolved-project" }));
+		expect(report?.provider).toBe("antigravity-cli");
+		expect(report?.metadata?.projectId).toBe("resolved-project");
+		expect(report?.limits.length).toBeGreaterThan(0);
+	});
+
+	it("skips discovery when the credential already carries a project", async () => {
+		const { calls, fetchImpl } = routedFetch({
+			":loadCodeAssist": { cloudaicompanionProject: "should-not-be-used" },
+			":retrieveUserQuotaSummary": quotaSummaryFixture,
+		});
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{ provider: "antigravity-cli", credential: makeCredential({ projectId: "stored-project" }) },
+			makeCtx(fetchImpl),
+		);
+
+		expect(calls.map(call => call.path)).toEqual(["/v1internal:retrieveUserQuotaSummary"]);
+		expect(calls[0]!.body).toBe(JSON.stringify({ project: "stored-project" }));
+		expect(report?.metadata?.projectId).toBe("stored-project");
+	});
+
+	it("reports no usage, without touching the quota endpoints, when no project is exposed", async () => {
+		const { calls, fetchImpl } = routedFetch({ ":loadCodeAssist": {} });
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{ provider: "antigravity-cli", credential: antigravityCliCredential() },
+			makeCtx(fetchImpl),
+		);
+
+		expect(calls.map(call => call.path)).toEqual(["/v1internal:loadCodeAssist"]);
+		expect(report).toBeNull();
+	});
+
+	it("keeps quota requests on Cloud Code when the model declares an ACP base URL", async () => {
+		const { calls, fetchImpl } = routedFetch({
+			":loadCodeAssist": { cloudaicompanionProject: "resolved-project" },
+			":retrieveUserQuotaSummary": quotaSummaryFixture,
+		});
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{
+				provider: "antigravity-cli",
+				// The bundled antigravity-cli model exposes its ACP transport URL here.
+				baseUrl: "https://antigravity.google",
+				credential: antigravityCliCredential(),
+			},
+			makeCtx(fetchImpl),
+		);
+
+		expect(calls.every(call => call.url.startsWith("https://daily-cloudcode-pa.googleapis.com/"))).toBe(true);
+		expect(report?.metadata?.projectId).toBe("resolved-project");
+	});
+
+	it("keeps the discovered project on the fetchAvailableModels fallback", async () => {
+		const { calls, fetchImpl } = routedFetch({
+			":loadCodeAssist": { cloudaicompanionProject: "resolved-project" },
+			":fetchAvailableModels": {
+				models: {
+					"gemini-4-hydrogen": {
+						displayName: "Gemini 4 Hydrogen",
+						quotaInfo: { remainingFraction: 0.4, windowId: "weekly" },
+					},
+				},
+			},
+		});
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{ provider: "antigravity-cli", credential: antigravityCliCredential() },
+			makeCtx(fetchImpl),
+		);
+
+		// retrieveUserQuotaSummary is unavailable here, so the legacy catalog is used.
+		expect(calls.map(call => call.path)).toEqual([
+			"/v1internal:loadCodeAssist",
+			"/v1internal:retrieveUserQuotaSummary",
+			"/v1internal:fetchAvailableModels",
+		]);
+		expect(report?.metadata?.projectId).toBe("resolved-project");
+		expect(report?.limits.length).toBeGreaterThan(0);
+		for (const limit of report?.limits ?? []) expect(limit.scope?.projectId).toBe("resolved-project");
+	});
+
+	it("keeps the legacy provider on its stored project", async () => {
+		const { calls, fetchImpl } = routedFetch({ ":retrieveUserQuotaSummary": quotaSummaryFixture });
+
+		const report = await antigravityUsageProvider.fetchUsage(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+
+		expect(calls.map(call => call.path)).toEqual(["/v1internal:retrieveUserQuotaSummary"]);
+		expect(report?.provider).toBe("google-antigravity");
 	});
 });
