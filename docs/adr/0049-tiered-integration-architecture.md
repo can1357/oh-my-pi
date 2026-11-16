@@ -243,6 +243,16 @@ Phase 4 `cap-forge` and `cap-ci` are DONE. Phase 4 PR1 landed the pure `omp-forg
 
 ## Amendment (2026-11-10)
 
+
+
+
+Consequences of this amendment:
+
+ctx_search({queries:["","can"], source:"s1wu"}) searches the whole output (4990 B).**Recommended:** keep the 300 budget and decide the method explicitly.
+
+**Owner decision (2026-11-16):** decide counting method first and record both measures in ADR 0049; choose trimming options afterwards.
+## Amendment (2026-11-10)
+
 **Owner decision (2026-11-10):** the first-party T2 extensions home may live **in the same git repository** as omp2 (as in early omp2 / can1357 upstream), not a separate GitHub repo. “Outside omp2” means **outside the Cargo workspace** (zero Cargo weight), not a separate remote.
 
 Consequences of this amendment:
