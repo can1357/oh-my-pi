@@ -34,10 +34,11 @@ import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type CustomTool, createAgentSession, customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import {
 	type ServingModel,
 	validateRetryFallbackChains,
@@ -639,6 +640,193 @@ describe("AgentSession retry fallback", () => {
 		expect(result.isError).not.toBe(true);
 		expect(await Bun.file(path.join(tempDir.path(), "eval-apply-patch.txt")).text()).toBe("bridged patch\n");
 	});
+
+	it.each([
+		["sdk", "model"],
+		["sdk", "direct"],
+		["extension", "model"],
+		["extension", "direct"],
+	] as const)("keeps custom apply_patch event identity for %s tools through %s dispatch", async (source, dispatch) => {
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		if (!model) throw new Error("Expected bundled test model to exist");
+		const target = path.join(tempDir.path(), "custom-patch.txt");
+		const parameters = type({ input: "string" });
+		const customTool: CustomTool<typeof parameters, unknown> = {
+			name: "apply_patch",
+			label: "Custom patch",
+			description: "Writes custom input without using the built-in edit tool",
+			parameters,
+			async execute(_id, params) {
+				await Bun.write(target, params.input);
+				return { content: [{ type: "text", text: "Custom patch executed" }] };
+			},
+		};
+		const events: string[] = [];
+		const reviewedResult = [{ type: "text" as const, text: "Custom patch reviewed" }];
+		({ session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"edit.modelVariants": { [model.id]: "apply_patch" },
+				"tools.xdev": false,
+				"lsp.enabled": false,
+			}),
+			model,
+			toolNames: ["edit"],
+			customTools: source === "sdk" ? [customTool] : [],
+			extensions: [
+				pi => {
+					if (source === "extension") pi.registerTool(customToolToDefinition(customTool));
+					pi.on("tool_call", event => {
+						events.push(`${event.type}:${event.toolName}`);
+						if (event.toolName === "edit") return { block: true, reason: "Protected edit" };
+						if (event.toolName === "apply_patch" && event.toolCallId === "blocked-custom-patch") {
+							return { block: true, reason: "Custom guard" };
+						}
+					});
+					pi.on("tool_result", event => {
+						events.push(`${event.type}:${event.toolName}`);
+						if (event.toolName === "apply_patch") return { content: reviewedResult };
+					});
+				},
+			],
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			cacheWarming: false,
+		}));
+		const custom = session.getToolByName("apply_patch");
+		if (!custom) throw new Error("Expected the custom apply_patch tool");
+		if (dispatch === "model") {
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "custom-patch",
+								name: "apply_patch",
+								arguments: { input: "custom\n" },
+							},
+						],
+					},
+					{ content: ["Finished the custom patch"] },
+				],
+			});
+			session.agent.streamFn = mock.stream;
+			await session.prompt("Use the custom patch tool");
+			await session.waitForIdle();
+			const result = session.messages.find(message => message.role === "toolResult");
+			expect(result?.role === "toolResult" && result.toolName).toBe("apply_patch");
+			expect(result?.content).toEqual(reviewedResult);
+		} else {
+			const result = await custom.execute("custom-patch", { input: "custom\n" });
+			expect(result.content).toEqual(reviewedResult);
+		}
+		expect(await Bun.file(target).text()).toBe("custom\n");
+		await expect(custom.execute("blocked-custom-patch", { input: "blocked\n" })).rejects.toThrow("Custom guard");
+		expect(await Bun.file(target).text()).toBe("custom\n");
+		expect(events).toEqual(["tool_call:apply_patch", "tool_result:apply_patch", "tool_call:apply_patch"]);
+	});
+
+	it.each(["allow", "prompt"] as const)(
+		"uses one edit approval for retained xd://apply_patch after fallback with %s policy",
+		async policy => {
+			const primaryModel = getBundledModel("openai", "gpt-4o-mini");
+			const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+				"edit.modelVariants": { [primaryModel.id]: "apply_patch", [fallbackModel.id]: "hashline" },
+				"tools.approvalMode": "always-ask",
+				"tools.approval": policy === "allow" ? { edit: "allow", write: "deny" } : { edit: "prompt" },
+				"lsp.enabled": false,
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			({ session } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				authStorage,
+				modelRegistry,
+				settings,
+				model: primaryModel,
+				toolNames: ["edit", "write"],
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				cacheWarming: false,
+			}));
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("Expected the session's extension runner");
+			const select = vi.fn(async (_title: string, options: string[]) => options[0]);
+			await initializeExtensions(session, {
+				uiContext: { ...runner.getUIContext(), select },
+				reportSendError: (_action, error) => {
+					throw error;
+				},
+				reportRuntimeError: error => {
+					throw new Error(error.error);
+				},
+			});
+			const mock = createMockModel();
+			const xdFile = `${policy}-xd.txt`;
+			const xdPatch = { input: `*** Begin Patch\n*** Add File: ${xdFile}\n+approved edit\n*** End Patch` };
+			let fallbackRequests = 0;
+			session.agent.streamFn = (model, context, options) => {
+				mock.push(
+					model.id === primaryModel.id
+						? { throw: "overloaded_error: provider returned error 503" }
+						: fallbackRequests++ === 0
+							? {
+									content: [
+										{
+											type: "toolCall",
+											id: `${policy}-xd`,
+											name: "write",
+											arguments: { path: "xd://apply_patch", content: JSON.stringify(xdPatch) },
+										},
+									],
+								}
+							: { content: ["Finished on the fallback"] },
+				);
+				return mock.stream(model, context, options);
+			};
+			await session.prompt("Continue on the fallback");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallbackModel.id);
+			const xdPrompts = select.mock.calls.length;
+			const retained = session.getToolByName("apply_patch");
+			if (!retained) throw new Error("Expected the retained apply_patch tool");
+			const directFile = `${policy}-direct.txt`;
+			const result = await retained.execute(`${policy}-direct`, {
+				input: `*** Begin Patch\n*** Add File: ${directFile}\n+approved edit\n*** End Patch`,
+			});
+			expect(result.isError).not.toBe(true);
+			expect(await Bun.file(path.join(tempDir.path(), directFile)).text()).toBe("approved edit\n");
+			expect(select.mock.calls.length - xdPrompts).toBe(policy === "prompt" ? 1 : 0);
+			const xdResult = session.messages.find(message => message.role === "toolResult");
+			expect(xdResult?.role === "toolResult" && xdResult.isError).not.toBe(true);
+			expect(await Bun.file(path.join(tempDir.path(), xdFile)).text()).toBe("approved edit\n");
+			expect(xdPrompts).toBe(policy === "prompt" ? 1 : 0);
+		},
+	);
 
 	it("keeps apply_patch callable after a retry fallback changes the edit mode", async () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");

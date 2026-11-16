@@ -5896,7 +5896,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const eventArgs = computer
 			? { actions: computer.actions, pendingSafetyChecks: computer.pendingSafetyChecks }
 			: ctx.args;
-		const toolName = resolveToolEventName(ctx.tool.name);
+		const toolName = resolveToolEventName(ctx.tool);
 		runner.markToolCallEmitted(ctx.toolCall.id, ctx.tool.name);
 		let callResult: Awaited<ReturnType<ExtensionRunner["emitToolCall"]>>;
 		try {

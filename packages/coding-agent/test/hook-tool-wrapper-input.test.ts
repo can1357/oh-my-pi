@@ -7,6 +7,8 @@ import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import {
 	HookRunner,
 	type LoadedHook,
@@ -72,18 +74,57 @@ describe("HookToolWrapper tool_call contract", () => {
 		} as AgentTool;
 	}
 
+	function makeRetainedTool(): EditTool {
+		return new EditTool({
+			cwd: sharedTempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			enableLsp: false,
+			settings: Settings.isolated({}),
+		}).createApplyPatchTool();
+	}
+
 	it("blocks retained apply_patch execution through an edit-filtered legacy hook", async () => {
-		const executed: unknown[] = [];
 		const runner = makeRunner(
 			makeHook(value => {
 				const event = value as ToolCallEvent;
 				if (event.toolName === "edit") return { block: true, reason: "Protected edit" };
 			}),
 		);
+		const wrapped = new HookToolWrapper(makeRetainedTool(), runner);
+
+		await expect(
+			wrapped.execute("retained-patch", {
+				input: "*** Begin Patch\n*** Add File: protected.txt\n+protected edit\n*** End Patch",
+			}),
+		).rejects.toThrow("Protected edit");
+		expect(await Bun.file(path.join(sharedTempDir.path(), "protected.txt")).exists()).toBe(false);
+	});
+
+	it("keeps custom apply_patch outside edit-filtered legacy hooks", async () => {
+		const executed: unknown[] = [];
+		const events: string[] = [];
+		const runner = makeRunner([
+			makeHook(value => {
+				const event = value as ToolCallEvent;
+				events.push(event.toolName);
+				if (event.toolName === "edit") return { block: true, reason: "Protected edit" };
+				if (event.toolCallId === "blocked-custom-patch") return { block: true, reason: "Custom guard" };
+			}),
+			makeHook(value => {
+				const event = value as ToolResultEvent;
+				events.push(event.toolName);
+				if (event.toolName === "apply_patch") return { content: [{ type: "text", text: "Custom result" }] };
+			}, "tool_result"),
+		]);
 		const wrapped = new HookToolWrapper({ ...makeRecordingTool(executed), name: "apply_patch" }, runner);
 
-		await expect(wrapped.execute("retained-patch", { command: "protected edit" })).rejects.toThrow("Protected edit");
-		expect(executed).toEqual([]);
+		const result = await wrapped.execute("custom-patch", { command: "custom" });
+		expect(result.content).toEqual([{ type: "text", text: "Custom result" }]);
+		await expect(wrapped.execute("blocked-custom-patch", { command: "blocked" })).rejects.toThrow("Custom guard");
+		expect(executed).toEqual([{ command: "custom" }]);
+		expect(events).toEqual(["apply_patch", "apply_patch", "apply_patch"]);
 	});
 
 	it.each(["success", "error", "throw"] as const)(
@@ -99,29 +140,30 @@ describe("HookToolWrapper tool_call contract", () => {
 					};
 				}, "tool_result"),
 			);
-			const tool: AgentTool = {
-				name: "apply_patch",
-				label: "Edit",
-				description: "Retained patch result",
-				parameters: Type.Object({}),
-				execute: async () => {
-					if (outcome === "throw") throw new Error("Patch failed");
-					return {
-						content: [{ type: "text", text: "secret" }],
-						isError: outcome === "error",
-					};
-				},
+			const tool = makeRetainedTool();
+			tool.execute = async () => {
+				if (outcome === "throw") throw new Error("Patch failed");
+				return {
+					content: [{ type: "text", text: "secret" }],
+					isError: outcome === "error",
+				};
 			};
 			const delivered: string[] = [];
-			const execution = new HookToolWrapper(tool, runner).execute("retained-result", {}, undefined, undefined, {
-				sessionManager: SessionManager.inMemory(),
-				modelRegistry,
-				model: undefined,
-				isIdle: () => true,
-				hasQueuedMessages: () => false,
-				abort: () => {},
-				addAdditionalContext: context => delivered.push(context),
-			});
+			const execution = new HookToolWrapper(tool, runner).execute(
+				"retained-result",
+				{ input: "" },
+				undefined,
+				undefined,
+				{
+					sessionManager: SessionManager.inMemory(),
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					addAdditionalContext: context => delivered.push(context),
+				},
+			);
 			if (outcome === "throw") {
 				await expect(execution).rejects.toThrow("Patch failed");
 			} else {

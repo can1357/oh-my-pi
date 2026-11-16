@@ -1,4 +1,5 @@
 import { HL_FILE_PREFIX, HL_FILE_SUFFIX } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { EditTool } from "../edit";
 
 const LEGACY_HASHLINE_FILE_PREFIX = "¶";
 const HASHLINE_FILE_TAG_RE = /#[0-9a-fA-F]{4}$/u;
@@ -9,8 +10,8 @@ interface ToolEventInputResolver {
 }
 
 /** Retained apply_patch calls keep edit's extension identity, not their dispatch name. */
-export function resolveToolEventName(name: string): string {
-	return name === "apply_patch" ? "edit" : name;
+export function resolveToolEventName(tool: ToolEventInputResolver): string {
+	return EditTool.isRetainedApplyPatchTool(tool) ? "edit" : tool.name;
 }
 
 /** Resolves mode-specific textual tool input before extension/hook event normalization. */
@@ -18,7 +19,7 @@ export function resolveToolEventInput(
 	tool: ToolEventInputResolver,
 	input: Record<string, unknown>,
 ): Record<string, unknown> {
-	if (resolveToolEventName(tool.name) !== "edit" || typeof tool.resolveEventInput !== "function") return input;
+	if (resolveToolEventName(tool) !== "edit" || typeof tool.resolveEventInput !== "function") return input;
 	let resolved = input;
 	for (const key of ["input", "_input"] as const) {
 		const value = stringField(resolved, key);

@@ -5,7 +5,7 @@ import { isResolutionDeviceName } from "@oh-my-pi/pi-tui/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { parseXdTopicUrl, parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { ToolSession } from "../tools";
-import { resolveToolTier } from "../tools/approval";
+import { resolveToolDecision } from "../tools/approval";
 import { dispatchReportIssueDevice, reportIssueDeviceUsage } from "../tools/report-tool-issue";
 import { dispatchResolutionDevice, resolutionDeviceUsage } from "../tools/resolve";
 import { dispatchXdevTool, resolveXdevTool, xdevDocs, xdevListing } from "../tools/xdev";
@@ -46,9 +46,10 @@ function deviceWriteTier(
 		// The policyKey makes the outer gate consult `tools.approval.<device>` for
 		// this dispatch before falling back to `tools.approval.write`, so users can
 		// scope allow/deny/prompt to a single device (issue #7923). It names the
-		// resolved canonical tool, so a wire alias (`xd://apply_patch` for `edit`)
-		// follows the same policy as the canonical spelling and a direct call.
-		return { tier: resolveToolTier(inst, parsed), policyKey: inst.name };
+		// resolved tool's effective policy identity, so aliases and retained tools
+		// follow the same policy as a direct call.
+		const decision = resolveToolDecision(inst, parsed);
+		return { tier: decision.tier, policyKey: decision.policyKey ?? inst.name };
 	} catch {
 		return "exec";
 	}
@@ -97,10 +98,11 @@ export class XdProtocolHandler implements ProtocolHandler {
 		const toolCall = context.toolCall;
 		if (!toolCall) throw new ToolError(`xd://${name} dispatches only from a tool call (write, or a bash redirect).`);
 		// The write tool's gate already resolved approval at this device's tier and
-		// under its canonical tool's `tools.approval` key (see `deviceWriteTier`) —
+		// under its effective `tools.approval` key (see `deviceWriteTier`) —
 		// record that key so a wrapped inner tool does not ask the same question
 		// again, whichever spelling the URL used.
-		const xdevPolicyKey = resolveXdevTool(xdev, name)?.name ?? name;
+		const decision = deviceWriteTier(url, content, session);
+		const xdevPolicyKey = typeof decision === "string" ? name : (decision.policyKey ?? name);
 		const { result, xdev: dispatch } = await dispatchXdevTool(
 			xdev,
 			name,

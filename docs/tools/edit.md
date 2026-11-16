@@ -29,6 +29,8 @@ This page primarily documents hashline. The schema, prompt, examples, renderer, 
 
 After a model switch leaves `apply_patch` mode, sessions with `edit` enabled register a separate `apply_patch` tool alongside the new mode's `edit` tool. This keeps earlier patch calls usable across retry fallbacks without changing `edit.modelVariants`. The extra tool follows the same edit approval policies and presents itself as `edit` to extension and legacy hook `tool_call` and `tool_result` events, as well as extension approval events, preserving edit-filtered guards. Dispatch, transcript messages, and `tool_execution_*` events keep the `apply_patch` wire name. The extra tool is removed from the registry when the model returns to `apply_patch` mode or editing is disabled. While `edit` itself uses `apply_patch` mode, its wire alias remains available through JavaScript eval and `xd://apply_patch` without a separate registry entry shadowing it.
 
+Only the retained built-in gets this `edit` event identity; an SDK or extension tool named `apply_patch` keeps its own name. Calls through `write` to `xd://apply_patch` also use the retained tool's `edit` approval key, so one approval covers both the outer write and the inner edit.
+
 ## Input
 
 | Field   | Type     | Required | Description                                                                                                                                                                                                      |

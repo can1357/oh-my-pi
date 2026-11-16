@@ -262,7 +262,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			(context as LoopAwareToolContext)[LOOP_DISPATCH_CONTEXT] = true;
 		}
 		const loopEmittedToolCall = this.runner.consumeToolCallEmitted(toolCallId, this.tool.name);
-		const toolName = resolveToolEventName(this.tool.name);
+		const toolName = resolveToolEventName(this.tool);
 		// Resolve approval settings up front. A `deny` on the original input short-circuits before the
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or

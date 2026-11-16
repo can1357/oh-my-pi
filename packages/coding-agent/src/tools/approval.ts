@@ -295,7 +295,8 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 	return { tier: "exec", override: false };
 }
 
-function getToolDecision(
+/** Evaluate and normalize a tool's declaration, preserving its effective policy identity. */
+export function resolveToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
 	context?: AgentToolContext,
@@ -314,7 +315,7 @@ function getToolDecision(
  * argument-dependent tier instead of falling back to `exec`.
  */
 export function resolveToolTier(tool: ApprovalSubject, args: unknown, context?: AgentToolContext): ToolTier {
-	return getToolDecision(tool, args, context).tier;
+	return resolveToolDecision(tool, args, context).tier;
 }
 
 function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
@@ -397,7 +398,7 @@ function resolvePolicy(
 	grants: ApprovalGrantStore | undefined,
 	context?: AgentToolContext,
 ): ResolvedApproval {
-	const decision = getToolDecision(tool, args, context);
+	const decision = resolveToolDecision(tool, args, context);
 	const policyKey = decision.policyKey ?? tool.name;
 	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
 	const fallbackPolicy =

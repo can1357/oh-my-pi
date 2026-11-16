@@ -47,7 +47,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 	) {
 		// Emit tool_call event - hooks can block execution or revise the input the tool runs with.
 		// If hook errors/times out, block by default (fail-safe)
-		const toolName = resolveToolEventName(this.tool.name);
+		const toolName = resolveToolEventName(this.tool);
 		let effectiveParams = params;
 		// Forwarded only after the tool returns a non-error result, matching the
 		// extension wrapper and the agent loop.

@@ -361,11 +361,14 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 	return Buffer.from(left.buffer, left.byteOffset, left.byteLength).equals(right);
 }
 
+const RETAINED_APPLY_PATCH_TOOL = Symbol("retainedApplyPatchTool");
+
 export class EditTool implements AgentTool<TInput> {
 	readonly label = "Edit";
 	readonly loadMode = "essential";
 	readonly concurrency = "exclusive";
 	readonly strict = true;
+	readonly [RETAINED_APPLY_PATCH_TOOL]: boolean;
 
 	readonly #editMode?: EditMode;
 	readonly #deferredDiagnostics: DeferredDiagnostics;
@@ -377,8 +380,14 @@ export class EditTool implements AgentTool<TInput> {
 		mode?: EditMode,
 		readonly name: "edit" | "apply_patch" = "edit",
 	) {
+		this[RETAINED_APPLY_PATCH_TOOL] = name === "apply_patch";
 		this.#editMode = mode;
 		this.#deferredDiagnostics = new DeferredDiagnostics(session);
+	}
+
+	/** The private brand survives tool proxies without aliasing exact-name custom tools. */
+	static isRetainedApplyPatchTool(tool: object): boolean {
+		return RETAINED_APPLY_PATCH_TOOL in tool && tool[RETAINED_APPLY_PATCH_TOOL] === true;
 	}
 
 	/** Builds the retired patch contract over this tool's conversation and policy state. */

@@ -106,13 +106,18 @@ function runnerWith(sessionManager: SessionManager, select: ExtensionUIContext["
  * tool (the mounted device included) in `ExtensionToolWrapper`, and `write`
  * dispatches `xd://` to the wrapped device.
  */
-function mountedDevice(runner: ExtensionRunner, cwd: string): { write: AgentTool; executed: unknown[] } {
+function mountedDevice(
+	runner: ExtensionRunner,
+	cwd: string,
+	policyKey?: string,
+): { write: AgentTool; executed: unknown[] } {
 	const executed: unknown[] = [];
 	const device: AgentTool = {
 		name: DEVICE,
 		label: "Add comment",
-		description: "MCP tool without an approval declaration (exec tier)",
+		description: "MCP comment tool",
 		parameters: type({ body: "string" }),
+		...(policyKey ? { approval: { tier: "write" as const, policyKey } } : {}),
 		async execute(_id, args) {
 			executed.push(args);
 			return { content: [{ type: "text", text: "commented" }] };
@@ -231,5 +236,27 @@ describe("write xd://<device> approval", () => {
 		// The outer gate must key the alias on `edit`: keyed on `apply_patch`, the
 		// mode asks there and the inner `edit` gate asks again for its own policy.
 		expect(await editPromptsBySpelling()).toEqual({ edit: 1, apply_patch: 1 });
+	});
+
+	it.each(["allow", "prompt"] as const)("honors a device's effective policyKey for %s decisions", async policy => {
+		const cwd = root.path();
+		const sessionManager = SessionManager.inMemory(cwd);
+		const select = vi.fn(async (_title: string, options: string[]) => options[0]);
+		const policyKey = "jira_comment";
+		const { write, executed } = mountedDevice(runnerWith(sessionManager, select), cwd, policyKey);
+
+		await write.execute(
+			`keyed-${policy}`,
+			args,
+			undefined,
+			undefined,
+			context(sessionManager, {
+				"tools.approvalMode": "always-ask",
+				"tools.approval": policy === "allow" ? { [policyKey]: "allow", write: "deny" } : { [policyKey]: "prompt" },
+			}),
+		);
+
+		expect(executed).toEqual([{ body: "hello" }]);
+		expect(select).toHaveBeenCalledTimes(policy === "prompt" ? 1 : 0);
 	});
 });
