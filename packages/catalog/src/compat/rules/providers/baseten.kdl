@@ -6,6 +6,47 @@ provider "baseten" {
 	dynamic-models-authoritative #true
 	discovery label="Baseten"
 
+	// Baseten's decision models (docs.baseten.co/inference/model-apis/decision-models)
+	// answer typed questions at `POST /v1/systemone`, outside the `/v1` chat
+	// prefix, and bill input tokens only. The `/v1/models` roster lists them with
+	// the chat models, so discovery routes `decision-models/*` rows to this API.
+	// Each takes text and images within a 16,384-token context.
+	seed api="baseten-systemone" base-url="https://inference.baseten.co" bundle="always" {
+		model "decision-models/baseten-elephant-9b-latest" name="elephant-1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.035 output=0 cache-read=0 cache-write=0
+			limits context=16384
+			supports-tools #false
+		}
+		model "decision-models/baseten-mammoth-27b-latest" name="mammoth-1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.1 output=0 cache-read=0 cache-write=0
+			limits context=16384
+			supports-tools #false
+		}
+		model "decision-models/baseten-joey-2b-latest" name="joey-1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.01 output=0 cache-read=0 cache-write=0
+			limits context=16384
+			supports-tools #false
+		}
+	}
+	models "decision-models/*" {
+		kind "judge"
+		// Measured against the live API: one image up to 2000x2000 answers and 2200x2200
+		// is rejected as over the vision token limit; three 1568x1568 images answer and four
+		// are rejected as over the image memory budget, as are twelve 1000x1000 ones while
+		// eight answer. 8000 patches of 32x32 sits under the 8,192 that answered.
+		judgment-image-input {
+			mime-types "image/png,image/jpeg,image/webp"
+			max-pixels 4000000
+			max-total-patches 8000
+		}
+	}
+
 	thinking-mode "effort"
 	// Exact reviewed correction: discovery advertises K3 reasoning effort even when the frozen
 	// source row still reports reasoning=false.

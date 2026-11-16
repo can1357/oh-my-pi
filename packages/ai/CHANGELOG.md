@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
+- Added the `baseten-systemone` judgment API for Baseten's elephant-1, mammoth-1 and joey-1 decision models, sending images as `state.messages` parts and splitting judgments that would exceed Baseten's 512-option request limit
 
 ### Fixed
 
