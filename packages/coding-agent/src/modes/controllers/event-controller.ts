@@ -2449,26 +2449,25 @@ export class EventController {
 		const view = this.ctx.viewSession;
 		// A run is open again by the time this event reaches the serialized
 		// dispatch chain: a superseded end, or a subscriber that started the next
-		// run while this one waited. Its own agent_end must own the status and
-		// teardown — reporting `done` now tells OSC 7501 receivers such as Rex
-		// that the agent finished while it is still working (#17307).
-		if (this.ctx.session.isRunActive) {
+		// run while this one waited. That ended run still owns its teardown, but
+		// it must not report `done`/`idle` now — that tells OSC 7501 receivers
+		// such as Rex the agent finished while it is still working (#17307).
+		const runActive = this.ctx.session.isRunActive;
+		if (view !== this.ctx.session && runActive) {
 			// A focused worker's run ended while main's run goes on: tear down
 			// only what the viewed worker owns (its loader); main's status stays
 			// `working` until main's own `agent_end`.
-			if (view !== this.ctx.session) {
-				if (this.ctx.loadingAnimation) {
-					this.ctx.loadingAnimation.stop();
-					this.ctx.loadingAnimation = undefined;
-					this.ctx.statusContainer.disposeChildren();
-				}
-				this.#runActive = false;
-				this.#syncComposerActivity();
+			if (this.ctx.loadingAnimation) {
+				this.ctx.loadingAnimation.stop();
+				this.ctx.loadingAnimation = undefined;
+				this.ctx.statusContainer.disposeChildren();
 			}
+			this.#runActive = false;
+			this.#syncComposerActivity();
 			return;
 		}
 		if (stoppedWaiting) {
-			setRunStatus({ state: "idle" });
+			if (!runActive) setRunStatus({ state: "idle" });
 			await this.#finishAgentEnd(event, { interrupted: true });
 			const running = this.ctx.session.getAsyncJobSnapshot()?.running.length ?? 0;
 			if (running > 0) {
@@ -2477,7 +2476,7 @@ export class EventController {
 				);
 			}
 		} else {
-			setRunStatus(this.#settledRunStatus(event));
+			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
 		// This run may be extension-started while the main input loop remains

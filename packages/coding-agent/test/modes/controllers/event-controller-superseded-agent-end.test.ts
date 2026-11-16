@@ -116,29 +116,41 @@ describe("EventController agent_end teardown", () => {
 		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
 	});
 
-	it("does not report done when a superseded agent_end lands after the next run opened on the viewed main session", async () => {
+	it("does not report done for a stale agent_end but still tears the ended run down when the next run opened on the viewed main session", async () => {
 		const { ctx, streamState, loader } = createContext({ viewSessionIsMain: true });
 		// The main session is on screen here, so the focused-worker teardown
 		// branch cannot be what protects the status: the helper's getter makes
 		// `viewSession === session` when no viewSession override is supplied.
 		const controller = new EventController(ctx);
 
+		// Run 1 starts and owns the loader / composer activity.
 		streamState.mainRunActive = true;
 		streamState.viewIsStreaming = true;
 		await controller.handleEvent(AGENT_START);
 		expect(ctx.loadingAnimation).toBeDefined();
 
-		// This end belongs to the run that just ended, but the serialized
-		// dispatch chain delivers it only after another run opened. Rex would
-		// play a success sound on the resulting `state=done` mid-run (#17307).
+		// Real chain order: #checkRun closes run 1 and emits its (stale)
+		// agent_end, then #drainStrandedQueuedMessages opens run 2 before the
+		// serialized dispatch chain delivers that end. So `isRunActive` is true
+		// again when the controller handles the stale end. Run 2's own
+		// agent_start follows in the chain — it is NOT dispatched before it.
+		streamState.mainRunActive = false; // #checkRun closes run 1
+		streamState.mainRunActive = true; // #drainStrandedQueuedMessages opens run 2
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		await controller.handleEvent(DONE_END);
 
+		// No mid-run `done` for Rex / OSC 7501 ...
 		expect(report).not.toHaveBeenCalled();
+		// ... but the ended run still got its full teardown, not a blanket skip.
+		expect(ctx.flushPendingModelSwitch).toHaveBeenCalled();
+		expect(loader.stop).toHaveBeenCalled();
+		expect(ctx.loadingAnimation).toBeUndefined();
+		expect(TERMINAL.sendNotification).toHaveBeenCalled();
+
+		// Run 2's agent_start follows the stale end and re-arms the live run.
+		await controller.handleEvent(AGENT_START);
 		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
 		expect(ctx.loadingAnimation).toBeDefined();
-		expect(loader.stop).not.toHaveBeenCalled();
-		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
 
 		// The live run's own terminal end still reports done normally.
 		streamState.mainRunActive = false;
