@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { ACP_STEP_TEXT_BYTES, MAX_IMAGE_BYTES } from "@oh-my-pi/pi-ai/providers/antigravity-cli/budget";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
@@ -304,6 +305,59 @@ describe("alignContextTokens", () => {
 		expect(alignContextTokens(1.5, 1_000, 200_000)).toBe(1.5);
 		expect(alignContextTokens(Number.NaN, 1_000, 200_000)).toBeNaN();
 		expect(alignContextTokens(0, 1_000, 200_000)).toBe(0);
+	});
+});
+describe("AgyHost prompt budgets", () => {
+	it("rejects an oversized replay before sending it", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("a".repeat(ACP_STEP_TEXT_BYTES + 1))]);
+		const fake = await state.started.next();
+		await expect(run.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(fake.promptHistory).toHaveLength(0);
+		expect(fake.closed).toBe(true);
+	});
+
+	it("rejects an oversized image on the replay path", async () => {
+		const state = await fixture();
+		const run = step(state.host, [
+			{
+				role: "user",
+				content: [
+					{ type: "image", data: Buffer.alloc(MAX_IMAGE_BYTES + 1).toString("base64"), mimeType: "image/png" },
+				],
+				timestamp: 0,
+			},
+		]);
+		const fake = await state.started.next();
+		await expect(run.done).rejects.toThrow("local ACP image budget is 8388608 bytes");
+		expect(fake.promptHistory).toHaveLength(0);
+	});
+
+	it("rejects an oversized resume input before steering the parked turn", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const next = step(state.host, [
+			...state.messages,
+			result(state.first.writer.output),
+			user("b".repeat(ACP_STEP_TEXT_BYTES + 1)),
+		]);
+		await expect(next.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect((await state.output).isError).toBe(true);
+		expect(state.fake.closed).toBe(true);
+	});
+
+	it("sends an under-budget replay unchanged", async () => {
+		const state = await fixture();
+		const body = "c".repeat(ACP_STEP_TEXT_BYTES);
+		const run = step(state.host, [user(body)]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		expect(prompt.request.prompt).toEqual([{ type: "text", text: body }]);
+		fake.text("Fits.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Fits." }]);
 	});
 });
 

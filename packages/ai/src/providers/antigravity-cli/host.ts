@@ -28,6 +28,7 @@ import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
 import { resolveAgyBinary } from "./binary";
+import { checkPromptBudget } from "./budget";
 import {
 	conversationStorePath,
 	deleteConversation,
@@ -314,12 +315,12 @@ export class AgyHost implements ProviderSessionState {
 				if (pending?.drain) await this.#setup(pending.drain);
 				if (plan.toolResult && pending?.state === "detached") {
 					this.#releasePending();
-					this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
+					this.#prompt(model, [...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
 				} else {
 					pending?.expiry.cancel();
 					if (plan.input.length > 0) {
 						const previous = this.#turn;
-						this.#prompt(plan.input.flatMap(inputBlocks));
+						this.#prompt(model, plan.input.flatMap(inputBlocks));
 						// The old prompt settling proves agy accepted the steer before the held tool resumes.
 						if (previous)
 							await this.#setup(
@@ -341,7 +342,7 @@ export class AgyHost implements ProviderSessionState {
 			} else {
 				const blocks = replayPrompt(plan.replay);
 				if (blocks.length === 0) throw new Error("Antigravity CLI has nothing new to send for this request");
-				this.#prompt(blocks);
+				this.#prompt(model, blocks);
 			}
 			await step.done.promise;
 		} catch (error) {
@@ -555,9 +556,11 @@ export class AgyHost implements ProviderSessionState {
 		conversation.requestedEffort = effort;
 	}
 
-	#prompt(blocks: ContentBlock[]): void {
+	#prompt(model: Model, blocks: ContentBlock[]): void {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
+		const overBudget = checkPromptBudget(blocks, model);
+		if (overBudget) throw new Error(overBudget);
 		const turn: Turn = {
 			conversationId: conversation.id,
 			response: Promise.withResolvers<PromptResponse>(),
