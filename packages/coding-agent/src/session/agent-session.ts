@@ -3208,7 +3208,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * A failed browser switch-on reverts to off.
 	 */
 	async #reconcileEvalPreludeSetting(
-		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled" | "commit.enabled" | "disassembler.backend",
+		path:
+			| "browser.enabled"
+			| "computer.enabled"
+			| "ratchet.enabled"
+			| "archive.enabled"
+			| "commit.enabled"
+			| "disassembler.backend",
 		enabled: boolean,
 	): Promise<void> {
 		try {

@@ -28,6 +28,7 @@
 
 ### Removed
 
+- Removed legacy standalone disassembler tools and their associated prompt instructions
 - Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet (copy a selection, double-click to edit).
 
 
