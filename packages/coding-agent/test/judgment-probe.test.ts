@@ -93,6 +93,28 @@ describe("probeNativeJudgeRoute", () => {
 			["jev-test", "Provider 'fixture' is not allowed for virtual key 'vk-test'"],
 		],
 		[
+			"a 403 refusing the provider for a key whose name says model",
+			bifrost(403, "provider_blocked", "Provider 'openai' is not allowed for virtual key 'judge-models'"),
+			{ failure: "forbidden", status: 403 },
+			["jev-test", "Provider 'openai' is not allowed for virtual key 'judge-models'"],
+		],
+		[
+			"a 403 refusing a project whose name says model",
+			bifrost(
+				403,
+				"access_blocked",
+				'project "ml-models" not found. It does not exist or does not admit this request.',
+			),
+			{ failure: "forbidden", status: 403 },
+			["jev-test", 'project "ml-models" not found'],
+		],
+		[
+			"a key refusal in a JSON body without an error envelope",
+			() => Response.json({ detail: "Not authenticated" }, { status: 403 }),
+			{ failure: "credential", status: 403 },
+			["Not authenticated"],
+		],
+		[
 			"a 403 whose body names neither",
 			() => new Response("forbidden", { status: 403 }),
 			{ failure: "forbidden", status: 403 },
@@ -110,7 +132,8 @@ describe("probeNativeJudgeRoute", () => {
 		const result = await probeNativeJudgeRoute(model, { apiKey: "key", fetch });
 		expect(calls).toHaveLength(1);
 		expect(result).toMatchObject({ ok: false, ...outcome });
-		const line = formatNativeJudgeProbe("fixture/jev-test", result);
+		// A route label without the wire id, so a "jev-test" mention can only come from the failure message.
+		const line = formatNativeJudgeProbe("fixture/judge", result);
 		for (const mention of mentions) expect(line).toContain(mention);
 	});
 });

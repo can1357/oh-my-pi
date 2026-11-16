@@ -71,21 +71,39 @@ function detail(error: unknown): string {
 	return text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX - 1)}…` : text;
 }
 
-/** Words a 401/403 body denies a model with; they count only in a body that also says "model". */
+/** Words a 401/403 body denies a model with; they count only in prose that also says "model". */
 const MODEL_DENIAL = /not[ _]allowed|blocked|not[ _]found|does not exist|unknown|no access|not available/;
 /** Words naming the key, and words saying it is unusable; a body refuses the key only with one of each. */
 const KEY_TERM = /api[ _-]?key|virtual[ _-]?key|token|credential/;
 const KEY_DENIAL = /invalid|incorrect|required|missing|expired|revoked|inactive|not[ _]found|does not exist/;
+/** A name quoted in single quotes (an apostrophe inside a word does not end it) or backticks. */
+const QUOTED_NAME = /(?<!\w)'(?:[^']|'(?=\w))*'(?!\w)|`[^`]*`/g;
+/** A name quoted in double quotes, as Go's `%q` writes it. */
+const DOUBLE_QUOTED_NAME = /"(?:[^"\\]|\\.)*"/g;
+
+/**
+ * `detail` without the names it quotes. A virtual key, access profile, provider or project is named by whoever
+ * runs the endpoint ("judge-models"), so a word inside the name says nothing about what was refused. A body the
+ * envelope parser did not recognize arrives as its JSON text, whose double quotes are syntax, not names.
+ */
+function unquotedProse(detail: string): string {
+	const text = detail.replace(QUOTED_NAME, " ");
+	return /^\s*[[{]/.test(text) ? text : text.replace(DOUBLE_QUOTED_NAME, " ");
+}
 
 /**
  * What a 401/403 error body says was refused: the model (blocked, not allowed, unknown for this key) or the key
  * itself (failed authentication, or invalid, missing, expired, revoked); `undefined` when the body says neither.
- * A body that only names the key, as Bifrost's "Provider 'x' is not allowed for virtual key 'y'" does, says
- * what the key may not reach, not that the key was refused.
+ * A machine code naming the model decides first (Bifrost's `model_blocked`); otherwise only the prose outside
+ * quoted names counts. A body that only names the key, as Bifrost's "Provider 'x' is not allowed for virtual key
+ * 'y'" does, says what the key may not reach, not that the key or the model was refused.
  */
 function refusedSubject(error: JudgmentApiError): "model" | "key" | undefined {
-	const text = `${error.code ?? ""} ${error.detail ?? ""}`.toLowerCase();
-	if (/model/.test(text) && MODEL_DENIAL.test(text)) return "model";
+	const code = error.code?.toLowerCase() ?? "";
+	if (code.includes("model")) return "model";
+	const prose = unquotedProse(error.detail ?? "").toLowerCase();
+	if (prose.includes("model") && MODEL_DENIAL.test(prose)) return "model";
+	const text = `${code} ${prose}`;
 	if (/unauthori[sz]ed|authenticat/.test(text) || (KEY_TERM.test(text) && KEY_DENIAL.test(text))) return "key";
 	return undefined;
 }
