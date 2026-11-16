@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini CLI requests reporting a stale client version; the current `@google/gemini-cli` release is now looked up from npm ([#19254](https://github.com/can1357/oh-my-pi/pull/19254) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
@@ -15,8 +19,6 @@
 
 ### Fixed
 
-- Fixed Gemini CLI requests reporting a stale client version; the current `@google/gemini-cli` release is now looked up from npm ([#19254](https://github.com/can1357/oh-my-pi/pull/19254) by [@Xytronix](https://github.com/Xytronix))
-- Fixed xAI Grok OAuth `grok-composer-2.5-fast` being listed as non-reasoning; thinking levels from minimal through xhigh are now available.
 - Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
 ## [18.20.3] - 2026-11-16
