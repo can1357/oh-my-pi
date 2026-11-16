@@ -9,9 +9,8 @@ fn update(body: &str) -> String {
 	format!("*** Begin Patch\n*** Update File: fixture.txt\n{body}\n*** End Patch")
 }
 
-/// apply_patch bodies carry no unified-diff file headers, so a row starting
-/// with `-`/`+` is content even when it reads `--- x` / `+++ x`, with or
-/// without an `@@` line and wherever the row sits in the hunk.
+/// A row starting with `-`/`+` is content even when it reads `--- x` /
+/// `+++ x`, with or without an `@@` line and wherever the row sits in the hunk.
 #[tokio::test]
 async fn diff_header_like_rows_are_hunk_content() {
 	const SQL: &str = "SELECT 1;\n-- old comment\nSELECT 2;\n";
@@ -40,6 +39,29 @@ async fn diff_header_like_rows_are_hunk_content() {
 			.await
 			.unwrap_or_else(|error| panic!("{body:?}: {error}"));
 		assert_eq!(workspace.read("fixture.txt").as_deref(), Some(after), "{body:?}");
+	}
+}
+
+/// A unified-diff file header opening the body right before an `@@` row is
+/// recognized and dropped, so a `git diff`-shaped update still applies.
+#[tokio::test]
+async fn leading_unified_file_header_is_dropped() {
+	const HUNK: &str = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c";
+	for header in [
+		"--- a/fixture.txt\n+++ b/fixture.txt\n",
+		"diff --git a/fixture.txt b/fixture.txt\nindex 1234567..89abcde 100644\n--- \
+		 a/fixture.txt\n+++ b/fixture.txt\n",
+		"--- a/fixture.txt\n",
+		"+++ b/fixture.txt\n",
+	] {
+		let workspace = common::Workspace::new(EditMode::ApplyPatch);
+		workspace.write("fixture.txt", "a\nb\nc\n");
+		let body = format!("{header}{HUNK}");
+		workspace
+			.apply_raw(&update(&body), &common::DiskWriter::default())
+			.await
+			.unwrap_or_else(|error| panic!("{body:?}: {error}"));
+		assert_eq!(workspace.read("fixture.txt").as_deref(), Some("a\nB\nc\n"), "{body:?}");
 	}
 }
 
