@@ -686,6 +686,20 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { release: "r7", target: "prod", checks: [], replicas: 2, owner: "" } });
 	});
 
+	it("accepts an echoed hidden fallback for an unchecked same-name checkbox", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <input type="hidden" name="enabled" value="off">
+  <label><input type="checkbox" name="enabled" value="on"> Enabled</label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { enabled: "off" } });
+
+		expect(await result).toEqual({ data: { enabled: "off" } });
+	});
+
 	it("fails a form too large for one frame without sending a truncated copy", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

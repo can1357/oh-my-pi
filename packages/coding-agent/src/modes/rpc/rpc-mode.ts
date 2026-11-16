@@ -1274,8 +1274,11 @@ function parseFormDialogResponse(
 	// Check the value against every field of its name, enforcing the same rules the form dialogs apply on submit.
 	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
 	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
+	const hidden = new Map(form.hidden);
 	for (const field of named) {
-		const entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
+		let entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
+		// An echoed same-name hidden input is the unchecked fallback (`off` beside a checkbox), not a selection.
+		if (field.kind === "choice" && entry !== undefined && entry === hidden.get(field.name)) entry = undefined;
 		const value = field.kind === "choice" ? parseFormChoice(field, entry) : parseFormText(field, entry);
 		const problem = fieldError(field, value);
 		if (problem) throw new Error(`Form field ${JSON.stringify(field.name)}: ${problem}`);
